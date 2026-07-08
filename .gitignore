@@ -1,0 +1,13 @@
+# Secrets
+.env
+
+# Harbor outputs (trial artifacts, logs, session exports)
+jobs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store

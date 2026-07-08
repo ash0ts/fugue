@@ -1,0 +1,37 @@
+# LiteLLM proxy config: Anthropic-protocol bridge to W&B Inference.
+#
+# Claude Code only speaks the Anthropic Messages API. W&B Inference only
+# speaks the OpenAI chat-completions API. This proxy exposes /v1/messages
+# and forwards everything to https://api.inference.wandb.ai/v1.
+#
+# Model names are passed through 1:1 (wildcard), so whatever model id the
+# harness asks for (e.g. "zai-org/GLM-5.2") is requested from W&B Inference
+# under the same id.
+
+# Provider prefix choice matters. The upstream only serves
+# /v1/chat/completions, so the bridge must *translate* Anthropic /v1/messages
+# (Claude Code) and OpenAI /v1/responses (Codex) instead of passing them
+# through. Tested against W&B Inference (2026-07-08):
+#   - openai/*      -> both endpoints forwarded natively upstream -> 404.
+#   - hosted_vllm/* -> messages translates, responses passes through -> 404.
+#   - openrouter/*  -> messages ok, responses passed through -> 404.
+#   - together_ai/* -> tools dropped on /v1/messages -> unusable.
+#   - mistral/*     -> works, but rewrites tool-call ids (9-char rule risk).
+#   - nebius/*      -> messages+tools, responses+tools, streaming all pass;
+#                      only quirk is tools=[] injected on TOOL-LESS /v1/responses
+#                      calls (rejected upstream), which no harness emits. Use this.
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: "nebius/*"
+      api_base: "https://api.inference.wandb.ai/v1"
+      api_key: "os.environ/WANDB_API_KEY"
+
+litellm_settings:
+  # Silently drop params W&B Inference doesn't accept (e.g. anthropic
+  # cache_control blocks) instead of failing the request.
+  drop_params: true
+
+general_settings:
+  # Harnesses authenticate to the bridge with this key (x-api-key or bearer).
+  master_key: "os.environ/LITELLM_MASTER_KEY"

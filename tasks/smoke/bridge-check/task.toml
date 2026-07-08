@@ -1,0 +1,19 @@
+schema_version = "1.3"
+
+[task]
+name = "fugue/smoke-bridge-check"
+version = "0.1.0"
+description = "Smoke task: prove a harness can read a file, call W&B Inference, and write a file."
+keywords = ["smoke", "fugue"]
+
+[agent]
+# Generous: first run per harness pays npm/nvm install costs inside the container.
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 900.0
+cpus = 2
+memory_mb = 2048

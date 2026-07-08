@@ -1,0 +1,19 @@
+# Anthropic-to-W&B-Inference bridge for Claude Code.
+#
+#   docker compose -f proxy/docker-compose.yaml up -d
+#
+# Binds to 127.0.0.1 only; task containers reach it via
+# http://host.docker.internal:4000 (Docker Desktop DNS).
+services:
+  anthropic-bridge:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: fugue-anthropic-bridge
+    ports:
+      - "127.0.0.1:4000:4000"
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    environment:
+      WANDB_API_KEY: ${WANDB_API_KEY}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-fugue-local}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    restart: unless-stopped
