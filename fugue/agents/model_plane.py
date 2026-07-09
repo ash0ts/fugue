@@ -1,14 +1,9 @@
-"""Harbor agent subclasses: W&B Inference model plane + Weave tracing.
+"""Harbor agent subclasses: provider-neutral model plane + Weave tracing.
 
-Model plane — W&B Inference (https://api.inference.wandb.ai/v1) speaks the
-OpenAI chat-completions API only; no Anthropic ``/v1/messages``, no OpenAI
-``/v1/responses`` (both verified 404):
-
-- Hermes     -> direct: user-defined ``wandb`` provider entry in config.yaml.
-- OpenClaw   -> direct: ``openai`` provider, ``baseUrl`` merged into openclaw.json.
-- Claude Code-> bridge: LiteLLM proxy (proxy/) exposes ``/v1/messages``.
-- Codex CLI  -> bridge: same proxy exposes ``/v1/responses`` (Codex >= 2026
-                removed ``wire_api = "chat"``).
+Fugue always traces to W&B Weave, while model calls can bill through W&B
+Inference, OpenAI, or Anthropic. The shared ``ModelRoute`` determines whether
+each harness can talk to the provider natively or should use the local LiteLLM
+bridge.
 
 Tracing plane — every harness ships its Weave plugin inside the container:
 
@@ -27,24 +22,27 @@ Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
 with the run key, harness, model, condition, timestamps, and harness session
 ids so Weave traces can be joined back to Harbor trials.
 
-All four accept one canonical model string: ``wandb/<wandb-model-id>``,
-e.g. ``wandb/zai-org/GLM-5.2`` (the bare id works too).
-
-Secrets: ``WANDB_API_KEY`` (billing + trace ingest) and the bridge master key
-come from the ``harbor`` process environment. They are injected per-exec;
-nothing is written to host config.
+All four accept one canonical model string:
+``wandb/...``, ``openai/...``, or ``anthropic/...``.
 """
 
 import copy
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, override
+from typing import Any
+
+try:
+    from typing import override
+except ImportError:  # pragma: no cover - Python 3.11 fallback
+    def override(func):
+        return func
 
 from harbor.agents.installed.base import CliFlag
 from harbor.agents.installed.claude_code import ClaudeCode
@@ -55,18 +53,12 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
 
-WANDB_INFERENCE_BASE_URL = os.environ.get(
-    "WANDB_INFERENCE_BASE_URL", "https://api.inference.wandb.ai/v1"
+from fugue.model_plane import (
+    BRIDGE_BASE_URL_CONTAINER,
+    ModelRoute,
+    bridge_master_key,
+    resolve_model_route,
 )
-
-# Anthropic/Responses-protocol bridge (proxy/docker-compose.yaml).
-# host.docker.internal resolves from task containers under Docker Desktop.
-ANTHROPIC_BRIDGE_URL = os.environ.get(
-    "ANTHROPIC_BRIDGE_URL", "http://host.docker.internal:4000"
-)
-BRIDGE_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "sk-fugue-local")
-
-DEFAULT_MODEL_ID = "zai-org/GLM-5.2"
 
 # Local working tree of the hermes-otel plugin (uploaded into Hermes
 # containers; see README "Trace plane").
@@ -105,14 +97,19 @@ _HERMES_OTEL_FILES = (
 _HERMES_OTEL_DIRS = ("skills",)
 
 
-def _require_wandb_key() -> str:
-    key = os.environ.get("WANDB_API_KEY", "").strip()
+def _require_env(key_name: str, purpose: str) -> str:
+    key = os.environ.get(key_name, "").strip()
     if not key:
-        raise ValueError(
-            "WANDB_API_KEY is not set. Source the repo .env before "
-            "running harbor (all model calls bill to W&B Inference)."
-        )
+        raise ValueError(f"{key_name} is not set. Source the repo .env for {purpose}.")
     return key
+
+
+def _require_trace_key() -> str:
+    return _require_env("WANDB_API_KEY", "Weave tracing")
+
+
+def _require_model_key(route: ModelRoute) -> str:
+    return _require_env(route.api_key_env, f"{route.display_model} model calls")
 
 
 def _weave_entity_project() -> tuple[str, str]:
@@ -134,13 +131,44 @@ def _weave_project_slug() -> str:
     return f"{entity}/{project}"
 
 
-def canonical_model_id(model_name: str | None) -> str:
-    """Normalize ``wandb/<id>`` or ``<id>`` to the W&B Inference model id."""
-    if not model_name:
-        return DEFAULT_MODEL_ID
-    if model_name.startswith("wandb/"):
-        return model_name[len("wandb/") :]
-    return model_name
+def _bridge_url_v1() -> str:
+    return f"{BRIDGE_BASE_URL_CONTAINER}/v1"
+
+
+def _bridge_key() -> str:
+    return bridge_master_key(os.environ)
+
+
+def _chat_base_url(route: ModelRoute) -> str:
+    return route.chat_base_url or _bridge_url_v1()
+
+
+def _chat_key_env(route: ModelRoute) -> str:
+    return route.api_key_env if route.chat_base_url else "LITELLM_MASTER_KEY"
+
+
+def _chat_key(route: ModelRoute) -> str:
+    return _require_model_key(route) if route.chat_base_url else _bridge_key()
+
+
+def _messages_base_url(route: ModelRoute) -> str:
+    return route.messages_base_url or BRIDGE_BASE_URL_CONTAINER
+
+
+def _messages_key(route: ModelRoute) -> str:
+    return _require_model_key(route) if route.provider == "anthropic" else _bridge_key()
+
+
+def _responses_base_url(route: ModelRoute) -> str:
+    return route.responses_base_url or _bridge_url_v1()
+
+
+def _responses_key(route: ModelRoute) -> str:
+    return _require_model_key(route) if route.provider == "openai" else _bridge_key()
+
+
+def _codex_provider_name(route: ModelRoute) -> str:
+    return "openai" if route.provider == "openai" else "fugue"
 
 
 _STAGED_HERMES_OTEL: Path | None = None
@@ -190,7 +218,7 @@ class _TrialMetaMixin:
 
     @property
     def condition(self) -> str:
-        return os.environ.get("FUGUE_CONDITION", "baseline")
+        return os.environ.get("FUGUE_CONDITION", "none")
 
     @property
     def run_key(self) -> str:
@@ -204,18 +232,28 @@ class _TrialMetaMixin:
     def _meta_path(self) -> Path:
         return self.logs_dir / "fugue-meta.json"
 
-    def _meta_begin(self, harness: str, model_id: str) -> None:
+    async def _begin_trial(
+        self, harness: str, route: ModelRoute, environment: BaseEnvironment
+    ) -> None:
+        self._memory_artifact_meta = await self._inject_memory_artifact(environment)
+        self._meta_begin(harness, route)
+
+    def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
         meta = {
             "run_key": self.run_key,
             "job_name": self.job_name,
             "harness": harness,
-            "model": model_id,
+            "model_provider": route.provider,
+            "model": route.display_model,
             "condition": self.condition,
             "weave_entity": entity,
             "weave_project": project,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "trace_project": f"{entity}/{project}",
+            "started_at": datetime.now(UTC).isoformat(),
         }
+        if getattr(self, "_memory_artifact_meta", None):
+            meta["memory_artifact"] = self._memory_artifact_meta
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -224,7 +262,7 @@ class _TrialMetaMixin:
             meta = json.loads(self._meta_path().read_text())
         except Exception:
             meta = {}
-        meta["ended_at"] = datetime.now(timezone.utc).isoformat()
+        meta["ended_at"] = datetime.now(UTC).isoformat()
         try:
             meta["session_ids"] = self._extract_session_ids()
         except Exception:
@@ -233,6 +271,65 @@ class _TrialMetaMixin:
 
     def _extract_session_ids(self) -> list[str]:
         return []
+
+    def _task_artifact_name(self) -> str:
+        return os.environ.get("FUGUE_TASK_NAME") or self.run_key.rsplit("__", 1)[0]
+
+    async def _container_repo_root(self, environment: BaseEnvironment) -> str:
+        configured = os.environ.get("FUGUE_CONTAINER_REPO_ROOT", "").strip()
+        if configured:
+            return configured
+        result = await self.exec_as_agent(
+            environment, command='printf %s "$PWD"', timeout_sec=10
+        )
+        return (result.stdout or "").strip() or "/app"
+
+    async def _inject_memory_artifact(
+        self, environment: BaseEnvironment
+    ) -> dict[str, Any] | None:
+        condition = self.condition
+        memory_root = os.environ.get("FUGUE_MEMORY_DIR", "").strip()
+        if not memory_root or condition == "none":
+            return None
+
+        task_name = self._task_artifact_name()
+        artifact_dir = Path(memory_root) / condition / task_name
+        if not artifact_dir.is_dir():
+            raise FileNotFoundError(
+                f"memory artifact not found for {condition}/{task_name}: "
+                f"{artifact_dir}"
+            )
+
+        repo_root = await self._container_repo_root(environment)
+        await environment.upload_dir(source_dir=artifact_dir, target_dir=repo_root)
+        files = [
+            p.relative_to(artifact_dir).as_posix()
+            for p in sorted(artifact_dir.rglob("*"))
+            if p.is_file()
+        ]
+        exclude_lines = "\n".join(f"/{path}" for path in files) + "\n"
+        await self.exec_as_agent(
+            environment,
+            command=(
+                f"ROOT={shlex.quote(repo_root)}; "
+                'GIT_DIR="$(git -C "$ROOT" rev-parse --git-dir 2>/dev/null || true)"; '
+                'if [ -n "$GIT_DIR" ]; then '
+                'mkdir -p "$GIT_DIR/info"; '
+                "cat >> \"$GIT_DIR/info/exclude\" <<'FUGUE_EXCLUDE'\n"
+                f"{exclude_lines}"
+                "FUGUE_EXCLUDE\n"
+                "fi"
+            ),
+            timeout_sec=30,
+        )
+        return {
+            "condition": condition,
+            "task_name": task_name,
+            "source_dir": artifact_dir.as_posix(),
+            "container_root": repo_root,
+            "sha256": _hash_dir(artifact_dir),
+            "files": files,
+        }
 
     @staticmethod
     def _regex_ids(path: Path, pattern: str) -> list[str]:
@@ -246,13 +343,23 @@ class _TrialMetaMixin:
         return seen
 
 
-class WandbHermes(_TrialMetaMixin, Hermes):
-    """Hermes on W&B Inference with the local hermes-otel checkout tracing
-    to Weave.
+def _hash_dir(path: Path) -> str:
+    hasher = hashlib.sha256()
+    for file in sorted(p for p in path.rglob("*") if p.is_file()):
+        hasher.update(file.relative_to(path).as_posix().encode())
+        hasher.update(b"\0")
+        hasher.update(file.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+class FugueHermes(_TrialMetaMixin, Hermes):
+    """Hermes with provider-routed model calls and local hermes-otel tracing.
 
     Model plane: hermes's ``openai`` builtin ignores ``OPENAI_BASE_URL`` for
     auth routing (verified 401), but config.yaml supports a ``providers:`` map
-    for arbitrary OpenAI-compatible endpoints -> ``--provider wandb``.
+    for arbitrary OpenAI-compatible endpoints. Anthropic models therefore use
+    the LiteLLM bridge's OpenAI-compatible chat endpoint.
 
     Tracing: hermes auto-discovers plugins from ``~/.hermes/plugins/<name>/
     plugin.yaml``, and the plugin's own config loader hardcodes
@@ -267,20 +374,25 @@ class WandbHermes(_TrialMetaMixin, Hermes):
     @staticmethod
     @override
     def name() -> str:
-        return "wandb-hermes"
+        return "fugue-hermes"
 
     def __init__(self, *args, model_name: str | None = None, **kwargs):
-        self.wandb_model_id = canonical_model_id(model_name)
-        _require_wandb_key()
+        self.model_route = resolve_model_route(model_name)
+        _require_model_key(self.model_route)
+        _require_trace_key()
         _weave_entity_project()  # fail fast before containers spin up
-        super().__init__(*args, model_name=self.wandb_model_id, **kwargs)
+        super().__init__(*args, model_name=self.model_route.model_id, **kwargs)
 
-    def _build_wandb_config_yaml(self) -> str:
+    def _provider_name(self) -> str:
+        return self.model_route.provider if self.model_route.chat_base_url else "fugue"
+
+    def _build_model_config_yaml(self) -> str:
         import yaml
 
+        provider = self._provider_name()
         config: dict[str, Any] = {
-            "model": self.wandb_model_id,
-            "provider": "wandb",
+            "model": self.model_route.model_id,
+            "provider": provider,
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": 90},
             "memory": {"memory_enabled": False, "user_profile_enabled": False},
@@ -289,11 +401,11 @@ class WandbHermes(_TrialMetaMixin, Hermes):
             "delegation": {"max_iterations": 50},
             "checkpoints": {"enabled": False},
             "providers": {
-                "wandb": {
-                    "name": "W&B Inference",
-                    "api": WANDB_INFERENCE_BASE_URL,
-                    "key_env": "WANDB_API_KEY",
-                    "models": [self.wandb_model_id],
+                provider: {
+                    "name": f"Fugue {self.model_route.provider}",
+                    "api": _chat_base_url(self.model_route),
+                    "key_env": _chat_key_env(self.model_route),
+                    "models": [self.model_route.model_id],
                 },
             },
             # Plugin enablement lives in this same file (`hermes plugins
@@ -320,7 +432,8 @@ class WandbHermes(_TrialMetaMixin, Hermes):
                 "fugue.run_key": self.run_key,
                 "fugue.harness": "hermes",
                 "fugue.condition": self.condition,
-                "fugue.model": self.wandb_model_id,
+                "fugue.model": self.model_route.display_model,
+                "fugue.model_provider": self.model_route.provider,
             },
             "force_flush_on_session_end": True,
         }
@@ -398,24 +511,25 @@ class WandbHermes(_TrialMetaMixin, Hermes):
         context: AgentContext,
     ) -> None:
         instruction = self.render_instruction(instruction)
-        self._meta_begin("hermes", self.wandb_model_id)
+        await self._begin_trial("hermes", self.model_route, environment)
 
         entity, project = _weave_entity_project()
         env: dict[str, str] = {
             "TERMINAL_ENV": "local",
-            "WANDB_API_KEY": _require_wandb_key(),
+            "WANDB_API_KEY": _require_trace_key(),
             "WANDB_ENTITY": entity,
             "WANDB_PROJECT": project,
             "HARBOR_INSTRUCTION": instruction,
             # Per-span detail lands in the plugin dir's debug.log — the
             # fastest signal when validating trace delivery.
             "HERMES_OTEL_DEBUG": "true",
+            _chat_key_env(self.model_route): _chat_key(self.model_route),
         }
 
         home = await self._detect_home(environment)
         await self._install_hermes_otel(environment, home)
 
-        config_yaml = self._build_wandb_config_yaml()
+        config_yaml = self._build_model_config_yaml()
         await self.exec_as_agent(
             environment,
             command=(
@@ -441,7 +555,8 @@ class WandbHermes(_TrialMetaMixin, Hermes):
         run_cmd = (
             'export PATH="$HOME/.local/bin:$PATH" && '
             'hermes --yolo chat -q "$HARBOR_INSTRUCTION" -Q '
-            f"--provider wandb --model {shlex.quote(self.wandb_model_id)} "
+            f"--provider {shlex.quote(self._provider_name())} "
+            f"--model {shlex.quote(self.model_route.model_id)} "
             "2>&1 | stdbuf -oL tee /logs/agent/hermes.txt"
         )
 
@@ -475,8 +590,8 @@ class WandbHermes(_TrialMetaMixin, Hermes):
         return self._regex_ids(self.logs_dir / "hermes.txt", r"session_id:\s*(\S+)")
 
 
-class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
-    """OpenClaw on W&B Inference with the weave-openclaw plugin.
+class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
+    """OpenClaw with provider-routed chat calls and the weave-openclaw plugin.
 
     Model plane fixes over the stock adapter:
 
@@ -523,14 +638,16 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
     @staticmethod
     @override
     def name() -> str:
-        return "wandb-openclaw"
+        return "fugue-openclaw"
 
     def __init__(self, *args, model_name: str | None = None, **kwargs):
-        self.wandb_model_id = canonical_model_id(model_name)
-        os.environ["OPENAI_API_KEY"] = _require_wandb_key()
-        os.environ["OPENAI_BASE_URL"] = WANDB_INFERENCE_BASE_URL
+        self.model_route = resolve_model_route(model_name)
+        _require_model_key(self.model_route)
+        _require_trace_key()
+        os.environ["OPENAI_API_KEY"] = _chat_key(self.model_route)
+        os.environ["OPENAI_BASE_URL"] = _chat_base_url(self.model_route)
         _weave_entity_project()
-        super().__init__(*args, model_name=f"openai/{self.wandb_model_id}", **kwargs)
+        super().__init__(*args, model_name=f"openai/{self.model_route.model_id}", **kwargs)
 
     @override
     def _normalize_provider_models_schema(self, cfg: dict[str, Any]) -> None:
@@ -540,7 +657,7 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
         raw_models = prov_cfg.get("models")
         if not isinstance(raw_models, list) or not raw_models:
             prov_cfg["models"] = [
-                {"id": self.wandb_model_id, "name": self.wandb_model_id}
+                {"id": self.model_route.model_id, "name": self.model_route.model_id}
             ]
 
     @override
@@ -560,7 +677,7 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
                 "serviceName": "fugue",
                 "agentName": self.run_key,
                 "agentDescription": (
-                    f"fugue {self.condition} / {self.wandb_model_id}"
+                    f"fugue {self.condition} / {self.model_route.display_model}"
                 ),
                 "apiKey": {
                     "source": "env",
@@ -650,7 +767,7 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
         # gateway wrapped around the agent turn (plugins only trace there).
         from harbor.agents.installed.openclaw import _nvm22
 
-        self._meta_begin("openclaw", self.wandb_model_id)
+        await self._begin_trial("openclaw", self.model_route, environment)
         escaped_instruction = shlex.quote(instruction)
 
         if not self.model_name or "/" not in self.model_name:
@@ -660,9 +777,11 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
         self._validate_provider(provider)
 
         env: dict[str, str] = {
-            "WANDB_API_KEY": _require_wandb_key(),
+            "WANDB_API_KEY": _require_trace_key(),
             "OPENCLAW_GATEWAY_TOKEN": self._GATEWAY_TOKEN,
             "OPENCLAW_GATEWAY_PORT": str(self._GATEWAY_PORT),
+            "OPENAI_API_KEY": _chat_key(self.model_route),
+            "OPENAI_BASE_URL": _chat_base_url(self.model_route),
         }
         for key in self._provider_env_keys(provider):
             val = self._get_env(key)
@@ -763,12 +882,12 @@ class WandbOpenClaw(_TrialMetaMixin, OpenClaw):
         )
 
 
-class WandbClaudeCode(_TrialMetaMixin, ClaudeCode):
-    """Claude Code on W&B Inference (via the Anthropic bridge) with the
-    weave-claude-code plugin.
+class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
+    """Claude Code with provider-routed Messages calls and Weave tracing.
 
-    Model plane: requests go to the local LiteLLM bridge; the stock adapter
-    pins every model alias to the W&B model once ``ANTHROPIC_BASE_URL`` is set.
+    Model plane: Anthropic models use Claude Code's native Messages path.
+    Other providers use the local LiteLLM bridge, which exposes the Messages
+    API and translates downstream.
 
     Tracing: ``weave-claude-code install --non-interactive --source=local``
     (the documented container-sandbox path) must run with the same
@@ -781,20 +900,20 @@ class WandbClaudeCode(_TrialMetaMixin, ClaudeCode):
     @staticmethod
     @override
     def name() -> str:
-        return "wandb-claude-code"
+        return "fugue-claude-code"
 
     def __init__(self, *args, model_name: str | None = None, **kwargs):
-        self.wandb_model_id = canonical_model_id(model_name)
-        _require_wandb_key()  # fail fast even though the bridge holds the key
+        self.model_route = resolve_model_route(model_name)
+        _require_model_key(self.model_route)
+        _require_trace_key()
         _weave_entity_project()
-        os.environ["ANTHROPIC_BASE_URL"] = ANTHROPIC_BRIDGE_URL
-        os.environ["ANTHROPIC_API_KEY"] = BRIDGE_MASTER_KEY
+        os.environ["ANTHROPIC_BASE_URL"] = _messages_base_url(self.model_route)
+        os.environ["ANTHROPIC_API_KEY"] = _messages_key(self.model_route)
         os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-        # GLM's reasoning_content round-trips through the bridge as Anthropic
-        # thinking blocks and fails validation on the next turn ("Content
-        # block is not a thinking block"). Keep thinking out of the protocol.
+        # Bridged models can round-trip provider-specific reasoning content as
+        # Anthropic thinking blocks and fail validation on the next turn.
         os.environ["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
-        super().__init__(*args, model_name=self.wandb_model_id, **kwargs)
+        super().__init__(*args, model_name=self.model_route.model_id, **kwargs)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
@@ -820,7 +939,7 @@ class WandbClaudeCode(_TrialMetaMixin, ClaudeCode):
         env = {
             "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
             "WEAVE_PROJECT": _weave_project_slug(),
-            "WANDB_API_KEY": _require_wandb_key(),
+            "WANDB_API_KEY": _require_trace_key(),
             "IS_SANDBOX": "1",
         }
         # Three container gotchas, all verified empirically:
@@ -886,7 +1005,7 @@ class WandbClaudeCode(_TrialMetaMixin, ClaudeCode):
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
-        self._meta_begin("claude-code", self.wandb_model_id)
+        await self._begin_trial("claude-code", self.model_route, environment)
         try:
             await self._install_weave_plugin(environment)
             await super().run(instruction, environment, context)
@@ -916,14 +1035,11 @@ class WandbClaudeCode(_TrialMetaMixin, ClaudeCode):
         return []
 
 
-class WandbCodex(_TrialMetaMixin, Codex):
-    """Codex CLI on W&B Inference (via the Responses bridge) with the
-    weave-codex plugin.
+class FugueCodex(_TrialMetaMixin, Codex):
+    """Codex CLI with provider-routed Responses calls and weave-codex tracing.
 
-    Model plane: two stock behaviors break against W&B Inference and force a
-    run() override — ``model_name.split("/")[-1]`` truncates namespaced ids,
-    and Codex only speaks the Responses API (``wire_api = "chat"`` removed in
-    2026), which the bridge translates.
+    Model plane: OpenAI models use the native Responses API. Other providers
+    go through the LiteLLM bridge's Responses endpoint.
 
     Tracing: weave-codex merges a Stop hook into ``$CODEX_HOME/hooks.json``
     (it honors CODEX_HOME, verified in its constants.js). The hook spawns a
@@ -941,8 +1057,8 @@ class WandbCodex(_TrialMetaMixin, Codex):
     harnesses. conversation_id additionally carries the codex session id.
     """
 
-    # GLM through the bridge does not accept OpenAI reasoning params; drop the
-    # stock default of `-c model_reasoning_effort=high`.
+    # Bridged providers may reject OpenAI reasoning params; drop the stock
+    # default of `-c model_reasoning_effort=high`.
     CLI_FLAGS = [
         flag for flag in Codex.CLI_FLAGS if flag.kwarg != "reasoning_effort"
     ]
@@ -950,13 +1066,14 @@ class WandbCodex(_TrialMetaMixin, Codex):
     @staticmethod
     @override
     def name() -> str:
-        return "wandb-codex"
+        return "fugue-codex"
 
     def __init__(self, *args, model_name: str | None = None, **kwargs):
-        self.wandb_model_id = canonical_model_id(model_name)
-        _require_wandb_key()  # fail fast even though the bridge holds the key
+        self.model_route = resolve_model_route(model_name)
+        _require_model_key(self.model_route)
+        _require_trace_key()
         _weave_entity_project()
-        super().__init__(*args, model_name=self.wandb_model_id, **kwargs)
+        super().__init__(*args, model_name=self.model_route.model_id, **kwargs)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
@@ -989,16 +1106,17 @@ class WandbCodex(_TrialMetaMixin, Codex):
             timeout_sec=600,
         )
 
-    def _build_wandb_config_toml(self) -> str:
+    def _build_model_config_toml(self) -> str:
         # Hook trust is handled by --dangerously-bypass-hook-trust on the exec
         # invocation; the README's `bypass_hook_trust` config key is a no-op
         # for headless runs on codex 0.143.0 (verified: hook never fires).
+        provider = _codex_provider_name(self.model_route)
         return (
-            f'model = "{self.wandb_model_id}"\n'
-            'model_provider = "wandb"\n'
-            "[model_providers.wandb]\n"
-            'name = "W&B Inference via bridge"\n'
-            f'base_url = "{ANTHROPIC_BRIDGE_URL}/v1"\n'
+            f'model = "{self.model_route.model_id}"\n'
+            f'model_provider = "{provider}"\n'
+            f"[model_providers.{provider}]\n"
+            f'name = "Fugue {self.model_route.provider}"\n'
+            f'base_url = "{_responses_base_url(self.model_route)}"\n'
             'env_key = "OPENAI_API_KEY"\n'
             'wire_api = "responses"\n'
         )
@@ -1007,7 +1125,7 @@ class WandbCodex(_TrialMetaMixin, Codex):
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
-        self._meta_begin("codex", self.wandb_model_id)
+        await self._begin_trial("codex", self.model_route, environment)
         instruction = self.render_instruction(instruction)
         escaped_instruction = shlex.quote(instruction)
 
@@ -1018,21 +1136,22 @@ class WandbCodex(_TrialMetaMixin, Codex):
         weave_project = _weave_project_slug()
         env: dict[str, str] = {
             "CODEX_HOME": remote_codex_home,
-            # Auth is against the local bridge, which holds the real W&B key.
-            "OPENAI_API_KEY": BRIDGE_MASTER_KEY,
+            # Codex reads the configured provider's key from OPENAI_API_KEY
+            # regardless of whether it is native OpenAI or the local bridge.
+            "OPENAI_API_KEY": _responses_key(self.model_route),
             # The Stop-hook collector inherits codex's env; give it Weave
             # credentials directly (settings.json below is the fallback).
-            "WANDB_API_KEY": _require_wandb_key(),
+            "WANDB_API_KEY": _require_trace_key(),
             "WEAVE_PROJECT": weave_project,
             # Consumed by the emit.js patch from install(); joins spans to
             # this Harbor trial.
             "WEAVE_CODEX_AGENT_NAME": self.run_key,
         }
 
-        config_toml = self._build_wandb_config_toml()
+        config_toml = self._build_model_config_toml()
         settings_json = json.dumps(
             {
-                "wandb_api_key": _require_wandb_key(),
+                "wandb_api_key": _require_trace_key(),
                 "weave_project": weave_project,
                 "capture_content": True,
             }
@@ -1058,6 +1177,9 @@ class WandbCodex(_TrialMetaMixin, Codex):
             environment, command=setup_command, env=env, timeout_sec=600
         )
 
+        codex_output = (EnvironmentPaths.agent_dir / self._OUTPUT_FILENAME).as_posix()
+        codex_sessions = (EnvironmentPaths.agent_dir / "sessions").as_posix()
+
         try:
             await self.exec_as_agent(
                 environment,
@@ -1072,9 +1194,7 @@ class WandbCodex(_TrialMetaMixin, Codex):
                     f"{cli_flags_arg}"
                     "-- "
                     f"{escaped_instruction} "
-                    f"2>&1 </dev/null | tee {
-                        EnvironmentPaths.agent_dir / self._OUTPUT_FILENAME
-                    }"
+                    f"2>&1 </dev/null | tee {codex_output}"
                 ),
                 env=env,
             )
@@ -1105,12 +1225,8 @@ class WandbCodex(_TrialMetaMixin, Codex):
                     command=(
                         f"mkdir -p {EnvironmentPaths.agent_dir.as_posix()}\n"
                         'if [ -d "$CODEX_HOME/sessions" ]; then\n'
-                        f"  rm -rf {
-                            (EnvironmentPaths.agent_dir / 'sessions').as_posix()
-                        }\n"
-                        f'  cp -R "$CODEX_HOME/sessions" {
-                            (EnvironmentPaths.agent_dir / "sessions").as_posix()
-                        }\n'
+                        f"  rm -rf {codex_sessions}\n"
+                        f'  cp -R "$CODEX_HOME/sessions" {codex_sessions}\n'
                         "fi"
                     ),
                     env=env,

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fugue Operator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500;600;700&family=Source+Sans+3:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Fugue navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">W&B</span>
+          <span>
+            <strong>Fugue</strong>
+            <small>operator console</small>
+          </span>
+        </div>
+
+        <nav class="nav-list" aria-label="Primary">
+          <button class="nav-item" data-tab-target="overview" type="button">
+            <span class="nav-glyph" aria-hidden="true"></span>
+            Overview
+          </button>
+          <button class="nav-item" data-tab-target="setup" type="button">
+            <span class="nav-glyph" aria-hidden="true"></span>
+            Setup
+          </button>
+          <button class="nav-item" data-tab-target="run" type="button">
+            <span class="nav-glyph" aria-hidden="true"></span>
+            Run matrix
+          </button>
+          <button class="nav-item" data-tab-target="jobs" type="button">
+            <span class="nav-glyph" aria-hidden="true"></span>
+            Jobs
+          </button>
+          <button class="nav-item" data-tab-target="results" type="button">
+            <span class="nav-glyph" aria-hidden="true"></span>
+            Results
+          </button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="sidebar-foot-label">Trace project</div>
+          <a id="sidebarWeaveLink" class="sidebar-link" href="#" target="_blank" rel="noreferrer">Not configured</a>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="app-header">
+          <div class="title-stack">
+            <p class="eyebrow">Fugue operator</p>
+            <h1 id="pageTitle">Overview</h1>
+          </div>
+          <div class="header-actions">
+            <span id="providerPill" class="status-pill neutral">provider</span>
+            <span id="modelPill" class="status-pill code">model</span>
+            <a id="projectPill" class="status-pill link" href="#" target="_blank" rel="noreferrer">W&B project</a>
+            <a id="openWandbBtn" class="button cyan" href="#" target="_blank" rel="noreferrer">Open W&B</a>
+            <button id="refreshBtn" class="button ghost" type="button">Refresh</button>
+          </div>
+        </header>
+
+        <main class="content">
+          <section id="tab-overview" class="tab-panel" data-tab-panel="overview">
+            <div class="stat-grid" id="readinessCards"></div>
+
+            <div class="content-grid overview-grid">
+              <section class="panel matrix-panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Run matrix</p>
+                    <h2>Matrix stave</h2>
+                  </div>
+                  <span id="matrixCount" class="badge neutral">0 cells</span>
+                </div>
+                <div id="matrixStave" class="matrix-stave"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Latest</p>
+                    <h2>Run state</h2>
+                  </div>
+                </div>
+                <div id="latestJobCard" class="detail-stack"></div>
+              </section>
+            </div>
+
+            <div class="content-grid result-overview-grid">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Results</p>
+                    <h2>Scoreboard</h2>
+                  </div>
+                  <button class="button ghost small" data-tab-link="results" type="button">View results</button>
+                </div>
+                <div id="summaryMetrics" class="metric-strip"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Experiment</p>
+                    <h2>W&B links</h2>
+                  </div>
+                </div>
+                <div id="overviewLinks" class="link-stack"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="tab-setup" class="tab-panel" data-tab-panel="setup" hidden>
+            <div class="content-grid setup-grid">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Credentials</p>
+                    <h2>Key presence</h2>
+                  </div>
+                  <button id="preflightBtn" class="button primary" type="button">Run preflight</button>
+                </div>
+                <div id="setupKeys" class="key-grid"></div>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Local bridge</p>
+                    <h2>LiteLLM gateway</h2>
+                  </div>
+                  <button id="bridgeBtn" class="button primary" type="button">Start bridge</button>
+                </div>
+                <div id="setupBridge" class="detail-stack"></div>
+              </section>
+            </div>
+
+            <div class="content-grid setup-grid">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Selected route</p>
+                    <h2>Provider plane</h2>
+                  </div>
+                </div>
+                <dl id="setupRoute" class="definition-grid"></dl>
+              </section>
+
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Manifest</p>
+                    <h2>Benchmark shape</h2>
+                  </div>
+                </div>
+                <dl id="setupManifest" class="definition-grid"></dl>
+              </section>
+            </div>
+          </section>
+
+          <section id="tab-run" class="tab-panel" data-tab-panel="run" hidden>
+            <div class="content-grid run-grid">
+              <section class="panel run-controls">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Controls</p>
+                    <h2>Run matrix</h2>
+                  </div>
+                  <label class="switch">
+                    <input id="dryRunInput" type="checkbox" checked />
+                    <span>Dry run</span>
+                  </label>
+                </div>
+
+                <label class="field">
+                  <span>Model</span>
+                  <input id="modelInput" value="wandb/zai-org/GLM-5.2" autocomplete="off" />
+                </label>
+
+                <div class="control-block">
+                  <div class="control-label">Harnesses</div>
+                  <div id="harnessToggles" class="toggle-grid"></div>
+                </div>
+
+                <div class="control-block">
+                  <div class="control-label">Conditions</div>
+                  <div id="conditionToggles" class="toggle-grid"></div>
+                </div>
+
+                <div class="number-row">
+                  <label class="field">
+                    <span>Tasks</span>
+                    <input id="taskInput" type="number" min="1" inputmode="numeric" />
+                  </label>
+                  <label class="field">
+                    <span>Attempts</span>
+                    <input id="attemptInput" type="number" min="1" inputmode="numeric" value="1" />
+                  </label>
+                  <label class="field">
+                    <span>Concurrent</span>
+                    <input id="concurrentInput" type="number" min="1" inputmode="numeric" value="2" />
+                  </label>
+                </div>
+
+                <div class="action-row">
+                  <button id="prepareBtn" class="button ghost" type="button">Prepare memory</button>
+                  <button id="runBtn" class="button primary" type="button">Run matrix</button>
+                </div>
+              </section>
+
+              <section class="panel command-panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Preview</p>
+                    <h2>Command</h2>
+                  </div>
+                </div>
+                <pre id="commandPreview" class="command-preview"></pre>
+                <div id="runManifestSummary" class="detail-stack"></div>
+              </section>
+            </div>
+          </section>
+
+          <section id="tab-jobs" class="tab-panel" data-tab-panel="jobs" hidden>
+            <div class="content-grid jobs-grid">
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Processes</p>
+                    <h2>Jobs</h2>
+                  </div>
+                </div>
+                <div id="jobList" class="job-list"></div>
+              </section>
+
+              <section class="panel log-panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Live stream</p>
+                    <h2>Output</h2>
+                  </div>
+                  <span id="activeJobBadge" class="badge neutral">No job selected</span>
+                </div>
+                <div id="jobDetail" class="job-detail"></div>
+                <pre id="logView" class="log-view"></pre>
+              </section>
+            </div>
+          </section>
+
+          <section id="tab-results" class="tab-panel" data-tab-panel="results" hidden>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Exported trials</p>
+                  <h2>Results</h2>
+                </div>
+                <div class="action-row compact">
+                  <button id="exportBtn" class="button ghost" type="button">Export results</button>
+                  <a id="resultsWeaveLink" class="button cyan" href="#" target="_blank" rel="noreferrer">Open Weave</a>
+                </div>
+              </div>
+
+              <div id="resultCards" class="result-card-grid"></div>
+              <div id="resultFilters" class="filter-row"></div>
+
+              <div id="resultEmpty" class="empty-state" hidden>
+                No results yet. Run a dry matrix or export existing jobs.
+              </div>
+
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Harness</th>
+                      <th>Condition</th>
+                      <th>Provider</th>
+                      <th>Model</th>
+                      <th>Pass</th>
+                      <th>Reward</th>
+                      <th>Tokens</th>
+                      <th>Cost</th>
+                      <th>Wall time</th>
+                      <th>Run key</th>
+                      <th>Trace</th>
+                    </tr>
+                  </thead>
+                  <tbody id="resultRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

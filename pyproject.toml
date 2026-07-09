@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fugue"
+version = "0.1.0"
+description = "Harbor + Weave runner for comparing agent harnesses on repository-memory benchmarks."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "pyyaml",
+    "weave",
+]
+
+[project.scripts]
+fugue = "fugue.bench.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+web = [
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.setuptools.packages.find]
+include = ["fugue*"]
+
+[tool.setuptools.package-data]
+fugue = ["web_static/*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

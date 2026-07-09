@@ -3,7 +3,7 @@ schema_version = "1.3"
 [task]
 name = "fugue/smoke-bridge-check"
 version = "0.1.0"
-description = "Smoke task: prove a harness can read a file, call W&B Inference, and write a file."
+description = "Smoke task: prove a harness can read a file, call the selected model provider, and write a file."
 keywords = ["smoke", "fugue"]
 
 [agent]

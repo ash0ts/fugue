@@ -1,13 +1,13 @@
-from fugue.agents.wandb_inference import (
-    WandbClaudeCode,
-    WandbCodex,
-    WandbHermes,
-    WandbOpenClaw,
+from fugue.agents.model_plane import (
+    FugueClaudeCode,
+    FugueCodex,
+    FugueHermes,
+    FugueOpenClaw,
 )
 
 __all__ = [
-    "WandbClaudeCode",
-    "WandbCodex",
-    "WandbHermes",
-    "WandbOpenClaw",
+    "FugueClaudeCode",
+    "FugueCodex",
+    "FugueHermes",
+    "FugueOpenClaw",
 ]

@@ -1,0 +1,63 @@
+dataset:
+  ref: swe-bench/swe-bench-verified
+  version: latest
+
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 2
+jobs_dir: jobs/pilot
+artifact_root: artifacts/memory
+lock_path: artifacts/lock.json
+
+conditions:
+  - none
+  - agentsmd
+  - openwiki
+
+harnesses:
+  - name: hermes
+    agent: fugue.agents:FugueHermes
+  - name: openclaw
+    agent: fugue.agents:FugueOpenClaw
+  - name: claude-code
+    agent: fugue.agents:FugueClaudeCode
+  - name: codex
+    agent: fugue.agents:FugueCodex
+
+tasks:
+  - id: astropy__astropy-12907
+    repo: astropy/astropy
+    base_commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
+  - id: astropy__astropy-13033
+    repo: astropy/astropy
+    base_commit: 298ccb478e6bf092953bca67a3d29dc6c35f6752
+  - id: django__django-13128
+    repo: django/django
+    base_commit: 2d67222472f80f251607ae1b720527afceba06ad
+  - id: django__django-13158
+    repo: django/django
+    base_commit: 7af8f4127397279d19ef7c7899e93018274e2f9b
+  - id: pydata__xarray-3151
+    repo: pydata/xarray
+    base_commit: 118f4d996e7711c9aced916e6049af9f28d5ec66
+  - id: pydata__xarray-3305
+    repo: pydata/xarray
+    base_commit: 69c7e01e5167a3137c285cb50d1978252bb8bcbf
+  - id: scikit-learn__scikit-learn-10844
+    repo: scikit-learn/scikit-learn
+    base_commit: 97523985b39ecde369d83352d7c3baf403b60a22
+  - id: scikit-learn__scikit-learn-10908
+    repo: scikit-learn/scikit-learn
+    base_commit: 67d06b18c68ee4452768f8a1e868565dd4354abf
+  - id: sphinx-doc__sphinx-8120
+    repo: sphinx-doc/sphinx
+    base_commit: 795747bdb6b8fb7d717d5bbfc2c3316869e66a73
+  - id: sphinx-doc__sphinx-8265
+    repo: sphinx-doc/sphinx
+    base_commit: b428cd2404675475a5c3dc2a2b0790ba57676202
+  - id: sympy__sympy-15599
+    repo: sympy/sympy
+    base_commit: 5e17a90c19f7eecfa10c1ab872648ae7e2131323
+  - id: sympy__sympy-15809
+    repo: sympy/sympy
+    base_commit: 28d913d3cead6c5646307ffa6540b21d65059dfd

@@ -1,49 +1,57 @@
 #!/usr/bin/env bash
-# Smoke run: 1 tiny task per harness against W&B Inference, all inside Harbor
-# containers. Usage:
-#   scripts/smoke.sh                 # all four harnesses
-#   scripts/smoke.sh codex hermes    # subset
-set -uo pipefail
+set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(dirname "$HERE")"                     # repo root
+ROOT="$(dirname "$HERE")"
 
 [ -f "$ROOT/.env" ] && { set -a; source "$ROOT/.env"; set +a; }
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-fugue-local}"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-# Weave tracing: agents fail fast without entity/project routing.
+MODEL="${FUGUE_MODEL:-wandb/zai-org/GLM-5.2}"
+HARNESSES=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        *)
+            HARNESSES+=("$1")
+            shift
+            ;;
+    esac
+done
+
 : "${WANDB_ENTITY:?set WANDB_ENTITY in .env (Weave tracing)}"
 : "${WANDB_PROJECT:?set WANDB_PROJECT in .env (Weave tracing)}"
 export WEAVE_PROJECT="${WEAVE_PROJECT:-$WANDB_ENTITY/$WANDB_PROJECT}"
-echo "Weave project: $WEAVE_PROJECT"
+export FUGUE_MODEL="$MODEL"
 
-MODEL="wandb/${FUGUE_MODEL:-zai-org/GLM-5.2}"
 TASK="$ROOT/tasks/smoke/bridge-check"
 JOBS="$ROOT/jobs/smoke"
 
 declare -A IMPORTS=(
-    [hermes]="fugue.agents.wandb_inference:WandbHermes"
-    [openclaw]="fugue.agents.wandb_inference:WandbOpenClaw"
-    [claude-code]="fugue.agents.wandb_inference:WandbClaudeCode"
-    [codex]="fugue.agents.wandb_inference:WandbCodex"
+    [hermes]="fugue.agents:FugueHermes"
+    [openclaw]="fugue.agents:FugueOpenClaw"
+    [claude-code]="fugue.agents:FugueClaudeCode"
+    [codex]="fugue.agents:FugueCodex"
 )
 
-# Keep the bridge up for claude-code.
-docker compose -f "$ROOT/proxy/docker-compose.yaml" up -d >/dev/null
+python -m fugue.bench.cli bridge up --repo-root "$ROOT" --model "$MODEL"
 
-HARNESSES=("$@")
 [ ${#HARNESSES[@]} -eq 0 ] && HARNESSES=(codex hermes openclaw claude-code)
 
 SUMMARY=()
 for h in "${HARNESSES[@]}"; do
     import="${IMPORTS[$h]:-}"
     if [ -z "$import" ]; then
-        echo "unknown harness: $h (choices: ${!IMPORTS[*]})"; exit 2
+        echo "unknown harness: $h (choices: ${!IMPORTS[*]})"
+        exit 2
     fi
     echo
-    echo "===== smoke: $h ====="
-    rm -rf "$JOBS/smoke-$h"   # fresh run; otherwise harbor resumes the old job
+    echo "===== smoke: $h / $MODEL ====="
+    rm -rf "$JOBS/smoke-$h"
     harbor run \
         -p "$TASK" \
         -a "$import" \
