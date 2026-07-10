@@ -118,7 +118,7 @@ class StubBuilder:
         raise NotImplementedError(f"{self.name} is not implemented for the pilot")
 
 
-def builder_for(condition: str) -> MemoryBuilder:
+def builder_for(memory: str) -> MemoryBuilder:
     builders: dict[str, MemoryBuilder] = {
         "none": NoneBuilder(),
         "agentsmd": AgentsMdBuilder(),
@@ -127,26 +127,26 @@ def builder_for(condition: str) -> MemoryBuilder:
         "deepwiki": StubBuilder("deepwiki"),
     }
     try:
-        return builders[condition]
+        return builders[memory]
     except KeyError as exc:
-        raise ValueError(f"unknown memory condition: {condition}") from exc
+        raise ValueError(f"unknown memory feature: {memory}") from exc
 
 
 def build_artifact(
     *,
-    condition: str,
+    memory: str,
     task: TaskSpec,
     repo_checkout: Path,
     artifact_root: Path,
 ) -> PreparedArtifact:
-    builder = builder_for(condition)
-    artifact_dir = artifact_root / condition / task.id
+    builder = builder_for(memory)
+    artifact_dir = artifact_root / memory / task.id
     if artifact_dir.exists():
         shutil.rmtree(artifact_dir)
-    if condition != "none":
+    if memory != "none":
         builder.build(repo_checkout, task, artifact_dir)
     return PreparedArtifact(
-        condition=condition,
+        feature_memory=memory,
         task_id=task.id,
         path=artifact_dir,
         builder=builder.name,
@@ -158,10 +158,10 @@ def build_artifact(
     )
 
 
-def write_condition_instruction(artifact_root: Path, condition: str) -> Path | None:
-    if condition == "none":
+def write_memory_instruction(artifact_root: Path, memory: str) -> Path | None:
+    if memory == "none":
         return None
-    instruction = artifact_root / condition / "INSTRUCTION.md"
+    instruction = artifact_root / memory / "INSTRUCTION.md"
     instruction.parent.mkdir(parents=True, exist_ok=True)
     instruction.write_text(
         "Additional repository memory for this trial has been injected into "
@@ -212,11 +212,11 @@ def clone_repo_at_commit(task: TaskSpec, checkout_root: Path) -> Path:
     return checkout
 
 
-def _write_pointer(artifact_dir: Path, condition: str) -> None:
+def _write_pointer(artifact_dir: Path, memory: str) -> None:
     pointer = artifact_dir / POINTER_DIR / POINTER_FILE
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text(
-        f"# Fugue Memory Condition: {condition}\n\n"
+        f"# Fugue Memory Feature: {memory}\n\n"
         "These files were generated from the benchmark task's base commit only. "
         "Treat them as repository orientation, not as the source of the patch.\n"
     )

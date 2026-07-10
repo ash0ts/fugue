@@ -47,14 +47,20 @@ Requirements: Docker Desktop, Harbor (`uv tool install harbor`), `jq`, and for
 Hermes a local `hermes-otel` checkout (`HERMES_OTEL_CHECKOUT`, default
 `~/Documents/GitHub/hermes-otel`).
 
-## RepoMemBench Runner
+## Experiment Runner
 
 ```bash
-fugue prepare --manifest datasets/pilot.yaml
-fugue run --manifest datasets/pilot.yaml \
+fugue prompts list
+fugue skills list
+fugue experiments list
+
+fugue prepare --experiment pilot --manifest datasets/pilot.yaml
+fugue run --experiment pilot --manifest datasets/pilot.yaml \
   --model openai/gpt-5 \
   --harnesses hermes,openclaw \
-  --conditions none,openwiki \
+  --variants baseline,prompt-skill \
+  --run-name gpt5-prompt-skill-sweep \
+  --tags pilot,gpt5 \
   -k 1 -l 3
 fugue export --jobs jobs/pilot --out reports/pilot.jsonl --to-weave
 ```
@@ -66,10 +72,18 @@ Model precedence is:
 3. `FUGUE_MODEL`
 4. `wandb/zai-org/GLM-5.2`
 
-`fugue prepare` builds memory artifacts under `artifacts/memory/` and writes
-`artifacts/lock.json`. `fugue run` invokes Harbor once per harness × condition
-with task filters from the manifest. `fugue export` joins Harbor
-`result.json`, `agent/fugue-meta.json`, and optional Weave span summaries.
+Saved experiments live under `configs/fugue/experiments/`, prompts under
+`configs/fugue/prompts/`, and Harbor skills under `configs/fugue/skills/`.
+Each experiment defines feature variants: named bundles of prompt, skills,
+optional memory, and advanced Harbor agent settings. `fugue run` renders one
+Harbor JobConfig per harness × feature variant with task filters from the
+manifest. `fugue export` joins Harbor `result.json`, `agent/fugue-meta.json`,
+and optional Weave span summaries.
+
+W&B traces default to `wandb/hermes_agent`; override `WANDB_ENTITY`,
+`WANDB_PROJECT`, or `WEAVE_PROJECT` only when you intentionally want a
+different trace project. Use `--run-name` and `--tags` to separate experiments
+inside the same project.
 
 ## Operator UI
 
@@ -80,18 +94,26 @@ uv pip install -e ".[web]"
 fugue web --host 127.0.0.1 --port 8765
 ```
 
-The UI is a W&B-style operator console with tabs for Overview, Setup, Run
-matrix, Jobs, and Results. It shows key presence, selected provider/model,
-bridge health, manifest shape, a matrix stave of harnesses × conditions, live
-job logs, result summaries, and links into W&B/Weave. It never returns raw API
-keys; status only reports whether each key is present.
+The UI is a W&B-style operator console with three tabs:
+
+- Run: choose a benchmark/task manifest, model, harnesses, feature variants,
+  prompts, skills, trial count, and concurrency.
+- Compare: inspect pass rate, reward, tokens, cost, failures, run keys, and
+  Weave links grouped by experiment, harness, prompt, skill, and variant.
+- Setup: check key presence, selected provider/model, bridge health, manifest
+  health, and links into W&B/Weave.
+
+The UI never returns raw API keys; status only reports whether each key is
+present.
 
 ## Environment
 
 ```bash
 WANDB_API_KEY=          # Weave tracing; also model billing for wandb/...
-WANDB_ENTITY=
-WANDB_PROJECT=
+WANDB_ENTITY=wandb      # default trace entity
+WANDB_PROJECT=hermes_agent
+FUGUE_RUN_NAME=         # optional; defaults to fugue-<UTC timestamp>
+FUGUE_TAGS=             # optional comma-separated tags
 
 OPENAI_API_KEY=        # model billing for openai/...
 ANTHROPIC_API_KEY=     # model billing for anthropic/...
@@ -119,10 +141,11 @@ fugue/
 │   ├── model_plane.py   # provider routing
 │   └── web.py           # local operator UI
 ├── datasets/pilot.yaml
+├── configs/fugue/       # saved prompts, skills, and experiments
 ├── scripts/
 ├── tasks/
 ├── artifacts/           # gitignored prepared memory artifacts
 ├── jobs/                # gitignored Harbor and web jobs
 ├── reports/             # gitignored exports
-└── .fugue/              # gitignored runtime bridge config
+└── .fugue/              # gitignored runtime bridge and JobConfig files
 ```

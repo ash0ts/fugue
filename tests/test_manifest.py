@@ -9,7 +9,7 @@ def test_manifest_round_trip_lock(tmp_path: Path) -> None:
         """
 dataset:
   ref: swe-bench/swe-bench-verified
-conditions: [none, agentsmd]
+memory_variants: [none, agentsmd]
 harnesses:
   - name: hermes
     agent: fugue.agents:FugueHermes
@@ -22,7 +22,7 @@ tasks:
 
     manifest = load_manifest(manifest_path)
     assert manifest.dataset.harbor_ref == "swe-bench/swe-bench-verified"
-    assert manifest.select_conditions(["agentsmd"]) == ["agentsmd"]
+    assert manifest.select_memory_variants(["agentsmd"]) == ["agentsmd"]
 
     lock_path = tmp_path / "artifacts" / "lock.json"
     write_lock(

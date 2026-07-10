@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from fugue.model_plane import trace_project_slug
+
 
 def export_rows(
     jobs: list[Path],
@@ -63,7 +65,9 @@ def publish_to_weave(rows: list[dict[str, Any]], project: str | None = None) -> 
             inputs={
                 "task": row.get("task_name"),
                 "harness": row.get("harness"),
-                "condition": row.get("condition"),
+                "feature_memory": row.get("feature_memory"),
+                "variant_id": row.get("variant_id"),
+                "prompt_id": row.get("prompt_id"),
             },
             output=row,
             scores={"reward": score} if score is not None else {},
@@ -170,7 +174,22 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "task_name": trial.get("task_name"),
         "trial_name": trial.get("trial_name") or trial_dir.name,
         "harness": meta.get("harness") or (trial.get("agent_info") or {}).get("name"),
-        "condition": meta.get("condition", "none"),
+        "experiment_id": meta.get("experiment_id"),
+        "run_name": meta.get("run_name"),
+        "run_group": meta.get("run_group"),
+        "variant_id": meta.get("variant_id"),
+        "prompt_id": meta.get("prompt_id"),
+        "feature_memory": meta.get("feature_memory", "none"),
+        "prompt_hashes": meta.get("prompt_hashes", {}),
+        "skill_ids": meta.get("skill_ids", []),
+        "skill_hashes": meta.get("skill_hashes", {}),
+        "harbor_config": meta.get("harbor_config"),
+        "harbor_environment": meta.get("harbor_environment"),
+        "harbor_resources": meta.get("harbor_resources", {}),
+        "agent_config_hash": meta.get("agent_config_hash"),
+        "tags": meta.get("tags", []),
+        "dataset": meta.get("dataset"),
+        "manifest_path": meta.get("manifest_path"),
         "model_provider": meta.get("model_provider"),
         "model": meta.get("model")
         or ((trial.get("config") or {}).get("agent") or {}).get("model_name"),
@@ -201,11 +220,4 @@ def _parse_time(value: str | None) -> datetime | None:
 
 
 def _weave_project_from_env() -> str:
-    project = os.environ.get("WEAVE_PROJECT")
-    if project and "/" in project:
-        return project
-    entity = os.environ.get("WANDB_ENTITY")
-    name = os.environ.get("WANDB_PROJECT")
-    if entity and name:
-        return f"{entity}/{name}"
-    raise RuntimeError("set WEAVE_PROJECT or WANDB_ENTITY/WANDB_PROJECT")
+    return trace_project_slug(os.environ)

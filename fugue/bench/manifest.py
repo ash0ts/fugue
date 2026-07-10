@@ -45,7 +45,7 @@ class TaskSpec:
 class BenchmarkManifest:
     dataset: DatasetSpec
     tasks: list[TaskSpec]
-    conditions: list[str]
+    memory_variants: list[str]
     harnesses: list[HarnessSpec]
     model: str | None = None
     k: int = 1
@@ -54,8 +54,8 @@ class BenchmarkManifest:
     lock_path: Path = Path("artifacts/lock.json")
     n_concurrent: int = 2
 
-    def select_conditions(self, names: list[str] | None) -> list[str]:
-        return _select("condition", self.conditions, names)
+    def select_memory_variants(self, names: list[str] | None) -> list[str]:
+        return _select("memory variant", self.memory_variants, names)
 
     def select_harnesses(self, names: list[str] | None) -> list[HarnessSpec]:
         selected = _select("harness", [h.name for h in self.harnesses], names)
@@ -116,7 +116,7 @@ def load_manifest(path: Path | str) -> BenchmarkManifest:
             version=dataset_raw.get("version"),
         ),
         tasks=tasks,
-        conditions=[str(c) for c in raw.get("conditions", ["none"])],
+        memory_variants=[str(c) for c in raw.get("memory_variants", ["none"])],
         harnesses=harnesses,
         model=str(raw["model"]) if raw.get("model") else None,
         k=int(raw.get("k", 1)),
@@ -173,7 +173,7 @@ def write_lock(
         "dataset": asdict(manifest.dataset),
         "model": manifest.model,
         "tasks": [asdict(task) for task in manifest.tasks],
-        "conditions": manifest.conditions,
+        "memory_variants": manifest.memory_variants,
         "harnesses": [asdict(harness) for harness in manifest.harnesses],
         "artifacts": artifacts,
     }
@@ -183,7 +183,7 @@ def write_lock(
 
 @dataclass
 class PreparedArtifact:
-    condition: str
+    feature_memory: str
     task_id: str
     path: Path
     builder: str
@@ -191,7 +191,7 @@ class PreparedArtifact:
 
     def to_lock_record(self, root: Path) -> dict[str, Any]:
         return {
-            "condition": self.condition,
+            "feature_memory": self.feature_memory,
             "task_id": self.task_id,
             "path": self.path.relative_to(root).as_posix()
             if self.path.is_relative_to(root)

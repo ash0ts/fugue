@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fugue.bench.cli import main
@@ -13,7 +14,7 @@ def test_run_dry_run_uses_cli_model_and_neutral_adapter(
         """
 dataset:
   ref: swe-bench/swe-bench-verified
-conditions: [none]
+memory_variants: [none]
 harnesses:
   - name: codex
     agent: fugue.agents:FugueCodex
@@ -30,6 +31,10 @@ tasks:
                 manifest.as_posix(),
                 "--model",
                 "openai/gpt-5",
+                "--run-name",
+                "unit-exp",
+                "--tags",
+                "nightly,cli",
                 "--dry-run",
                 "--repo-root",
                 tmp_path.as_posix(),
@@ -41,5 +46,13 @@ tasks:
     )
 
     out = capsys.readouterr().out
-    assert "-m openai/gpt-5" in out
-    assert "-a fugue.agents:FugueCodex" in out
+    assert "harbor run --config" in out
+    config_line = next(line for line in out.splitlines() if line.startswith("# config: "))
+    config_path = Path(config_line.removeprefix("# config: "))
+    config = json.loads(config_path.read_text())
+    assert config["agents"][0]["model_name"] == "openai/gpt-5"
+    assert config["agents"][0]["import_path"] == "fugue.agents:FugueCodex"
+    assert config["job_name"] == "unit-exp-codex-baseline"
+    assert config["fugue"]["experiment_id"] == "pilot"
+    assert config["fugue"]["variant_id"] == "baseline"
+    assert config["fugue"]["feature_memory"] == "none"

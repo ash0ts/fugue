@@ -17,6 +17,7 @@ from fugue.model_plane import (
     missing_model_env,
     missing_trace_env,
     resolve_model_route,
+    trace_project_slug,
 )
 
 
@@ -104,7 +105,7 @@ def _append_env_checks(
         PreflightCheck(
             "trace env",
             not trace_missing,
-            "WANDB trace env present"
+            f"WANDB trace env present; target {trace_project_slug(env)}"
             if not trace_missing
             else "missing " + ", ".join(trace_missing),
         )

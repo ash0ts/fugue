@@ -1,0 +1,48 @@
+id: pilot
+title: Pilot experiment
+description: Default Fugue experiment for comparing harnesses, prompts, skills, and optional features.
+manifest: datasets/pilot.yaml
+model: wandb/zai-org/GLM-5.2
+run_name: pilot
+tags:
+  - pilot
+harnesses:
+  - hermes
+  - openclaw
+  - claude-code
+  - codex
+variants:
+  - id: baseline
+    label: Baseline
+    memory: none
+    enabled: true
+  - id: prompt-skill
+    label: Prompt + skill
+    prompt_id: repository-memory
+    skill_ids:
+      - repository-orientation
+    memory: none
+    enabled: true
+  - id: memory-skill
+    label: Memory + skill
+    prompt_id: repository-memory
+    skill_ids:
+      - repository-orientation
+    memory: agentsmd
+    enabled: true
+n_attempts: 1
+n_concurrent: 2
+n_tasks:
+jobs_dir: jobs/pilot
+environment:
+  type: docker
+  cpu_enforcement_policy: auto
+  memory_enforcement_policy: auto
+artifacts: []
+verifier: {}
+retry: {}
+agent_kwargs: {}
+agent_env: {}
+mcp_servers: []
+debug: false
+quiet: false

@@ -23,9 +23,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-: "${WANDB_ENTITY:?set WANDB_ENTITY in .env (Weave tracing)}"
-: "${WANDB_PROJECT:?set WANDB_PROJECT in .env (Weave tracing)}"
+export WANDB_ENTITY="${WANDB_ENTITY:-wandb}"
+export WANDB_PROJECT="${WANDB_PROJECT:-hermes_agent}"
 export WEAVE_PROJECT="${WEAVE_PROJECT:-$WANDB_ENTITY/$WANDB_PROJECT}"
+export FUGUE_RUN_NAME="${FUGUE_RUN_NAME:-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
+export FUGUE_RUN_GROUP="${FUGUE_RUN_GROUP:-$FUGUE_RUN_NAME}"
+export FUGUE_TAGS="${FUGUE_TAGS:-fugue,smoke,run:$FUGUE_RUN_NAME}"
 export FUGUE_MODEL="$MODEL"
 
 TASK="$ROOT/tasks/smoke/bridge-check"

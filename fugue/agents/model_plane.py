@@ -19,8 +19,9 @@ Tracing plane — every harness ships its Weave plugin inside the container:
                 ``$CODEX_HOME/hooks.json`` (+ ``bypass_hook_trust``).
 
 Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
-with the run key, harness, model, condition, timestamps, and harness session
-ids so Weave traces can be joined back to Harbor trials.
+with the run key, harness, model, experiment, variant, feature flags,
+timestamps, and harness session ids so Weave traces can be joined back to
+Harbor trials.
 
 All four accept one canonical model string:
 ``wandb/...``, ``openai/...``, or ``anthropic/...``.
@@ -58,6 +59,7 @@ from fugue.model_plane import (
     ModelRoute,
     bridge_master_key,
     resolve_model_route,
+    trace_entity_project,
 )
 
 # Local working tree of the hermes-otel plugin (uploaded into Hermes
@@ -113,22 +115,68 @@ def _require_model_key(route: ModelRoute) -> str:
 
 
 def _weave_entity_project() -> tuple[str, str]:
-    entity = os.environ.get("WANDB_ENTITY", "").strip()
-    project = os.environ.get("WANDB_PROJECT", "").strip()
-    slug = os.environ.get("WEAVE_PROJECT", "").strip()
-    if slug and "/" in slug:
-        entity, project = slug.split("/", 1)
-    if not entity or not project:
-        raise ValueError(
-            "WANDB_ENTITY/WANDB_PROJECT (or WEAVE_PROJECT=entity/project) must "
-            "be set for Weave tracing. Source the repo .env."
-        )
-    return entity, project
+    return trace_entity_project(os.environ)
 
 
 def _weave_project_slug() -> str:
     entity, project = _weave_entity_project()
     return f"{entity}/{project}"
+
+
+def _experiment_name() -> str:
+    return os.environ.get("FUGUE_RUN_NAME", "").strip() or "manual"
+
+
+def _run_group() -> str:
+    return os.environ.get("FUGUE_RUN_GROUP", "").strip() or _experiment_name()
+
+
+def _split_tags(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _json_env(key: str) -> Any:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _dedupe_tags(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        tag = str(value).strip()
+        if tag and tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+    return out
+
+
+def _experiment_tags(harness: str, route: ModelRoute, feature_memory: str) -> list[str]:
+    prompt_ids = _split_tags(os.environ.get("FUGUE_PROMPT_ID"))
+    skill_ids = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
+    return _dedupe_tags(
+        [
+            *_split_tags(os.environ.get("FUGUE_TAGS")),
+            "fugue",
+            f"experiment-id:{os.environ.get('FUGUE_EXPERIMENT_ID', 'manual')}",
+            f"run:{_experiment_name()}",
+            f"group:{_run_group()}",
+            f"harness:{harness}",
+            f"variant:{os.environ.get('FUGUE_VARIANT_ID', 'baseline')}",
+            f"memory:{feature_memory}",
+            *[f"prompt:{item_id}" for item_id in prompt_ids],
+            *[f"skill:{item_id}" for item_id in skill_ids],
+            f"provider:{route.provider}",
+            f"model:{route.display_model}",
+        ]
+    )
 
 
 def _bridge_url_v1() -> str:
@@ -217,8 +265,8 @@ class _TrialMetaMixin:
     logs_dir: Path  # provided by BaseAgent
 
     @property
-    def condition(self) -> str:
-        return os.environ.get("FUGUE_CONDITION", "none")
+    def feature_memory(self) -> str:
+        return os.environ.get("FUGUE_FEATURE_MEMORY", "none")
 
     @property
     def run_key(self) -> str:
@@ -240,13 +288,31 @@ class _TrialMetaMixin:
 
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
+        tags = _experiment_tags(harness, route, self.feature_memory)
+        prompt_id = os.environ.get("FUGUE_PROMPT_ID")
+        variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
         meta = {
             "run_key": self.run_key,
             "job_name": self.job_name,
             "harness": harness,
+            "run_name": _experiment_name(),
+            "run_group": _run_group(),
+            "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
-            "condition": self.condition,
+            "experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID"),
+            "variant_id": variant_id,
+            "feature_memory": self.feature_memory,
+            "prompt_id": prompt_id,
+            "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),
+            "skill_ids": _split_tags(os.environ.get("FUGUE_SKILL_IDS")),
+            "skill_hashes": _json_env("FUGUE_SKILL_HASHES"),
+            "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
+            "harbor_environment": os.environ.get("FUGUE_HARBOR_ENVIRONMENT"),
+            "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
+            "agent_config_hash": os.environ.get("FUGUE_AGENT_CONFIG_HASH"),
+            "dataset": os.environ.get("FUGUE_DATASET"),
+            "manifest_path": os.environ.get("FUGUE_MANIFEST_PATH"),
             "weave_entity": entity,
             "weave_project": project,
             "trace_project": f"{entity}/{project}",
@@ -287,16 +353,16 @@ class _TrialMetaMixin:
     async def _inject_memory_artifact(
         self, environment: BaseEnvironment
     ) -> dict[str, Any] | None:
-        condition = self.condition
+        feature_memory = self.feature_memory
         memory_root = os.environ.get("FUGUE_MEMORY_DIR", "").strip()
-        if not memory_root or condition == "none":
+        if not memory_root or feature_memory == "none":
             return None
 
         task_name = self._task_artifact_name()
-        artifact_dir = Path(memory_root) / condition / task_name
+        artifact_dir = Path(memory_root) / feature_memory / task_name
         if not artifact_dir.is_dir():
             raise FileNotFoundError(
-                f"memory artifact not found for {condition}/{task_name}: "
+                f"memory artifact not found for {feature_memory}/{task_name}: "
                 f"{artifact_dir}"
             )
 
@@ -323,7 +389,7 @@ class _TrialMetaMixin:
             timeout_sec=30,
         )
         return {
-            "condition": condition,
+            "feature_memory": feature_memory,
             "task_name": task_name,
             "source_dir": artifact_dir.as_posix(),
             "container_root": repo_root,
@@ -424,14 +490,23 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         import yaml
 
         entity, project = _weave_entity_project()
+        tags = _experiment_tags("hermes", self.model_route, self.feature_memory)
         config: dict[str, Any] = {
             "backends": [
                 {"type": "weave", "entity": entity, "project": project},
             ],
             "resource_attributes": {
                 "fugue.run_key": self.run_key,
+                "fugue.job_name": self.job_name,
+                "fugue.run_name": _experiment_name(),
+                "fugue.run_group": _run_group(),
+                "fugue.tags": ",".join(tags),
+                "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
+                "fugue.variant_id": os.environ.get("FUGUE_VARIANT_ID", "baseline"),
+                "fugue.feature_memory": self.feature_memory,
+                "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
+                "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", ""),
                 "fugue.harness": "hermes",
-                "fugue.condition": self.condition,
                 "fugue.model": self.model_route.display_model,
                 "fugue.model_provider": self.model_route.provider,
             },
@@ -677,7 +752,8 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 "serviceName": "fugue",
                 "agentName": self.run_key,
                 "agentDescription": (
-                    f"fugue {self.condition} / {self.model_route.display_model}"
+                    f"fugue {_experiment_name()} {self.feature_memory} / "
+                    f"{self.model_route.display_model}"
                 ),
                 "apiKey": {
                     "source": "env",

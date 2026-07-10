@@ -8,6 +8,8 @@ from typing import Literal
 Provider = Literal["wandb", "openai", "anthropic"]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
+DEFAULT_WANDB_ENTITY = "wandb"
+DEFAULT_WANDB_PROJECT = "hermes_agent"
 WANDB_INFERENCE_BASE_URL = "https://api.inference.wandb.ai/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -119,11 +121,32 @@ def missing_model_env(
 
 def missing_trace_env(env: Mapping[str, str] | None = None) -> list[str]:
     values = env if env is not None else os.environ
-    return [
-        key
-        for key in ("WANDB_API_KEY", "WANDB_ENTITY", "WANDB_PROJECT")
-        if not values.get(key, "").strip()
-    ]
+    return [key for key in ("WANDB_API_KEY",) if not values.get(key, "").strip()]
+
+
+def trace_entity_project(env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    values = env if env is not None else os.environ
+    slug = values.get("WEAVE_PROJECT", "").strip()
+    if slug and "/" in slug:
+        entity, project = slug.split("/", 1)
+        return entity, project
+    entity = values.get("WANDB_ENTITY", "").strip() or DEFAULT_WANDB_ENTITY
+    project = values.get("WANDB_PROJECT", "").strip() or DEFAULT_WANDB_PROJECT
+    return entity, project
+
+
+def trace_project_slug(env: Mapping[str, str] | None = None) -> str:
+    entity, project = trace_entity_project(env)
+    return f"{entity}/{project}"
+
+
+def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    entity, project = trace_entity_project(env)
+    return {
+        "WANDB_ENTITY": entity,
+        "WANDB_PROJECT": project,
+        "WEAVE_PROJECT": f"{entity}/{project}",
+    }
 
 
 def env_presence(

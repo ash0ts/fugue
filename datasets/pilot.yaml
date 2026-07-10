@@ -9,7 +9,7 @@ jobs_dir: jobs/pilot
 artifact_root: artifacts/memory
 lock_path: artifacts/lock.json
 
-conditions:
+memory_variants:
   - none
   - agentsmd
   - openwiki

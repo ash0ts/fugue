@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Fugue Operator</title>
+    <title>Fugue Experiment Runner</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -19,35 +19,16 @@
           <span class="brand-mark" aria-hidden="true">W&B</span>
           <span>
             <strong>Fugue</strong>
-            <small>operator console</small>
+            <small>experiment runner</small>
           </span>
         </div>
-
         <nav class="nav-list" aria-label="Primary">
-          <button class="nav-item" data-tab-target="overview" type="button">
-            <span class="nav-glyph" aria-hidden="true"></span>
-            Overview
-          </button>
-          <button class="nav-item" data-tab-target="setup" type="button">
-            <span class="nav-glyph" aria-hidden="true"></span>
-            Setup
-          </button>
-          <button class="nav-item" data-tab-target="run" type="button">
-            <span class="nav-glyph" aria-hidden="true"></span>
-            Run matrix
-          </button>
-          <button class="nav-item" data-tab-target="jobs" type="button">
-            <span class="nav-glyph" aria-hidden="true"></span>
-            Jobs
-          </button>
-          <button class="nav-item" data-tab-target="results" type="button">
-            <span class="nav-glyph" aria-hidden="true"></span>
-            Results
-          </button>
+          <button class="nav-item" data-tab-target="run" type="button"><span class="nav-glyph"></span>Run</button>
+          <button class="nav-item" data-tab-target="compare" type="button"><span class="nav-glyph"></span>Compare</button>
+          <button class="nav-item" data-tab-target="setup" type="button"><span class="nav-glyph"></span>Setup</button>
         </nav>
-
         <div class="sidebar-foot">
-          <div class="sidebar-foot-label">Trace project</div>
+          <div class="sidebar-foot-label">Weave project</div>
           <a id="sidebarWeaveLink" class="sidebar-link" href="#" target="_blank" rel="noreferrer">Not configured</a>
         </div>
       </aside>
@@ -55,8 +36,8 @@
       <div class="workspace">
         <header class="app-header">
           <div class="title-stack">
-            <p class="eyebrow">Fugue operator</p>
-            <h1 id="pageTitle">Overview</h1>
+            <p class="eyebrow">Fugue</p>
+            <h1 id="pageTitle">Run</h1>
           </div>
           <div class="header-actions">
             <span id="providerPill" class="status-pill neutral">provider</span>
@@ -68,57 +49,127 @@
         </header>
 
         <main class="content">
-          <section id="tab-overview" class="tab-panel" data-tab-panel="overview">
-            <div class="stat-grid" id="readinessCards"></div>
-
-            <div class="content-grid overview-grid">
-              <section class="panel matrix-panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Run matrix</p>
-                    <h2>Matrix stave</h2>
-                  </div>
-                  <span id="matrixCount" class="badge neutral">0 cells</span>
-                </div>
-                <div id="matrixStave" class="matrix-stave"></div>
-              </section>
-
-              <section class="panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Latest</p>
-                    <h2>Run state</h2>
-                  </div>
-                </div>
-                <div id="latestJobCard" class="detail-stack"></div>
-              </section>
-            </div>
-
-            <div class="content-grid result-overview-grid">
-              <section class="panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Results</p>
-                    <h2>Scoreboard</h2>
-                  </div>
-                  <button class="button ghost small" data-tab-link="results" type="button">View results</button>
-                </div>
-                <div id="summaryMetrics" class="metric-strip"></div>
-              </section>
-
-              <section class="panel">
+          <section class="tab-panel" data-tab-panel="run">
+            <div class="runner-grid">
+              <section class="panel run-basics">
                 <div class="panel-head">
                   <div>
                     <p class="panel-kicker">Experiment</p>
-                    <h2>W&B links</h2>
+                    <h2>What to run</h2>
                   </div>
+                  <label class="switch"><input id="dryRunInput" type="checkbox" checked /><span>Dry run</span></label>
                 </div>
-                <div id="overviewLinks" class="link-stack"></div>
+
+                <div class="field-row">
+                  <label class="field"><span>Saved experiment</span><select id="experimentSelect"></select></label>
+                  <label class="field"><span>Experiment ID</span><input id="experimentIdInput" autocomplete="off" /></label>
+                </div>
+                <label class="field"><span>Display name</span><input id="experimentNameInput" placeholder="gpt5-prompt-skill-sweep" autocomplete="off" /></label>
+                <label class="field"><span>Model</span><input id="modelInput" value="wandb/zai-org/GLM-5.2" autocomplete="off" /></label>
+                <label class="field"><span>Benchmark or task manifest</span><input id="manifestInput" value="datasets/pilot.yaml" autocomplete="off" /></label>
+
+                <div class="number-row">
+                  <label class="field"><span>Task limit</span><input id="taskInput" type="number" min="1" inputmode="numeric" /></label>
+                  <label class="field"><span>Trials per cell</span><input id="attemptInput" type="number" min="1" inputmode="numeric" value="1" /></label>
+                  <label class="field"><span>Concurrency</span><input id="concurrentInput" type="number" min="1" inputmode="numeric" value="2" /></label>
+                </div>
+
+                <div class="control-block">
+                  <div class="control-label">Harnesses</div>
+                  <div id="harnessToggles" class="toggle-grid"></div>
+                </div>
+
+                <div class="action-row">
+                  <button id="saveExperimentBtn" class="button ghost" type="button">Save experiment</button>
+                  <button id="renderBtn" class="button ghost" type="button">Render configs</button>
+                  <button id="runBtn" class="button primary" type="button">Run experiment</button>
+                </div>
+              </section>
+
+              <section class="panel variants-panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Variants</p>
+                    <h2>Feature variants</h2>
+                  </div>
+                  <button id="addVariantBtn" class="button primary" type="button">Add variant</button>
+                </div>
+                <div class="variant-table-wrap">
+                  <table class="variant-table">
+                    <thead>
+                      <tr>
+                        <th>On</th>
+                        <th>Variant</th>
+                        <th>Prompt</th>
+                        <th>Skills</th>
+                        <th>Memory</th>
+                        <th>Config</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody id="variantRows"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="panel run-summary-panel">
+                <div class="panel-head">
+                  <div>
+                    <p class="panel-kicker">Run summary</p>
+                    <h2>Ready to compare</h2>
+                  </div>
+                  <span id="previewBadge" class="badge neutral">Not rendered</span>
+                </div>
+                <div id="runSummaryCards" class="mini-stat-grid"></div>
+                <div id="readinessStrip" class="readiness-strip"></div>
+                <pre id="commandPreview" class="command-preview"></pre>
+                <div id="renderedConfigs" class="config-list"></div>
+                <div id="activityPanel" class="detail-stack"></div>
               </section>
             </div>
           </section>
 
-          <section id="tab-setup" class="tab-panel" data-tab-panel="setup" hidden>
+          <section class="tab-panel" data-tab-panel="compare" hidden>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Compare</p>
+                  <h2>Results by harness, prompt, skill, and variant</h2>
+                </div>
+                <div class="action-row compact">
+                  <button id="exportBtn" class="button ghost" type="button">Export results</button>
+                  <a id="resultsWeaveLink" class="button cyan" href="#" target="_blank" rel="noreferrer">Open Weave</a>
+                </div>
+              </div>
+              <div id="resultCards" class="result-card-grid"></div>
+              <div id="resultFilters" class="filter-row"></div>
+              <div id="resultEmpty" class="empty-state" hidden>No results yet. Run a dry experiment or export existing jobs.</div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Experiment</th>
+                      <th>Variant</th>
+                      <th>Prompt</th>
+                      <th>Skills</th>
+                      <th>Harness</th>
+                      <th>Model</th>
+                      <th>Pass</th>
+                      <th>Reward</th>
+                      <th>Tokens</th>
+                      <th>Cost</th>
+                      <th>Run key</th>
+                      <th>Trace</th>
+                    </tr>
+                  </thead>
+                  <tbody id="resultRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section class="tab-panel" data-tab-panel="setup" hidden>
+            <div class="stat-grid" id="readinessCards"></div>
             <div class="content-grid setup-grid">
               <section class="panel">
                 <div class="panel-head">
@@ -130,7 +181,6 @@
                 </div>
                 <div id="setupKeys" class="key-grid"></div>
               </section>
-
               <section class="panel">
                 <div class="panel-head">
                   <div>
@@ -142,162 +192,49 @@
                 <div id="setupBridge" class="detail-stack"></div>
               </section>
             </div>
-
-            <div class="content-grid setup-grid">
-              <section class="panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Selected route</p>
-                    <h2>Provider plane</h2>
-                  </div>
-                </div>
+            <details class="panel setup-details">
+              <summary>Details</summary>
+              <div class="content-grid setup-grid">
                 <dl id="setupRoute" class="definition-grid"></dl>
-              </section>
-
-              <section class="panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Manifest</p>
-                    <h2>Benchmark shape</h2>
-                  </div>
-                </div>
                 <dl id="setupManifest" class="definition-grid"></dl>
-              </section>
-            </div>
-          </section>
-
-          <section id="tab-run" class="tab-panel" data-tab-panel="run" hidden>
-            <div class="content-grid run-grid">
-              <section class="panel run-controls">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Controls</p>
-                    <h2>Run matrix</h2>
-                  </div>
-                  <label class="switch">
-                    <input id="dryRunInput" type="checkbox" checked />
-                    <span>Dry run</span>
-                  </label>
-                </div>
-
-                <label class="field">
-                  <span>Model</span>
-                  <input id="modelInput" value="wandb/zai-org/GLM-5.2" autocomplete="off" />
-                </label>
-
-                <div class="control-block">
-                  <div class="control-label">Harnesses</div>
-                  <div id="harnessToggles" class="toggle-grid"></div>
-                </div>
-
-                <div class="control-block">
-                  <div class="control-label">Conditions</div>
-                  <div id="conditionToggles" class="toggle-grid"></div>
-                </div>
-
-                <div class="number-row">
-                  <label class="field">
-                    <span>Tasks</span>
-                    <input id="taskInput" type="number" min="1" inputmode="numeric" />
-                  </label>
-                  <label class="field">
-                    <span>Attempts</span>
-                    <input id="attemptInput" type="number" min="1" inputmode="numeric" value="1" />
-                  </label>
-                  <label class="field">
-                    <span>Concurrent</span>
-                    <input id="concurrentInput" type="number" min="1" inputmode="numeric" value="2" />
-                  </label>
-                </div>
-
-                <div class="action-row">
-                  <button id="prepareBtn" class="button ghost" type="button">Prepare memory</button>
-                  <button id="runBtn" class="button primary" type="button">Run matrix</button>
-                </div>
-              </section>
-
-              <section class="panel command-panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Preview</p>
-                    <h2>Command</h2>
-                  </div>
-                </div>
-                <pre id="commandPreview" class="command-preview"></pre>
-                <div id="runManifestSummary" class="detail-stack"></div>
-              </section>
-            </div>
-          </section>
-
-          <section id="tab-jobs" class="tab-panel" data-tab-panel="jobs" hidden>
-            <div class="content-grid jobs-grid">
-              <section class="panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Processes</p>
-                    <h2>Jobs</h2>
-                  </div>
-                </div>
-                <div id="jobList" class="job-list"></div>
-              </section>
-
-              <section class="panel log-panel">
-                <div class="panel-head">
-                  <div>
-                    <p class="panel-kicker">Live stream</p>
-                    <h2>Output</h2>
-                  </div>
-                  <span id="activeJobBadge" class="badge neutral">No job selected</span>
-                </div>
-                <div id="jobDetail" class="job-detail"></div>
-                <pre id="logView" class="log-view"></pre>
-              </section>
-            </div>
-          </section>
-
-          <section id="tab-results" class="tab-panel" data-tab-panel="results" hidden>
-            <section class="panel">
-              <div class="panel-head">
-                <div>
-                  <p class="panel-kicker">Exported trials</p>
-                  <h2>Results</h2>
-                </div>
-                <div class="action-row compact">
-                  <button id="exportBtn" class="button ghost" type="button">Export results</button>
-                  <a id="resultsWeaveLink" class="button cyan" href="#" target="_blank" rel="noreferrer">Open Weave</a>
-                </div>
               </div>
-
-              <div id="resultCards" class="result-card-grid"></div>
-              <div id="resultFilters" class="filter-row"></div>
-
-              <div id="resultEmpty" class="empty-state" hidden>
-                No results yet. Run a dry matrix or export existing jobs.
-              </div>
-
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Harness</th>
-                      <th>Condition</th>
-                      <th>Provider</th>
-                      <th>Model</th>
-                      <th>Pass</th>
-                      <th>Reward</th>
-                      <th>Tokens</th>
-                      <th>Cost</th>
-                      <th>Wall time</th>
-                      <th>Run key</th>
-                      <th>Trace</th>
-                    </tr>
-                  </thead>
-                  <tbody id="resultRows"></tbody>
-                </table>
-              </div>
-            </section>
+            </details>
           </section>
         </main>
+      </div>
+    </div>
+
+    <div id="editorModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <p id="editorKicker" class="panel-kicker">Prompt</p>
+            <h2 id="editorTitle">Edit prompt</h2>
+          </div>
+          <button id="closeEditorBtn" class="button ghost" type="button">Close</button>
+        </div>
+        <label class="field"><span>ID</span><input id="editorIdInput" autocomplete="off" /></label>
+        <textarea id="editorBody" class="editor" spellcheck="false"></textarea>
+        <div class="action-row">
+          <button id="saveEditorBtn" class="button primary" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="advancedModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Variant config</p>
+            <h2 id="advancedTitle">Advanced config</h2>
+          </div>
+          <button id="closeAdvancedBtn" class="button ghost" type="button">Close</button>
+        </div>
+        <pre class="advanced-help">Edit JSON for agent_kwargs, agent_env, mcp_servers, environment, verifier, retry, or artifacts.</pre>
+        <textarea id="advancedBody" class="editor" spellcheck="false"></textarea>
+        <div class="action-row">
+          <button id="saveAdvancedBtn" class="button primary" type="button">Save config</button>
+        </div>
       </div>
     </div>
 

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from fugue.bench.manifest import TaskSpec
-from fugue.bench.memory import AgentsMdBuilder, write_condition_instruction
+from fugue.bench.memory import AgentsMdBuilder, write_memory_instruction
 
 
 def test_agentsmd_builder_writes_golden_files(tmp_path: Path) -> None:
@@ -22,8 +22,8 @@ def test_agentsmd_builder_writes_golden_files(tmp_path: Path) -> None:
     assert (artifact / ".fugue-memory" / "README.md").is_file()
 
 
-def test_condition_instruction_points_to_injected_memory(tmp_path: Path) -> None:
-    instruction = write_condition_instruction(tmp_path, "agentsmd")
+def test_memory_instruction_points_to_injected_memory(tmp_path: Path) -> None:
+    instruction = write_memory_instruction(tmp_path, "agentsmd")
 
     assert instruction is not None
     assert "Additional repository memory" in instruction.read_text()

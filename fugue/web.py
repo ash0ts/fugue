@@ -1,16 +1,35 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-import time
-from datetime import UTC, datetime
 from pathlib import Path
-from threading import Thread
 from typing import Any
+
+try:
+    from fastapi import Request
+except ImportError:  # pragma: no cover - web extra not installed
+    Request = Any  # type: ignore
 
 from fugue.bench.cli import _load_env
 from fugue.bench.export import export_rows
+from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
+from fugue.bench.library import (
+    ExperimentSpec,
+    experiment_from_data,
+    experiment_to_yaml,
+    experiment_with_overrides,
+    get_experiment,
+    get_experiment_text,
+    get_prompt,
+    get_skill,
+    list_experiments,
+    list_prompts,
+    list_skills,
+    save_experiment,
+    save_experiment_data,
+    save_prompt,
+    save_skill,
+)
 from fugue.bench.manifest import load_manifest
 from fugue.bridge import bridge_status
 from fugue.model_plane import (
@@ -18,9 +37,10 @@ from fugue.model_plane import (
     env_presence,
     resolve_model_route,
     select_model,
+    trace_project_slug,
 )
+from fugue.web_jobs import job_detail, list_jobs, start_job, tail_job_events
 
-WEB_JOBS_DIR = Path("jobs") / "web"
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 
 
@@ -35,7 +55,7 @@ def run_web(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 def create_app():
     try:
-        from fastapi import FastAPI, HTTPException, Request
+        from fastapi import FastAPI, HTTPException
         from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
@@ -57,7 +77,7 @@ def create_app():
         status = _status_payload()
         manifest = _manifest_payload("datasets/pilot.yaml")
         rows = _safe_export_rows(Path("jobs"))
-        jobs = _list_jobs()
+        jobs = list_jobs()
         result_summary = _summarize_rows(rows)
         readiness = {
             "trace": bool(status.get("weave_project"))
@@ -73,52 +93,133 @@ def create_app():
             "readiness": readiness,
             "jobs": {"latest": jobs[0] if jobs else None, "count": len(jobs)},
             "results": result_summary,
-            "matrix": _matrix(rows, manifest),
         }
 
     @app.get("/api/manifest")
     def api_manifest(path: str = "datasets/pilot.yaml") -> dict[str, Any]:
         return _manifest_payload(path)
 
+    @app.get("/api/library")
+    def api_library() -> dict[str, Any]:
+        return _library_payload()
+
+    @app.get("/api/prompts/{item_id}")
+    def api_prompt(item_id: str) -> dict[str, Any]:
+        try:
+            return _dataclass_payload(get_prompt(item_id))
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/prompts/{item_id}")
+    async def api_save_prompt(item_id: str, request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        try:
+            return _dataclass_payload(save_prompt(item_id, str(body.get("body") or "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/skills/{item_id}")
+    def api_skill(item_id: str) -> dict[str, Any]:
+        try:
+            return _dataclass_payload(get_skill(item_id))
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/skills/{item_id}")
+    async def api_save_skill(item_id: str, request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        try:
+            return _dataclass_payload(save_skill(item_id, str(body.get("body") or "")))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/experiments/{item_id}")
+    def api_experiment(item_id: str) -> dict[str, Any]:
+        try:
+            experiment = get_experiment(item_id)
+            return {
+                "experiment": experiment.to_dict(),
+                "body": get_experiment_text(item_id),
+            }
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.put("/api/experiments/{item_id}")
+    async def api_save_experiment(item_id: str, request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        try:
+            if isinstance(body.get("experiment"), dict):
+                experiment = save_experiment_data(item_id, body["experiment"])
+            else:
+                experiment = save_experiment(item_id, str(body.get("body") or ""))
+            return {
+                "experiment": experiment.to_dict(),
+                "body": experiment_to_yaml(experiment),
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/preview")
+    async def api_preview(request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        try:
+            return _render_payload(body, write=False)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/render")
+    async def api_render(request: Request) -> dict[str, Any]:
+        body = await _json_body(request)
+        try:
+            return _render_payload(body, write=True)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/preflight")
     async def api_preflight(request: Request) -> JSONResponse:
         body = await _json_body(request)
         command = _cli_command("preflight", _model_args(body), "--no-bridge-up")
-        return JSONResponse(_start_job("preflight", command))
+        return JSONResponse(start_job("preflight", command))
 
     @app.post("/api/bridge/up")
     async def api_bridge_up(request: Request) -> JSONResponse:
         body = await _json_body(request)
         command = _cli_command("bridge", "up", _model_args(body))
-        return JSONResponse(_start_job("bridge-up", command))
+        return JSONResponse(start_job("bridge-up", command))
 
     @app.post("/api/prepare")
     async def api_prepare(request: Request) -> JSONResponse:
         body = await _json_body(request)
+        _save_body_experiment(body)
         command = _cli_command(
             "prepare",
+            *_str_arg("--experiment", body.get("experiment_id")),
             "--manifest",
             str(body.get("manifest") or "datasets/pilot.yaml"),
-            *_csv_arg("--conditions", body.get("conditions")),
+            *_csv_arg("--memory-variants", body.get("memory_variants")),
         )
-        return JSONResponse(_start_job("prepare", command))
+        return JSONResponse(start_job("prepare", command))
 
     @app.post("/api/run")
     async def api_run(request: Request) -> JSONResponse:
         body = await _json_body(request)
+        _save_body_experiment(body)
         command = _cli_command(
             "run",
+            *_str_arg("--experiment", body.get("experiment_id")),
             "--manifest",
             str(body.get("manifest") or "datasets/pilot.yaml"),
             _model_args(body),
+            *_str_arg("--run-name", _run_name_from_body(body)),
+            *_str_arg("--tags", body.get("tags")),
             *_csv_arg("--harnesses", body.get("harnesses")),
-            *_csv_arg("--conditions", body.get("conditions")),
+            *_csv_arg("--variants", body.get("variant_ids")),
             *_int_arg("-l", body.get("n_tasks")),
             *_int_arg("-k", body.get("n_attempts")),
             *_int_arg("-n", body.get("n_concurrent")),
             *(["--dry-run"] if body.get("dry_run", True) else []),
         )
-        return JSONResponse(_start_job("run", command))
+        return JSONResponse(start_job("run", command))
 
     @app.post("/api/export")
     async def api_export(request: Request) -> JSONResponse:
@@ -126,37 +227,24 @@ def create_app():
         jobs = body.get("jobs") or ["jobs/pilot"]
         out = body.get("out") or "reports/pilot.jsonl"
         command = _cli_command("export", "--jobs", *jobs, "--out", out)
-        return JSONResponse(_start_job("export", command))
+        return JSONResponse(start_job("export", command))
 
     @app.get("/api/jobs")
     def api_jobs() -> list[dict[str, Any]]:
-        return _list_jobs()
+        return list_jobs()
 
     @app.get("/api/jobs/{job_id}")
     def api_job(job_id: str) -> dict[str, Any]:
-        job_dir = WEB_JOBS_DIR / job_id
-        meta_path = job_dir / "meta.json"
-        if not meta_path.is_file():
+        detail = job_detail(job_id)
+        if detail is None:
             raise HTTPException(status_code=404, detail="job not found")
-        try:
-            meta = json.loads(meta_path.read_text())
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=500, detail="job metadata is invalid"
-            ) from exc
-        log_path = job_dir / "output.log"
-        if log_path.exists():
-            meta["log_tail"] = log_path.read_text(errors="replace")[-8000:]
-        else:
-            meta["log_tail"] = ""
-        return meta
+        return detail
 
     @app.get("/api/jobs/{job_id}/events")
     def api_job_events(job_id: str) -> StreamingResponse:
-        job_dir = WEB_JOBS_DIR / job_id
-        if not job_dir.is_dir():
+        if job_detail(job_id) is None:
             raise HTTPException(status_code=404, detail="job not found")
-        return StreamingResponse(_tail_log(job_dir), media_type="text/event-stream")
+        return StreamingResponse(tail_job_events(job_id), media_type="text/event-stream")
 
     @app.get("/api/results")
     def api_results(path: str = "jobs") -> dict[str, Any]:
@@ -177,7 +265,7 @@ async def _json_body(request: Any) -> dict[str, Any]:
 
 
 def _cli_command(*parts: Any) -> list[str]:
-    flat = [str(p) for part in parts for p in _flatten(part) if str(p)]
+    flat = [str(part) for value in parts for part in _flatten(value) if str(part)]
     return [sys.executable, "-m", "fugue.bench.cli", *flat]
 
 
@@ -197,81 +285,54 @@ def _model_args(body: dict[str, Any]) -> list[str]:
 
 
 def _csv_arg(flag: str, value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        value = ",".join(str(item) for item in value if str(item))
-    return [flag, str(value)]
+    values = _coerce_list(value)
+    return [flag, ",".join(values)] if values else []
 
 
 def _int_arg(flag: str, value: Any) -> list[str]:
     return [flag, str(int(value))] if value not in (None, "") else []
 
 
-def _start_job(kind: str, command: list[str]) -> dict[str, Any]:
-    WEB_JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    job_id = f"{stamp}-{kind}"
-    job_dir = WEB_JOBS_DIR / job_id
-    suffix = 1
-    while job_dir.exists():
-        suffix += 1
-        job_id = f"{stamp}-{kind}-{suffix}"
-        job_dir = WEB_JOBS_DIR / job_id
-    job_dir.mkdir()
-    log_path = job_dir / "output.log"
-    meta_path = job_dir / "meta.json"
-    env = _load_env(Path(".env"))
-    env["PYTHONPATH"] = _prepend_cwd(env.get("PYTHONPATH"))
-    log_file = log_path.open("w")
-    process = subprocess.Popen(
-        command,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-        cwd=Path.cwd(),
-    )
-    meta = {
-        "id": job_id,
-        "kind": kind,
-        "command": command,
-        "pid": process.pid,
-        "status": "running",
-        "started_at": datetime.now(UTC).isoformat(),
-        "log_path": log_path.as_posix(),
-    }
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
-
-    def wait_for_process() -> None:
-        returncode = process.wait()
-        log_file.close()
-        current = json.loads(meta_path.read_text())
-        current["status"] = "succeeded" if returncode == 0 else "failed"
-        current["returncode"] = returncode
-        current["ended_at"] = datetime.now(UTC).isoformat()
-        meta_path.write_text(json.dumps(current, indent=2) + "\n")
-
-    Thread(target=wait_for_process, daemon=True).start()
-    return meta
+def _str_arg(flag: str, value: Any) -> list[str]:
+    text = str(value).strip() if value not in (None, "") else ""
+    return [flag, text] if text else []
 
 
-def _list_jobs() -> list[dict[str, Any]]:
-    if not WEB_JOBS_DIR.exists():
+def _coerce_list(value: Any) -> list[str]:
+    if value in (None, ""):
         return []
-    jobs = []
-    for meta_path in sorted(WEB_JOBS_DIR.glob("*/meta.json"), reverse=True):
-        try:
-            jobs.append(json.loads(meta_path.read_text()))
-        except json.JSONDecodeError:
-            continue
-    return jobs
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value)]
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _run_name_from_body(body: dict[str, Any]) -> str | None:
+    value = body.get("run_name")
+    if value not in (None, ""):
+        return str(value)
+    experiment = body.get("experiment")
+    if isinstance(experiment, dict):
+        return str(
+            experiment.get("run_name")
+            or experiment.get("title")
+            or experiment.get("id")
+            or ""
+        )
+    return None
 
 
 def _status_payload() -> dict[str, Any]:
     env = _load_env(Path(".env"))
     model = select_model(env=env)
-    trace_project = _trace_project(env)
+    trace_project = trace_project_slug(env)
     urls = _wandb_urls(trace_project, env)
     try:
         route = resolve_model_route(model, env)
@@ -311,9 +372,9 @@ def _manifest_payload(path: str | Path) -> dict[str, Any]:
     return {
         "dataset": manifest.dataset.__dict__,
         "model": manifest.model,
-        "conditions": manifest.conditions,
-        "harnesses": [h.__dict__ for h in manifest.harnesses],
-        "tasks": [t.__dict__ for t in manifest.tasks],
+        "memory_variants": manifest.memory_variants,
+        "harnesses": [harness.__dict__ for harness in manifest.harnesses],
+        "tasks": [task.__dict__ for task in manifest.tasks],
         "k": manifest.k,
         "n_concurrent": manifest.n_concurrent,
         "jobs_dir": manifest.jobs_dir.as_posix(),
@@ -321,9 +382,138 @@ def _manifest_payload(path: str | Path) -> dict[str, Any]:
         "counts": {
             "tasks": len(manifest.tasks),
             "harnesses": len(manifest.harnesses),
-            "conditions": len(manifest.conditions),
-            "matrix_cells": len(manifest.harnesses) * len(manifest.conditions),
+            "memory_variants": len(manifest.memory_variants),
         },
+    }
+
+
+def _library_payload() -> dict[str, Any]:
+    return {
+        "prompts": [_dataclass_payload(item) for item in list_prompts()],
+        "skills": [_dataclass_payload(item) for item in list_skills()],
+        "experiments": [_dataclass_payload(item) for item in list_experiments()],
+    }
+
+
+def _dataclass_payload(value: Any) -> dict[str, Any]:
+    data = value.__dict__.copy()
+    return {key: _jsonable(item) for key, item in data.items()}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _experiment_from_body(body: dict[str, Any], experiment_id: str) -> ExperimentSpec:
+    if isinstance(body.get("experiment"), dict):
+        data = dict(body["experiment"])
+        data["id"] = experiment_id
+        return experiment_from_data(data, item_id=experiment_id)
+    return get_experiment(experiment_id)
+
+
+def _save_body_experiment(body: dict[str, Any]) -> None:
+    experiment_id = str(body.get("experiment_id") or "")
+    if experiment_id and isinstance(body.get("experiment"), dict):
+        save_experiment_data(experiment_id, body["experiment"])
+
+
+def _render_payload(body: dict[str, Any], *, write: bool) -> dict[str, Any]:
+    experiment_id = str(body.get("experiment_id") or "pilot")
+    experiment = _experiment_from_body(body, experiment_id)
+    variants = _variant_override(experiment, body.get("variant_ids"))
+    experiment = experiment_with_overrides(
+        experiment,
+        model=body.get("model"),
+        run_name=_run_name_from_body(body),
+        tags=_coerce_list(body.get("tags")),
+        harnesses=_coerce_list(body.get("harnesses")),
+        variants=[variant.to_dict() for variant in variants] if variants else None,
+        n_tasks=body.get("n_tasks"),
+        n_attempts=body.get("n_attempts"),
+        n_concurrent=body.get("n_concurrent"),
+    )
+    env = _load_env(Path(".env"))
+    manifest_path = Path(body.get("manifest") or experiment.manifest)
+    manifest = load_manifest(manifest_path)
+    renderer = render_jobs if write else preview_jobs
+    rendered = renderer(
+        experiment=experiment,
+        manifest=manifest,
+        manifest_path=manifest_path,
+        repo_root=Path.cwd(),
+        env=env,
+        model=body.get("model"),
+        harness_names=_coerce_list(body.get("harnesses")) or None,
+        n_tasks=_optional_int(body.get("n_tasks")),
+        n_attempts=_optional_int(body.get("n_attempts")),
+        n_concurrent=_optional_int(body.get("n_concurrent")),
+        run_name=_run_name_from_body(body),
+        tags=_coerce_list(body.get("tags")),
+        run_id=_render_run_id(body, write=write),
+    )
+    return {
+        "experiment": experiment.to_dict(),
+        "summary": _render_summary(rendered, manifest, experiment),
+        "commands": [_rendered_job_payload(job) for job in rendered],
+    }
+
+
+def _variant_override(
+    experiment: ExperimentSpec, variant_ids: Any
+) -> list[Any] | None:
+    selected_ids = set(_coerce_list(variant_ids))
+    if not selected_ids:
+        return None
+    variants = [variant for variant in experiment.variants if variant.id in selected_ids]
+    missing = sorted(selected_ids - {variant.id for variant in variants})
+    if missing:
+        raise ValueError(f"unknown variant(s): {', '.join(missing)}")
+    return variants
+
+
+def _render_run_id(body: dict[str, Any], *, write: bool) -> str:
+    if not write:
+        return "web-preview"
+    return _slug(_run_name_from_body(body) or body.get("experiment_id") or "web")
+
+
+def _render_summary(
+    rendered: list[RenderedJob], manifest: Any, experiment: ExperimentSpec
+) -> dict[str, Any]:
+    task_count = experiment.n_tasks or len(manifest.tasks)
+    trials_per_cell = experiment.n_attempts or manifest.k
+    return {
+        "cells": len(rendered),
+        "task_count": task_count,
+        "trials_per_cell": trials_per_cell,
+        "estimated_trials": len(rendered) * task_count * trials_per_cell,
+        "variants": len({job.variant_id for job in rendered}),
+        "harnesses": len({job.harness for job in rendered}),
+    }
+
+
+def _rendered_job_payload(job: RenderedJob) -> dict[str, Any]:
+    return {
+        "command": job.command,
+        "config_path": job.config_path.as_posix(),
+        "job_name": job.job_name,
+        "harness": job.harness,
+        "feature_memory": job.feature_memory,
+        "prompt_id": job.prompt_id,
+        "skill_ids": job.skill_ids,
+        "variant_id": job.variant_id,
+        "variant_label": job.variant_label,
+        "agent_config_hash": job.agent_config_hash,
+        "provider": job.route.provider,
+        "model": job.route.display_model,
+        "config": job.config,
     }
 
 
@@ -345,26 +535,6 @@ def _add_weave_urls(rows: list[dict[str, Any]], env: dict[str, str]) -> list[dic
     return updated
 
 
-def _tail_log(job_dir: Path):
-    log_path = job_dir / "output.log"
-    meta_path = job_dir / "meta.json"
-    position = 0
-    while True:
-        if log_path.exists():
-            text = log_path.read_text(errors="replace")
-            if len(text) > position:
-                chunk = text[position:]
-                position = len(text)
-                yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-        status = {}
-        if meta_path.exists():
-            status = json.loads(meta_path.read_text())
-        if status.get("status") != "running":
-            yield f"data: {json.dumps({'done': True, 'status': status})}\n\n"
-            break
-        time.sleep(1)
-
-
 def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
     passed = sum(1 for row in rows if row.get("pass") is True)
@@ -382,8 +552,13 @@ def _summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "cache": sum(int(row.get("n_cache_tokens") or 0) for row in rows),
             "output": sum(int(row.get("n_output_tokens") or 0) for row in rows),
         },
+        "by_experiment_id": _group_rows(rows, "experiment_id"),
+        "by_run_name": _group_rows(rows, "run_name"),
+        "by_variant_id": _group_rows(rows, "variant_id"),
+        "by_prompt": _group_rows(rows, "prompt_id"),
+        "by_skill": _group_list_rows(rows, "skill_ids"),
+        "by_feature_memory": _group_rows(rows, "feature_memory"),
         "by_harness": _group_rows(rows, "harness"),
-        "by_condition": _group_rows(rows, "condition"),
         "by_provider": _group_rows(rows, "model_provider"),
         "latest_failure_count": failed + exceptions,
     }
@@ -410,48 +585,17 @@ def _group_rows(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return grouped
 
 
-def _matrix(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    by_cell: dict[tuple[str, str], list[dict[str, Any]]] = {}
+def _group_list_rows(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    expanded: list[dict[str, Any]] = []
     for row in rows:
-        key = (str(row.get("harness") or ""), str(row.get("condition") or "none"))
-        by_cell.setdefault(key, []).append(row)
-    matrix = []
-    for harness in manifest.get("harnesses", []):
-        harness_name = harness["name"]
-        cells = []
-        for condition in manifest.get("conditions", []):
-            group = by_cell.get((harness_name, condition), [])
-            cells.append(
-                {
-                    "condition": condition,
-                    "status": _cell_status(group),
-                    "total": len(group),
-                    "passed": sum(1 for row in group if row.get("pass") is True),
-                }
-            )
-        matrix.append({"harness": harness_name, "cells": cells})
-    return matrix
-
-
-def _cell_status(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return "ready"
-    if any(row.get("pass") is False or row.get("exception_class") for row in rows):
-        return "failed"
-    if any(row.get("pass") is True for row in rows):
-        return "passed"
-    return "not run"
-
-
-def _trace_project(env: dict[str, str]) -> str | None:
-    weave_project = env.get("WEAVE_PROJECT", "").strip()
-    if "/" in weave_project:
-        return weave_project
-    entity = env.get("WANDB_ENTITY", "").strip()
-    project = env.get("WANDB_PROJECT", "").strip()
-    if entity and project:
-        return f"{entity}/{project}"
-    return None
+        values = row.get(key) or ["none"]
+        if not isinstance(values, list):
+            values = [values]
+        for value in values or ["none"]:
+            item = dict(row)
+            item[key] = value
+            expanded.append(item)
+    return _group_rows(expanded, key)
 
 
 def _wandb_urls(trace_project: str | None, env: dict[str, str]) -> dict[str, str | None]:
@@ -473,6 +617,6 @@ def _model_key_ready(status: dict[str, Any]) -> bool:
     return bool(key and (status.get("keys") or {}).get(key))
 
 
-def _prepend_cwd(existing: str | None) -> str:
-    cwd = Path.cwd().as_posix()
-    return cwd if not existing else f"{cwd}:{existing}"
+def _slug(value: Any) -> str:
+    out = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value).strip())
+    return "-".join(part for part in out.split("-") if part) or "web"

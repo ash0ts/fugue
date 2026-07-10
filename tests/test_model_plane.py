@@ -4,10 +4,15 @@ import pytest
 
 from fugue.model_plane import (
     DEFAULT_MODEL,
+    DEFAULT_WANDB_ENTITY,
+    DEFAULT_WANDB_PROJECT,
     missing_model_env,
     missing_trace_env,
     resolve_model_route,
     select_model,
+    trace_entity_project,
+    trace_env_defaults,
+    trace_project_slug,
 )
 
 
@@ -50,10 +55,20 @@ def test_select_model_precedence() -> None:
 
 def test_missing_env_separates_model_and_trace_keys() -> None:
     route = resolve_model_route("openai/gpt-5", {})
-    env = {
-        "WANDB_API_KEY": "trace",
-        "WANDB_ENTITY": "entity",
-        "WANDB_PROJECT": "project",
-    }
+    env = {"WANDB_API_KEY": "trace"}
     assert missing_trace_env(env) == []
     assert missing_model_env(route, env) == ["OPENAI_API_KEY"]
+
+
+def test_trace_project_defaults_to_wandb_shared_project() -> None:
+    assert trace_entity_project({}) == (DEFAULT_WANDB_ENTITY, DEFAULT_WANDB_PROJECT)
+    assert trace_project_slug({}) == "wandb/hermes_agent"
+    assert trace_env_defaults({}) == {
+        "WANDB_ENTITY": "wandb",
+        "WANDB_PROJECT": "hermes_agent",
+        "WEAVE_PROJECT": "wandb/hermes_agent",
+    }
+    assert trace_entity_project({"WEAVE_PROJECT": "custom/project"}) == (
+        "custom",
+        "project",
+    )
