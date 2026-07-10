@@ -1,0 +1,31 @@
+dataset:
+  ref: benchflow/skillsbench
+  version: "1.1"
+
+model: wandb/zai-org/GLM-5.2
+k: 2
+n_concurrent: 2
+jobs_dir: jobs/skillsbench-pdf-ab
+artifact_root: artifacts/skillsbench-pdf
+lock_path: artifacts/skillsbench-pdf/lock.json
+
+memory_variants:
+  - none
+
+harnesses:
+  - name: hermes
+    agent: fugue.agents:FugueHermes
+  - name: openclaw
+    agent: fugue.agents:FugueOpenClaw
+  - name: claude-code
+    agent: fugue.agents:FugueClaudeCode
+  - name: codex
+    agent: fugue.agents:FugueCodex
+
+tasks:
+  - id: court-form-filling
+    notes: Fill and validate a structured court PDF form.
+  - id: pdf-excel-diff
+    notes: Extract a PDF table and compare it with an Excel workbook.
+  - id: paper-anonymizer
+    notes: Redact identifying information from research papers.

@@ -1,0 +1,46 @@
+id: skillsbench-pdf-ab
+title: SkillsBench PDF skill A/B
+description: Compare an original PDF artifact workflow skill with a no-skill baseline across four agent harnesses.
+manifest: datasets/skillsbench-pdf.yaml
+model: wandb/zai-org/GLM-5.2
+run_name: skillsbench-pdf-ab
+tags:
+  - demo
+  - skillsbench
+  - skill-ab
+  - pdf
+harnesses:
+  - hermes
+  - openclaw
+  - claude-code
+  - codex
+variants:
+  - id: baseline
+    label: No skill
+    memory: none
+    enabled: true
+  - id: with-pdf-skill
+    label: PDF artifact workflow
+    skill_ids:
+      - pdf-artifact-workflow
+    memory: none
+    enabled: true
+n_attempts: 2
+n_concurrent: 2
+n_tasks: 3
+jobs_dir: jobs/skillsbench-pdf-ab
+environment:
+  type: docker
+  cpu_enforcement_policy: auto
+  memory_enforcement_policy: auto
+artifacts:
+  - /root/sc100-filled.pdf
+  - /root/diff_report.json
+  - /root/redacted
+verifier: {}
+retry: {}
+agent_kwargs: {}
+agent_env: {}
+mcp_servers: []
+debug: false
+quiet: false

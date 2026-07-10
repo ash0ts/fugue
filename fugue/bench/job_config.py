@@ -251,8 +251,8 @@ def _job_config(
         ],
         "datasets": [
             {
-                "ref": manifest.dataset.ref,
-                "version": manifest.dataset.version,
+                "name": manifest.dataset.ref,
+                "ref": manifest.dataset.version,
                 "task_names": [task.id for task in manifest.tasks],
                 "n_tasks": n_tasks,
             }

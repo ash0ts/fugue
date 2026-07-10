@@ -65,6 +65,57 @@ fugue run --experiment pilot --manifest datasets/pilot.yaml \
 fugue export --jobs jobs/pilot --out reports/pilot.jsonl --to-weave
 ```
 
+## Skill A/B Demo
+
+The checked-in `skillsbench-pdf-ab` experiment measures one controlled change:
+the `baseline` variant receives no skill, while `with-pdf-skill` receives
+Fugue's original `pdf-artifact-workflow` skill. Both variants otherwise use the
+same model, tasks, harness settings, prompt, memory setting, and trial count.
+
+The demo uses three PDF-heavy tasks from
+[SkillsBench v1.1](https://www.skillsbench.ai/blogs/skillsbench-1-1): form
+filling, PDF-to-spreadsheet comparison, and document anonymization. Across four
+harnesses and two attempts, the complete run contains 48 trials:
+
+```text
+4 harnesses x 2 variants x 3 tasks x 2 trials = 48 trials
+```
+
+Check model and trace credentials, then start the local bridge:
+
+```bash
+fugue preflight --model wandb/zai-org/GLM-5.2 --no-bridge-up
+fugue bridge up --model wandb/zai-org/GLM-5.2
+```
+
+In another terminal, render and inspect the eight Harbor JobConfigs before
+launching the matrix:
+
+```bash
+fugue run --experiment skillsbench-pdf-ab --dry-run
+fugue run --experiment skillsbench-pdf-ab \
+  --run-name skillsbench-pdf-ab-v1
+```
+
+Export the joined results to JSONL and Weave, or inspect each trial and its
+collected output artifacts in Harbor's local viewer:
+
+```bash
+fugue export --jobs jobs/skillsbench-pdf-ab \
+  --out reports/skillsbench-pdf-ab.jsonl \
+  --fetch-weave \
+  --to-weave
+harbor view jobs/skillsbench-pdf-ab
+```
+
+Compare pass rate, reward, cost, tokens, wall time, and failures by harness and
+variant. For individual wins and regressions, open the Weave traces and check
+whether the harness found and followed the skill before producing its artifact.
+
+This is a Fugue-authored skill experiment running on public SkillsBench tasks.
+It does not copy SkillsBench's bundled skills and is not an official
+SkillsBench leaderboard reproduction.
+
 Model precedence is:
 
 1. CLI `--model`

@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from uuid import uuid4
+
+from fugue.bench.job_config import preview_jobs
+from fugue.bench.library import get_experiment, get_skill
+from fugue.bench.manifest import load_manifest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_PATH = REPO_ROOT / "datasets" / "skillsbench-pdf.yaml"
+
+
+def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
+    manifest = load_manifest(MANIFEST_PATH)
+    experiment = get_experiment("skillsbench-pdf-ab", REPO_ROOT)
+    skill = get_skill("pdf-artifact-workflow", REPO_ROOT)
+
+    assert manifest.dataset.ref == "benchflow/skillsbench"
+    assert manifest.dataset.version == "1.1"
+    assert [task.id for task in manifest.tasks] == [
+        "court-form-filling",
+        "pdf-excel-diff",
+        "paper-anonymizer",
+    ]
+    assert [harness.name for harness in manifest.harnesses] == [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex",
+    ]
+    assert skill.title == "PDF artifact workflow"
+    assert len(skill.sha256) == 64
+
+    run_id = f"test-preview-{uuid4().hex}"
+    runtime_dir = REPO_ROOT / ".fugue" / "runtime" / run_id
+    assert not runtime_dir.exists()
+
+    rendered = preview_jobs(
+        experiment=experiment,
+        manifest=manifest,
+        manifest_path=MANIFEST_PATH,
+        repo_root=REPO_ROOT,
+        env={"WANDB_API_KEY": "secret-wandb"},
+        run_id=run_id,
+    )
+
+    assert len(rendered) == 8
+    assert not runtime_dir.exists()
+    assert all(not job.config_path.exists() for job in rendered)
+
+    cells = {(job.harness, job.variant_id): job for job in rendered}
+    expected_artifacts = [
+        "/root/sc100-filled.pdf",
+        "/root/diff_report.json",
+        "/root/redacted",
+    ]
+    expected_tasks = [
+        "court-form-filling",
+        "pdf-excel-diff",
+        "paper-anonymizer",
+    ]
+
+    for harness in ("hermes", "openclaw", "claude-code", "codex"):
+        baseline = cells[(harness, "baseline")].config
+        skilled = cells[(harness, "with-pdf-skill")].config
+
+        assert baseline["datasets"] == skilled["datasets"]
+        assert baseline["datasets"] == [
+            {
+                "name": "benchflow/skillsbench",
+                "ref": "1.1",
+                "task_names": expected_tasks,
+                "n_tasks": 3,
+            }
+        ]
+        assert baseline["n_attempts"] == skilled["n_attempts"] == 2
+        assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
+        assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
+        assert baseline["environment"] == skilled["environment"]
+        assert baseline.get("extra_instruction_paths", []) == []
+        assert skilled.get("extra_instruction_paths", []) == []
+
+        baseline_agent = dict(baseline["agents"][0])
+        skilled_agent = dict(skilled["agents"][0])
+        assert baseline_agent.pop("skills", []) == []
+        assert skilled_agent.pop("skills") == [
+            "configs/fugue/skills/pdf-artifact-workflow"
+        ]
+        assert baseline_agent == skilled_agent
+
+        assert "secret-wandb" not in json.dumps(baseline)
+        assert "secret-wandb" not in json.dumps(skilled)
