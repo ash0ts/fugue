@@ -1,0 +1,10 @@
+id: agentsmd
+title: Repository map (AGENTS.md)
+description: Deterministic repository structure and entry-point notes.
+provider: fugue.bench.context:AgentsMdContextProvider
+version: "1"
+capabilities: [prepare, bind]
+license: Fugue
+config:
+  binding:
+    extra_instruction_paths: ["{artifact}/AGENTS.md"]

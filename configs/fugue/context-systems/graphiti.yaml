@@ -1,0 +1,18 @@
+id: graphiti
+title: Graphiti
+description: Temporal context graph with provenance and hybrid retrieval.
+provider: fugue.bench.context:GraphitiContextProvider
+version: graphiti-core@0.29.2
+required_packages: [graphiti_core, fastembed]
+capabilities: [prepare, retrieve, bind, ingest, sequence]
+license: Apache-2.0
+source_url: https://github.com/getzep/graphiti
+required_env: [FUGUE_GRAPHITI_URI]
+config:
+  backend: graphiti
+  embedding_model: BAAI/bge-small-en-v1.5
+  binding:
+    mcp_servers:
+      - name: fugue-memory
+        command: python
+        args: [-m, fugue.context_server, --system, graphiti, --prepared, .fugue-context]

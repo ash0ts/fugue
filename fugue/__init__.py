@@ -1,11 +1,7 @@
-"""Fugue: comparative evaluation of Weave-instrumented agent harnesses.
+"""Fugue: comparative evaluation of Weave-instrumented agent experiments.
 
-Harbor-based runner that executes any set of agent harnesses (Hermes,
-OpenClaw, Claude Code, Codex CLI) on the same task suite — provider-routed
-model calls, one trace plane (W&B Weave), fully containerized.
-
-The flagship study is the repo-memory benchmark: does giving an agent a
-wiki of the repository (OpenWiki et al.) improve it, per harness?
-
-See README.md for usage.
+Fugue composes Harbor tasks, harnesses, prompts, skills, and context systems
+into isolated trial cells. Provider-routed model calls share one W&B Weave
+trace plane, while direct retrieval and sequence diagnostics remain explicitly
+separate from harness outcomes.
 """

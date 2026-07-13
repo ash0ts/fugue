@@ -3,7 +3,6 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 const TABS = { run: "Run", compare: "Compare", setup: "Setup" };
 const DEFAULT_MANIFEST = "datasets/pilot.yaml";
-const MEMORY_OPTIONS = ["none", "agentsmd", "openwiki", "semsearch", "deepwiki"];
 
 const state = {
   activeJob: null,
@@ -15,14 +14,18 @@ const state = {
   experiment: null,
   experimentId: "pilot",
   initializedControls: false,
-  library: { prompts: [], skills: [], experiments: [] },
+  library: { prompts: [], skills: [], experiments: [], context_systems: [] },
   manifest: null,
   preview: null,
   previewTimer: null,
+  presetHarnesses: null,
+  presetSystems: null,
   resultFilter: "all",
   results: { rows: [], summary: {} },
   selectedHarnesses: new Set(),
+  selectedWorkloads: new Set(),
   status: null,
+  statusTimer: null,
   summary: null,
 };
 
@@ -82,27 +85,43 @@ function bindActions() {
   $("refreshBtn").addEventListener("click", () => refreshAll().catch(showError));
   $("preflightBtn").addEventListener("click", () => startJob("preflight"));
   $("bridgeBtn").addEventListener("click", () => startJob("bridge"));
+  $("prepareBtn").addEventListener("click", () => startJob("prepare"));
   $("renderBtn").addEventListener("click", () => renderPreview(true).catch(showError));
   $("runBtn").addEventListener("click", () => startJob("run"));
   $("exportBtn").addEventListener("click", () => startJob("export"));
   $("saveExperimentBtn").addEventListener("click", saveExperiment);
   $("addVariantBtn").addEventListener("click", addVariant);
-  $("experimentSelect").addEventListener("change", () => loadExperiment($("experimentSelect").value));
+  $("experimentSelect").addEventListener("change", async () => {
+    await loadExperiment($("experimentSelect").value);
+    await refreshSummary();
+  });
+  $("presetSelect").addEventListener("change", () => {
+    const preset = selectedPreset();
+    applyPresetSelection(preset);
+    renderRun();
+    schedulePreview();
+  });
   $("closeEditorBtn").addEventListener("click", closeEditor);
   $("saveEditorBtn").addEventListener("click", saveEditor);
   $("closeAdvancedBtn").addEventListener("click", closeAdvanced);
   $("saveAdvancedBtn").addEventListener("click", saveAdvanced);
 
-  ["experimentIdInput", "experimentNameInput", "modelInput", "manifestInput", "taskInput", "attemptInput", "concurrentInput", "dryRunInput"].forEach((id) => {
+  ["experimentIdInput", "experimentNameInput", "modelInput", "builderModelInput", "judgeModelInput", "manifestInput", "presetSelect", "taskInput", "attemptInput", "concurrentInput", "dryRunInput"].forEach((id) => {
     $(id).addEventListener("input", () => {
       syncExperimentFromControls();
       renderCommandPreview();
       schedulePreview();
+      if (["modelInput", "builderModelInput", "judgeModelInput"].includes(id)) {
+        scheduleStatusRefresh();
+      }
     });
     $(id).addEventListener("change", () => {
       syncExperimentFromControls();
       renderCommandPreview();
       schedulePreview();
+      if (["modelInput", "builderModelInput", "judgeModelInput"].includes(id)) {
+        scheduleStatusRefresh();
+      }
     });
   });
 
@@ -127,12 +146,26 @@ function bindActions() {
       toggleHarness(harness.dataset.toggleValue);
       renderRun();
       schedulePreview();
+      return;
+    }
+    const workload = event.target.closest("[data-toggle-kind='workload']");
+    if (workload) {
+      toggleWorkload(workload.dataset.toggleValue);
+      renderRun();
+      schedulePreview();
     }
   });
   document.addEventListener("click", (event) => {
     const toggle = event.target.closest("[data-toggle-kind='harness']");
     if (toggle) {
       toggleHarness(toggle.dataset.toggleValue);
+      renderRun();
+      schedulePreview();
+      return;
+    }
+    const workloadToggle = event.target.closest("[data-toggle-kind='workload']");
+    if (workloadToggle) {
+      toggleWorkload(workloadToggle.dataset.toggleValue);
       renderRun();
       schedulePreview();
       return;
@@ -159,8 +192,9 @@ function bindActions() {
 }
 
 async function refreshAll() {
+  const summaryQuery = new URLSearchParams({ experiment_id: state.experimentId });
   const [summary, jobs, results, library] = await Promise.all([
-    getJSON("/api/summary"),
+    getJSON(`/api/summary?${summaryQuery}`),
     getJSON("/api/jobs"),
     getJSON("/api/results"),
     getJSON("/api/library"),
@@ -178,11 +212,57 @@ async function refreshAll() {
   schedulePreview();
 }
 
+async function refreshSummary() {
+  const query = new URLSearchParams({
+    experiment_id: state.experimentId,
+    model: $("modelInput").value.trim(),
+    builder_model: $("builderModelInput").value.trim(),
+    judge_model: $("judgeModelInput").value.trim(),
+  });
+  const summary = await getJSON(`/api/summary?${query}`);
+  state.summary = summary;
+  state.status = summary.status || state.status;
+  state.manifest = summary.manifest || state.manifest;
+  renderAll();
+}
+
+function scheduleStatusRefresh() {
+  window.clearTimeout(state.statusTimer);
+  state.statusTimer = window.setTimeout(() => refreshStatus().catch(showError), 350);
+}
+
+async function refreshStatus() {
+  const query = new URLSearchParams({
+    model: $("modelInput").value.trim(),
+    builder_model: $("builderModelInput").value.trim(),
+    judge_model: $("judgeModelInput").value.trim(),
+  });
+  const contextSystems = state.status?.context_systems || [];
+  state.status = await getJSON(`/api/status?${query}`);
+  state.status.context_systems = contextSystems;
+  state.summary ||= { readiness: {} };
+  state.summary.readiness ||= {};
+  const keyReady = (role) => {
+    const route = state.status.routes?.[role];
+    return !route || Boolean(state.status.keys?.[route.api_key_env]);
+  };
+  state.summary.readiness = {
+    ...state.summary.readiness,
+    trace: Boolean(state.status.weave_project && state.status.keys?.WANDB_API_KEY),
+    model: keyReady("target"),
+    builder: keyReady("builder"),
+    judge: keyReady("judge"),
+    bridge: Boolean(state.status.bridge?.ok),
+  };
+  renderAll();
+}
+
 function normalizeLibrary(library) {
   return {
     prompts: library?.prompts || [],
     skills: library?.skills || [],
     experiments: library?.experiments || [],
+    context_systems: library?.context_systems || [],
   };
 }
 
@@ -232,7 +312,7 @@ function normalizeVariants(variants) {
       label: variant.label || variant.id || `Variant ${index + 1}`,
       prompt_id: variant.prompt_id || "",
       skill_ids: Array.isArray(variant.skill_ids) ? variant.skill_ids : [],
-      memory: variant.memory || "none",
+      context: variant.context || { system_id: "none", config: {} },
       agent_kwargs: variant.agent_kwargs || {},
       agent_env: variant.agent_env || {},
       mcp_servers: variant.mcp_servers || [],
@@ -244,9 +324,9 @@ function normalizeVariants(variants) {
     }));
   }
   return [
-    { id: "baseline", label: "Baseline", prompt_id: "", skill_ids: [], memory: "none", enabled: true },
-    { id: "prompt-skill", label: "Prompt + skill", prompt_id: state.library.prompts[0]?.id || "", skill_ids: state.library.skills[0]?.id ? [state.library.skills[0].id] : [], memory: "none", enabled: true },
-    { id: "memory-skill", label: "Memory + skill", prompt_id: state.library.prompts[0]?.id || "", skill_ids: state.library.skills[0]?.id ? [state.library.skills[0].id] : [], memory: "agentsmd", enabled: true },
+    { id: "baseline", label: "Baseline", prompt_id: "", skill_ids: [], context: { system_id: "none", config: {} }, enabled: true },
+    { id: "prompt-skill", label: "Prompt + skill", prompt_id: state.library.prompts[0]?.id || "", skill_ids: state.library.skills[0]?.id ? [state.library.skills[0].id] : [], context: { system_id: "none", config: {} }, enabled: true },
+    { id: "repo-context", label: "Repository context", prompt_id: "", skill_ids: [], context: { system_id: "agentsmd", config: {} }, enabled: true },
   ];
 }
 
@@ -257,13 +337,30 @@ function syncControls() {
     $("experimentIdInput").value = experiment.id || state.experimentId || "pilot";
     $("experimentNameInput").value = experiment.run_name || experiment.title || "";
     $("modelInput").value = experiment.model || state.status?.route?.model || state.manifest?.model || state.status?.default_model || "";
-    $("manifestInput").value = experiment.manifest || DEFAULT_MANIFEST;
+    $("builderModelInput").value = experiment.builder_model || state.status?.builder_model || "";
+    $("judgeModelInput").value = experiment.judge_model || state.status?.judge_model || "";
+    const workloadManaged = (experiment.workloads || []).length > 0;
+    $("manifestInput").value = workloadManaged ? "" : (experiment.manifest || DEFAULT_MANIFEST);
+    $("manifestInput").placeholder = workloadManaged ? "Defined by selected workloads" : DEFAULT_MANIFEST;
     $("attemptInput").value = experiment.n_attempts || state.manifest?.k || 1;
     $("concurrentInput").value = experiment.n_concurrent || state.manifest?.n_concurrent || 2;
     $("taskInput").value = experiment.n_tasks || "";
     state.selectedHarnesses = new Set(experiment.harnesses?.length ? experiment.harnesses : manifestHarnesses());
+    const preset = selectedPreset(experiment);
+    $("presetSelect").value = preset?.id || "default";
+    applyPresetSelection(preset);
     state.initializedControls = true;
   }
+}
+
+function applyPresetSelection(preset) {
+  state.selectedWorkloads = new Set(
+    preset?.workloads?.length
+      ? preset.workloads
+      : (state.experiment?.workloads || []).map((item) => item.id),
+  );
+  state.presetHarnesses = preset?.harnesses?.length ? new Set(preset.harnesses) : null;
+  state.presetSystems = preset?.systems?.length ? new Set(preset.systems) : null;
 }
 
 function syncExperimentFromControls() {
@@ -272,7 +369,10 @@ function syncExperimentFromControls() {
   state.experiment.title = $("experimentNameInput").value.trim() || state.experiment.id;
   state.experiment.run_name = $("experimentNameInput").value.trim();
   state.experiment.model = $("modelInput").value.trim();
-  state.experiment.manifest = $("manifestInput").value.trim() || DEFAULT_MANIFEST;
+  state.experiment.builder_model = $("builderModelInput").value.trim();
+  state.experiment.judge_model = $("judgeModelInput").value.trim();
+  state.experiment.manifest = $("manifestInput").value.trim()
+    || ((state.experiment.workloads || []).length ? "" : DEFAULT_MANIFEST);
   state.experiment.n_attempts = numberOrNull($("attemptInput").value);
   state.experiment.n_concurrent = numberOrNull($("concurrentInput").value);
   state.experiment.n_tasks = numberOrNull($("taskInput").value);
@@ -316,7 +416,9 @@ function renderHeader() {
 
 function renderRun() {
   fillSelect($("experimentSelect"), state.library.experiments, state.experimentId);
+  renderPresetSelect();
   renderHarnessToggles();
+  renderWorkloadToggles();
   renderVariantRows();
   renderRunSummary();
   renderCommandPreview();
@@ -324,11 +426,33 @@ function renderRun() {
   renderActivity();
 }
 
+function renderPresetSelect() {
+  const presets = state.experiment?.presets || [];
+  const options = presets.length ? presets : [{ id: "default" }];
+  const selected = $("presetSelect").value || state.experiment?.default_preset || options[0].id;
+  $("presetSelect").innerHTML = options.map((preset) => `<option value="${escapeAttr(preset.id)}">${escapeHTML(preset.id)}</option>`).join("");
+  $("presetSelect").value = options.some((preset) => preset.id === selected) ? selected : options[0].id;
+}
+
+function renderWorkloadToggles() {
+  const workloads = state.experiment?.workloads || [];
+  if (!workloads.length) {
+    state.selectedWorkloads = new Set();
+    $("workloadToggles").innerHTML = `<span class="badge neutral">Harbor benchmark</span>`;
+    return;
+  }
+  if (!state.selectedWorkloads.size) workloads.forEach((item) => state.selectedWorkloads.add(item.id));
+  $("workloadToggles").innerHTML = workloads.map((item) => {
+    const active = state.selectedWorkloads.has(item.id);
+    return `<button class="toggle-chip ${active ? "active" : ""}" data-toggle-kind="workload" data-toggle-value="${escapeAttr(item.id)}" aria-pressed="${String(active)}" type="button">${escapeHTML(item.id)}</button>`;
+  }).join("");
+}
+
 function renderHarnessToggles() {
   const harnesses = manifestHarnesses();
   if (!state.selectedHarnesses.size) harnesses.forEach((value) => state.selectedHarnesses.add(value));
   $("harnessToggles").innerHTML = harnesses.map((value) => {
-    const active = state.selectedHarnesses.has(value);
+    const active = activeHarnesses().includes(value);
     return `<button class="toggle-chip ${active ? "active" : ""}" data-toggle-kind="harness" data-toggle-value="${escapeAttr(value)}" aria-pressed="${String(active)}" type="button">${escapeHTML(value)}</button>`;
   }).join("");
 }
@@ -339,7 +463,7 @@ function renderVariantRows() {
   state.experiment.variants = variants;
   $("variantRows").innerHTML = variants.map((variant) => `
     <tr data-variant-id="${escapeAttr(variant.id)}">
-      <td><input data-variant-field="enabled" data-variant-id="${escapeAttr(variant.id)}" type="checkbox" ${variant.enabled ? "checked" : ""} /></td>
+      <td><input data-variant-field="enabled" data-variant-id="${escapeAttr(variant.id)}" type="checkbox" ${isVariantActive(variant) ? "checked" : ""} /></td>
       <td>
         <input class="table-input strong" data-variant-field="label" data-variant-id="${escapeAttr(variant.id)}" value="${escapeAttr(variant.label)}" />
         <input class="table-input code" data-variant-field="id" data-variant-id="${escapeAttr(variant.id)}" value="${escapeAttr(variant.id)}" />
@@ -356,9 +480,10 @@ function renderVariantRows() {
         <button class="inline-link" data-variant-action="edit-skill" data-variant-id="${escapeAttr(variant.id)}" type="button">Edit skills</button>
       </td>
       <td>
-        <select class="table-input" data-variant-field="memory" data-variant-id="${escapeAttr(variant.id)}">
-          ${MEMORY_OPTIONS.map((value) => `<option value="${escapeAttr(value)}" ${value === (variant.memory || "none") ? "selected" : ""}>${escapeHTML(value)}</option>`).join("")}
+        <select class="table-input" data-variant-field="context_system_id" data-variant-id="${escapeAttr(variant.id)}">
+          ${state.library.context_systems.map((item) => `<option value="${escapeAttr(item.id)}" ${item.id === (variant.context?.system_id || "none") ? "selected" : ""}>${escapeHTML(item.title || item.id)}</option>`).join("")}
         </select>
+        ${contextReadinessBadge(variant.context?.system_id || "none")}
       </td>
       <td><span class="badge ${hasAdvancedConfig(variant) ? "ok" : "neutral"}">${hasAdvancedConfig(variant) ? "custom" : "default"}</span></td>
       <td class="table-actions">
@@ -377,10 +502,10 @@ function renderRunSummary() {
   const cells = preview?.cells || state.selectedHarnesses.size * variants.length;
   const trials = preview?.estimated_trials || cells * taskCount * attempts;
   $("runSummaryCards").innerHTML = [
-    ["Cells", String(cells), `${state.selectedHarnesses.size} harnesses x ${variants.length} variants`],
-    ["Estimated trials", String(trials), `${taskCount} tasks x ${attempts} trials`],
-    ["Prompts", String(new Set(variants.map((v) => v.prompt_id).filter(Boolean)).size), "selected prompt files"],
-    ["Skills", String(new Set(variants.flatMap((v) => v.skill_ids || [])).size), "selected Harbor skills"],
+    ["Trials", String(trials), `${preview?.applicable_cells ?? cells} runnable cells`],
+    ["Systems", String(preview?.systems || new Set(variants.map((v) => v.context?.system_id)).size), `${preview?.cache_ready_cells || 0} caches ready`],
+    ["Workloads", String(preview?.workloads || state.selectedWorkloads.size || 1), `${preview?.skipped_cells || 0} cells not applicable`],
+    ["Harnesses", String(preview?.harnesses || state.selectedHarnesses.size), `${attempts} trial${attempts === 1 ? "" : "s"} per cell`],
   ].map(metricHTML).join("");
   $("readinessStrip").innerHTML = readinessItems().map(([label, ok, note]) => `<span class="badge ${ok ? "ok" : "danger"}">${escapeHTML(label)} ${ok ? "ready" : note}</span>`).join("");
 }
@@ -391,12 +516,15 @@ function renderCommandPreview() {
 
 function renderRenderedConfigs() {
   const commands = state.preview?.commands || [];
-  $("previewBadge").textContent = commands.length ? `${commands.length} configs` : "Not rendered";
+  const hasDirectRunners = (state.preview?.summary?.direct_runners || []).length > 0;
+  $("previewBadge").textContent = commands.length
+    ? `${commands.length} ${hasDirectRunners ? "cells" : "configs"}`
+    : "Not rendered";
   $("previewBadge").className = `badge ${commands.length ? "ok" : "neutral"}`;
   $("renderedConfigs").innerHTML = commands.length ? commands.slice(0, 8).map((item) => `
     <div class="config-item">
-      <div><strong>${escapeHTML(item.harness)}</strong><span>${escapeHTML(item.variant_label || item.variant_id)}</span></div>
-      <code>${escapeHTML(item.config_path)}</code>
+      <div><strong>${escapeHTML(item.workload_id)} / ${escapeHTML(item.harness)}</strong><span>${escapeHTML(item.context_system_id)}</span></div>
+      <code>${escapeHTML(item.skip_reason || item.config_path)}</code>
     </div>
   `).join("") : `<div class="empty-state compact">Render configs to inspect generated Harbor files.</div>`;
 }
@@ -415,26 +543,51 @@ function renderCompare() {
   const summary = state.results?.summary || {};
   renderResultCards(summary);
   renderResultFilters(rows);
+  renderComparisonTable(summary);
   const filtered = rows.filter(rowMatchesFilter);
   $("resultEmpty").hidden = rows.length > 0;
   $("resultRows").innerHTML = filtered.slice(0, 300).map(resultRowHTML).join("");
   setOptionalLink($("resultsWeaveLink"), state.status?.weave_project_url, "Open Weave");
 }
 
+function renderComparisonTable(summary) {
+  const rows = summary.comparison || [];
+  const paretoKeys = new Set((summary.pareto || []).map(comparisonKey));
+  $("comparisonRows").innerHTML = rows.length ? rows.map((row) => `
+    <tr>
+      <td>${escapeHTML(row.workload_id || "")}</td>
+      <td class="code-cell">${escapeHTML(row.context_system_id || "none")}</td>
+      <td>${escapeHTML(row.harness || "")}</td>
+      <td>${escapeHTML(formatPercent(row.pass_rate ?? row.judge_overall))}</td>
+      <td>${escapeHTML(formatMetric(row.mrr))}</td>
+      <td>${escapeHTML(formatMetric(row.recall_at_10))}</td>
+      <td>${escapeHTML(formatMetric(row.evidence_recall))}</td>
+      <td>${escapeHTML(formatMetric(row.fact_recall))}</td>
+      <td>${escapeHTML(formatDuration(row.query_latency_p50_ms))}</td>
+      <td>${escapeHTML(formatDuration(row.query_latency_p95_ms))}</td>
+      <td>${escapeHTML(formatPercent(row.error_rate))}</td>
+      <td>${escapeHTML(formatCurrency(row.cost_usd))}</td>
+      <td>${paretoKeys.has(comparisonKey(row)) ? '<span class="badge ok">Pareto</span>' : ""}</td>
+    </tr>
+  `).join("") : `<tr><td colspan="13" class="subtle-cell">No grouped metrics yet.</td></tr>`;
+}
+
+function comparisonKey(row) {
+  return [row.workload_id, row.context_system_id, row.harness].join("::");
+}
+
 function renderResultCards(summary) {
   const groups = [
     { scope: "All", name: "Trials", ...summary },
-    ...groupCards("Variant", summary.by_variant_id || summary.by_variant || []),
+    ...groupCards("Context", summary.by_context_system || []),
+    ...groupCards("Workload", summary.by_workload || []),
     ...groupCards("Harness", summary.by_harness || []),
-    ...groupCards("Prompt", summary.by_prompt || []),
-    ...groupCards("Skill", summary.by_skill || []),
-    ...groupCards("Provider", summary.by_provider || []),
   ].slice(0, 10);
   $("resultCards").innerHTML = groups.length ? groups.map((group) => `
     <article class="result-card">
       <div class="result-card-label">${escapeHTML(group.scope)}</div>
-      <div class="result-card-value">${escapeHTML(formatPercent(group.pass_rate))}</div>
-      <div class="result-card-note">${escapeHTML(group.name)} - ${escapeHTML(group.passed || 0)}/${escapeHTML(group.total || 0)} passed</div>
+      <div class="result-card-value">${escapeHTML(formatPercent(group.pass_rate ?? group.judge_overall))}</div>
+      <div class="result-card-note">${escapeHTML(group.name)} - ${group.pass_rate == null && group.judge_overall != null ? "judge score" : `${escapeHTML(group.passed || 0)}/${escapeHTML(group.scored || 0)} passed`}</div>
     </article>
   `).join("") : metricHTML(["Rows", "0", "No exported trials"]);
 }
@@ -455,16 +608,20 @@ function resultRowHTML(row) {
   return `
     <tr>
       <td>${escapeHTML(row.experiment_id || row.run_name || "")}</td>
-      <td class="code-cell">${escapeHTML(row.variant_id || "")}</td>
-      <td>${escapeHTML(row.prompt_id || "")}</td>
-      <td>${escapeHTML((row.skill_ids || []).join(", "))}</td>
+      <td>${escapeHTML(row.workload_id || "harbor")}</td>
+      <td class="code-cell">${escapeHTML(row.context_system_id || "none")}</td>
       <td>${escapeHTML(row.harness || "")}</td>
-      <td class="code-cell">${escapeHTML(row.model || "")}</td>
       <td>${passBadge(row)}</td>
-      <td>${escapeHTML(formatValue(row.reward))}</td>
+      <td>${escapeHTML(formatMetric(row.judge_overall))}</td>
+      <td>${escapeHTML(formatMetric(row.judge_groundedness))}</td>
+      <td>${escapeHTML(formatMetric(row.mrr))}</td>
+      <td>${escapeHTML(formatMetric(row.recall_at_10))}</td>
+      <td>${escapeHTML(formatDuration(row.query_latency_ms || row.context_query_latency_ms))}</td>
+      <td>${escapeHTML(formatDuration(row.build_latency_ms))}</td>
+      <td>${escapeHTML(formatInteger(row.context_call_count || row.result_count || 0))}</td>
       <td>${escapeHTML(formatInteger(tokens))}</td>
       <td>${escapeHTML(formatCurrency(row.cost_usd))}</td>
-      <td class="code-cell"><button class="copy-key" data-copy="${escapeAttr(row.run_key || "")}" type="button">${escapeHTML(row.run_key || "")}</button></td>
+      <td class="code-cell"><button class="copy-key" data-copy="${escapeAttr(row.run_key || row.query_id || "")}" type="button">${escapeHTML(row.run_key || row.query_id || "")}</button></td>
       <td>${weaveUrl ? `<a href="${escapeAttr(weaveUrl)}" target="_blank" rel="noreferrer">Open Weave</a>` : ""}</td>
     </tr>
   `;
@@ -482,18 +639,30 @@ function renderSetup() {
     ${detailRow("Next action", bridge.ok ? "Run experiment" : "Start bridge", bridge.error || "")}
   `;
   const route = state.status?.route || {};
+  const routes = state.status?.routes || {};
   $("setupRoute").innerHTML = definitionRows({
-    Provider: route.provider || "unknown",
-    Model: route.model || "",
-    "Model key": route.api_key_env || "",
+    "Target route": route.model || "unknown",
+    "Target key": route.api_key_env || "",
+    "Builder route": routes.builder?.model || "same as target",
+    "Builder key": routes.builder?.api_key_env || "",
+    "Judge route": routes.judge?.model || "not configured",
+    "Judge key": routes.judge?.api_key_env || "",
   });
   const manifest = state.manifest || {};
   $("setupManifest").innerHTML = definitionRows({
-    Dataset: manifest.dataset?.ref || "",
+    Dataset: manifest.dataset?.ref || manifest.dataset?.path || "",
     Tasks: manifest.counts?.tasks || 0,
     Harnesses: manifestHarnesses().join(", "),
     "Jobs dir": manifest.jobs_dir || "",
   });
+  const systems = state.status?.context_systems || state.library.context_systems || [];
+  $("setupContextSystems").innerHTML = systems.map((system) => `
+    <div class="context-system-row">
+      <span><strong>${escapeHTML(system.title || system.id)}</strong><small>${escapeHTML(system.version || "")}</small></span>
+      <span class="context-capabilities">${escapeHTML((system.capabilities || []).join(" · "))}</span>
+      <span class="badge ${system.ready ? "ok" : system.requires_license_approval && !system.license_ready ? "warning" : "danger"}">${system.ready ? "ready" : system.requires_license_approval && !system.license_ready ? "license gate" : "needs setup"}</span>
+    </div>
+  `).join("");
 }
 
 function renderReadinessCards() {
@@ -502,6 +671,8 @@ function renderReadinessCards() {
   const cards = [
     ["Trace", readiness.trace ? "Ready" : "Missing", status.trace_project || "Set W&B tracing", readiness.trace],
     ["Model key", readiness.model ? "Ready" : "Missing", status.route?.api_key_env || "Select a model", readiness.model],
+    ["Builder key", readiness.builder ? "Ready" : "Missing", status.routes?.builder?.api_key_env || "Uses target route", readiness.builder],
+    ...(status.routes?.judge ? [["Judge key", readiness.judge ? "Ready" : "Missing", status.routes.judge.api_key_env || "Configure a judge", readiness.judge]] : []),
     ["Bridge", readiness.bridge ? "Online" : "Offline", readiness.bridge ? "127.0.0.1:4000" : "Start bridge for bridged runs", readiness.bridge],
     ["Manifest", readiness.manifest ? "Loaded" : "Missing", `${state.manifest?.counts?.tasks || 0} tasks`, readiness.manifest],
   ];
@@ -522,7 +693,7 @@ function addVariant() {
     label: `Variant ${state.experiment.variants.length + 1}`,
     prompt_id: state.library.prompts[0]?.id || "",
     skill_ids: [],
-    memory: "none",
+    context: { system_id: "none", config: {} },
     enabled: true,
   });
   renderRun();
@@ -547,6 +718,7 @@ function updateVariantField(field) {
   if (key === "enabled") variant.enabled = field.checked;
   else if (key === "skill_ids") variant.skill_ids = csv(field.value);
   else if (key === "id") variant.id = sanitizeId(field.value);
+  else if (key === "context_system_id") variant.context = { ...(variant.context || {}), system_id: field.value };
   else variant[key] = field.value;
 }
 
@@ -669,7 +841,14 @@ async function refreshLibraryOnly() {
 
 function schedulePreview() {
   clearTimeout(state.previewTimer);
-  state.previewTimer = setTimeout(() => renderPreview(false).catch(() => {}), 400);
+  state.previewTimer = setTimeout(() => renderPreview(false).catch(showPreviewError), 400);
+}
+
+function showPreviewError(error) {
+  state.preview = null;
+  $("previewBadge").textContent = "Preview failed";
+  $("previewBadge").className = "badge danger";
+  $("renderedConfigs").innerHTML = `<div class="error-callout">${escapeHTML(error?.message || String(error))}</div>`;
 }
 
 async function renderPreview(toast = false) {
@@ -700,8 +879,17 @@ async function startJob(kind) {
 
 function jobConfig(kind) {
   const model = $("modelInput").value.trim();
-  if (kind === "preflight") return { label: "Run preflight", url: "/api/preflight", body: { model } };
-  if (kind === "bridge") return { label: "Start bridge", url: "/api/bridge/up", body: { model } };
+  if (kind === "preflight") return { label: "Run preflight", url: "/api/preflight", body: runBody() };
+  if (kind === "bridge") return {
+    label: "Start bridge",
+    url: "/api/bridge/up",
+    body: {
+      model,
+      builder_model: $("builderModelInput").value.trim(),
+      judge_model: $("judgeModelInput").value.trim(),
+    },
+  };
+  if (kind === "prepare") return { label: "Prepare context", url: "/api/prepare", body: runBody() };
   if (kind === "export") return { label: "Export results", url: "/api/export", body: {} };
   return { label: "Run experiment", url: "/api/run", body: runBody() };
 }
@@ -711,10 +899,15 @@ function runBody() {
   return {
     experiment_id: state.experiment.id || state.experimentId || "pilot",
     experiment: state.experiment,
-    manifest: state.experiment.manifest || DEFAULT_MANIFEST,
+    manifest: state.experiment.manifest || "",
     model: state.experiment.model || "",
+    builder_model: state.experiment.builder_model || "",
+    judge_model: state.experiment.judge_model || "",
+    preset: $("presetSelect").value || "default",
+    workloads: Array.from(state.selectedWorkloads),
+    systems: Array.from(new Set(enabledVariants().map((variant) => variant.context?.system_id || "none"))),
     run_name: state.experiment.run_name || state.experiment.title || state.experiment.id || "",
-    harnesses: Array.from(state.selectedHarnesses),
+    harnesses: activeHarnesses(),
     variant_ids: enabledVariants().map((variant) => variant.id),
     n_tasks: state.experiment.n_tasks,
     n_attempts: state.experiment.n_attempts,
@@ -763,8 +956,14 @@ function closeStream() {
 
 function buildRunCommand() {
   const body = runBody();
-  const parts = ["fugue", "run", "--experiment", body.experiment_id, "--manifest", body.manifest];
+  const parts = ["fugue", "run", "--experiment", body.experiment_id];
+  if (body.manifest) parts.push("--manifest", body.manifest);
   if (body.model) parts.push("--model", body.model);
+  if (body.builder_model) parts.push("--builder-model", body.builder_model);
+  if (body.judge_model) parts.push("--judge-model", body.judge_model);
+  if (body.preset && body.preset !== "default") parts.push("--preset", body.preset);
+  if (body.workloads.length) parts.push("--workloads", body.workloads.join(","));
+  if (body.systems.length) parts.push("--systems", body.systems.join(","));
   if (body.run_name) parts.push("--run-name", body.run_name);
   if (body.harnesses.length) parts.push("--harnesses", body.harnesses.join(","));
   if (body.variant_ids.length) parts.push("--variants", body.variant_ids.join(","));
@@ -776,7 +975,18 @@ function buildRunCommand() {
 }
 
 function enabledVariants() {
-  return normalizeVariants(state.experiment?.variants).filter((variant) => variant.enabled);
+  return normalizeVariants(state.experiment?.variants).filter(isVariantActive);
+}
+
+function activeHarnesses() {
+  return Array.from(state.selectedHarnesses).filter(
+    (harness) => !state.presetHarnesses || state.presetHarnesses.has(harness),
+  );
+}
+
+function isVariantActive(variant) {
+  const systemId = variant.context?.system_id || "none";
+  return variant.enabled && (!state.presetSystems || state.presetSystems.has(systemId));
 }
 
 function findVariant(variantId) {
@@ -788,6 +998,12 @@ function toggleHarness(value) {
   if (state.selectedHarnesses.has(value) && state.selectedHarnesses.size > 1) state.selectedHarnesses.delete(value);
   else state.selectedHarnesses.add(value);
   syncExperimentFromControls();
+}
+
+function toggleWorkload(value) {
+  if (!value) return;
+  if (state.selectedWorkloads.has(value) && state.selectedWorkloads.size > 1) state.selectedWorkloads.delete(value);
+  else state.selectedWorkloads.add(value);
 }
 
 function hasAdvancedConfig(variant) {
@@ -804,11 +1020,14 @@ function hasAdvancedConfig(variant) {
 
 function readinessItems() {
   const readiness = state.summary?.readiness || {};
-  return [
+  const items = [
     ["trace", readiness.trace, "missing"],
     ["model", readiness.model, "missing"],
+    ["builder", readiness.builder, "missing"],
     ["manifest", readiness.manifest, "missing"],
   ];
+  if (state.status?.routes?.judge) items.push(["judge", readiness.judge, "missing"]);
+  return items;
 }
 
 function rowMatchesFilter(row) {
@@ -830,6 +1049,20 @@ function groupCards(scope, groups) {
 
 function manifestHarnesses() {
   return (state.manifest?.harnesses || []).map((harness) => harness.name).filter(Boolean);
+}
+
+function selectedPreset(experiment = state.experiment) {
+  const presets = experiment?.presets || [];
+  const id = $("presetSelect")?.value || experiment?.default_preset || presets[0]?.id;
+  return presets.find((preset) => preset.id === id) || presets[0] || null;
+}
+
+function contextReadinessBadge(systemId) {
+  const system = (state.status?.context_systems || state.library.context_systems || []).find((item) => item.id === systemId);
+  if (!system || system.ready === undefined) return "";
+  const label = system.ready ? "ready" : system.requires_license_approval && !system.license_ready ? "license gate" : "setup";
+  const kind = system.ready ? "ok" : system.requires_license_approval && !system.license_ready ? "warning" : "danger";
+  return `<span class="badge ${kind}">${label}</span>`;
 }
 
 function numberOrNull(value) {
@@ -865,7 +1098,7 @@ function uniqueSkillId(variantId) {
 }
 
 function setActionBusy(busy) {
-  ["preflightBtn", "bridgeBtn", "renderBtn", "runBtn", "exportBtn", "saveExperimentBtn", "addVariantBtn", "saveEditorBtn", "saveAdvancedBtn"].forEach((id) => {
+  ["preflightBtn", "bridgeBtn", "prepareBtn", "renderBtn", "runBtn", "exportBtn", "saveExperimentBtn", "addVariantBtn", "saveEditorBtn", "saveAdvancedBtn"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = busy;
   });
@@ -943,6 +1176,16 @@ function formatCurrency(value) {
 
 function formatValue(value) {
   return value === null || value === undefined ? "" : String(value);
+}
+
+function formatMetric(value) {
+  return value === null || value === undefined ? "n/a" : Number(value).toFixed(3);
+}
+
+function formatDuration(value) {
+  if (value === null || value === undefined) return "n/a";
+  const number = Number(value);
+  return number < 1000 ? `${Math.round(number)} ms` : `${(number / 1000).toFixed(1)} s`;
 }
 
 function escapeHTML(value) {

@@ -1,0 +1,19 @@
+id: codegraph
+title: CodeGraph
+description: Local SQLite code graph exposed through native MCP tools.
+provider: fugue.bench.context:CommandContextProvider
+version: "@colbymchenry/codegraph@0.7.9"
+capabilities: [prepare, bind]
+required_commands: [npx]
+license: MIT
+source_url: https://github.com/colbymchenry/codegraph
+config:
+  prepare:
+    command: [npx, -y, "@colbymchenry/codegraph@0.7.9", init, -i]
+    copy_paths: [.codegraph]
+  binding:
+    mcp_servers:
+      - name: codegraph
+        command: npx
+        args: [-y, "@colbymchenry/codegraph@0.7.9", serve, --mcp]
+        cwd: .fugue-context/artifact

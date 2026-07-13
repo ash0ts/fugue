@@ -2,11 +2,27 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from fugue.bench.context import (
+    DEFAULT_CACHE_ROOT,
+    ContextBinding,
+    ContextRuntime,
+    ContextSystemSpec,
+    RepositorySnapshot,
+    TrialContext,
+    bind_context,
+    context_cache_key,
+    expected_prepared_context,
+    get_context_system,
+    preflight_context,
+    run_async,
+)
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
@@ -14,9 +30,11 @@ from fugue.bench.library import (
     get_prompt,
     get_skill,
 )
-from fugue.bench.manifest import BenchmarkManifest, HarnessSpec
-from fugue.bench.memory import write_memory_instruction
+from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.model_plane import ModelRoute, resolve_model_route, select_model
+
+CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
+CONTEXT_RUNTIME_SERVICE = "fugue-context"
 
 
 @dataclass(frozen=True)
@@ -27,83 +45,39 @@ class RenderedJob:
     env: dict[str, str]
     job_name: str
     harness: str
-    feature_memory: str
+    context_system_id: str
+    context_version: str
+    context_cache_keys: dict[str, str]
+    context_cache_ready: bool
     prompt_id: str | None
     skill_ids: list[str]
     variant_id: str
     variant_label: str
     agent_config_hash: str
     route: ModelRoute
+    workload_id: str
+    preset_id: str | None
+    run_id: str
+    run_name: str
+    task_id: str
+    applicable: bool = True
+    skip_reason: str | None = None
 
 
-def preview_jobs(
-    *,
-    experiment: ExperimentSpec,
-    manifest: BenchmarkManifest,
-    manifest_path: Path,
-    repo_root: Path,
-    env: dict[str, str],
-    model: str | None = None,
-    harness_names: list[str] | None = None,
-    n_tasks: int | None = None,
-    n_attempts: int | None = None,
-    n_concurrent: int | None = None,
-    jobs_dir: Path | None = None,
-    run_name: str | None = None,
-    tags: list[str] | None = None,
-    run_id: str | None = None,
-) -> list[RenderedJob]:
+def preview_jobs(**kwargs: Any) -> list[RenderedJob]:
+    run_id = kwargs.pop("run_id", None) or "preview"
     return _build_jobs(
-        experiment=experiment,
-        manifest=manifest,
-        manifest_path=manifest_path,
-        repo_root=repo_root,
-        env=env,
-        model=model,
-        harness_names=harness_names,
-        n_tasks=n_tasks,
-        n_attempts=n_attempts,
-        n_concurrent=n_concurrent,
-        jobs_dir=jobs_dir,
-        run_name=run_name,
-        tags=tags,
-        run_id=run_id or "preview",
+        **kwargs,
+        run_id=run_id,
         write_configs=False,
     )
 
 
-def render_jobs(
-    *,
-    experiment: ExperimentSpec,
-    manifest: BenchmarkManifest,
-    manifest_path: Path,
-    repo_root: Path,
-    env: dict[str, str],
-    model: str | None = None,
-    harness_names: list[str] | None = None,
-    n_tasks: int | None = None,
-    n_attempts: int | None = None,
-    n_concurrent: int | None = None,
-    jobs_dir: Path | None = None,
-    run_name: str | None = None,
-    tags: list[str] | None = None,
-    run_id: str | None = None,
-) -> list[RenderedJob]:
+def render_jobs(**kwargs: Any) -> list[RenderedJob]:
+    run_id = kwargs.pop("run_id", None) or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return _build_jobs(
-        experiment=experiment,
-        manifest=manifest,
-        manifest_path=manifest_path,
-        repo_root=repo_root,
-        env=env,
-        model=model,
-        harness_names=harness_names,
-        n_tasks=n_tasks,
-        n_attempts=n_attempts,
-        n_concurrent=n_concurrent,
-        jobs_dir=jobs_dir,
-        run_name=run_name,
-        tags=tags,
-        run_id=run_id or datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+        **kwargs,
+        run_id=run_id,
         write_configs=True,
     )
 
@@ -115,101 +89,177 @@ def _build_jobs(
     manifest_path: Path,
     repo_root: Path,
     env: dict[str, str],
-    model: str | None,
-    harness_names: list[str] | None,
-    n_tasks: int | None,
-    n_attempts: int | None,
-    n_concurrent: int | None,
-    jobs_dir: Path | None,
-    run_name: str | None,
-    tags: list[str] | None,
+    model: str | None = None,
+    harness_names: list[str] | None = None,
+    system_names: list[str] | None = None,
+    n_tasks: int | None = None,
+    n_attempts: int | None = None,
+    n_concurrent: int | None = None,
+    jobs_dir: Path | None = None,
+    run_name: str | None = None,
+    tags: list[str] | None = None,
     run_id: str,
     write_configs: bool,
+    workload_id: str = "harbor",
+    preset_id: str | None = None,
+    required_capabilities: list[str] | None = None,
+    workload_artifacts: list[Any] | None = None,
 ) -> list[RenderedJob]:
-    runtime_dir = repo_root / ".fugue" / "runtime" / run_id / "job-configs"
+    runtime_root = repo_root / ".fugue" / "runtime" / run_id
+    config_dir = runtime_root / "job-configs"
     if write_configs:
-        runtime_dir.mkdir(parents=True, exist_ok=True)
+        config_dir.mkdir(parents=True, exist_ok=True)
 
     harnesses = manifest.select_harnesses(harness_names or experiment.harnesses or None)
     variants = [variant for variant in experiment.variants if variant.enabled]
+    if system_names:
+        requested = set(system_names)
+        variants = [variant for variant in variants if variant.context.system_id in requested]
+        missing = sorted(requested - {variant.context.system_id for variant in variants})
+        if missing:
+            raise ValueError(f"context systems are not variants in this experiment: {', '.join(missing)}")
     selected_jobs_dir = jobs_dir or experiment.jobs_dir or manifest.jobs_dir
     selected_attempts = n_attempts or experiment.n_attempts or manifest.k
     selected_concurrent = n_concurrent or experiment.n_concurrent or manifest.n_concurrent
     selected_n_tasks = n_tasks if n_tasks is not None else experiment.n_tasks
+    selected_tasks = manifest.tasks[:selected_n_tasks] if selected_n_tasks else manifest.tasks
+    task_groups = [[task] for task in selected_tasks]
     selected_run_name = run_name or experiment.run_name or experiment.id
     selected_tags = [*experiment.tags, *(tags or [])]
+    runtime = ContextRuntime(
+        repo_root=repo_root,
+        cache_root=repo_root / DEFAULT_CACHE_ROOT,
+        env=env,
+    )
 
     rendered: list[RenderedJob] = []
     for harness in harnesses:
         selected_model = select_model(
             model,
-            harness.model or experiment.model or manifest.model,
+            manifest.model,
             env,
+            harness_model=harness.model,
+            experiment_model=experiment.model,
         )
         route = resolve_model_route(selected_model, env)
         for variant in variants:
-            feature_memory = variant.memory or "none"
-            skill_ids = list(variant.skill_ids)
-            job_name = _job_name(
-                run_name=selected_run_name,
-                harness=harness.name,
-                variant_id=variant.id,
+            spec = _context_spec(variant, repo_root)
+            applicable, skip_reason = _applicability(
+                spec,
+                required_capabilities or [],
+                runtime,
             )
-            agent_config_hash = _agent_config_hash(experiment, variant)
-            config = _job_config(
-                experiment=experiment,
-                variant=variant,
-                manifest=manifest,
-                harness=harness,
-                route=route,
-                feature_memory=feature_memory,
-                skill_ids=skill_ids,
-                agent_config_hash=agent_config_hash,
-                job_name=job_name,
-                jobs_dir=selected_jobs_dir,
-                n_attempts=selected_attempts,
-                n_concurrent=selected_concurrent,
-                n_tasks=selected_n_tasks,
-                repo_root=repo_root,
-                write_artifacts=write_configs,
-            )
-            config_path = runtime_dir / f"{job_name}.json"
-            if write_configs:
-                config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
-            job_env = _job_env(
-                base_env=env,
-                experiment=experiment,
-                manifest=manifest,
-                manifest_path=manifest_path,
-                harness=harness,
-                route=route,
-                variant=variant,
-                feature_memory=feature_memory,
-                skill_ids=skill_ids,
-                agent_config_hash=agent_config_hash,
-                job_name=job_name,
-                run_name=selected_run_name,
-                tags=selected_tags,
-                repo_root=repo_root,
-                config_path=config_path,
-            )
-            rendered.append(
-                RenderedJob(
-                    command=["harbor", "run", "--config", config_path.as_posix()],
-                    config_path=config_path,
-                    config=config,
-                    env=job_env,
-                    job_name=job_name,
+            for tasks in task_groups:
+                job_name = _job_name(
+                    run_name=selected_run_name,
+                    workload_id=workload_id,
                     harness=harness.name,
-                    feature_memory=feature_memory,
-                    prompt_id=variant.prompt_id,
-                    skill_ids=skill_ids,
                     variant_id=variant.id,
-                    variant_label=variant.label,
-                    agent_config_hash=agent_config_hash,
-                    route=route,
+                    task_id=tasks[0].id,
                 )
-            )
+                binding, cache_keys, cache_ready = _context_binding(
+                    spec=spec,
+                    variant=variant,
+                    tasks=tasks,
+                    experiment=experiment,
+                    harness=harness,
+                    workload_id=workload_id,
+                    dataset_id=manifest.dataset.harbor_ref,
+                    runtime=runtime,
+                    runtime_root=runtime_root,
+                    job_name=job_name,
+                    write=write_configs,
+                )
+                skill_ids = list(variant.skill_ids)
+                agent_config_hash = _agent_config_hash(experiment, variant, spec, binding)
+                context_instruction = _context_instruction_path(
+                    runtime_root,
+                    spec,
+                    write=write_configs,
+                    collect_evidence=bool(required_capabilities),
+                )
+                config = _job_config(
+                    experiment=experiment,
+                    variant=variant,
+                    manifest=manifest,
+                    harness=harness,
+                    route=route,
+                    context_spec=spec,
+                    context_binding=binding,
+                    context_instruction=context_instruction,
+                    context_cache_keys=cache_keys,
+                    skill_ids=skill_ids,
+                    agent_config_hash=agent_config_hash,
+                    job_name=job_name,
+                    jobs_dir=selected_jobs_dir,
+                    n_attempts=selected_attempts,
+                    n_concurrent=selected_concurrent,
+                    tasks=tasks,
+                    repo_root=repo_root,
+                    workload_id=workload_id,
+                    preset_id=preset_id,
+                    run_id=run_id,
+                    run_name=selected_run_name,
+                    applicable=applicable,
+                    skip_reason=skip_reason,
+                    collect_evidence=bool(required_capabilities),
+                    workload_artifacts=workload_artifacts or [],
+                )
+                config_path = config_dir / f"{job_name}.json"
+                if write_configs:
+                    config_path.write_text(
+                        json.dumps(config, indent=2, sort_keys=True) + "\n"
+                    )
+                job_env = _job_env(
+                    base_env=env,
+                    experiment=experiment,
+                    manifest=manifest,
+                    manifest_path=manifest_path,
+                    harness=harness,
+                    route=route,
+                    variant=variant,
+                    context_spec=spec,
+                    context_binding=binding,
+                    context_cache_keys=cache_keys,
+                    skill_ids=skill_ids,
+                    agent_config_hash=agent_config_hash,
+                    job_name=job_name,
+                    run_name=selected_run_name,
+                    tags=selected_tags,
+                    repo_root=repo_root,
+                    config_path=config_path,
+                    workload_id=workload_id,
+                    preset_id=preset_id,
+                    run_id=run_id,
+                    task_id=tasks[0].id,
+                )
+                rendered.append(
+                    RenderedJob(
+                        command=["harbor", "run", "--config", config_path.as_posix()],
+                        config_path=config_path,
+                        config=config,
+                        env=job_env,
+                        job_name=job_name,
+                        harness=harness.name,
+                        context_system_id=spec.id,
+                        context_version=spec.version,
+                        context_cache_keys=cache_keys,
+                        context_cache_ready=cache_ready,
+                        prompt_id=variant.prompt_id,
+                        skill_ids=skill_ids,
+                        variant_id=variant.id,
+                        variant_label=variant.label,
+                        agent_config_hash=agent_config_hash,
+                        route=route,
+                        workload_id=workload_id,
+                        preset_id=preset_id,
+                        run_id=run_id,
+                        run_name=selected_run_name,
+                        task_id=tasks[0].id,
+                        applicable=applicable,
+                        skip_reason=skip_reason,
+                    )
+                )
     return rendered
 
 
@@ -220,18 +270,57 @@ def _job_config(
     manifest: BenchmarkManifest,
     harness: HarnessSpec,
     route: ModelRoute,
-    feature_memory: str,
+    context_spec: ContextSystemSpec,
+    context_binding: ContextBinding,
+    context_instruction: Path | None,
+    context_cache_keys: dict[str, str],
     skill_ids: list[str],
     agent_config_hash: str,
     job_name: str,
     jobs_dir: Path,
     n_attempts: int,
     n_concurrent: int,
-    n_tasks: int | None,
+    tasks: list[TaskSpec],
     repo_root: Path,
-    write_artifacts: bool,
+    workload_id: str,
+    preset_id: str | None,
+    run_id: str,
+    run_name: str,
+    applicable: bool,
+    skip_reason: str | None,
+    collect_evidence: bool,
+    workload_artifacts: list[Any],
 ) -> dict[str, Any]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
+    environment = _merge_dicts(experiment.environment, variant.environment)
+    if context_binding.mounts:
+        environment["mounts"] = [
+            *environment.get("mounts", []),
+            *context_binding.mounts,
+        ]
+    if context_binding.compose_files:
+        environment["extra_docker_compose"] = [
+            *environment.get("extra_docker_compose", []),
+            *[path.as_posix() for path in context_binding.compose_files],
+        ]
+    artifacts = _dedupe_values(
+        [
+            *(variant.artifacts or experiment.artifacts),
+            *workload_artifacts,
+            *context_binding.artifacts,
+            *(
+                ["/logs/artifacts/fugue-context-events.jsonl"]
+                if (context_spec.id != "none" or context_binding.mcp_servers)
+                and not any(
+                    isinstance(item, dict)
+                    and item.get("service") == CONTEXT_RUNTIME_SERVICE
+                    for item in context_binding.artifacts
+                )
+                else []
+            ),
+            *(["/logs/artifacts/fugue-evidence.json"] if collect_evidence else []),
+        ]
+    )
     config: dict[str, Any] = {
         "job_name": job_name,
         "jobs_dir": jobs_dir.as_posix(),
@@ -245,44 +334,72 @@ def _job_config(
                 route=route,
                 experiment=experiment,
                 variant=variant,
+                binding=context_binding,
                 skill_ids=skill_ids,
                 repo_root=repo_root,
             )
         ],
         "datasets": [
-            {
-                "name": manifest.dataset.ref,
-                "ref": manifest.dataset.version,
-                "task_names": [task.id for task in manifest.tasks],
-                "n_tasks": n_tasks,
-            }
+            _dataset_config(manifest, repo_root, tasks)
         ],
         "extra_instruction_paths": _extra_instruction_paths(
             repo_root=repo_root,
-            artifact_root=manifest.artifact_root,
-            feature_memory=feature_memory,
+            context_instruction=context_instruction,
+            binding=context_binding,
             prompt_ids=prompt_ids,
-            write_files=write_artifacts,
         ),
     }
-    _set_if(config, "environment", _merge_dicts(experiment.environment, variant.environment))
-    _set_if(config, "artifacts", variant.artifacts or experiment.artifacts)
+    _set_if(config, "environment", environment)
+    _set_if(config, "artifacts", artifacts)
     _set_if(config, "verifier", _merge_dicts(experiment.verifier, variant.verifier))
     _set_if(config, "retry", _merge_dicts(experiment.retry, variant.retry))
     config["fugue"] = {
         "experiment_id": experiment.id,
+        "run_id": run_id,
+        "run_name": run_name,
+        "workload_id": workload_id,
+        "preset_id": preset_id,
         "variant_id": variant.id,
         "variant_label": variant.label,
         "prompt_id": variant.prompt_id,
-        "feature_memory": feature_memory,
+        "context_system_id": context_spec.id,
+        "context_version": context_spec.version,
+        "context_config_hash": _context_config_hash(context_spec),
+        "context_cache_keys": context_cache_keys,
         "skill_ids": skill_ids,
         "agent_config_hash": agent_config_hash,
+        "applicable": applicable,
+        "skip_reason": skip_reason,
         "content_hashes": content_hashes_for_ids(
             prompt_ids=prompt_ids,
             skill_ids=skill_ids,
             repo_root=repo_root,
         ),
+        "expected_evidence_paths": {
+            task.id: list(task.expected_paths) for task in tasks if task.expected_paths
+        },
+        "task_id": tasks[0].id,
+        "model_provider": route.provider,
+        "model": route.display_model,
     }
+    return _drop_empty(config)
+
+
+def _dataset_config(
+    manifest: BenchmarkManifest,
+    repo_root: Path,
+    tasks: list[TaskSpec],
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "task_names": [task.id for task in tasks],
+        "n_tasks": len(tasks),
+    }
+    if manifest.dataset.path:
+        path = manifest.dataset.path
+        config["path"] = (path if path.is_absolute() else repo_root / path).as_posix()
+    else:
+        config["name"] = manifest.dataset.ref
+        config["ref"] = manifest.dataset.version
     return _drop_empty(config)
 
 
@@ -292,6 +409,7 @@ def _agent_config(
     route: ModelRoute,
     experiment: ExperimentSpec,
     variant: FeatureVariant,
+    binding: ContextBinding,
     skill_ids: list[str],
     repo_root: Path,
 ) -> dict[str, Any]:
@@ -303,8 +421,15 @@ def _agent_config(
             for item_id in skill_ids
         ],
         "kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
-        "env": _merge_dicts(experiment.agent_env, variant.agent_env),
-        "mcp_servers": variant.mcp_servers or experiment.mcp_servers,
+        "env": _merge_dicts(
+            _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
+        ),
+        "mcp_servers": _instrument_mcp_servers(
+            [
+                *(variant.mcp_servers or experiment.mcp_servers),
+                *binding.mcp_servers,
+            ]
+        ),
     }
     if _looks_like_import_path(harness.agent):
         config["import_path"] = harness.agent
@@ -317,27 +442,15 @@ def _agent_config(
 def _extra_instruction_paths(
     *,
     repo_root: Path,
-    artifact_root: Path,
-    feature_memory: str,
+    context_instruction: Path | None,
+    binding: ContextBinding,
     prompt_ids: list[str],
-    write_files: bool,
 ) -> list[str]:
-    paths: list[Path] = []
-    memory_root = _resolve(repo_root, artifact_root)
-    memory_instruction = (
-        write_memory_instruction(memory_root, feature_memory)
-        if write_files
-        else _memory_instruction_path(memory_root, feature_memory)
-    )
-    if memory_instruction is not None:
-        paths.append(memory_instruction)
-    for item_id in prompt_ids:
-        paths.append(Path(get_prompt(item_id, repo_root).path))
+    paths = [*binding.extra_instruction_paths]
+    if context_instruction is not None:
+        paths.insert(0, context_instruction)
+    paths.extend(Path(get_prompt(item_id, repo_root).path) for item_id in prompt_ids)
     return [_relative_or_absolute(path, repo_root) for path in paths]
-
-
-def _memory_instruction_path(artifact_root: Path, feature_memory: str) -> Path | None:
-    return None if feature_memory == "none" else artifact_root / feature_memory / "INSTRUCTION.md"
 
 
 def _job_env(
@@ -349,7 +462,9 @@ def _job_env(
     harness: HarnessSpec,
     route: ModelRoute,
     variant: FeatureVariant,
-    feature_memory: str,
+    context_spec: ContextSystemSpec,
+    context_binding: ContextBinding,
+    context_cache_keys: dict[str, str],
     skill_ids: list[str],
     agent_config_hash: str,
     job_name: str,
@@ -357,6 +472,10 @@ def _job_env(
     tags: list[str],
     repo_root: Path,
     config_path: Path,
+    workload_id: str,
+    preset_id: str | None,
+    run_id: str,
+    task_id: str,
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = content_hashes_for_ids(
@@ -369,8 +488,10 @@ def _job_env(
             *_csv(base_env.get("FUGUE_TAGS")),
             "fugue",
             f"experiment-id:{experiment.id}",
+            f"workload:{workload_id}",
+            *( [f"preset:{preset_id}"] if preset_id else []),
             f"variant:{variant.id}",
-            f"memory:{feature_memory}",
+            f"context-system:{context_spec.id}",
             *[f"prompt:{item_id}" for item_id in prompt_ids],
             *[f"skill:{item_id}" for item_id in skill_ids],
             f"run:{run_name}",
@@ -384,8 +505,23 @@ def _job_env(
     env.update(
         {
             "FUGUE_EXPERIMENT_ID": experiment.id,
+            "FUGUE_RUN_ID": run_id,
+            "FUGUE_WORKLOAD_ID": workload_id,
+            "FUGUE_PRESET_ID": preset_id or "",
             "FUGUE_VARIANT_ID": variant.id,
-            "FUGUE_FEATURE_MEMORY": feature_memory,
+            "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
+            "FUGUE_CONTEXT_VERSION": context_spec.version,
+            "FUGUE_CONTEXT_CONFIG_HASH": _context_config_hash(context_spec),
+            "FUGUE_CONTEXT_CACHE_KEYS": json.dumps(context_cache_keys, sort_keys=True),
+            "FUGUE_CONTEXT_CACHE_ROOT": (repo_root / DEFAULT_CACHE_ROOT).as_posix(),
+            "FUGUE_EXPECTED_EVIDENCE_PATHS": json.dumps(
+                {
+                    task.id: list(task.expected_paths)
+                    for task in manifest.tasks
+                    if task.expected_paths
+                },
+                sort_keys=True,
+            ),
             "FUGUE_PROMPT_ID": ",".join(prompt_ids),
             "FUGUE_PROMPT_HASHES": json.dumps(hashes["prompts"], sort_keys=True),
             "FUGUE_SKILL_IDS": ",".join(skill_ids),
@@ -401,15 +537,15 @@ def _job_env(
             "FUGUE_TAGS": ",".join(run_tags),
             "FUGUE_MANIFEST_PATH": manifest_path.as_posix(),
             "FUGUE_DATASET": manifest.dataset.harbor_ref,
-            "FUGUE_MEMORY_DIR": _resolve(repo_root, manifest.artifact_root).as_posix(),
-            "FUGUE_LOCK_PATH": _resolve(repo_root, manifest.lock_path).as_posix(),
             "FUGUE_HARNESS": harness.name,
             "FUGUE_JOB_NAME": job_name,
+            "FUGUE_TASK_NAME": task_id,
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
             "PYTHONPATH": _prepend_path(repo_root, base_env.get("PYTHONPATH")),
         }
     )
+    env.update({str(key): str(value) for key, value in context_binding.env.items()})
     return env
 
 
@@ -417,18 +553,335 @@ def env_group(env: dict[str, str], run_name: str) -> str:
     return env.get("FUGUE_RUN_GROUP", "").strip() or run_name
 
 
-def _agent_config_hash(experiment: ExperimentSpec, variant: FeatureVariant) -> str:
+def _context_spec(variant: FeatureVariant, repo_root: Path) -> ContextSystemSpec:
+    spec = get_context_system(variant.context.system_id, repo_root)
+    if not variant.context.config:
+        return spec
+    return replace(spec, config=_merge_dicts(spec.config, variant.context.config))
+
+
+def _context_binding(
+    *,
+    spec: ContextSystemSpec,
+    variant: FeatureVariant,
+    tasks: list[TaskSpec],
+    experiment: ExperimentSpec,
+    harness: HarnessSpec,
+    workload_id: str,
+    dataset_id: str,
+    runtime: ContextRuntime,
+    runtime_root: Path,
+    job_name: str,
+    write: bool,
+) -> tuple[ContextBinding, dict[str, str], bool]:
+    snapshots = [
+        _snapshot_for_task(task, runtime.repo_root, dataset_id) for task in tasks
+    ]
+    cache_keys = {
+        snapshot.task_id: context_cache_key(spec, snapshot, runtime)
+        for snapshot in snapshots
+    }
+    prepared = expected_prepared_context(spec, snapshots[0], runtime)
+    trial = TrialContext(
+        experiment_id=experiment.id,
+        workload_id=workload_id,
+        task_id=snapshots[0].task_id,
+        harness=harness.name,
+    )
+    binding = run_async(bind_context(spec, prepared, trial, runtime))
+    if spec.id != "none":
+        mounts = [
+            _read_only_mount(prepared.path, "/fugue-context"),
+        ]
+        env = dict(binding.env)
+        if any(_is_fugue_context_server(item) for item in binding.mcp_servers):
+            binding = _bind_fugue_context_runtime(
+                binding=binding,
+                spec=spec,
+                prepared=prepared,
+                runtime=runtime,
+                runtime_root=runtime_root,
+                job_name=job_name,
+                write=write,
+            )
+        elif binding.mcp_servers:
+            mounts.extend(
+                [
+                    _read_only_mount(
+                        runtime.repo_root / "fugue",
+                        "/fugue-src/fugue",
+                    ),
+                    _read_only_mount(
+                        runtime.repo_root / "configs" / "fugue" / "context-systems",
+                        "/fugue-configs/configs/fugue/context-systems",
+                    ),
+                ]
+            )
+            env.update(
+                {
+                    "FUGUE_REPO_ROOT": "/fugue-configs",
+                    "PYTHONPATH": "/fugue-src",
+                }
+            )
+        binding = replace(
+            binding,
+            mcp_servers=tuple(
+                _replace_container_paths(item) for item in binding.mcp_servers
+            ),
+            env=env,
+            mounts=tuple([*binding.mounts, *mounts]),
+        )
+    cache_ready = all((runtime.cache_root / key / "context-manifest.json").is_file() for key in cache_keys.values())
+    return binding, cache_keys, cache_ready
+
+
+def _bind_fugue_context_runtime(
+    *,
+    binding: ContextBinding,
+    spec: ContextSystemSpec,
+    prepared: Any,
+    runtime: ContextRuntime,
+    runtime_root: Path,
+    job_name: str,
+    write: bool,
+) -> ContextBinding:
+    compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
+    compose = {
+        "services": {
+            "main": {
+                "depends_on": {
+                    CONTEXT_RUNTIME_SERVICE: {"condition": "service_healthy"}
+                }
+            },
+            CONTEXT_RUNTIME_SERVICE: {
+                "image": CONTEXT_RUNTIME_IMAGE,
+                "build": {
+                    "context": runtime.repo_root.resolve().as_posix(),
+                    "dockerfile": "Dockerfile.context",
+                },
+                "command": [
+                    "python",
+                    "-m",
+                    "fugue.context_server",
+                    "--system",
+                    spec.id,
+                    "--prepared",
+                    "/context",
+                    "--repo-root",
+                    "/opt/fugue",
+                    "--transport",
+                    "streamable-http",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "8000",
+                ],
+                "environment": [
+                    "ANTHROPIC_API_KEY",
+                    "FUGUE_BUILDER_MODEL",
+                    "FUGUE_EMBEDDING_MODEL",
+                    "FUGUE_GRAPHITI_PASSWORD",
+                    "FUGUE_GRAPHITI_URI",
+                    "FUGUE_GRAPHITI_USER",
+                    "FUGUE_MODEL",
+                    "LITELLM_MASTER_KEY",
+                    "OPENAI_API_KEY",
+                    "WANDB_API_KEY",
+                    "FUGUE_BRIDGE_BASE_URL=http://host.docker.internal:4000",
+                    "FUGUE_CONTEXT_EVENTS_PATH=/logs/artifacts/fugue-context-events.jsonl",
+                ],
+                "extra_hosts": ["host.docker.internal:host-gateway"],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": prepared.path.resolve().as_posix(),
+                        "target": "/context",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }
+                ],
+                "healthcheck": {
+                    "test": [
+                        "CMD",
+                        "python",
+                        "-c",
+                        "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+                    ],
+                    "interval": "2s",
+                    "timeout": "3s",
+                    "retries": 30,
+                },
+            },
+        }
+    }
+    if write:
+        compose_path.parent.mkdir(parents=True, exist_ok=True)
+        compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
+    servers = tuple(
+        {
+            "name": str(item.get("name") or CONTEXT_RUNTIME_SERVICE),
+            "transport": "streamable-http",
+            "url": f"http://{CONTEXT_RUNTIME_SERVICE}:8000/mcp",
+        }
+        if _is_fugue_context_server(item)
+        else item
+        for item in binding.mcp_servers
+    )
+    event_artifact = {
+        "source": "/logs/artifacts/fugue-context-events.jsonl",
+        "destination": "fugue-context-events.jsonl",
+        "service": CONTEXT_RUNTIME_SERVICE,
+    }
+    return replace(
+        binding,
+        mcp_servers=servers,
+        compose_files=(*binding.compose_files, compose_path),
+        artifacts=(*binding.artifacts, event_artifact),
+    )
+
+
+def _is_fugue_context_server(server: dict[str, Any]) -> bool:
+    command = [
+        str(server.get("command") or ""),
+        *[str(item) for item in server.get("args", [])],
+    ]
+    return "fugue.context_server" in command
+
+
+def _read_only_mount(source: Path, target: str) -> dict[str, Any]:
+    return {
+        "type": "bind",
+        "source": source.resolve().as_posix(),
+        "target": target,
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
+
+
+def _replace_container_paths(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace(".fugue-context", "/fugue-context")
+    if isinstance(value, list):
+        return [_replace_container_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _replace_container_paths(item) for key, item in value.items()
+        }
+    return value
+
+
+def _snapshot_for_task(
+    task: TaskSpec, repo_root: Path, dataset_id: str
+) -> RepositorySnapshot:
+    return RepositorySnapshot(
+        task_id=task.id,
+        repo=task.repo or task.repo_slug,
+        commit=task.base_commit or "dataset-managed",
+        checkout=repo_root,
+        dataset_id=dataset_id,
+    )
+
+
+def _applicability(
+    spec: ContextSystemSpec,
+    required_capabilities: list[str],
+    runtime: ContextRuntime,
+) -> tuple[bool, str | None]:
+    missing = sorted(set(required_capabilities) - set(spec.capabilities))
+    if missing:
+        return False, f"missing context capabilities: {', '.join(missing)}"
+    checks = run_async(preflight_context(spec, runtime))
+    failed = [
+        check
+        for check in checks
+        if not check.ok
+        and check.severity == "required"
+        and (check.phase == "runtime" or check.name == "license")
+    ]
+    if failed:
+        return False, "; ".join(f"{item.name}: {item.detail}" for item in failed)
+    return True, None
+
+
+def _context_instruction_path(
+    runtime_root: Path,
+    spec: ContextSystemSpec,
+    *,
+    write: bool,
+    collect_evidence: bool,
+) -> Path | None:
+    if spec.id == "none" and not collect_evidence:
+        return None
+    path = runtime_root / "context-instructions" / f"{spec.id}.md"
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        context_text = ""
+        if spec.id != "none":
+            context_text = (
+                f"This trial provides the `{spec.id}` context system. "
+                "Use its injected `.fugue-context/artifact/` files or configured MCP "
+                "tools when they help answer the task. Verify important evidence "
+                "against the repository.\n\n"
+            )
+        path.write_text(
+            "# Fugue Trial Evidence\n\n"
+            + context_text
+            + "Before finishing, write `/logs/artifacts/fugue-evidence.json` with "
+            "a JSON object containing `paths`, the repository-relative files that "
+            "materially supported the answer, and optional `notes`. Use an empty "
+            "`paths` list when no repository evidence was used.\n"
+        )
+    return path
+
+
+def _agent_config_hash(
+    experiment: ExperimentSpec,
+    variant: FeatureVariant,
+    spec: ContextSystemSpec,
+    binding: ContextBinding,
+) -> str:
     payload = {
         "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
         "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
-        "mcp_servers": variant.mcp_servers or experiment.mcp_servers,
+        "mcp_servers": [
+            *(variant.mcp_servers or experiment.mcp_servers),
+            *binding.mcp_servers,
+        ],
         "environment": _merge_dicts(experiment.environment, variant.environment),
         "verifier": _merge_dicts(experiment.verifier, variant.verifier),
         "retry": _merge_dicts(experiment.retry, variant.retry),
         "artifacts": variant.artifacts or experiment.artifacts,
+        "context": {"id": spec.id, "version": spec.version, "config": spec.config},
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    servers: list[dict[str, Any]] = []
+    for value in values:
+        server = dict(value)
+        command = server.get("command")
+        transport = str(server.get("transport") or ("stdio" if command else "sse"))
+        server["transport"] = transport
+        if transport != "stdio" or not command:
+            servers.append(server)
+            continue
+        upstream = [str(command), *[str(item) for item in server.get("args", [])]]
+        proxy_args = ["--name", str(server.get("name") or command)]
+        cwd = server.pop("cwd", None)
+        if cwd:
+            proxy_args.extend(["--cwd", str(cwd)])
+        proxy_args.extend(["--", *upstream])
+        server["command"] = "python"
+        server["args"] = ["/fugue-src/fugue/mcp_proxy.py", *proxy_args]
+        servers.append(server)
+    return servers
+
+
+def _context_config_hash(spec: ContextSystemSpec) -> str:
+    payload = {"provider": spec.provider, "version": spec.version, "config": spec.config}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -437,8 +890,17 @@ def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
     return merged
 
 
-def _job_name(*, run_name: str, harness: str, variant_id: str) -> str:
-    base = f"{_slug(run_name)}-{_slug(harness)}-{_slug(variant_id)}"
+def _job_name(
+    *,
+    run_name: str,
+    workload_id: str,
+    harness: str,
+    variant_id: str,
+    task_id: str | None = None,
+) -> str:
+    base = f"{_slug(run_name)}-{_slug(workload_id)}-{_slug(harness)}-{_slug(variant_id)}"
+    if task_id:
+        base += f"-{_slug(task_id)}"
     return base[:120].rstrip("-") or "fugue"
 
 
@@ -484,10 +946,6 @@ def _relative_or_absolute(path: Path, repo_root: Path) -> str:
         return path.as_posix()
 
 
-def _resolve(root: Path, path: Path) -> Path:
-    return path if path.is_absolute() else root / path
-
-
 def _prepend_path(path: Path, existing: str | None) -> str:
     root = path.resolve().as_posix()
     return root if not existing else f"{root}:{existing}"
@@ -501,6 +959,17 @@ def _dedupe(values: list[str]) -> list[str]:
         if item and item not in seen:
             seen.add(item)
             out.append(item)
+    return out
+
+
+def _dedupe_values(values: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    out: list[Any] = []
+    for value in values:
+        key = json.dumps(value, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
     return out
 
 

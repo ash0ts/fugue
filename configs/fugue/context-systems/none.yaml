@@ -1,0 +1,7 @@
+id: none
+title: No added context
+description: Native harness tools only; the control condition.
+provider: fugue.bench.context:EmptyContextProvider
+version: "1"
+capabilities: [prepare, retrieve, bind, ingest, sequence]
+license: Fugue

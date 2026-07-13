@@ -14,21 +14,24 @@ harnesses:
 variants:
   - id: baseline
     label: Baseline
-    memory: none
+    context:
+      system_id: none
     enabled: true
   - id: prompt-skill
     label: Prompt + skill
     prompt_id: repository-memory
     skill_ids:
       - repository-orientation
-    memory: none
+    context:
+      system_id: none
     enabled: true
-  - id: memory-skill
-    label: Memory + skill
+  - id: context-skill
+    label: Repository context + skill
     prompt_id: repository-memory
     skill_ids:
       - repository-orientation
-    memory: agentsmd
+    context:
+      system_id: agentsmd
     enabled: true
 n_attempts: 1
 n_concurrent: 2

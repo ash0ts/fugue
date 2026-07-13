@@ -1,0 +1,17 @@
+id: rag-bm25
+title: Fugue RAG (BM25)
+description: Controlled lexical retrieval baseline using the shared Fugue chunker.
+provider: fugue.bench.context:RagContextProvider
+version: "1"
+capabilities: [prepare, retrieve, bind]
+license: Fugue
+config:
+  mode: bm25
+  lines_per_chunk: 80
+  line_overlap: 20
+  embedding_model: BAAI/bge-small-en-v1.5
+  binding:
+    mcp_servers:
+      - name: fugue-context
+        command: python
+        args: [-m, fugue.context_server, --system, rag-bm25, --prepared, .fugue-context]

@@ -35,10 +35,15 @@ def select_model(
     cli_model: str | None = None,
     manifest_model: str | None = None,
     env: Mapping[str, str] | None = None,
+    *,
+    harness_model: str | None = None,
+    experiment_model: str | None = None,
 ) -> str:
     values = env if env is not None else os.environ
     for candidate in (
         cli_model,
+        harness_model,
+        experiment_model,
         manifest_model,
         values.get("FUGUE_MODEL"),
         DEFAULT_MODEL,

@@ -1,0 +1,15 @@
+id: aider-repomap
+title: Aider RepoMap
+description: Tree-sitter and PageRank based compact repository map.
+provider: fugue.bench.context:CommandContextProvider
+version: aider-chat@0.86.2
+capabilities: [prepare, bind]
+required_commands: [uvx]
+license: Apache-2.0
+source_url: https://github.com/Aider-AI/aider
+config:
+  prepare:
+    command: [uvx, --from, "aider-chat==0.86.2", aider, --show-repo-map, --exit]
+    stdout_path: REPO_MAP.md
+  binding:
+    extra_instruction_paths: ["{artifact}/REPO_MAP.md"]

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +9,16 @@ import yaml
 
 @dataclass(frozen=True)
 class DatasetSpec:
-    ref: str
+    ref: str | None = None
     version: str | None = None
+    path: Path | None = None
+    materializer: str | None = None
+    source: dict[str, Any] = field(default_factory=dict)
 
     @property
     def harbor_ref(self) -> str:
+        if not self.ref:
+            return self.path.as_posix() if self.path else ""
         return f"{self.ref}@{self.version}" if self.version else self.ref
 
 
@@ -33,6 +35,8 @@ class TaskSpec:
     repo: str | None = None
     base_commit: str | None = None
     notes: str | None = None
+    expected_paths: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def repo_slug(self) -> str:
@@ -45,25 +49,15 @@ class TaskSpec:
 class BenchmarkManifest:
     dataset: DatasetSpec
     tasks: list[TaskSpec]
-    memory_variants: list[str]
     harnesses: list[HarnessSpec]
     model: str | None = None
     k: int = 1
     jobs_dir: Path = Path("jobs/pilot")
-    artifact_root: Path = Path("artifacts/memory")
-    lock_path: Path = Path("artifacts/lock.json")
     n_concurrent: int = 2
-
-    def select_memory_variants(self, names: list[str] | None) -> list[str]:
-        return _select("memory variant", self.memory_variants, names)
 
     def select_harnesses(self, names: list[str] | None) -> list[HarnessSpec]:
         selected = _select("harness", [h.name for h in self.harnesses], names)
         return [h for h in self.harnesses if h.name in selected]
-
-    def task_by_id(self) -> dict[str, TaskSpec]:
-        return {task.id: task for task in self.tasks}
-
 
 def _select(kind: str, available: list[str], requested: list[str] | None) -> list[str]:
     if not requested:
@@ -99,105 +93,57 @@ def load_manifest(path: Path | str) -> BenchmarkManifest:
             repo=item.get("repo"),
             base_commit=item.get("base_commit"),
             notes=item.get("notes"),
+            expected_paths=tuple(str(path) for path in item.get("expected_paths", [])),
+            metadata=dict(item.get("metadata") or {}),
         )
         for item in raw.get("tasks", [])
     ]
 
-    if not dataset_raw.get("ref"):
-        raise ValueError(f"{manifest_path}: dataset.ref is required")
+    if not dataset_raw.get("ref") and not dataset_raw.get("path"):
+        raise ValueError(f"{manifest_path}: dataset.ref or dataset.path is required")
     if not harnesses:
         raise ValueError(f"{manifest_path}: at least one harness is required")
     if not tasks:
         raise ValueError(f"{manifest_path}: at least one task is required")
+    _require_unique([harness.name for harness in harnesses], "harness", manifest_path)
+    _require_unique([task.id for task in tasks], "task", manifest_path)
+    k = _positive_int(raw.get("k", 1), "k", manifest_path)
+    n_concurrent = _positive_int(
+        raw.get("n_concurrent", 2), "n_concurrent", manifest_path
+    )
 
     return BenchmarkManifest(
         dataset=DatasetSpec(
-            ref=str(dataset_raw["ref"]),
+            ref=str(dataset_raw["ref"]) if dataset_raw.get("ref") else None,
             version=dataset_raw.get("version"),
+            path=Path(dataset_raw["path"]) if dataset_raw.get("path") else None,
+            materializer=(
+                str(dataset_raw["materializer"])
+                if dataset_raw.get("materializer")
+                else None
+            ),
+            source=dict(dataset_raw.get("source") or {}),
         ),
         tasks=tasks,
-        memory_variants=[str(c) for c in raw.get("memory_variants", ["none"])],
         harnesses=harnesses,
         model=str(raw["model"]) if raw.get("model") else None,
-        k=int(raw.get("k", 1)),
+        k=k,
         jobs_dir=_as_path(raw.get("jobs_dir"), "jobs/pilot"),
-        artifact_root=_as_path(raw.get("artifact_root"), "artifacts/memory"),
-        lock_path=_as_path(raw.get("lock_path"), "artifacts/lock.json"),
-        n_concurrent=int(raw.get("n_concurrent", 2)),
+        n_concurrent=n_concurrent,
     )
 
 
-def manifest_digest(path: Path | str) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+def _positive_int(value: Any, name: str, path: Path) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{path}: {name} must be positive")
+    return parsed
 
 
-def tree_digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    if not path.exists():
-        return hasher.hexdigest()
-    for file in sorted(p for p in path.rglob("*") if p.is_file()):
-        rel = file.relative_to(path).as_posix()
-        hasher.update(rel.encode())
-        hasher.update(b"\0")
-        hasher.update(file.read_bytes())
-        hasher.update(b"\0")
-    return hasher.hexdigest()
-
-
-def file_manifest(path: Path) -> list[dict[str, str]]:
-    if not path.exists():
-        return []
-    files: list[dict[str, str]] = []
-    for file in sorted(p for p in path.rglob("*") if p.is_file()):
-        files.append(
-            {
-                "path": file.relative_to(path).as_posix(),
-                "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
-            }
-        )
-    return files
-
-
-def write_lock(
-    *,
-    path: Path,
-    manifest_path: Path,
-    manifest: BenchmarkManifest,
-    artifacts: list[dict[str, Any]],
-) -> None:
-    lock = {
-        "schema_version": 1,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "manifest_path": manifest_path.as_posix(),
-        "manifest_sha256": manifest_digest(manifest_path),
-        "dataset": asdict(manifest.dataset),
-        "model": manifest.model,
-        "tasks": [asdict(task) for task in manifest.tasks],
-        "memory_variants": manifest.memory_variants,
-        "harnesses": [asdict(harness) for harness in manifest.harnesses],
-        "artifacts": artifacts,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
-
-
-@dataclass
-class PreparedArtifact:
-    feature_memory: str
-    task_id: str
-    path: Path
-    builder: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_lock_record(self, root: Path) -> dict[str, Any]:
-        return {
-            "feature_memory": self.feature_memory,
-            "task_id": self.task_id,
-            "path": self.path.relative_to(root).as_posix()
-            if self.path.is_relative_to(root)
-            else self.path.as_posix(),
-            "sha256": tree_digest(self.path),
-            "files": file_manifest(self.path),
-            "builder": self.builder,
-            "metadata": self.metadata,
-        }
+def _require_unique(values: list[str], kind: str, path: Path) -> None:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    duplicates = sorted(value for value, count in counts.items() if count > 1)
+    if duplicates:
+        raise ValueError(f"{path}: duplicate {kind} id(s): {', '.join(duplicates)}")

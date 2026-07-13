@@ -1,0 +1,15 @@
+id: semble
+title: Semble
+description: Local CPU semantic and BM25 code retrieval through MCP.
+provider: fugue.bench.context:CommandContextProvider
+version: semble@0.5.1
+capabilities: [prepare, bind]
+required_commands: [uvx]
+license: Apache-2.0
+source_url: https://github.com/MinishLab/semble
+config:
+  binding:
+    mcp_servers:
+      - name: semble
+        command: uvx
+        args: [--from, "semble[mcp]==0.5.1", semble]

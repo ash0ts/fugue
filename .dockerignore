@@ -1,0 +1,10 @@
+.env
+.git
+.fugue
+.pytest_cache
+.ruff_cache
+.venv
+artifacts
+jobs
+**/__pycache__
+*.pyc

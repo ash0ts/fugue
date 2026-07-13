@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fugue.bridge import docker_compose_for_route, litellm_config_for_route
+from fugue.bridge import (
+    LITELLM_IMAGE,
+    docker_compose_for_route,
+    litellm_config_for_route,
+)
 from fugue.model_plane import resolve_model_route
 
 
@@ -36,3 +40,31 @@ def test_anthropic_bridge_config_uses_messages_base_url() -> None:
     assert params["model"] == "anthropic/*"
     assert params["api_base"] == "https://api.anthropic.com"
     assert params["api_key"] == "os.environ/ANTHROPIC_API_KEY"
+
+
+def test_bridge_uses_distinct_role_aliases_and_pinned_image() -> None:
+    target = resolve_model_route("openai/gpt-5", {})
+    builder = resolve_model_route("anthropic/claude-sonnet-4-5", {})
+    judge = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+
+    config = litellm_config_for_route(
+        target,
+        builder_route=builder,
+        judge_route=judge,
+    )
+    aliases = {item["model_name"]: item for item in config["model_list"]}
+
+    assert aliases["fugue-target"]["litellm_params"]["model"] == "openai/gpt-5"
+    assert aliases["fugue-builder"]["litellm_params"]["model"] == (
+        "anthropic/claude-sonnet-4-5"
+    )
+    assert aliases["fugue-judge"]["litellm_params"]["model"] == (
+        "nebius/zai-org/GLM-5.2"
+    )
+    compose = docker_compose_for_route(
+        target,
+        builder_route=builder,
+        judge_route=judge,
+    )
+    assert compose["services"]["bridge"]["image"] == LITELLM_IMAGE
+    assert "latest" not in LITELLM_IMAGE

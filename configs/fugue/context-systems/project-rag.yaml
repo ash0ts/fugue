@@ -1,0 +1,18 @@
+id: project-rag
+title: Project RAG
+description: Local hybrid repository RAG implementation exposed through MCP.
+provider: fugue.bench.context:CommandContextProvider
+version: git@d5abf98a48b60d35b73745e47e1aacca3963a6f0
+capabilities: [prepare, bind]
+required_commands: [uvx]
+license: MIT
+source_url: https://github.com/Brainwires/project-rag
+config:
+  binding:
+    mcp_servers:
+      - name: project-rag
+        command: uvx
+        args:
+          - --from
+          - "git+https://github.com/Brainwires/project-rag@d5abf98a48b60d35b73745e47e1aacca3963a6f0"
+          - project-rag

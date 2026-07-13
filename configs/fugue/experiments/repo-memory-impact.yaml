@@ -1,0 +1,74 @@
+id: repo-memory-impact
+title: Repository context-system impact
+description: Compare retrieval, generated context, MCP knowledge tools, and warmed memory across agent harnesses.
+model: wandb/zai-org/GLM-5.2
+run_name: repo-memory-impact
+default_preset: smoke
+tags: [context-eval, repository, retrieval, longitudinal]
+harnesses: [hermes, openclaw, claude-code, codex]
+workloads:
+  - id: retrieval
+    runner: retrieval
+    dataset: datasets/repo-memory/agent-retrieval-bench-v1.yaml
+    required_capabilities: [retrieve]
+    systems: [rag-bm25, rag-dense, rag-hybrid]
+  - id: qa
+    runner: harbor
+    manifest: datasets/repo-memory/swe-qa.yaml
+    required_capabilities: [bind]
+    artifacts: [/logs/artifacts/fugue-answer.md]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+  - id: coding
+    runner: harbor
+    manifest: datasets/pilot.yaml
+    required_capabilities: [bind]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+  - id: continuity
+    runner: sequence
+    dataset: datasets/repo-memory/continuity-smoke.yaml
+    required_capabilities: [sequence]
+    systems: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
+presets:
+  smoke:
+    workloads: [retrieval, qa, coding, continuity]
+    systems: [none, agentsmd, openwiki, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid, markdown-log, latmd, mem0, graphiti]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_concurrent: 2
+    workload_overrides:
+      retrieval: {n_tasks: 3}
+      qa: {n_tasks: 1}
+      coding: {n_tasks: 1}
+      continuity: {n_tasks: 1}
+  full:
+    workloads: [retrieval, qa, coding, continuity]
+    systems: [none, agentsmd, openwiki, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid, markdown-log, latmd, mem0, graphiti]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 2
+    n_concurrent: 2
+    workload_overrides:
+      retrieval: {n_tasks: 225}
+      qa: {n_tasks: 24}
+      coding: {n_tasks: 12}
+      continuity: {n_tasks: 2}
+variants:
+  - {id: none, label: No added context, context: {system_id: none}}
+  - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd}}
+  - {id: openwiki, label: OpenWiki, context: {system_id: openwiki}}
+  - {id: gitnexus, label: GitNexus, context: {system_id: gitnexus}}
+  - {id: codegraph, label: CodeGraph, context: {system_id: codegraph}}
+  - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap}}
+  - {id: semble, label: Semble, context: {system_id: semble}}
+  - {id: project-rag, label: Project RAG, context: {system_id: project-rag}}
+  - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25}}
+  - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense}}
+  - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid}}
+  - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log}}
+  - {id: latmd, label: lat.md, context: {system_id: latmd}}
+  - {id: mem0, label: Mem0, context: {system_id: mem0}}
+  - {id: graphiti, label: Graphiti, context: {system_id: graphiti}}
+n_attempts: 1
+n_concurrent: 2
+jobs_dir: jobs/repo-memory-impact
+artifacts:
+  - /logs/artifacts/fugue-context-events.jsonl

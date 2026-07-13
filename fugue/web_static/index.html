@@ -62,10 +62,15 @@
 
                 <div class="field-row">
                   <label class="field"><span>Saved experiment</span><select id="experimentSelect"></select></label>
-                  <label class="field"><span>Experiment ID</span><input id="experimentIdInput" autocomplete="off" /></label>
+                  <label class="field"><span>Preset</span><select id="presetSelect"></select></label>
                 </div>
+                <label class="field"><span>Experiment ID</span><input id="experimentIdInput" autocomplete="off" /></label>
                 <label class="field"><span>Display name</span><input id="experimentNameInput" placeholder="gpt5-prompt-skill-sweep" autocomplete="off" /></label>
-                <label class="field"><span>Model</span><input id="modelInput" value="wandb/zai-org/GLM-5.2" autocomplete="off" /></label>
+                <div class="field-row">
+                  <label class="field"><span>Target model</span><input id="modelInput" value="wandb/zai-org/GLM-5.2" autocomplete="off" /></label>
+                  <label class="field"><span>Judge model</span><input id="judgeModelInput" placeholder="openai/gpt-5-mini" autocomplete="off" /></label>
+                </div>
+                <label class="field"><span>Context builder model <small>optional</small></span><input id="builderModelInput" placeholder="Defaults to target model" autocomplete="off" /></label>
                 <label class="field"><span>Benchmark or task manifest</span><input id="manifestInput" value="datasets/pilot.yaml" autocomplete="off" /></label>
 
                 <div class="number-row">
@@ -75,12 +80,18 @@
                 </div>
 
                 <div class="control-block">
+                  <div class="control-label">Workloads</div>
+                  <div id="workloadToggles" class="toggle-grid"></div>
+                </div>
+
+                <div class="control-block">
                   <div class="control-label">Harnesses</div>
                   <div id="harnessToggles" class="toggle-grid"></div>
                 </div>
 
                 <div class="action-row">
                   <button id="saveExperimentBtn" class="button ghost" type="button">Save experiment</button>
+                  <button id="prepareBtn" class="button ghost" type="button">Prepare context</button>
                   <button id="renderBtn" class="button ghost" type="button">Render configs</button>
                   <button id="runBtn" class="button primary" type="button">Run experiment</button>
                 </div>
@@ -102,7 +113,7 @@
                         <th>Variant</th>
                         <th>Prompt</th>
                         <th>Skills</th>
-                        <th>Memory</th>
+                        <th>Context system</th>
                         <th>Config</th>
                         <th></th>
                       </tr>
@@ -134,7 +145,7 @@
               <div class="panel-head">
                 <div>
                   <p class="panel-kicker">Compare</p>
-                  <h2>Results by harness, prompt, skill, and variant</h2>
+                  <h2>Outcome, retrieval quality, and efficiency</h2>
                 </div>
                 <div class="action-row compact">
                   <button id="exportBtn" class="button ghost" type="button">Export results</button>
@@ -143,19 +154,53 @@
               </div>
               <div id="resultCards" class="result-card-grid"></div>
               <div id="resultFilters" class="filter-row"></div>
-              <div id="resultEmpty" class="empty-state" hidden>No results yet. Run a dry experiment or export existing jobs.</div>
+              <div id="resultEmpty" class="empty-state" hidden>No results yet. Turn off Dry run and launch an experiment, or export existing Harbor jobs.</div>
+              <div class="subsection-head">
+                <h3>Metric comparison</h3>
+                <span>Grouped by workload, context system, and harness</span>
+              </div>
+              <div class="table-wrap">
+                <table class="comparison-table">
+                  <thead>
+                    <tr>
+                      <th>Workload</th>
+                      <th>Context</th>
+                      <th>Harness</th>
+                      <th>Outcome</th>
+                      <th>MRR</th>
+                      <th>Recall@10</th>
+                      <th>Evidence</th>
+                      <th>Recall over time</th>
+                      <th>Query p50</th>
+                      <th>Query p95</th>
+                      <th>Error rate</th>
+                      <th>Cost</th>
+                      <th>Tradeoff</th>
+                    </tr>
+                  </thead>
+                  <tbody id="comparisonRows"></tbody>
+                </table>
+              </div>
+              <div class="subsection-head">
+                <h3>Trial detail</h3>
+                <span>Raw exported records and local artifacts</span>
+              </div>
               <div class="table-wrap">
                 <table>
                   <thead>
                     <tr>
                       <th>Experiment</th>
-                      <th>Variant</th>
-                      <th>Prompt</th>
-                      <th>Skills</th>
+                      <th>Workload</th>
+                      <th>Context</th>
                       <th>Harness</th>
-                      <th>Model</th>
                       <th>Pass</th>
-                      <th>Reward</th>
+                      <th>Answer</th>
+                      <th>Grounded</th>
+                      <th>MRR</th>
+                      <th>Recall@10</th>
+                      <th>Query</th>
+                      <th>Build</th>
+                      <th>Uses</th>
                       <th>Tokens</th>
                       <th>Cost</th>
                       <th>Run key</th>
@@ -199,6 +244,15 @@
                 <dl id="setupManifest" class="definition-grid"></dl>
               </div>
             </details>
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <p class="panel-kicker">Context systems</p>
+                  <h2>Local prerequisites and license gates</h2>
+                </div>
+              </div>
+              <div id="setupContextSystems" class="context-system-grid"></div>
+            </section>
           </section>
         </main>
       </div>

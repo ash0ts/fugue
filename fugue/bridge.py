@@ -21,6 +21,7 @@ BRIDGE_PORT = 4000
 BRIDGE_RUNTIME_DIR = Path(".fugue") / "bridge"
 BRIDGE_CONFIG_NAME = "litellm.config.yaml"
 BRIDGE_COMPOSE_NAME = "docker-compose.yaml"
+LITELLM_IMAGE = "ghcr.io/berriai/litellm:v1.89.0"
 
 
 @dataclass(frozen=True)
@@ -30,21 +31,43 @@ class BridgeFiles:
     compose_path: Path
 
 
-def litellm_config_for_route(route: ModelRoute) -> dict[str, Any]:
+def _litellm_params(route: ModelRoute, *, concrete: bool = False) -> dict[str, Any]:
     params: dict[str, Any] = {
-        "model": route.litellm_model,
+        "model": (
+            route.litellm_model.replace("*", route.model_id)
+            if concrete
+            else route.litellm_model
+        ),
         "api_key": f"os.environ/{route.api_key_env}",
     }
     if route.provider in {"wandb", "openai"} and route.chat_base_url:
         params["api_base"] = route.chat_base_url
     if route.provider == "anthropic" and route.messages_base_url:
         params["api_base"] = route.messages_base_url
+    return params
+
+
+def litellm_config_for_route(
+    route: ModelRoute,
+    *,
+    builder_route: ModelRoute | None = None,
+    judge_route: ModelRoute | None = None,
+) -> dict[str, Any]:
+    roles = {
+        "fugue-target": route,
+        "fugue-builder": builder_route or route,
+        "fugue-judge": judge_route or route,
+    }
     return {
         "model_list": [
-            {
-                "model_name": "*",
-                "litellm_params": params,
-            }
+            {"model_name": "*", "litellm_params": _litellm_params(route)},
+            *[
+                {
+                    "model_name": name,
+                    "litellm_params": _litellm_params(role_route, concrete=True),
+                }
+                for name, role_route in roles.items()
+            ],
         ],
         "litellm_settings": {
             "drop_params": True,
@@ -55,16 +78,25 @@ def litellm_config_for_route(route: ModelRoute) -> dict[str, Any]:
     }
 
 
-def docker_compose_for_route(route: ModelRoute) -> dict[str, Any]:
+def docker_compose_for_route(
+    route: ModelRoute,
+    *,
+    builder_route: ModelRoute | None = None,
+    judge_route: ModelRoute | None = None,
+) -> dict[str, Any]:
+    routes = (route, builder_route or route, judge_route or route)
+    provider_env = {
+        item.api_key_env: f"${{{item.api_key_env}}}" for item in routes
+    }
     return {
         "services": {
             "bridge": {
-                "image": "ghcr.io/berriai/litellm:main-latest",
+                "image": LITELLM_IMAGE,
                 "container_name": "fugue-litellm-bridge",
                 "ports": [f"127.0.0.1:{BRIDGE_PORT}:4000"],
                 "volumes": [f"./{BRIDGE_CONFIG_NAME}:/app/config.yaml:ro"],
                 "environment": {
-                    route.api_key_env: f"${{{route.api_key_env}}}",
+                    **provider_env,
                     BRIDGE_MASTER_KEY_ENV: f"${{{BRIDGE_MASTER_KEY_ENV}:-sk-fugue-local}}",
                 },
                 "command": [
@@ -82,7 +114,11 @@ def docker_compose_for_route(route: ModelRoute) -> dict[str, Any]:
 
 
 def write_bridge_files(
-    route: ModelRoute, repo_root: Path | str | None = None
+    route: ModelRoute,
+    repo_root: Path | str | None = None,
+    *,
+    builder_route: ModelRoute | None = None,
+    judge_route: ModelRoute | None = None,
 ) -> BridgeFiles:
     root = Path.cwd() if repo_root is None else Path(repo_root)
     runtime_dir = root / BRIDGE_RUNTIME_DIR
@@ -90,10 +126,20 @@ def write_bridge_files(
     config_path = runtime_dir / BRIDGE_CONFIG_NAME
     compose_path = runtime_dir / BRIDGE_COMPOSE_NAME
     config_path.write_text(
-        yaml.safe_dump(litellm_config_for_route(route), sort_keys=False)
+        yaml.safe_dump(
+            litellm_config_for_route(
+                route, builder_route=builder_route, judge_route=judge_route
+            ),
+            sort_keys=False,
+        )
     )
     compose_path.write_text(
-        yaml.safe_dump(docker_compose_for_route(route), sort_keys=False)
+        yaml.safe_dump(
+            docker_compose_for_route(
+                route, builder_route=builder_route, judge_route=judge_route
+            ),
+            sort_keys=False,
+        )
     )
     return BridgeFiles(
         runtime_dir=runtime_dir,
@@ -107,9 +153,18 @@ def bridge_up(
     *,
     repo_root: Path | str | None = None,
     env: Mapping[str, str] | None = None,
+    builder_model: str | None = None,
+    judge_model: str | None = None,
 ) -> BridgeFiles:
     route = resolve_model_route(model, env=env)
-    files = write_bridge_files(route, repo_root)
+    builder_route = resolve_model_route(builder_model, env=env) if builder_model else None
+    judge_route = resolve_model_route(judge_model, env=env) if judge_model else None
+    files = write_bridge_files(
+        route,
+        repo_root,
+        builder_route=builder_route,
+        judge_route=judge_route,
+    )
     subprocess.run(
         ["docker", "compose", "-f", files.compose_path.as_posix(), "up", "-d"],
         cwd=Path.cwd() if repo_root is None else Path(repo_root),

@@ -1,0 +1,7 @@
+id: markdown-log
+title: Append-only Markdown memory
+description: Transparent warmed-memory baseline with one ordered event log.
+provider: fugue.bench.context:MarkdownLogContextProvider
+version: "1"
+capabilities: [prepare, retrieve, bind, ingest, sequence]
+license: Fugue

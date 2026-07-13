@@ -1,0 +1,15 @@
+FROM ghcr.io/astral-sh/uv:0.11.27-python3.13-bookworm-slim
+
+WORKDIR /opt/fugue
+
+COPY pyproject.toml uv.lock README.md ./
+COPY fugue ./fugue
+COPY configs ./configs
+
+RUN uv sync --frozen --no-dev --extra context
+
+ENV PATH="/opt/fugue/.venv/bin:${PATH}"
+ENV PYTHONPATH="/opt/fugue"
+
+ENTRYPOINT []
+CMD ["python", "-m", "fugue.context_server", "--help"]

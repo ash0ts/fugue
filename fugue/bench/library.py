@@ -43,12 +43,18 @@ class Skill:
 
 
 @dataclass(frozen=True)
+class ContextSelection:
+    system_id: str = "none"
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class FeatureVariant:
     id: str
     label: str
     prompt_id: str | None = None
     skill_ids: list[str] = field(default_factory=list)
-    memory: str | None = None
+    context: ContextSelection = field(default_factory=ContextSelection)
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
@@ -63,12 +69,39 @@ class FeatureVariant:
 
 
 @dataclass(frozen=True)
+class WorkloadSpec:
+    id: str
+    runner: str
+    manifest: Path | None = None
+    dataset: str | None = None
+    systems: list[str] = field(default_factory=list)
+    required_capabilities: list[str] = field(default_factory=list)
+    n_tasks: int | None = None
+    n_attempts: int | None = None
+    artifacts: list[Any] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PresetSpec:
+    id: str
+    workloads: list[str] = field(default_factory=list)
+    systems: list[str] = field(default_factory=list)
+    harnesses: list[str] = field(default_factory=list)
+    n_tasks: int | None = None
+    n_attempts: int | None = None
+    n_concurrent: int | None = None
+    workload_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     id: str
     title: str
     description: str = ""
     manifest: Path = Path("datasets/pilot.yaml")
     model: str | None = None
+    builder_model: str | None = None
+    judge_model: str | None = None
     run_name: str | None = None
     tags: list[str] = field(default_factory=list)
     harnesses: list[str] = field(default_factory=list)
@@ -84,15 +117,14 @@ class ExperimentSpec:
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    workloads: list[WorkloadSpec] = field(default_factory=list)
+    presets: list[PresetSpec] = field(default_factory=list)
+    default_preset: str | None = None
     debug: bool = False
     quiet: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["manifest"] = self.manifest.as_posix()
-        if self.jobs_dir is not None:
-            data["jobs_dir"] = self.jobs_dir.as_posix()
-        return data
+        return _paths_to_strings(asdict(self))
 
 
 def library_root(repo_root: Path | None = None) -> Path:
@@ -186,7 +218,12 @@ def get_experiment(item_id: str, repo_root: Path | None = None) -> ExperimentSpe
     path = library_root(repo_root) / EXPERIMENTS_DIR / f"{item_id}.yaml"
     if not path.is_file():
         raise FileNotFoundError(f"experiment not found: {item_id}")
-    return experiment_from_yaml(path.read_text(), item_id=item_id)
+    experiment = experiment_from_yaml(path.read_text(), item_id=item_id)
+    if experiment.id != item_id:
+        raise ValueError(
+            f"experiment file {path.name!r} declares mismatched id {experiment.id!r}"
+        )
+    return experiment
 
 
 def get_experiment_text(item_id: str, repo_root: Path | None = None) -> str:
@@ -238,20 +275,46 @@ def experiment_from_data(
     )
     variants = _variants(raw)
     if not variants:
-        variants = [FeatureVariant(id="baseline", label="Baseline", memory="none")]
+        variants = [FeatureVariant(id="baseline", label="Baseline")]
+    workloads = _workloads(raw.get("workloads"))
+    presets = _presets(raw.get("presets"))
+    _require_unique([variant.id for variant in variants], kind="variant")
+    _require_unique([workload.id for workload in workloads], kind="workload")
+    _require_unique([preset.id for preset in presets], kind="preset")
+    workload_ids = {workload.id for workload in workloads}
+    for preset in presets:
+        unknown = sorted(
+            (set(preset.workloads) | set(preset.workload_overrides)) - workload_ids
+        )
+        if unknown:
+            raise ValueError(
+                f"preset {preset.id} overrides unknown workload(s): {', '.join(unknown)}"
+            )
+    default_preset = _optional_str(raw.get("default_preset"))
+    if default_preset and default_preset not in {preset.id for preset in presets}:
+        raise ValueError(f"unknown default preset: {default_preset}")
     return ExperimentSpec(
         id=experiment_id,
         title=str(raw.get("title") or experiment_id),
         description=str(raw.get("description") or ""),
         manifest=Path(str(raw.get("manifest") or "datasets/pilot.yaml")),
         model=_optional_str(raw.get("model")),
+        builder_model=_optional_str(raw.get("builder_model")),
+        judge_model=_optional_str(raw.get("judge_model")),
         run_name=_optional_str(raw.get("run_name")),
         tags=_string_list(raw.get("tags")),
         harnesses=_string_list(raw.get("harnesses")),
         variants=variants,
-        n_attempts=_optional_int(raw.get("n_attempts") or raw.get("k")),
-        n_concurrent=_optional_int(raw.get("n_concurrent")),
-        n_tasks=_optional_int(raw.get("n_tasks")),
+        n_attempts=_positive_int(
+            raw.get("n_attempts")
+            if raw.get("n_attempts") is not None
+            else raw.get("k"),
+            kind="experiment n_attempts",
+        ),
+        n_concurrent=_positive_int(
+            raw.get("n_concurrent"), kind="experiment n_concurrent"
+        ),
+        n_tasks=_positive_int(raw.get("n_tasks"), kind="experiment n_tasks"),
         jobs_dir=Path(str(raw["jobs_dir"])) if raw.get("jobs_dir") else None,
         environment=_dict(raw.get("environment")),
         artifacts=_list(raw.get("artifacts")),
@@ -260,6 +323,9 @@ def experiment_from_data(
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
         mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
+        workloads=workloads,
+        presets=presets,
+        default_preset=default_preset,
         debug=bool(raw.get("debug", False)),
         quiet=bool(raw.get("quiet", False)),
     )
@@ -304,13 +370,22 @@ def _variants(raw: dict[str, Any]) -> list[FeatureVariant]:
 def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     if not isinstance(raw, dict):
         raise ValueError("variant must be a mapping")
+    if "memory" in raw:
+        raise ValueError("variant.memory was removed; use context.system_id")
     variant_id = validate_id(raw.get("id") or f"variant-{index}", kind="variant id")
+    prompt_id = _optional_str(raw.get("prompt_id"))
+    if prompt_id:
+        validate_id(prompt_id, kind="prompt id")
+    skill_ids = _string_list(raw.get("skill_ids"))
+    for skill_id in skill_ids:
+        validate_id(skill_id, kind="skill id")
+    _require_unique(skill_ids, kind=f"variant {variant_id} skill")
     return FeatureVariant(
         id=variant_id,
         label=str(raw.get("label") or variant_id),
-        prompt_id=_optional_str(raw.get("prompt_id")),
-        skill_ids=_string_list(raw.get("skill_ids")),
-        memory=_optional_str(raw.get("memory")) or "none",
+        prompt_id=prompt_id,
+        skill_ids=skill_ids,
+        context=_context_selection(raw.get("context")),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
         mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
@@ -320,6 +395,87 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
         artifacts=_list(raw.get("artifacts")),
         enabled=bool(raw.get("enabled", True)),
     )
+
+
+def _context_selection(raw: Any) -> ContextSelection:
+    if raw in (None, ""):
+        return ContextSelection()
+    if isinstance(raw, str):
+        system_id = validate_id(raw, kind="context system id")
+        return ContextSelection(system_id=system_id)
+    if not isinstance(raw, dict):
+        raise ValueError("variant context must be a string or mapping")
+    system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
+    return ContextSelection(system_id=system_id, config=_dict(raw.get("config")))
+
+
+def _workloads(raw: Any) -> list[WorkloadSpec]:
+    values = _list(raw)
+    workloads: list[WorkloadSpec] = []
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, dict):
+            raise ValueError("workload must be a mapping")
+        workload_id = validate_id(
+            value.get("id") or f"workload-{index}", kind="workload id"
+        )
+        runner = str(value.get("runner") or "harbor")
+        if runner not in {"harbor", "retrieval", "sequence"}:
+            raise ValueError(f"unknown workload runner: {runner}")
+        workloads.append(
+            WorkloadSpec(
+                id=workload_id,
+                runner=runner,
+                manifest=Path(str(value["manifest"])) if value.get("manifest") else None,
+                dataset=_optional_str(value.get("dataset")),
+                systems=_string_list(value.get("systems")),
+                required_capabilities=_string_list(value.get("required_capabilities")),
+                n_tasks=_positive_int(
+                    value.get("n_tasks"), kind=f"workload {workload_id} n_tasks"
+                ),
+                n_attempts=_positive_int(
+                    value.get("n_attempts"),
+                    kind=f"workload {workload_id} n_attempts",
+                ),
+                artifacts=_list(value.get("artifacts")),
+            )
+        )
+    return workloads
+
+
+def _presets(raw: Any) -> list[PresetSpec]:
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        values = [{"id": key, **_dict(value)} for key, value in raw.items()]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        raise ValueError("presets must be a mapping or list")
+    presets: list[PresetSpec] = []
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, dict):
+            raise ValueError("preset must be a mapping")
+        preset_id = validate_id(value.get("id") or f"preset-{index}", kind="preset id")
+        presets.append(
+            PresetSpec(
+                id=preset_id,
+                workloads=_string_list(value.get("workloads")),
+                systems=_string_list(value.get("systems")),
+                harnesses=_string_list(value.get("harnesses")),
+                n_tasks=_positive_int(
+                    value.get("n_tasks"), kind=f"preset {preset_id} n_tasks"
+                ),
+                n_attempts=_positive_int(
+                    value.get("n_attempts"), kind=f"preset {preset_id} n_attempts"
+                ),
+                n_concurrent=_positive_int(
+                    value.get("n_concurrent"),
+                    kind=f"preset {preset_id} n_concurrent",
+                ),
+                workload_overrides=_nested_dict(value.get("workload_overrides")),
+            )
+        )
+    return presets
 
 
 def _library_item(item_id: str, path: Path, title: str | None) -> LibraryItem:
@@ -402,6 +558,24 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
+def _positive_int(value: Any, *, kind: str) -> int | None:
+    parsed = _optional_int(value)
+    if parsed is not None and parsed < 1:
+        raise ValueError(f"{kind} must be positive")
+    return parsed
+
+
+def _require_unique(values: list[str], *, kind: str) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for value in values:
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    if duplicates:
+        raise ValueError(f"duplicate {kind} id(s): {', '.join(sorted(duplicates))}")
+
+
 def _dict(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -410,9 +584,24 @@ def _dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def _nested_dict(value: Any) -> dict[str, dict[str, Any]]:
+    values = _dict(value)
+    return {str(key): _dict(item) for key, item in values.items()}
+
+
 def _list(value: Any) -> list[Any]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise ValueError(f"expected list, got {type(value).__name__}")
     return list(value)
+
+
+def _paths_to_strings(value: Any) -> Any:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, dict):
+        return {str(key): _paths_to_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_paths_to_strings(item) for item in value]
+    return value

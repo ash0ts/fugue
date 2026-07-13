@@ -51,6 +51,25 @@ def test_select_model_precedence() -> None:
     assert select_model(None, "wandb/manifest", env) == "wandb/manifest"
     assert select_model(None, None, env) == "anthropic/env-model"
     assert select_model(None, None, {}) == DEFAULT_MODEL
+    assert (
+        select_model(
+            None,
+            "wandb/manifest",
+            env,
+            harness_model="openai/harness",
+            experiment_model="anthropic/experiment",
+        )
+        == "openai/harness"
+    )
+    assert (
+        select_model(
+            None,
+            "wandb/manifest",
+            env,
+            experiment_model="anthropic/experiment",
+        )
+        == "anthropic/experiment"
+    )
 
 
 def test_missing_env_separates_model_and_trace_keys() -> None:

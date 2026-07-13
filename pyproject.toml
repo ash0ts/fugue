@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fugue"
 version = "0.1.0"
-description = "Harbor + Weave runner for comparing agent harnesses on repository-memory benchmarks."
+description = "Harbor + Weave runner for comparing agent harnesses and context systems."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx",
+    "filelock==3.29.7",
     "pyyaml",
     "weave",
 ]
@@ -25,6 +26,14 @@ dev = [
 web = [
     "fastapi",
     "uvicorn",
+]
+context = [
+    "fastembed==0.8.0",
+    "graphiti-core==0.29.2",
+    "lancedb==0.34.0",
+    "mcp==1.28.1",
+    "mem0ai==0.1.118",
+    "qdrant-client==1.18.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -46,11 +46,11 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
         run_id=run_id,
     )
 
-    assert len(rendered) == 8
+    assert len(rendered) == 24
     assert not runtime_dir.exists()
     assert all(not job.config_path.exists() for job in rendered)
 
-    cells = {(job.harness, job.variant_id): job for job in rendered}
+    cells = {(job.harness, job.variant_id, job.task_id): job for job in rendered}
     expected_artifacts = [
         "/root/sc100-filled.pdf",
         "/root/diff_report.json",
@@ -63,32 +63,33 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
     ]
 
     for harness in ("hermes", "openclaw", "claude-code", "codex"):
-        baseline = cells[(harness, "baseline")].config
-        skilled = cells[(harness, "with-pdf-skill")].config
+        for task_id in expected_tasks:
+            baseline = cells[(harness, "baseline", task_id)].config
+            skilled = cells[(harness, "with-pdf-skill", task_id)].config
 
-        assert baseline["datasets"] == skilled["datasets"]
-        assert baseline["datasets"] == [
-            {
-                "name": "benchflow/skillsbench",
-                "ref": "1.1",
-                "task_names": expected_tasks,
-                "n_tasks": 3,
-            }
-        ]
-        assert baseline["n_attempts"] == skilled["n_attempts"] == 2
-        assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
-        assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
-        assert baseline["environment"] == skilled["environment"]
-        assert baseline.get("extra_instruction_paths", []) == []
-        assert skilled.get("extra_instruction_paths", []) == []
+            assert baseline["datasets"] == skilled["datasets"]
+            assert baseline["datasets"] == [
+                {
+                    "name": "benchflow/skillsbench",
+                    "ref": "1.1",
+                    "task_names": [task_id],
+                    "n_tasks": 1,
+                }
+            ]
+            assert baseline["n_attempts"] == skilled["n_attempts"] == 2
+            assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
+            assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
+            assert baseline["environment"] == skilled["environment"]
+            assert baseline.get("extra_instruction_paths", []) == []
+            assert skilled.get("extra_instruction_paths", []) == []
 
-        baseline_agent = dict(baseline["agents"][0])
-        skilled_agent = dict(skilled["agents"][0])
-        assert baseline_agent.pop("skills", []) == []
-        assert skilled_agent.pop("skills") == [
-            "configs/fugue/skills/pdf-artifact-workflow"
-        ]
-        assert baseline_agent == skilled_agent
+            baseline_agent = dict(baseline["agents"][0])
+            skilled_agent = dict(skilled["agents"][0])
+            assert baseline_agent.pop("skills", []) == []
+            assert skilled_agent.pop("skills") == [
+                "configs/fugue/skills/pdf-artifact-workflow"
+            ]
+            assert baseline_agent == skilled_agent
 
-        assert "secret-wandb" not in json.dumps(baseline)
-        assert "secret-wandb" not in json.dumps(skilled)
+            assert "secret-wandb" not in json.dumps(baseline)
+            assert "secret-wandb" not in json.dumps(skilled)

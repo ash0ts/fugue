@@ -1,0 +1,119 @@
+dataset:
+  path: .fugue/cache/datasets/swe-qa-pro/596892dac60b
+  materializer: fugue.bench.datasets:SweQaProMaterializer
+  source:
+    name: TIGER-Lab/SWE-QA-Pro-Bench
+    revision: 596892dac60b6f500f01a7dc2becb9f66593b7b7
+    url: https://huggingface.co/datasets/TIGER-Lab/SWE-QA-Pro-Bench/resolve/596892dac60b6f500f01a7dc2becb9f66593b7b7/data/test.jsonl
+    sha256: bba4aade95e707d012e11e622a40687bc0efd8cc509ed4a7dd3ba24c6e365737
+    license: MIT
+model: wandb/zai-org/GLM-5.2
+k: 2
+n_concurrent: 2
+jobs_dir: jobs/repo-memory-impact/qa
+harnesses:
+  - name: hermes
+    agent: fugue.agents:FugueHermes
+  - name: openclaw
+    agent: fugue.agents:FugueOpenClaw
+  - name: claude-code
+    agent: fugue.agents:FugueClaudeCode
+  - name: codex
+    agent: fugue.agents:FugueCodex
+tasks:
+  - id: swe-qa-pro-000-qibo
+    repo: qiboteam/qibo
+    base_commit: 2f98679c4a738d5a59de17eccd4712659d52a461
+    metadata: {source_index: 0}
+  - id: swe-qa-pro-010-sanic
+    repo: sanic-org/sanic
+    base_commit: 57d44f263fa84bd5cd6f77b5565825640d85b1e2
+    metadata: {source_index: 10}
+  - id: swe-qa-pro-020-sqlfluff
+    repo: sqlfluff/sqlfluff
+    base_commit: 0243d4a1ba29e6cc3dc96bd9ea178d0f8a576a8f
+    metadata: {source_index: 20}
+  - id: swe-qa-pro-030-cekit
+    repo: cekit/cekit
+    base_commit: 6b82c4adc0e2e1d2ddda66305c1c9abe7b91f407
+    metadata: {source_index: 30}
+  - id: swe-qa-pro-040-docker-py
+    repo: docker/docker-py
+    base_commit: b2a18d7209f827d83cc33acb80aa31bf404ffd4b
+    metadata: {source_index: 40}
+  - id: swe-qa-pro-050-dwave-cloud-client
+    repo: dwavesystems/dwave-cloud-client
+    base_commit: 88e14e9b745957569d86ca8d8fcd1461ff7101b9
+    metadata: {source_index: 50}
+  - id: swe-qa-pro-060-geopandas
+    repo: geopandas/geopandas
+    base_commit: 7d460d9efff57720c970fd6a040914286846c589
+    metadata: {source_index: 60}
+  - id: swe-qa-pro-070-pennylane
+    repo: PennyLaneAI/pennylane
+    base_commit: 6fae4e77ab73a330cd28eb237cd3b7ed712f4dac
+    metadata: {source_index: 70}
+  - id: swe-qa-pro-080-tox
+    repo: tox-dev/tox
+    base_commit: 984ce025ad8e75e323877fb5f34128abcfba950d
+    metadata: {source_index: 80}
+  - id: swe-qa-pro-090-psyclone
+    repo: stfc/PSyclone
+    base_commit: 0a0cfa6f0577acc4b4d9c2ad21a27794af97449b
+    metadata: {source_index: 90}
+  - id: swe-qa-pro-100-checkov
+    repo: bridgecrewio/checkov
+    base_commit: c2091482f54d5aca11969e7e7c1ddf96a5f49159
+    metadata: {source_index: 100}
+  - id: swe-qa-pro-110-jsonargparse
+    repo: omni-us/jsonargparse
+    base_commit: dd0f9e3767fcf2168c183bb346db9d7324bf7c28
+    metadata: {source_index: 110}
+  - id: swe-qa-pro-120-pybryt
+    repo: microsoft/pybryt
+    base_commit: 4506ddccd82b3a3a4ca517ca586266b18f47a7a0
+    metadata: {source_index: 120}
+  - id: swe-qa-pro-130-seaborn
+    repo: mwaskom/seaborn
+    base_commit: 3d3d715989d1a9cecc2b08fb23c695b6bb686754
+    metadata: {source_index: 130}
+  - id: swe-qa-pro-140-yt-dlp
+    repo: yt-dlp/yt-dlp
+    base_commit: f2a4983df7a64c4e93b56f79dbd16a781bd90206
+    metadata: {source_index: 140}
+  - id: swe-qa-pro-150-numba
+    repo: numba/numba
+    base_commit: 6bb29300254a40d2be35a6c88906bd4ddaad2c4d
+    metadata: {source_index: 150}
+  - id: swe-qa-pro-160-sphinx
+    repo: sphinx-doc/sphinx
+    base_commit: 47757c4062a6421feeaf0ae2ded89896d6cb3526
+    metadata: {source_index: 160}
+  - id: swe-qa-pro-170-xarray
+    repo: pydata/xarray
+    base_commit: 82fd8320b1be7a434effd247baf07004b66b802f
+    metadata: {source_index: 170}
+  - id: swe-qa-pro-180-pillow
+    repo: python-pillow/Pillow
+    base_commit: c4325c805e5909f0bf7201ce1f259bc34a1a49e0
+    metadata: {source_index: 180}
+  - id: swe-qa-pro-190-mkdocs
+    repo: mkdocs/mkdocs
+    base_commit: 74d3191e419b7cb79fe66f700119ead3365f70d0
+    metadata: {source_index: 190}
+  - id: swe-qa-pro-200-responses
+    repo: getsentry/responses
+    base_commit: 3e029949c8f3c1b3b2b48f9e437fedd7cf27746d
+    metadata: {source_index: 200}
+  - id: swe-qa-pro-210-frictionless
+    repo: frictionlessdata/frictionless-py
+    base_commit: 72e1391b41094678e97c1a3e386703f6e193c96d
+    metadata: {source_index: 210}
+  - id: swe-qa-pro-220-hy
+    repo: hylang/hy
+    base_commit: 902233d854d765058927402d60f1ee8bef02daf8
+    metadata: {source_index: 220}
+  - id: swe-qa-pro-230-web3
+    repo: ethereum/web3.py
+    base_commit: 305b3c30812f516dce33537ec054a9c6c64a3603
+    metadata: {source_index: 230}

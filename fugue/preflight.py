@@ -38,6 +38,8 @@ def run_preflight(
     env: Mapping[str, str] | None = None,
     live: bool = True,
     start_bridge: bool = True,
+    builder_model: str | None = None,
+    judge_model: str | None = None,
 ) -> list[PreflightCheck]:
     values = env if env is not None else os.environ
     root = Path.cwd() if repo_root is None else Path(repo_root)
@@ -66,7 +68,13 @@ def run_preflight(
 
     if start_bridge:
         try:
-            bridge_up(route.display_model, repo_root=root, env=values)
+            bridge_up(
+                route.display_model,
+                repo_root=root,
+                env=values,
+                builder_model=builder_model,
+                judge_model=judge_model,
+            )
             checks.append(PreflightCheck("bridge up", True, "docker compose is up"))
         except Exception as exc:
             checks.append(PreflightCheck("bridge up", False, str(exc)))

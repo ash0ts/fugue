@@ -19,7 +19,7 @@ Tracing plane — every harness ships its Weave plugin inside the container:
                 ``$CODEX_HOME/hooks.json`` (+ ``bypass_hook_trust``).
 
 Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
-with the run key, harness, model, experiment, variant, feature flags,
+with the run key, harness, model, experiment, variant, context system,
 timestamps, and harness session ids so Weave traces can be joined back to
 Harbor trials.
 
@@ -27,7 +27,6 @@ All four accept one canonical model string:
 ``wandb/...``, ``openai/...``, or ``anthropic/...``.
 """
 
-import copy
 import hashlib
 import json
 import os
@@ -45,7 +44,7 @@ except ImportError:  # pragma: no cover - Python 3.11 fallback
     def override(func):
         return func
 
-from harbor.agents.installed.base import CliFlag
+from harbor.agents.installed.base import BaseInstalledAgent, CliFlag
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
@@ -158,7 +157,9 @@ def _dedupe_tags(values: list[str]) -> list[str]:
     return out
 
 
-def _experiment_tags(harness: str, route: ModelRoute, feature_memory: str) -> list[str]:
+def _experiment_tags(
+    harness: str, route: ModelRoute, context_system_id: str
+) -> list[str]:
     prompt_ids = _split_tags(os.environ.get("FUGUE_PROMPT_ID"))
     skill_ids = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
     return _dedupe_tags(
@@ -170,7 +171,7 @@ def _experiment_tags(harness: str, route: ModelRoute, feature_memory: str) -> li
             f"group:{_run_group()}",
             f"harness:{harness}",
             f"variant:{os.environ.get('FUGUE_VARIANT_ID', 'baseline')}",
-            f"memory:{feature_memory}",
+            f"context-system:{context_system_id}",
             *[f"prompt:{item_id}" for item_id in prompt_ids],
             *[f"skill:{item_id}" for item_id in skill_ids],
             f"provider:{route.provider}",
@@ -257,21 +258,30 @@ def stage_hermes_otel_checkout() -> Path:
 class _TrialMetaMixin:
     """Writes /logs/agent/fugue-meta.json (host side) per trial.
 
-    The run key is the Harbor trial directory name (e.g.
-    ``bridge-check__hmXLrEo``); Weave traces are joined back to trials via
-    this file (plus harness session ids extracted from agent output).
+    The run key contains the immutable execution, workload, record type, task,
+    harness, context system, variant, and Harbor trial id. Weave traces are
+    joined back to trials through that key and the local metadata file.
     """
 
     logs_dir: Path  # provided by BaseAgent
 
     @property
-    def feature_memory(self) -> str:
-        return os.environ.get("FUGUE_FEATURE_MEMORY", "none")
+    def context_system_id(self) -> str:
+        return os.environ.get("FUGUE_CONTEXT_SYSTEM_ID", "none")
 
     @property
     def run_key(self) -> str:
-        # logs_dir is <trial_dir>/agent
-        return self.logs_dir.parent.name
+        coordinates = (
+            os.environ.get("FUGUE_RUN_ID"),
+            os.environ.get("FUGUE_WORKLOAD_ID"),
+            "trial",
+            os.environ.get("FUGUE_TASK_NAME"),
+            os.environ.get("FUGUE_HARNESS"),
+            os.environ.get("FUGUE_CONTEXT_SYSTEM_ID"),
+            os.environ.get("FUGUE_VARIANT_ID"),
+            self.logs_dir.parent.name,
+        )
+        return ":".join(value for value in coordinates if value)
 
     @property
     def job_name(self) -> str:
@@ -283,16 +293,49 @@ class _TrialMetaMixin:
     async def _begin_trial(
         self, harness: str, route: ModelRoute, environment: BaseEnvironment
     ) -> None:
-        self._memory_artifact_meta = await self._inject_memory_artifact(environment)
+        await self._install_context_runtime(environment)
+        self._context_artifact_meta = await self._inject_context_artifact(environment)
         self._meta_begin(harness, route)
+
+    async def _install_context_runtime(self, environment: BaseEnvironment) -> None:
+        servers = getattr(self, "mcp_servers", []) or []
+        commands = " ".join(
+            " ".join(
+                [
+                    str(getattr(server, "command", "") or ""),
+                    *[str(item) for item in (getattr(server, "args", None) or [])],
+                ]
+            )
+            for server in servers
+        )
+        if not commands:
+            return
+        required = {"python"}
+        if "uvx" in commands:
+            required.add("uvx")
+        if "npx" in commands:
+            required.add("npx")
+        if "project-rag" in commands:
+            required.add("project-rag")
+        checks = " && ".join(
+            f"command -v {shlex.quote(command)} >/dev/null"
+            for command in sorted(required)
+        )
+        await self.exec_as_root(
+            environment,
+            command=checks,
+            timeout_sec=30,
+        )
 
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
-        tags = _experiment_tags(harness, route, self.feature_memory)
+        tags = _experiment_tags(harness, route, self.context_system_id)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
         variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
         meta = {
             "run_key": self.run_key,
+            "run_id": os.environ.get("FUGUE_RUN_ID"),
+            "harbor_trial_id": self.logs_dir.parent.name,
             "job_name": self.job_name,
             "harness": harness,
             "run_name": _experiment_name(),
@@ -300,9 +343,19 @@ class _TrialMetaMixin:
             "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
+            "builder_model": os.environ.get("FUGUE_BUILDER_MODEL"),
+            "judge_model": os.environ.get("FUGUE_JUDGE_MODEL"),
             "experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID"),
+            "workload_id": os.environ.get("FUGUE_WORKLOAD_ID"),
+            "preset_id": os.environ.get("FUGUE_PRESET_ID"),
             "variant_id": variant_id,
-            "feature_memory": self.feature_memory,
+            "context_system_id": self.context_system_id,
+            "context_version": os.environ.get("FUGUE_CONTEXT_VERSION"),
+            "context_config_hash": os.environ.get("FUGUE_CONTEXT_CONFIG_HASH"),
+            "context_cache_keys": _json_env("FUGUE_CONTEXT_CACHE_KEYS"),
+            "expected_evidence_paths": _json_env(
+                "FUGUE_EXPECTED_EVIDENCE_PATHS"
+            ),
             "prompt_id": prompt_id,
             "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),
             "skill_ids": _split_tags(os.environ.get("FUGUE_SKILL_IDS")),
@@ -318,20 +371,20 @@ class _TrialMetaMixin:
             "trace_project": f"{entity}/{project}",
             "started_at": datetime.now(UTC).isoformat(),
         }
-        if getattr(self, "_memory_artifact_meta", None):
-            meta["memory_artifact"] = self._memory_artifact_meta
+        if getattr(self, "_context_artifact_meta", None):
+            meta["context_artifact"] = self._context_artifact_meta
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     def _meta_end(self) -> None:
         try:
             meta = json.loads(self._meta_path().read_text())
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             meta = {}
         meta["ended_at"] = datetime.now(UTC).isoformat()
         try:
             meta["session_ids"] = self._extract_session_ids()
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             meta["session_ids"] = []
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -339,7 +392,9 @@ class _TrialMetaMixin:
         return []
 
     def _task_artifact_name(self) -> str:
-        return os.environ.get("FUGUE_TASK_NAME") or self.run_key.rsplit("__", 1)[0]
+        return os.environ.get("FUGUE_TASK_NAME") or self.logs_dir.parent.name.rsplit(
+            "__", 1
+        )[0]
 
     async def _container_repo_root(self, environment: BaseEnvironment) -> str:
         configured = os.environ.get("FUGUE_CONTAINER_REPO_ROOT", "").strip()
@@ -350,27 +405,30 @@ class _TrialMetaMixin:
         )
         return (result.stdout or "").strip() or "/app"
 
-    async def _inject_memory_artifact(
+    async def _inject_context_artifact(
         self, environment: BaseEnvironment
     ) -> dict[str, Any] | None:
-        feature_memory = self.feature_memory
-        memory_root = os.environ.get("FUGUE_MEMORY_DIR", "").strip()
-        if not memory_root or feature_memory == "none":
+        system_id = self.context_system_id
+        cache_root = os.environ.get("FUGUE_CONTEXT_CACHE_ROOT", "").strip()
+        if not cache_root or system_id == "none":
             return None
 
         task_name = self._task_artifact_name()
-        artifact_dir = Path(memory_root) / feature_memory / task_name
-        if not artifact_dir.is_dir():
+        cache_keys = _json_env("FUGUE_CONTEXT_CACHE_KEYS")
+        cache_key = cache_keys.get(task_name) if isinstance(cache_keys, dict) else None
+        prepared_dir = Path(cache_root) / str(cache_key or "")
+        if not cache_key or not prepared_dir.is_dir():
             raise FileNotFoundError(
-                f"memory artifact not found for {feature_memory}/{task_name}: "
-                f"{artifact_dir}"
+                f"context artifact not prepared for {system_id}/{task_name}: "
+                f"run `fugue context prepare --system {system_id}` first"
             )
 
         repo_root = await self._container_repo_root(environment)
-        await environment.upload_dir(source_dir=artifact_dir, target_dir=repo_root)
+        target_dir = f"{repo_root.rstrip('/')}/.fugue-context"
+        await environment.upload_dir(source_dir=prepared_dir, target_dir=target_dir)
         files = [
-            p.relative_to(artifact_dir).as_posix()
-            for p in sorted(artifact_dir.rglob("*"))
+            f".fugue-context/{p.relative_to(prepared_dir).as_posix()}"
+            for p in sorted(prepared_dir.rglob("*"))
             if p.is_file()
         ]
         exclude_lines = "\n".join(f"/{path}" for path in files) + "\n"
@@ -389,11 +447,12 @@ class _TrialMetaMixin:
             timeout_sec=30,
         )
         return {
-            "feature_memory": feature_memory,
+            "context_system_id": system_id,
             "task_name": task_name,
-            "source_dir": artifact_dir.as_posix(),
-            "container_root": repo_root,
-            "sha256": _hash_dir(artifact_dir),
+            "cache_key": cache_key,
+            "source_dir": prepared_dir.as_posix(),
+            "container_root": target_dir,
+            "sha256": _hash_dir(prepared_dir),
             "files": files,
         }
 
@@ -490,7 +549,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         import yaml
 
         entity, project = _weave_entity_project()
-        tags = _experiment_tags("hermes", self.model_route, self.feature_memory)
+        tags = _experiment_tags("hermes", self.model_route, self.context_system_id)
         config: dict[str, Any] = {
             "backends": [
                 {"type": "weave", "entity": entity, "project": project},
@@ -503,7 +562,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 "fugue.tags": ",".join(tags),
                 "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
                 "fugue.variant_id": os.environ.get("FUGUE_VARIANT_ID", "baseline"),
-                "fugue.feature_memory": self.feature_memory,
+                "fugue.context_system_id": self.context_system_id,
                 "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
                 "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", ""),
                 "fugue.harness": "hermes",
@@ -752,7 +811,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 "serviceName": "fugue",
                 "agentName": self.run_key,
                 "agentDescription": (
-                    f"fugue {_experiment_name()} {self.feature_memory} / "
+                    f"fugue {_experiment_name()} {self.context_system_id} / "
                     f"{self.model_route.display_model}"
                 ),
                 "apiKey": {
@@ -1330,6 +1389,109 @@ class FugueCodex(_TrialMetaMixin, Codex):
         return ids
 
 
-# copy.deepcopy is used by the stock OpenClaw config builder; keep the import
-# referenced so linters don't flag it after subclass edits.
-_ = copy
+class FugueLetta(_TrialMetaMixin, BaseInstalledAgent):
+    """Pinned Letta Code harness with isolated local state per Harbor trial.
+
+    Letta is intentionally an agent harness, not a portable context provider.
+    Its MemFS and conversation state are collected under ``/logs/agent`` so
+    stateful results remain separate from the four-harness context matrix.
+    """
+
+    LETTA_VERSION = "0.26.2"
+
+    @staticmethod
+    @override
+    def name() -> str:
+        return "fugue-letta"
+
+    def __init__(self, *args, model_name: str | None = None, **kwargs):
+        self.model_route = resolve_model_route(model_name)
+        _require_model_key(self.model_route)
+        _require_trace_key()
+        _weave_entity_project()
+        kwargs.pop("version", None)
+        super().__init__(
+            *args,
+            model_name=self.model_route.display_model,
+            version=self.LETTA_VERSION,
+            **kwargs,
+        )
+
+    def get_version_command(self) -> str:
+        return "letta --version"
+
+    @override
+    async def install(self, environment: BaseEnvironment) -> None:
+        await self.exec_as_root(
+            environment,
+            command=(
+                "apt-get update && apt-get install -y --no-install-recommends "
+                "nodejs npm ca-certificates && rm -rf /var/lib/apt/lists/* && "
+                f"npm install -g @letta-ai/letta-code@{self.LETTA_VERSION}"
+            ),
+            env={"DEBIAN_FRONTEND": "noninteractive"},
+            timeout_sec=600,
+        )
+
+    def _connection(self) -> tuple[str, str, str]:
+        route = self.model_route
+        if route.provider == "anthropic":
+            return "anthropic", route.display_model, route.messages_base_url or ""
+        if route.provider == "openai":
+            return "openai", route.display_model, route.chat_base_url or ""
+        return (
+            "openai",
+            f"openai/{route.model_id}",
+            f"{BRIDGE_BASE_URL_CONTAINER}/v1",
+        )
+
+    @override
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        await self._begin_trial("letta", self.model_route, environment)
+        provider, letta_model, base_url = self._connection()
+        model_key = (
+            bridge_master_key()
+            if self.model_route.provider == "wandb"
+            else _require_model_key(self.model_route)
+        )
+        env = {
+            "FUGUE_LETTA_API_KEY": model_key,
+            "LETTA_LOCAL_BACKEND_DIR": "/logs/agent/letta-state",
+            "WANDB_API_KEY": _require_trace_key(),
+            "WEAVE_PROJECT": _weave_project_slug(),
+        }
+        connect = (
+            f"letta --backend local connect {shlex.quote(provider)} "
+            '--api-key "$FUGUE_LETTA_API_KEY"'
+        )
+        if base_url:
+            connect += f" --base-url {shlex.quote(base_url)}"
+        skills = ""
+        if self.skills_dir:
+            skills = (
+                "mkdir -p .agents/skills; "
+                f"cp -R {shlex.quote(str(self.skills_dir))}/. .agents/skills/; "
+            )
+        command = (
+            "mkdir -p \"$LETTA_LOCAL_BACKEND_DIR\" /logs/agent; "
+            f"{skills}"
+            f"{connect} > /logs/agent/letta-connect.log 2>&1 && "
+            "letta --backend local --new-agent "
+            f"--model {shlex.quote(letta_model)} "
+            f"-p {shlex.quote(self.render_instruction(instruction))} "
+            "--output-format text --no-system-info-reminder "
+            "2>&1 | tee /logs/agent/letta-output.txt"
+        )
+        try:
+            await self.exec_as_agent(environment, command=command, env=env)
+        finally:
+            self._meta_end()
+
+    @override
+    def _extract_session_ids(self) -> list[str]:
+        root = self.logs_dir / "letta-state" / "memfs"
+        if not root.is_dir():
+            return []
+        return sorted(path.name for path in root.iterdir() if path.is_dir())

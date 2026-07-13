@@ -17,13 +17,15 @@ harnesses:
 variants:
   - id: baseline
     label: No skill
-    memory: none
+    context:
+      system_id: none
     enabled: true
   - id: with-pdf-skill
     label: PDF artifact workflow
     skill_ids:
       - pdf-artifact-workflow
-    memory: none
+    context:
+      system_id: none
     enabled: true
 n_attempts: 2
 n_concurrent: 2

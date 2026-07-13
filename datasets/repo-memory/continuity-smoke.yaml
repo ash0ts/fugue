@@ -1,0 +1,53 @@
+id: repository-continuity
+runner: sequence
+source:
+  name: continuity-benchmarks
+  version: main
+  url: https://github.com/Alienfader/continuity-benchmarks
+  counts:
+    smoke: 1
+    full: 2
+sequences:
+  - id: astropy-maintainer-preferences
+    repo: astropy/astropy
+    commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
+    events:
+      - episode: 1
+        kind: decision
+        content: The team requires regression tests for modeling changes and keeps them in astropy/modeling/tests/test_models.py.
+      - episode: 2
+        kind: correction
+        content: Use pytest for focused validation; do not add a standalone validation script.
+    probes:
+      - id: regression-test-location
+        after_episode: 1
+        query: Where should a regression test for a modeling change be added?
+        expected_paths: [MEMORY.md]
+        expected_facts: [astropy/modeling/tests/test_models.py]
+      - id: validation-policy
+        after_episode: 2
+        query: How should this modeling change be validated?
+        expected_paths: [MEMORY.md]
+        expected_facts: [pytest]
+  - id: django-maintainer-preferences
+    repo: django/django
+    commit: 2d67222472f80f251607ae1b720527afceba06ad
+    events:
+      - episode: 1
+        kind: decision
+        content: Model form validation changes should preserve backwards compatibility and add tests under tests/model_forms.
+      - episode: 2
+        kind: correction
+        content: Prefer the smallest focused test invocation before running the broader model_forms suite.
+    probes:
+      - id: model-form-test-location
+        after_episode: 1
+        query: Where do validation regression tests belong?
+        expected_paths: [MEMORY.md]
+        expected_facts: [tests/model_forms]
+      - id: focused-validation
+        after_episode: 2
+        query: What validation order should the agent use?
+        expected_paths: [MEMORY.md]
+        expected_facts: [smallest focused test]
+
