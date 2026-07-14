@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from fugue.bench import export
 from fugue.bench.export import (
+    _fetch_agents_spans,
+    _summarize_spans,
     _weave_safe_row,
     export_rows,
     judge_qa_rows,
@@ -37,6 +39,9 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["tags"] == ["fugue", "run:fixture-exp", "harness:hermes"]
     assert row["model_provider"] == "wandb"
     assert row["trace_project"] == "test/fugue"
+    assert row["weave_agent_name"] == "hermes-agent"
+    assert row["weave_conversation_ids"] == ["session-1"]
+    assert row["native_session_ids"] == ["session-1"]
     assert row["reward"] == 1.0
     assert row["pass"] is True
     assert row["wall_time_sec"] == 5.0
@@ -131,6 +136,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     tmp_path: Path, monkeypatch
 ) -> None:
     calls = []
+    monkeypatch.setenv("WANDB_BASE_URL", "https://api.wandb.test")
 
     class FakeLogger:
         def __init__(self, *, model, dataset) -> None:
@@ -141,20 +147,105 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             calls.append((inputs, output, scores))
 
     fake_weave = SimpleNamespace(
-        init=lambda project: calls.append(("init", project)),
+        init=lambda project: calls.append(
+            ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
+        ),
         EvaluationLogger=FakeLogger,
     )
     monkeypatch.setitem(sys.modules, "weave", fake_weave)
     project = f"entity/project-{tmp_path.name}"
     rows = [{"record_type": "trial", "task_name": "task", "reward": 1.0}]
 
-    assert publish_to_weave(rows, project, ledger_root=tmp_path) == 1
+    env = {
+        "WANDB_API_KEY": "test-only",
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+    }
+    assert publish_to_weave(rows, project, ledger_root=tmp_path, env=env) == 1
     assert publish_to_weave(rows, project, ledger_root=tmp_path) == 0
     assert publish_to_weave(
         rows, project, ledger_root=tmp_path, republish=True
     ) == 1
 
     examples = [item for item in calls if isinstance(item, tuple) and len(item) == 3]
-    assert len(examples) == 2
-    assert examples[0][0]["publication_id"] == examples[1][0]["publication_id"]
-    assert examples[0][2] == {"reward": 1.0}
+    logged_examples = [item for item in examples if item[0] != "init"]
+    assert len(logged_examples) == 2
+    assert logged_examples[0][0]["publication_id"] == logged_examples[1][0]["publication_id"]
+    assert logged_examples[0][2] == {"reward": 1.0}
+    assert ("init", project, "https://api.wandb.ai") in calls
+
+
+def test_agent_span_query_uses_conversation_identity() -> None:
+    requests = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"spans": [{"id": "turn-1"}]}
+
+    class Client:
+        def post(self, url, *, json):
+            requests.append((url, json))
+            return Response()
+
+    spans = _fetch_agents_spans(
+        Client(),
+        "https://api.wandb.ai",
+        "team/fugue-experiments",
+        ["conversation-1", "conversation-1"],
+    )
+
+    assert spans == [{"id": "turn-1"}]
+    assert requests == [
+        (
+            "https://api.wandb.ai/agents/spans/query",
+            {
+                "project_id": "team/fugue-experiments",
+                "filter": {"conversation_id": "conversation-1"},
+            },
+        )
+    ]
+
+
+def test_agent_span_summary_counts_logical_hierarchy_once() -> None:
+    spans = [
+        {
+            "id": "turn",
+            "trace_id": "trace-1",
+            "attributes": {
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.conversation.id": "conversation-1",
+            },
+        },
+        {
+            "id": "chat",
+            "parent_id": "turn",
+            "attributes": {
+                "gen_ai.operation.name": "chat",
+                "gen_ai.conversation.id": "conversation-1",
+                "gen_ai.usage.input_tokens": 12,
+                "gen_ai.usage.output_tokens": 3,
+            },
+        },
+        {
+            "id": "tool",
+            "parent_id": "chat",
+            "attributes": {
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.conversation.id": "conversation-1",
+            },
+        },
+        {"id": "tool", "attributes": {"gen_ai.operation.name": "execute_tool"}},
+    ]
+
+    summary = _summarize_spans(spans)
+
+    assert summary["weave_span_count"] == 3
+    assert summary["weave_turn_count"] == 1
+    assert summary["weave_llm_call_count"] == 1
+    assert summary["weave_tool_call_count"] == 1
+    assert summary["weave_conversation_ids"] == ["conversation-1"]
+    assert summary["weave_root_span_ids"] == ["turn"]
+    assert summary["weave_input_tokens"] == 12
+    assert summary["weave_output_tokens"] == 3

@@ -1,6 +1,6 @@
 ---
 name: fugue-dev
-description: Use when modifying the Fugue repository, especially provider routing, context-system plugins and caching, Harbor JobConfig rendering, experiments/prompts/skills, workload runners, the FastAPI operator UI, Weave metadata/export, or tests. Helps preserve Fugue's provider-neutral experiment contracts and avoid memory-specific or legacy compatibility surfaces.
+description: Use when modifying the Fugue repository, especially provider routing, context-system plugins and caching, Harbor JobConfig rendering, experiments/prompts/skills, workload runners, the Textual terminal operator, Weave agent observability/export, or tests. Helps preserve Fugue's provider-neutral experiment contracts and avoid memory-specific or legacy compatibility surfaces.
 ---
 
 # Fugue Development
@@ -15,6 +15,7 @@ Use the product vocabulary consistently:
 - `FeatureVariant`: a named comparison bundle of prompt, skills, one `ContextSelection`, and advanced Harbor config.
 - `ContextSystem`: a repo-backed plugin definition with explicit prepare, bind, retrieve, ingest, and sequence capabilities.
 - `Workload`: a `harbor`, `retrieval`, or `sequence` evaluation lane selected through an experiment preset.
+- `Run ID`: an immutable generated execution identity with durable state under `.fugue/runtime/<run-id>/`.
 - `Run name`: the W&B/Weave grouping name for one execution.
 
 Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or `memory_variant` compatibility paths. This is a net-new repo; prefer one clean contract.
@@ -30,7 +31,25 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - Only advertise a capability a provider implements. Unsupported cells are `not_applicable`/`N/A`, not failures or zero scores.
 - Preserve each native context interface. Wrap stdio MCP with `fugue.mcp_proxy` for bounded, redacted telemetry instead of replacing upstream tools.
 - Never serialize raw API keys. Use env var names and presence booleans only.
-- Operator UI stays no-build: FastAPI plus static `index.html`, `app.css`, and `app.js`. Do not add React, Vite, Tailwind, or a frontend package manager.
+- Keep operator behavior in `fugue.bench.operator`; both Rich commands and Textual consume those presentation-neutral services.
+- Keep AI transport normalization in `fugue.assistant`, experiment/result indexing in `fugue.bench.catalog`, and grounded composer/analyst behavior in `fugue.bench.ai`. CLI and Textual must consume these services instead of embedding prompts or model calls.
+- Composer output is an untrusted draft. Parse it through `ExperimentSpec`, validate every prompt/skill/context/manifest reference, and run side-effect-free preview before exposing Apply, Save, or Run.
+- Analyst arithmetic is deterministic Python over an immutable catalog snapshot. The model may interpret aggregates and inspect bounded evidence, but it must not calculate official metrics or cite evidence ids that do not exist.
+- `.fugue/cache/catalog` is rebuildable generated state. Saved analysis definitions belong in `configs/fugue/analyses`; generated reports and evidence belong in `reports/analyses`.
+- Assistant tools may read only bounded, redacted Fugue metadata and result artifacts. Never expose arbitrary filesystem, shell, environment, or Python execution to an assistant model.
+- Keep `fugue.tui` presentation-only. Long operations run in workers or detached process groups and communicate through durable state/events; never block Textual's event loop.
+- Run state is append-friendly and recoverable: atomic `run.json`, `events.jsonl`, `cells.jsonl`, combined logs, and per-cell logs. A cell failure must not stop independent cells.
+- The browser frontend has been removed. Do not add FastAPI, static web assets, or HTTP job abstractions back into the operator path.
+
+## Weave Agent Contract
+
+- Use stable harness agent names: `hermes-agent`, `openclaw`, `claude-code`, and `codex`. Experiments, variants, and trials are attributes, never agent identities.
+- Set `gen_ai.agent.name`, deterministic `gen_ai.conversation.id`, and flat `fugue.*` attributes for run, experiment, workload, harness, variant, context, task, trial, model, prompt, skills, tags, and run key.
+- Native harness integrations own `invoke_agent`, `chat`, and `execute_tool` spans. Never add wrapper spans that duplicate native turns, model calls, or tools.
+- Store deterministic Fugue conversation identity and native session IDs in trial metadata. Export joins Agents spans by conversation ID and `fugue.run_key`, not by per-trial agent names.
+- `trace_content` defaults to `full`. Metadata mode must fail preflight or render `not_applicable` when an integration cannot guarantee content suppression.
+- Trace the operator agents with stable names `fugue-experiment-composer` and `fugue-analysis-agent`. Each natural-language request is one conversation turn with nested assistant model and typed-tool spans.
+- Live traces are emitted during execution. `fugue export` remains the only normalized evaluation publisher and must honor the publication ledger.
 
 ## Metadata And Tags
 
@@ -43,8 +62,8 @@ Trial metadata and exported rows should make comparison easy:
 ## Change Workflow
 
 1. Read the relevant tests and local module before editing. Use `rg` first.
-2. If changing schema, update `library.py`, `job_config.py`, CLI/web callers, metadata/export, and tests together.
-3. If changing UI behavior, update API shape and static JS in the same pass; keep Run, Compare, and Setup as the only primary tabs.
+2. If changing schema, update `library.py`, `job_config.py`, operator/CLI callers, metadata/export, and tests together.
+3. If changing terminal behavior, keep Compose, Runs, Results, and Setup coherent; add a Textual Pilot test for the workflow.
 4. If changing provider behavior, validate routing, required env vars, generated bridge config, and adapter expectations.
 5. Keep edits scoped. Avoid broad refactors unless they reduce real duplication or remove a stale abstraction.
 
@@ -58,10 +77,12 @@ python -m ruff check .
 python -m pytest
 ```
 
-For UI changes, also start the local app and smoke the current browser path:
+For terminal changes, run Textual headlessly and smoke Rich output:
 
 ```bash
-fugue web --host 127.0.0.1 --port 8765
+FUGUE_NO_ANIMATION=1 python -m pytest tests/test_tui.py
+fugue status
+fugue runs list
 ```
 
-Check that Run can preview without writing `.fugue/runtime`, Render writes configs, and Compare still shows Weave links without leaking secrets.
+Check that Compose preview does not write `.fugue/runtime`, live runs persist durable state, Results shows local summaries, and Weave actions never expose credentials or invent unverified trace URLs.

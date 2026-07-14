@@ -24,7 +24,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 export WANDB_ENTITY="${WANDB_ENTITY:-wandb}"
-export WANDB_PROJECT="${WANDB_PROJECT:-hermes_agent}"
+export WANDB_PROJECT="${WANDB_PROJECT:-fugue-experiments}"
 export WEAVE_PROJECT="${WEAVE_PROJECT:-$WANDB_ENTITY/$WANDB_PROJECT}"
 export FUGUE_RUN_NAME="${FUGUE_RUN_NAME:-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
 export FUGUE_RUN_GROUP="${FUGUE_RUN_GROUP:-$FUGUE_RUN_NAME}"

@@ -3,7 +3,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fugue.bench.cli import _load_env, main
+from fugue.bench.cli import main
+from fugue.bench.operator import load_env
+
+
+def test_bare_fugue_launches_compose_tui(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "fugue.bench.cli._tui",
+        lambda args: calls.append((args.screen, args.experiment)) or 0,
+    )
+
+    assert main([]) == 0
+    assert calls == [("compose", "pilot")]
 
 
 def test_run_dry_run_uses_cli_model_and_neutral_adapter(
@@ -67,7 +79,7 @@ def test_shell_environment_wins_over_blank_dotenv(
     monkeypatch.setenv("OPENAI_API_KEY", "shell-value")
     monkeypatch.setenv("WANDB_API_KEY", "shell-trace")
 
-    env = _load_env(env_file)
+    env = load_env(env_file)
 
     assert env["OPENAI_API_KEY"] == "shell-value"
     assert env["WANDB_API_KEY"] == "shell-trace"
@@ -113,3 +125,25 @@ def test_repo_memory_smoke_render_uses_per_workload_limits(tmp_path: Path, capsy
     assert counts == {"qa": {1}, "coding": {1}}
     assert "--limit 3" in output
     assert "--limit 1" in output
+
+
+def test_catalog_cli_refreshes_local_experiment_buckets(tmp_path: Path, capsys) -> None:
+    from test_operator import make_operator_repo
+
+    make_operator_repo(tmp_path)
+    assert (
+        main(
+            [
+                "catalog",
+                "refresh",
+                "--source",
+                "local",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert "1 experiments" in capsys.readouterr().out

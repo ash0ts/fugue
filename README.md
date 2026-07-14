@@ -25,8 +25,8 @@ comparison.
 ```mermaid
 flowchart LR
     subgraph authoring["Authoring"]
-        UI["Operator UI"]
-        CLI["Fugue CLI"]
+        UI["Textual terminal operator"]
+        CLI["Rich headless CLI"]
         CONFIG["Experiments, prompts, skills, and manifests"]
     end
 
@@ -48,7 +48,7 @@ flowchart LR
         LOCAL["Harbor jobs, artifacts, and cell state"]
         EXPORT["Normalized export"]
         WEAVE["W&B Weave traces and evaluations"]
-        COMPARE["Fugue Compare"]
+        COMPARE["Terminal summaries"]
     end
 
     UI --> PLAN
@@ -112,14 +112,16 @@ flowchart LR
 
 ```bash
 cp .env.example .env
-uv venv && uv pip install -e ".[dev,web,context]"
+uv venv && uv pip install -e ".[dev,context]"
 
-fugue preflight --model wandb/zai-org/GLM-5.2
-fugue bridge up --model openai/gpt-5
+fugue status
+fugue bridge up --model wandb/zai-org/GLM-5.2
+fugue                         # full-screen terminal operator
 
-scripts/smoke.sh --model wandb/zai-org/GLM-5.2
-scripts/smoke.sh --model openai/gpt-5 codex hermes
-scripts/smoke.sh --model anthropic/claude-sonnet-4-5 claude-code
+# The same workflow remains scriptable.
+fugue run --experiment pilot --dry-run
+fugue run --experiment pilot --detach
+fugue runs list
 ```
 
 Requirements: Docker Desktop, Harbor (`uv tool install harbor`), `jq`, and for
@@ -199,7 +201,7 @@ fugue export --jobs jobs/skillsbench-pdf-ab \
   --out reports/skillsbench-pdf-ab.jsonl \
   --fetch-weave \
   --to-weave
-harbor view jobs/skillsbench-pdf-ab
+harbor view jobs
 ```
 
 Compare pass rate, reward, cost, tokens, wall time, and failures by harness and
@@ -250,8 +252,14 @@ stateDiagram-v2
     Pending --> NotApplicable: unsupported or unavailable
     Running --> Passed: Harbor command succeeds
     Running --> Failed: Harbor command fails
+    Pending --> Cancelled: operator cancels run
+    Running --> Cancelled: operator cancels run
+    Pending --> Interrupted: process disappears
+    Running --> Interrupted: process disappears
     Passed --> [*]
     Failed --> [*]
+    Cancelled --> [*]
+    Interrupted --> [*]
     NotApplicable --> [*]
 
     note right of Failed
@@ -381,7 +389,7 @@ With every optional dependency ready, the complete smoke definition expands to
 89 cells and 95 evaluations: three
 ranked retrieval cases for each controlled RAG system, one repository-QA and
 one coding task across eligible context systems and all four harnesses, and
-one short continuity sequence per longitudinal system. The UI and preview API
+one short continuity sequence per longitudinal system. The TUI and operator preview
 show this breakdown before launch. Missing prerequisites and unsupported cells
 remain visible as `not applicable` and are excluded from estimated trial count.
 
@@ -457,58 +465,216 @@ flowchart LR
     LIVE["Preparation, retrieval, ingestion, trial, and scoring"] --> TRACES["Live Weave operation traces"]
 ```
 
-W&B traces default to `wandb/hermes_agent`; override `WANDB_ENTITY`,
+W&B traces default to the **Fugue Experiments** project at
+`wandb/fugue-experiments`; override `WANDB_ENTITY`,
 `WANDB_PROJECT`, or `WEAVE_PROJECT` only when you intentionally want a
 different trace project. Use `--run-name` and `--tags` to separate experiments
 inside the same project.
 
-## Operator UI
+## AI Experiment Copilot And Analyst
 
-### Recommended Workflow
-
-The browser and CLI drive the same backend. Preview is deliberately
-side-effect free; a live run prepares missing context, executes eligible cells,
-and leaves both local and Weave records for inspection.
+Fugue has two grounded operator agents. The composer turns a natural-language
+experiment idea into a real `ExperimentSpec`; the analyst finds a reproducible
+result cohort and explains deterministic Fugue metrics. Neither agent receives
+shell access, environment values, or an unrestricted filesystem tool.
 
 ```mermaid
 flowchart LR
-    SETUP["1. Setup: check keys, Docker, Harbor, and bridge"] --> SELECT["2. Run: choose experiment and preset"]
-    SELECT --> PREVIEW["3. Preview exact cells, trials, and JobConfigs"]
-    PREVIEW --> LAUNCH["4. Launch the live run"]
-    LAUNCH --> JOBS["5. Follow cell status and logs"]
-    JOBS --> EXPORT["6. Export normalized results"]
-    EXPORT --> COMPARE["7. Compare harness, prompt, skill, context, and model"]
-    COMPARE --> WEAVE["8. Open detailed traces in Weave"]
-    JOBS --> HARBOR["Inspect local artifacts with harbor view jobs"]
+    USER["Natural-language experiment request"] --> COMPOSER["Fugue experiment composer"]
+    CATALOG["Repo experiments, manifests, prompts, skills, context systems"] --> COMPOSER
+    COMPOSER --> DRAFT["Untrusted structured draft"]
+    DRAFT --> VALIDATE["ExperimentSpec parsing and reference validation"]
+    VALIDATE --> PREVIEW["Side-effect-free Harbor matrix preview"]
+    PREVIEW --> REVIEW{"Explicit operator action"}
+    REVIEW -->|"Apply"| FORM["Unsaved Compose state"]
+    REVIEW -->|"Save"| REPO["configs/fugue/experiments"]
+    REVIEW -->|"Run"| SNAPSHOT["Immutable runtime experiment snapshot"]
+    SNAPSHOT --> HARBOR["Harbor cells"]
 ```
 
-Install the web extra and start the local operator console:
+Draft from the CLI. Without `--save` or `--run`, this only prints the validated
+proposal and exact matrix:
 
 ```bash
-uv pip install -e ".[web]"
-fugue web --host 127.0.0.1 --port 8765
+fugue compose "Compare BM25 and no context across all harnesses for one task"
+fugue compose "Create a PDF skill A/B based on skillsbench-pdf-ab" --save pdf-v2
+fugue compose "Run a one-task smoke test" --run
 ```
 
-The UI is a W&B-style operator console with three tabs:
+`FUGUE_COMPOSER_MODEL` selects the composer model. It falls back to the active
+experiment model and then `FUGUE_MODEL`. In the TUI, expand **Ask Fugue to
+compose an experiment** on Compose. `Apply` changes the current form without
+writing files; `Save draft` and `Run draft` are separate explicit actions.
 
-- Run: choose a benchmark/task manifest, model, harnesses, feature variants,
-  prompts, skills, context systems, preset/workloads, trial count, and concurrency.
-- Compare: inspect pass rate, reward, tokens, cost, failures, run keys, and
-  retrieval/evidence metrics, Weave links, and Pareto tradeoffs by workload,
-  context system, harness, prompt, skill, and variant.
-- Setup: check key presence, selected provider/model, bridge health, manifest
-  health, context-system prerequisites/license status, cache state, and links
-  into W&B/Weave.
+The analyst uses a rebuildable local catalog to bucket records by benchmark,
+workload, intervention, experiment, variant, harness, context system, provider,
+model, status, and time. Hybrid analysis starts from normalized local rows and
+enriches the selected cohort from Weave when credentials and connectivity are
+available.
 
-The UI never returns raw API keys; status only reports whether each key is
-present.
+```mermaid
+flowchart TD
+    CONFIGS["Saved experiment definitions and content hashes"] --> CATALOG["SQLite experiment catalog"]
+    RUNTIME["Durable run state and Harbor trial results"] --> CATALOG
+    REPORTS["Normalized JSONL exports and local artifacts"] --> CATALOG
+    WEAVE["Selected Weave calls, costs, conversations, and traces"] --> CATALOG
+    QUESTION["Natural-language analysis question"] --> SCOPE["Deterministic filters and grouping plan"]
+    CATALOG --> SCOPE
+    SCOPE --> SNAPSHOT["Immutable row-id snapshot"]
+    SNAPSHOT --> METRICS["Deterministic pass, reward, latency, token, cost, failure, tool, and retrieval metrics"]
+    METRICS --> ANALYST["Evidence-constrained interpretation"]
+    ARTIFACTS["Bounded redacted artifact excerpts"] --> ANALYST
+    ANALYST --> OUTPUTS["report.md, analysis.json, scope.json, evidence.jsonl"]
+    OUTPUTS --> LINKS["Local evidence and Weave conversation links"]
+```
+
+```bash
+fugue catalog refresh --source hybrid
+fugue catalog facets
+fugue analyze "Which context system improved coding pass rate without excessive latency?"
+fugue analyze "Compare the PDF skill lift by harness" \
+  --filter experiment_id=skillsbench-pdf-ab --save pdf-skill-lift
+fugue analyses list
+fugue analyses run pdf-skill-lift
+```
+
+Saved analysis definitions live in `configs/fugue/analyses`. Each analysis run
+writes an immutable evidence bundle under `reports/analyses/<analysis-id>/`.
+Every generated finding must cite a concrete evidence id. Fugue computes the
+numbers; the analyst only interprets them. Mixed workload/model cohorts are
+stratified and called out instead of being presented as one lift estimate.
+
+Composer and analyst sessions are traced as `fugue-experiment-composer` and
+`fugue-analysis-agent` in Weave Agents. Full trace mode includes requests,
+responses, reports, and tool evidence; metadata mode omits those bodies.
+
+## Terminal Operator
+
+Bare `fugue` opens a keyboard-first Textual workspace. The TUI and headless
+commands call the same presentation-neutral operator services; neither owns
+experiment execution. Secrets are represented only as present or missing.
+
+```text
+  FUGUE / AGENT EXPERIMENT OPERATOR
+  HERMES       ··················  pending
+  OPENCLAW     ······■···········  running
+  CLAUDE CODE  ··················  pending
+  CODEX        ··················  pending
+
+  [1 Compose] [2 Runs] [3 Results] [4 Setup]
+```
+
+- **Compose** loads or saves an experiment, edits variant prompt/skill/context
+  choices, selects target/builder/judge models, previews exact cells, and starts
+  attached or detached work.
+- **Runs** shows durable runs, a harness-by-variant cell matrix, combined or
+  per-cell logs, cancellation, export, and Weave Agents actions.
+- **Results** summarizes local Harbor trial outcomes by harness, variant, and
+  context system. Detailed conversations and traces stay in Weave.
+- **Setup** checks selected model keys, W&B project, Docker, Harbor, bridge, and
+  full-versus-metadata trace policy without displaying secret values.
+
+```mermaid
+flowchart LR
+    SETUP["1. Setup routes and tools"] --> COMPOSE["2. Compose experiment matrix"]
+    COMPOSE --> PREVIEW["3. Preview exact cells and commands"]
+    PREVIEW --> LAUNCH["4. Launch or detach"]
+    LAUNCH --> RUNS["5. Follow cells and logs"]
+    RUNS --> EXPORT["6. Export and enrich results"]
+    EXPORT --> RESULTS["7. Compare local summaries"]
+    RESULTS --> AGENTS["8. Inspect behavior in Weave Agents"]
+    RUNS --> HARBOR["Inspect artifacts with harbor view jobs"]
+```
+
+Useful keys are `1` through `4` for screens, `/` for command search, `?` for
+help, `r` to run, `d` to detach, `c` to cancel, `e` to export, `a` for Weave
+Agents, and `w` for the selected conversation. Set `FUGUE_NO_ANIMATION=1` or
+`NO_COLOR=1` for a static terminal.
+
+Direct screen navigation and headless operation remain available:
+
+```bash
+fugue tui --screen setup
+fugue status --experiment repo-memory-impact
+fugue runs list
+fugue runs show RUN_ID
+fugue runs logs RUN_ID --follow
+fugue runs logs RUN_ID --cell CELL_ID --follow
+fugue runs cancel RUN_ID
+fugue runs export RUN_ID --fetch-weave --to-weave
+fugue runs open RUN_ID --target agents
+```
+
+### Detached Execution
+
+The operator launches every live run in its own process group. The child owns
+the run even when the TUI exits; a new TUI discovers it from atomic state and
+reattaches. Cancellation terminates the process group and marks unfinished
+cells explicitly instead of leaving them in `running` forever.
+
+```mermaid
+sequenceDiagram
+    participant T as Terminal operator
+    participant S as Run supervisor
+    participant C as Fugue child process group
+    participant H as Harbor cells
+    participant D as .fugue/runtime/RUN_ID
+
+    T->>S: Launch experiment
+    S->>D: Atomically write run.json
+    S->>C: Start detached process group
+    C->>D: Append events and cell states
+    C->>H: Execute bounded concurrent cells
+    H-->>D: Stream combined and per-cell logs
+    T--xT: Exit or detach
+    T->>D: Reopen and recover run
+    T->>S: Cancel when requested
+    S->>C: SIGTERM process group
+    S->>D: Mark unfinished cells cancelled
+```
+
+### Weave Agents
+
+Fugue uses stable agents (`hermes-agent`, `openclaw`, `claude-code`, and
+`codex`) and filterable `fugue.*` attributes. A stateless Harbor trial is one
+conversation with one agent turn; a continuity-capable harness can reuse a
+cohort conversation key across episodes. Provider-only diagnostic sequences
+remain separate from harness conversations. Native harness plugins remain
+authoritative for turn, LLM, and tool spans, so Fugue does not add duplicate
+wrappers.
+
+This follows Weave's documented
+[agent data model](https://docs.wandb.ai/weave/guides/tracking/trace-agents)
+and uses the supported
+[harness integrations](https://docs.wandb.ai/weave/guides/tracking/trace-agent-integrations).
+
+```mermaid
+flowchart TB
+    AGENT["Stable harness agent"] --> CONV["Conversation: one trial or continuity cohort"]
+    CONV --> TURN1["invoke_agent turn"]
+    CONV --> TURN2["later continuity turn"]
+    TURN1 --> LLM1["chat: model call"]
+    TURN1 --> LLM2["chat: model call"]
+    LLM1 --> TOOL1["execute_tool"]
+    LLM2 --> TOOL2["execute_tool"]
+
+    ATTRS["fugue.run_id, experiment, workload, harness, variant, context, task, trial, model, prompt, skills, tags"] --> TURN1
+```
+
+`trace_content` defaults to `full`, which can send prompts, responses,
+reasoning, tool arguments, and tool results to Weave. Harness plugins do not
+provide automatic PII scrubbing. Select `metadata` only for integrations that
+can guarantee content suppression; preflight reports unsupported selections.
+Export joins traces by conversation identity and `fugue.run_key`, then remains
+the sole publisher of normalized evaluation rows.
 
 ## Environment
 
 ```bash
 WANDB_API_KEY=          # Weave tracing; also model billing for wandb/...
+WANDB_BASE_URL=https://api.wandb.ai
 WANDB_ENTITY=wandb      # default trace entity
-WANDB_PROJECT=hermes_agent
+WANDB_PROJECT=fugue-experiments
 FUGUE_RUN_NAME=         # optional; defaults to fugue-<UTC timestamp>
 FUGUE_TAGS=             # optional comma-separated tags
 
@@ -546,13 +712,13 @@ fugue/
 │   ├── context_server.py # normalized context-search MCP server
 │   ├── mcp_proxy.py     # transparent MCP telemetry relay
 │   ├── model_plane.py   # provider routing
-│   └── web.py           # local operator UI
+│   └── tui.py           # Textual terminal operator
 ├── Dockerfile.context   # pinned Fugue context MCP sidecar
 ├── datasets/pilot.yaml
 ├── configs/fugue/       # saved prompts, skills, and experiments
 ├── scripts/
 ├── tasks/
-├── jobs/                # gitignored Harbor and web jobs
+├── jobs/                # gitignored Harbor jobs and artifacts
 ├── reports/             # gitignored exports
 └── .fugue/              # gitignored context cache, runtime, bridge, and JobConfigs
 ```

@@ -1093,7 +1093,7 @@ def run_async(coro: Any) -> Any:
     except RuntimeError:
         return asyncio.run(coro)
 
-    # FastAPI preview handlers already own an event loop. Run the small provider
+    # Operator callers may already own an event loop. Run the small provider
     # lifecycle in a worker thread instead of nesting event loops.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()

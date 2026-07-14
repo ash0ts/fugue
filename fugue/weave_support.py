@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import os
+from collections.abc import Awaitable, Callable, Mapping
 from threading import Lock
 from typing import Any
 
@@ -8,12 +9,31 @@ _INITIALIZED_PROJECTS: set[str] = set()
 _LOCK = Lock()
 
 
-def initialize_weave(project: str) -> Any:
+_WEAVE_ENV_KEYS = (
+    "WANDB_API_KEY",
+    "WANDB_BASE_URL",
+    "WANDB_PUBLIC_BASE_URL",
+    "WF_TRACE_SERVER_URL",
+    "WEAVE_INSECURE_DISABLE_SSL",
+)
+
+
+def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
+    if env is None:
+        return
+    for key in _WEAVE_ENV_KEYS:
+        value = env.get(key)
+        if value is not None:
+            os.environ[key] = value
+
+
+def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
     try:
         import weave
     except ImportError as exc:
         raise RuntimeError("weave is not installed") from exc
     with _LOCK:
+        _apply_weave_environment(env)
         if project not in _INITIALIZED_PROJECTS:
             weave.init(project)
             _INITIALIZED_PROJECTS.add(project)
@@ -32,7 +52,7 @@ async def trace_async_operation(
     from fugue.model_plane import trace_project_slug
 
     try:
-        weave = initialize_weave(trace_project_slug(env))
+        weave = initialize_weave(trace_project_slug(env), env)
     except RuntimeError:
         return await operation()
     result: Any = None

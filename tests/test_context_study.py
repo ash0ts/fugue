@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from fugue.bench.cli import _preparation_targets, _selected_preset
 from fugue.bench.context import list_context_systems
 from fugue.bench.library import get_experiment
-from fugue.web import _render_payload
+from fugue.bench.operator import ExperimentRequest, OperatorService
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,47 +50,27 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
 
 def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) -> None:
     monkeypatch.chdir(REPO_ROOT)
-    runtime = REPO_ROOT / ".fugue" / "runtime" / "web-preview"
+    runtime = REPO_ROOT / ".fugue" / "runtime"
     before = sorted(path.as_posix() for path in runtime.rglob("*") if path.is_file())
 
-    payload = _render_payload(
-        {
-            "experiment_id": "repo-memory-impact",
-            "preset": "smoke",
-            "model": "openai/gpt-5",
-            "run_name": "context-smoke-preview",
-        },
-        write=False,
+    preview = OperatorService(REPO_ROOT).preview(
+        ExperimentRequest(
+            experiment_id="repo-memory-impact",
+            preset="smoke",
+            model="openai/gpt-5",
+            run_name="context-smoke-preview",
+        )
     )
 
-    summary = payload["summary"]
-    assert {key: summary[key] for key in (
-        "cells",
-        "task_count",
-        "trials_per_cell",
-        "variants",
-        "harnesses",
-        "workloads",
-        "systems",
-        "cache_ready_cells",
-    )} == {
-        "cells": 89,
-        "task_count": 6,
-        "trials_per_cell": 1,
-        "variants": 14,
-        "harnesses": 4,
-        "workloads": 4,
-        "systems": 14,
-        "cache_ready_cells": 0,
-    }
-    assert summary["applicable_cells"] + summary["skipped_cells"] == summary["cells"]
-    assert summary["estimated_trials"] <= 95
-    assert {
-        item["workload_id"]: item["task_count"]
-        for item in summary["workload_breakdown"]
-    } == {"retrieval": 3, "qa": 1, "coding": 1, "continuity": 1}
+    assert preview.cells == 89
+    assert preview.applicable_cells <= preview.cells
+    assert preview.estimated_trials <= 95
+    assert len(preview.variants) == 14
+    assert preview.harnesses == ("claude-code", "codex", "hermes", "openclaw")
+    assert preview.workloads == ("coding", "continuity", "qa", "retrieval")
+    assert len(preview.systems) == 14
     after = sorted(path.as_posix() for path in runtime.rglob("*") if path.is_file())
     assert after == before
-    serialized = json.dumps(payload)
+    serialized = json.dumps(asdict(preview))
     assert "OPENAI_API_KEY" not in serialized
     assert "WANDB_API_KEY" not in serialized

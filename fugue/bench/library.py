@@ -120,6 +120,7 @@ class ExperimentSpec:
     workloads: list[WorkloadSpec] = field(default_factory=list)
     presets: list[PresetSpec] = field(default_factory=list)
     default_preset: str | None = None
+    trace_content: str = "full"
     debug: bool = False
     quiet: bool = False
 
@@ -326,6 +327,7 @@ def experiment_from_data(
         workloads=workloads,
         presets=presets,
         default_preset=default_preset,
+        trace_content=_trace_content(raw.get("trace_content")),
         debug=bool(raw.get("debug", False)),
         quiet=bool(raw.get("quiet", False)),
     )
@@ -540,6 +542,13 @@ def _optional_str(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _trace_content(value: Any) -> str:
+    selected = str(value or "full").strip().lower()
+    if selected not in {"full", "metadata"}:
+        raise ValueError("trace_content must be 'full' or 'metadata'")
+    return selected
 
 
 def _string_list(value: Any) -> list[str]:

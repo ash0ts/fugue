@@ -81,11 +81,11 @@ def test_missing_env_separates_model_and_trace_keys() -> None:
 
 def test_trace_project_defaults_to_wandb_shared_project() -> None:
     assert trace_entity_project({}) == (DEFAULT_WANDB_ENTITY, DEFAULT_WANDB_PROJECT)
-    assert trace_project_slug({}) == "wandb/hermes_agent"
+    assert trace_project_slug({}) == "wandb/fugue-experiments"
     assert trace_env_defaults({}) == {
         "WANDB_ENTITY": "wandb",
-        "WANDB_PROJECT": "hermes_agent",
-        "WEAVE_PROJECT": "wandb/hermes_agent",
+        "WANDB_PROJECT": "fugue-experiments",
+        "WEAVE_PROJECT": "wandb/fugue-experiments",
     }
     assert trace_entity_project({"WEAVE_PROJECT": "custom/project"}) == (
         "custom",

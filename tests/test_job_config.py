@@ -107,6 +107,8 @@ tasks:
     assert config["fugue"]["context_version"] == "1"
     assert len(config["fugue"]["context_config_hash"]) == 64
     assert config["fugue"]["agent_config_hash"] == job.agent_config_hash
+    assert config["fugue"]["trace_content"] == "full"
+    assert job.env["FUGUE_TRACE_CONTENT"] == "full"
 
 
 def test_missing_context_capability_is_not_applicable(tmp_path: Path):
@@ -243,6 +245,44 @@ tasks:
     assert job.skip_reason == (
         "runtime:image: provider MCP binding has no pinned runtime_image"
     )
+
+
+def test_metadata_trace_policy_rejects_unsupported_harness(tmp_path: Path):
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="experiment-a",
+        title="Experiment A",
+        trace_content="metadata",
+        variants=[FeatureVariant(id="baseline", label="Baseline")],
+    )
+
+    jobs = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    claude = next(job for job in jobs if job.harness == "claude-code")
+    codex = next(job for job in jobs if job.harness == "codex")
+    assert claude.applicable is False
+    assert "cannot guarantee metadata-only" in str(claude.skip_reason)
+    assert codex.applicable is True
+    assert codex.env["FUGUE_TRACE_CONTENT"] == "metadata"
+    assert codex.config["fugue"]["trace_content"] == "metadata"
 
 
 def test_context_workload_renders_one_native_binding_per_task(tmp_path: Path):

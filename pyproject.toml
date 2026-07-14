@@ -12,6 +12,9 @@ dependencies = [
     "httpx",
     "filelock==3.29.7",
     "pyyaml",
+    "rich==15.0.0",
+    "rich-argparse==1.8.0",
+    "textual==8.2.8",
     "weave",
 ]
 
@@ -22,10 +25,6 @@ fugue = "fugue.bench.cli:main"
 dev = [
     "pytest",
     "ruff",
-]
-web = [
-    "fastapi",
-    "uvicorn",
 ]
 context = [
     "fastembed==0.8.0",
@@ -38,9 +37,6 @@ context = [
 
 [tool.setuptools.packages.find]
 include = ["fugue*"]
-
-[tool.setuptools.package-data]
-fugue = ["web_static/*"]
 
 [tool.ruff]
 line-length = 88

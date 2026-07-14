@@ -149,6 +149,12 @@ def _build_jobs(
                 required_capabilities or [],
                 runtime,
             )
+            if experiment.trace_content == "metadata" and harness.name == "claude-code":
+                applicable = False
+                skip_reason = (
+                    "Claude Code tracing cannot guarantee metadata-only capture; "
+                    "use trace_content: full or exclude claude-code"
+                )
             for tasks in task_groups:
                 job_name = _job_name(
                     run_name=selected_run_name,
@@ -381,6 +387,7 @@ def _job_config(
         "task_id": tasks[0].id,
         "model_provider": route.provider,
         "model": route.display_model,
+        "trace_content": experiment.trace_content,
     }
     return _drop_empty(config)
 
@@ -542,6 +549,7 @@ def _job_env(
             "FUGUE_TASK_NAME": task_id,
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
+            "FUGUE_TRACE_CONTENT": experiment.trace_content,
             "PYTHONPATH": _prepend_path(repo_root, base_env.get("PYTHONPATH")),
         }
     )

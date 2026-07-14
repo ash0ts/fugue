@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import os
 import shutil
 import subprocess
@@ -148,12 +147,7 @@ def _append_local_tool_checks(
             f"harbor found at {harbor}" if harbor else "harbor CLI not found",
         )
     )
-    try:
-        importlib.import_module("fugue.agents")
-        detail = f"fugue.agents importable from {Path(repo_root).resolve()}"
-        checks.append(PreflightCheck("adapters", True, detail))
-    except Exception as exc:
-        checks.append(PreflightCheck("adapters", False, str(exc)))
+    checks.append(harbor_import_check(repo_root))
 
 
 def _check_provider_metadata(
@@ -185,10 +179,10 @@ def _check_provider_metadata(
 def harbor_import_check(repo_root: Path | str) -> PreflightCheck:
     harbor = shutil.which("harbor")
     if not harbor:
-        return PreflightCheck("harbor python", False, "harbor CLI not found")
-    harbor_py = Path(harbor).parent / "python"
+        return PreflightCheck("adapters", False, "harbor CLI not found")
+    harbor_py = Path(harbor).resolve().parent / "python"
     if not harbor_py.exists():
-        return PreflightCheck("harbor python", False, f"{harbor_py} not found")
+        return PreflightCheck("adapters", False, f"{harbor_py} not found")
     result = subprocess.run(
         [harbor_py.as_posix(), "-c", "import fugue.agents"],
         cwd=repo_root,
@@ -196,7 +190,7 @@ def harbor_import_check(repo_root: Path | str) -> PreflightCheck:
         text=True,
     )
     return PreflightCheck(
-        "harbor python",
+        "adapters",
         result.returncode == 0,
         "fugue.agents importable under harbor python"
         if result.returncode == 0

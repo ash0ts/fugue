@@ -9,7 +9,7 @@ Provider = Literal["wandb", "openai", "anthropic"]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
-DEFAULT_WANDB_PROJECT = "hermes_agent"
+DEFAULT_WANDB_PROJECT = "fugue-experiments"
 WANDB_INFERENCE_BASE_URL = "https://api.inference.wandb.ai/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"

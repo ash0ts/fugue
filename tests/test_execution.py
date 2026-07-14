@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,8 @@ from fugue.bench.execution import (
     execute_cells,
     latest_cell_records,
     new_run_id,
+    read_run_manifest,
+    write_run_manifest,
 )
 from fugue.bench.export import export_rows
 
@@ -85,6 +88,16 @@ def test_cells_are_bounded_failure_isolated_and_durable(tmp_path: Path) -> None:
         "not_applicable",
     }
     assert all(row["record_type"] == "cell" for row in rows)
+    events = [
+        json.loads(line)
+        for line in (state_path.parent / "events.jsonl").read_text().splitlines()
+    ]
+    assert any(
+        event["event"] == "cell_state"
+        and event["cell_id"] == "cell-fail"
+        and event["status"] == "failed"
+        for event in events
+    )
 
 
 def test_run_ids_are_immutable_and_unique() -> None:
@@ -98,3 +111,24 @@ def test_execution_rejects_mixed_runs_and_duplicate_cells(tmp_path: Path) -> Non
         execute_cells([first, second_run], repo_root=tmp_path, max_workers=1)
     with pytest.raises(ValueError, match="cell ids must be unique"):
         execute_cells([first, first], repo_root=tmp_path, max_workers=1)
+
+
+def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -> None:
+    barrier = threading.Barrier(3)
+
+    def update(values):
+        barrier.wait()
+        write_run_manifest(tmp_path, "run-atomic", values)
+
+    first = threading.Thread(target=update, args=({"pid": 123},))
+    second = threading.Thread(target=update, args=({"trace_project": "team/project"},))
+    first.start()
+    second.start()
+    barrier.wait()
+    first.join()
+    second.join()
+
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime/run-atomic")
+    assert manifest is not None
+    assert manifest["pid"] == 123
+    assert manifest["trace_project"] == "team/project"

@@ -13,10 +13,31 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from filelock import FileLock
+
+from fugue.redaction import redact_text, secrets_from_env
+
 if TYPE_CHECKING:
     from fugue.bench.job_config import RenderedJob
 
-CellStatus = Literal["pending", "running", "passed", "failed", "not_applicable"]
+CellStatus = Literal[
+    "pending",
+    "running",
+    "passed",
+    "failed",
+    "not_applicable",
+    "cancelled",
+    "interrupted",
+]
+RunStatus = Literal[
+    "starting",
+    "running",
+    "passed",
+    "failed",
+    "cancelled",
+    "interrupted",
+]
+EventCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -118,7 +139,8 @@ def execute_cells(
     *,
     repo_root: Path,
     max_workers: int,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
+    event_callback: EventCallback | None = None,
 ) -> list[CellOutcome]:
     if max_workers < 1:
         raise ValueError("cell concurrency must be positive")
@@ -128,30 +150,45 @@ def execute_cells(
     cell_ids = [cell.id for cell in cells]
     if len(set(cell_ids)) != len(cell_ids):
         raise ValueError("cell ids must be unique within an execution")
-    store = _CellStore(repo_root / ".fugue" / "runtime" / cells[0].run_id) if cells else None
+    store = (
+        _RunStore(repo_root / ".fugue" / "runtime" / cells[0].run_id, event_callback)
+        if cells
+        else None
+    )
     runnable: list[PlannedCell] = []
     outcomes: list[CellOutcome] = []
     for cell in cells:
         assert store is not None
-        store.append(cell.record("pending"))
+        store.append_cell(cell.record("pending"))
+        store.append_event("cell_state", cell=cell, status="pending")
         if cell.applicable:
             runnable.append(cell)
         else:
-            store.append(cell.record("not_applicable"))
+            store.append_cell(cell.record("not_applicable"))
+            store.append_event(
+                "cell_state",
+                cell=cell,
+                status="not_applicable",
+                message=cell.skip_reason,
+            )
             outcomes.append(CellOutcome(cell.id, "not_applicable"))
 
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
-        store.append(cell.record("running"))
+        store.append_cell(cell.record("running"))
+        store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
         try:
-            result = runner(
-                list(cell.command),
-                check=False,
-                env=cell.env,
-                cwd=repo_root,
-            )
-            returncode = int(result.returncode)
+            if runner is None:
+                returncode = _run_cell_process(cell, repo_root, store)
+            else:
+                result = runner(
+                    list(cell.command),
+                    check=False,
+                    env=cell.env,
+                    cwd=repo_root,
+                )
+                returncode = int(result.returncode)
             status: CellStatus = "passed" if returncode == 0 else "failed"
             outcome = CellOutcome(cell.id, status, returncode=returncode)
         except Exception as exc:
@@ -161,7 +198,7 @@ def execute_cells(
                 error=f"{type(exc).__name__}: {exc}",
             )
         ended = datetime.now(UTC)
-        store.append(
+        store.append_cell(
             cell.record(
                 outcome.status,
                 returncode=outcome.returncode,
@@ -170,6 +207,14 @@ def execute_cells(
                 ended_at=ended.isoformat(),
                 wall_time_sec=(ended - started).total_seconds(),
             )
+        )
+        store.append_event(
+            "cell_state",
+            cell=cell,
+            status=outcome.status,
+            returncode=outcome.returncode,
+            message=outcome.error,
+            wall_time_sec=(ended - started).total_seconds(),
         )
         return outcome
 
@@ -180,26 +225,107 @@ def execute_cells(
     return outcomes
 
 
+def _run_cell_process(cell: PlannedCell, repo_root: Path, store: _RunStore) -> int:
+    log_path = store.logs_dir / f"{cell.id}.log"
+    process = subprocess.Popen(
+        list(cell.command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=cell.env,
+        cwd=repo_root,
+    )
+    secrets = secrets_from_env(cell.env)
+    with log_path.open("a") as log:
+        assert process.stdout is not None
+        for line in process.stdout:
+            safe_line = redact_text(line, secrets)
+            log.write(safe_line)
+            log.flush()
+            print(safe_line, end="", flush=True)
+            store.append_event("log", cell=cell, chunk=safe_line)
+    return process.wait()
+
+
 def write_run_manifest(repo_root: Path, run_id: str, values: dict[str, Any]) -> Path:
     path = repo_root / ".fugue" / "runtime" / run_id / "run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    temp.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "run_id": run_id,
-                "created_at": datetime.now(UTC).isoformat(),
-                **values,
-            },
-            indent=2,
-            sort_keys=True,
-            default=str,
+    with FileLock(path.with_suffix(".lock").as_posix()):
+        existing = read_run_manifest(path.parent) or {}
+        created_at = existing.get("created_at") or datetime.now(UTC).isoformat()
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(
+            json.dumps(
+                {
+                    **existing,
+                    "schema_version": 2,
+                    "run_id": run_id,
+                    "created_at": created_at,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                    **values,
+                },
+                indent=2,
+                sort_keys=True,
+                default=str,
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    os.replace(temp, path)
+        os.replace(temp, path)
     return path
+
+
+def read_run_manifest(run_dir: Path) -> dict[str, Any] | None:
+    path = run_dir if run_dir.name == "run.json" else run_dir / "run.json"
+    try:
+        value = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def list_run_manifests(repo_root: Path) -> list[dict[str, Any]]:
+    runtime = repo_root / ".fugue" / "runtime"
+    if not runtime.exists():
+        return []
+    values = [
+        value
+        for path in runtime.glob("*/run.json")
+        if (value := read_run_manifest(path)) is not None
+    ]
+    return sorted(
+        values,
+        key=lambda item: str(item.get("created_at") or item.get("run_id") or ""),
+        reverse=True,
+    )
+
+
+def mark_unfinished_cells(
+    run_dir: Path,
+    status: Literal["cancelled", "interrupted"],
+    *,
+    message: str,
+) -> None:
+    state_path = run_dir / "cells.jsonl"
+    latest = latest_cell_records(state_path)
+    store = _RunStore(run_dir)
+    for record in latest:
+        if record.get("status") not in {"pending", "running"}:
+            continue
+        updated = {
+            **record,
+            "status": status,
+            "error": message,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "ended_at": datetime.now(UTC).isoformat(),
+        }
+        store.append_cell(updated)
+        store.append_event(
+            "cell_state",
+            cell_id=str(record.get("cell_id") or ""),
+            status=status,
+            message=message,
+        )
 
 
 def latest_cell_records(path: Path) -> list[dict[str, Any]]:
@@ -216,14 +342,46 @@ def latest_cell_records(path: Path) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
-class _CellStore:
-    def __init__(self, run_dir: Path):
-        self.path = run_dir / "cells.jsonl"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+class _RunStore:
+    def __init__(
+        self, run_dir: Path, event_callback: EventCallback | None = None
+    ) -> None:
+        self.run_dir = run_dir
+        self.cells_path = run_dir / "cells.jsonl"
+        self.events_path = run_dir / "events.jsonl"
+        self.logs_dir = run_dir / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._event_callback = event_callback
         self._lock = threading.Lock()
+        self._cells_file_lock = FileLock(f"{self.cells_path}.lock")
+        self._events_file_lock = FileLock(f"{self.events_path}.lock")
 
-    def append(self, record: dict[str, Any]) -> None:
+    def append_cell(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, sort_keys=True, default=str) + "\n"
-        with self._lock, self.path.open("a") as handle:
+        with self._lock, self._cells_file_lock, self.cells_path.open("a") as handle:
             handle.write(line)
             handle.flush()
+
+    def append_event(
+        self,
+        event: str,
+        *,
+        cell: PlannedCell | None = None,
+        cell_id: str | None = None,
+        **data: Any,
+    ) -> None:
+        record = {
+            "schema_version": 1,
+            "event_id": uuid.uuid4().hex,
+            "event": event,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "run_id": cell.run_id if cell else self.run_dir.name,
+            "cell_id": cell.id if cell else cell_id,
+            **data,
+        }
+        line = json.dumps(record, sort_keys=True, default=str) + "\n"
+        with self._lock, self._events_file_lock, self.events_path.open("a") as handle:
+            handle.write(line)
+            handle.flush()
+        if self._event_callback is not None:
+            self._event_callback(record)

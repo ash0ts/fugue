@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+import uuid
+
+AGENT_NAMES = {
+    "hermes": "hermes-agent",
+    "openclaw": "openclaw",
+    "claude-code": "claude-code",
+    "codex": "codex",
+    "letta": "letta",
+}
+CONVERSATION_NAMESPACE = uuid.UUID("218f38ca-7fe1-4db2-96e0-30f9b62c20eb")
+
+def stable_agent_name(harness: str) -> str:
+    return AGENT_NAMES.get(harness, harness)
+
+
+def conversation_id(run_or_cohort_key: str) -> str:
+    if not run_or_cohort_key:
+        raise ValueError("conversation key cannot be empty")
+    return str(uuid.uuid5(CONVERSATION_NAMESPACE, run_or_cohort_key))
+
+
+def normalize_trace_content(value: str | None) -> str:
+    selected = str(value or "full").strip().lower()
+    if selected not in {"full", "metadata"}:
+        raise ValueError("trace content must be 'full' or 'metadata'")
+    return selected

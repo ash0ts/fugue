@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ def export_rows(
     *,
     fetch_weave: bool = False,
     weave_project: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     rows = [
         *[_row_from_trial(path) for job in jobs for path in _trial_result_paths(job)],
@@ -33,9 +35,24 @@ def export_rows(
         run_keys = list(
             dict.fromkeys(str(row["run_key"]) for row in rows if row.get("run_key"))
         )
+        conversation_ids = {
+            str(row["run_key"]): [
+                str(value)
+                for value in (
+                    row.get("weave_conversation_ids")
+                    or row.get("native_session_ids")
+                    or []
+                )
+                if value
+            ]
+            for row in rows
+            if row.get("run_key")
+        }
         spans = fetch_weave_summaries(
             run_keys=run_keys,
-            project=weave_project or _weave_project_from_env(),
+            conversation_ids_by_run=conversation_ids,
+            project=weave_project or _weave_project_from_env(env),
+            env=env,
         )
         for row in rows:
             if row.get("run_key"):
@@ -142,9 +159,10 @@ def publish_to_weave(
     *,
     ledger_root: Path | None = None,
     republish: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> int:
-    project = project or _weave_project_from_env()
-    weave = initialize_weave(project)
+    project = project or _weave_project_from_env(env)
+    weave = initialize_weave(project, env)
     logger_cls = getattr(weave, "EvaluationLogger", None)
     if logger_cls is None:
         raise RuntimeError("installed weave package has no EvaluationLogger")
@@ -250,20 +268,28 @@ def _weave_safe_row(row: dict[str, Any]) -> dict[str, Any]:
 def fetch_weave_summaries(
     *,
     run_keys: list[str],
+    conversation_ids_by_run: Mapping[str, list[str]] | None = None,
     project: str,
     timeout_sec: float = 30.0,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    api_key = os.environ.get("WANDB_API_KEY")
+    values = env if env is not None else os.environ
+    api_key = values.get("WANDB_API_KEY")
     if not api_key:
         raise RuntimeError("WANDB_API_KEY is required to fetch Weave spans")
-    base_url = os.environ.get("WEAVE_BASE_URL", "https://api.wandb.ai").rstrip("/")
+    base_url = values.get("WEAVE_BASE_URL", "https://api.wandb.ai").rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     summaries: dict[str, dict[str, Any]] = {}
     with httpx.Client(timeout=timeout_sec, headers=headers) as client:
         for run_key in run_keys:
             summaries[run_key] = _summarize_spans(
                 _fetch_calls_spans(client, base_url, project, run_key)
-                + _fetch_agents_spans(client, base_url, project, run_key)
+                + _fetch_agents_spans(
+                    client,
+                    base_url,
+                    project,
+                    (conversation_ids_by_run or {}).get(run_key, []),
+                )
             )
     return summaries
 
@@ -296,25 +322,118 @@ def _fetch_calls_spans(
 
 
 def _fetch_agents_spans(
-    client: httpx.Client, base_url: str, project: str, run_key: str
+    client: httpx.Client,
+    base_url: str,
+    project: str,
+    conversation_ids: list[str],
 ) -> list[dict[str, Any]]:
-    payload = {"project_id": project, "filter": {"agent_name": run_key}}
-    response = client.post(f"{base_url}/agents/spans/query", json=payload)
-    if response.status_code >= 400:
-        return []
-    data = response.json()
-    return data if isinstance(data, list) else data.get("spans", [])
+    spans: list[dict[str, Any]] = []
+    for conversation_id in dict.fromkeys(conversation_ids):
+        payload = {
+            "project_id": project,
+            "filter": {"conversation_id": conversation_id},
+        }
+        response = client.post(f"{base_url}/agents/spans/query", json=payload)
+        if response.status_code >= 400:
+            continue
+        data = response.json()
+        values = data if isinstance(data, list) else data.get("spans", [])
+        spans.extend(value for value in values if isinstance(value, dict))
+    return spans
 
 
 def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
-    text = json.dumps(spans)
+    unique: dict[str, dict[str, Any]] = {}
+    for index, span in enumerate(spans):
+        identity = str(
+            span.get("id")
+            or span.get("span_id")
+            or span.get("call_id")
+            or f"row-{index}"
+        )
+        unique[identity] = span
+    values = list(unique.values())
+    operations = [_span_operation(span) for span in values]
+    attributes = [_span_attributes(span) for span in values]
+    text = json.dumps(values)
+    conversation_ids = sorted(
+        {
+            str(value)
+            for attrs in attributes
+            if (value := attrs.get("gen_ai.conversation.id"))
+        }
+    )
+    trace_ids = sorted(
+        {str(value) for span in values if (value := _span_value(span, "trace_id"))}
+    )
+    root_span_ids = sorted(
+        {
+            str(_span_value(span, "id") or _span_value(span, "span_id"))
+            for span in values
+            if _span_operation(span) == "invoke_agent"
+            and not (_span_value(span, "parent_id") or _span_value(span, "parent_span_id"))
+        }
+        - {"None"}
+    )
+    call_ids = [
+        str(value)
+        for span in values
+        if (value := _span_value(span, "id") or _span_value(span, "call_id"))
+    ]
     return {
-        "weave_span_count": len(spans),
+        "weave_span_count": len(values),
+        "weave_turn_count": operations.count("invoke_agent"),
+        "weave_llm_call_count": operations.count("chat"),
+        "weave_tool_call_count": operations.count("execute_tool"),
+        "weave_error_count": sum(_span_has_error(span) for span in values),
+        "weave_conversation_ids": conversation_ids,
+        "weave_trace_ids": trace_ids,
+        "weave_root_span_ids": root_span_ids,
+        "weave_call_id": call_ids[0] if call_ids else None,
+        "weave_input_tokens": _sum_attribute(attributes, "gen_ai.usage.input_tokens"),
+        "weave_output_tokens": _sum_attribute(attributes, "gen_ai.usage.output_tokens"),
         "context_read_count": text.count(".fugue-context")
         + text.count("AGENTS.md")
         + text.count("openwiki")
         + text.count("context_search"),
     }
+
+
+def _span_attributes(span: dict[str, Any]) -> dict[str, Any]:
+    attributes = span.get("attributes") or {}
+    return attributes if isinstance(attributes, dict) else {}
+
+
+def _span_operation(span: dict[str, Any]) -> str:
+    attrs = _span_attributes(span)
+    value = attrs.get("gen_ai.operation.name") or span.get("operation")
+    if value:
+        return str(value)
+    name = str(span.get("name") or span.get("op_name") or "")
+    return name.split(" ", 1)[0]
+
+
+def _span_value(span: dict[str, Any], key: str) -> Any:
+    return span.get(key) or _span_attributes(span).get(key)
+
+
+def _span_has_error(span: dict[str, Any]) -> bool:
+    status = span.get("status") or _span_attributes(span).get("status")
+    return bool(
+        span.get("exception")
+        or span.get("error")
+        or str(status).lower() == "error"
+    )
+
+
+def _sum_attribute(attributes: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for values in attributes:
+        try:
+            total += int(values.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def _trial_result_paths(job: Path) -> list[Path]:
@@ -399,7 +518,12 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_artifact": meta.get("context_artifact"),
         **context_events,
         **evidence,
-        "session_ids": meta.get("session_ids", []),
+        "weave_agent_name": meta.get("weave_agent_name"),
+        "weave_conversation_key": meta.get("weave_conversation_key"),
+        "weave_conversation_id": meta.get("weave_conversation_id"),
+        "weave_conversation_ids": meta.get("weave_conversation_ids", []),
+        "native_session_ids": meta.get("native_session_ids", []),
+        "trace_content": meta.get("trace_content", "full"),
         "trial_dir": trial_dir.as_posix(),
     }
 
@@ -674,5 +798,5 @@ def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _weave_project_from_env() -> str:
-    return trace_project_slug(os.environ)
+def _weave_project_from_env(env: Mapping[str, str] | None = None) -> str:
+    return trace_project_slug(env if env is not None else os.environ)
