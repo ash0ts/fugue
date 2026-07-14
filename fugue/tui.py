@@ -120,8 +120,8 @@ class HelpScreen(ModalScreen[None]):
         with Vertical(id="help-panel"):
             yield Label("FUGUE / KEYBOARD", classes="section-title")
             yield Static(
-                "1 Compose     2 Runs       3 Results      4 Setup\n"
-                "/ Commands    r Run        d Detach       c Cancel\n"
+                "1 Plan        2 Runs       3 Results      4 Setup\n"
+                "/ Commands    r Run                       c Cancel\n"
                 "e Export      a Agents     w Trace        ? Help\n\n"
                 "Fugue operates experiments locally. Weave Agents explains each "
                 "conversation, turn, model call, and tool invocation."
@@ -389,14 +389,13 @@ class FugueApp(App[None]):
     Footer { background: $panel; color: #9CA3AF; }
     """
     BINDINGS = [
-        Binding("1", "show_compose", "Compose", show=True),
+        Binding("1", "show_compose", "Plan", show=True),
         Binding("2", "show_runs", "Runs", show=True),
         Binding("3", "show_results", "Results", show=True),
         Binding("4", "show_setup", "Setup", show=True),
         Binding("/", "command_palette", "Commands", show=False),
         Binding("?", "help", "Help", show=False),
         Binding("r", "run", "Run", show=False),
-        Binding("d", "detach", "Detach", show=False),
         Binding("c", "cancel", "Cancel", show=False),
         Binding("e", "export", "Export", show=False),
         Binding("a", "open_agents", "Agents", show=False),
@@ -410,16 +409,19 @@ class FugueApp(App[None]):
         service: OperatorService | None = None,
         initial_screen: str = "compose",
         experiment_id: str = "pilot",
+        initial_draft: Any = None,
     ) -> None:
         super().__init__()
         self.service = service or OperatorService()
         self.initial_screen = initial_screen
         self.experiment_id = experiment_id
+        self.initial_draft = initial_draft
         self.selected_run_id: str | None = None
         self.selected_cell_id: str | None = None
         self.last_preview: ExperimentRequest | None = None
         self.composer_draft: Any = None
         self.applied_draft: Any = None
+        self.analysis_preview: Any = None
         self.analysis_result: Any = None
         self._log_target: tuple[str, str | None] | None = None
         self._log_offset = 0
@@ -428,7 +430,7 @@ class FugueApp(App[None]):
         yield Static("FUGUE  /  AGENT EXPERIMENT OPERATOR", id="masthead")
         yield PixelSequencer()
         with TabbedContent(initial=self.initial_screen, id="workspace"):
-            with TabPane("Compose", id="compose"):
+            with TabPane("Plan", id="compose"):
                 yield from self._compose_experiment()
             with TabPane("Runs", id="runs"):
                 yield from self._compose_runs()
@@ -461,8 +463,6 @@ class FugueApp(App[None]):
                 yield SelectionList(id="variant-list")
                 yield Label("Workloads", classes="muted")
                 yield SelectionList(id="workload-list")
-                yield Label("Context systems", classes="muted")
-                yield SelectionList(id="system-list")
                 with Horizontal():
                     yield Input(placeholder="Trials", type="integer", id="attempts-input")
                     yield Input(placeholder="Tasks", type="integer", id="tasks-input")
@@ -480,7 +480,7 @@ class FugueApp(App[None]):
                 )
             with VerticalScroll(classes="summary-column"):
                 with Collapsible(
-                    title="Ask Fugue to compose an experiment",
+                    title="Ask Fugue to plan an experiment",
                     collapsed=True,
                     id="composer-drawer",
                 ):
@@ -507,7 +507,6 @@ class FugueApp(App[None]):
                 with Horizontal(classes="button-row"):
                     yield Button("Preview", id="preview", variant="default")
                     yield Button("Run", id="run-live", variant="primary")
-                    yield Button("Detach", id="run-detached")
                 with Horizontal(classes="button-row"):
                     yield Button("Edit variant", id="edit-variant")
                     yield Button("Save as", id="save-experiment")
@@ -550,7 +549,7 @@ class FugueApp(App[None]):
                         id="analysis-filters",
                     )
                     yield Select(
-                        [("Hybrid", "hybrid"), ("Local", "local"), ("Weave", "weave")],
+                        [("Hybrid", "hybrid"), ("Local", "local")],
                         value="hybrid",
                         allow_blank=False,
                         id="analysis-source",
@@ -560,7 +559,8 @@ class FugueApp(App[None]):
                     id="analysis-model",
                 )
                 with Horizontal(classes="button-row"):
-                    yield Button("Analyze", id="analyze-ai", variant="primary")
+                    yield Button("Resolve scope", id="analyze-ai", variant="primary")
+                    yield Button("Generate report", id="generate-analysis")
                     yield Input(
                         placeholder="Saved analysis id",
                         id="analysis-save-id",
@@ -582,10 +582,19 @@ class FugueApp(App[None]):
 
     def on_mount(self) -> None:
         self._load_experiment(self.experiment_id)
+        if self.initial_draft is not None:
+            self.call_after_refresh(self._apply_initial_draft)
         self._refresh_runs()
         self._refresh_results()
         self._refresh_setup()
         self.set_interval(1.0, self._poll_runs)
+
+    def _apply_initial_draft(self) -> None:
+        draft = self.initial_draft
+        self.initial_draft = None
+        if draft is not None:
+            self._show_composer_draft(draft)
+            self._apply_ai_draft()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "experiment-select" and event.value != Select.NULL:
@@ -595,8 +604,7 @@ class FugueApp(App[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         actions = {
             "preview": self._preview,
-            "run-live": lambda: self._launch(attached=True),
-            "run-detached": lambda: self._launch(attached=False),
+            "run-live": self._launch,
             "edit-variant": self._edit_variant,
             "save-experiment": self._save_experiment,
             "compose-ai": self._compose_with_ai,
@@ -611,6 +619,7 @@ class FugueApp(App[None]):
             "refresh-results": self._refresh_results,
             "results-agents": self.action_open_agents,
             "analyze-ai": self._analyze_with_ai,
+            "generate-analysis": self._generate_analysis,
             "save-analysis": self._save_analysis,
             "run-preflight": self._run_preflight,
             "start-bridge": self._start_bridge,
@@ -650,7 +659,7 @@ class FugueApp(App[None]):
     def _compose_with_ai(self) -> None:
         request = self.query_one("#composer-request", Input).value.strip()
         if not request:
-            self.notify("Describe the experiment you want to compose", severity="warning")
+            self.notify("Describe the experiment you want to plan", severity="warning")
             return
         model = self.query_one("#composer-model", Input).value.strip() or None
         trace_content = str(self.query_one("#trace-content-select", Select).value)
@@ -714,7 +723,7 @@ class FugueApp(App[None]):
             f"{self.composer_draft.preview.estimated_trials} estimated trials\n"
             "AI draft applied locally; it is not saved or running."
         )
-        self.notify("Draft applied to Compose without writing files")
+        self.notify("Draft applied to Plan without writing files")
 
     def _save_ai_draft(self) -> None:
         if self.composer_draft is None:
@@ -747,9 +756,15 @@ class FugueApp(App[None]):
                 severity="warning",
                 timeout=6,
             )
+        if self.composer_draft.assets:
+            self.notify(
+                "Save the experiment and its proposed prompt or skill before running",
+                severity="warning",
+            )
+            return
         try:
             experiment = self._experiment_from_form(self.composer_draft.experiment)
-            run = self.service.launch_experiment(experiment, attached=False)
+            run = self.service.launch(self._request(), experiment=experiment)
         except Exception as exc:
             self.notify(str(exc), severity="error")
             return
@@ -772,11 +787,11 @@ class FugueApp(App[None]):
         source = str(self.query_one("#analysis-source", Select).value)
         report = self.query_one("#analysis-report", RichLog)
         report.clear()
-        report.write("Resolving a reproducible experiment scope...")
-        self._analysis_worker(question, filters, model, source)
+        report.write("Planning and resolving a reproducible local scope...")
+        self._analysis_scope_worker(question, filters, model, source)
 
     @work(thread=True, exclusive=True, group="analyst")
-    def _analysis_worker(
+    def _analysis_scope_worker(
         self,
         question: str,
         filters: dict[str, str],
@@ -784,14 +799,53 @@ class FugueApp(App[None]):
         source: str,
     ) -> None:
         try:
-            result = asyncio.run(
-                self.service.analyze_experiments(
+            spec = asyncio.run(
+                self.service.plan_analysis(
                     question,
                     filters=filters,
                     model=model,
                     source=source,
                 )
             )
+            preview = self.service.prepare_analysis(spec)
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(
+                self.query_one("#analysis-report", RichLog).write,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return
+        self.call_from_thread(self._show_analysis_preview, preview)
+
+    def _show_analysis_preview(self, preview: Any) -> None:
+        self.analysis_preview = preview
+        self.analysis_result = None
+        scope = preview.scope
+        self.query_one("#analysis-scope", Static).update(
+            f"{len(scope.experiments)} experiments / "
+            f"{len(scope.runs)} runs / {scope.rows} records / "
+            f"{len(scope.tasks)} tasks\n"
+            f"Models: {', '.join(scope.models)}  Sources: {', '.join(scope.sources)}"
+        )
+        report = self.query_one("#analysis-report", RichLog)
+        report.clear()
+        report.write("Scope resolved locally. Review it, then generate the report explicitly.")
+        self.query_one("#analysis-save-id", Input).value = preview.spec.id
+        self.notify("Analysis scope ready; no Weave query or report call has run yet")
+
+    def _generate_analysis(self) -> None:
+        if self.analysis_preview is None:
+            self.notify("Resolve an analysis scope first", severity="warning")
+            return
+        self.query_one("#analysis-report", RichLog).write(
+            "Enriching the confirmed scope and generating an evidence-backed report..."
+        )
+        self._analysis_report_worker(self.analysis_preview)
+
+    @work(thread=True, exclusive=True, group="analyst")
+    def _analysis_report_worker(self, preview: Any) -> None:
+        try:
+            result = asyncio.run(self.service.execute_analysis(preview))
         except Exception as exc:
             self.call_from_thread(self.notify, str(exc), severity="error")
             self.call_from_thread(
@@ -862,12 +916,7 @@ class FugueApp(App[None]):
 
     def action_run(self) -> None:
         if self.query_one("#workspace", TabbedContent).active == "compose":
-            self._launch(attached=True)
-
-    def action_detach(self) -> None:
-        if self.selected_run_id:
-            self.notify(f"{self.selected_run_id} continues in the background")
-        self.action_show_compose()
+            self._launch()
 
     def action_cancel(self) -> None:
         if not self.selected_run_id:
@@ -881,9 +930,18 @@ class FugueApp(App[None]):
         if not self.selected_run_id:
             self.notify("Select a run to export", severity="warning")
             return
-        self._run_cli(
-            ["runs", "export", self.selected_run_id, "--fetch-weave"],
-            target_log="run-log",
+        self._export_worker(self.selected_run_id)
+
+    @work(thread=True, exclusive=True, group="export")
+    def _export_worker(self, run_id: str) -> None:
+        try:
+            summary = self.service.export_run(run_id, fetch_weave=True)
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            return
+        self.call_from_thread(
+            self.notify,
+            f"Exported {summary.rows} rows to {summary.path}",
         )
 
     def action_open_agents(self) -> None:
@@ -941,10 +999,6 @@ class FugueApp(App[None]):
             "workload-list",
             [(item.id, item.id, True) for item in experiment.workloads]
             or [("Manifest tasks", "harbor", False)],
-        )
-        systems = list(dict.fromkeys(variant.context.system_id for variant in experiment.variants))
-        self._replace_selection(
-            "system-list", [(system, system, True) for system in systems]
         )
         presets = [(item.id, item.id) for item in experiment.presets]
         preset_select = self.query_one("#preset-select", Select)
@@ -1006,7 +1060,6 @@ class FugueApp(App[None]):
             preset=_select_value(self.query_one("#preset-select", Select)),
             workloads=tuple(self.query_one("#workload-list", SelectionList).selected),
             harnesses=tuple(self.query_one("#harness-list", SelectionList).selected),
-            systems=tuple(self.query_one("#system-list", SelectionList).selected),
             variants=tuple(self.query_one("#variant-list", SelectionList).selected),
             model=self.query_one("#model-input", Input).value or None,
             builder_model=self.query_one("#builder-model-input", Input).value or None,
@@ -1040,7 +1093,7 @@ class FugueApp(App[None]):
     ) -> None:
         try:
             preview = (
-                self.service.preview_experiment(experiment)
+                self.service.preview_experiment(experiment, request=request)
                 if experiment is not None
                 else self.service.preview(request)
             )
@@ -1065,7 +1118,7 @@ class FugueApp(App[None]):
         for command in preview.commands:
             log.write(f"$ {command}")
 
-    def _launch(self, *, attached: bool) -> None:
+    def _launch(self) -> None:
         request = self._request()
         if request.trace_content == "full":
             self.notify(
@@ -1074,24 +1127,27 @@ class FugueApp(App[None]):
                 timeout=6,
             )
         try:
+            if self.applied_draft is not None and self.applied_draft.assets:
+                raise ValueError(
+                    "save the experiment and its proposed prompt or skill before running"
+                )
             run = (
-                self.service.launch_experiment(
-                    self._experiment_from_form(self.applied_draft.experiment),
-                    attached=attached,
+                self.service.launch(
+                    request,
+                    experiment=self._experiment_from_form(
+                        self.applied_draft.experiment
+                    ),
                 )
                 if self.applied_draft is not None
-                else self.service.launch(request, attached=attached)
+                else self.service.launch(request)
             )
         except Exception as exc:
             self.notify(str(exc), severity="error")
             return
         self.selected_run_id = run.run_id
         self._refresh_runs()
-        if attached:
-            self.action_show_runs()
-            self._show_run(run.run_id)
-        else:
-            self.notify(f"Started {run.run_id} in the background")
+        self.action_show_runs()
+        self._show_run(run.run_id)
 
     def _refresh_runs(self) -> None:
         table = self.query_one("#runs-table", DataTable)
@@ -1283,15 +1339,7 @@ class FugueApp(App[None]):
                     True,
                     f"{len(status.selected_context_systems)} selected / "
                     f"{status.context_system_count} available / "
-                        f"{status.context_cache_entries} cached",
-                ),
-                (
-                    "Catalog",
-                    status.catalog_records > 0,
-                    (
-                        f"{status.catalog_records} records / "
-                        f"{status.catalog_refreshed_at or 'not refreshed'}"
-                    ),
+                    f"{status.context_cache_entries} cached",
                 ),
             )
         )
@@ -1305,63 +1353,62 @@ class FugueApp(App[None]):
 
     def _run_preflight(self) -> None:
         request = self._request()
-        command = ["preflight", "--experiment", request.experiment_id, "--no-live"]
-        if request.preset:
-            command.extend(["--preset", request.preset])
-        if request.model:
-            command.extend(["--model", request.model])
-        if request.builder_model:
-            command.extend(["--builder-model", request.builder_model])
-        if request.judge_model:
-            command.extend(["--judge-model", request.judge_model])
-        if request.systems:
-            command.extend(["--systems", ",".join(request.systems)])
-        command.extend(["--trace-content", request.trace_content])
-        self._run_cli(command, target_log="setup-log")
+        self.query_one("#setup-log", RichLog).write("Running observational preflight...")
+        self._preflight_worker(request)
+
+    @work(thread=True, exclusive=True, group="setup")
+    def _preflight_worker(self, request: ExperimentRequest) -> None:
+        try:
+            checks = self.service.preflight(request, live=True)
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            return
+        self.call_from_thread(self._show_preflight, checks)
+
+    def _show_preflight(self, checks: tuple[Any, ...]) -> None:
+        log = self.query_one("#setup-log", RichLog)
+        log.clear()
+        for check in checks:
+            log.write(f"{'ready' if check.ok else 'missing':<8} {check.name}: {check.detail}")
+        self.notify(
+            "Preflight passed" if all(check.ok for check in checks) else "Preflight found missing setup",
+            severity="information" if all(check.ok for check in checks) else "warning",
+        )
+        self._refresh_setup()
 
     def _start_bridge(self) -> None:
         request = self._request()
-        command = ["bridge", "up"]
-        if request.model:
-            command.extend(["--model", request.model])
-        if request.builder_model:
-            command.extend(["--builder-model", request.builder_model])
-        if request.judge_model:
-            command.extend(["--judge-model", request.judge_model])
-        self._run_cli(command, target_log="setup-log")
+        self.query_one("#setup-log", RichLog).write("Starting the local model bridge...")
+        self._bridge_worker(request)
 
-    @work(exclusive=True, group="commands")
-    async def _run_cli(self, arguments: list[str], *, target_log: str) -> None:
-        log = self.query_one(f"#{target_log}", RichLog)
-        log.write(f"$ fugue {' '.join(arguments)}")
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "fugue.bench.cli",
-            *arguments,
-            "--repo-root",
-            self.service.repo_root.as_posix(),
-            "--env-file",
-            self.service.env_file.as_posix(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=self.service.repo_root,
-            env=self.service.env,
-        )
-        assert process.stdout is not None
-        while line := await process.stdout.readline():
-            log.write(line.decode(errors="replace").rstrip())
-        returncode = await process.wait()
-        self.notify(
-            "Command completed" if returncode == 0 else f"Command failed ({returncode})",
-            severity="information" if returncode == 0 else "error",
-        )
+    @work(thread=True, exclusive=True, group="setup")
+    def _bridge_worker(self, request: ExperimentRequest) -> None:
+        try:
+            files = self.service.start_bridge(request)
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            return
+        self.call_from_thread(self._show_bridge_started, files.runtime_dir)
+
+    def _show_bridge_started(self, runtime_dir: Any) -> None:
+        self.query_one("#setup-log", RichLog).write(f"Bridge running from {runtime_dir}")
+        self.notify("Bridge started")
         self._refresh_setup()
-        self._refresh_runs()
 
 
-def run_tui(*, initial_screen: str = "compose", experiment_id: str = "pilot") -> None:
-    FugueApp(initial_screen=initial_screen, experiment_id=experiment_id).run()
+def run_tui(
+    *,
+    initial_screen: str = "compose",
+    experiment_id: str = "pilot",
+    service: OperatorService | None = None,
+    initial_draft: Any = None,
+) -> None:
+    FugueApp(
+        service=service,
+        initial_screen=initial_screen,
+        experiment_id=experiment_id,
+        initial_draft=initial_draft,
+    ).run()
 
 
 def _animation_enabled() -> bool:

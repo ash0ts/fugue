@@ -481,7 +481,7 @@ class _TrialMetaMixin:
         if not cache_key or not prepared_dir.is_dir():
             raise FileNotFoundError(
                 f"context artifact not prepared for {system_id}/{task_name}: "
-                f"run `fugue context prepare --system {system_id}` first"
+                f"run `fugue setup --prepare-context --systems {system_id}` first"
             )
 
         repo_root = await self._container_repo_root(environment)

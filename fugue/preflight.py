@@ -4,13 +4,12 @@ import os
 import shutil
 import subprocess
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import httpx
 
-from fugue.bridge import bridge_status, bridge_up
+from fugue.bridge import bridge_status
 from fugue.model_plane import (
     ModelRoute,
     missing_model_env,
@@ -26,9 +25,6 @@ class PreflightCheck:
     ok: bool
     detail: str
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
 
 def run_preflight(
     model: str | None = None,
@@ -36,9 +32,6 @@ def run_preflight(
     repo_root: Path | str | None = None,
     env: Mapping[str, str] | None = None,
     live: bool = True,
-    start_bridge: bool = True,
-    builder_model: str | None = None,
-    judge_model: str | None = None,
 ) -> list[PreflightCheck]:
     values = env if env is not None else os.environ
     root = Path.cwd() if repo_root is None else Path(repo_root)
@@ -65,18 +58,6 @@ def run_preflight(
     if not missing_model_env(route, values):
         checks.append(_check_provider_metadata(route, values))
 
-    if start_bridge:
-        try:
-            bridge_up(
-                route.display_model,
-                repo_root=root,
-                env=values,
-                builder_model=builder_model,
-                judge_model=judge_model,
-            )
-            checks.append(PreflightCheck("bridge up", True, "docker compose is up"))
-        except Exception as exc:
-            checks.append(PreflightCheck("bridge up", False, str(exc)))
     status = bridge_status()
     checks.append(
         PreflightCheck(
@@ -86,22 +67,6 @@ def run_preflight(
         )
     )
     return checks
-
-
-def print_preflight(checks: list[PreflightCheck]) -> int:
-    passed = 0
-    failed = 0
-    print("== fugue preflight ==")
-    for check in checks:
-        if check.ok:
-            passed += 1
-            marker = "[ok]  "
-        else:
-            failed += 1
-            marker = "[FAIL]"
-        print(f"  {marker} {check.name}: {check.detail}")
-    print(f"== {passed} ok, {failed} failed ==")
-    return 0 if failed == 0 else 1
 
 
 def _append_env_checks(

@@ -19,14 +19,12 @@ variants:
     label: No skill
     context:
       system_id: none
-    enabled: true
   - id: with-pdf-skill
     label: PDF artifact workflow
     skill_ids:
       - pdf-artifact-workflow
     context:
       system_id: none
-    enabled: true
 n_attempts: 2
 n_concurrent: 2
 n_tasks: 3
@@ -39,10 +37,3 @@ artifacts:
   - /root/sc100-filled.pdf
   - /root/diff_report.json
   - /root/redacted
-verifier: {}
-retry: {}
-agent_kwargs: {}
-agent_env: {}
-mcp_servers: []
-debug: false
-quiet: false

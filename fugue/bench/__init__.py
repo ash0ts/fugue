@@ -1,4 +1,4 @@
-"""RepoMemBench prepare/run/export helpers."""
+"""Fugue experiment orchestration helpers."""
 
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
 

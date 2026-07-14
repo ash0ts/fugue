@@ -16,7 +16,6 @@ variants:
     label: Baseline
     context:
       system_id: none
-    enabled: true
   - id: prompt-skill
     label: Prompt + skill
     prompt_id: repository-memory
@@ -24,7 +23,6 @@ variants:
       - repository-orientation
     context:
       system_id: none
-    enabled: true
   - id: context-skill
     label: Repository context + skill
     prompt_id: repository-memory
@@ -32,20 +30,10 @@ variants:
       - repository-orientation
     context:
       system_id: agentsmd
-    enabled: true
 n_attempts: 1
 n_concurrent: 2
-n_tasks:
 jobs_dir: jobs/pilot
 environment:
   type: docker
   cpu_enforcement_policy: auto
   memory_enforcement_policy: auto
-artifacts: []
-verifier: {}
-retry: {}
-agent_kwargs: {}
-agent_env: {}
-mcp_servers: []
-debug: false
-quiet: false

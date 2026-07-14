@@ -1,24 +1,71 @@
 from __future__ import annotations
 
-import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.cli import main
-from fugue.bench.operator import load_env
+from fugue.bench.operator import OperatorService, PreviewSummary, load_env
 
 
-def test_bare_fugue_launches_compose_tui(monkeypatch) -> None:
-    calls = []
-    monkeypatch.setattr(
-        "fugue.bench.cli._tui",
-        lambda args: calls.append((args.screen, args.experiment)) or 0,
-    )
-
+def test_bare_fugue_is_noninteractive_when_not_attached_to_tty(capsys) -> None:
     assert main([]) == 0
-    assert calls == [("compose", "pilot")]
+    output = capsys.readouterr().out
+    for command in ("plan", "run", "runs", "analyze", "setup", "tui"):
+        assert command in output
 
 
-def test_run_dry_run_uses_cli_model_and_neutral_adapter(
+def test_public_command_surface_is_intentionally_small() -> None:
+    from fugue.bench import cli
+
+    subparsers = next(
+        action
+        for action in cli._parser()._actions
+        if isinstance(action, cli.argparse._SubParsersAction)
+    )
+    assert set(subparsers.choices) == {"plan", "run", "runs", "analyze", "setup", "tui"}
+
+
+def test_rich_command_center_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fugue.bench import cli
+
+    parser = cli._parser()
+    terminal = SimpleNamespace(isatty=lambda: True)
+    monkeypatch.setattr(cli.sys, "stdin", terminal)
+    monkeypatch.setattr(cli.sys, "stdout", terminal)
+    monkeypatch.setattr(cli.CONSOLE, "clear", lambda: None)
+    monkeypatch.setattr(cli, "_print_home", lambda service: None)
+    monkeypatch.setattr(cli.Prompt, "ask", lambda *args, **kwargs: "exit")
+
+    assert cli._command_center(parser) == 0
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "render",
+        "export",
+        "preflight",
+        "bridge",
+        "status",
+        "compose",
+        "analyses",
+        "catalog",
+        "prompts",
+        "skills",
+        "experiments",
+        "context",
+    ),
+)
+def test_removed_public_commands_are_rejected(command: str) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        main([command])
+
+
+def test_run_preview_is_side_effect_free(
     tmp_path: Path, capsys
 ) -> None:
     manifest = tmp_path / "pilot.yaml"
@@ -46,7 +93,7 @@ tasks:
                 "unit-exp",
                 "--tags",
                 "nightly,cli",
-                "--dry-run",
+                "--preview",
                 "--repo-root",
                 tmp_path.as_posix(),
                 "--env-file",
@@ -58,17 +105,7 @@ tasks:
 
     out = capsys.readouterr().out
     assert "harbor run --config" in out
-    config_line = next(line for line in out.splitlines() if line.startswith("# config: "))
-    config_path = Path(config_line.removeprefix("# config: "))
-    config = json.loads(config_path.read_text())
-    assert config["agents"][0]["model_name"] == "openai/gpt-5"
-    assert config["agents"][0]["import_path"] == "fugue.agents:FugueCodex"
-    assert config["job_name"] == (
-        "unit-exp-harbor-codex-baseline-astropy-astropy-12907"
-    )
-    assert config["fugue"]["experiment_id"] == "pilot"
-    assert config["fugue"]["variant_id"] == "baseline"
-    assert config["fugue"]["context_system_id"] == "none"
+    assert not (tmp_path / ".fugue").exists()
 
 
 def test_shell_environment_wins_over_blank_dotenv(
@@ -85,19 +122,19 @@ def test_shell_environment_wins_over_blank_dotenv(
     assert env["WANDB_API_KEY"] == "shell-trace"
 
 
-def test_repo_memory_smoke_render_uses_per_workload_limits(tmp_path: Path, capsys) -> None:
+def test_repo_memory_smoke_preview_uses_per_workload_limits(tmp_path: Path, capsys) -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     assert (
         main(
             [
-                "render",
-                "--experiment",
+                "run",
                 "repo-memory-impact",
                 "--preset",
                 "smoke",
                 "--run-name",
                 "smoke-preview",
+                "--preview",
                 "--repo-root",
                 repo_root.as_posix(),
                 "--env-file",
@@ -108,36 +145,75 @@ def test_repo_memory_smoke_render_uses_per_workload_limits(tmp_path: Path, capsy
     )
 
     output = capsys.readouterr().out
-    paths = [
-        Path(line.removeprefix("# config: "))
-        for line in output.splitlines()
-        if line.startswith("# config: ")
-    ]
-    harbor_configs = [json.loads(path.read_text()) for path in paths if path.suffix == ".json"]
-    counts = {
-        workload: {
-            len(item["datasets"][0]["task_names"])
-            for item in harbor_configs
-            if item["fugue"]["workload_id"] == workload
-        }
-        for workload in ("qa", "coding")
-    }
-    assert counts == {"qa": {1}, "coding": {1}}
     assert "--limit 3" in output
     assert "--limit 1" in output
 
 
-def test_catalog_cli_refreshes_local_experiment_buckets(tmp_path: Path, capsys) -> None:
+def test_plan_run_requires_generated_assets_to_be_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from test_operator import make_operator_repo
 
-    make_operator_repo(tmp_path)
+    service = make_operator_repo(tmp_path)
+    draft = _draft(
+        service,
+        assets=(AssetDraft("prompt", "new-prompt", "New prompt", "# New\n"),),
+    )
+
+    async def compose(*args, **kwargs):
+        return draft
+
+    monkeypatch.setattr("fugue.bench.ai.ExperimentComposer.compose", compose)
+    with pytest.raises(ValueError, match="save the experiment"):
+        main(
+            [
+                "plan",
+                "use a new prompt",
+                "--from",
+                "demo",
+                "--run",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+
+
+def test_plan_save_and_run_launches_saved_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_operator import make_operator_repo
+
+    service = make_operator_repo(tmp_path)
+    draft = _draft(service)
+    launched = []
+
+    async def compose(*args, **kwargs):
+        return draft
+
+    def save(self, draft, *, experiment_id, replace_assets=False):
+        return replace(draft.experiment, id=experiment_id)
+
+    def launch(self, request, *, experiment=None):
+        launched.append((request.experiment_id, experiment))
+        return type("Run", (), {"run_id": "run-saved"})()
+
+    monkeypatch.setattr("fugue.bench.ai.ExperimentComposer.compose", compose)
+    monkeypatch.setattr("fugue.bench.ai.ExperimentComposer.save", save)
+    monkeypatch.setattr(OperatorService, "launch", launch)
+
     assert (
         main(
             [
-                "catalog",
-                "refresh",
-                "--source",
-                "local",
+                "plan",
+                "save this",
+                "--from",
+                "demo",
+                "--save",
+                "saved-demo",
+                "--run",
+                "--json",
                 "--repo-root",
                 tmp_path.as_posix(),
                 "--env-file",
@@ -146,4 +222,91 @@ def test_catalog_cli_refreshes_local_experiment_buckets(tmp_path: Path, capsys) 
         )
         == 0
     )
-    assert "1 experiments" in capsys.readouterr().out
+    assert launched == [("saved-demo", None)]
+
+
+def test_run_uses_one_durable_launch_path_and_waits_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_operator import make_operator_repo
+
+    make_operator_repo(tmp_path)
+    launched = []
+    waited = []
+
+    def launch(self, request, *, experiment=None):
+        launched.append((request.experiment_id, experiment))
+        return SimpleNamespace(
+            run_id="run-managed",
+            run_name="Demo",
+            log_path=tmp_path / "combined.log",
+        )
+
+    monkeypatch.setattr(OperatorService, "launch", launch)
+    monkeypatch.setattr(
+        "fugue.bench.cli._wait_for_run",
+        lambda service, run_id: waited.append(run_id) or 0,
+    )
+
+    assert (
+        main(
+            [
+                "run",
+                "demo",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert launched == [("demo", None)]
+    assert waited == ["run-managed"]
+
+    assert (
+        main(
+            [
+                "run",
+                "demo",
+                "--detach",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert len(launched) == 2
+    assert waited == ["run-managed"]
+
+
+def _draft(
+    service: OperatorService,
+    *,
+    assets: tuple[AssetDraft, ...] = (),
+) -> ExperimentDraft:
+    return ExperimentDraft(
+        experiment=service.experiment("demo"),
+        assets=assets,
+        rationale="Controlled demo",
+        assumptions=(),
+        warnings=(),
+        diff="",
+        preview=PreviewSummary(
+            cells=1,
+            applicable_cells=1,
+            estimated_trials=1,
+            harnesses=("codex",),
+            variants=("baseline",),
+            systems=("none",),
+            workloads=("harbor",),
+            commands=(),
+        ),
+        model="openai/gpt-5",
+        provider="openai",
+        session_id="session",
+        input_tokens=1,
+        output_tokens=1,
+    )

@@ -10,18 +10,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from fugue.bench.export import export_rows
 from fugue.bench.library import (
     ExperimentSpec,
     get_experiment,
     list_experiments,
 )
-from fugue.model_plane import trace_project_slug
 from fugue.redaction import redact_value
 
-CATALOG_PATH = Path(".fugue/cache/catalog/v1/catalog.sqlite")
+CATALOG_PATH = Path(".fugue/cache/catalog/v2/catalog.sqlite")
 FILTER_FIELDS = {
     "record_type",
     "experiment_id",
@@ -49,14 +46,12 @@ class CatalogStatus:
     experiments: int
     records: int
     local_records: int
-    weave_records: int
     refreshed_at: str | None
     revision: str | None
 
 
 @dataclass(frozen=True)
 class ArtifactExcerpt:
-    evidence_id: str
     path: str
     sha256: str
     text: str
@@ -64,21 +59,15 @@ class ArtifactExcerpt:
 
 
 class ExperimentCatalog:
-    def __init__(self, repo_root: Path, env: Mapping[str, str] | None = None) -> None:
+    def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root.resolve()
-        self.env = dict(env or {})
         self.path = self.repo_root / CATALOG_PATH
 
-    def refresh(self, *, source: str = "hybrid") -> CatalogStatus:
-        if source not in {"local", "weave", "hybrid"}:
-            raise ValueError("catalog source must be local, weave, or hybrid")
+    def refresh(self) -> CatalogStatus:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             self._create_schema(connection)
-            if source in {"local", "hybrid"}:
-                self._refresh_local(connection)
-            if source in {"weave", "hybrid"}:
-                self._refresh_weave(connection)
+            self._refresh_local(connection)
             now = datetime.now(UTC).isoformat()
             revision = self._revision(connection)
             connection.execute(
@@ -94,32 +83,26 @@ class ExperimentCatalog:
 
     def status(self) -> CatalogStatus:
         if not self.path.is_file():
-            return CatalogStatus(self.path.as_posix(), 0, 0, 0, 0, None, None)
+            return CatalogStatus(self.path.as_posix(), 0, 0, 0, None, None)
         with self._connect() as connection:
             self._create_schema(connection)
             experiments = int(
                 connection.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
             )
             records = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
-            counts = dict(
-                connection.execute(
-                    "SELECT source, COUNT(*) FROM records GROUP BY source"
-                ).fetchall()
-            )
             metadata = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
         return CatalogStatus(
             path=self.path.as_posix(),
             experiments=experiments,
             records=records,
-            local_records=int(counts.get("local", 0)),
-            weave_records=int(counts.get("weave", 0)),
+            local_records=records,
             refreshed_at=metadata.get("refreshed_at"),
             revision=metadata.get("revision"),
         )
 
     def experiment_catalog(self) -> list[dict[str, Any]]:
         if not self.path.is_file():
-            self.refresh(source="local")
+            self.refresh()
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT payload FROM experiments ORDER BY experiment_id"
@@ -130,13 +113,12 @@ class ExperimentCatalog:
         self,
         *,
         filters: Mapping[str, str] | None = None,
-        text: str | None = None,
         limit: int = 10_000,
     ) -> list[dict[str, Any]]:
         if limit < 1:
             raise ValueError("catalog limit must be positive")
         if not self.path.is_file():
-            self.refresh(source="local")
+            self.refresh()
         clauses: list[str] = []
         values: list[Any] = []
         for key, value in (filters or {}).items():
@@ -152,9 +134,6 @@ class ExperimentCatalog:
             else:
                 clauses.append(f"{key} = ?")
             values.append(str(value))
-        if text and text.strip():
-            clauses.append("search_text LIKE ?")
-            values.append(f"%{text.strip().lower()}%")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT payload FROM records{where} ORDER BY created_at DESC LIMIT ?"
         values.append(limit)
@@ -222,7 +201,6 @@ class ExperimentCatalog:
         excerpt = data[:max_bytes].decode(errors="replace")
         digest = hashlib.sha256(data).hexdigest()
         return ArtifactExcerpt(
-            evidence_id=f"artifact:{digest[:16]}",
             path=path.relative_to(self.repo_root).as_posix(),
             sha256=digest,
             text=excerpt,
@@ -312,50 +290,15 @@ class ExperimentCatalog:
         else:
             connection.execute("DELETE FROM records WHERE source = 'local'")
 
-    def _refresh_weave(self, connection: sqlite3.Connection) -> None:
-        if not self.env.get("WANDB_API_KEY", "").strip():
-            return
-        rows = _fetch_weave_records(self.env)
-        seen: set[str] = set()
-        for payload in rows:
-            row_id = _row_id(payload)
-            payload["row_id"] = row_id
-            seen.add(row_id)
-            self._upsert_record(connection, payload)
-        if seen:
-            placeholders = ",".join("?" for _ in seen)
-            connection.execute(
-                f"DELETE FROM records WHERE source = 'weave' AND row_id NOT IN ({placeholders})",
-                tuple(sorted(seen)),
-            )
-        else:
-            connection.execute("DELETE FROM records WHERE source = 'weave'")
-
     def _upsert_record(self, connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
-        search_text = " ".join(
-            str(payload.get(key) or "")
-            for key in (
-                "experiment_id",
-                "run_id",
-                "run_name",
-                "workload_id",
-                "task_name",
-                "harness",
-                "variant_id",
-                "context_system_id",
-                "model",
-                "tags",
-                "exception_message",
-            )
-        ).lower()
         connection.execute(
             """
             INSERT OR REPLACE INTO records(
                 row_id, source, record_type, experiment_id, run_id, run_key,
                 workload_id, task_name, harness, variant_id, context_system_id,
                 provider, model, status, intervention_type, created_at,
-                search_text, payload
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                payload
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["row_id"],
@@ -374,7 +317,6 @@ class ExperimentCatalog:
                 payload.get("status"),
                 payload.get("intervention_type"),
                 payload.get("created_at") or payload.get("started_at") or "",
-                search_text,
                 json.dumps(payload, sort_keys=True, default=str),
             ),
         )
@@ -427,7 +369,6 @@ class ExperimentCatalog:
                 status TEXT,
                 intervention_type TEXT,
                 created_at TEXT,
-                search_text TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_records_experiment ON records(experiment_id);
@@ -525,66 +466,4 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
             continue
         if isinstance(value, dict):
             values.append(value)
-    return values
-
-
-def _fetch_weave_records(env: Mapping[str, str]) -> list[dict[str, Any]]:
-    project = trace_project_slug(env)
-    base = env.get("WEAVE_BASE_URL", "https://api.wandb.ai").rstrip("/")
-    headers = {"Authorization": f"Bearer {env['WANDB_API_KEY']}"}
-    values: list[dict[str, Any]] = []
-    offset = 0
-    with httpx.Client(timeout=30, headers=headers) as client:
-        while True:
-            payload = {
-                "project_id": project,
-                "filter": {"trace_roots_only": True},
-                "columns": [
-                    "id",
-                    "trace_id",
-                    "started_at",
-                    "ended_at",
-                    "attributes",
-                    "summary",
-                    "op_name",
-                ],
-                "include_costs": True,
-                "limit": 500,
-                "offset": offset,
-            }
-            response = client.post(f"{base}/calls/stream_query", json=payload)
-            if response.status_code >= 400:
-                raise RuntimeError(
-                    f"Weave catalog query failed with HTTP {response.status_code}"
-                )
-            body = response.json()
-            rows = body if isinstance(body, list) else body.get("calls", [])
-            if not rows:
-                break
-            for call in rows:
-                attrs = call.get("attributes") or {}
-                fugue = {
-                    key.removeprefix("fugue."): value
-                    for key, value in attrs.items()
-                    if key.startswith("fugue.")
-                }
-                if not fugue.get("run_id"):
-                    continue
-                values.append(
-                    {
-                        "source": "weave",
-                        "record_type": "trace_only",
-                        "call_id": call.get("id"),
-                        "trace_id": call.get("trace_id"),
-                        "created_at": call.get("started_at"),
-                        "ended_at": call.get("ended_at"),
-                        "provider": fugue.get("provider"),
-                        "status": "failed" if (call.get("summary") or {}).get("error") else "observed",
-                        "weave_summary": redact_value(call.get("summary") or {}),
-                        **fugue,
-                    }
-                )
-            if len(rows) < 500:
-                break
-            offset += len(rows)
     return values

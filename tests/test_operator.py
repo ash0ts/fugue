@@ -79,6 +79,7 @@ def test_operator_status_masks_secrets_and_links_to_agents(tmp_path: Path) -> No
     )
     assert "model-secret" not in payload
     assert "trace-secret" not in payload
+    assert "catalog_records" not in payload
 
 
 def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
@@ -115,7 +116,11 @@ def test_ephemeral_experiment_launch_persists_runtime_snapshot(
         return service.supervisor.get(values["run_id"], recover=False)
 
     monkeypatch.setattr(service.supervisor, "start_detached", start_detached)
-    run = service.launch_experiment(service.experiment("demo"), attached=False)
+    experiment = service.experiment("demo")
+    run = service.launch(
+        ExperimentRequest(experiment_id="demo"),
+        experiment=experiment,
+    )
 
     snapshot = tmp_path / ".fugue/runtime" / run.run_id / "experiment.yaml"
     assert snapshot.is_file()

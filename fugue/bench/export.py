@@ -142,17 +142,6 @@ def write_jsonl(rows: list[dict[str, Any]], path: Path) -> None:
             handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
 
-def write_parquet(rows: list[dict[str, Any]], path: Path) -> bool:
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except ImportError:
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pylist(rows), path)
-    return True
-
-
 def publish_to_weave(
     rows: list[dict[str, Any]],
     project: str | None = None,

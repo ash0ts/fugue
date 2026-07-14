@@ -3,35 +3,32 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import shlex
-import shutil
 import sys
+import time
 import webbrowser
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-from rich.console import Console
+from rich import box
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 from rich_argparse import RichHelpFormatter
 
 from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
     ContextRuntime,
-    RepositorySnapshot,
-    RetrievalQuery,
-    checkout_repository,
-    get_context_system,
-    list_context_systems,
-    preflight_context,
-    prepare_context,
-    prepared_from_index,
-    query_context,
 )
-from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.execution import (
     execute_cells,
     mark_unfinished_cells,
@@ -39,52 +36,39 @@ from fugue.bench.execution import (
     plan_cells,
     write_run_manifest,
 )
-from fugue.bench.export import (
-    export_rows,
-    filter_rows,
-    judge_qa_rows,
-    publish_to_weave,
-    write_jsonl,
-    write_parquet,
-)
-from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
+from fugue.bench.job_config import RenderedJob
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
-    PresetSpec,
-    WorkloadSpec,
     experiment_from_yaml,
-    experiment_to_yaml,
-    experiment_with_overrides,
     get_experiment,
-    get_experiment_text,
-    get_prompt,
-    get_skill,
-    list_experiments,
-    list_prompts,
-    list_skills,
-    save_experiment,
-    save_prompt,
-    save_skill,
 )
-from fugue.bench.manifest import BenchmarkManifest, load_manifest
-from fugue.bench.operator import load_env
+from fugue.bench.manifest import load_manifest
+from fugue.bench.operator import (
+    ExperimentRequest,
+    OperatorService,
+    load_env,
+)
 from fugue.bench.workloads import (
     load_workload_dataset,
     run_retrieval_workload,
     run_sequence_workload,
 )
-from fugue.bridge import bridge_status, bridge_up, write_bridge_files
 from fugue.model_plane import (
     resolve_model_route,
-    select_model,
-    trace_env_defaults,
     trace_project_slug,
 )
-from fugue.preflight import PreflightCheck, print_preflight, run_preflight
-from fugue.weave_support import trace_async_operation
 
-CONSOLE = Console()
+FUGUE_THEME = Theme(
+    {
+        "fugue.gold": "#FFCC33",
+        "fugue.cyan": "#00AFC2",
+        "fugue.coral": "#FF6B6B",
+        "fugue.success": "#22C55E",
+        "fugue.muted": "#9CA3AF",
+    }
+)
+CONSOLE = Console(theme=FUGUE_THEME)
 
 
 class FugueArgumentParser(argparse.ArgumentParser):
@@ -95,198 +79,125 @@ class FugueArgumentParser(argparse.ArgumentParser):
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    parser = FugueArgumentParser(
-        prog="fugue",
-        description="Compose and compare Harbor agent experiments in W&B Weave.",
-    )
-    subparsers = parser.add_subparsers(dest="command")
-
-    run = subparsers.add_parser("run", help="Run Harbor experiment")
-    _add_run_args(run)
-    run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--detach", action="store_true")
-    run.add_argument("--run-id", help=argparse.SUPPRESS)
-
-    render = subparsers.add_parser("render", help="Render Harbor JobConfig files")
-    _add_run_args(render)
-
-    export = subparsers.add_parser("export", help="Export Harbor + Weave rows")
-    export.add_argument("--jobs", type=Path, nargs="+", required=True)
-    export.add_argument("--out", type=Path, required=True)
-    export.add_argument("--parquet-out", type=Path)
-    export.add_argument("--fetch-weave", action="store_true")
-    export.add_argument("--to-weave", action="store_true")
-    export.add_argument("--republish", action="store_true")
-    export.add_argument("--weave-project")
-    export.add_argument("--judge-model")
-    export.add_argument("--preset")
-    export.add_argument("--workloads")
-    export.add_argument("--systems")
-    export.add_argument("--env-file", type=Path, default=Path(".env"))
-    export.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-    preflight = subparsers.add_parser("preflight", help="Validate Fugue setup")
-    preflight.add_argument("--model")
-    preflight.add_argument("--judge-model")
-    preflight.add_argument("--builder-model")
-    preflight.add_argument("--experiment")
-    preflight.add_argument("--preset")
-    preflight.add_argument("--systems")
-    preflight.add_argument("--trace-content", choices=("full", "metadata"))
-    preflight.add_argument("--env-file", type=Path, default=Path(".env"))
-    preflight.add_argument("--repo-root", type=Path, default=Path.cwd())
-    preflight.add_argument("--no-live", action="store_true")
-    preflight.add_argument("--no-bridge-up", action="store_true")
-
-    bridge = subparsers.add_parser("bridge", help="Manage the LiteLLM bridge")
-    bridge_subparsers = bridge.add_subparsers(dest="bridge_command", required=True)
-    bridge_up_parser = bridge_subparsers.add_parser("up", help="Render config and start bridge")
-    bridge_up_parser.add_argument("--model")
-    bridge_up_parser.add_argument("--builder-model")
-    bridge_up_parser.add_argument("--judge-model")
-    bridge_up_parser.add_argument("--env-file", type=Path, default=Path(".env"))
-    bridge_up_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    bridge_render = bridge_subparsers.add_parser("render", help="Render bridge files only")
-    bridge_render.add_argument("--model")
-    bridge_render.add_argument("--builder-model")
-    bridge_render.add_argument("--judge-model")
-    bridge_render.add_argument("--env-file", type=Path, default=Path(".env"))
-    bridge_render.add_argument("--repo-root", type=Path, default=Path.cwd())
-    bridge_subparsers.add_parser("status", help="Check bridge health")
-
-    tui = subparsers.add_parser("tui", help="Open the Fugue terminal operator")
-    tui.add_argument(
-        "--screen",
-        choices=("compose", "runs", "results", "setup"),
-        default="compose",
-    )
-    tui.add_argument("--experiment", default="pilot")
-
-    status = subparsers.add_parser("status", help="Show operator readiness")
-    status.add_argument("--experiment", default="pilot")
-    status.add_argument("--model")
-    status.add_argument("--builder-model")
-    status.add_argument("--judge-model")
-    status.add_argument("--trace-content", choices=("full", "metadata"))
-    status.add_argument("--json", action="store_true")
-    status.add_argument("--env-file", type=Path, default=Path(".env"))
-    status.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-    compose = subparsers.add_parser(
-        "compose", help="Draft a Fugue experiment from natural language"
-    )
-    compose.add_argument("request", nargs="+")
-    compose.add_argument("--from", dest="base_experiment", default="pilot")
-    compose.add_argument("--model")
-    compose.add_argument("--save")
-    compose.add_argument("--run", action="store_true")
-    compose.add_argument("--replace-assets", action="store_true")
-    compose.add_argument("--trace-content", choices=("full", "metadata"))
-    compose.add_argument("--json", action="store_true")
-    compose.add_argument("--env-file", type=Path, default=Path(".env"))
-    compose.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-    analyze = subparsers.add_parser(
-        "analyze", help="Analyze Fugue experiments from natural language"
-    )
-    analyze.add_argument("question", nargs="+")
-    analyze.add_argument("--filter", action="append", default=[])
-    analyze.add_argument("--model")
-    analyze.add_argument("--source", choices=("local", "weave", "hybrid"))
-    analyze.add_argument("--save")
-    analyze.add_argument("--json", action="store_true")
-    analyze.add_argument("--env-file", type=Path, default=Path(".env"))
-    analyze.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-    _add_analysis_commands(subparsers)
-    _add_catalog_commands(subparsers)
-
-    _add_runs_commands(subparsers)
-
-    _add_library_commands(subparsers)
-    _add_context_commands(subparsers)
-
+    if raw_argv[:1] == ["_context-evaluate"]:
+        return _internal_context_evaluate(raw_argv[1:])
+    parser = _parser()
     args = parser.parse_args(raw_argv)
     args._raw_argv = raw_argv
     if args.command is None:
-        return _tui(argparse.Namespace(screen="compose", experiment="pilot"))
-    if args.command == "run":
-        if args.detach and not args.dry_run:
-            return _detach_run(args)
-        return _run(args)
-    if args.command == "render":
-        return _render(args)
-    if args.command == "export":
-        return _export(args)
-    if args.command == "preflight":
-        return _preflight(args)
-    if args.command == "bridge":
-        return _bridge(args)
-    if args.command == "tui":
-        return _tui(args)
-    if args.command == "status":
-        return _status(args)
-    if args.command == "compose":
-        return _compose_ai(args)
-    if args.command == "analyze":
-        return _analyze_ai(args)
-    if args.command == "analyses":
-        return _analyses(args)
-    if args.command == "catalog":
-        return _catalog(args)
-    if args.command == "runs":
-        return _runs(args)
-    if args.command in {"prompts", "skills", "experiments"}:
-        return _library(args)
-    if args.command == "context":
-        return _context(args)
-    raise AssertionError(args.command)
+        return _command_center(parser)
+    return int(args.handler(args))
 
 
-def _add_experiment_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--experiment", help="Saved experiment id")
-    parser.add_argument(
-        "--experiment-file",
-        type=Path,
-        help="Immutable experiment YAML snapshot",
+def _internal_context_evaluate(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--experiment", required=True)
+    parser.add_argument("--workload", required=True)
+    parser.add_argument("--system", required=True)
+    parser.add_argument("--preset", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--attempts", type=_positive_cli_int, default=1)
+    parser.add_argument("--concurrency", type=_positive_cli_int, default=4)
+    parser.add_argument("--limit", type=_positive_cli_int)
+    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    return _context_evaluate(parser.parse_args(argv))
+
+
+def _parser() -> FugueArgumentParser:
+    parser = FugueArgumentParser(
+        prog="fugue",
+        description="Plan, run, and analyze Harbor agent experiments in W&B Weave.",
     )
-    parser.add_argument("--manifest", type=Path, help="Benchmark manifest override")
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    plan = subparsers.add_parser("plan", help="Plan an experiment with Fugue AI")
+    plan.add_argument("request", nargs="+")
+    plan.add_argument("--from", dest="base_experiment", default="pilot")
+    plan.add_argument("--model")
+    plan.add_argument("--save")
+    plan.add_argument("--run", action="store_true")
+    plan.add_argument("--yes", action="store_true")
+    plan.add_argument("--replace-assets", action="store_true")
+    plan.add_argument("--trace-content", choices=("full", "metadata"))
+    _add_common_args(plan, json_output=True)
+    plan.set_defaults(handler=_plan)
+
+    run = subparsers.add_parser("run", help="Preview or run an experiment")
+    run.add_argument("experiment", nargs="?", help="Saved experiment id (default: pilot)")
+    _add_run_args(run)
+    run.add_argument("--preview", action="store_true", help="Show the matrix without writing runtime state")
+    run.add_argument("--detach", action="store_true", help="Start the durable run and return immediately")
+    run.add_argument("--json", action="store_true", help="Emit structured output without Rich decoration")
+    run.add_argument("--run-id", help=argparse.SUPPRESS)
+    run.add_argument("--experiment-file", type=Path, help=argparse.SUPPRESS)
+    run.set_defaults(handler=_run_command)
+
+    runs = subparsers.add_parser("runs", help="Inspect and manage durable runs")
+    runs.add_argument("run_id", nargs="?", help="Managed run id; omit to list recent runs")
+    runs.add_argument("--limit", type=_positive_cli_int, default=20, help="Maximum recent runs to list")
+    action = runs.add_mutually_exclusive_group()
+    action.add_argument("--logs", action="store_true", help="Read run or selected-cell logs")
+    action.add_argument("--cancel", action="store_true", help="Cancel the managed process group")
+    action.add_argument("--export", action="store_true", dest="export_run", help="Write normalized JSONL")
+    action.add_argument("--open", choices=("agents", "trace", "project"), help="Open the stable W&B destination")
+    runs.add_argument("--follow", action="store_true", help="Follow logs until the run finishes")
+    runs.add_argument("--cell", help="Select one cell for logs or trace lookup")
+    runs.add_argument("--out", type=Path, help="Export destination")
+    runs.add_argument("--fetch-weave", action="store_true", help="Enrich exported rows with Weave summaries")
+    runs.add_argument("--to-weave", action="store_true", help="Publish normalized evaluations once")
+    runs.add_argument("--republish", action="store_true", help="Intentionally bypass the publication ledger")
+    runs.add_argument("--print", action="store_true", dest="print_only", help="Print a link instead of opening it")
+    _add_common_args(runs, json_output=True)
+    runs.set_defaults(handler=_runs)
+
+    analyze = subparsers.add_parser("analyze", help="Analyze experiment results with Fugue AI")
+    analyze.add_argument("question", nargs="*")
+    source = analyze.add_mutually_exclusive_group()
+    source.add_argument("--saved", help="Run a saved analysis definition")
+    source.add_argument("--list", action="store_true", dest="list_saved", help="List saved analysis definitions")
+    analyze.add_argument("--filter", action="append", default=[], help="Required FIELD=VALUE scope filter")
+    analyze.add_argument("--model", help="Analyst model route")
+    analyze.add_argument("--source", choices=("local", "hybrid"), help="Use local outcomes or narrow Weave enrichment")
+    analyze.add_argument("--save", help="Save the generated analysis definition")
+    analyze.add_argument("--yes", action="store_true", help="Confirm report generation without prompting")
+    _add_common_args(analyze, json_output=True)
+    analyze.set_defaults(handler=_analyze)
+
+    setup = subparsers.add_parser("setup", help="Inspect and prepare Fugue dependencies")
+    setup.add_argument("--experiment", default="pilot")
+    setup.add_argument("--model")
+    setup.add_argument("--builder-model")
+    setup.add_argument("--judge-model")
+    setup.add_argument("--preset")
+    setup.add_argument("--manifest", type=Path)
+    setup.add_argument("--workloads")
+    setup.add_argument("--systems")
+    setup.add_argument("--trace-content", choices=("full", "metadata"))
+    operation = setup.add_mutually_exclusive_group()
+    operation.add_argument("--check", action="store_true", help="Run observational live preflight")
+    operation.add_argument("--start-bridge", action="store_true", help="Start the local LiteLLM bridge")
+    operation.add_argument("--prepare-context", action="store_true", help="Build selected context artifacts")
+    setup.add_argument("--rebuild", action="store_true", help="Ignore reusable context cache entries")
+    _add_common_args(setup, json_output=True)
+    setup.set_defaults(handler=_setup)
+
+    tui = subparsers.add_parser("tui", help="Open the full-screen terminal workspace")
+    tui.add_argument("--screen", choices=("plan", "runs", "results", "setup"), default="plan")
+    tui.add_argument("--experiment", default="pilot")
+    tui.set_defaults(handler=_tui)
+    return parser
 
 
-def _add_analysis_commands(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("analyses", help="Manage saved analyses")
-    nested = parser.add_subparsers(dest="analyses_command", required=True)
-    listing = nested.add_parser("list", help="List saved analyses")
-    listing.add_argument("--json", action="store_true")
-    show = nested.add_parser("show", help="Show a saved analysis")
-    show.add_argument("id")
-    run = nested.add_parser("run", help="Run a saved analysis")
-    run.add_argument("id")
-    run.add_argument("--model")
-    run.add_argument("--source", choices=("local", "weave", "hybrid"))
-    run.add_argument("--json", action="store_true")
-    for item in (listing, show, run):
-        item.add_argument("--env-file", type=Path, default=Path(".env"))
-        item.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-
-def _add_catalog_commands(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("catalog", help="Inspect the experiment catalog")
-    nested = parser.add_subparsers(dest="catalog_command", required=True)
-    refresh = nested.add_parser("refresh", help="Refresh catalog sources")
-    refresh.add_argument("--source", choices=("local", "weave", "hybrid"), default="hybrid")
-    status = nested.add_parser("status", help="Show catalog status")
-    status.add_argument("--json", action="store_true")
-    facets = nested.add_parser("facets", help="Show deterministic experiment buckets")
-    facets.add_argument("--filter", action="append", default=[])
-    facets.add_argument("--json", action="store_true")
-    for item in (refresh, status, facets):
-        item.add_argument("--env-file", type=Path, default=Path(".env"))
-        item.add_argument("--repo-root", type=Path, default=Path.cwd())
+def _add_common_args(parser: argparse.ArgumentParser, *, json_output: bool = False) -> None:
+    parser.add_argument("--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS)
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
+    if json_output:
+        parser.add_argument("--json", action="store_true", help="Emit structured output without Rich decoration")
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
-    _add_experiment_arg(parser)
+    parser.add_argument("--manifest", type=Path, help="Benchmark manifest override")
     parser.add_argument("--harnesses", help="Comma-separated harness subset")
     parser.add_argument("--variants", help="Comma-separated variant subset")
     parser.add_argument("--preset", help="Saved experiment preset")
@@ -298,7 +209,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-k", "--n-attempts", type=_positive_cli_int)
     parser.add_argument("-n", "--n-concurrent", type=_positive_cli_int)
     parser.add_argument("-l", "--n-tasks", type=_positive_cli_int)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS)
     parser.add_argument("--jobs-dir", type=Path)
     parser.add_argument(
         "--run-name",
@@ -310,99 +221,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         choices=("full", "metadata"),
         help="Weave agent content capture policy (default: experiment or full)",
     )
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-
-def _add_runs_commands(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("runs", help="Inspect and manage durable runs")
-    nested = parser.add_subparsers(dest="runs_command", required=True)
-    listing = nested.add_parser("list", help="List recent runs")
-    listing.add_argument("--limit", type=_positive_cli_int, default=20)
-    listing.add_argument("--json", action="store_true")
-    show = nested.add_parser("show", help="Show one run")
-    show.add_argument("run_id")
-    show.add_argument("--json", action="store_true")
-    logs = nested.add_parser("logs", help="Read run or cell logs")
-    logs.add_argument("run_id")
-    logs.add_argument("--cell")
-    logs.add_argument("--follow", action="store_true")
-    cancel = nested.add_parser("cancel", help="Cancel a running experiment")
-    cancel.add_argument("run_id")
-    export = nested.add_parser("export", help="Export one run")
-    export.add_argument("run_id")
-    export.add_argument("--out", type=Path)
-    export.add_argument("--fetch-weave", action="store_true")
-    export.add_argument("--to-weave", action="store_true")
-    export.add_argument("--republish", action="store_true")
-    open_parser = nested.add_parser("open", help="Open W&B or Weave")
-    open_parser.add_argument("run_id")
-    open_parser.add_argument("--cell")
-    open_parser.add_argument(
-        "--target", choices=("agents", "trace", "project"), default="agents"
-    )
-    open_parser.add_argument("--print", action="store_true", dest="print_only")
-    for item in (listing, show, logs, cancel, export, open_parser):
-        item.add_argument("--repo-root", type=Path, default=Path.cwd())
-        item.add_argument("--env-file", type=Path, default=Path(".env"))
-
-
-def _add_context_commands(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser("context", help="Manage context systems")
-    nested = parser.add_subparsers(dest="context_command", required=True)
-    nested.add_parser("list", help="List configured context systems")
-    show = nested.add_parser("show", help="Show one context-system spec")
-    show.add_argument("system")
-    check = nested.add_parser("preflight", help="Validate context-system dependencies")
-    check.add_argument("--systems")
-    check.add_argument("--env-file", type=Path, default=Path(".env"))
-    check.add_argument("--repo-root", type=Path, default=Path.cwd())
-    prepare = nested.add_parser("prepare", help="Build content-addressed context")
-    _add_experiment_arg(prepare)
-    prepare.add_argument("--systems")
-    prepare.add_argument("--workloads")
-    prepare.add_argument("--preset")
-    prepare.add_argument("--model")
-    prepare.add_argument("--builder-model")
-    prepare.add_argument("--rebuild", action="store_true")
-    prepare.add_argument("--env-file", type=Path, default=Path(".env"))
-    prepare.add_argument("--repo-root", type=Path, default=Path.cwd())
-    query = nested.add_parser("query", help="Run one directly scored retrieval query")
-    query.add_argument("--system", required=True)
-    query.add_argument("--task-id", required=True)
-    query.add_argument("--query", required=True)
-    query.add_argument("--expected-paths")
-    query.add_argument("--top-k", type=_positive_cli_int, default=10)
-    query.add_argument("--repo-root", type=Path, default=Path.cwd())
-    evaluate = nested.add_parser("evaluate", help=argparse.SUPPRESS)
-    evaluate.add_argument("--experiment", required=True)
-    evaluate.add_argument("--workload", required=True)
-    evaluate.add_argument("--system", required=True)
-    evaluate.add_argument("--preset", required=True)
-    evaluate.add_argument("--run-id", required=True)
-    evaluate.add_argument("--attempts", type=_positive_cli_int, default=1)
-    evaluate.add_argument("--concurrency", type=_positive_cli_int, default=4)
-    evaluate.add_argument("--limit", type=_positive_cli_int)
-    evaluate.add_argument("--env-file", type=Path, default=Path(".env"))
-    evaluate.add_argument("--repo-root", type=Path, default=Path.cwd())
-
-
-def _add_library_commands(subparsers: argparse._SubParsersAction) -> None:
-    for command, label in (
-        ("prompts", "prompt"),
-        ("skills", "skill"),
-        ("experiments", "experiment"),
-    ):
-        parser = subparsers.add_parser(command, help=f"Manage saved {label}s")
-        nested = parser.add_subparsers(dest="library_command", required=True)
-        nested.add_parser("list", help=f"List saved {label}s")
-        show = nested.add_parser("show", help=f"Show a saved {label}")
-        show.add_argument("id")
-        save = nested.add_parser("save", help=f"Save a {label}")
-        save.add_argument("id")
-        save.add_argument("--file", type=Path)
-        save.add_argument("--body")
-        validate = nested.add_parser("validate", help=f"Validate a saved {label}")
-        validate.add_argument("id")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
 
 
 def _positive_cli_int(value: str) -> int:
@@ -412,9 +231,252 @@ def _positive_cli_int(value: str) -> int:
     return parsed
 
 
-def _run(args: argparse.Namespace) -> int:
+def _command_center(parser: FugueArgumentParser) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.print_help()
+        return 0
+    service = OperatorService()
+    while True:
+        CONSOLE.clear()
+        _print_home(service)
+        action = Prompt.ask(
+            "Action",
+            choices=("plan", "analyze", "run", "tui", "setup", "exit"),
+            default="plan",
+        )
+        if action == "exit":
+            return 0
+        if action == "tui":
+            from fugue.tui import run_tui
+
+            run_tui(service=service)
+            continue
+        if action == "setup":
+            _print_setup(service.status())
+        elif action == "plan":
+            request = Prompt.ask("Describe the experiment")
+            base = Prompt.ask("Base experiment", default="pilot")
+            main(["plan", request, "--from", base])
+        elif action == "analyze":
+            question = Prompt.ask("What should Fugue analyze?")
+            main(["analyze", question])
+        elif action == "run":
+            experiment = Prompt.ask("Experiment", default="pilot")
+            main(["run", experiment])
+        Prompt.ask("Press enter to return", default="")
+
+
+def _print_home(service: OperatorService) -> None:
+    status = service.status()
+    runs = service.runs()
+    latest = runs[0] if runs else None
+    title = Text("FUGUE", style="bold fugue.gold")
+    title.append("  AGENT EXPERIMENT OPERATOR", style="fugue.muted")
+    identity = Table.grid(padding=(0, 2))
+    identity.add_column(style="bold")
+    identity.add_column()
+    identity.add_row("Model", f"{status.model}  [{status.model_provider}]")
+    identity.add_row("Weave", status.trace_project)
+    identity.add_row("Experiments", str(status.experiments))
+    ready = sum(
+        (
+            status.model_key_present,
+            status.trace_key_present,
+            status.docker_present,
+            status.harbor_present,
+        )
+    )
+    readiness = Table.grid(padding=(0, 2))
+    readiness.add_row("Credentials", _state(status.model_key_present and status.trace_key_present))
+    readiness.add_row("Docker", _state(status.docker_present))
+    readiness.add_row("Harbor", _state(status.harbor_present))
+    readiness.add_row("Bridge", _state(status.bridge_ready))
+    latest_text = (
+        f"[bold]{latest.run_name}[/]\n{_status_markup(latest.status)}\n"
+        f"{latest.passed} passed  {latest.failed} failed"
+        if latest
+        else "[fugue.muted]No runs yet[/]"
+    )
+    CONSOLE.print(Panel(title, border_style="fugue.gold", box=box.SQUARE))
+    CONSOLE.print(
+        Columns(
+            (
+                Panel(identity, title="Workspace", border_style="fugue.cyan"),
+                Panel(readiness, title=f"Readiness {ready}/4", border_style="fugue.gold"),
+                Panel(latest_text, title="Latest run", border_style="fugue.coral"),
+            ),
+            equal=True,
+            expand=True,
+        )
+    )
+    if latest:
+        CONSOLE.print(_sequencer(latest))
+    CONSOLE.print(
+        "[bold fugue.gold]plan[/] experiment   "
+        "[bold fugue.cyan]analyze[/] results   "
+        "[bold]run[/] experiment   [bold]tui[/] workspace   [bold]setup[/]"
+    )
+
+
+def _state(ready: bool) -> str:
+    return "[fugue.success]ready[/]" if ready else "[fugue.coral]missing[/]"
+
+
+def _sequencer(run: Any) -> Panel:
+    statuses = {cell.harness: cell.status for cell in run.cells}
+    lines = []
+    for label, harness in (
+        ("HERMES", "hermes"),
+        ("OPENCLAW", "openclaw"),
+        ("CLAUDE", "claude-code"),
+        ("CODEX", "codex"),
+    ):
+        status = statuses.get(harness, "pending")
+        glyph = "■" if status == "running" else "▪" if status == "passed" else "×" if status == "failed" else "·"
+        lines.append(f"{label:<10} {glyph * 12}  {status.replace('_', ' ')}")
+    return Panel("\n".join(lines), title="Harness sequencer", border_style="fugue.cyan")
+
+
+def _print_preview(preview: Any) -> None:
+    summary = Table.grid(padding=(0, 2))
+    summary.add_row("Cells", str(preview.cells))
+    summary.add_row("Applicable", str(preview.applicable_cells))
+    summary.add_row("Estimated trials", str(preview.estimated_trials))
+    summary.add_row("Harnesses", ", ".join(preview.harnesses) or "none")
+    summary.add_row("Variants", ", ".join(preview.variants) or "none")
+    summary.add_row("Workloads", ", ".join(preview.workloads) or "none")
+    commands = "\n".join(preview.commands) or "No applicable commands."
+    CONSOLE.print(
+        Group(
+            Panel(summary, title="Experiment matrix", border_style="fugue.gold"),
+            Panel(Syntax(commands, "bash", word_wrap=True), title="Harbor commands", border_style="fugue.cyan"),
+        )
+    )
+
+
+def _print_draft(draft: Any) -> None:
+    body = [draft.rationale or "No rationale supplied."]
+    if draft.assumptions:
+        body.append("\nAssumptions: " + "; ".join(draft.assumptions))
+    if draft.assets:
+        body.append("\nAssets: " + ", ".join(f"{item.kind}:{item.id}" for item in draft.assets))
+    CONSOLE.print(
+        Panel(
+            "\n".join(body),
+            title=f"{draft.experiment.title}  [{draft.experiment.id}]",
+            border_style="fugue.gold",
+        )
+    )
+    _print_preview(draft.preview)
+    if draft.diff:
+        CONSOLE.print(Panel(Syntax(draft.diff, "diff"), title="Proposed diff", border_style="fugue.cyan"))
+    for warning in draft.warnings:
+        CONSOLE.print(f"[fugue.coral]warning[/] {warning}")
+
+
+def _print_analysis_preview(preview: Any) -> None:
+    scope = preview.scope
+    table = Table.grid(padding=(0, 2))
+    table.add_row("Experiments", ", ".join(scope.experiments) or "none")
+    table.add_row("Runs", str(len(scope.runs)))
+    table.add_row("Trial records", str(scope.rows))
+    table.add_row("Tasks", str(len(scope.tasks)))
+    table.add_row("Models", ", ".join(scope.models) or "none")
+    table.add_row("Variants", ", ".join(scope.variants) or "none")
+    table.add_row("Sources", ", ".join(scope.sources) or "local")
+    if scope.missing_metrics:
+        table.add_row("Missing metrics", ", ".join(scope.missing_metrics))
+    CONSOLE.print(Panel(table, title="Resolved analysis scope", border_style="fugue.cyan"))
+    for warning in scope.warnings:
+        CONSOLE.print(f"[fugue.coral]warning[/] {warning}")
+
+
+def _print_setup(status: Any) -> None:
+    table = Table("Component", "State", "Detail", box=box.SIMPLE_HEAD)
+    for route in status.routes:
+        table.add_row(
+            f"{route.role.title()} model",
+            _state(route.key_present),
+            f"{route.model} / {route.key_env}",
+        )
+    table.add_row("Weave", _state(status.trace_key_present), status.trace_project)
+    table.add_row("Docker", _state(status.docker_present), "container runtime")
+    table.add_row("Harbor", _state(status.harbor_present), "experiment runner")
+    table.add_row("Bridge", _state(status.bridge_ready), "127.0.0.1:4000")
+    table.add_row(
+        "Context cache",
+        str(status.context_cache_entries),
+        ", ".join(status.selected_context_systems) or "no selected systems",
+    )
+    table.add_row(
+        "Trace content",
+        "[fugue.coral]FULL[/]" if status.trace_content == "full" else "metadata",
+        "Prompts and tool data may leave this machine",
+    )
+    CONSOLE.print(Panel(table, title="Setup", border_style="fugue.gold"))
+    CONSOLE.print(f"Agents: [link={status.links.agents}]{status.links.agents}[/link]")
+
+
+def _print_checks(checks: Any) -> None:
+    table = Table("Check", "State", "Detail", box=box.SIMPLE_HEAD)
+    for check in checks:
+        table.add_row(check.name, _state(check.ok), check.detail)
+    CONSOLE.print(Panel(table, title="Preflight", border_style="fugue.gold"))
+
+
+def _print_context_preparation(records: Any) -> None:
+    table = Table("System", "Task", "State", "Detail", box=box.SIMPLE_HEAD)
+    for record in records:
+        table.add_row(
+            record.system_id,
+            record.task_id,
+            record.status,
+            record.detail,
+        )
+    if records:
+        CONSOLE.print(Panel(table, title="Context preparation", border_style="fugue.cyan"))
+    else:
+        CONSOLE.print("[fugue.muted]No context artifacts were required.[/]")
+
+
+def _run_command(args: argparse.Namespace) -> int:
+    if args.run_id:
+        return _run_worker(args)
+    service = OperatorService(args.repo_root, args.env_file)
+    experiment = _load_experiment_arg(args)
+    request = _request_from_args(args, experiment.id)
+    inline_experiment = bool(args.experiment_file or args.manifest or not args.experiment)
+    if args.preview:
+        preview = (
+            service.preview_experiment(experiment, request=request)
+            if inline_experiment
+            else service.preview(request)
+        )
+        if args.json:
+            from fugue.bench.operator import as_json
+
+            print(as_json(preview))
+        else:
+            _print_preview(preview)
+        return 0
+    run = service.launch(request, experiment=experiment if inline_experiment else None)
+    if args.json:
+        from fugue.bench.operator import as_json
+
+        final = run if args.detach else service.wait_for_run(run.run_id)
+        print(as_json(final))
+        return 0 if final.status in {"starting", "running", "passed"} else 1
+    if args.detach:
+        _print_started_run(run)
+        return 0
+    return _wait_for_run(service, run.run_id)
+
+
+def _run_worker(args: argparse.Namespace) -> int:
     run_id = getattr(args, "run_id", None) or new_run_id()
     experiment = _load_experiment_arg(args)
+    service = OperatorService(args.repo_root, args.env_file)
+    request = _request_from_args(args, experiment.id)
     write_run_manifest(
         args.repo_root,
         run_id,
@@ -432,25 +494,19 @@ def _run(args: argparse.Namespace) -> int:
         },
     )
     try:
-        if not args.dry_run:
-            _materialize_run_datasets(args)
-            prepare_args = argparse.Namespace(**vars(args), rebuild=False, run_id=run_id)
-            _context_prepare(prepare_args)
-        rendered = _rendered_jobs_from_args(args, run_id=run_id)
+        preparation = service.prepare_context(
+            request,
+            experiment=experiment,
+            run_id=run_id,
+        )
+        _print_context_preparation(preparation)
+        rendered = service.rendered_jobs(request, run_id=run_id, experiment=experiment)
         for job in rendered:
             if not job.applicable:
                 CONSOLE.print(f"[yellow]skip[/] {job.job_name}: {job.skip_reason}")
                 continue
             CONSOLE.print("[cyan]+[/] " + " ".join(shlex.quote(part) for part in job.command))
             print(f"# config: {job.config_path}")
-        if args.dry_run:
-            write_run_manifest(
-                args.repo_root,
-                run_id,
-                {"status": "passed", "dry_run": True, "ended_at": _now()},
-            )
-            return 0
-
         run_name = rendered[0].run_name if rendered else _run_name(args.run_name, {})
         cells = plan_cells(rendered, run_id=run_id, run_name=run_name)
         job_dirs = sorted(
@@ -567,137 +623,6 @@ def _resolved_role_metadata(
     }
 
 
-def _render(args: argparse.Namespace) -> int:
-    rendered = _rendered_jobs_from_args(args, run_id=new_run_id())
-    for job in rendered:
-        print("+ " + " ".join(shlex.quote(part) for part in job.command))
-        print(f"# config: {job.config_path}")
-    print(f"rendered {len(rendered)} Harbor job config(s)")
-    return 0
-
-
-def _rendered_jobs_from_args(
-    args: argparse.Namespace,
-    *,
-    run_id: str | None = None,
-    write_configs: bool = True,
-) -> list[RenderedJob]:
-    run_id = run_id or new_run_id()
-    experiment = _load_experiment_arg(args)
-    experiment = _experiment_with_cli_overrides(experiment, args)
-    env = load_env(args.env_file)
-    env |= trace_env_defaults(env)
-    env["FUGUE_BUILDER_MODEL"] = (
-        args.builder_model
-        or experiment.builder_model
-        or env.get("FUGUE_BUILDER_MODEL")
-        or args.model
-        or experiment.model
-        or ""
-    )
-    if getattr(args, "model", None):
-        env["FUGUE_MODEL"] = args.model
-    env["FUGUE_JUDGE_MODEL"] = (
-        args.judge_model
-        or experiment.judge_model
-        or env.get("FUGUE_JUDGE_MODEL")
-        or ""
-    )
-    run_name = _run_name(args.run_name or experiment.run_name, env)
-    env["FUGUE_RUN_NAME"] = run_name
-    env["FUGUE_RUN_GROUP"] = env.get("FUGUE_RUN_GROUP", "").strip() or run_name
-    preset = _selected_preset(experiment, args.preset)
-    workloads = _selected_workloads(experiment, preset, _csv(args.workloads))
-    if not workloads:
-        workloads = [
-            WorkloadSpec(
-                id="harbor",
-                runner="harbor",
-                manifest=_manifest_path_from_args(args, experiment),
-            )
-        ]
-    rendered: list[RenderedJob] = []
-    for workload in workloads:
-        if workload.runner == "harbor":
-            manifest_path = _resolve(
-                args.repo_root,
-                getattr(args, "manifest", None)
-                or workload.manifest
-                or experiment.manifest,
-            )
-            manifest = load_manifest(manifest_path)
-            env["FUGUE_TAGS"] = ",".join(
-                _run_tags(
-                    env=env,
-                    cli_tags=args.tags,
-                    run_name=run_name,
-                    manifest=manifest,
-                    manifest_path=manifest_path,
-                )
-            )
-            renderer = render_jobs if write_configs else preview_jobs
-            rendered.extend(
-                renderer(
-                    experiment=experiment,
-                    manifest=manifest,
-                    manifest_path=manifest_path,
-                    repo_root=args.repo_root,
-                    env=env,
-                    model=args.model,
-                    harness_names=_csv(args.harnesses) or preset.harnesses,
-                    system_names=_selected_system_ids(
-                        experiment,
-                        workload,
-                        preset,
-                        _csv(args.systems),
-                    ),
-                    n_tasks=(
-                        args.n_tasks
-                        or _preset_workload_int(preset, workload.id, "n_tasks")
-                        or workload.n_tasks
-                        or preset.n_tasks
-                    ),
-                    n_attempts=(
-                        args.n_attempts
-                        or _preset_workload_int(preset, workload.id, "n_attempts")
-                        or workload.n_attempts
-                        or preset.n_attempts
-                    ),
-                    n_concurrent=(
-                        args.n_concurrent
-                        or _preset_workload_int(preset, workload.id, "n_concurrent")
-                        or preset.n_concurrent
-                    ),
-                    jobs_dir=args.jobs_dir,
-                    run_name=run_name,
-                    tags=_csv(args.tags) or [],
-                    run_id=run_id,
-                    workload_id=workload.id,
-                    preset_id=preset.id if preset.id != "default" else None,
-                    required_capabilities=workload.required_capabilities,
-                    workload_artifacts=workload.artifacts,
-                )
-            )
-        else:
-            rendered.extend(
-                _direct_workload_jobs(
-                    experiment=experiment,
-                    workload=workload,
-                    preset=preset,
-                    env=env,
-                    repo_root=args.repo_root,
-                    run_name=run_name,
-                    model=args.model,
-                    requested_systems=_csv(args.systems),
-                    n_tasks=args.n_tasks,
-                    n_attempts=args.n_attempts,
-                    n_concurrent=args.n_concurrent,
-                    run_id=run_id,
-                )
-            )
-    return rendered
-
-
 def _load_experiment_arg(args: argparse.Namespace) -> ExperimentSpec:
     inline = getattr(args, "experiment_spec", None)
     if isinstance(inline, ExperimentSpec):
@@ -723,516 +648,40 @@ def _load_experiment_arg(args: argparse.Namespace) -> ExperimentSpec:
     )
 
 
-def _experiment_with_cli_overrides(
-    experiment: ExperimentSpec, args: argparse.Namespace
-) -> ExperimentSpec:
-    variant_ids = _csv(args.variants) or []
-    variants = (
-        [variant for variant in experiment.variants if variant.id in set(variant_ids)]
-        if variant_ids
-        else None
-    )
-    if variant_ids and not variants:
-        raise ValueError(f"unknown variant(s): {', '.join(variant_ids)}")
-    return experiment_with_overrides(
-        experiment,
-        model=args.model,
-        builder_model=args.builder_model,
-        judge_model=args.judge_model,
-        tags=_csv(args.tags),
-        harnesses=_csv(args.harnesses),
-        variants=[variant.to_dict() for variant in variants] if variants else None,
-        n_tasks=args.n_tasks,
-        n_attempts=args.n_attempts,
-        n_concurrent=args.n_concurrent,
+def _request_from_args(
+    args: argparse.Namespace,
+    experiment_id: str,
+) -> ExperimentRequest:
+    return ExperimentRequest(
+        experiment_id=experiment_id,
+        manifest=getattr(args, "manifest", None),
+        preset=getattr(args, "preset", None),
+        workloads=tuple(_csv(getattr(args, "workloads", None)) or []),
+        harnesses=tuple(_csv(getattr(args, "harnesses", None)) or []),
+        systems=tuple(_csv(getattr(args, "systems", None)) or []),
+        variants=tuple(_csv(getattr(args, "variants", None)) or []),
+        model=getattr(args, "model", None),
+        builder_model=getattr(args, "builder_model", None),
+        judge_model=getattr(args, "judge_model", None),
+        n_attempts=getattr(args, "n_attempts", None),
+        n_tasks=getattr(args, "n_tasks", None),
+        n_concurrent=getattr(args, "n_concurrent", None),
+        run_name=getattr(args, "run_name", None),
+        tags=tuple(_csv(getattr(args, "tags", None)) or []),
+        jobs_dir=getattr(args, "jobs_dir", None),
         trace_content=getattr(args, "trace_content", None),
     )
-
-
-def _manifest_path_from_args(args: argparse.Namespace, experiment: ExperimentSpec) -> Path:
-    manifest = getattr(args, "manifest", None)
-    return _resolve(args.repo_root, manifest or experiment.manifest)
-
-
-def _selected_preset(
-    experiment: ExperimentSpec, requested: str | None
-) -> PresetSpec:
-    if not experiment.presets:
-        return PresetSpec(id="default")
-    preset_id = requested or experiment.default_preset or experiment.presets[0].id
-    for preset in experiment.presets:
-        if preset.id == preset_id:
-            return preset
-    raise ValueError(f"unknown preset: {preset_id}")
-
-
-def _selected_workloads(
-    experiment: ExperimentSpec,
-    preset: PresetSpec,
-    requested: list[str] | None,
-) -> list[WorkloadSpec]:
-    selected = set(requested or preset.workloads or [item.id for item in experiment.workloads])
-    workloads = [item for item in experiment.workloads if item.id in selected]
-    missing = sorted(selected - {item.id for item in workloads})
-    if missing:
-        raise ValueError(f"unknown workload(s): {', '.join(missing)}")
-    return workloads
-
-
-def _preset_workload_int(
-    preset: PresetSpec, workload_id: str, key: str
-) -> int | None:
-    value = (preset.workload_overrides.get(workload_id) or {}).get(key)
-    if value in (None, ""):
-        return None
-    parsed = int(value)
-    if parsed < 1:
-        raise ValueError(
-            f"preset {preset.id} workload {workload_id} {key} must be positive"
-        )
-    return parsed
-
-
-def _selected_system_ids(
-    experiment: ExperimentSpec,
-    workload: WorkloadSpec,
-    preset: PresetSpec,
-    requested: list[str] | None,
-) -> list[str] | None:
-    selected = requested or preset.systems or workload.systems
-    if selected:
-        allowed = set(workload.systems) if workload.systems else None
-        return [item for item in selected if allowed is None or item in allowed]
-    values = [
-        variant.context.system_id
-        for variant in experiment.variants
-        if variant.enabled
-    ]
-    return list(dict.fromkeys(values)) or None
-
-
-def _direct_workload_jobs(
-    *,
-    experiment: ExperimentSpec,
-    workload: WorkloadSpec,
-    preset: PresetSpec,
-    env: dict[str, str],
-    repo_root: Path,
-    run_name: str,
-    model: str | None,
-    requested_systems: list[str] | None,
-    n_tasks: int | None,
-    n_attempts: int | None,
-    n_concurrent: int | None,
-    run_id: str,
-) -> list[RenderedJob]:
-    if not workload.dataset:
-        raise ValueError(f"workload {workload.id} requires dataset")
-    dataset_path = _resolve(repo_root, Path(workload.dataset))
-    dataset = load_workload_dataset(dataset_path)
-    if dataset.runner != workload.runner:
-        raise ValueError(
-            f"workload {workload.id} runner {workload.runner} does not match {dataset.runner} dataset"
-        )
-    selected = _selected_system_ids(
-        experiment, workload, preset, requested_systems
-    ) or []
-    selected_model = select_model(model, env=env, experiment_model=experiment.model)
-    route = resolve_model_route(selected_model, env)
-    direct_env = dict(env)
-    direct_env["FUGUE_MODEL"] = selected_model
-    attempts = (
-        n_attempts
-        or _preset_workload_int(preset, workload.id, "n_attempts")
-        or workload.n_attempts
-        or preset.n_attempts
-        or experiment.n_attempts
-        or 1
-    )
-    limit = (
-        n_tasks
-        or _preset_workload_int(preset, workload.id, "n_tasks")
-        or workload.n_tasks
-        or preset.n_tasks
-    )
-    required = set(workload.required_capabilities or [workload.runner])
-    runtime = ContextRuntime(
-        repo_root=repo_root,
-        cache_root=repo_root / DEFAULT_CACHE_ROOT,
-        env=env,
-    )
-    jobs: list[RenderedJob] = []
-    for system_id in selected:
-        spec = get_context_system(system_id, repo_root)
-        missing = sorted(required - set(spec.capabilities))
-        license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
-        license_blocked = spec.requires_license_approval and env.get(license_env, "").lower() not in {
-            "1",
-            "true",
-            "yes",
-        }
-        skip_reason = None
-        if missing:
-            skip_reason = f"missing context capabilities: {', '.join(missing)}"
-        elif license_blocked:
-            skip_reason = f"license approval required via {license_env}"
-        else:
-            failed = [
-                check
-                for check in asyncio.run(
-                    preflight_context(spec, runtime, phase="host")
-                )
-                if not check.ok and check.severity == "required"
-            ]
-            if failed:
-                skip_reason = "; ".join(
-                    f"{check.name}: {check.detail}" for check in failed
-                )
-        command = [
-            sys.executable,
-            "-m",
-            "fugue.bench.cli",
-            "context",
-            "evaluate",
-            "--experiment",
-            experiment.id,
-            "--workload",
-            workload.id,
-            "--system",
-            system_id,
-            "--preset",
-            preset.id,
-            "--run-id",
-            run_id,
-            "--attempts",
-            str(attempts),
-            "--concurrency",
-            str(n_concurrent or preset.n_concurrent or experiment.n_concurrent or 4),
-            "--repo-root",
-            repo_root.as_posix(),
-        ]
-        if limit:
-            command.extend(["--limit", str(limit)])
-        local_count = (
-            len(dataset.retrieval_cases)
-            if workload.runner == "retrieval"
-            else len(dataset.sequence_cases)
-        )
-        count = int(
-            ((dataset.source.get("counts") or {}).get(preset.id)) or local_count
-        )
-        task_count = min(count, limit) if limit else count
-        config = {
-            "fugue": {
-                "experiment_id": experiment.id,
-                "preset_id": preset.id,
-                "workload_id": workload.id,
-                "runner": workload.runner,
-                "context_system_id": system_id,
-                "context_version": spec.version,
-                "dataset": dataset_path.as_posix(),
-                "task_count": task_count,
-                "n_attempts": attempts,
-                "applicable": skip_reason is None,
-                "skip_reason": skip_reason,
-            }
-        }
-        jobs.append(
-            RenderedJob(
-                command=command,
-                config_path=dataset_path,
-                config=config,
-                env=direct_env,
-                job_name=f"{_slug(run_name)}-{workload.id}-{system_id}",
-                harness="direct" if workload.runner == "retrieval" else "sequence",
-                context_system_id=system_id,
-                context_version=spec.version,
-                context_cache_keys={},
-                context_cache_ready=False,
-                prompt_id=None,
-                skill_ids=[],
-                variant_id=system_id,
-                variant_label=spec.title,
-                agent_config_hash="",
-                route=route,
-                workload_id=workload.id,
-                preset_id=preset.id,
-                run_id=run_id,
-                run_name=run_name,
-                task_id=dataset.id,
-                applicable=skip_reason is None,
-                skip_reason=skip_reason,
-            )
-        )
-    return jobs
-
-
-def _export(args: argparse.Namespace) -> int:
-    env = load_env(args.env_file)
-    weave_project = args.weave_project or trace_project_slug(env)
-    rows = export_rows(
-        args.jobs,
-        fetch_weave=args.fetch_weave,
-        weave_project=weave_project,
-        env=env,
-    )
-    rows = filter_rows(
-        rows,
-        presets=_csv(args.preset),
-        workloads=_csv(args.workloads),
-        systems=_csv(args.systems),
-    )
-    judge_model = args.judge_model or env.get("FUGUE_JUDGE_MODEL")
-    if judge_model:
-        judge_qa_rows(
-            rows,
-            model=judge_model,
-            env=env,
-            repo_root=args.repo_root,
-        )
-    write_jsonl(rows, args.out)
-    parquet_out = args.parquet_out or args.out.with_suffix(".parquet")
-    if not write_parquet(rows, parquet_out):
-        print("pyarrow is not installed; skipped parquet export")
-    if args.to_weave:
-        published = publish_to_weave(
-            rows,
-            weave_project,
-            ledger_root=args.repo_root / ".fugue" / "runtime" / "publications",
-            republish=args.republish,
-            env=env,
-        )
-        print(f"published {published} new evaluation row(s) to Weave")
-    print(f"exported {len(rows)} rows to {args.out}")
-    return 0
-
-
-def _preflight(args: argparse.Namespace) -> int:
-    env = load_env(args.env_file)
-    experiment = (
-        get_experiment(args.experiment, args.repo_root) if args.experiment else None
-    )
-    target_model = select_model(
-        args.model,
-        env=env,
-        experiment_model=experiment.model if experiment else None,
-    )
-    builder_model = (
-        args.builder_model
-        or (experiment.builder_model if experiment else None)
-        or env.get("FUGUE_BUILDER_MODEL")
-        or target_model
-    )
-    judge_model = (
-        args.judge_model
-        or (experiment.judge_model if experiment else None)
-        or env.get("FUGUE_JUDGE_MODEL")
-    )
-    checks = run_preflight(
-        target_model,
-        repo_root=args.repo_root,
-        env=env,
-        live=not args.no_live,
-        start_bridge=not args.no_bridge_up,
-        builder_model=builder_model,
-        judge_model=judge_model,
-    )
-    for role, value in (("builder", builder_model), ("judge", judge_model)):
-        if value:
-            checks.append(_model_role_check(role, value, env))
-    if experiment:
-        trace_content = args.trace_content or experiment.trace_content
-        if trace_content == "metadata" and "claude-code" in experiment.harnesses:
-            checks.append(
-                PreflightCheck(
-                    "Claude Code trace content",
-                    False,
-                    "weave-claude-code cannot guarantee metadata-only capture; "
-                    "select full capture or exclude claude-code",
-                )
-            )
-        preset = _selected_preset(experiment, args.preset)
-        systems = _csv(args.systems) or preset.systems or [
-            variant.context.system_id
-            for variant in experiment.variants
-            if variant.enabled
-        ]
-        runtime = ContextRuntime(
-            repo_root=args.repo_root,
-            cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
-            env=env,
-        )
-        for system_id in dict.fromkeys(systems):
-            spec = get_context_system(system_id, args.repo_root)
-            for item in asyncio.run(preflight_context(spec, runtime)):
-                checks.append(
-                    PreflightCheck(
-                        f"context {system_id}: {item.name}", item.ok, item.detail
-                    )
-                )
-        if preset.id == "full":
-            for workload in _selected_workloads(experiment, preset, None):
-                if not workload.dataset:
-                    continue
-                dataset = load_workload_dataset(
-                    _resolve(args.repo_root, Path(workload.dataset))
-                )
-                command = (dataset.source.get("materialize_command") or [None])[0]
-                if command:
-                    checks.append(
-                        PreflightCheck(
-                            f"workload {workload.id} materializer",
-                            shutil.which(str(command)) is not None,
-                            f"{command} is available"
-                            if shutil.which(str(command))
-                            else f"install {command} before the full preset",
-                        )
-                    )
-            if not judge_model:
-                checks.append(
-                    PreflightCheck(
-                        "judge model",
-                        False,
-                        "full preset requires FUGUE_JUDGE_MODEL or --judge-model",
-                    )
-                )
-    return print_preflight(checks)
-
-
-def _model_role_check(
-    role: str,
-    model: str,
-    env: dict[str, str],
-) -> PreflightCheck:
-    try:
-        route = resolve_model_route(model, env)
-    except ValueError as exc:
-        return PreflightCheck(f"{role} model", False, str(exc))
-    key_present = bool(env.get(route.api_key_env, "").strip())
-    return PreflightCheck(
-        f"{role} model",
-        key_present,
-        (
-            f"{route.display_model} can use {route.api_key_env}"
-            if key_present
-            else f"{route.display_model} requires {route.api_key_env}"
-        ),
-    )
-
-
-def _bridge(args: argparse.Namespace) -> int:
-    if args.bridge_command == "status":
-        status = bridge_status()
-        print(status)
-        return 0 if status.get("ok") else 1
-
-    env = load_env(args.env_file)
-    selected_model = select_model(args.model, env=env)
-    route = resolve_model_route(selected_model, env)
-    builder_model = args.builder_model or env.get("FUGUE_BUILDER_MODEL")
-    judge_model = args.judge_model or env.get("FUGUE_JUDGE_MODEL")
-    builder_route = (
-        resolve_model_route(builder_model, env) if builder_model else None
-    )
-    judge_route = resolve_model_route(judge_model, env) if judge_model else None
-    if args.bridge_command == "render":
-        files = write_bridge_files(
-            route,
-            args.repo_root,
-            builder_route=builder_route,
-            judge_route=judge_route,
-        )
-        print(f"wrote {files.config_path}")
-        print(f"wrote {files.compose_path}")
-        return 0
-    if args.bridge_command == "up":
-        files = bridge_up(
-            route.display_model,
-            repo_root=args.repo_root,
-            env=env,
-            builder_model=builder_model,
-            judge_model=judge_model,
-        )
-        print(f"bridge running from {files.runtime_dir}")
-        return 0
-    raise AssertionError(args.bridge_command)
-
-
-def _detach_run(args: argparse.Namespace) -> int:
-    from fugue.bench.supervisor import RunSupervisor
-
-    run_id = getattr(args, "run_id", None) or new_run_id()
-    raw = list(args._raw_argv)
-    raw = [value for value in raw if value != "--detach"]
-    command = [sys.executable, "-m", "fugue.bench.cli", *raw, "--run-id", run_id]
-    experiment = _load_experiment_arg(args)
-    env = load_env(args.env_file)
-    env["PYTHONPATH"] = _prepend_env_path(args.repo_root, env.get("PYTHONPATH"))
-    run_name = _run_name(args.run_name or experiment.run_name, env)
-    run = RunSupervisor(args.repo_root).start_detached(
-        run_id=run_id,
-        command=command,
-        env=env,
-        run_name=run_name,
-        experiment_id=experiment.id,
-    )
-    CONSOLE.print(f"[bold green]started[/] {run.run_id}")
-    CONSOLE.print(f"Logs: [cyan]{run.log_path}[/]")
-    CONSOLE.print(f"Reattach: [bold]fugue runs logs {run.run_id} --follow[/]")
-    return 0
 
 
 def _tui(args: argparse.Namespace) -> int:
     from fugue.tui import run_tui
 
-    run_tui(initial_screen=args.screen, experiment_id=args.experiment)
+    screen = "compose" if args.screen == "plan" else args.screen
+    run_tui(initial_screen=screen, experiment_id=args.experiment)
     return 0
 
 
-def _status(args: argparse.Namespace) -> int:
-    from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
-
-    service = OperatorService(args.repo_root, args.env_file)
-    status = service.status(
-        ExperimentRequest(
-            experiment_id=args.experiment,
-            model=args.model,
-            builder_model=args.builder_model,
-            judge_model=args.judge_model,
-            trace_content=args.trace_content,
-        )
-    )
-    if args.json:
-        print(as_json(status))
-        return 0
-    table = Table(title="Fugue setup", box=None, show_header=False)
-    table.add_column("Item", style="bold")
-    table.add_column("State")
-    table.add_column("Detail", style="dim")
-    for route in status.routes:
-        _status_row(
-            table,
-            f"{route.role.title()} model",
-            route.key_present,
-            f"{route.model} / {route.key_env}",
-        )
-    _status_row(table, "Weave", status.trace_key_present, status.trace_project)
-    _status_row(table, "Docker", status.docker_present, "container runtime")
-    _status_row(table, "Harbor", status.harbor_present, "experiment runner")
-    _status_row(table, "Bridge", status.bridge_ready, "127.0.0.1:4000")
-    _status_row(
-        table,
-        "Catalog",
-        status.catalog_records > 0,
-        f"{status.catalog_records} records / {status.catalog_refreshed_at or 'not refreshed'}",
-    )
-    table.add_row("Trace content", "[yellow]FULL[/]" if status.trace_content == "full" else "metadata", "Prompts and tool data may leave this machine")
-    CONSOLE.print(table)
-    CONSOLE.print(f"Agents: [link={status.links.agents}]{status.links.agents}[/link]")
-    return 0 if all(route.key_present for route in status.routes) and status.trace_key_present else 1
-
-
-def _compose_ai(args: argparse.Namespace) -> int:
+def _plan(args: argparse.Namespace) -> int:
     from fugue.bench.ai import ExperimentComposer
     from fugue.bench.operator import OperatorService, as_json
 
@@ -1246,16 +695,60 @@ def _compose_ai(args: argparse.Namespace) -> int:
             trace_content=args.trace_content,
         )
     )
-    saved = None
-    run = None
-    if args.save:
-        saved = composer.save(
+    save_id = args.save
+    run_requested = args.run
+    open_tui = False
+    draft_shown = False
+    if CONSOLE.is_terminal and not args.json and not save_id and not run_requested:
+        _print_draft(draft)
+        draft_shown = True
+        action = Prompt.ask(
+            "Next",
+            choices=("tui", "save", "run", "both", "discard"),
+            default="discard",
+        )
+        open_tui = action == "tui"
+        run_requested = action in {"run", "both"}
+        if action in {"save", "both"}:
+            save_id = Prompt.ask("Experiment id", default=f"{draft.experiment.id}-planned")
+    saved = (
+        composer.save(
             draft,
-            experiment_id=args.save,
+            experiment_id=save_id,
             replace_assets=args.replace_assets,
         )
-    if args.run:
-        run = service.launch_experiment(draft.experiment, attached=False)
+        if save_id
+        else None
+    )
+    if open_tui:
+        from fugue.tui import run_tui
+
+        run_tui(
+            initial_screen="compose",
+            experiment_id=args.base_experiment,
+            service=service,
+            initial_draft=draft,
+        )
+        return 0
+    run = None
+    if run_requested:
+        if draft.experiment.trace_content == "full" and CONSOLE.is_terminal and not args.yes:
+            if not Confirm.ask("Run with full prompt, response, and tool content in Weave?"):
+                run_requested = False
+        if not run_requested:
+            return 0
+        saved = composer.save(
+            draft, experiment_id=save_id, replace_assets=args.replace_assets
+        ) if save_id and saved is None else saved
+        if draft.assets and not saved:
+            raise ValueError(
+                "save the experiment and its proposed prompt or skill before running"
+            )
+        selected = saved or draft.experiment
+        run = service.launch(
+            ExperimentRequest(experiment_id=selected.id),
+            experiment=None if saved else selected,
+        )
     if args.json:
         print(
             as_json(
@@ -1267,135 +760,139 @@ def _compose_ai(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    CONSOLE.print(f"[bold]{draft.experiment.title}[/]  [dim]{draft.experiment.id}[/]")
-    CONSOLE.print(draft.rationale or "No rationale supplied.")
-    CONSOLE.print(
-        f"[cyan]{draft.preview.cells} cells[/] / "
-        f"{draft.preview.estimated_trials} estimated trials / "
-        f"{draft.preview.applicable_cells} applicable"
-    )
-    if draft.diff:
-        CONSOLE.print("\n[bold]Proposed diff[/]")
-        CONSOLE.print(draft.diff)
-    for warning in draft.warnings:
-        CONSOLE.print(f"[yellow]warning[/] {warning}")
+    if not draft_shown:
+        _print_draft(draft)
     if saved:
         CONSOLE.print(f"[green]saved[/] configs/fugue/experiments/{saved.id}.yaml")
     if run:
-        CONSOLE.print(f"[green]started[/] {run.run_id}")
+        _print_started_run(run)
     elif not saved:
         CONSOLE.print("[dim]Draft only. Use --save ID or --run to accept it.[/]")
     return 0
 
 
-def _analyze_ai(args: argparse.Namespace) -> int:
-    from fugue.bench.ai import ExperimentAnalyst, save_analysis
-    from fugue.bench.operator import OperatorService, as_json
-
-    service = OperatorService(args.repo_root, args.env_file)
-    analyst = ExperimentAnalyst(service)
-    result = asyncio.run(
-        analyst.analyze(
-            " ".join(args.question),
-            filters=_key_value_args(args.filter),
-            model=args.model,
-            source=args.source,
-        )
+def _analyze(args: argparse.Namespace) -> int:
+    from fugue.bench.ai import (
+        ExperimentAnalyst,
+        get_analysis,
+        list_analyses,
+        save_analysis,
     )
-    if args.save:
-        save_analysis(
-            replace(result.spec, id=args.save, title=result.spec.title),
-            args.repo_root,
-        )
-    if args.json:
-        print(as_json(result))
-    else:
-        CONSOLE.print(result.report)
-        CONSOLE.print(f"Report: [cyan]{result.report_dir / 'report.md'}[/]")
-    return 0
-
-
-def _analyses(args: argparse.Namespace) -> int:
-    from fugue.bench.ai import ExperimentAnalyst, get_analysis, list_analyses
     from fugue.bench.operator import OperatorService, as_json
 
-    if args.analyses_command == "list":
+    if args.list_saved:
         values = list_analyses(args.repo_root)
         if args.json:
             print(json.dumps(values, indent=2, sort_keys=True))
         else:
+            table = Table("ID", "Title", box=box.SIMPLE_HEAD)
             for item in values:
-                print(f"{item['id']}\t{item['title']}\t{item['path']}")
+                table.add_row(item["id"], item["title"])
+            CONSOLE.print(table if values else "[fugue.muted]No saved analyses.[/]")
         return 0
-    spec = get_analysis(args.id, args.repo_root)
-    if args.analyses_command == "show":
-        print(yaml.safe_dump(spec.to_dict(), sort_keys=False), end="")
-        return 0
-    if args.analyses_command == "run":
+    service = OperatorService(args.repo_root, args.env_file)
+    analyst = ExperimentAnalyst(service)
+    if args.saved:
+        spec = get_analysis(args.saved, args.repo_root)
         if args.source:
             spec = replace(spec, source=args.source)
-        service = OperatorService(args.repo_root, args.env_file)
-        result = asyncio.run(ExperimentAnalyst(service).analyze(spec=spec, model=args.model))
+    else:
+        question = " ".join(args.question).strip()
+        if not question:
+            raise ValueError("analysis question is required unless --saved or --list is used")
+        spec = asyncio.run(
+            analyst.plan(
+                question,
+                filters=_key_value_args(args.filter),
+                model=args.model,
+                source=args.source,
+            )
+        )
+    preview = analyst.prepare(spec)
+    if args.save:
+        save_analysis(replace(spec, id=args.save), args.repo_root)
+    if not args.json:
+        _print_analysis_preview(preview)
+    execute = args.yes or (
+        CONSOLE.is_terminal and Confirm.ask("Generate the evidence-backed report?")
+    )
+    if not execute:
         if args.json:
-            print(as_json(result))
+            print(as_json(preview))
         else:
-            CONSOLE.print(result.report)
-            CONSOLE.print(f"Report: [cyan]{result.report_dir / 'report.md'}[/]")
+            CONSOLE.print("[fugue.muted]Scope only. Use --yes to generate the report.[/]")
         return 0
-    raise AssertionError(args.analyses_command)
+    result = asyncio.run(analyst.execute(preview, model=args.model))
+    if args.json:
+        print(as_json(result))
+    else:
+        CONSOLE.print(Panel(Markdown(result.report), title="Analysis", border_style="fugue.cyan"))
+        CONSOLE.print(f"Report: [fugue.cyan]{result.report_dir / 'report.md'}[/]")
+    return 0
 
 
-def _catalog(args: argparse.Namespace) -> int:
-    from fugue.bench.catalog import ExperimentCatalog
+def _setup(args: argparse.Namespace) -> int:
     from fugue.bench.operator import as_json
 
-    catalog = ExperimentCatalog(args.repo_root, load_env(args.env_file))
-    if args.catalog_command == "refresh":
-        status = catalog.refresh(source=args.source)
-        CONSOLE.print(
-            f"[green]catalog refreshed[/] {status.records} records / "
-            f"{status.experiments} experiments"
-        )
-        return 0
-    if args.catalog_command == "status":
-        status = catalog.status()
+    service = OperatorService(args.repo_root, args.env_file)
+    request = ExperimentRequest(
+        experiment_id=args.experiment,
+        manifest=args.manifest,
+        preset=args.preset,
+        workloads=tuple(_csv(args.workloads) or []),
+        systems=tuple(_csv(args.systems) or []),
+        model=args.model,
+        builder_model=args.builder_model,
+        judge_model=args.judge_model,
+        trace_content=args.trace_content,
+    )
+    if args.check:
+        checks = service.preflight(request, live=True)
         if args.json:
-            print(as_json(status))
+            print(as_json(checks))
+        else:
+            _print_checks(checks)
+        return 0 if all(check.ok for check in checks) else 1
+    if args.start_bridge:
+        files = service.start_bridge(request)
+        if args.json:
+            print(as_json(files))
         else:
             CONSOLE.print(
-                f"{status.records} records / {status.experiments} experiments / "
-                f"{status.local_records} local / {status.weave_records} Weave"
+                Panel(
+                    f"Bridge is running from [fugue.cyan]{files.runtime_dir}[/]",
+                    title="Bridge",
+                    border_style="fugue.success",
+                )
             )
-            CONSOLE.print(f"Catalog: [cyan]{status.path}[/]")
         return 0
-    if args.catalog_command == "facets":
-        records = catalog.records(filters=_key_value_args(args.filter))
-        facets = catalog.facets(records)
+    if args.prepare_context:
+        records = service.prepare_context(request, rebuild=args.rebuild)
         if args.json:
-            print(json.dumps(facets, indent=2, sort_keys=True))
+            print(as_json(records))
         else:
-            for name, values in facets.items():
-                CONSOLE.print(f"[bold]{name}[/]")
-                for value, count in values.items():
-                    CONSOLE.print(f"  {value:<30} {count}")
+            _print_context_preparation(records)
         return 0
-    raise AssertionError(args.catalog_command)
-
-
-def _status_row(table: Table, name: str, ready: bool, detail: str) -> None:
-    table.add_row(name, "[green]ready[/]" if ready else "[red]missing[/]", detail)
+    status = service.status(request)
+    if args.json:
+        print(as_json(status))
+    else:
+        _print_setup(status)
+    return 0 if all(route.key_present for route in status.routes) and status.trace_key_present else 1
 
 
 def _runs(args: argparse.Namespace) -> int:
     from fugue.bench.operator import OperatorService, as_json
 
     service = OperatorService(args.repo_root, args.env_file)
-    if args.runs_command == "list":
+    if not args.run_id:
+        if any((args.logs, args.cancel, args.export_run, args.open)):
+            raise ValueError("a run id is required for this action")
         runs = service.runs()[: args.limit]
         if args.json:
             print(as_json(runs))
             return 0
-        table = Table(title="Fugue runs", box=None)
+        table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
         for name in ("Run", "Experiment", "Status", "Passed", "Failed", "Pending"):
             table.add_column(name)
         for run in runs:
@@ -1410,33 +907,9 @@ def _runs(args: argparse.Namespace) -> int:
         if runs:
             CONSOLE.print(table)
         else:
-            CONSOLE.print("[dim]No runs yet. Start one with `fugue` or `fugue run`.[/]")
+            CONSOLE.print("[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]")
         return 0
-    if args.runs_command == "show":
-        run = service.run_summary(args.run_id)
-        if args.json:
-            print(as_json(run))
-            return 0
-        CONSOLE.print(f"[bold]{run.run_name}[/]  {run.run_id}")
-        CONSOLE.print(
-            f"{_status_markup(run.status)}  {run.passed} passed  "
-            f"{run.failed} failed  {run.pending} pending"
-        )
-        cells = Table(box=None)
-        for name in ("Cell", "Harness", "Variant", "Context", "Task", "Status"):
-            cells.add_column(name)
-        for cell in run.cells:
-            cells.add_row(
-                cell.cell_id,
-                cell.harness,
-                cell.variant_id,
-                cell.context_system_id,
-                cell.task_id,
-                _status_markup(cell.status),
-            )
-        CONSOLE.print(cells)
-        return 0
-    if args.runs_command == "logs":
+    if args.logs:
         if args.follow:
             try:
                 for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
@@ -1446,44 +919,33 @@ def _runs(args: argparse.Namespace) -> int:
         else:
             print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
         return 0
-    if args.runs_command == "cancel":
+    if args.cancel:
         run = service.supervisor.cancel(args.run_id)
-        CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
+        if args.json:
+            print(as_json(service.run_summary(args.run_id)))
+        else:
+            CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
         return 0
-    if args.runs_command == "export":
-        run = service.supervisor.get(args.run_id)
-        trace_project = str(
-            run.metadata.get("trace_project") or trace_project_slug(service.env)
-        )
-        job_dirs = [
-            _resolve(args.repo_root, Path(path))
-            for path in run.metadata.get("jobs_dirs", [])
-        ]
-        sources = [*job_dirs, run.run_dir]
-        rows = export_rows(
-            sources,
+    if args.export_run:
+        summary = service.export_run(
+            args.run_id,
+            out=args.out,
             fetch_weave=args.fetch_weave,
-            weave_project=trace_project,
-            env=service.env,
+            to_weave=args.to_weave,
+            republish=args.republish,
         )
-        out = args.out or args.repo_root / "reports" / f"{args.run_id}.jsonl"
-        write_jsonl(rows, out)
-        if args.to_weave:
-            published = publish_to_weave(
-                rows,
-                trace_project,
-                ledger_root=args.repo_root / ".fugue" / "runtime" / "publications",
-                republish=args.republish,
-                env=service.env,
-            )
-            CONSOLE.print(f"Published {published} new evaluation row(s)")
-        CONSOLE.print(f"Exported {len(rows)} rows to [cyan]{out}[/]")
+        if args.json:
+            print(as_json(summary))
+        else:
+            if summary.published:
+                CONSOLE.print(f"Published {summary.published} new evaluation row(s)")
+            CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
         return 0
-    if args.runs_command == "open":
+    if args.open:
         links = service.run_links(args.run_id)
-        url = links.project if args.target == "project" else links.agents
+        url = links.project if args.open == "project" else links.agents
         conversation_id = None
-        if args.target == "trace":
+        if args.open == "trace":
             url = links.trace or links.agents
             refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
             conversation_id = next(
@@ -1494,15 +956,96 @@ def _runs(args: argparse.Namespace) -> int:
                 ),
                 None,
             )
-        if args.print_only:
+        if args.json:
+            print(as_json({"url": url, "conversation_id": conversation_id}))
+        elif args.print_only:
             print(url)
         else:
             webbrowser.open(url)
             CONSOLE.print(f"Opened [link={url}]{url}[/link]")
-        if conversation_id:
+        if conversation_id and not args.json:
             CONSOLE.print(f"Conversation: [cyan]{conversation_id}[/]")
         return 0
-    raise AssertionError(args.runs_command)
+    run = service.run_summary(args.run_id)
+    if args.json:
+        print(as_json(run))
+    else:
+        CONSOLE.print(_run_panel(run))
+        CONSOLE.print(_cells_table(run))
+    return 0
+
+
+def _print_started_run(run: Any) -> None:
+    CONSOLE.print(
+        Panel(
+            f"[fugue.success]started[/] [bold]{run.run_id}[/]\n"
+            f"Logs: [fugue.cyan]{run.log_path}[/]\n"
+            f"Follow: [bold]fugue runs {run.run_id} --logs --follow[/]",
+            title=run.run_name,
+            border_style="fugue.success",
+        )
+    )
+
+
+def _run_panel(run: Any) -> Panel:
+    return Panel(
+        f"{_status_markup(run.status)}  "
+        f"[fugue.success]{run.passed} passed[/]  "
+        f"[fugue.coral]{run.failed} failed[/]  "
+        f"{run.pending} pending  {run.not_applicable} not applicable",
+        title=f"{run.run_name}  [{run.run_id}]",
+        border_style="fugue.cyan" if run.status in {"starting", "running"} else "fugue.gold",
+    )
+
+
+def _cells_table(run: Any) -> Table:
+    table = Table("Harness", "Variant", "Context", "Task", "Status", box=box.SIMPLE_HEAD)
+    for cell in run.cells:
+        table.add_row(
+            cell.harness,
+            cell.variant_id,
+            cell.context_system_id,
+            cell.task_id,
+            _status_markup(cell.status),
+        )
+    if not run.cells:
+        table.add_row("-", "-", "-", "waiting for planner", _status_markup(run.status))
+    return table
+
+
+def _wait_for_run(service: OperatorService, run_id: str) -> int:
+    terminal = {"passed", "failed", "cancelled", "interrupted"}
+    if not CONSOLE.is_terminal:
+        try:
+            for chunk in service.supervisor.follow_log(run_id):
+                print(chunk, end="", flush=True)
+        except KeyboardInterrupt:
+            service.supervisor.cancel(run_id)
+            return 130
+        run = service.run_summary(run_id)
+        return 0 if run.status == "passed" else 1
+    offset = 0
+    log_tail = ""
+    try:
+        with Live(console=CONSOLE, refresh_per_second=4) as live:
+            while True:
+                run = service.run_summary(run_id)
+                chunk, offset = service.supervisor.read_log_chunk(run_id, offset=offset)
+                if chunk:
+                    log_tail = (log_tail + chunk)[-8_000:]
+                live.update(
+                    Group(
+                        _run_panel(run),
+                        _cells_table(run),
+                        Panel(log_tail or "Waiting for output...", title="Live log", border_style="fugue.muted"),
+                    )
+                )
+                if run.status in terminal:
+                    return 0 if run.status == "passed" else 1
+                time.sleep(0.25)
+    except KeyboardInterrupt:
+        service.supervisor.cancel(run_id)
+        return 130
 
 
 def _status_markup(status: str) -> str:
@@ -1518,227 +1061,8 @@ def _status_markup(status: str) -> str:
     return f"[{color}]{status.replace('_', ' ')}[/]"
 
 
-def _prepend_env_path(root: Path, existing: str | None) -> str:
-    value = root.resolve().as_posix()
-    return value if not existing else f"{value}{os.pathsep}{existing}"
-
-
 def _now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-def _context(args: argparse.Namespace) -> int:
-    if args.context_command == "list":
-        for spec in list_context_systems():
-            default = "default" if spec.enabled_by_default else "opt-in"
-            print(
-                f"{spec.id}\t{spec.title}\t{spec.version}\t"
-                f"{','.join(sorted(spec.capabilities))}\t{default}"
-            )
-        return 0
-    if args.context_command == "show":
-        print(yaml.safe_dump(get_context_system(args.system).to_dict(), sort_keys=False), end="")
-        return 0
-    if args.context_command == "preflight":
-        return _context_preflight(args)
-    if args.context_command == "prepare":
-        return _context_prepare(args)
-    if args.context_command == "query":
-        return _context_query(args)
-    if args.context_command == "evaluate":
-        return _context_evaluate(args)
-    raise AssertionError(args.context_command)
-
-
-def _context_preflight(args: argparse.Namespace) -> int:
-    env = load_env(args.env_file)
-    runtime = ContextRuntime(
-        repo_root=args.repo_root,
-        cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
-        env=env,
-    )
-    requested = _csv(args.systems)
-    specs = [
-        spec
-        for spec in list_context_systems(args.repo_root)
-        if not requested or spec.id in set(requested)
-    ]
-    if requested:
-        missing = sorted(set(requested) - {spec.id for spec in specs})
-        if missing:
-            raise ValueError(f"unknown context system(s): {', '.join(missing)}")
-    failed = 0
-    for spec in specs:
-        checks = asyncio.run(preflight_context(spec, runtime))
-        status = "ok" if all(check.ok for check in checks) else "FAIL"
-        if status == "FAIL":
-            failed += 1
-        print(f"[{status}] {spec.id} ({spec.version})")
-        for check in checks:
-            marker = "ok" if check.ok else "FAIL"
-            print(f"  [{marker}] {check.name}: {check.detail}")
-    return 1 if failed else 0
-
-
-def _context_prepare(args: argparse.Namespace) -> int:
-    env = load_env(args.env_file)
-    experiment = _load_experiment_arg(args)
-    env["FUGUE_BUILDER_MODEL"] = (
-        getattr(args, "builder_model", None)
-        or experiment.builder_model
-        or env.get("FUGUE_BUILDER_MODEL")
-        or getattr(args, "model", None)
-        or experiment.model
-        or ""
-    )
-    runtime = ContextRuntime(
-        repo_root=args.repo_root,
-        cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
-        env=env,
-    )
-    preset = _selected_preset(experiment, args.preset)
-    workloads = _selected_workloads(experiment, preset, _csv(args.workloads))
-    for workload in workloads:
-        if workload.runner != "harbor":
-            continue
-        manifest_path = _resolve(
-            args.repo_root,
-            args.manifest or workload.manifest or experiment.manifest,
-        )
-        materialized = materialize_manifest_dataset(
-            load_manifest(manifest_path),
-            args.repo_root,
-            rebuild=args.rebuild,
-        )
-        if materialized:
-            print(f"dataset\t{workload.id}\t{materialized}")
-    targets = _preparation_targets(
-        experiment=experiment,
-        workloads=workloads,
-        preset=preset,
-        requested_systems=_csv(args.systems),
-        manifest_override=args.manifest,
-        repo_root=args.repo_root,
-    )
-    records = 0
-    checkouts: dict[tuple[str, str, str], RepositorySnapshot] = {}
-    for system_id, snapshot in targets:
-        spec = get_context_system(system_id, args.repo_root)
-        failed = [
-            check
-            for check in asyncio.run(preflight_context(spec, runtime, phase="host"))
-            if not check.ok and check.severity == "required"
-        ]
-        if failed:
-            detail = "; ".join(f"{item.name}: {item.detail}" for item in failed)
-            print(f"skip\t{system_id}\t{snapshot.task_id}\t{detail}")
-            continue
-        checkout = snapshot
-        if system_id != "none" and checkout.checkout == args.repo_root:
-            snapshot_key = (snapshot.task_id, snapshot.repo, snapshot.commit)
-            checkout = checkouts.get(snapshot_key) or checkout_repository(
-                task_id=snapshot.task_id,
-                repo=snapshot.repo,
-                commit=snapshot.commit,
-                checkout_root=runtime.cache_root / "checkouts",
-                dataset_id=snapshot.dataset_id,
-                rebuild=args.rebuild,
-            )
-            checkouts[snapshot_key] = checkout
-        prepared = asyncio.run(
-            trace_async_operation(
-                "fugue.context.prepare",
-                {
-                    "experiment_id": experiment.id,
-                    "preset_id": preset.id,
-                    "run_id": getattr(args, "run_id", None),
-                    "context_system_id": system_id,
-                    "task_id": snapshot.task_id,
-                    "dataset_id": snapshot.dataset_id,
-                    "repository": snapshot.repo,
-                    "commit": snapshot.commit,
-                },
-                runtime.env,
-                lambda spec=spec, checkout=checkout: prepare_context(
-                    spec,
-                    checkout,
-                    runtime,
-                    rebuild=args.rebuild,
-                ),
-                lambda value: {
-                    "cache_key": value.cache_key,
-                    "cache_hit": value.cache_hit,
-                    **value.metrics,
-                },
-            )
-        )
-        status = "cache" if prepared.cache_hit else "built"
-        print(
-            f"{status}\t{system_id}\t{snapshot.task_id}\t"
-            f"{prepared.cache_key[:12]}\t{prepared.path}"
-        )
-        records += 1
-    print(f"prepared {records} context artifact(s)")
-    return 0
-
-
-def _materialize_run_datasets(args: argparse.Namespace) -> None:
-    experiment = _load_experiment_arg(args)
-    preset = _selected_preset(experiment, args.preset)
-    workloads = _selected_workloads(experiment, preset, _csv(args.workloads))
-    for workload in workloads:
-        if workload.runner != "harbor":
-            continue
-        manifest_path = _resolve(
-            args.repo_root,
-            getattr(args, "manifest", None)
-            or workload.manifest
-            or experiment.manifest,
-        )
-        path = materialize_manifest_dataset(load_manifest(manifest_path), args.repo_root)
-        if path:
-            print(f"# dataset ready: {path}")
-
-
-def _context_query(args: argparse.Namespace) -> int:
-    if args.top_k < 1:
-        raise ValueError("top-k must be positive")
-    runtime = ContextRuntime(
-        repo_root=args.repo_root,
-        cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
-        env=dict(os.environ),
-    )
-    spec = get_context_system(args.system, args.repo_root)
-    prepared = prepared_from_index(runtime.cache_root, args.system, args.task_id)
-    if prepared is None:
-        raise FileNotFoundError(
-            f"no prepared context for {args.system}/{args.task_id}; run context prepare"
-        )
-    hits, metrics = asyncio.run(
-        query_context(
-            spec,
-            RetrievalQuery(
-                id="cli",
-                text=args.query,
-                top_k=args.top_k,
-                expected_paths=tuple(_csv(args.expected_paths) or []),
-            ),
-            prepared,
-            runtime,
-        )
-    )
-    print(
-        json.dumps(
-            {
-                "system": spec.id,
-                "metrics": metrics,
-                "hits": [hit.__dict__ for hit in hits],
-            },
-            indent=2,
-            default=str,
-        )
-    )
-    return 0
 
 
 def _context_evaluate(args: argparse.Namespace) -> int:
@@ -1785,154 +1109,6 @@ def _context_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _preparation_targets(
-    *,
-    experiment: ExperimentSpec,
-    workloads: list[WorkloadSpec],
-    preset: PresetSpec,
-    requested_systems: list[str] | None,
-    manifest_override: Path | None,
-    repo_root: Path,
-) -> list[tuple[str, RepositorySnapshot]]:
-    targets: dict[tuple[str, str, str, str], tuple[str, RepositorySnapshot]] = {}
-    selected = workloads or [
-        WorkloadSpec(
-            id="harbor", runner="harbor", manifest=manifest_override or experiment.manifest
-        )
-    ]
-    for workload in selected:
-        system_ids = _selected_system_ids(
-            experiment,
-            workload,
-            preset,
-            requested_systems,
-        ) or []
-        required = set(workload.required_capabilities)
-        system_ids = [
-            system_id
-            for system_id in system_ids
-            if required
-            <= set(get_context_system(system_id, repo_root).capabilities)
-        ]
-        limit = (
-            _preset_workload_int(preset, workload.id, "n_tasks")
-            or workload.n_tasks
-            or preset.n_tasks
-        )
-        snapshots: list[RepositorySnapshot] = []
-        if workload.runner == "harbor":
-            path = _resolve(
-                repo_root, manifest_override or workload.manifest or experiment.manifest
-            )
-            manifest = load_manifest(path)
-            tasks = manifest.tasks[:limit] if limit else manifest.tasks
-            for task in tasks:
-                if not task.repo or not task.base_commit:
-                    continue
-                snapshots.append(
-                    RepositorySnapshot(
-                        task.id,
-                        task.repo,
-                        task.base_commit,
-                        repo_root,
-                        manifest.dataset.harbor_ref,
-                    )
-                )
-        elif workload.dataset:
-            dataset = load_workload_dataset(_resolve(repo_root, Path(workload.dataset)))
-            cases = [*dataset.retrieval_cases, *dataset.sequence_cases]
-            if limit:
-                cases = cases[:limit]
-            snapshots.extend(
-                RepositorySnapshot(
-                    case.id, case.repo, case.commit, repo_root, dataset.id
-                )
-                for case in cases
-            )
-        for system_id in system_ids:
-            for snapshot in snapshots:
-                key = (system_id, snapshot.task_id, snapshot.repo, snapshot.commit)
-                targets[key] = (system_id, snapshot)
-    return list(targets.values())
-
-
-def _library(args: argparse.Namespace) -> int:
-    if args.command == "prompts":
-        return _library_prompt(args)
-    if args.command == "skills":
-        return _library_skill(args)
-    if args.command == "experiments":
-        return _library_experiment(args)
-    raise AssertionError(args.command)
-
-
-def _library_prompt(args: argparse.Namespace) -> int:
-    if args.library_command == "list":
-        _print_items(list_prompts())
-        return 0
-    if args.library_command == "show":
-        print(get_prompt(args.id).body, end="")
-        return 0
-    if args.library_command == "save":
-        item = save_prompt(args.id, _body_arg(args))
-        print(f"saved prompt {item.id} -> {item.path}")
-        return 0
-    if args.library_command == "validate":
-        item = get_prompt(args.id)
-        print(json.dumps({"id": item.id, "sha256": item.sha256}, sort_keys=True))
-        return 0
-    raise AssertionError(args.library_command)
-
-
-def _library_skill(args: argparse.Namespace) -> int:
-    if args.library_command == "list":
-        _print_items(list_skills())
-        return 0
-    if args.library_command == "show":
-        print(get_skill(args.id).body, end="")
-        return 0
-    if args.library_command == "save":
-        item = save_skill(args.id, _body_arg(args))
-        print(f"saved skill {item.id} -> {item.path}")
-        return 0
-    if args.library_command == "validate":
-        item = get_skill(args.id)
-        print(json.dumps({"id": item.id, "sha256": item.sha256}, sort_keys=True))
-        return 0
-    raise AssertionError(args.library_command)
-
-
-def _library_experiment(args: argparse.Namespace) -> int:
-    if args.library_command == "list":
-        _print_items(list_experiments())
-        return 0
-    if args.library_command == "show":
-        print(get_experiment_text(args.id), end="")
-        return 0
-    if args.library_command == "save":
-        experiment = save_experiment(args.id, _body_arg(args))
-        print(f"saved experiment {experiment.id}")
-        return 0
-    if args.library_command == "validate":
-        experiment = get_experiment(args.id)
-        print(experiment_to_yaml(experiment), end="")
-        return 0
-    raise AssertionError(args.library_command)
-
-
-def _print_items(items) -> None:
-    for item in items:
-        print(f"{item.id}\t{item.title}\t{item.sha256[:12]}\t{item.path}")
-
-
-def _body_arg(args: argparse.Namespace) -> str:
-    if args.file:
-        return args.file.read_text()
-    if args.body is not None:
-        return args.body
-    raise ValueError("--file or --body is required")
-
-
 def _csv(value: str | None) -> list[str] | None:
     if not value:
         return None
@@ -1956,48 +1132,6 @@ def _run_name(cli_value: str | None, env: dict[str, str]) -> str:
     if value and value.strip():
         return value.strip()
     return datetime.now(UTC).strftime("fugue-%Y%m%dT%H%M%SZ")
-
-
-def _run_tags(
-    *,
-    env: dict[str, str],
-    cli_tags: str | None,
-    run_name: str,
-    manifest: BenchmarkManifest,
-    manifest_path: Path,
-) -> list[str]:
-    configured = []
-    for raw in (env.get("FUGUE_TAGS"), cli_tags):
-        configured.extend(_csv(raw) or [])
-    return _dedupe(
-        [
-            "fugue",
-            f"run:{run_name}",
-            f"dataset:{manifest.dataset.ref or manifest.dataset.path}",
-            f"manifest:{manifest_path.stem}",
-            *configured,
-        ]
-    )
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        item = str(value).strip()
-        if item and item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
-
-
-def _slug(value: str) -> str:
-    out = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
-    return "-".join(part for part in out.split("-") if part) or "fugue"
-
-
-def _env_id(value: str) -> str:
-    return "".join(ch.upper() if ch.isalnum() else "_" for ch in value)
 
 
 def _resolve(root: Path, path: Path) -> Path:

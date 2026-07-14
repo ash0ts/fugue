@@ -24,9 +24,12 @@ def test_tui_renders_four_operator_screens_and_preview(
             await pilot.pause()
             assert app.query_one("#workspace").active == "compose"
             assert len(app.query("TabPane")) == 4
-            assert app.query_one("#setup-table").row_count == 11
+            assert app.query_one("#setup-table").row_count == 10
             assert app.query_one("#composer-drawer")
             assert app.query_one("#analyst-drawer")
+            assert not app.query("#system-list")
+            assert not app.query("#run-detached")
+            assert not hasattr(app, "_run_cli")
 
             await pilot.click("#preview")
             await pilot.pause(1)
@@ -115,26 +118,34 @@ def test_tui_applies_ai_draft_and_renders_analysis_scope(
         input_tokens=10,
         output_tokens=5,
     )
-    app = FugueApp(service=service, experiment_id="demo")
+    app = FugueApp(service=service, experiment_id="demo", initial_draft=draft)
 
     async def exercise() -> None:
         async with app.run_test(size=(130, 44)) as pilot:
             await pilot.pause()
-            app.composer_draft = draft
-            app._apply_ai_draft()
             assert app.applied_draft is draft
             assert "AI draft applied" in str(app.query_one("#matrix-summary").render())
 
+            scope = SimpleNamespace(
+                experiments=("demo",),
+                runs=("run-1",),
+                rows=1,
+                tasks=("task-one",),
+                models=("openai/gpt-5",),
+                variants=("baseline",),
+                sources=("local",),
+            )
+            preview = SimpleNamespace(
+                scope=scope,
+                spec=SimpleNamespace(id="demo-analysis"),
+            )
+            app._show_analysis_preview(preview)
+            assert app.analysis_preview is preview
+            assert "1 experiments" in str(app.query_one("#analysis-scope").render())
+
             app._show_analysis(
                 SimpleNamespace(
-                    scope=SimpleNamespace(
-                        experiments=("demo",),
-                        runs=("run-1",),
-                        rows=1,
-                        tasks=("task-one",),
-                        models=("openai/gpt-5",),
-                        sources=("local",),
-                    ),
+                    scope=scope,
                     report="# Demo analysis\n\nOne result [E001].\n",
                     spec=SimpleNamespace(id="demo-analysis"),
                     report_dir=tmp_path / "reports/analyses/demo-analysis/run-1",

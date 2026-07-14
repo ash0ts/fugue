@@ -271,6 +271,7 @@ def experiment_from_yaml(
 def experiment_from_data(
     raw: dict[str, Any], *, item_id: str | None = None
 ) -> ExperimentSpec:
+    _reject_unknown(raw, ExperimentSpec, kind="experiment")
     experiment_id = validate_id(
         raw.get("id") or item_id or "experiment", kind="experiment id"
     )
@@ -306,12 +307,7 @@ def experiment_from_data(
         tags=_string_list(raw.get("tags")),
         harnesses=_string_list(raw.get("harnesses")),
         variants=variants,
-        n_attempts=_positive_int(
-            raw.get("n_attempts")
-            if raw.get("n_attempts") is not None
-            else raw.get("k"),
-            kind="experiment n_attempts",
-        ),
+        n_attempts=_positive_int(raw.get("n_attempts"), kind="experiment n_attempts"),
         n_concurrent=_positive_int(
             raw.get("n_concurrent"), kind="experiment n_concurrent"
         ),
@@ -372,8 +368,7 @@ def _variants(raw: dict[str, Any]) -> list[FeatureVariant]:
 def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     if not isinstance(raw, dict):
         raise ValueError("variant must be a mapping")
-    if "memory" in raw:
-        raise ValueError("variant.memory was removed; use context.system_id")
+    _reject_unknown(raw, FeatureVariant, kind="variant")
     variant_id = validate_id(raw.get("id") or f"variant-{index}", kind="variant id")
     prompt_id = _optional_str(raw.get("prompt_id"))
     if prompt_id:
@@ -407,6 +402,7 @@ def _context_selection(raw: Any) -> ContextSelection:
         return ContextSelection(system_id=system_id)
     if not isinstance(raw, dict):
         raise ValueError("variant context must be a string or mapping")
+    _reject_unknown(raw, ContextSelection, kind="variant context")
     system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
     return ContextSelection(system_id=system_id, config=_dict(raw.get("config")))
 
@@ -417,6 +413,7 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
     for index, value in enumerate(values, start=1):
         if not isinstance(value, dict):
             raise ValueError("workload must be a mapping")
+        _reject_unknown(value, WorkloadSpec, kind="workload")
         workload_id = validate_id(
             value.get("id") or f"workload-{index}", kind="workload id"
         )
@@ -457,6 +454,7 @@ def _presets(raw: Any) -> list[PresetSpec]:
     for index, value in enumerate(values, start=1):
         if not isinstance(value, dict):
             raise ValueError("preset must be a mapping")
+        _reject_unknown(value, PresetSpec, kind="preset")
         preset_id = validate_id(value.get("id") or f"preset-{index}", kind="preset id")
         presets.append(
             PresetSpec(
@@ -474,7 +472,9 @@ def _presets(raw: Any) -> list[PresetSpec]:
                     value.get("n_concurrent"),
                     kind=f"preset {preset_id} n_concurrent",
                 ),
-                workload_overrides=_nested_dict(value.get("workload_overrides")),
+                workload_overrides=_workload_overrides(
+                    value.get("workload_overrides"), preset_id
+                ),
             )
         )
     return presets
@@ -551,6 +551,12 @@ def _trace_content(value: Any) -> str:
     return selected
 
 
+def _reject_unknown(raw: dict[str, Any], contract: type, *, kind: str) -> None:
+    unknown = sorted(set(raw) - set(contract.__dataclass_fields__))
+    if unknown:
+        raise ValueError(f"unknown {kind} field(s): {', '.join(unknown)}")
+
+
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -593,9 +599,26 @@ def _dict(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def _nested_dict(value: Any) -> dict[str, dict[str, Any]]:
+def _workload_overrides(value: Any, preset_id: str) -> dict[str, dict[str, Any]]:
     values = _dict(value)
-    return {str(key): _dict(item) for key, item in values.items()}
+    allowed = {"n_tasks", "n_attempts", "n_concurrent"}
+    result: dict[str, dict[str, Any]] = {}
+    for key, item in values.items():
+        settings = _dict(item)
+        unknown = sorted(set(settings) - allowed)
+        if unknown:
+            raise ValueError(
+                f"preset {preset_id} workload {key} has unknown override(s): "
+                f"{', '.join(unknown)}"
+            )
+        result[str(key)] = {
+            name: _positive_int(
+                selected,
+                kind=f"preset {preset_id} workload {key} {name}",
+            )
+            for name, selected in settings.items()
+        }
+    return result
 
 
 def _list(value: Any) -> list[Any]:

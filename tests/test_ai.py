@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 from test_operator import make_operator_repo
 
-from fugue.assistant import AssistantModelClient
+from fugue.assistant import AssistantAgent, AssistantModelClient
 from fugue.bench.ai import (
     ExperimentAnalyst,
     ExperimentComposer,
@@ -47,6 +47,14 @@ def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
     service = make_operator_repo(tmp_path)
     base = service.experiment("demo").to_dict()
     attempts = 0
+    session_ids: list[str] = []
+    real_run = AssistantAgent.run
+
+    async def record_session(agent, messages):
+        session_ids.append(agent.session_id)
+        return await real_run(agent, messages)
+
+    monkeypatch.setattr("fugue.bench.ai.AssistantAgent.run", record_session)
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
@@ -85,6 +93,7 @@ def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
     draft = asyncio.run(composer.compose("Make a small demo", base_experiment="demo"))
 
     assert attempts == 2
+    assert len(set(session_ids)) == 1
     assert draft.experiment.id == "ai-demo"
     assert draft.preview.cells == 1
     assert not list((tmp_path / ".fugue/runtime").glob("*/run.json"))
@@ -93,7 +102,7 @@ def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
 
 
 def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> None:
-    service = make_operator_repo(tmp_path)
+    make_operator_repo(tmp_path)
     reports = tmp_path / "reports"
     reports.mkdir()
     row = {
@@ -113,9 +122,10 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
         "wall_time_sec": 2.0,
     }
     (reports / "one.jsonl").write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
-    catalog = ExperimentCatalog(tmp_path, service.env)
-    status = catalog.refresh(source="local")
+    catalog = ExperimentCatalog(tmp_path)
+    status = catalog.refresh()
 
+    assert "/catalog/v2/" in status.path
     assert status.experiments == 1
     assert status.records == 1
     assert catalog.facets()["intervention_type"] == {"baseline": 1}
@@ -173,8 +183,7 @@ def test_analyst_snapshots_scope_and_requires_evidence(
                         "filters": {"experiment_id": "demo"},
                         "group_by": ["experiment_id", "harness", "variant_id"],
                         "metrics": ["pass_rate", "reward", "wall_time_sec"],
-                        "baseline": "baseline",
-                        "source": "local",
+                        "source": "hybrid",
                         "include_artifacts": False,
                     },
                 ),
@@ -199,16 +208,37 @@ def test_analyst_snapshots_scope_and_requires_evidence(
         service,
         client_factory=_client_factory(httpx.MockTransport(handler)),
     )
-    result = asyncio.run(
-        analyst.analyze(
+    weave_queries: list[list[str]] = []
+
+    def fetch(run_keys, **kwargs):
+        weave_queries.append(list(run_keys))
+        return {
+            "run-1:task:codex:1": {
+                "weave_span_count": 2,
+                "weave_conversation_ids": ["conversation-1"],
+            }
+        }
+
+    monkeypatch.setattr("fugue.bench.ai.fetch_weave_summaries", fetch)
+    spec = asyncio.run(
+        analyst.plan(
             "How did the demo perform?",
             filters={"experiment_id": "demo"},
-            source="local",
+            source="hybrid",
         )
     )
+    preview = analyst.prepare(spec)
 
+    assert weave_queries == []
+    assert preview.scope.rows == 1
+    assert not (tmp_path / "reports/analyses").exists()
+
+    result = asyncio.run(analyst.execute(preview))
+
+    assert weave_queries == [["run-1:task:codex:1"]]
     assert result.scope.rows == 1
     assert result.aggregates[0]["pass_rate"] == 1.0
+    assert "paired_pass_rate_delta" not in result.aggregates[0]
     assert "[E001]" in result.report
     assert (result.report_dir / "scope.json").is_file()
     path = save_analysis(result.spec, tmp_path)

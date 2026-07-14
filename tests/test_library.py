@@ -91,8 +91,8 @@ manifest: datasets/pilot.yaml
     assert experiment.variants[0].context.system_id == "none"
 
 
-def test_removed_memory_axis_fails_with_migration_message(tmp_path):
-    with pytest.raises(ValueError, match="context.system_id"):
+def test_unknown_variant_fields_are_rejected(tmp_path):
+    with pytest.raises(ValueError, match="unknown variant field.*memory"):
         save_experiment(
             "old-experiment",
             """
@@ -100,6 +100,19 @@ id: old-experiment
 variants:
   - id: baseline
     memory: none
+""",
+            tmp_path,
+        )
+
+
+@pytest.mark.parametrize("field", ["k", "invented"])
+def test_unknown_experiment_fields_are_rejected(tmp_path, field):
+    with pytest.raises(ValueError, match=f"unknown experiment field.*{field}"):
+        save_experiment(
+            "strict",
+            f"""
+id: strict
+{field}: 2
 """,
             tmp_path,
         )
@@ -117,6 +130,24 @@ presets:
   smoke:
     workload_overrides:
       typo: {n_tasks: 1}
+""",
+            tmp_path,
+        )
+
+
+def test_preset_rejects_unknown_workload_override_setting(tmp_path):
+    with pytest.raises(ValueError, match="unknown override.*typo"):
+        save_experiment(
+            "bad-setting",
+            """
+id: bad-setting
+workloads:
+  - {id: coding, runner: harbor}
+presets:
+  smoke:
+    workloads: [coding]
+    workload_overrides:
+      coding: {typo: 1}
 """,
             tmp_path,
         )

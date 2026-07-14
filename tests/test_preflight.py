@@ -60,3 +60,23 @@ def test_preflight_reports_harbor_runtime_adapter_check(
     adapters = next(check for check in checks if check.name == "adapters")
     assert adapters.ok is True
     assert adapters.detail == "harbor runtime"
+
+
+def test_live_preflight_is_read_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.preflight.bridge_status",
+        lambda: {"ok": False, "error": "offline"},
+    )
+
+    checks = run_preflight(
+        "openai/gpt-5",
+        repo_root=tmp_path,
+        env={},
+        live=True,
+    )
+
+    assert next(check for check in checks if check.name == "bridge health").ok is False
+    assert not (tmp_path / ".fugue").exists()

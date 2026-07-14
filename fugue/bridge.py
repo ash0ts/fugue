@@ -13,7 +13,6 @@ import yaml
 from fugue.model_plane import (
     BRIDGE_MASTER_KEY_ENV,
     ModelRoute,
-    bridge_master_key,
     resolve_model_route,
 )
 
@@ -191,9 +190,3 @@ def bridge_status(timeout_sec: float = 3.0) -> dict[str, Any]:
         "status_code": response.status_code,
         "body": body,
     }
-
-
-def bridge_env_for_route(route: ModelRoute, env: Mapping[str, str]) -> dict[str, str]:
-    values = dict(env)
-    values.setdefault(BRIDGE_MASTER_KEY_ENV, bridge_master_key(values))
-    return values

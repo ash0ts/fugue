@@ -152,10 +152,3 @@ def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
         "WANDB_PROJECT": project,
         "WEAVE_PROJECT": f"{entity}/{project}",
     }
-
-
-def env_presence(
-    keys: list[str], env: Mapping[str, str] | None = None
-) -> dict[str, bool]:
-    values = env if env is not None else os.environ
-    return {key: bool(values.get(key, "").strip()) for key in keys}

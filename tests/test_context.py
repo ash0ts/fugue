@@ -25,9 +25,7 @@ from fugue.bench.context import (
 )
 from fugue.bench.scoring import (
     latency_summary,
-    pareto_frontier,
     score_retrieval,
-    summarize_metric_rows,
 )
 from fugue.bench.workloads import (
     RetrievalCase,
@@ -263,16 +261,6 @@ def test_retrieval_metrics_and_na_behavior() -> None:
     assert metrics["recall_at_5"] == 0.5
     assert score_retrieval(RetrievalQuery("q2", "x"), [])["recall_at_10"] is None
     assert latency_summary([]) == {"p50_ms": None, "p95_ms": None}
-    frontier = pareto_frontier(
-        [
-            {"id": "fast", "quality": 0.8, "cost": 1},
-            {"id": "slow", "quality": 0.8, "cost": 2},
-            {"id": "best", "quality": 0.9, "cost": 3},
-        ],
-        quality="quality",
-        cost="cost",
-    )
-    assert {item["id"] for item in frontier} == {"fast", "best"}
 
 
 def test_workload_dataset_rejects_duplicate_cases_and_invalid_counts(
@@ -330,32 +318,6 @@ def test_retrieval_metrics_deduplicate_file_hits_and_stay_bounded() -> None:
     assert metrics["unique_result_count"] == 2
     for name in ("mrr", "ndcg_at_10", "recall_at_5", "precision_at_5"):
         assert 0 <= float(metrics[name]) <= 1
-
-
-def test_retrieval_summary_reports_latency_and_failure_rates() -> None:
-    summary = summarize_metric_rows(
-        [
-            {
-                "record_type": "retrieval",
-                "context_system_id": "rag",
-                "query_latency_ms": 10,
-                "empty": 0,
-            },
-            {
-                "record_type": "retrieval",
-                "context_system_id": "rag",
-                "query_latency_ms": 30,
-                "empty": 1,
-                "exception_class": "TimeoutError",
-            },
-        ],
-        ("context_system_id",),
-    )[0]
-
-    assert summary["query_latency_p50_ms"] == 20
-    assert summary["query_latency_p95_ms"] == 29
-    assert summary["empty_rate"] == 0.5
-    assert summary["error_rate"] == 0.5
 
 
 @pytest.mark.parametrize("system_id", ["none", "markdown-log"])

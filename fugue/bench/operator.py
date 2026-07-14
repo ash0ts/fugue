@@ -1,29 +1,63 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import sys
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
+    ContextRuntime,
+    RepositorySnapshot,
+    checkout_repository,
+    get_context_system,
     list_context_systems,
+    preflight_context,
 )
+from fugue.bench.context import (
+    prepare_context as build_context,
+)
+from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.execution import latest_cell_records, new_run_id
-from fugue.bench.export import export_rows
-from fugue.bench.library import ExperimentSpec, get_experiment, list_experiments
+from fugue.bench.export import export_rows, publish_to_weave, write_jsonl
+from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
+from fugue.bench.library import (
+    ExperimentSpec,
+    PresetSpec,
+    WorkloadSpec,
+    experiment_to_yaml,
+    experiment_with_overrides,
+    get_experiment,
+    list_experiments,
+)
+from fugue.bench.manifest import BenchmarkManifest, load_manifest
 from fugue.bench.supervisor import ManagedRun, RunSupervisor
-from fugue.bridge import bridge_status
-from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
+from fugue.bench.workloads import load_workload_dataset
+from fugue.bridge import BridgeFiles, bridge_status, bridge_up
+from fugue.model_plane import (
+    resolve_model_route,
+    select_model,
+    trace_env_defaults,
+    trace_project_slug,
+)
+from fugue.weave_support import trace_async_operation
+
+if TYPE_CHECKING:
+    from fugue.bench.ai import AnalysisPreview, AnalysisResult, AnalysisSpec
+    from fugue.preflight import PreflightCheck
 
 
 @dataclass(frozen=True)
 class ExperimentRequest:
     experiment_id: str = "pilot"
+    manifest: Path | None = None
     preset: str | None = None
     workloads: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
@@ -115,6 +149,23 @@ class DeepLinks:
 
 
 @dataclass(frozen=True)
+class ExportSummary:
+    path: Path
+    rows: int
+    published: int = 0
+
+
+@dataclass(frozen=True)
+class ContextPreparation:
+    system_id: str
+    task_id: str
+    status: str
+    detail: str
+    cache_key: str | None = None
+    path: Path | None = None
+
+
+@dataclass(frozen=True)
 class ModelRoleStatus:
     role: str
     model: str
@@ -141,8 +192,6 @@ class OperatorStatus:
     selected_context_systems: tuple[str, ...] = ()
     context_system_count: int = 0
     context_cache_entries: int = 0
-    catalog_records: int = 0
-    catalog_refreshed_at: str | None = None
     keys: dict[str, bool] = field(default_factory=dict)
 
 
@@ -185,8 +234,6 @@ class OperatorService:
         if judge_model:
             routes.append(self._role_status("judge", judge_model, env))
         from fugue.assistant import select_assistant_model
-        from fugue.bench.catalog import ExperimentCatalog
-
         routes.append(
             self._role_status(
                 "composer",
@@ -211,18 +258,34 @@ class OperatorService:
             (request.trace_content if request else None) or experiment.trace_content
         )
         key_names = ("WANDB_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        preset = select_preset(experiment, request.preset if request else None)
+        workloads = select_workloads(
+            experiment,
+            preset,
+            list(request.workloads) if request and request.workloads else None,
+        )
         selected_systems = tuple(
             dict.fromkeys(
-                (request.systems if request and request.systems else ())
-                or tuple(
-                    variant.context.system_id
-                    for variant in experiment.variants
-                    if variant.enabled
+                system_id
+                for workload in workloads
+                for system_id in (
+                    selected_system_ids(
+                        experiment,
+                        workload,
+                        preset,
+                        list(request.systems) if request and request.systems else None,
+                    )
+                    or []
                 )
+            )
+        ) or tuple(
+            dict.fromkeys(
+                variant.context.system_id
+                for variant in experiment.variants
+                if variant.enabled
             )
         )
         cache_root = self.repo_root / DEFAULT_CACHE_ROOT
-        catalog_status = ExperimentCatalog(self.repo_root, env).status()
         return OperatorStatus(
             trace_project=trace_project,
             links=self.deep_links(),
@@ -244,10 +307,253 @@ class OperatorService:
                 if cache_root.is_dir()
                 else 0
             ),
-            catalog_records=catalog_status.records,
-            catalog_refreshed_at=catalog_status.refreshed_at,
             keys={key: bool(env.get(key, "").strip()) for key in key_names},
         )
+
+    def preflight(
+        self,
+        request: ExperimentRequest,
+        *,
+        live: bool = True,
+    ) -> tuple[PreflightCheck, ...]:
+        from fugue.preflight import PreflightCheck, run_preflight
+
+        env = self.env
+        experiment = self.experiment(request.experiment_id)
+        target_model = select_model(
+            request.model,
+            env=env,
+            experiment_model=experiment.model,
+        )
+        builder_model = (
+            request.builder_model
+            or experiment.builder_model
+            or env.get("FUGUE_BUILDER_MODEL")
+            or target_model
+        )
+        judge_model = (
+            request.judge_model
+            or experiment.judge_model
+            or env.get("FUGUE_JUDGE_MODEL")
+        )
+        checks = run_preflight(
+            target_model,
+            repo_root=self.repo_root,
+            env=env,
+            live=live,
+        )
+        for role, model in (("builder", builder_model), ("judge", judge_model)):
+            if not model:
+                continue
+            try:
+                route = resolve_model_route(model, env)
+                present = bool(env.get(route.api_key_env, "").strip())
+                detail = (
+                    f"{route.display_model} can use {route.api_key_env}"
+                    if present
+                    else f"{route.display_model} requires {route.api_key_env}"
+                )
+            except ValueError as exc:
+                present = False
+                detail = str(exc)
+            checks.append(PreflightCheck(f"{role} model", present, detail))
+        trace_content = request.trace_content or experiment.trace_content
+        if trace_content == "metadata" and "claude-code" in experiment.harnesses:
+            checks.append(
+                PreflightCheck(
+                    "Claude Code trace content",
+                    False,
+                    "weave-claude-code cannot guarantee metadata-only capture",
+                )
+            )
+        preset = select_preset(experiment, request.preset)
+        systems = list(request.systems) or preset.systems or [
+            variant.context.system_id
+            for variant in experiment.variants
+            if variant.enabled
+        ]
+        runtime = ContextRuntime(
+            repo_root=self.repo_root,
+            cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
+            env=env,
+        )
+        for system_id in dict.fromkeys(systems):
+            spec = get_context_system(system_id, self.repo_root)
+            for item in asyncio.run(preflight_context(spec, runtime)):
+                checks.append(
+                    PreflightCheck(
+                        f"context {system_id}: {item.name}",
+                        item.ok,
+                        item.detail,
+                    )
+                )
+        if preset.id == "full":
+            for workload in select_workloads(experiment, preset, None):
+                if not workload.dataset:
+                    continue
+                dataset = load_workload_dataset(
+                    _resolve(self.repo_root, Path(workload.dataset))
+                )
+                command = (dataset.source.get("materialize_command") or [None])[0]
+                if command:
+                    available = shutil.which(str(command)) is not None
+                    checks.append(
+                        PreflightCheck(
+                            f"workload {workload.id} materializer",
+                            available,
+                            f"{command} is available"
+                            if available
+                            else f"install {command} before the full preset",
+                        )
+                    )
+            if not judge_model:
+                checks.append(
+                    PreflightCheck(
+                        "judge model",
+                        False,
+                        "full preset requires a judge model",
+                    )
+                )
+        return tuple(checks)
+
+    def start_bridge(self, request: ExperimentRequest) -> BridgeFiles:
+        env = self.env
+        experiment = self.experiment(request.experiment_id)
+        target = select_model(
+            request.model,
+            env=env,
+            experiment_model=experiment.model,
+        )
+        return bridge_up(
+            target,
+            repo_root=self.repo_root,
+            env=env,
+            builder_model=(
+                request.builder_model
+                or experiment.builder_model
+                or env.get("FUGUE_BUILDER_MODEL")
+            ),
+            judge_model=(
+                request.judge_model
+                or experiment.judge_model
+                or env.get("FUGUE_JUDGE_MODEL")
+            ),
+        )
+
+    def prepare_context(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+        rebuild: bool = False,
+        run_id: str | None = None,
+    ) -> tuple[ContextPreparation, ...]:
+        selected = experiment or self.experiment(request.experiment_id)
+        env = self.env
+        env["FUGUE_BUILDER_MODEL"] = (
+            request.builder_model
+            or selected.builder_model
+            or env.get("FUGUE_BUILDER_MODEL")
+            or request.model
+            or selected.model
+            or ""
+        )
+        runtime = ContextRuntime(
+            repo_root=self.repo_root,
+            cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
+            env=env,
+        )
+        preset = select_preset(selected, request.preset)
+        workloads = select_workloads(selected, preset, list(request.workloads) or None)
+        for workload in workloads:
+            if workload.runner != "harbor":
+                continue
+            manifest_path = _resolve(
+                self.repo_root,
+                request.manifest or workload.manifest or selected.manifest,
+            )
+            materialize_manifest_dataset(
+                load_manifest(manifest_path),
+                self.repo_root,
+                rebuild=rebuild,
+            )
+        targets = _preparation_targets(
+            experiment=selected,
+            workloads=workloads,
+            preset=preset,
+            requested_systems=list(request.systems) or None,
+            manifest_override=request.manifest,
+            repo_root=self.repo_root,
+        )
+        records: list[ContextPreparation] = []
+        checkouts: dict[tuple[str, str, str], RepositorySnapshot] = {}
+        for system_id, snapshot in targets:
+            spec = get_context_system(system_id, self.repo_root)
+            failed = [
+                check
+                for check in asyncio.run(preflight_context(spec, runtime, phase="host"))
+                if not check.ok and check.severity == "required"
+            ]
+            if failed:
+                records.append(
+                    ContextPreparation(
+                        system_id,
+                        snapshot.task_id,
+                        "skipped",
+                        "; ".join(f"{item.name}: {item.detail}" for item in failed),
+                    )
+                )
+                continue
+            checkout = snapshot
+            if system_id != "none" and checkout.checkout == self.repo_root:
+                snapshot_key = (snapshot.task_id, snapshot.repo, snapshot.commit)
+                checkout = checkouts.get(snapshot_key) or checkout_repository(
+                    task_id=snapshot.task_id,
+                    repo=snapshot.repo,
+                    commit=snapshot.commit,
+                    checkout_root=runtime.cache_root / "checkouts",
+                    dataset_id=snapshot.dataset_id,
+                    rebuild=rebuild,
+                )
+                checkouts[snapshot_key] = checkout
+            prepared = asyncio.run(
+                trace_async_operation(
+                    "fugue.context.prepare",
+                    {
+                        "experiment_id": selected.id,
+                        "preset_id": preset.id,
+                        "run_id": run_id,
+                        "context_system_id": system_id,
+                        "task_id": snapshot.task_id,
+                        "dataset_id": snapshot.dataset_id,
+                        "repository": snapshot.repo,
+                        "commit": snapshot.commit,
+                    },
+                    runtime.env,
+                    lambda spec=spec, checkout=checkout: build_context(
+                        spec,
+                        checkout,
+                        runtime,
+                        rebuild=rebuild,
+                    ),
+                    lambda value: {
+                        "cache_key": value.cache_key,
+                        "cache_hit": value.cache_hit,
+                        **value.metrics,
+                    },
+                )
+            )
+            records.append(
+                ContextPreparation(
+                    system_id,
+                    snapshot.task_id,
+                    "cached" if prepared.cache_hit else "built",
+                    prepared.path.as_posix(),
+                    cache_key=prepared.cache_key,
+                    path=prepared.path,
+                )
+            )
+        return tuple(records)
 
     def experiment(self, experiment_id: str) -> ExperimentSpec:
         return get_experiment(experiment_id, self.repo_root)
@@ -256,39 +562,30 @@ class OperatorService:
         return [(item.title, item.id) for item in list_experiments(self.repo_root)]
 
     def preview(self, request: ExperimentRequest) -> PreviewSummary:
-        return self._preview_namespace(self._namespace(request))
+        return self._preview(request)
 
-    def preview_experiment(self, experiment: ExperimentSpec) -> PreviewSummary:
-        namespace = self._namespace(
-            ExperimentRequest(
-                experiment_id=experiment.id,
-                preset=experiment.default_preset,
-                harnesses=tuple(experiment.harnesses),
-                variants=tuple(
-                    variant.id for variant in experiment.variants if variant.enabled
-                ),
-                model=experiment.model,
-                builder_model=experiment.builder_model,
-                judge_model=experiment.judge_model,
-                n_attempts=experiment.n_attempts,
-                n_tasks=experiment.n_tasks,
-                n_concurrent=experiment.n_concurrent,
-                run_name=experiment.run_name,
-                tags=tuple(experiment.tags),
-                jobs_dir=experiment.jobs_dir,
-                trace_content=experiment.trace_content,
-            )
+    def preview_experiment(
+        self,
+        experiment: ExperimentSpec,
+        *,
+        request: ExperimentRequest | None = None,
+    ) -> PreviewSummary:
+        return self._preview(
+            request or _request_for_experiment(experiment),
+            experiment=experiment,
         )
-        namespace.experiment_spec = experiment
-        return self._preview_namespace(namespace)
 
-    def _preview_namespace(self, namespace: Any) -> PreviewSummary:
-        from fugue.bench.cli import _rendered_jobs_from_args
-
-        jobs = _rendered_jobs_from_args(
-            namespace,
+    def _preview(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> PreviewSummary:
+        jobs = self.rendered_jobs(
+            request,
             run_id="preview",
             write_configs=False,
+            experiment=experiment,
         )
         estimated_trials = 0
         for job in jobs:
@@ -320,44 +617,271 @@ class OperatorService:
             commands=tuple(" ".join(job.command) for job in jobs),
         )
 
-    def launch_experiment(
+    def rendered_jobs(
         self,
-        experiment: ExperimentSpec,
+        request: ExperimentRequest,
         *,
-        attached: bool,
-    ) -> RunSummary:
-        from fugue.bench.library import experiment_to_yaml
-
-        run_id = new_run_id()
-        run_dir = self.repo_root / ".fugue" / "runtime" / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        snapshot = run_dir / "experiment.yaml"
-        temp = snapshot.with_suffix(".tmp")
-        temp.write_text(experiment_to_yaml(experiment))
-        os.replace(temp, snapshot)
-        run_name = experiment.run_name or experiment.id
-        command = [
-            sys.executable,
-            "-m",
-            "fugue.bench.cli",
-            "run",
-            "--experiment-file",
-            snapshot.as_posix(),
-            "--repo-root",
-            self.repo_root.as_posix(),
-            "--env-file",
-            self.env_file.as_posix(),
-            "--run-id",
-            run_id,
-        ]
-        self.supervisor.start_detached(
-            run_id=run_id,
-            command=command,
-            env=self.env,
-            run_name=run_name,
-            experiment_id=experiment.id,
+        run_id: str,
+        write_configs: bool = True,
+        experiment: ExperimentSpec | None = None,
+    ) -> list[RenderedJob]:
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        env = self.env
+        env |= trace_env_defaults(env)
+        if request.model:
+            env["FUGUE_MODEL"] = request.model
+        env["FUGUE_BUILDER_MODEL"] = (
+            request.builder_model
+            or selected.builder_model
+            or env.get("FUGUE_BUILDER_MODEL")
+            or request.model
+            or selected.model
+            or ""
         )
-        return self.run_summary(run_id)
+        env["FUGUE_JUDGE_MODEL"] = (
+            request.judge_model
+            or selected.judge_model
+            or env.get("FUGUE_JUDGE_MODEL")
+            or ""
+        )
+        run_name = _run_name(request.run_name or selected.run_name, env)
+        env["FUGUE_RUN_NAME"] = run_name
+        env["FUGUE_RUN_GROUP"] = env.get("FUGUE_RUN_GROUP", "").strip() or run_name
+        preset = select_preset(selected, request.preset)
+        workloads = select_workloads(selected, preset, list(request.workloads) or None)
+        if not workloads:
+            workloads = [
+                WorkloadSpec(
+                    id="harbor",
+                    runner="harbor",
+                    manifest=request.manifest or selected.manifest,
+                )
+            ]
+        rendered: list[RenderedJob] = []
+        for workload in workloads:
+            if workload.runner == "harbor":
+                manifest_path = _resolve(
+                    self.repo_root,
+                    request.manifest or workload.manifest or selected.manifest,
+                )
+                manifest = load_manifest(manifest_path)
+                env["FUGUE_TAGS"] = ",".join(
+                    _run_tags(
+                        env=env,
+                        tags=request.tags,
+                        run_name=run_name,
+                        manifest=manifest,
+                        manifest_path=manifest_path,
+                    )
+                )
+                renderer = render_jobs if write_configs else preview_jobs
+                rendered.extend(
+                    renderer(
+                        experiment=selected,
+                        manifest=manifest,
+                        manifest_path=manifest_path,
+                        repo_root=self.repo_root,
+                        env=env,
+                        model=request.model,
+                        harness_names=list(request.harnesses) or preset.harnesses,
+                        system_names=selected_system_ids(
+                            selected,
+                            workload,
+                            preset,
+                            list(request.systems) or None,
+                        ),
+                        n_tasks=(
+                            request.n_tasks
+                            or preset_workload_int(preset, workload.id, "n_tasks")
+                            or workload.n_tasks
+                            or preset.n_tasks
+                        ),
+                        n_attempts=(
+                            request.n_attempts
+                            or preset_workload_int(preset, workload.id, "n_attempts")
+                            or workload.n_attempts
+                            or preset.n_attempts
+                        ),
+                        n_concurrent=(
+                            request.n_concurrent
+                            or preset_workload_int(preset, workload.id, "n_concurrent")
+                            or preset.n_concurrent
+                        ),
+                        jobs_dir=request.jobs_dir,
+                        run_name=run_name,
+                        tags=list(request.tags),
+                        run_id=run_id,
+                        workload_id=workload.id,
+                        preset_id=preset.id if preset.id != "default" else None,
+                        required_capabilities=workload.required_capabilities,
+                        workload_artifacts=workload.artifacts,
+                    )
+                )
+            else:
+                rendered.extend(
+                    self._direct_workload_jobs(
+                        experiment=selected,
+                        workload=workload,
+                        preset=preset,
+                        env=env,
+                        run_name=run_name,
+                        request=request,
+                        run_id=run_id,
+                    )
+                )
+        return rendered
+
+    def _direct_workload_jobs(
+        self,
+        *,
+        experiment: ExperimentSpec,
+        workload: WorkloadSpec,
+        preset: PresetSpec,
+        env: dict[str, str],
+        run_name: str,
+        request: ExperimentRequest,
+        run_id: str,
+    ) -> list[RenderedJob]:
+        if not workload.dataset:
+            raise ValueError(f"workload {workload.id} requires dataset")
+        dataset_path = _resolve(self.repo_root, Path(workload.dataset))
+        dataset = load_workload_dataset(dataset_path)
+        if dataset.runner != workload.runner:
+            raise ValueError(
+                f"workload {workload.id} runner {workload.runner} does not match "
+                f"{dataset.runner} dataset"
+            )
+        systems = selected_system_ids(
+            experiment, workload, preset, list(request.systems) or None
+        ) or []
+        selected_model = select_model(
+            request.model,
+            env=env,
+            experiment_model=experiment.model,
+        )
+        route = resolve_model_route(selected_model, env)
+        direct_env = dict(env)
+        direct_env["FUGUE_MODEL"] = selected_model
+        attempts = (
+            request.n_attempts
+            or preset_workload_int(preset, workload.id, "n_attempts")
+            or workload.n_attempts
+            or preset.n_attempts
+            or experiment.n_attempts
+            or 1
+        )
+        limit = (
+            request.n_tasks
+            or preset_workload_int(preset, workload.id, "n_tasks")
+            or workload.n_tasks
+            or preset.n_tasks
+        )
+        required = set(workload.required_capabilities or [workload.runner])
+        runtime = ContextRuntime(
+            repo_root=self.repo_root,
+            cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
+            env=env,
+        )
+        jobs: list[RenderedJob] = []
+        for system_id in systems:
+            spec = get_context_system(system_id, self.repo_root)
+            missing = sorted(required - set(spec.capabilities))
+            license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
+            license_blocked = spec.requires_license_approval and env.get(
+                license_env, ""
+            ).lower() not in {"1", "true", "yes"}
+            skip_reason = None
+            if missing:
+                skip_reason = f"missing context capabilities: {', '.join(missing)}"
+            elif license_blocked:
+                skip_reason = f"license approval required via {license_env}"
+            else:
+                failed = [
+                    check
+                    for check in asyncio.run(
+                        preflight_context(spec, runtime, phase="host")
+                    )
+                    if not check.ok and check.severity == "required"
+                ]
+                if failed:
+                    skip_reason = "; ".join(
+                        f"{check.name}: {check.detail}" for check in failed
+                    )
+            command = [
+                sys.executable,
+                "-m",
+                "fugue.bench.cli",
+                "_context-evaluate",
+                "--experiment",
+                experiment.id,
+                "--workload",
+                workload.id,
+                "--system",
+                system_id,
+                "--preset",
+                preset.id,
+                "--run-id",
+                run_id,
+                "--attempts",
+                str(attempts),
+                "--concurrency",
+                str(request.n_concurrent or preset.n_concurrent or experiment.n_concurrent or 4),
+                "--repo-root",
+                self.repo_root.as_posix(),
+            ]
+            if limit:
+                command.extend(["--limit", str(limit)])
+            local_count = (
+                len(dataset.retrieval_cases)
+                if workload.runner == "retrieval"
+                else len(dataset.sequence_cases)
+            )
+            count = int(((dataset.source.get("counts") or {}).get(preset.id)) or local_count)
+            task_count = min(count, limit) if limit else count
+            config = {
+                "fugue": {
+                    "experiment_id": experiment.id,
+                    "preset_id": preset.id,
+                    "workload_id": workload.id,
+                    "runner": workload.runner,
+                    "context_system_id": system_id,
+                    "context_version": spec.version,
+                    "dataset": dataset_path.as_posix(),
+                    "task_count": task_count,
+                    "n_attempts": attempts,
+                    "applicable": skip_reason is None,
+                    "skip_reason": skip_reason,
+                }
+            }
+            jobs.append(
+                RenderedJob(
+                    command=command,
+                    config_path=dataset_path,
+                    config=config,
+                    env=direct_env,
+                    job_name=f"{_slug(run_name)}-{workload.id}-{system_id}",
+                    harness="direct" if workload.runner == "retrieval" else "sequence",
+                    context_system_id=system_id,
+                    context_version=spec.version,
+                    context_cache_keys={},
+                    context_cache_ready=False,
+                    prompt_id=None,
+                    skill_ids=[],
+                    variant_id=system_id,
+                    variant_label=spec.title,
+                    agent_config_hash="",
+                    route=route,
+                    workload_id=workload.id,
+                    preset_id=preset.id,
+                    run_id=run_id,
+                    run_name=run_name,
+                    task_id=dataset.id,
+                    applicable=skip_reason is None,
+                    skip_reason=skip_reason,
+                )
+            )
+        return jobs
 
     async def compose_experiment(
         self,
@@ -376,7 +900,7 @@ class OperatorService:
             trace_content=trace_content,
         )
 
-    async def analyze_experiments(
+    async def plan_analysis(
         self,
         question: str,
         *,
@@ -386,41 +910,82 @@ class OperatorService:
     ) -> Any:
         from fugue.bench.ai import ExperimentAnalyst
 
-        return await ExperimentAnalyst(self).analyze(
+        return await ExperimentAnalyst(self).plan(
             question,
             filters=filters,
             model=model,
             source=source,
         )
 
-    def launch(self, request: ExperimentRequest, *, attached: bool) -> RunSummary:
+    def prepare_analysis(self, spec: AnalysisSpec) -> AnalysisPreview:
+        from fugue.bench.ai import ExperimentAnalyst
+
+        return ExperimentAnalyst(self).prepare(spec)
+
+    async def execute_analysis(
+        self,
+        preview: AnalysisPreview,
+        *,
+        model: str | None = None,
+    ) -> AnalysisResult:
+        from fugue.bench.ai import ExperimentAnalyst
+
+        return await ExperimentAnalyst(self).execute(preview, model=model)
+
+    def launch(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> RunSummary:
         run_id = new_run_id()
-        experiment = self.experiment(request.experiment_id)
-        run_name = request.run_name or experiment.run_name or experiment.id
+        selected = experiment or self.experiment(request.experiment_id)
+        snapshot = None
+        if experiment is not None:
+            run_dir = self.repo_root / ".fugue" / "runtime" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = run_dir / "experiment.yaml"
+            temp = snapshot.with_suffix(".tmp")
+            temp.write_text(experiment_to_yaml(experiment))
+            os.replace(temp, snapshot)
+        run_name = request.run_name or selected.run_name or selected.id
         command = [
             sys.executable,
             "-m",
             "fugue.bench.cli",
-            *self.request_arguments(request),
+            *self.request_arguments(request, experiment_file=snapshot),
             "--run-id",
             run_id,
         ]
-        run = self.supervisor.start_detached(
+        env = self.env
+        existing_path = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            self.repo_root.as_posix()
+            if not existing_path
+            else f"{self.repo_root}{os.pathsep}{existing_path}"
+        )
+        self.supervisor.start_detached(
             run_id=run_id,
             command=command,
-            env=self.env,
+            env=env,
             run_name=run_name,
-            experiment_id=request.experiment_id,
+            experiment_id=selected.id,
         )
-        if attached:
-            # Attached means the operator follows the durable run; the child
-            # still owns its own process group so closing the TUI is safe.
-            return self.run_summary(run.run_id)
-        return self.run_summary(run.run_id)
+        return self.run_summary(run_id)
 
-    def request_arguments(self, request: ExperimentRequest) -> list[str]:
-        args = ["run", "--experiment", request.experiment_id]
+    def request_arguments(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment_file: Path | None = None,
+    ) -> list[str]:
+        args = ["run"]
+        if experiment_file:
+            args.extend(["--experiment-file", experiment_file.as_posix()])
+        else:
+            args.append(request.experiment_id)
         for flag, value in (
+            ("--manifest", request.manifest.as_posix() if request.manifest else None),
             ("--preset", request.preset),
             ("--workloads", _joined(request.workloads)),
             ("--harnesses", _joined(request.harnesses)),
@@ -453,6 +1018,14 @@ class OperatorService:
     def run_summary(self, run_id: str) -> RunSummary:
         return self._summarize_run(self.supervisor.get(run_id))
 
+    def wait_for_run(self, run_id: str, *, poll_sec: float = 0.25) -> RunSummary:
+        terminal = {"passed", "failed", "cancelled", "interrupted"}
+        while True:
+            run = self.run_summary(run_id)
+            if run.status in terminal:
+                return run
+            time.sleep(poll_sec)
+
     def run_trace_refs(
         self, run_id: str, *, cell_id: str | None = None
     ) -> tuple[AgentTraceRef, ...]:
@@ -479,6 +1052,40 @@ class OperatorService:
                 raise ValueError(f"cell not found in {run_id}: {cell_id}")
             rows = [row for row in rows if _row_matches_cell(row, cell)]
         return _agent_trace_refs(rows)
+
+    def export_run(
+        self,
+        run_id: str,
+        *,
+        out: Path | None = None,
+        fetch_weave: bool = False,
+        to_weave: bool = False,
+        republish: bool = False,
+    ) -> ExportSummary:
+        run = self.supervisor.get(run_id)
+        project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
+        job_dirs = [
+            _resolve(self.repo_root, Path(str(path)))
+            for path in run.metadata.get("jobs_dirs", [])
+        ]
+        rows = export_rows(
+            [*job_dirs, run.run_dir],
+            fetch_weave=fetch_weave,
+            weave_project=project,
+            env=self.env,
+        )
+        output = out or self.repo_root / "reports" / f"{run_id}.jsonl"
+        write_jsonl(rows, output)
+        published = 0
+        if to_weave:
+            published = publish_to_weave(
+                rows,
+                project,
+                ledger_root=self.repo_root / ".fugue" / "runtime" / "publications",
+                republish=republish,
+                env=self.env,
+            )
+        return ExportSummary(path=output, rows=len(rows), published=published)
 
     def results(self, paths: list[Path] | None = None) -> ResultSummary:
         sources = paths or [
@@ -533,32 +1140,6 @@ class OperatorService:
         project = str(run.metadata.get("trace_project") or "").strip() or None
         return self.deep_links(project=project)
 
-    def _namespace(self, request: ExperimentRequest) -> Any:
-        from argparse import Namespace
-
-        return Namespace(
-            experiment=request.experiment_id,
-            manifest=None,
-            harnesses=_joined(request.harnesses),
-            variants=_joined(request.variants),
-            preset=request.preset,
-            workloads=_joined(request.workloads),
-            systems=_joined(request.systems),
-            model=request.model,
-            judge_model=request.judge_model,
-            builder_model=request.builder_model,
-            n_attempts=request.n_attempts,
-            n_concurrent=request.n_concurrent,
-            n_tasks=request.n_tasks,
-            env_file=self.env_file,
-            jobs_dir=request.jobs_dir,
-            run_name=request.run_name,
-            tags=_joined(request.tags),
-            repo_root=self.repo_root,
-            trace_content=request.trace_content,
-            experiment_spec=None,
-        )
-
     @staticmethod
     def _role_status(
         role: str, model: str, env: dict[str, str]
@@ -607,6 +1188,192 @@ class OperatorService:
         )
 
 
+def select_preset(experiment: ExperimentSpec, requested: str | None) -> PresetSpec:
+    if not experiment.presets:
+        return PresetSpec(id="default")
+    preset_id = requested or experiment.default_preset or experiment.presets[0].id
+    for preset in experiment.presets:
+        if preset.id == preset_id:
+            return preset
+    raise ValueError(f"unknown preset: {preset_id}")
+
+
+def select_workloads(
+    experiment: ExperimentSpec,
+    preset: PresetSpec,
+    requested: list[str] | None,
+) -> list[WorkloadSpec]:
+    selected = set(
+        requested or preset.workloads or [item.id for item in experiment.workloads]
+    )
+    workloads = [item for item in experiment.workloads if item.id in selected]
+    missing = sorted(selected - {item.id for item in workloads})
+    if missing:
+        raise ValueError(f"unknown workload(s): {', '.join(missing)}")
+    return workloads
+
+
+def preset_workload_int(
+    preset: PresetSpec,
+    workload_id: str,
+    key: str,
+) -> int | None:
+    value = (preset.workload_overrides.get(workload_id) or {}).get(key)
+    if value in (None, ""):
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(
+            f"preset {preset.id} workload {workload_id} {key} must be positive"
+        )
+    return parsed
+
+
+def selected_system_ids(
+    experiment: ExperimentSpec,
+    workload: WorkloadSpec,
+    preset: PresetSpec,
+    requested: list[str] | None,
+) -> list[str] | None:
+    if requested:
+        return list(dict.fromkeys(requested))
+    selected = preset.systems or workload.systems
+    if selected:
+        allowed = set(workload.systems) if workload.systems else None
+        return [item for item in selected if allowed is None or item in allowed]
+    values = [
+        variant.context.system_id
+        for variant in experiment.variants
+        if variant.enabled
+    ]
+    return list(dict.fromkeys(values)) or None
+
+
+def _request_for_experiment(experiment: ExperimentSpec) -> ExperimentRequest:
+    return ExperimentRequest(
+        experiment_id=experiment.id,
+        preset=experiment.default_preset,
+        harnesses=tuple(experiment.harnesses),
+        variants=tuple(
+            variant.id for variant in experiment.variants if variant.enabled
+        ),
+        model=experiment.model,
+        builder_model=experiment.builder_model,
+        judge_model=experiment.judge_model,
+        n_attempts=experiment.n_attempts,
+        n_tasks=experiment.n_tasks,
+        n_concurrent=experiment.n_concurrent,
+        run_name=experiment.run_name,
+        tags=tuple(experiment.tags),
+        jobs_dir=experiment.jobs_dir,
+        trace_content=experiment.trace_content,
+    )
+
+
+def _preparation_targets(
+    *,
+    experiment: ExperimentSpec,
+    workloads: list[WorkloadSpec],
+    preset: PresetSpec,
+    requested_systems: list[str] | None,
+    manifest_override: Path | None,
+    repo_root: Path,
+) -> list[tuple[str, RepositorySnapshot]]:
+    targets: dict[tuple[str, str, str, str], tuple[str, RepositorySnapshot]] = {}
+    selected = workloads or [
+        WorkloadSpec(
+            id="harbor",
+            runner="harbor",
+            manifest=manifest_override or experiment.manifest,
+        )
+    ]
+    for workload in selected:
+        system_ids = selected_system_ids(
+            experiment,
+            workload,
+            preset,
+            requested_systems,
+        ) or []
+        required = set(workload.required_capabilities)
+        system_ids = [
+            system_id
+            for system_id in system_ids
+            if required <= set(get_context_system(system_id, repo_root).capabilities)
+        ]
+        limit = (
+            preset_workload_int(preset, workload.id, "n_tasks")
+            or workload.n_tasks
+            or preset.n_tasks
+        )
+        snapshots: list[RepositorySnapshot] = []
+        if workload.runner == "harbor":
+            path = _resolve(
+                repo_root,
+                manifest_override or workload.manifest or experiment.manifest,
+            )
+            manifest = load_manifest(path)
+            tasks = manifest.tasks[:limit] if limit else manifest.tasks
+            snapshots.extend(
+                RepositorySnapshot(
+                    task.id,
+                    task.repo,
+                    task.base_commit,
+                    repo_root,
+                    manifest.dataset.harbor_ref,
+                )
+                for task in tasks
+                if task.repo and task.base_commit
+            )
+        elif workload.dataset:
+            dataset = load_workload_dataset(_resolve(repo_root, Path(workload.dataset)))
+            cases = [*dataset.retrieval_cases, *dataset.sequence_cases]
+            if limit:
+                cases = cases[:limit]
+            snapshots.extend(
+                RepositorySnapshot(
+                    case.id,
+                    case.repo,
+                    case.commit,
+                    repo_root,
+                    dataset.id,
+                )
+                for case in cases
+            )
+        for system_id in system_ids:
+            for snapshot in snapshots:
+                key = (system_id, snapshot.task_id, snapshot.repo, snapshot.commit)
+                targets[key] = (system_id, snapshot)
+    return list(targets.values())
+
+
+def _experiment_with_request_overrides(
+    experiment: ExperimentSpec,
+    request: ExperimentRequest,
+) -> ExperimentSpec:
+    variant_ids = set(request.variants)
+    variants = (
+        [variant for variant in experiment.variants if variant.id in variant_ids]
+        if variant_ids
+        else None
+    )
+    missing = sorted(variant_ids - {variant.id for variant in variants or []})
+    if missing:
+        raise ValueError(f"unknown variant(s): {', '.join(missing)}")
+    return experiment_with_overrides(
+        experiment,
+        model=request.model,
+        builder_model=request.builder_model,
+        judge_model=request.judge_model,
+        tags=list(request.tags),
+        harnesses=list(request.harnesses),
+        variants=[variant.to_dict() for variant in variants] if variants else None,
+        n_tasks=request.n_tasks,
+        n_attempts=request.n_attempts,
+        n_concurrent=request.n_concurrent,
+        trace_content=request.trace_content,
+    )
+
+
 def load_env(path: Path) -> dict[str, str]:
     env = os.environ.copy()
     if not path.exists():
@@ -630,6 +1397,55 @@ def as_json(value: Any) -> str:
 
 def _joined(values: tuple[str, ...]) -> str | None:
     return ",".join(values) if values else None
+
+
+def _run_name(value: str | None, env: dict[str, str]) -> str:
+    selected = value or env.get("FUGUE_RUN_NAME")
+    if selected and selected.strip():
+        return selected.strip()
+    return datetime.now(UTC).strftime("fugue-%Y%m%dT%H%M%SZ")
+
+
+def _run_tags(
+    *,
+    env: dict[str, str],
+    tags: tuple[str, ...],
+    run_name: str,
+    manifest: BenchmarkManifest,
+    manifest_path: Path,
+) -> list[str]:
+    configured = [
+        part.strip()
+        for part in env.get("FUGUE_TAGS", "").split(",")
+        if part.strip()
+    ]
+    return _dedupe(
+        [
+            "fugue",
+            f"run:{run_name}",
+            f"dataset:{manifest.dataset.ref or manifest.dataset.path}",
+            f"manifest:{manifest_path.stem}",
+            *configured,
+            *tags,
+        ]
+    )
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value.strip() for value in values if value.strip()))
+
+
+def _slug(value: str) -> str:
+    out = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    return "-".join(part for part in out.split("-") if part) or "fugue"
+
+
+def _env_id(value: str) -> str:
+    return "".join(ch.upper() if ch.isalnum() else "_" for ch in value)
+
+
+def _resolve(root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else root / path
 
 
 def _agent_trace_refs(rows: list[dict[str, Any]]) -> tuple[AgentTraceRef, ...]:

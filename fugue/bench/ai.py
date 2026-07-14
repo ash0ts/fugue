@@ -24,6 +24,7 @@ from fugue.assistant import (
 )
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
+from fugue.bench.export import fetch_weave_summaries
 from fugue.bench.library import (
     ExperimentSpec,
     experiment_from_data,
@@ -40,15 +41,14 @@ from fugue.bench.library import (
     validate_id,
 )
 from fugue.bench.manifest import load_manifest
-from fugue.model_plane import resolve_model_route, select_model
+from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
 
 if TYPE_CHECKING:
     from fugue.bench.operator import OperatorService, PreviewSummary
 
 ANALYSES_DIR = Path("configs/fugue/analyses")
 ANALYSIS_REPORTS_DIR = Path("reports/analyses")
-ASSISTANT_RUNTIME_DIR = Path(".fugue/runtime/assistant")
-AnalysisSource = Literal["local", "weave", "hybrid"]
+AnalysisSource = Literal["local", "hybrid"]
 ClientFactory = Callable[[str, Mapping[str, str]], AssistantModelClient]
 ANALYSIS_GROUP_FIELDS = FILTER_FIELDS | {"skill_ids", "manifest", "run_name"}
 
@@ -59,7 +59,6 @@ class AssetDraft:
     id: str
     title: str
     body: str
-    replace: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,7 +98,6 @@ class AnalysisSpec:
         "failures",
         "tool_calls",
     )
-    baseline: str | None = None
     source: AnalysisSource = "hybrid"
     include_artifacts: bool = True
     model: str | None = None
@@ -161,6 +159,15 @@ class AnalysisResult:
     output_tokens: int
 
 
+@dataclass(frozen=True)
+class AnalysisPreview:
+    spec: AnalysisSpec
+    scope: AnalysisScope
+    snapshot: AnalysisSnapshot
+    evidence: tuple[EvidenceRef, ...]
+    aggregates: tuple[dict[str, Any], ...]
+
+
 class ExperimentComposer:
     def __init__(
         self,
@@ -193,6 +200,18 @@ class ExperimentComposer:
             raise RuntimeError(f"{route.api_key_env} is required for the composer")
         client = self.client_factory(selected_model, env)
         tools = self._tools(base)
+        agent = AssistantAgent(
+            client,
+            role="composer",
+            tools=tools,
+            env=env,
+            trace_content=trace_content or base.trace_content,
+            max_rounds=8,
+            attributes={
+                "fugue.ai.base_experiment": base.id,
+                "fugue.ai.action": "compose",
+            },
+        )
         messages = [
             AssistantMessage("system", _composer_instructions()),
             AssistantMessage(
@@ -211,18 +230,6 @@ class ExperimentComposer:
         base_messages = list(messages)
         validation_error: Exception | None = None
         for attempt in range(3):
-            agent = AssistantAgent(
-                client,
-                role="composer",
-                tools=tools,
-                env=env,
-                trace_content=trace_content or base.trace_content,
-                max_rounds=8,
-                attributes={
-                    "fugue.ai.base_experiment": base.id,
-                    "fugue.ai.action": "compose",
-                },
-            )
             result = await agent.run(messages)
             try:
                 draft = self._validate_draft(result, base)
@@ -239,13 +246,6 @@ class ExperimentComposer:
                     ),
                 ]
                 continue
-            _write_session(
-                self.repo_root,
-                result,
-                role="composer",
-                request=request,
-                output={"experiment": draft.experiment.to_dict()},
-            )
             return draft
         assert validation_error is not None
         raise ValueError(f"composer draft remained invalid: {validation_error}")
@@ -442,7 +442,7 @@ class ExperimentAnalyst:
         self.operator = operator
         self.repo_root = operator.repo_root
         self.client_factory = client_factory or _client_factory
-        self.catalog = ExperimentCatalog(self.repo_root, operator.env)
+        self.catalog = ExperimentCatalog(self.repo_root)
 
     async def analyze(
         self,
@@ -464,9 +464,8 @@ class ExperimentAnalyst:
             )
         elif filters:
             spec = AnalysisSpec(**{**spec.to_dict(), "filters": {**spec.filters, **filters}})
-        result = await self._execute(spec, model=model)
-        _write_analysis(result)
-        return result
+        preview = self.prepare(spec)
+        return await self.execute(preview, model=model)
 
     async def plan(
         self,
@@ -490,7 +489,9 @@ class ExperimentAnalyst:
             env=env,
         )
         client = self.client_factory(selected_model, env)
+        self.catalog.refresh()
         catalog = self.catalog.experiment_catalog()
+        facets = self.catalog.facets()
         agent = AssistantAgent(
             client,
             role="analyst",
@@ -499,7 +500,7 @@ class ExperimentAnalyst:
                     "list_experiment_catalog",
                     "Return saved experiment metadata and deterministic intervention buckets.",
                     {"type": "object", "properties": {}, "additionalProperties": False},
-                    lambda _: catalog,
+                    lambda _: {"experiments": catalog, "facets": facets},
                 ),
                 AssistantTool(
                     "submit_analysis_plan",
@@ -531,6 +532,7 @@ class ExperimentAnalyst:
                         "required_filters": dict(filters or {}),
                         "requested_source": source,
                         "experiments": catalog,
+                        "facets": facets,
                     },
                     sort_keys=True,
                     default=str,
@@ -573,40 +575,61 @@ class ExperimentAnalyst:
         assert error is not None
         raise ValueError(f"analysis plan remained invalid: {error}")
 
-    async def _execute(self, spec: AnalysisSpec, *, model: str | None) -> AnalysisResult:
-        warnings: list[str] = []
-        effective_source = spec.source
-        try:
-            status = self.catalog.refresh(source=spec.source)
-        except Exception as exc:
-            if spec.source != "hybrid":
-                raise
-            status = self.catalog.refresh(source="local")
-            effective_source = "local"
-            warnings.append(f"Weave enrichment unavailable; using local data: {exc}")
-        filters = {**spec.filters, "record_type": "trial"}
-        if effective_source in {"local", "weave"}:
-            filters["source"] = effective_source
+    def prepare(self, spec: AnalysisSpec) -> AnalysisPreview:
+        status = self.catalog.refresh()
+        filters = {**spec.filters, "record_type": "trial", "source": "local"}
         rows = self.catalog.records(filters=filters)
-        if effective_source == "hybrid" and rows:
-            remote_filters = {**spec.filters, "source": "weave"}
-            remote = self.catalog.records(filters=remote_filters)
-            by_run_key = {
-                str(row.get("run_key")): row
-                for row in remote
-                if row.get("run_key")
-            }
-            rows = [
-                _merge_weave_record(row, by_run_key.get(str(row.get("run_key"))))
-                for row in rows
-            ]
-        if not rows and spec.source in {"weave", "hybrid"}:
-            filters.pop("record_type")
-            filters["source"] = "weave"
-            rows = self.catalog.records(filters=filters)
         if not rows:
             raise ValueError("analysis scope resolved to no experiment records")
         snapshot = _snapshot(rows, status.revision)
+        scope = _scope(rows, spec.metrics, [])
+        aggregates, evidence = _aggregate(rows, spec)
+        return AnalysisPreview(
+            spec=spec,
+            scope=scope,
+            snapshot=snapshot,
+            evidence=tuple(evidence),
+            aggregates=tuple(aggregates),
+        )
+
+    async def execute(
+        self,
+        preview: AnalysisPreview,
+        *,
+        model: str | None = None,
+    ) -> AnalysisResult:
+        spec = preview.spec
+        rows = [dict(row) for row in preview.snapshot.rows]
+        warnings: list[str] = []
+        if spec.source == "hybrid":
+            try:
+                run_keys = [str(row["run_key"]) for row in rows if row.get("run_key")]
+                conversations = {
+                    str(row["run_key"]): [
+                        str(value)
+                        for value in (
+                            row.get("weave_conversation_ids")
+                            or row.get("native_session_ids")
+                            or []
+                        )
+                        if value
+                    ]
+                    for row in rows
+                    if row.get("run_key")
+                }
+                remote = fetch_weave_summaries(
+                    run_keys,
+                    conversation_ids_by_run=conversations,
+                    project=trace_project_slug(self.operator.env),
+                    env=self.operator.env,
+                )
+                rows = [
+                    _merge_weave_record(row, remote.get(str(row.get("run_key"))))
+                    for row in rows
+                ]
+            except Exception as exc:
+                warnings.append(f"Weave enrichment unavailable; using local data: {exc}")
+        snapshot = _snapshot(rows, preview.snapshot.catalog_revision)
         scope = _scope(rows, spec.metrics, warnings)
         aggregates, evidence = _aggregate(rows, spec)
         selected_model = select_assistant_model(
@@ -816,13 +839,7 @@ class ExperimentAnalyst:
             input_tokens=run.usage.input_tokens or 0,
             output_tokens=run.usage.output_tokens or 0,
         )
-        _write_session(
-            self.repo_root,
-            run,
-            role="analyst",
-            request=spec.question,
-            output={"analysis_id": spec.id, "snapshot": snapshot.digest},
-        )
+        _write_analysis(result)
         return result
 
 
@@ -862,8 +879,8 @@ def save_analysis(spec: AnalysisSpec, repo_root: Path | None = None) -> Path:
 def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
     item_id = validate_id(str(raw.get("id") or _slug(str(raw.get("title") or raw.get("question") or "analysis"))), kind="analysis id")
     source = str(raw.get("source") or "hybrid")
-    if source not in {"local", "weave", "hybrid"}:
-        raise ValueError("analysis source must be local, weave, or hybrid")
+    if source not in {"local", "hybrid"}:
+        raise ValueError("analysis source must be local or hybrid")
     trace_content = str(raw.get("trace_content") or "full")
     if trace_content not in {"full", "metadata"}:
         raise ValueError("analysis trace_content must be full or metadata")
@@ -890,7 +907,6 @@ def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
         filters={str(key): str(value) for key, value in filters.items()},
         group_by=group_by,
         metrics=tuple(str(item) for item in raw.get("metrics") or AnalysisSpec.__dataclass_fields__["metrics"].default),
-        baseline=str(raw["baseline"]) if raw.get("baseline") else None,
         source=source,  # type: ignore[arg-type]
         include_artifacts=bool(raw.get("include_artifacts", True)),
         model=str(raw["model"]) if raw.get("model") else None,
@@ -948,40 +964,7 @@ def _aggregate(
                 data=payload,
             )
         )
-    if spec.baseline:
-        _add_paired_deltas(aggregates, rows, spec)
     return aggregates, evidence
-
-
-def _add_paired_deltas(
-    aggregates: list[dict[str, Any]],
-    rows: Sequence[dict[str, Any]],
-    spec: AnalysisSpec,
-) -> None:
-    if "variant_id" not in spec.group_by:
-        return
-    baseline_rows = [row for row in rows if str(row.get("variant_id")) == spec.baseline]
-    baseline = {
-        _pair_key(row): 1.0 if row.get("pass") is True else 0.0
-        for row in baseline_rows
-        if row.get("pass") is not None
-    }
-    for aggregate in aggregates:
-        if aggregate.get("variant_id") == spec.baseline:
-            aggregate["paired_pass_rate_delta"] = 0.0
-            continue
-        selected = [
-            row
-            for row in rows
-            if all(str(row.get(key) or "unknown") == str(aggregate[key]) for key in spec.group_by)
-        ]
-        deltas = [
-            (1.0 if row.get("pass") is True else 0.0) - baseline[_pair_key(row)]
-            for row in selected
-            if row.get("pass") is not None and _pair_key(row) in baseline
-        ]
-        aggregate["paired_pass_rate_delta"] = _average(deltas)
-        aggregate["paired_trials"] = len(deltas)
 
 
 def _scope(
@@ -1050,11 +1033,8 @@ def _merge_weave_record(
         return local
     return {
         **local,
+        **remote,
         "weave_enriched": True,
-        "weave_call_id": remote.get("call_id"),
-        "weave_trace_id": remote.get("trace_id"),
-        "weave_conversation_id": remote.get("conversation_id"),
-        "weave_summary": remote.get("weave_summary") or {},
     }
 
 
@@ -1121,36 +1101,12 @@ def _write_analysis(result: AnalysisResult) -> None:
             handle.write(json.dumps(asdict(item), sort_keys=True, default=str) + "\n")
 
 
-def _write_session(
-    repo_root: Path,
-    result: AssistantRunResult,
-    *,
-    role: str,
-    request: str,
-    output: dict[str, Any],
-) -> None:
-    root = repo_root / ASSISTANT_RUNTIME_DIR / result.session_id
-    root.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "session_id": result.session_id,
-        "role": role,
-        "model": result.model,
-        "provider": result.provider,
-        "request": request,
-        "output": output,
-        "input_tokens": result.usage.input_tokens,
-        "output_tokens": result.usage.output_tokens,
-        "recorded_at": datetime.now(UTC).isoformat(),
-    }
-    path = root / "session.json"
-    temp = root / f".session.{uuid.uuid4().hex}.tmp"
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n")
-    temp.replace(path)
-
-
 def _asset_draft(raw: Any) -> AssetDraft:
     if not isinstance(raw, dict):
         raise ValueError("asset draft must be an object")
+    unknown = sorted(set(raw) - {"kind", "id", "title", "body"})
+    if unknown:
+        raise ValueError(f"unknown asset draft field(s): {', '.join(unknown)}")
     kind = str(raw.get("kind") or "")
     if kind not in {"prompt", "skill"}:
         raise ValueError("asset draft kind must be prompt or skill")
@@ -1163,7 +1119,6 @@ def _asset_draft(raw: Any) -> AssetDraft:
         id=item_id,
         title=str(raw.get("title") or item_id),
         body=body + "\n",
-        replace=bool(raw.get("replace", False)),
     )
 
 
@@ -1209,7 +1164,7 @@ def _composer_instructions() -> str:
 
 
 def _analyst_planner_instructions() -> str:
-    return """You plan reproducible Fugue analyses. Select only catalog fields and ids that exist. Translate the question into exact filters, grouping dimensions, deterministic metrics, and an optional baseline. Do not calculate results and do not invent experiments. Call submit_analysis_plan."""
+    return """You plan reproducible Fugue analyses. Select only catalog fields and ids that exist. Translate the question into exact filters, grouping dimensions, and deterministic metrics. Do not calculate results and do not invent experiments. Call submit_analysis_plan."""
 
 
 def _analyst_report_instructions() -> str:
@@ -1240,8 +1195,7 @@ def _analysis_plan_schema() -> dict[str, Any]:
             "filters": {"type": "object", "additionalProperties": {"type": "string"}},
             "group_by": {"type": "array", "items": {"type": "string"}},
             "metrics": {"type": "array", "items": {"type": "string"}},
-            "baseline": {"type": ["string", "null"]},
-            "source": {"type": "string", "enum": ["local", "weave", "hybrid"]},
+            "source": {"type": "string", "enum": ["local", "hybrid"]},
             "include_artifacts": {"type": "boolean"},
         },
         "required": ["id", "title", "filters", "group_by", "metrics"],
@@ -1310,16 +1264,6 @@ def _numbers(rows: Sequence[Mapping[str, Any]], key: str) -> list[float]:
 
 def _average(values: Sequence[float]) -> float | None:
     return sum(values) / len(values) if values else None
-
-
-def _pair_key(row: Mapping[str, Any]) -> tuple[str, ...]:
-    return (
-        str(row.get("workload_id") or ""),
-        str(row.get("task_name") or row.get("task_id") or ""),
-        str(row.get("harness") or ""),
-        str(row.get("model") or ""),
-        str(row.get("trial") or row.get("attempt") or ""),
-    )
 
 
 def _unique(

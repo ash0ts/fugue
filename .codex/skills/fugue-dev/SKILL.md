@@ -32,14 +32,23 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - Preserve each native context interface. Wrap stdio MCP with `fugue.mcp_proxy` for bounded, redacted telemetry instead of replacing upstream tools.
 - Never serialize raw API keys. Use env var names and presence booleans only.
 - Keep operator behavior in `fugue.bench.operator`; both Rich commands and Textual consume those presentation-neutral services.
+- Keep experiment selection, overrides, and job planning in `OperatorService`; the CLI only translates arguments and executes the returned plan.
+- Keep the public operator surface to bare `fugue` plus `plan`, `run`, `runs`, `analyze`, `setup`, and `tui`. Do not expose catalog, asset CRUD, bridge, export, preflight, or context internals as separate top-level commands.
+- Rich is the lightweight command center and Textual is the full-screen workspace. Share typed requests and results, never Rich renderables or CLI subprocess calls.
 - Keep AI transport normalization in `fugue.assistant`, experiment/result indexing in `fugue.bench.catalog`, and grounded composer/analyst behavior in `fugue.bench.ai`. CLI and Textual must consume these services instead of embedding prompts or model calls.
 - Composer output is an untrusted draft. Parse it through `ExperimentSpec`, validate every prompt/skill/context/manifest reference, and run side-effect-free preview before exposing Apply, Save, or Run.
 - Analyst arithmetic is deterministic Python over an immutable catalog snapshot. The model may interpret aggregates and inspect bounded evidence, but it must not calculate official metrics or cite evidence ids that do not exist.
-- `.fugue/cache/catalog` is rebuildable generated state. Saved analysis definitions belong in `configs/fugue/analyses`; generated reports and evidence belong in `reports/analyses`.
+- Do not report paired lift until exported trials contain a stable ordinal shared across variants.
+- `.fugue/cache/catalog/v2` is rebuildable local generated state. Hybrid analysis starts from a local cohort and queries Weave only for its run keys and conversation IDs. Saved analysis definitions belong in `configs/fugue/analyses`; generated reports and evidence belong in `reports/analyses`.
 - Assistant tools may read only bounded, redacted Fugue metadata and result artifacts. Never expose arbitrary filesystem, shell, environment, or Python execution to an assistant model.
 - Keep `fugue.tui` presentation-only. Long operations run in workers or detached process groups and communicate through durable state/events; never block Textual's event loop.
+- Textual has one durable launch mode. Do not add cosmetic attached/detached controls; use `fugue run --detach` for the explicit headless option.
 - Run state is append-friendly and recoverable: atomic `run.json`, `events.jsonl`, `cells.jsonl`, combined logs, and per-cell logs. A cell failure must not stop independent cells.
 - The browser frontend has been removed. Do not add FastAPI, static web assets, or HTTP job abstractions back into the operator path.
+- Preflight is observational. Starting the bridge and preparing context are explicit `fugue setup` actions.
+- Experiment YAML is strict. Do not add compatibility aliases for removed fields.
+- JSONL is the only normalized local export format.
+- CodeGraph, GitNexus, Project-RAG, Semble, and lat.md are opt-in research adapters until their pinned Harbor MCP runtimes pass integration tests. Preserve their definitions without placing them in default presets.
 
 ## Weave Agent Contract
 
@@ -48,8 +57,9 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - Native harness integrations own `invoke_agent`, `chat`, and `execute_tool` spans. Never add wrapper spans that duplicate native turns, model calls, or tools.
 - Store deterministic Fugue conversation identity and native session IDs in trial metadata. Export joins Agents spans by conversation ID and `fugue.run_key`, not by per-trial agent names.
 - `trace_content` defaults to `full`. Metadata mode must fail preflight or render `not_applicable` when an integration cannot guarantee content suppression.
-- Trace the operator agents with stable names `fugue-experiment-composer` and `fugue-analysis-agent`. Each natural-language request is one conversation turn with nested assistant model and typed-tool spans.
-- Live traces are emitted during execution. `fugue export` remains the only normalized evaluation publisher and must honor the publication ledger.
+- Trace the operator agents with stable names `fugue-experiment-composer` and `fugue-analysis-agent`. Validation repairs retain one session identity. Do not persist a second write-only assistant session store.
+- Live traces are emitted during execution. Managed run export remains the only normalized evaluation publisher and must honor the publication ledger.
+- Analysis must stop after `AnalysisPreview` until the user confirms report generation. Local scope resolution cannot query Weave, call the report model, or write a report.
 
 ## Metadata And Tags
 
@@ -63,7 +73,7 @@ Trial metadata and exported rows should make comparison easy:
 
 1. Read the relevant tests and local module before editing. Use `rg` first.
 2. If changing schema, update `library.py`, `job_config.py`, operator/CLI callers, metadata/export, and tests together.
-3. If changing terminal behavior, keep Compose, Runs, Results, and Setup coherent; add a Textual Pilot test for the workflow.
+3. If changing terminal behavior, keep Plan, Runs, Results, and Setup coherent; add a Textual Pilot test for the workflow.
 4. If changing provider behavior, validate routing, required env vars, generated bridge config, and adapter expectations.
 5. Keep edits scoped. Avoid broad refactors unless they reduce real duplication or remove a stale abstraction.
 
@@ -81,8 +91,8 @@ For terminal changes, run Textual headlessly and smoke Rich output:
 
 ```bash
 FUGUE_NO_ANIMATION=1 python -m pytest tests/test_tui.py
-fugue status
-fugue runs list
+fugue setup
+fugue runs
 ```
 
-Check that Compose preview does not write `.fugue/runtime`, live runs persist durable state, Results shows local summaries, and Weave actions never expose credentials or invent unverified trace URLs.
+Check that Plan preview does not write `.fugue/runtime`, live runs persist durable state, Results shows local summaries, and Weave actions never expose credentials or invent unverified trace URLs.

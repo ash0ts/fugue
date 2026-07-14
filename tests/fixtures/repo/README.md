@@ -1,3 +1,3 @@
 # Fixture Repo
 
-Small repository used by RepoMemBench unit tests.
+Small repository used by Fugue unit tests.

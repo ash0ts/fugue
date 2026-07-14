@@ -8,6 +8,7 @@ capabilities: [prepare, retrieve, bind, ingest, sequence]
 license: Apache-2.0
 source_url: https://github.com/getzep/graphiti
 required_env: [FUGUE_GRAPHITI_URI]
+enabled_by_default: false
 config:
   backend: graphiti
   embedding_model: BAAI/bge-small-en-v1.5
