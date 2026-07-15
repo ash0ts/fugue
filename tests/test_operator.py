@@ -926,6 +926,69 @@ def test_candidate_summary_separates_execution_and_benchmark_outcomes(
     assert "1 failed benchmark cell(s)" in candidate.packageability_reason
 
 
+def test_run_summary_keeps_cancellation_separate_from_failures(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "cancelled-summary"
+    candidate_id = "c" * 64
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {
+            "status": "cancelled",
+            "run_name": "cancelled",
+            "experiment_id": "demo",
+            "cancellation_cleanup_status": "passed",
+            "cancellation_cleanup_projects": ["fugue-run-cell"],
+            "cancellation_cleanup_errors": [],
+        },
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {candidate_id: {"harness": "codex"}},
+                "planned_matrix": [
+                    {"cell_id": "cancelled", "candidate_id": candidate_id},
+                    {"cell_id": "interrupted", "candidate_id": candidate_id},
+                    {"cell_id": "failed", "candidate_id": candidate_id},
+                ],
+            }
+        )
+    )
+    (run_dir / "cells.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "cell_id": cell_id,
+                    "candidate_id": candidate_id,
+                    "status": status,
+                    "benchmark_outcome": "unscored",
+                }
+            )
+            for cell_id, status in (
+                ("cancelled", "cancelled"),
+                ("interrupted", "interrupted"),
+                ("failed", "failed"),
+            )
+        )
+        + "\n"
+    )
+
+    summary = service.run_summary(run_id)
+    [candidate] = summary.candidates
+
+    assert summary.failed == 1
+    assert summary.cancelled == 1
+    assert summary.interrupted == 1
+    assert summary.cancellation_cleanup_status == "passed"
+    assert summary.cancellation_cleanup_projects == ("fugue-run-cell",)
+    assert summary.cancellation_cleanup_errors == ()
+    assert candidate.execution_failed == 1
+    assert candidate.cancelled == 1
+    assert candidate.interrupted == 1
+
+
 def test_run_summary_preserves_not_applicable_reason(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     run_id = "not-applicable-reason"

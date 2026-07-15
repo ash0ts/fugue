@@ -1062,7 +1062,16 @@ def _runs(args: argparse.Namespace) -> int:
             print(as_json(runs))
             return 0
         table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
-        for name in ("Run", "Experiment", "Status", "Passed", "Failed", "Pending"):
+        for name in (
+            "Run",
+            "Experiment",
+            "Status",
+            "Passed",
+            "Failed",
+            "Cancelled",
+            "Interrupted",
+            "Pending",
+        ):
             table.add_column(name)
         for run in runs:
             table.add_row(
@@ -1071,6 +1080,8 @@ def _runs(args: argparse.Namespace) -> int:
                 _status_markup(run.status),
                 str(run.passed),
                 str(run.failed),
+                str(run.cancelled),
+                str(run.interrupted),
                 str(run.pending),
             )
         if runs:
@@ -1211,8 +1222,18 @@ def _run_panel(run: Any) -> Panel:
         f"{_status_markup(run.status)}  "
         f"[fugue.success]{run.passed} passed[/]  "
         f"[fugue.coral]{run.failed} failed[/]  "
+        f"[yellow]{run.cancelled} cancelled[/]  "
+        f"[yellow]{run.interrupted} interrupted[/]  "
         f"{run.pending} pending  {run.not_applicable} not applicable"
     )
+    if run.cancellation_cleanup_status:
+        details += (
+            "\nCancellation cleanup: "
+            f"{run.cancellation_cleanup_status} "
+            f"({len(run.cancellation_cleanup_projects)} Compose projects)"
+        )
+        for error in run.cancellation_cleanup_errors:
+            details += f"\n  [fugue.coral]{error}[/]"
     if run.evaluations:
         details += "\n\nWeave evaluations:"
         for evaluation in run.evaluations:
@@ -1283,6 +1304,8 @@ def _candidates_table(run: Any) -> Table:
         "Passed",
         "Eval failed",
         "Exec failed",
+        "Cancelled",
+        "Interrupted",
         "Unscored",
         "Pending",
         "N/A",
@@ -1305,6 +1328,8 @@ def _candidates_table(run: Any) -> Table:
             str(candidate.passed),
             str(candidate.failed),
             str(candidate.execution_failed),
+            str(candidate.cancelled),
+            str(candidate.interrupted),
             str(candidate.unscored),
             str(candidate.pending),
             str(candidate.not_applicable),

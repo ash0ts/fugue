@@ -216,6 +216,8 @@ class CandidateSummary:
     passed: int
     failed: int
     execution_failed: int
+    cancelled: int
+    interrupted: int
     unscored: int
     pending: int
     not_applicable: int
@@ -234,6 +236,8 @@ class RunSummary:
     cells: tuple[CellSummary, ...]
     passed: int
     failed: int
+    cancelled: int
+    interrupted: int
     pending: int
     not_applicable: int
     candidates: tuple[CandidateSummary, ...]
@@ -241,6 +245,9 @@ class RunSummary:
     observability_status: str | None = None
     evaluations: tuple[PublishedEvaluation, ...] = ()
     evaluation_failures: tuple[str, ...] = ()
+    cancellation_cleanup_status: str | None = None
+    cancellation_cleanup_projects: tuple[str, ...] = ()
+    cancellation_cleanup_errors: tuple[str, ...] = ()
 
     @property
     def evaluation_urls(self) -> tuple[str, ...]:
@@ -2434,9 +2441,9 @@ class OperatorService:
             created_at=run.created_at,
             cells=cells,
             passed=sum(cell.status == "passed" for cell in cells),
-            failed=sum(
-                cell.status in {"failed", "cancelled", "interrupted"} for cell in cells
-            ),
+            failed=sum(cell.status == "failed" for cell in cells),
+            cancelled=sum(cell.status == "cancelled" for cell in cells),
+            interrupted=sum(cell.status == "interrupted" for cell in cells),
             pending=sum(cell.status in {"pending", "running"} for cell in cells),
             not_applicable=sum(cell.status == "not_applicable" for cell in cells),
             candidates=candidates,
@@ -2446,6 +2453,17 @@ class OperatorService:
             evaluation_failures=tuple(
                 str(value)
                 for value in run.metadata.get("evaluation_failures", [])
+                if value
+            ),
+            cancellation_cleanup_status=run.metadata.get("cancellation_cleanup_status"),
+            cancellation_cleanup_projects=tuple(
+                str(value)
+                for value in run.metadata.get("cancellation_cleanup_projects", [])
+                if value
+            ),
+            cancellation_cleanup_errors=tuple(
+                str(value)
+                for value in run.metadata.get("cancellation_cleanup_errors", [])
                 if value
             ),
         )
@@ -2476,9 +2494,9 @@ def _candidate_summaries(
         selected = [cell for cell in cells if cell.candidate_id == candidate_id]
         passed = sum(cell.benchmark_outcome == "passed" for cell in selected)
         failed = sum(cell.benchmark_outcome == "failed" for cell in selected)
-        execution_failed = sum(
-            cell.status in {"failed", "cancelled", "interrupted"} for cell in selected
-        )
+        execution_failed = sum(cell.status == "failed" for cell in selected)
+        cancelled = sum(cell.status == "cancelled" for cell in selected)
+        interrupted = sum(cell.status == "interrupted" for cell in selected)
         unscored = sum(
             cell.status == "passed" and cell.benchmark_outcome == "unscored"
             for cell in selected
@@ -2519,6 +2537,8 @@ def _candidate_summaries(
                 passed=passed,
                 failed=failed,
                 execution_failed=execution_failed,
+                cancelled=cancelled,
+                interrupted=interrupted,
                 unscored=unscored,
                 pending=pending,
                 not_applicable=not_applicable,
