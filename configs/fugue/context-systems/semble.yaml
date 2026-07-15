@@ -6,7 +6,7 @@ version: semble@0.5.1
 support: experimental
 capabilities: [prepare, bind]
 deliveries: [native_mcp]
-license: Apache-2.0
+license: MIT
 source_url: https://github.com/MinishLab/semble
 enabled_by_default: false
 config:
@@ -14,3 +14,5 @@ config:
     copy_repository: true
   binding:
     managed_runtime: pinned_mcp
+    repository_path: /workspace/repository
+    extra_instruction_paths: ["{artifact}/FUGUE_NATIVE_MCP.md"]

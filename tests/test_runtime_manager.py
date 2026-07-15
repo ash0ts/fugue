@@ -18,9 +18,33 @@ def test_managed_runtime_catalog_is_pinned_and_install_free_at_trial_time() -> N
         "latmd",
     }
     assert runtime_manager.RUNTIMES["codegraph"].version.endswith("@0.9.0")
+    semble = runtime_manager.RUNTIMES["semble"]
+    assert semble.upstream_command[:2] == ("/opt/gateway/bin/python", "-c")
+    assert "semble.mcp import serve" in semble.upstream_command[2]
+    assert semble.install_probe_command == (
+        "/opt/gateway/bin/python",
+        "-c",
+        "import semble.mcp",
+    )
+    assert dict(semble.asset_integrities) == {
+        "minishlab/potion-code-16M-v2": (
+            "git:e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b"
+        ),
+        "tree-sitter-language-pack": (
+            "version:1.6.2;languages:bash,c,cpp,csharp,css,dockerfile,go,html,"
+            "java,javascript,json,markdown,php,pkl,python,ruby,rust,toml,tsx,"
+            "typescript,yaml"
+        ),
+    }
+    assert dict(semble.runtime_env) == {
+        "SEMBLE_MODEL_NAME": "/opt/semble-model",
+        "SEMBLE_TREE_SITTER_CACHE": "/opt/tree-sitter-languages",
+        "HF_HUB_OFFLINE": "1",
+    }
     assert runtime_manager.RUNTIMES["project-rag"].version.endswith(
         "d5abf98a48b60d35b73745e47e1aacca3963a6f0"
     )
+    assert runtime_manager.RUNTIMES["latmd"].prepare_command == ("lat", "init")
     for spec in runtime_manager.RUNTIMES.values():
         assert len(spec.recipe_sha256) == 64
         assert "latest" not in spec.dockerfile
@@ -28,7 +52,7 @@ def test_managed_runtime_catalog_is_pinned_and_install_free_at_trial_time() -> N
         assert spec.entrypoint == ("/opt/fugue/start-gateway",)
         assert spec.health_check
         assert spec.network_policy == "share_cell_network"
-        assert spec.repository_mount == "/fugue-context/repository"
+        assert spec.repository_mount == "/workspace/repository"
         assert spec.state_mount == "/workspace/state"
     assert dict(runtime_manager.RUNTIMES["gitnexus"].runtime_env) == {
         "GITNEXUS_HOME": "/workspace/state/home/.gitnexus"
@@ -160,10 +184,10 @@ def test_repository_preparation_uses_the_active_runtime_paths(
 
     command = commands[0]
     assert any(
-        value.endswith(",dst=/workspace/state/repository") for value in command
+        value.endswith(",dst=/workspace/repository") for value in command
     )
     assert any(value.endswith(",dst=/workspace/state/home") for value in command)
-    assert command[-1] == "/workspace/state/repository"
+    assert command[-1] == "/workspace/repository"
     assert "GITNEXUS_HOME=/workspace/state/home/.gitnexus" in command
 
 
@@ -195,3 +219,46 @@ def test_install_probe_is_offline_and_does_not_start_the_gateway(
     assert commands[0][commands[0].index("--network") + 1] == "none"
     assert commands[0][commands[0].index("--entrypoint") + 1] == "lat"
     assert commands[0][-2:] == ["mcp", "--help"]
+
+
+def test_managed_runtime_command_passes_secret_by_environment_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = runtime_manager.RUNTIMES["latmd"]
+    root = tmp_path / runtime_manager.RUNTIME_ROOT / "latmd"
+    root.mkdir(parents=True)
+    (root / "runtime-lock.json").write_text(
+        json.dumps(
+            {
+                "recipe_sha256": spec.recipe_sha256,
+                "image": spec.image,
+                "image_id": "sha256:" + "a" * 64,
+            }
+        )
+    )
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(command: list[str], **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "result", "")
+
+    monkeypatch.setattr(runtime_manager.subprocess, "run", run)
+    result = runtime_manager.run_runtime_command(
+        "latmd",
+        repo_root=tmp_path,
+        repository=repository,
+        env={"LAT_LLM_KEY": "private-value"},
+        command=("lat", "search", "query"),
+    )
+
+    command, kwargs = calls[0]
+    assert result.stdout == "result"
+    assert "private-value" not in command
+    assert command[command.index("--env") + 1] == "HOME=/workspace/state/home"
+    assert command[command.index("--env", command.index("--env") + 1) + 1] == (
+        "LAT_LLM_KEY"
+    )
+    assert kwargs["env"]["LAT_LLM_KEY"] == "private-value"
+    assert command[-3:] == [spec.image, "search", "query"]

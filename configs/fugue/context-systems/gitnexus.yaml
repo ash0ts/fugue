@@ -14,3 +14,5 @@ requires_license_approval: true
 config:
   binding:
     managed_runtime: pinned_mcp
+    repository_path: /workspace/repository
+    extra_instruction_paths: ["{artifact}/FUGUE_NATIVE_MCP.md"]

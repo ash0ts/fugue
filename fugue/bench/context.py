@@ -36,6 +36,7 @@ from fugue.bench.context_contracts import (
 from fugue.bench.library import validate_id
 from fugue.bench.runtime_manager import (
     prepare_runtime_repository,
+    run_runtime_command,
     runtime_ready,
     runtime_spec,
 )
@@ -485,27 +486,25 @@ class LatMdContextProvider(MarkdownLogContextProvider):
         output = _require_output_dir(runtime)
         artifact = output / "artifact"
         artifact.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["npx", "-y", "lat.md@0.11.0", "init"],
-            cwd=artifact,
-            env=runtime.env,
-            check=True,
-            capture_output=True,
-            text=True,
+        repository = artifact / "repository"
+        _copy_repository_snapshot(
+            snapshot.checkout,
+            repository,
+            ignored=(".git", ".fugue"),
         )
-        lattice = artifact / "lat.md"
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+        )
+        lattice = repository / "lat.md"
         lattice.mkdir(parents=True, exist_ok=True)
         episodes = lattice / "episodes.md"
         if not episodes.exists():
             episodes.write_text("# Experiment Context\n\n")
-        shutil.copytree(
-            snapshot.checkout,
-            artifact / "repository",
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".git", ".fugue"),
-        )
+        _write_managed_repository_instruction(spec, artifact)
         return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
 
     async def ingest(
@@ -538,13 +537,12 @@ class LatMdContextProvider(MarkdownLogContextProvider):
         runtime: ContextRuntime,
     ) -> list[RetrievalHit]:
         result = await asyncio.to_thread(
-            subprocess.run,
-            ["npx", "-y", "lat.md@0.11.0", "search", query.text],
-            cwd=prepared.path,
+            run_runtime_command,
+            spec.id,
+            repo_root=runtime.repo_root,
+            repository=prepared.path,
             env=runtime.env,
-            capture_output=True,
-            text=True,
-            check=True,
+            command=("lat", "search", query.text),
         )
         text = result.stdout.strip()
         return (
@@ -736,12 +734,10 @@ class CommandContextProvider(BaseContextProvider):
                 shutil.copy2(source, target)
         if prepare.get("copy_repository"):
             repository = artifact / "repository"
-            shutil.copytree(
+            _copy_repository_snapshot(
                 snapshot.checkout,
                 repository,
-                dirs_exist_ok=True,
-                symlinks=True,
-                ignore=shutil.ignore_patterns(".fugue"),
+                ignored=(".fugue",),
             )
         await asyncio.to_thread(
             prepare_runtime_repository,
@@ -750,6 +746,7 @@ class CommandContextProvider(BaseContextProvider):
             artifact=artifact,
             env=runtime.env,
         )
+        _write_managed_repository_instruction(spec, artifact)
         metrics = _tree_metrics(artifact)
         metrics["command"] = command
         return _prepared(spec, snapshot, runtime, metrics)
@@ -963,12 +960,10 @@ class GitNexusContextProvider(CommandContextProvider):
         home = artifact / "home"
         home.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(
-            shutil.copytree,
+            _copy_repository_snapshot,
             snapshot.checkout,
             repository,
-            dirs_exist_ok=True,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(".fugue", ".gitnexus"),
+            ignored=(".fugue", ".gitnexus"),
         )
         await asyncio.to_thread(
             prepare_runtime_repository,
@@ -977,6 +972,7 @@ class GitNexusContextProvider(CommandContextProvider):
             artifact=artifact,
             env=runtime.env,
         )
+        _write_managed_repository_instruction(spec, artifact)
         index = repository / ".gitnexus"
         if not index.is_dir():
             raise FileNotFoundError("GitNexus did not create .gitnexus")
@@ -984,6 +980,52 @@ class GitNexusContextProvider(CommandContextProvider):
         if not registry.is_file():
             raise FileNotFoundError("GitNexus did not register the prepared repository")
         return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
+
+
+def _write_managed_repository_instruction(
+    spec: ContextSystemSpec,
+    artifact: Path,
+) -> None:
+    binding = _dict(spec.config.get("binding"))
+    repository_path = str(binding.get("repository_path") or "")
+    if not repository_path:
+        return
+    if not repository_path.startswith("/workspace/"):
+        raise ValueError(
+            f"context system {spec.id} repository_path must be under /workspace"
+        )
+    (artifact / "FUGUE_NATIVE_MCP.md").write_text(
+        "The managed context server has the task repository at "
+        f"`{repository_path}`. When a tool requires a repository or path "
+        "argument, pass this exact path. Do not substitute a host path.\n"
+    )
+
+
+def _copy_repository_snapshot(
+    source: Path,
+    target: Path,
+    *,
+    ignored: tuple[str, ...],
+) -> None:
+    root = source.resolve()
+    for path in source.rglob("*"):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(source).as_posix()
+        link = Path(os.readlink(path))
+        if link.is_absolute():
+            raise ValueError(f"absolute repository symlink is not allowed: {relative}")
+        try:
+            (path.parent / link).resolve().relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"repository symlink escapes checkout: {relative}") from exc
+    shutil.copytree(
+        source,
+        target,
+        dirs_exist_ok=True,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*ignored),
+    )
 
 
 class RagContextProvider(BaseContextProvider):

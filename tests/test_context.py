@@ -22,6 +22,7 @@ from fugue.bench.context import (
     RetrievalQuery,
     TrialContext,
     _command_env,
+    _copy_repository_snapshot,
     _dense_artifact_contract,
     _materialize_dense_artifact,
     _mem0_config,
@@ -728,6 +729,54 @@ def test_rag_rejects_empty_repository_instead_of_publishing_empty_index(
     assert not (runtime.cache_root / context_cache_key(spec, snapshot)).exists()
 
 
+def test_managed_repository_copy_rejects_escaping_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    (source / "escape.txt").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="absolute repository symlink"):
+        _copy_repository_snapshot(source, tmp_path / "target", ignored=())
+
+
+def test_latmd_preparation_uses_the_pinned_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / "README.md").write_text("fixture\n")
+    commit = _commit_repository(checkout)
+    output = tmp_path / "output"
+    spec = get_context_system("latmd", Path(__file__).resolve().parents[1])
+    runtime = ContextRuntime(
+        tmp_path,
+        tmp_path / "cache",
+        {"LAT_LLM_KEY": "private", "FUGUE_ENABLE_EXPERIMENTAL_LATMD": "true"},
+        output_dir=output,
+    )
+    calls: list[str] = []
+
+    def fake_prepare(system_id, *, repo_root, artifact, env):
+        calls.append(system_id)
+        (artifact / "repository" / "lat.md").mkdir()
+
+    monkeypatch.setattr(
+        "fugue.bench.context.prepare_runtime_repository", fake_prepare
+    )
+    prepared = asyncio.run(
+        load_provider(spec).prepare(
+            spec,
+            RepositorySnapshot("task", "repo", commit, checkout, "dataset"),
+            runtime,
+        )
+    )
+
+    assert calls == ["latmd"]
+    assert (prepared.path / "artifact/repository/lat.md/episodes.md").is_file()
+    assert (prepared.path / "artifact/FUGUE_NATIVE_MCP.md").is_file()
+
+
 def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -772,6 +821,18 @@ def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
     registry = prepared.path / "artifact" / "home" / ".gitnexus" / "registry.json"
     assert "/workspace/repository" in registry.read_text()
     assert checkout.as_posix() not in registry.read_text()
+    instruction = prepared.path / "artifact" / "FUGUE_NATIVE_MCP.md"
+    assert "/workspace/repository" in instruction.read_text()
+    binding = asyncio.run(
+        provider.bind(
+            spec,
+            prepared,
+            TrialContext("experiment", "workload", "task", "harness"),
+            runtime,
+            "native_mcp",
+        )
+    )
+    assert binding.extra_instruction_paths == (instruction,)
     assert not (checkout / ".gitnexus").exists()
 
 

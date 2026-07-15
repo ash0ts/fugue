@@ -24,6 +24,7 @@ class ManagedMCPRuntimeSpec:
     upstream_command: tuple[str, ...]
     package_integrity: str | None = None
     platform_integrities: tuple[tuple[str, str], ...] = ()
+    asset_integrities: tuple[tuple[str, str], ...] = ()
     prepare_command: tuple[str, ...] = ()
     architectures: tuple[str, ...] = ("amd64", "arm64")
     entrypoint: tuple[str, ...] = ("/opt/fugue/start-gateway",)
@@ -33,9 +34,10 @@ class ManagedMCPRuntimeSpec:
         "import socket;s=socket.create_connection(('127.0.0.1',8765),2);s.close()",
     )
     network_policy: str = "share_cell_network"
-    repository_mount: str = "/fugue-context/repository"
+    repository_mount: str = "/workspace/repository"
     state_mount: str = "/workspace/state"
     runtime_env: tuple[tuple[str, str], ...] = ()
+    probe_command: tuple[str, ...] = ()
 
     @property
     def recipe_sha256(self) -> str:
@@ -56,7 +58,7 @@ class ManagedMCPRuntimeSpec:
 
     @property
     def install_probe_command(self) -> tuple[str, ...]:
-        return (*self.upstream_command, "--help")
+        return self.probe_command or (*self.upstream_command, "--help")
 
 
 _GATEWAY_INSTALL = (
@@ -81,6 +83,17 @@ _PROJECT_RAG_PYTHON_IMAGE = (
     "python:3.12.11-slim-trixie@"
     "sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f"
 )
+_SEMBLE_LANGUAGES = (
+    "bash,c,cpp,csharp,css,dockerfile,go,html,java,javascript,json,markdown,php,"
+    "pkl,python,ruby,rust,toml,tsx,typescript,yaml"
+)
+_SEMBLE_COMMAND = (
+    "/opt/gateway/bin/python",
+    "-c",
+    "import asyncio, os; import tree_sitter_language_pack as pack; "
+    "pack.configure(cache_dir=os.environ['SEMBLE_TREE_SITTER_CACHE']); "
+    "from semble.mcp import serve; asyncio.run(serve())",
+)
 
 
 def _node_runtime(
@@ -103,11 +116,17 @@ CMD {json.dumps(list(command))}
 """
 
 
-def _python_runtime(package: str, command: tuple[str, ...]) -> str:
+def _python_runtime(
+    package: str,
+    command: tuple[str, ...],
+    *,
+    post_install: str = "",
+) -> str:
+    post_install_step = f"RUN {post_install}\n" if post_install else ""
     return f"""FROM {_PYTHON_IMAGE}
 RUN python -m venv /opt/gateway && /opt/gateway/bin/pip install --no-cache-dir mcp==1.28.1 uvicorn==0.41.0 starlette==0.52.1
 RUN /opt/gateway/bin/pip install --no-cache-dir {package}
-COPY mcp_gateway.py /opt/fugue/mcp_gateway.py
+{post_install_step}COPY mcp_gateway.py /opt/fugue/mcp_gateway.py
 COPY start-gateway /opt/fugue/start-gateway
 RUN chmod 0555 /opt/fugue/start-gateway
 ENTRYPOINT [\"/opt/fugue/start-gateway\"]
@@ -156,7 +175,7 @@ RUNTIMES = {
             "analyze",
             "--skip-agents-md",
             "--force",
-            "/workspace/state/repository",
+            "/workspace/repository",
         ),
         runtime_env=(("GITNEXUS_HOME", "/workspace/state/home/.gitnexus"),),
     ),
@@ -188,12 +207,45 @@ RUNTIMES = {
             "'semble[mcp] @ https://files.pythonhosted.org/packages/d2/90/"
             "ad620429e2205a59f2eec0ace692e296b2ad328319e8480dcafd504d5e1e/"
             "semble-0.5.1-py3-none-any.whl#sha256="
-            "dd31391ae284b9c29afb9562525e94d9294d175e6785bc26aeb36f1a46baf3bd'",
-            ("semble",),
+            "dd31391ae284b9c29afb9562525e94d9294d175e6785bc26aeb36f1a46baf3bd' "
+            "tree-sitter-language-pack==1.6.2",
+            _SEMBLE_COMMAND,
+            post_install=(
+                "/opt/gateway/bin/python -c \"from huggingface_hub import "
+                "snapshot_download; snapshot_download(repo_id='minishlab/"
+                "potion-code-16M-v2', revision='e9d2a44ca6a05ac6685f3b23709ea57e"
+                "b7352d5b', local_dir='/opt/semble-model')\" && "
+                "/opt/gateway/bin/python -c \"import tree_sitter_language_pack "
+                "as pack; languages='"
+                + _SEMBLE_LANGUAGES
+                + "'.split(','); pack.configure(cache_dir='/opt/tree-sitter-"
+                "languages'); pack.download(languages); "
+                "[pack.get_parser(name) for name in languages]\""
+            ),
         ),
-        ("semble",),
+        _SEMBLE_COMMAND,
         package_integrity=(
             "sha256:dd31391ae284b9c29afb9562525e94d9294d175e6785bc26aeb36f1a46baf3bd"
+        ),
+        asset_integrities=(
+            (
+                "minishlab/potion-code-16M-v2",
+                "git:e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b",
+            ),
+            (
+                "tree-sitter-language-pack",
+                "version:1.6.2;languages:" + _SEMBLE_LANGUAGES,
+            ),
+        ),
+        runtime_env=(
+            ("SEMBLE_MODEL_NAME", "/opt/semble-model"),
+            ("SEMBLE_TREE_SITTER_CACHE", "/opt/tree-sitter-languages"),
+            ("HF_HUB_OFFLINE", "1"),
+        ),
+        probe_command=(
+            "/opt/gateway/bin/python",
+            "-c",
+            "import semble.mcp",
         ),
     ),
     "latmd": ManagedMCPRuntimeSpec(
@@ -205,6 +257,7 @@ RUNTIMES = {
             "sha512-MWq8OizSyw79FJkVbyjdlEvM9aivvdXbSmy92vsxTaJiIZ9twZuY/"
             "ZGGuydzuL4Xhu82z5bRz/8+ZOCowQ5dPQ=="
         ),
+        prepare_command=("lat", "init"),
     ),
     "project-rag": ManagedMCPRuntimeSpec(
         "project-rag",
@@ -273,6 +326,7 @@ def prepare_runtime(
         "upstream_command": list(spec.upstream_command),
         "package_integrity": spec.package_integrity,
         "platform_integrities": dict(spec.platform_integrities),
+        "asset_integrities": dict(spec.asset_integrities),
         "entrypoint": list(spec.entrypoint),
         "health_check": list(spec.health_check),
         "network_policy": spec.network_policy,
@@ -365,9 +419,13 @@ def prepare_runtime_repository(
     selected_env = [
         item
         for name in sorted(env)
-        if name in {"LAT_LLM_KEY"}
+        if name in {"LAT_LLM_KEY"} and env.get(name)
         for item in ("--env", name)
     ]
+    docker_env = {
+        **os.environ,
+        **{name: value for name, value in env.items() if name in {"LAT_LLM_KEY"}},
+    }
     runtime_env = [
         item for name, value in spec.runtime_env for item in ("--env", f"{name}={value}")
     ]
@@ -386,7 +444,7 @@ def prepare_runtime_repository(
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=1g",
             "--mount",
-            f"type=bind,src={repository.resolve()},dst={spec.state_mount}/repository",
+            f"type=bind,src={repository.resolve()},dst={spec.repository_mount}",
             "--mount",
             f"type=bind,src={home.resolve()},dst={spec.state_mount}/home",
             "--env",
@@ -394,15 +452,76 @@ def prepare_runtime_repository(
             *selected_env,
             *runtime_env,
             "--workdir",
-            f"{spec.state_mount}/repository",
+            spec.repository_mount,
             "--entrypoint",
             spec.prepare_command[0],
             str(lock["image"]),
             *spec.prepare_command[1:],
         ],
         cwd=repo_root,
+        env=docker_env,
         check=True,
         timeout=1800,
+    )
+
+
+def run_runtime_command(
+    system_id: str,
+    *,
+    repo_root: Path,
+    repository: Path,
+    env: dict[str, str],
+    command: tuple[str, ...],
+    timeout: float = 300,
+) -> subprocess.CompletedProcess[str]:
+    spec = RUNTIMES.get(system_id)
+    lock = read_runtime_lock(system_id, repo_root)
+    if spec is None or lock is None:
+        raise RuntimeError(f"managed runtime for {system_id} is not prepared")
+    if not command or command[0] != spec.upstream_command[0]:
+        raise ValueError(f"managed runtime {system_id} rejected an unknown command")
+    selected_env = [
+        item
+        for name in ("LAT_LLM_KEY",)
+        if env.get(name)
+        for item in ("--env", name)
+    ]
+    docker_env = {
+        **os.environ,
+        **{name: value for name, value in env.items() if name in {"LAT_LLM_KEY"}},
+    }
+    return subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"{spec.state_mount}:rw,noexec,nosuid,size=256m",
+            "--mount",
+            f"type=bind,src={repository.resolve()},dst={spec.repository_mount}",
+            "--env",
+            f"HOME={spec.state_mount}/home",
+            *selected_env,
+            "--workdir",
+            spec.repository_mount,
+            "--entrypoint",
+            command[0],
+            str(lock["image"]),
+            *command[1:],
+        ],
+        cwd=repo_root,
+        env=docker_env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
 
@@ -430,7 +549,10 @@ def render_runtime_compose(
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
                 "volumes": [f"{artifact.resolve().as_posix()}:/fugue-context:ro"],
-                "tmpfs": [f"{spec.state_mount}:rw,noexec,nosuid,size=2g"],
+                "tmpfs": [
+                    f"{spec.state_mount}:rw,noexec,nosuid,size=2g",
+                    f"{spec.repository_mount}:rw,noexec,nosuid,size=2g",
+                ],
                 "environment": {
                     "HOME": "/workspace/state/home",
                     **dict(spec.runtime_env),
@@ -483,10 +605,10 @@ def render_runtime_compose(
 def _gateway_entrypoint() -> str:
     return """#!/bin/sh
 set -eu
-mkdir -p /workspace/state/repository /workspace/state/home
-cp -a /fugue-context/repository/. /workspace/state/repository/
+mkdir -p /workspace/repository /workspace/state/home
+cp -a /fugue-context/repository/. /workspace/repository/
 if [ -d /fugue-context/home ]; then cp -a /fugue-context/home/. /workspace/state/home/; fi
-cd /workspace/state/repository
+cd /workspace/repository
 exec /opt/gateway/bin/python /opt/fugue/mcp_gateway.py --host 0.0.0.0 --port 8765 -- "$@"
 """
 
