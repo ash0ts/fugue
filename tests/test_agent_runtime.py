@@ -67,6 +67,9 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     assert "marketplace.json" in " ".join(claude_runtime.probe)
     assert '"NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime"' in ranges["claude-code"]
+    assert "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime" in (
+        ranges["claude-code"]
+    )
     assert "hermes-install.sh" in agent_runtime.RUNTIMES["hermes"].dockerfile
 
 

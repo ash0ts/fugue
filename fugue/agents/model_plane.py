@@ -1798,6 +1798,8 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             environment,
             command=(
                 'export PATH="$HOME/.local/bin:$PATH"; '
+                "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime; "
+                'export npm_config_prefix="$NPM_CONFIG_PREFIX"; '
                 'mkdir -p "$CLAUDE_CONFIG_DIR"; '
                 "{ test -s /opt/fugue-agent-runtime/claude-code-patch-lock.json && "
                 "weave-claude-code install --non-interactive --source=local && "
