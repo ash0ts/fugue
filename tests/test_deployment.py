@@ -171,6 +171,8 @@ def test_packages_explicit_imperfect_candidate_reproducibly(tmp_path: Path) -> N
         "fugue": "0.1.0",
     }
     assert spec["protocol_versions"]["open-responses"] == "2026-04-24"
+    assert "raw.githubusercontent.com" in spec["network_allowed_hosts"]
+    assert "nodejs.org" in spec["network_allowed_hosts"]
     assert spec["provenance"]["workspace"]["digest"] == first.workspace_digest
     assert spec["candidate"]["model_route"]["responses_base_url"] == (
         "https://api.openai.com/v1"
