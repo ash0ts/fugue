@@ -203,12 +203,17 @@ RUNTIMES = {
     ),
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
-        version="openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1",
+        version=(
+            "openclaw@2026.7.1+weave-openclaw@0.1.1+"
+            "weave-otel2.1+fugue-load-path.1"
+        ),
         dockerfile=_node_agent_dockerfile("openclaw", "openclaw", "2026.7.1"),
         probe=(
             "/bin/sh",
             "-c",
-            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH openclaw --version",
+            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH openclaw --version && "
+            f"test -s {AGENT_RUNTIME_MOUNT}/node_modules/weave-openclaw/"
+            "openclaw.plugin.json",
         ),
     ),
     "claude-code": AgentRuntimeSpec(

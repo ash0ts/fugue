@@ -64,7 +64,21 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert "/tmp/hermes/config.yaml" not in hermes_adapter
     assert "/tmp/hermes/skills" not in hermes_adapter
 
-    assert "npm ci --ignore-scripts" in agent_runtime.RUNTIMES["openclaw"].dockerfile
+    openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
+    assert openclaw_runtime.version == (
+        "openclaw@2026.7.1+weave-openclaw@0.1.1+"
+        "weave-otel2.1+fugue-load-path.1"
+    )
+    assert "npm ci --ignore-scripts" in openclaw_runtime.dockerfile
+    assert "weave-openclaw/openclaw.plugin.json" in " ".join(
+        openclaw_runtime.probe
+    )
+    openclaw_adapter = ranges["openclaw"]
+    assert 'plugins.setdefault("load", {})' in openclaw_adapter
+    assert "plugins list --json" in openclaw_adapter
+    assert r'plugin.status!==\"loaded\"' in openclaw_adapter
+    assert r'plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"' in openclaw_adapter
+    assert "~/.openclaw/npm/projects" not in openclaw_adapter
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
     assert "npm ci --ignore-scripts" in claude_runtime.dockerfile
     assert "lib/node_modules/npm" in claude_runtime.dockerfile

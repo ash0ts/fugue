@@ -1373,30 +1373,14 @@ class FugueHermes(_TrialMetaMixin, Hermes):
 class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     """OpenClaw with provider-routed chat calls and the weave-openclaw plugin.
 
-    Model plane fixes over the stock adapter:
+    OpenClaw discovers external plugins through ``plugins.load.paths`` or its
+    mutable extensions directory. Fugue points at the read-only setup-built
+    tree and verifies the resolved plugin id, version, source, and loaded
+    state before starting a turn. A warning that merely mentions Weave is not
+    registration evidence.
 
-    - Provider ``models`` array must hold the id relative to the provider
-      (``zai-org/GLM-5.2``), not the full harbor name.
-    - ``--thinking high`` is rejected for custom OpenAI-compatible models
-      ("Use one of: off").
-
-    Tracing (all three verified empirically, incl. on a fresh host install):
-
-    - The weave entry (entity/project + allowConversationAccess) is baked
-      into the generated openclaw.json *before* ``openclaw plugins install
-      weave-openclaw`` runs — the plugin manager validates config against
-      the plugin schema, which requires ``entity``.
-    - OpenClaw's managed npm overrides force ``@opentelemetry/core@2.8.0``
-      but the published weave SDK ships the OTel 1.x trace stack
-      (``TracesSamplerValues.AlwaysOn`` is gone from core 2.x), so the
-      plugin crashes at load. Fix: after the plugin install, override
-      ``weave`` in the plugin project to our OTel-2.x SDK build
-      (WEAVE_NODE_SDK_TGZ, from the wandb/weave migration branch) and
-      reinstall — the whole tree then resolves a consistent 2.x stack.
-    - Plugin services only start in **gateway mode** — ``openclaw agent
-      --local`` never initializes the exporter. run() starts a loopback
-      gateway, waits for it to become ready, runs the turn against it, and
-      tears it down after a flush window.
+    Plugin services start only in gateway mode. The loopback gateway wraps
+    exactly one turn and receives SIGTERM after the final exporter flush.
 
     Spans land in the Weave *Agents* store (``/agents/otel/v1/traces`` ->
     query via ``POST /agents/spans/query``), not the calls table. The stable
@@ -1414,7 +1398,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     _GATEWAY_PORT = 18789
     _GATEWAY_LOG = "/logs/agent/openclaw-gateway.log"
     _GATEWAY_PID_FILE = "/tmp/openclaw-gateway.pid"
-    _PLUGIN_PROJECT = "~/.openclaw/npm/projects/weave-openclaw"
+    _WEAVE_PLUGIN_ROOT = "/opt/fugue-agent-runtime/node_modules/weave-openclaw"
     _WEAVE_PLUGIN_VERSION = "0.1.1"
     _OPENCLAW_VERSION = "2026.7.1"
     _HEADLESS_TOOL_DENY = (
@@ -1494,6 +1478,10 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         cfg = super()._build_full_openclaw_config()
         entity, project = _weave_entity_project()
         plugins = cfg.setdefault("plugins", {})
+        load = plugins.setdefault("load", {})
+        paths = load.setdefault("paths", [])
+        if self._WEAVE_PLUGIN_ROOT not in paths:
+            paths.append(self._WEAVE_PLUGIN_ROOT)
         allow = plugins.setdefault("allow", [])
         if "weave" not in allow:
             allow.append("weave")
@@ -1521,16 +1509,23 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         }
         return cfg
 
-    def _install_plugin_command(self) -> str:
-        """Activate the setup-built plugin tree in this cell's OpenClaw home."""
+    def _verify_plugin_command(self) -> str:
+        """Require the immutable plugin tree to resolve as an enabled plugin."""
         return (
             "set -e; RUNTIME=/opt/fugue-agent-runtime; "
             "test -s $RUNTIME/openclaw-patch-lock.json; "
-            "mkdir -p ~/.openclaw/npm/projects; "
-            f"rm -rf {self._PLUGIN_PROJECT}; "
-            f"ln -s $RUNTIME/node_modules/weave-openclaw {self._PLUGIN_PROJECT}; "
-            "openclaw plugins list 2>&1 | tee /logs/agent/weave-openclaw-install.txt; "
-            "grep -qi weave /logs/agent/weave-openclaw-install.txt"
+            f"test -s {self._WEAVE_PLUGIN_ROOT}/openclaw.plugin.json; "
+            "openclaw plugins list --json "
+            "> /logs/agent/weave-openclaw-registration.json; "
+            "node -e 'const fs=require(\"fs\"); "
+            "const value=JSON.parse(fs.readFileSync("
+            "\"/logs/agent/weave-openclaw-registration.json\",\"utf8\")); "
+            "const plugin=value.plugins.find((item)=>item.id===\"weave\"); "
+            f"const root=\"{self._WEAVE_PLUGIN_ROOT}/dist/index.js\"; "
+            f"if (!plugin || plugin.status!==\"loaded\" || "
+            f"plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\" || "
+            "plugin.source!==root) { console.error(JSON.stringify(plugin)); "
+            "process.exit(1); }'"
         )
 
     def _start_gateway_command(self) -> str:
@@ -1576,10 +1571,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        # Mirrors the stock run() with three insertions: WANDB_API_KEY in the
-        # agent env (the plugin reads it per config apiKey.source=env), the
-        # plugin install + OTel pin after the config lands, and a loopback
-        # gateway wrapped around the agent turn (plugins only trace there).
+        # The gateway owns plugin lifecycle, so it must bracket the one turn.
         await self._begin_trial("openclaw", self.model_route, environment)
         escaped_instruction = shlex.quote(instruction)
 
@@ -1637,9 +1629,9 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
 
             await self.exec_as_agent(
                 environment,
-                command=self._install_plugin_command(),
+                command=self._verify_plugin_command(),
                 env=env,
-                timeout_sec=600,
+                timeout_sec=60,
             )
 
             await self.exec_as_agent(
