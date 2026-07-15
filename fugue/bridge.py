@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -198,7 +199,14 @@ def bridge_up(
         check=True,
         env=dict(env) if env is not None else None,
     )
-    return files
+    deadline = time.monotonic() + 60
+    status: dict[str, Any] = {"ok": False, "error": "bridge did not start"}
+    while time.monotonic() < deadline:
+        status = bridge_status(timeout_sec=2)
+        if status.get("ok") is True:
+            return files
+        time.sleep(0.25)
+    raise RuntimeError(f"LiteLLM bridge did not become ready: {status}")
 
 
 def bridge_status(timeout_sec: float = 3.0) -> dict[str, Any]:
