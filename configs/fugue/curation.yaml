@@ -1,0 +1,52 @@
+version: 1
+
+gates:
+  maximum_inactive_days: 180
+  minimum_stars:
+    skill: 1000
+    context_system: 500
+  allowed_licenses:
+    - MIT
+    - Apache-2.0
+    - BSD-2-Clause
+    - BSD-3-Clause
+    - ISC
+  verified_owners:
+    - agentskills
+    - anthropics
+    - github
+    - modelcontextprotocol
+
+lanes:
+  skills:
+    experiments:
+      - pilot
+      - skillsbench-pdf-ab
+    allowed_capabilities:
+      - instruction
+      - reference
+  context_systems:
+    experiment: repo-memory-impact
+    allowed_capabilities:
+      - prepare
+      - retrieve
+      - bind
+      - ingest
+      - sequence
+
+discovery:
+  skills:
+    github_skill_search: true
+    repositories:
+      - github/awesome-copilot
+      - anthropics/skills
+  integrations:
+    github_repository_search: true
+    registries:
+      - https://registry.modelcontextprotocol.io
+
+proposal:
+  maximum_pull_requests: 1
+  draft: true
+  base_branch: main
+  require_human_merge: true

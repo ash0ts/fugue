@@ -25,6 +25,7 @@ fugue = "fugue.bench.cli:main"
 dev = [
     "pytest",
     "ruff",
+    "skills-ref==0.1.1",
 ]
 context = [
     "fastembed==0.8.0",

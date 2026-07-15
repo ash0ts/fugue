@@ -808,6 +808,40 @@ sequenceDiagram
     U->>U: Review and open promotion PR
 ```
 
+## Automated Curation
+
+The authored GitHub Agentic Workflow in
+`.github/workflows/fugue-curator.md` searches public GitHub skills and
+prospective context/MCP integrations for additions to Fugue's existing
+comparison lanes. It runs Mondays at 14:00 UTC, proposes no more than one draft
+pull request, and never merges or enables an integration automatically.
+
+Candidate evidence is evaluated by the checked-in policy in
+`configs/fugue/curation.yaml`. The internal command accepts a JSON record and
+returns deterministic eligibility reasons without extending the public `fugue`
+CLI:
+
+```bash
+python -m fugue.bench.curation evaluate \
+  --candidate /tmp/candidate.json \
+  --policy configs/fugue/curation.yaml \
+  --repo-root . \
+  --as-of 2026-07-14T14:00:00Z
+```
+
+The workflow can change only skills, context-system definitions, derived
+experiments, their tests, and the relevant README entry. Dependency manifests,
+runtime code, workflows, secrets, datasets, presets, and arbitrary files are
+blocked. Imported skills are instruction/reference-only and validated with
+`skills-ref==0.1.1`; proposed context systems use the declarative
+`CommandContextProvider`, remain disabled by default, and stay outside presets
+until a human completes runtime integration testing.
+
+Rollout requires the `COPILOT_GITHUB_TOKEN` repository secret. First run a
+manual dispatch with `dry_run=true`, then one manual live canary with
+`dry_run=false`. Set the `FUGUE_CURATOR_ENABLED` repository variable to `true`
+only after reviewing both runs; scheduled executions are gated on that variable.
+
 ## Development
 
 ```bash
