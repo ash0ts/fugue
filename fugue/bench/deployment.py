@@ -137,8 +137,6 @@ def candidate_packageability(
         not in {"passed", "failed"}
         for item, status in zip(applicable, statuses, strict=True)
     )
-    if unscored:
-        return False, f"candidate has {unscored} unscored applicable cell(s)"
     if not passed:
         return False, "candidate has no passed applicable cells"
     failed = benchmark_failed + execution_failed
@@ -151,11 +149,21 @@ def candidate_packageability(
             "pass --allow-failed and confirm",
         )
     if failed:
+        unscored_detail = (
+            f" and {unscored} unscored terminal cell(s)" if unscored else ""
+        )
         return (
             True,
             "packageable with "
             f"{benchmark_failed} failed benchmark cell(s) and "
-            f"{execution_failed} execution failure(s) explicitly allowed",
+            f"{execution_failed} execution failure(s) explicitly allowed"
+            f"{unscored_detail}",
+        )
+    if unscored:
+        return (
+            True,
+            f"packageable with {passed} passed and "
+            f"{unscored} unscored terminal applicable cell(s)",
         )
     return True, "all planned applicable cells completed and passed"
 

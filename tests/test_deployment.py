@@ -415,20 +415,38 @@ def test_candidate_packageability_uses_deterministic_outcome() -> None:
     assert "explicitly allowed" in allowed_reason
 
 
-def test_candidate_packageability_blocks_unscored_and_direct_candidates() -> None:
+def test_candidate_packageability_requires_a_pass_but_allows_terminal_unscored() -> None:
     snapshot = {
         "candidate_runtime": {"candidate-a": {"harness": "codex"}},
-        "planned_matrix": [{"cell_id": "a", "candidate_id": "candidate-a"}],
+        "planned_matrix": [
+            {"cell_id": "a", "candidate_id": "candidate-a"},
+            {"cell_id": "b", "candidate_id": "candidate-a"},
+        ],
     }
     records = [
-        {"cell_id": "a", "status": "passed", "benchmark_outcome": "unscored"}
+        {"cell_id": "a", "status": "passed", "benchmark_outcome": "passed"},
+        {"cell_id": "b", "status": "passed", "benchmark_outcome": "unscored"},
     ]
 
     packageable, reason = candidate_packageability(
         snapshot, records, "candidate-a", allow_failed=True
     )
-    assert packageable is False
-    assert reason == "candidate has 1 unscored applicable cell(s)"
+    assert packageable is True
+    assert reason == (
+        "packageable with 1 passed and 1 unscored terminal applicable cell(s)"
+    )
+
+    only_unscored = candidate_packageability(
+        {
+            "candidate_runtime": {"candidate-a": {"harness": "codex"}},
+            "planned_matrix": [
+                {"cell_id": "b", "candidate_id": "candidate-a"}
+            ],
+        },
+        [records[1]],
+        "candidate-a",
+    )
+    assert only_unscored == (False, "candidate has no passed applicable cells")
 
     snapshot["candidate_runtime"]["candidate-a"]["harness"] = "direct"
     packageable, reason = candidate_packageability(
