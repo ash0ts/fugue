@@ -2780,6 +2780,11 @@ def _preparation_targets(
                     _fixture_repository_path(task.repository, repo_root),
                     manifest.dataset.harbor_ref,
                     task.metadata,
+                    (
+                        task.repository.sha256
+                        if isinstance(task.repository, FixtureRepositorySpec)
+                        else None
+                    ),
                 )
                 for task in tasks
                 if task.repo and task.base_commit

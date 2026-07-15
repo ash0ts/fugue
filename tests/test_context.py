@@ -42,6 +42,7 @@ from fugue.bench.context import (
     prepare_context,
 )
 from fugue.bench.export import export_rows
+from fugue.bench.manifest import fixture_repository_digest
 from fugue.bench.scoring import (
     latency_summary,
     score_retrieval,
@@ -811,6 +812,34 @@ def test_rag_rejects_empty_repository_instead_of_publishing_empty_index(
         asyncio.run(prepare_context(spec, snapshot, runtime))
 
     assert not (runtime.cache_root / context_cache_key(spec, snapshot)).exists()
+
+
+def test_rag_indexes_a_digest_verified_fixture_repository(tmp_path: Path) -> None:
+    source = tmp_path / "fixture"
+    (source / "src").mkdir(parents=True)
+    (source / "src" / "semantic.py").write_text("VECTOR_SENTINEL = 42\n")
+    digest = fixture_repository_digest(source)
+    snapshot = RepositorySnapshot(
+        task_id="fixture__task",
+        repo="fixture/repo",
+        commit=digest,
+        checkout=source,
+        fixture_digest=digest,
+    )
+
+    assert _repository_chunks(snapshot, lines_per_chunk=80, overlap=20) == [
+        {
+            "id": "src/semantic.py:1",
+            "path": "src/semantic.py",
+            "start_line": 1,
+            "end_line": 1,
+            "text": "VECTOR_SENTINEL = 42",
+        }
+    ]
+
+    (source / "src" / "semantic.py").write_text("VECTOR_SENTINEL = 7\n")
+    with pytest.raises(ValueError, match="fixture repository digest changed"):
+        _repository_chunks(snapshot, lines_per_chunk=80, overlap=20)
 
 
 def test_managed_repository_copy_rejects_escaping_symlink(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from fugue.bench.context_contracts import (
     SupportLevel,
 )
 from fugue.bench.library import validate_id
+from fugue.bench.manifest import fixture_repository_digest
 from fugue.bench.runtime_manager import (
     GITNEXUS_VECTOR_MODE,
     gitnexus_retrieval_mode,
@@ -92,6 +93,7 @@ class RepositorySnapshot:
     checkout: Path
     dataset_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    fixture_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2332,6 +2334,8 @@ def _repository_chunks(
 def _tracked_repository_text(
     snapshot: RepositorySnapshot,
 ) -> list[tuple[str, str]]:
+    if snapshot.fixture_digest is not None:
+        return _fixture_repository_text(snapshot)
     listing = subprocess.run(
         [
             "git",
@@ -2417,6 +2421,43 @@ def _tracked_repository_text(
         for stream in (process.stdin, process.stdout, process.stderr):
             if not stream.closed:
                 stream.close()
+    return values
+
+
+def _fixture_repository_text(
+    snapshot: RepositorySnapshot,
+) -> list[tuple[str, str]]:
+    if snapshot.commit != snapshot.fixture_digest:
+        raise ValueError(
+            "fixture repository commit and declared digest must match"
+        )
+    actual = fixture_repository_digest(snapshot.checkout)
+    if actual != snapshot.fixture_digest:
+        raise ValueError(
+            "fixture repository digest changed: "
+            f"expected {snapshot.fixture_digest}, got {actual}"
+        )
+
+    values: list[tuple[str, str]] = []
+    for path in sorted(
+        snapshot.checkout.rglob("*"),
+        key=lambda item: item.relative_to(snapshot.checkout).as_posix(),
+    ):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(snapshot.checkout).as_posix()
+        pure_path = PurePosixPath(relative)
+        if (
+            any(part in _IGNORED_DIRS for part in pure_path.parts)
+            or pure_path.suffix.lower() not in _TEXT_SUFFIXES
+            or path.stat().st_size > 1_000_000
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except UnicodeDecodeError:
+            continue
+        values.append((relative, text))
     return values
 
 
