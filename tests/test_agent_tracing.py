@@ -16,7 +16,10 @@ from fugue.agent_tracing import (
     openclaw_conversation_id,
     stable_agent_name,
 )
-from fugue.registration import skill_registration_probe_command
+from fugue.registration import (
+    context_registration_digest,
+    skill_registration_probe_command,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_MODEL_PLANE = REPO_ROOT / "fugue" / "agents" / "model_plane.py"
@@ -127,6 +130,31 @@ def test_skill_registration_probe_requires_every_assigned_skill(
     assert incomplete.returncode == 2
 
 
+def test_context_registration_digest_is_order_independent_and_behavioral() -> None:
+    inputs = {
+        "context_system_id": "gitnexus",
+        "delivery": "native_mcp",
+        "context_config_hash": "config-a",
+        "command": None,
+    }
+    first = context_registration_digest(
+        **inputs,
+        servers=[{"name": "b", "url": "http://b"}, {"name": "a"}],
+    )
+    second = context_registration_digest(
+        **inputs,
+        servers=[{"name": "a"}, {"name": "b", "url": "http://b"}],
+    )
+    changed = context_registration_digest(
+        **{**inputs, "context_config_hash": "config-b"},
+        servers=[{"name": "a"}, {"name": "b", "url": "http://b"}],
+    )
+
+    assert first == second
+    assert first.startswith("sha256:")
+    assert changed != first
+
+
 def test_trial_trace_attributes_are_flat_and_comparable() -> None:
     source = AGENT_MODEL_PLANE.read_text()
 
@@ -139,6 +167,7 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.context_system_id",
         "fugue.context_delivery",
         "fugue.context_registration_status",
+        "fugue.context_registration_digest",
         "fugue.context_support",
         "fugue.integration_ids",
         "fugue.task_id",

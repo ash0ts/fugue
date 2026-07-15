@@ -1,7 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
+from typing import Any
+
+
+def context_registration_digest(
+    *,
+    context_system_id: str,
+    delivery: str,
+    context_config_hash: str,
+    command: str | None,
+    servers: list[dict[str, Any]],
+) -> str:
+    payload = {
+        "context_system_id": context_system_id,
+        "delivery": delivery,
+        "context_config_hash": context_config_hash,
+        "command": command,
+        "servers": sorted(servers, key=lambda item: str(item.get("name") or "")),
+    }
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 def skill_registration_probe_command(directory: str, assigned: list[str]) -> str:

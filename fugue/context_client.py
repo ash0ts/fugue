@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-DEFAULT_URL = "http://fugue-context:8001"
+DEFAULT_URL = "http://127.0.0.1:8001"
 MAX_RESPONSE_BYTES = 1_048_576
 
 

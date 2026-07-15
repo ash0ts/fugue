@@ -3382,6 +3382,9 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "runtime_fingerprints": _runtime_fingerprints(trial_dir, meta),
         "context_registration": context_registration,
         "context_registration_status": registration_status or "unavailable",
+        "context_registration_digest": context_registration.get(
+            "registration_digest"
+        ),
         "context_registered": context_registered if context_assigned else None,
         "context_artifact": meta.get("context_artifact"),
         "context_assigned": context_assigned,

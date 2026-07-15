@@ -25,6 +25,7 @@ def test_codex_runtime_uses_cell_home_and_structured_mcp_config(
     monkeypatch.setenv("FUGUE_TASK_NAME", "task-a")
     monkeypatch.setenv("FUGUE_HARNESS", "codex")
     monkeypatch.setenv("FUGUE_CONTEXT_SYSTEM_ID", "gitnexus")
+    monkeypatch.setenv("FUGUE_CONTEXT_CONFIG_HASH", "config-a")
     monkeypatch.setenv("FUGUE_VARIANT_ID", "gitnexus")
     monkeypatch.setenv("FUGUE_TRIAL_INDEX", "1")
 
@@ -36,3 +37,9 @@ def test_codex_runtime_uses_cell_home_and_structured_mcp_config(
     assert command is not None
     assert 'command = "python"' in command
     assert 'args = ["-m","server"]' in command
+
+    registration = agent._context_registration(
+        {"status": "registered", "transport": "native_mcp"}
+    )
+    assert registration["context_system_id"] == "gitnexus"
+    assert registration["registration_digest"].startswith("sha256:")

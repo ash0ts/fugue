@@ -63,7 +63,10 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_entity_project,
 )
-from fugue.registration import skill_registration_probe_command
+from fugue.registration import (
+    context_registration_digest,
+    skill_registration_probe_command,
+)
 from fugue.tool_policy import (
     HarnessToolPolicy,
     tool_result_guard_cli_flags,
@@ -378,8 +381,8 @@ class _TrialMetaMixin:
         await self._capture_runtime_fingerprint(environment, "pre_execution")
         registration_error: Exception | None = None
         try:
-            self._context_registration_meta = await self._install_context_runtime(
-                environment
+            self._context_registration_meta = self._context_registration(
+                await self._install_context_runtime(environment)
             )
         except Exception as exc:
             registration_error = exc
@@ -718,6 +721,7 @@ done
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     def _set_context_registration(self, value: dict[str, Any]) -> None:
+        value = self._context_registration(value)
         self._context_registration_meta = value
         try:
             meta = json.loads(self._meta_path().read_text())
@@ -725,6 +729,44 @@ done
             meta = {}
         meta["context_registration"] = value
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
+
+    def _context_registration(self, value: dict[str, Any]) -> dict[str, Any]:
+        registration = dict(value)
+        if registration.get("status") != "registered":
+            registration.setdefault("registration_digest", None)
+            return registration
+        servers = []
+        for server in getattr(self, "mcp_servers", []) or []:
+            servers.append(
+                {
+                    key: item
+                    for key, item in {
+                        "name": getattr(server, "name", None),
+                        "transport": getattr(server, "transport", None),
+                        "url": getattr(server, "url", None),
+                        "command": getattr(server, "command", None),
+                        "args": list(getattr(server, "args", None) or []),
+                    }.items()
+                    if item not in (None, "", [])
+                }
+            )
+        registration["context_system_id"] = self.context_system_id
+        registration["registration_digest"] = context_registration_digest(
+            context_system_id=self.context_system_id,
+            delivery=str(
+                registration.get("delivery")
+                or registration.get("transport")
+                or os.environ.get("FUGUE_CONTEXT_DELIVERY", "portable")
+            ),
+            context_config_hash=os.environ.get("FUGUE_CONTEXT_CONFIG_HASH", ""),
+            command=(
+                str(registration["command"])
+                if registration.get("command")
+                else None
+            ),
+            servers=servers,
+        )
+        return registration
 
     def _set_skill_registration(self, value: dict[str, Any]) -> None:
         self._skill_registration_meta = value
@@ -812,6 +854,9 @@ done
             "fugue.context_registration_status": getattr(
                 self, "_context_registration_meta", {}
             ).get("status", "unavailable"),
+            "fugue.context_registration_digest": getattr(
+                self, "_context_registration_meta", {}
+            ).get("registration_digest", ""),
             "fugue.context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT", ""),
             "fugue.task_id": os.environ.get("FUGUE_TASK_NAME", ""),
             "fugue.trial_id": self.logs_dir.parent.name,
