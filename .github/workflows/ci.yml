@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -12,6 +16,7 @@ jobs:
   python:
     name: Python ${{ matrix.python }} / ${{ matrix.suite }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +45,7 @@ jobs:
   quality:
     name: Quality, build, and command smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -70,10 +76,15 @@ jobs:
           mmdc -p .github/puppeteer-ci.json -a /tmp/fugue-mermaid-assets -i README.md -o /tmp/fugue-readme.md
       - name: Validate repository skill
         run: uv run pytest -q tests/test_skill.py
+      - name: Tracked source remains clean
+        run: git diff --exit-code
 
   serving:
     name: Python 3.13 serving and protocol compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONWARNINGS: error
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -93,6 +104,7 @@ jobs:
   curator:
     name: Curator compiler and policy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
