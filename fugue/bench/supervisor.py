@@ -36,6 +36,7 @@ class RunSupervisor:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root.resolve()
         self.runtime_root = self.repo_root / ".fugue" / "runtime"
+        self._processes: dict[int, subprocess.Popen[str]] = {}
 
     def start_detached(
         self,
@@ -85,6 +86,7 @@ class RunSupervisor:
                 "process_group": process.pid,
             },
         )
+        self._processes[process.pid] = process
         return self.get(run_id, recover=False)
 
     def list(self, *, recover: bool = True) -> list[ManagedRun]:
@@ -117,6 +119,8 @@ class RunSupervisor:
                 os.killpg(process_group, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+        if run.pid is not None:
+            self._reap_local_process(run.pid, wait=True)
         message = "Run cancelled by the operator."
         mark_unfinished_cells(run.run_dir, "cancelled", message=message)
         write_run_manifest(
@@ -193,9 +197,11 @@ class RunSupervisor:
             time.sleep(poll_sec)
 
     def _recover(self, run_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        pid = metadata.get("pid")
+        if isinstance(pid, int):
+            self._reap_local_process(pid)
         if metadata.get("status") not in {"starting", "running"}:
             return metadata
-        pid = metadata.get("pid")
         if isinstance(pid, int) and _pid_alive(pid):
             return metadata
         message = "The managed process exited before recording a terminal state."
@@ -211,6 +217,20 @@ class RunSupervisor:
             },
         )
         return read_run_manifest(run_dir) or metadata
+
+    def _reap_local_process(self, pid: int, *, wait: bool = False) -> None:
+        process = self._processes.get(pid)
+        if process is None:
+            return
+        if wait:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                return
+        else:
+            process.poll()
+        if process.returncode is not None:
+            self._processes.pop(pid, None)
 
     def _managed(self, metadata: dict[str, Any]) -> ManagedRun:
         run_id = str(metadata.get("run_id") or "")
