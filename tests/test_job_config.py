@@ -871,7 +871,7 @@ tasks:
     agent = job.config["agents"][0]
     assert "mcp_servers" not in agent
     assert agent["env"]["FUGUE_CONTEXT_COMMAND"] == "fugue-context"
-    assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == ("http://fugue-context:8001")
+    assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == "http://127.0.0.1:8001"
     assert job.context_delivery == "portable"
     assert job.config["fugue"]["context_delivery"] == "portable"
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
@@ -886,15 +886,14 @@ tasks:
     descriptor = job.resolved_candidate.execution_definition["context_runtime"]
     assert descriptor == {
         "bridge_url": "http://host.docker.internal:4000",
-        "host_gateway": "host.docker.internal:host-gateway",
         "image": "sha256:" + "1" * 64,
         "image_id": "sha256:" + "1" * 64,
         "kind": "compose_service",
         "mcp_port": 8000,
-        "network": "compose_project",
+        "network": "shared_main_namespace",
         "portable_port": 8001,
         "prepared": True,
-        "query_url": "http://fugue-context:8001",
+        "query_url": "http://127.0.0.1:8001",
         "recipe_sha256": "2" * 64,
         "schema_version": 1,
         "service": "fugue-context",
@@ -908,7 +907,7 @@ tasks:
     assert service["pull_policy"] == "never"
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
-    assert service["extra_hosts"] == [descriptor["host_gateway"]]
+    assert "extra_hosts" not in service
     assert service["environment"]["FUGUE_BRIDGE_BASE_URL"] == descriptor["bridge_url"]
     assert "WANDB_API_KEY" not in service["environment"]
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == descriptor["query_url"]
@@ -919,7 +918,7 @@ tasks:
     assert (
         next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
     )
-    assert "network_mode" not in service
+    assert service["network_mode"] == "service:main"
     assert "main" not in compose["services"]
     client_mount = next(
         item
@@ -1003,7 +1002,7 @@ interfaces:
     integration_service = yaml.safe_load(integration_path.read_text())["services"][
         "api"
     ]
-    assert "network_mode" not in context_service
+    assert context_service["network_mode"] == "service:main"
     assert integration_service["network_mode"] == "service:main"
 
 
@@ -1228,7 +1227,7 @@ tasks:
     for job in jobs:
         agent = job.config["agents"][0]
         assert agent["env"]["FUGUE_CONTEXT_COMMAND"] == "fugue-context"
-        assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == ("http://fugue-context:8001")
+        assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == "http://127.0.0.1:8001"
         assert "mcp_servers" not in agent
         assert "must-not-serialize" not in json.dumps(job.config)
 

@@ -1158,6 +1158,7 @@ def _bind_fugue_context_runtime(
             service_name: {
                 "image": descriptor["image"],
                 "pull_policy": "never",
+                "network_mode": "service:main",
                 "read_only": True,
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
@@ -1184,9 +1185,6 @@ def _bind_fugue_context_runtime(
                     "FUGUE_BRIDGE_BASE_URL": descriptor["bridge_url"],
                     "FUGUE_CONTEXT_EVENTS_PATH": ("/tmp/fugue-context-events.jsonl"),
                 },
-                # Portable context is addressed by service name. Keeping it on
-                # the project network also leaves the bridge host alias valid.
-                "extra_hosts": [descriptor["host_gateway"]],
                 "volumes": [
                     {
                         "type": "bind",
@@ -1272,12 +1270,11 @@ def _portable_context_runtime_descriptor(
         "recipe_sha256": lock.get("recipe_sha256") if lock else None,
         "prepared": lock is not None,
         "service": CONTEXT_RUNTIME_SERVICE,
-        "network": "compose_project",
-        "host_gateway": "host.docker.internal:host-gateway",
+        "network": "shared_main_namespace",
         "bridge_url": "http://host.docker.internal:4000",
         "mcp_port": 8000,
         "portable_port": 8001,
-        "query_url": f"http://{CONTEXT_RUNTIME_SERVICE}:8001",
+        "query_url": "http://127.0.0.1:8001",
     }
 
 
