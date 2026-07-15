@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -177,6 +178,7 @@ def test_runtime_compose_uses_isolated_sidecar_and_read_only_repository(
 
     compose = runtime_manager.yaml.safe_load(path.read_text())
     service = compose["services"]["fugue-semble"]
+    assert service["user"] == f"{os.getuid()}:{os.getgid()}"
     assert service["network_mode"] == "service:main"
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
@@ -286,6 +288,8 @@ def test_gitnexus_hybrid_preparation_is_offline_and_fails_closed(
         },
     )
     graph_analyze, vector_analyze, probe = commands
+    for command in commands:
+        assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert "--network" in graph_analyze and "none" in graph_analyze
     assert "--embeddings" not in graph_analyze
     assert "--embeddings" in vector_analyze
