@@ -546,8 +546,23 @@ def apply_generated_evaluation(
     judge_request: Any | None = None,
 ) -> None:
     """Add separate generated-evaluation dimensions without altering Harbor status."""
+    answer = _trial_answer(trial_dir, row)
+    deterministic = _deterministic_assertions(
+        case,
+        row=row,
+        answer=answer,
+        trial_dir=trial_dir,
+    )
+    row["evaluation_assertions"] = deterministic
+    if not rubrics:
+        row["evaluation_judge_status"] = "not_requested"
+        return
     if not judge_model:
-        raise ValueError("generated evaluation scoring requires an explicit judge_model")
+        row["evaluation_judge_status"] = "failed"
+        row["evaluation_error"] = (
+            "ValueError: generated evaluation scoring requires an explicit judge_model"
+        )
+        return
     dimensions = list(dict.fromkeys(str(v) for v in case["scorer_dimensions"]))
     definitions = {
         str(value["id"]): value
@@ -557,15 +572,11 @@ def apply_generated_evaluation(
     }
     missing = sorted(set(dimensions) - set(definitions))
     if missing:
-        raise ValueError(f"rubric is missing dimension(s): {', '.join(missing)}")
-    answer = _trial_answer(trial_dir, row)
-    deterministic = _deterministic_assertions(
-        case,
-        row=row,
-        answer=answer,
-        trial_dir=trial_dir,
-    )
-    row["evaluation_assertions"] = deterministic
+        row["evaluation_judge_status"] = "failed"
+        row["evaluation_error"] = (
+            f"ValueError: rubric is missing dimension(s): {', '.join(missing)}"
+        )
+        return
     evidence = {
         "answer": answer,
         "artifact_paths": sorted(
@@ -626,7 +637,9 @@ def apply_generated_evaluation(
         row["evaluation_judge_reasons"] = redact_value(
             row["evaluation_judge_reasons"]
         )
+        row["evaluation_judge_status"] = "scored"
     except Exception as exc:
+        row["evaluation_judge_status"] = "failed"
         row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
     finally:
         row["evaluation_judge_latency_ms"] = (

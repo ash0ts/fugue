@@ -1168,6 +1168,11 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "FUGUE_TRACE_CONTENT": "full",
         },
         n_attempts=1,
+        evaluation_case={
+            "id": "task-a",
+            "scorer_dimensions": ["task_completion", "artifact_quality"],
+            "expected": {"artifacts": []},
+        },
     )
 
     def summaries(**kwargs):
@@ -1232,6 +1237,10 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
     assert live_row["evaluation_prediction_latency_sec"] >= 0
+    assert live_row["evaluation_judge_status"] == "not_requested"
+    assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_requested"
+    )
     assert predictions[0].predict_and_score_call.summary == {
         "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }

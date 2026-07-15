@@ -262,18 +262,6 @@ class LiveEvaluationCoordinator:
             self._raise_if_cancelled()
             _merge_error_events(row)
             _apply_observed_identity(row)
-            if cell.evaluation_case is not None:
-                apply_generated_evaluation(
-                    row,
-                    case=cell.evaluation_case,
-                    rubrics=cell.evaluation_rubrics,
-                    judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
-                    env=self.env,
-                    trial_dir=Path(
-                        str(row.get("trial_dir") or cell.result_path.parent)
-                    ),
-                )
-            self._raise_if_cancelled()
             root = (
                 None
                 if row.get("trace_link_status") in {"not_applicable", "not_started"}
@@ -296,6 +284,22 @@ class LiveEvaluationCoordinator:
                     root_span_id=root.get("span_id"),
                     eval_predict_and_score_call_id=call_id,
                 )
+            if cell.evaluation_case is not None:
+                try:
+                    apply_generated_evaluation(
+                        row,
+                        case=cell.evaluation_case,
+                        rubrics=cell.evaluation_rubrics,
+                        judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
+                        env=self.env,
+                        trial_dir=Path(
+                            str(row.get("trial_dir") or cell.result_path.parent)
+                        ),
+                    )
+                except Exception as exc:
+                    row["evaluation_judge_status"] = "failed"
+                    row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
+            self._raise_if_cancelled()
             _set_adapter_outcome(row)
             if not self._pop_prediction(cell.id, active):
                 return
@@ -3143,11 +3147,13 @@ def _set_adapter_outcome(
         deterministic = "passed"
     else:
         deterministic = "failed"
-    if row.get("judge_error"):
+    if row.get("judge_error") or row.get("evaluation_error"):
         judge = "failed"
-    elif row.get("judge_overall") is not None:
+    elif row.get("judge_overall") is not None or row.get(
+        "evaluation_judge_status"
+    ) == "scored":
         judge = "scored"
-    elif row.get("judge_model") or row.get("evaluation_rubrics"):
+    elif row.get("evaluation_rubrics"):
         judge = "pending"
     else:
         judge = "not_requested"

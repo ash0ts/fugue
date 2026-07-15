@@ -617,6 +617,26 @@ def test_judge_failure_is_an_evaluation_error_not_a_harbor_failure(
     assert "evaluation_task_completion" not in row
 
 
+def test_case_assertions_do_not_select_a_rubric_scorer(tmp_path: Path) -> None:
+    row = {"status": "passed", "pass": True}
+
+    apply_generated_evaluation(
+        row,
+        case={
+            **_cases(1)[0],
+            "scorer_dimensions": ["task_completion", "artifact_quality"],
+        },
+        rubrics=[],
+        judge_model="openai/gpt-5-mini",
+        env={},
+        trial_dir=tmp_path,
+    )
+
+    assert row["evaluation_assertions"]["task_completion"] == 1
+    assert row["evaluation_judge_status"] == "not_requested"
+    assert "evaluation_error" not in row
+
+
 def test_artifact_assertions_bound_the_structured_judge_score(
     tmp_path: Path,
 ) -> None:
