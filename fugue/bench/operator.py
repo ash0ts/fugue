@@ -109,8 +109,8 @@ from fugue.bench.sources import (
 from fugue.bench.supervisor import ManagedRun, RunSupervisor
 from fugue.bench.task_runtime import (
     prepare_task_runtime,
+    read_task_runtime_lock,
     task_architecture,
-    task_runtime_ready,
 )
 from fugue.bench.workloads import (
     PreparedWorkloadDataset,
@@ -957,7 +957,9 @@ class OperatorService:
             if key in seen_tasks:
                 continue
             seen_tasks.add(key)
-            was_ready, _ = task_runtime_ready(manifest, task, self.repo_root)
+            previous_lock = read_task_runtime_lock(
+                manifest, task, self.repo_root
+            )
             lock = prepare_task_runtime(
                 manifest,
                 task,
@@ -968,7 +970,14 @@ class OperatorService:
                 TaskRuntimePreparation(
                     task_id=task.id,
                     architecture=architecture,
-                    status="cached" if was_ready and not rebuild else "built",
+                    status=(
+                        "cached"
+                        if previous_lock is not None
+                        and previous_lock.get("recipe_sha256")
+                        == lock.get("recipe_sha256")
+                        and not rebuild
+                        else "built"
+                    ),
                     image=str(lock["image"]),
                     image_id=str(lock["image_id"]),
                     recipe_sha256=str(lock["recipe_sha256"]),
