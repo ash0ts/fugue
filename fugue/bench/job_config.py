@@ -980,8 +980,9 @@ def _bind_fugue_context_runtime(
                     "FUGUE_BRIDGE_BASE_URL=http://host.docker.internal:4000",
                     "FUGUE_CONTEXT_EVENTS_PATH=/tmp/fugue-context-events.jsonl",
                 ],
+                # Portable context is addressed by service name. Keeping it on
+                # the project network also leaves the bridge host alias valid.
                 "extra_hosts": ["host.docker.internal:host-gateway"],
-                "network_mode": "service:main",
                 "volumes": [
                     {
                         "type": "bind",

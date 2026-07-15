@@ -553,7 +553,8 @@ tasks:
     assert "fugue.context_server" in service["command"]
     assert "8001" in service["healthcheck"]["test"][-1]
     assert next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
-    assert service["network_mode"] == "service:main"
+    assert service["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    assert "network_mode" not in service
     assert "main" not in compose["services"]
     client_mount = next(
         item
