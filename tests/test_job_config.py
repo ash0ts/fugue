@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from fugue.bench.job_config import render_jobs
@@ -186,13 +187,199 @@ required_env: [RETRIEVAL_TOKEN]
         {
             "name": "retrieval",
             "transport": "streamable-http",
-            "url": "http://retrieval:8000/mcp",
+            "url": "http://127.0.0.1:8000/mcp",
         }
     ]
     assert "secret-value" not in job.config_path.read_text()
     assert job.env["RETRIEVAL_TOKEN"] == "secret-value"
     assert job.integration_ids == ("retrieval",)
     assert job.config["fugue"]["integrations"][0]["support"] == "experimental"
+
+
+def test_missing_integration_secret_marks_cell_not_applicable_without_injection(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    integration = (
+        tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
+    )
+    integration.parent.mkdir(parents=True)
+    integration.write_text(
+        """
+id: retrieval
+version: "1"
+runtime: {type: external, url: https://api.example.test}
+allowed_hosts: [api.example.test]
+interfaces:
+  - {type: http, name: search, path: /search}
+required_env: [RETRIEVAL_TOKEN]
+"""
+    )
+    experiment = ExperimentSpec(
+        id="missing-secret",
+        title="Missing secret",
+        variants=[
+            FeatureVariant(
+                id="retrieval",
+                label="Retrieval",
+                integrations=[IntegrationSelection("retrieval")],
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    assert not job.applicable
+    assert job.skip_reason == (
+        "integration retrieval requires environment: RETRIEVAL_TOKEN"
+    )
+    assert "env" not in job.config["agents"][0]
+    assert "extra_allowed_hosts" not in job.config["agents"][0]
+    assert job.config["fugue"]["integration_ids"] == ["retrieval"]
+
+
+def test_external_http_integration_renders_endpoint_allowlist_and_provenance(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    integration = tmp_path / "configs" / "fugue" / "integrations" / "api.yaml"
+    integration.parent.mkdir(parents=True)
+    integration.write_text(
+        """
+id: api
+version: "2026-07-14"
+support: supported
+runtime: {type: external, url: https://api.example.test/v1}
+allowed_hosts: [API.EXAMPLE.TEST]
+interfaces:
+  - {type: http, name: search, path: /search}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="external-api",
+        title="External API",
+        variants=[
+            FeatureVariant(
+                id="api",
+                label="API",
+                integrations=[IntegrationSelection("api")],
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    agent = job.config["agents"][0]
+    assert job.applicable
+    assert agent["extra_allowed_hosts"] == ["api.example.test"]
+    assert agent["env"] == {
+        "FUGUE_INTEGRATION_API_SEARCH_URL": "https://api.example.test/v1/search"
+    }
+    assert job.integration_provenance[0]["version"] == "2026-07-14"
+    assert len(job.integration_provenance[0]["config_hash"]) == 64
+
+
+def test_stdio_integration_mounts_and_invokes_the_policy_proxy(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    integration = (
+        tmp_path / "configs" / "fugue" / "integrations" / "stdio.yaml"
+    )
+    integration.parent.mkdir(parents=True)
+    integration.write_text(
+        """
+id: stdio
+version: "1"
+runtime: {type: builtin, command: [python, -m, example_server]}
+interfaces:
+  - type: mcp
+    name: reviewed
+    transport: stdio
+    allowed_tools: [search]
+"""
+    )
+    experiment = ExperimentSpec(
+        id="stdio",
+        title="Stdio",
+        variants=[
+            FeatureVariant(
+                id="stdio",
+                label="Stdio",
+                integrations=[IntegrationSelection("stdio")],
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    agent = job.config["agents"][0]
+    [server] = agent["mcp_servers"]
+    assert server["command"] == "python"
+    assert server["args"][:5] == [
+        "-m",
+        "fugue.mcp_proxy",
+        "--name",
+        "reviewed",
+        "--allow-tool",
+    ]
+    assert "search" in server["args"]
+    assert server["args"][-4:] == ["--", "python", "-m", "example_server"]
+    assert agent["env"]["PYTHONPATH"] == "/fugue-src"
+    assert any(
+        mount["target"] == "/fugue-src/fugue"
+        and mount["read_only"] is True
+        for mount in job.config["environment"]["mounts"]
+    )
 
 
 def test_attempts_render_as_independent_comparable_trials(tmp_path: Path):
@@ -307,7 +494,7 @@ tasks:
     assert server == {
         "name": "fugue-context",
         "transport": "streamable-http",
-        "url": "http://fugue-context:8000/mcp",
+        "url": "http://127.0.0.1:8000/mcp",
     }
     [compose_path] = job.config["environment"]["extra_docker_compose"]
     compose_text = (tmp_path / compose_path).read_text()
@@ -320,10 +507,60 @@ tasks:
     assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
     assert "fugue.context_server" in service["command"]
     assert next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
-    assert compose["services"]["main"]["depends_on"]["fugue-context"] == {
-        "condition": "service_healthy"
-    }
+    assert service["network_mode"] == "service:main"
+    assert "main" not in compose["services"]
     assert "artifacts" not in job.config
+
+
+def test_context_and_integration_shared_ports_may_not_collide(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    integration = tmp_path / "configs" / "fugue" / "integrations" / "api.yaml"
+    integration.parent.mkdir(parents=True)
+    integration.write_text(
+        """
+id: api
+version: "1"
+runtime:
+  type: compose
+  image: ghcr.io/example/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  service: api
+  port: 8000
+interfaces:
+  - {type: http, name: api, path: /}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="port-collision",
+        title="Port collision",
+        variants=[
+            FeatureVariant(
+                id="combined",
+                label="Combined",
+                context=ContextSelection(system_id="rag-bm25"),
+                integrations=[IntegrationSelection("api")],
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="fugue-context and api both use port 8000"):
+        render_jobs(
+            experiment=experiment,
+            manifest=load_manifest(manifest_path),
+            manifest_path=manifest_path,
+            repo_root=tmp_path,
+            env={},
+            model="openai/gpt-5",
+            run_id="unit",
+        )
 
 
 def test_bridged_codex_context_mcp_is_explicitly_not_applicable(tmp_path: Path):
@@ -364,7 +601,7 @@ tasks:
         {
             "name": "fugue-context",
             "transport": "streamable-http",
-            "url": "http://fugue-context:8000/mcp",
+            "url": "http://127.0.0.1:8000/mcp",
         }
     ]
     assert job.config["environment"]["extra_docker_compose"]

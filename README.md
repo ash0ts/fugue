@@ -146,8 +146,10 @@ fugue setup --approve-skill hallmark=sha256:REVIEWED_DIGEST \
 The first command fetches Git objects, inspects only the declared skill
 subdirectory, and writes a review record. It does not check out or run the
 repository's installer, hooks, package scripts, or plugin code. The second
-command locks one exact bundle digest after explicit review. A moving ref is
-never injected directly into a trial.
+command locks one exact bundle digest after explicit review. Moving refs are
+rejected rather than injected into a trial. Once approved, the selected bundle is
+available inside the Harbor sandbox, where the agent may follow its
+instructions or run acknowledged scripts.
 
 Model precedence is:
 
@@ -471,7 +473,9 @@ Use the narrowest extension point that represents the treatment:
   lifecycle and content-addressed caches.
 - `integrations`: explicitly selected MCP or HTTP services. Local Compose
   services require digest-pinned images and hardened defaults; external
-  services require HTTPS and an explicit Harbor host allowlist.
+  services require HTTPS and an explicit Harbor host allowlist. Compose
+  services share the trial network namespace, use loopback endpoints, and
+  must declare non-conflicting ports.
 - `repository`: a benchmark task's immutable Git input, expressed as a URL and
   full commit SHA.
 - `workload`/Harbor dataset: task provisioning, environment, submission, and

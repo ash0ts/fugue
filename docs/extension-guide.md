@@ -25,7 +25,7 @@ environments stay isolated without weakening the execution contract.
 | Extension | Implemented now | Important boundary |
 | --- | --- | --- |
 | Local skills | Full skill directories under `configs/fugue/skills/<id>` | Whole bundle is hashed; duplicate declared names are rejected |
-| Remote skills | Public GitHub source, exact subdirectory, review, approval, lock, immutable cache | Git objects are inspected without checkout; repository code is never installed or run |
+| Remote skills | Public GitHub source, full commit SHA, exact subdirectory, review, approval, lock, immutable cache | Git objects are inspected without checkout; setup never installs or runs repository code |
 | Context providers | `preflight`, `prepare`, `bind`, retrieval and optional ingestion/sequence | Task/commit cache identity and per-trial bindings remain separate |
 | MCP integrations | Stdio, SSE, and streamable HTTP Harbor bindings | Stdio can enforce per-tool allowlists; HTTP requires a future policy gateway for per-tool filtering |
 | HTTP services | Compose or external URL exposed through a deterministic endpoint environment variable | Compose image digest and external host allowlist are mandatory |
@@ -75,6 +75,9 @@ limit violations. It inventories every file and flags scripts, package
 manifests, network/credential instructions, destructive commands, repository
 mutation, servers, telemetry, and subagent control. Acknowledgement is tied to
 the exact digest and source commit in `configs/fugue/skills.lock.yaml`.
+Setup never installs or executes repository code. After approval, the selected
+bundle is intentionally available to the agent inside Harbor's sandbox; an
+agent may follow its instructions or run its acknowledged scripts there.
 
 Fugue includes pinned declarations for one skill directory from Taste Skill,
 Superpowers, Hallmark, and Emil Kowalski's skills repository. Only the selected
@@ -98,8 +101,8 @@ runtime:
   type: compose
   image: ghcr.io/example/repository-search@sha256:FULL_64_HEX_DIGEST
   service: repository-search
-  port: 8000
-  healthcheck: {path: /health}
+  port: 8100
+  healthcheck: {command: [/app/healthcheck]}
 interfaces:
   - type: mcp
     name: repository-search
@@ -119,6 +122,12 @@ services with all Linux capabilities dropped, `no-new-privileges`, a bounded
 temporary filesystem, no published host ports, and optional resource and
 health checks. Secret values are not written into generated job configs;
 Harbor resolves `${NAME}` templates from the trial process environment.
+Compose integrations share `main`'s network namespace and use a loopback
+endpoint. This remains reachable when Harbor places `main` behind its egress
+sidecar. Selected Compose integrations must therefore use distinct ports; a
+context runtime and integration with the same port are rejected while
+rendering. A `healthcheck.path` probe uses Python inside the service image;
+images without Python should declare an image-native `healthcheck.command`.
 
 An external integration requires HTTPS and its hostname in `allowed_hosts`.
 Fugue passes that list to Harbor's `extra_allowed_hosts`; it does not widen

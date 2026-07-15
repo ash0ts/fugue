@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -13,7 +14,6 @@ import yaml
 from fugue.bench.library import IntegrationSelection
 
 INTEGRATION_ROOT = Path("configs") / "fugue" / "integrations"
-INTEGRATION_LOCK_PATH = Path("configs") / "fugue" / "integrations.lock.yaml"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SUPPORT_LEVELS = {"supported", "experimental", "not_applicable", "disabled"}
@@ -109,11 +109,16 @@ def load_integration(integration_id: str, repo_root: Path) -> IntegrationSpec:
         raise ValueError(f"{path}: unsupported support level {support!r}")
     runtime = _runtime(raw.get("runtime"), path)
     interfaces = _interfaces(raw.get("interfaces"), path)
+    _validate_runtime_interfaces(runtime, interfaces, path)
     required_env = tuple(_string_list(raw.get("required_env")))
     for name in required_env:
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
             raise ValueError(f"{path}: invalid required environment variable {name!r}")
-    allowed_hosts = tuple(_string_list(raw.get("allowed_hosts")))
+    if len(set(required_env)) != len(required_env):
+        raise ValueError(f"{path}: required_env entries must be unique")
+    allowed_hosts = tuple(
+        dict.fromkeys(host.lower() for host in _string_list(raw.get("allowed_hosts")))
+    )
     for host in allowed_hosts:
         _validate_host(host, path)
     if runtime.type == "external":
@@ -140,14 +145,8 @@ def load_integration(integration_id: str, repo_root: Path) -> IntegrationSpec:
     instructions = tuple(_string_list(raw.get("instructions")))
     for instruction in instructions:
         _validate_relative_path(instruction, path)
-    artifacts_raw = raw.get("artifacts") or []
-    if not isinstance(artifacts_raw, list) or not all(
-        isinstance(item, dict) for item in artifacts_raw
-    ):
-        raise ValueError(f"{path}: artifacts must be a list of mappings")
-    config_schema = raw.get("config_schema") or {}
-    if not isinstance(config_schema, dict):
-        raise ValueError(f"{path}: config_schema must be a mapping")
+    artifacts = _artifacts(raw.get("artifacts"), path, runtime)
+    config_schema = _config_schema(raw.get("config_schema"), path)
     return IntegrationSpec(
         id=integration_id,
         version=version,
@@ -158,8 +157,8 @@ def load_integration(integration_id: str, repo_root: Path) -> IntegrationSpec:
         required_env=required_env,
         allowed_hosts=allowed_hosts,
         instructions=instructions,
-        artifacts=tuple(dict(item) for item in artifacts_raw),
-        config_schema=dict(config_schema),
+        artifacts=artifacts,
+        config_schema=config_schema,
     )
 
 
@@ -178,6 +177,7 @@ def bind_integrations(
     job_name: str,
     env: dict[str, str],
     write: bool,
+    reserved_ports: dict[int, str] | None = None,
 ) -> IntegrationBinding:
     if not selections:
         return IntegrationBinding()
@@ -190,6 +190,7 @@ def bind_integrations(
     allowed_hosts: list[str] = []
     provenance: list[dict[str, Any]] = []
     names: set[str] = set()
+    compose_ports: dict[int, str] = dict(reserved_ports or {})
     for selection in selections:
         spec = load_integration(selection.id, repo_root)
         _validate_selection_config(spec, selection.config)
@@ -252,6 +253,14 @@ def bind_integrations(
                 server["fugue_allowed_tools"] = list(interface.allowed_tools)
             servers.append(server)
         if spec.runtime.type == "compose":
+            assert spec.runtime.port is not None
+            previous = compose_ports.get(spec.runtime.port)
+            if previous:
+                raise ValueError(
+                    f"shared services {previous} and {spec.id} both use "
+                    f"port {spec.runtime.port}"
+                )
+            compose_ports[spec.runtime.port] = spec.id
             compose_path = runtime_root / "integrations" / f"{job_name}-{spec.id}.yaml"
             if write:
                 compose_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,20 +308,35 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
     service = str(raw.get("service") or "") or None
     port = int(raw["port"]) if raw.get("port") is not None else None
     url = str(raw["url"]) if raw.get("url") else None
+    command = tuple(_string_list(raw.get("command")))
+    if any(not item.strip() for item in command):
+        raise ValueError(f"{path}: runtime command entries may not be empty")
+    healthcheck = _healthcheck(raw.get("healthcheck"), path)
+    resources = raw.get("resources") or {}
+    if not isinstance(resources, dict):
+        raise ValueError(f"{path}: resources must be a mapping")
     if runtime_type == "compose":
         if not image or not _IMAGE_DIGEST_RE.fullmatch(image):
             raise ValueError(f"{path}: compose images must be pinned by sha256 digest")
         if not port or not 1 <= port <= 65535:
             raise ValueError(f"{path}: compose runtime requires a valid port")
+        if url:
+            raise ValueError(f"{path}: compose runtime may not declare an external URL")
         service = service or PurePosixPath(path).stem
         _validate_id(service, "compose service")
-    if runtime_type == "external":
+    elif runtime_type == "external":
         _validate_external_url(url, path)
-    command = tuple(_string_list(raw.get("command")))
-    healthcheck = raw.get("healthcheck") or {}
-    resources = raw.get("resources") or {}
-    if not isinstance(healthcheck, dict) or not isinstance(resources, dict):
-        raise ValueError(f"{path}: healthcheck and resources must be mappings")
+        if any((image, service, port, command, healthcheck, resources)):
+            raise ValueError(
+                f"{path}: external runtime accepts only type and url fields"
+            )
+    else:
+        if not command:
+            raise ValueError(f"{path}: builtin runtime requires a reviewed command")
+        if any((image, service, port, url, healthcheck, resources)):
+            raise ValueError(
+                f"{path}: builtin runtime accepts only type and command fields"
+            )
     return IntegrationRuntime(
         type=runtime_type,
         image=image,
@@ -323,6 +347,35 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
         healthcheck=dict(healthcheck),
         resources=dict(resources),
     )
+
+
+def _healthcheck(raw: Any, path: Path) -> dict[str, Any]:
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: healthcheck must be a mapping")
+    _reject_unknown(
+        raw,
+        {"path", "command", "interval", "timeout", "retries"},
+        path,
+        "healthcheck",
+    )
+    has_path = raw.get("path") is not None
+    has_command = raw.get("command") is not None
+    if has_path == has_command:
+        raise ValueError(
+            f"{path}: healthcheck requires exactly one of path or command"
+        )
+    if has_path and not str(raw["path"]).startswith("/"):
+        raise ValueError(f"{path}: healthcheck path must start with '/'")
+    if has_command:
+        command = _string_list(raw["command"])
+        if not command or any(not item.strip() for item in command):
+            raise ValueError(f"{path}: healthcheck command may not be empty")
+    retries = raw.get("retries", 30)
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 1:
+        raise ValueError(f"{path}: healthcheck retries must be a positive integer")
+    return dict(raw)
 
 
 def _interfaces(raw: Any, path: Path) -> tuple[IntegrationInterface, ...]:
@@ -345,6 +398,8 @@ def _interfaces(raw: Any, path: Path) -> tuple[IntegrationInterface, ...]:
         transport = str(value.get("transport") or "streamable-http")
         if interface_type == "mcp" and transport not in _TRANSPORTS:
             raise ValueError(f"{path}: unsupported MCP transport {transport!r}")
+        if interface_type == "http" and "transport" in value:
+            raise ValueError(f"{path}: plain HTTP interfaces may not set transport")
         interface_path = str(value["path"]) if value.get("path") else None
         if interface_path and not interface_path.startswith("/"):
             raise ValueError(f"{path}: interface path must start with '/'")
@@ -362,6 +417,33 @@ def _interfaces(raw: Any, path: Path) -> tuple[IntegrationInterface, ...]:
     if len(set(names)) != len(names):
         raise ValueError(f"{path}: duplicate interface names")
     return tuple(result)
+
+
+def _validate_runtime_interfaces(
+    runtime: IntegrationRuntime,
+    interfaces: tuple[IntegrationInterface, ...],
+    path: Path,
+) -> None:
+    for interface in interfaces:
+        if runtime.type == "compose":
+            if interface.transport == "stdio":
+                raise ValueError(f"{path}: compose runtime may not use stdio MCP")
+            if interface.url:
+                raise ValueError(
+                    f"{path}: compose interfaces use the declared service and may not set url"
+                )
+        elif runtime.type == "external":
+            if interface.transport == "stdio":
+                raise ValueError(f"{path}: external runtime may not use stdio MCP")
+        else:
+            if interface.type != "mcp" or interface.transport != "stdio":
+                raise ValueError(
+                    f"{path}: builtin runtime supports only stdio MCP interfaces"
+                )
+            if interface.path or interface.url:
+                raise ValueError(
+                    f"{path}: builtin stdio interfaces may not set path or url"
+                )
 
 
 def _mcp_server(
@@ -394,7 +476,7 @@ def _interface_url(
 ) -> str:
     runtime = spec.runtime
     if runtime.type == "compose":
-        return f"http://{runtime.service}:{runtime.port}{interface.path or ''}"
+        return f"http://127.0.0.1:{runtime.port}{interface.path or ''}"
     if runtime.type == "external":
         return interface.url or _join_url(str(runtime.url), interface.path)
     if interface.url:
@@ -416,11 +498,11 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
         "user": "65532:65532",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
+        "network_mode": "service:main",
         "tmpfs": ["/tmp:rw,noexec,nosuid,size=64m"],
         "environment": {
             name: f"${{{name}}}" for name in spec.required_env
         },
-        "expose": [str(runtime.port)],
     }
     if runtime.command:
         service["command"] = list(runtime.command)
@@ -434,6 +516,9 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
     if health:
         if health.get("path"):
             health_path = str(health["path"])
+            health_url = json.dumps(
+                f"http://127.0.0.1:{runtime.port}{health_path}"
+            )
             service["healthcheck"] = {
                 "test": [
                     "CMD",
@@ -441,7 +526,7 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
                     "-c",
                     (
                         "import urllib.request; "
-                        f"urllib.request.urlopen('http://127.0.0.1:{runtime.port}{health_path}', timeout=2)"
+                        f"urllib.request.urlopen({health_url}, timeout=2)"
                     ),
                 ],
                 "interval": str(health.get("interval") or "2s"),
@@ -455,22 +540,79 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
                 "timeout": str(health.get("timeout") or "3s"),
                 "retries": int(health.get("retries") or 30),
             }
-    depends_on: dict[str, Any] = {
-        runtime.service: {
-            "condition": "service_healthy" if service.get("healthcheck") else "service_started"
-        }
-    }
-    return {"services": {"main": {"depends_on": depends_on}, runtime.service: service}}
+    return {"services": {runtime.service: service}}
+
+
+def _artifacts(
+    raw: Any, path: Path, runtime: IntegrationRuntime
+) -> tuple[dict[str, Any], ...]:
+    values = raw or []
+    if not isinstance(values, list) or not all(
+        isinstance(item, dict) for item in values
+    ):
+        raise ValueError(f"{path}: artifacts must be a list of mappings")
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(values, start=1):
+        _reject_unknown(
+            item,
+            {"source", "destination", "exclude", "service"},
+            path,
+            f"artifact {index}",
+        )
+        source = str(item.get("source") or "")
+        if not source:
+            raise ValueError(f"{path}: artifact {index} requires source")
+        service = str(item.get("service") or "") or None
+        if service and service != "main":
+            _validate_id(service, "artifact service")
+            if runtime.type != "compose" or service != runtime.service:
+                raise ValueError(
+                    f"{path}: artifact {index} may target only main or the integration service"
+                )
+            if not PurePosixPath(source).is_absolute():
+                raise ValueError(
+                    f"{path}: service artifact {index} requires an absolute source"
+                )
+        exclude = item.get("exclude") or []
+        if not isinstance(exclude, list) or not all(
+            isinstance(value, str) for value in exclude
+        ):
+            raise ValueError(f"{path}: artifact {index} exclude must be a list of strings")
+        result.append(dict(item))
+    return tuple(result)
+
+
+def _config_schema(raw: Any, path: Path) -> dict[str, Any]:
+    schema = raw or {}
+    if not isinstance(schema, dict):
+        raise ValueError(f"{path}: config_schema must be a mapping")
+    for name, contract in schema.items():
+        _validate_id(str(name), "integration config field")
+        if _sensitive_name(str(name)):
+            raise ValueError(
+                f"{path}: secret-like config field {name!r} must use required_env"
+            )
+        if not isinstance(contract, dict):
+            raise ValueError(f"{path}: config schema {name} must be a mapping")
+        _reject_unknown(
+            contract,
+            {"type", "required"},
+            path,
+            f"config schema {name}",
+        )
+        expected = contract.get("type")
+        if expected not in {"string", "integer", "number", "boolean"}:
+            raise ValueError(
+                f"{path}: config schema {name} has unsupported type {expected!r}"
+            )
+        if "required" in contract and not isinstance(contract["required"], bool):
+            raise ValueError(f"{path}: config schema {name} required must be boolean")
+    return dict(schema)
 
 
 def _validate_selection_config(spec: IntegrationSpec, config: dict[str, Any]) -> None:
     sensitive = sorted(
-        name
-        for name in config
-        if any(
-            token in name.lower().replace("-", "_")
-            for token in ("api_key", "credential", "password", "secret", "token")
-        )
+        name for name in config if _sensitive_name(name)
     )
     if sensitive:
         raise ValueError(
@@ -488,23 +630,46 @@ def _validate_selection_config(spec: IntegrationSpec, config: dict[str, Any]) ->
             f"integration {spec.id} has unknown config field(s): {', '.join(unknown)}"
         )
     for name, contract in schema.items():
-        if not isinstance(contract, dict):
-            continue
         if contract.get("required") and name not in config:
             raise ValueError(f"integration {spec.id} requires config field {name}")
         if name not in config:
             continue
         expected = contract.get("type")
         value = config[name]
-        types = {"string": str, "integer": int, "number": (int, float), "boolean": bool}
-        if expected in types and not isinstance(value, types[expected]):
+        valid = {
+            "string": isinstance(value, str),
+            "integer": isinstance(value, int) and not isinstance(value, bool),
+            "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+            "boolean": isinstance(value, bool),
+        }[str(expected)]
+        if not valid:
             raise ValueError(
                 f"integration {spec.id} config {name} must be {expected}"
             )
 
 
+def _sensitive_name(value: str) -> bool:
+    normalized = value.lower().replace("-", "_")
+    return any(
+        token in normalized
+        for token in ("api_key", "credential", "password", "secret", "token")
+    )
+
+
 def _instruction_path(repo_root: Path, integration_id: str, value: str) -> Path:
-    path = repo_root / INTEGRATION_ROOT / integration_id / value
+    root = repo_root / INTEGRATION_ROOT / integration_id
+    path = root / value
+    cursor = root
+    if root.is_symlink():
+        raise ValueError(
+            f"integration {integration_id} instruction directory may not be a symlink"
+        )
+    for part in PurePosixPath(value).parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError(
+                f"integration {integration_id} instruction may not use symlinks: {value}"
+            )
     if not path.is_file():
         raise FileNotFoundError(
             f"integration {integration_id} instruction does not exist: {value}"
@@ -521,8 +686,16 @@ def _validate_external_url(value: str | None, path: Path) -> None:
             f"{path}: external URLs may not contain credentials, queries, or fragments"
         )
     host = parsed.hostname.lower()
-    if host in {"localhost", "0.0.0.0"} or host.startswith("127.") or host == "::1":
+    if host == "localhost" or host.endswith(".localhost"):
         raise ValueError(f"{path}: external URLs may not target local addresses")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ValueError(
+            f"{path}: external URLs may not target non-public IP addresses"
+        )
 
 
 def _validate_host(value: str, path: Path) -> None:

@@ -194,7 +194,7 @@ def _parser() -> FugueArgumentParser:
     setup.add_argument(
         "--refresh-skills",
         action="store_true",
-        help="Refresh moving Git refs while inspecting remote skills",
+        help="Refetch pinned Git objects while inspecting remote skills",
     )
     setup.add_argument(
         "--acknowledge-risk",

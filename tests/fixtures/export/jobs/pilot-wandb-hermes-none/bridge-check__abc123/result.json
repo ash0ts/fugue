@@ -1,0 +1,26 @@
+{
+  "task_name": "fugue/smoke-bridge-check",
+  "trial_name": "bridge-check__abc123",
+  "config": {
+    "agent": {
+      "model_name": "wandb/zai-org/GLM-5.2"
+    }
+  },
+  "agent_info": {
+    "name": "wandb-hermes"
+  },
+  "agent_result": {
+    "n_input_tokens": 10,
+    "n_cache_tokens": 0,
+    "n_output_tokens": 5,
+    "cost_usd": 0.01
+  },
+  "verifier_result": {
+    "rewards": {
+      "reward": 1.0
+    }
+  },
+  "exception_info": null,
+  "started_at": "2026-07-08T22:19:56.798954Z",
+  "finished_at": "2026-07-08T22:20:01.798954Z"
+}
