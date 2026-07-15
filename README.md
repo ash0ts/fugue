@@ -403,8 +403,12 @@ flowchart LR
     KEY --> LOCK["Process-safe build lock"]
     LOCK --> PROVIDER["Context provider prepare"]
     PROVIDER --> CACHE["Atomic cache publication"]
-    CACHE --> BIND["Instructions / MCP / mounts / sidecars"]
-    BIND --> CELL["Harbor cell"]
+    CACHE --> TRANSPORT{"Context transport"}
+    TRANSPORT -->|portable| SIDECAR["Pinned Fugue sidecar"]
+    SIDECAR --> COMMAND["fugue-context query"]
+    TRANSPORT -->|native_mcp| MCP["Provider-native MCP tools"]
+    COMMAND --> CELL["Harbor cell"]
+    MCP --> CELL
 ```
 
 Default studies use only systems with runnable prerequisites. CodeGraph,
@@ -412,11 +416,71 @@ GitNexus, Project-RAG, Semble, and lat.md remain explicit research adapters
 until their pinned Harbor runtimes pass integration tests. Unsupported cells
 are recorded as `not_applicable`, never as failed trials.
 
-Codex exposes MCP tools as Responses namespaces. Native OpenAI routes support
-that wire format; W&B and Anthropic bridge routes currently accept function
-tools only, so Codex plus an MCP-backed context system is reported as
-`not_applicable` before execution instead of silently mounting static context
-or recording a model failure.
+`ContextSelection.transport` makes the treatment interface explicit:
+
+- `portable` is the default for Fugue BM25, dense, and hybrid RAG. A pinned
+  sidecar owns the index and every harness receives the same bounded command:
+  `fugue-context query --text "..." --top-k 10`.
+- `native_mcp` is for studies of a provider's native tool interface. It is a
+  distinct treatment, not a fallback for portable retrieval.
+
+Portable RAG does not expose the cache as a static repository mount. Every
+cell runs a deterministic registration probe before the agent starts. Fugue
+reports context as assigned, registered, and invoked separately; zero agent
+queries remain a valid intent-to-treat result when the probe passed.
+
+Codex exposes native MCP tools as Responses namespaces. Native OpenAI routes
+are eligible only after that compatibility probe passes. W&B and Anthropic
+bridge routes currently accept function tools only, so `native_mcp` Codex
+cells on those routes are `not_applicable`. Portable context remains available
+to W&B-routed Codex because it is a shell command, not a Responses namespace.
+
+```mermaid
+flowchart TB
+    SELECT["rag-bm25 treatment"] --> SIDE["fugue-context sidecar"]
+    SIDE --> PROBE["Registration probe"]
+    PROBE --> H["Hermes: fugue-context query"]
+    PROBE --> O["OpenClaw: fugue-context query"]
+    PROBE --> C["Claude Code: fugue-context query"]
+    PROBE --> X["Codex: fugue-context query"]
+    H --> EVENTS["Normalized retrieval events"]
+    O --> EVENTS
+    C --> EVENTS
+    X --> EVENTS
+```
+
+### Error ownership and comparability
+
+Fugue merges native Harbor trajectories with Weave spans and de-duplicates
+the same logical failure. Errors are attributed to one of six actionable
+owners: agent behavior, benchmark runtime, harness adapter, context system,
+model provider, or Fugue. Recoverable tool errors do not become terminal agent
+failures merely because they appeared in a trace.
+
+```mermaid
+flowchart LR
+    LOCAL["Harbor trajectory"] --> MERGE["Normalized error events"]
+    WEAVE["Weave spans"] --> MERGE
+    MERGE --> AGENT["agent"]
+    MERGE --> RUNTIME["benchmark runtime"]
+    MERGE --> ADAPTER["harness adapter"]
+    MERGE --> CONTEXT["context system"]
+    MERGE --> PROVIDER["provider"]
+    MERGE --> FUGUE["Fugue"]
+```
+
+Each harness records a pre-install fingerprint and a pre-execution
+fingerprint. Cohort comparability uses the pre-install benchmark environment;
+if package, Python, or platform digests differ, rows are marked
+`runtime_equivalence_status=mismatch` and should not be used for causal lift
+claims. File evidence is derived from normalized read/search trajectories,
+the final git diff, and benchmark expected paths. Agents are not asked to
+author a special evidence JSON file.
+
+OpenClaw's headless benchmark config denies provider-backed or interactive
+tools that are unavailable in the container, including browser, web search,
+image, canvas, node, channel, and gateway administration tools. This keeps a
+missing external service from being counted as an agent reasoning error.
 
 ## Weave Agent Model
 
@@ -436,7 +500,7 @@ flowchart TD
     TURN --> CHAT["chat spans"]
     TURN --> TOOL["execute_tool spans"]
     TURN --> SUB["sub-agent spans"]
-    CONV --> ATTR["fugue.run / experiment / variant / context / task / trial"]
+    CONV --> ATTR["fugue.run / experiment / variant / context transport / task / trial"]
     ATTR --> ID["candidate + comparison example identities"]
 ```
 
@@ -452,8 +516,9 @@ Fugue stores planned and observed conversation identities separately. The
 observed native conversation is used for evaluation links; the deterministic
 planned id remains correlation metadata. Context experiments separately report
 whether context was assigned, available, invoked, and successfully returned
-results. A configured retrieval system with zero calls is an unused treatment,
-not evidence that retrieval helped.
+results. Registration, runtime equivalence, and error provenance are published
+as separate scores. A configured retrieval system with zero calls is an unused
+treatment, not evidence that retrieval helped.
 
 ## Included Demos
 

@@ -97,6 +97,7 @@ class PreviewCellSummary:
     applicable: bool
     reason: str | None = None
     context_cache_ready: bool = False
+    context_transport: str = "portable"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class CellSummary:
     task_id: str
     wall_time_sec: float | None = None
     error: str | None = None
+    context_transport: str = "portable"
 
 
 @dataclass(frozen=True)
@@ -166,6 +168,9 @@ class ResultSummary:
     turns: int
     context_assigned: int = 0
     context_invoked: int = 0
+    context_registered: int = 0
+    runtime_mismatched: int = 0
+    attributed_errors: int = 0
     linked_traces: int = 0
     unlinked_traces: int = 0
     usage_unavailable: int = 0
@@ -794,6 +799,7 @@ class OperatorService:
                     applicable=job.applicable,
                     reason=job.skip_reason,
                     context_cache_ready=job.context_cache_ready,
+                    context_transport=job.context_transport,
                 )
                 for job in jobs
             ),
@@ -981,6 +987,14 @@ class OperatorService:
         jobs: list[RenderedJob] = []
         for system_id in systems:
             spec = get_context_system(system_id, self.repo_root)
+            transport = next(
+                (
+                    variant.context.transport
+                    for variant in experiment.variants
+                    if variant.context.system_id == system_id
+                ),
+                "portable",
+            )
             missing = sorted(required - set(spec.capabilities))
             license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
             license_blocked = spec.requires_license_approval and env.get(
@@ -1041,6 +1055,7 @@ class OperatorService:
                     "workload_id": workload.id,
                     "runner": workload.runner,
                     "context_system_id": system_id,
+                    "context_transport": transport,
                     "context_version": spec.version,
                     "dataset": dataset_path.as_posix(),
                     "task_count": task_count,
@@ -1064,7 +1079,11 @@ class OperatorService:
                     else "sequence",
                     "model": route.display_model,
                     "variant": system_id,
-                    "context": {"id": system_id, "version": spec.version},
+                    "context": {
+                        "id": system_id,
+                        "version": spec.version,
+                        "transport": transport,
+                    },
                 }
             )
             jobs.append(
@@ -1072,10 +1091,15 @@ class OperatorService:
                     command=command,
                     config_path=dataset_path,
                     config=config,
-                    env=direct_env,
+                    env={
+                        **direct_env,
+                        "FUGUE_CONTEXT_SYSTEM_ID": system_id,
+                        "FUGUE_CONTEXT_TRANSPORT": transport,
+                    },
                     job_name=f"{_slug(run_name)}-{workload.id}-{system_id}",
                     harness="direct" if workload.runner == "retrieval" else "sequence",
                     context_system_id=system_id,
+                    context_transport=transport,
                     context_version=spec.version,
                     context_cache_keys={},
                     context_cache_ready=False,
@@ -1291,7 +1315,7 @@ class OperatorService:
             env=self.env,
         )
         output = out or self.repo_root / "reports" / f"{run_id}.jsonl"
-        write_jsonl(rows, output)
+        write_jsonl(rows, output, env=self.env)
         published = 0
         skipped = 0
         evaluations: tuple[PublishedEvaluation, ...] = ()
@@ -1346,6 +1370,24 @@ class OperatorService:
             turns=sum(int(row.get("weave_turn_count") or 0) for row in trials),
             context_assigned=sum(bool(row.get("context_assigned")) for row in trials),
             context_invoked=sum(bool(row.get("context_invoked")) for row in trials),
+            context_registered=sum(
+                row.get("context_registered") is True for row in trials
+            ),
+            runtime_mismatched=sum(
+                row.get("runtime_equivalence_status") == "mismatch" for row in trials
+            ),
+            attributed_errors=sum(
+                int(row.get(f"{origin}_error_count") or 0)
+                for row in trials
+                for origin in (
+                    "agent",
+                    "benchmark_runtime",
+                    "harness_adapter",
+                    "context_system",
+                    "provider",
+                    "fugue",
+                )
+            ),
             linked_traces=sum(
                 row.get("trace_link_status") == "linked" for row in trials
             ),
@@ -1412,6 +1454,7 @@ class OperatorService:
                     else None
                 ),
                 error=item.get("error"),
+                context_transport=str(item.get("context_transport") or "portable"),
             )
             for item in records
         )
