@@ -1335,10 +1335,20 @@ class FugueApp(App[None]):
         }
         experiment = self.plan.experiment
         model = self.plan.request.model or experiment.model or "FUGUE_MODEL"
+        contexts = ", ".join(
+            sorted(
+                {
+                    f"{item.context_system_id} ({item.context_transport})"
+                    for item in preview.matrix_cells
+                    if item.context_system_id != "none"
+                }
+            )
+        ) or "none"
         self.query_one("#review-summary", Static).update(
             f"{experiment.title}\n{experiment.description}\n\n"
             f"Benchmark: {', '.join(_workload_label(item, item) for item in preview.workloads)}\n"
             f"Model: {model}\nWeave: {self.service.deep_links().weave}\n"
+            f"Context treatments: {contexts}\n"
             f"{_count(preview.cells, 'cell')} / {_count(len(tasks), 'task')} / "
             f"{_count(preview.estimated_trials, 'trial')}"
         )
@@ -1626,12 +1636,15 @@ class FugueApp(App[None]):
         run = self.service.run_summary(run_id)
         cells = self.query_one("#cells-table", DataTable)
         cells.clear(columns=True)
-        cells.add_columns("Harness", "Variant", "Context", "Task", "Status", "Time")
+        cells.add_columns(
+            "Harness", "Variant", "Context", "Transport", "Task", "Status", "Time"
+        )
         for cell in run.cells:
             cells.add_row(
                 cell.harness,
                 cell.variant_id,
                 cell.context_system_id,
+                cell.context_transport,
                 cell.task_id,
                 cell.status.replace("_", " "),
                 f"{cell.wall_time_sec:.1f}s" if cell.wall_time_sec is not None else "-",
@@ -1696,7 +1709,10 @@ class FugueApp(App[None]):
             f"${result.cost_usd:.4f}   "
             f"{result.input_tokens:,} in / {result.output_tokens:,} out tokens   "
             f"{result.turns} turns   {result.tool_calls} tools   "
+            f"{result.context_registered}/{result.context_assigned} registered   "
             f"{result.context_invoked}/{result.context_assigned} context used   "
+            f"{result.runtime_mismatched} runtime mismatches   "
+            f"{result.attributed_errors} attributed errors   "
             f"{result.linked_traces} linked traces   "
             f"{result.usage_unavailable} usage N/A"
         )
@@ -1707,6 +1723,7 @@ class FugueApp(App[None]):
             "Experiment",
             "Variant",
             "Context",
+            "Transport",
             "Model",
             "Trials",
             "Pass rate",
@@ -1718,7 +1735,7 @@ class FugueApp(App[None]):
             "Failures",
             "Conversations",
         )
-        groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = (
+        groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = (
             defaultdict(list)
         )
         for row in result.rows:
@@ -1727,10 +1744,11 @@ class FugueApp(App[None]):
                 str(row.get("experiment_id") or "unknown"),
                 str(row.get("variant_id") or "baseline"),
                 str(row.get("context_system_id") or "none"),
+                str(row.get("context_transport") or "portable"),
                 str(row.get("model") or "unknown"),
             )
             groups[key].append(row)
-        for (harness, experiment, variant, context, model), rows in sorted(
+        for (harness, experiment, variant, context, transport, model), rows in sorted(
             groups.items()
         ):
             scored = [row for row in rows if row.get("pass") is not None]
@@ -1768,6 +1786,7 @@ class FugueApp(App[None]):
                 experiment,
                 variant,
                 f"{context} ({invoked}/{assigned} used)" if assigned else context,
+                transport,
                 model,
                 str(len(rows)),
                 pass_rate,

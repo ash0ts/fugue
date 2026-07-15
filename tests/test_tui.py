@@ -332,14 +332,15 @@ def test_memory_smoke_shows_unavailable_cells_without_counting_trials(
 
             assert app.plan.preview is not None
             assert app.plan.preview.cells == 8
-            assert app.plan.preview.applicable_cells == 7
-            assert app.plan.preview.estimated_trials == 7
+            assert app.plan.preview.applicable_cells == 8
+            assert app.plan.preview.estimated_trials == 8
             assert set(app.plan.preview.variants) == {"none", "rag-bm25"}
-            unavailable = [
-                cell for cell in app.plan.preview.matrix_cells if not cell.applicable
-            ]
-            assert [(cell.harness, cell.variant_id) for cell in unavailable] == [
-                ("codex", "rag-bm25")
-            ]
+            assert all(cell.applicable for cell in app.plan.preview.matrix_cells)
+            codex_rag = next(
+                cell
+                for cell in app.plan.preview.matrix_cells
+                if cell.harness == "codex" and cell.variant_id == "rag-bm25"
+            )
+            assert codex_rag.context_transport == "portable"
 
     asyncio.run(exercise())

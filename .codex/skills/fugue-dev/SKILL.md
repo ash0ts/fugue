@@ -31,8 +31,10 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - Render/run paths may write generated JobConfigs and runtime files.
 - Context preparation is content-addressed under `.fugue/cache/context`; include repository commit, provider/version/config, builder model, and embedding model in cache keys. Publish atomically under a lock.
 - Only advertise a capability a provider implements. Unsupported cells are `not_applicable`/`N/A`, not failures or zero scores.
-- Preserve each native context interface. Wrap stdio MCP with `fugue.mcp_proxy` for bounded, redacted telemetry instead of replacing upstream tools.
-- Codex MCP tools use Responses namespaces. Until a bridge advertises and passes namespace-tool compatibility, render bridged Codex MCP cells as `not_applicable`; never substitute a static mount while retaining an MCP-backed treatment label.
+- Treat `ContextSelection.transport` as part of treatment identity. `portable` means every harness receives the same bounded `fugue-context query` command backed by a pinned sidecar; `native_mcp` means the provider's native MCP interface is itself under study.
+- Default Fugue BM25, dense, and hybrid RAG to `portable`. Never expose their prepared cache as a static agent mount. Probe registration before agent execution and report assigned, registered, and invoked separately.
+- Preserve third-party native context interfaces. Wrap stdio MCP with `fugue.mcp_proxy` for bounded, redacted telemetry instead of replacing upstream tools.
+- Codex native MCP tools use Responses namespaces. Until a bridge advertises and passes namespace-tool compatibility, render bridged Codex `native_mcp` cells as `not_applicable`. Portable context remains eligible because it does not enter the model tool namespace.
 - Never serialize raw API keys. Use env var names and presence booleans only.
 - Keep operator behavior in `fugue.bench.operator`; both Rich commands and Textual consume those presentation-neutral services.
 - Keep experiment selection, overrides, and job planning in `OperatorService`; the CLI only translates arguments and executes the returned plan.
@@ -52,6 +54,11 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - The `r` shortcut navigates to Review before launch. Full-content tracing requires confirmation at launch, not a persistent warning competing with primary configuration.
 - Textual has one durable launch mode. Do not add cosmetic attached/detached controls; use `fugue run --detach` for the explicit headless option.
 - Run state is append-friendly and recoverable: atomic `run.json`, `events.jsonl`, `cells.jsonl`, combined logs, and per-cell logs. A cell failure must not stop independent cells.
+- Capture pre-install and pre-execution runtime fingerprints. Compare benchmark cohorts using the pre-install digest and mark mismatches non-comparable; do not explain dependency differences from outcomes alone.
+- Derive inspected, changed, expected, and relevant files from normalized trajectories, the final git diff, and benchmark metadata. Never require an agent-authored evidence JSON artifact.
+- Normalize errors to one owner: `agent`, `benchmark_runtime`, `harness_adapter`, `context_system`, `provider`, or `fugue`. Merge local trajectory and Weave observations by logical occurrence so the same tool failure is not counted twice.
+- Pin harness and tracing-plugin versions. Do not add `latest` installs or reinstall the same harness through a tracing plugin setup path.
+- OpenClaw headless runs must deny tools whose external providers or interactive surfaces are unavailable. Keep those adapter omissions distinct from agent-selected tool failures.
 - The browser frontend has been removed. Do not add FastAPI, static web assets, or HTTP job abstractions back into the operator path.
 - Preflight is observational. Starting the bridge and preparing context are explicit `fugue setup` actions.
 - Experiment YAML is strict. Do not add compatibility aliases for removed fields.
@@ -71,7 +78,7 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 - Partition publication by exact shared example and scorer scope, then candidate. Dataset inputs contain only invariant benchmark/example identity. Candidate fields belong in a uniquely named model object; Evaluation attributes remain scope-only so candidates reuse one Evaluation definition.
 - Open `EvaluationLogger.log_prediction()` before each Harbor cell and finish it after resolving the authoritative native root. Inject the exact `weave.eval.*` link attributes, attach `genai_span_ref`, call `log_summary()` without a custom nested summary, and write a v3 marker only after successful finalization. Do not publish administrative cell or preparation rows.
 - Keep `planned_conversation_id` and `observed_conversation_id` separate. Evaluation output and deep links use only an observed native root that matches run key, task, stable agent name, and prediction call id.
-- Report context assignment, availability, invocation, query/result counts, latency, and errors separately. Never infer context use from prompt text or static mount names.
+- Report context transport, assignment, registration, availability, invocation, query/result counts, latency, and errors separately. Never infer context use from prompt text or static mount names.
 - Prefer measured child `chat` usage. Use root aggregate usage only when child usage is absent; never add both. Preserve missing usage as `None` with an unavailable status rather than zero.
 - Query Calls through `WF_TRACE_SERVER_URL` or `https://trace.wandb.ai`, use the current Calls filter schema and NDJSON response shape, and surface transport errors. Raw resource attributes are diagnostic fallback only; normalized Agents rows should expose flat `fugue.*` span attributes.
 - Analysis must stop after `AnalysisPreview` until the user confirms report generation. Local scope resolution cannot query Weave, call the report model, or write a report.
@@ -80,7 +87,7 @@ Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or 
 
 Trial metadata and exported rows should make comparison easy:
 
-- Include `experiment_id`, `preset_id`, `workload_id`, `run_name`, `variant_id`, `context_system_id`, `context_version`, `context_config_hash`, cache keys, prompt/skill ids and hashes, agent config hash, harness, model role/provider/model, trace project, and local artifact paths.
+- Include `experiment_id`, `preset_id`, `workload_id`, `run_name`, `variant_id`, `context_system_id`, `context_transport`, `context_version`, `context_config_hash`, cache keys, prompt/skill ids and hashes, agent config hash, harness, model role/provider/model, trace project, runtime equivalence, error provenance, and local artifact paths.
 - Tags should include `fugue`, experiment, preset, workload, variant, context system, prompt, skill, harness, provider, model, and run name where applicable.
 - Results should group by experiment, workload, context system, variant, prompt, skill, harness, and provider. Keep outcome, retrieval, evidence, efficiency, and utilization metrics separate; do not invent a composite score.
 
