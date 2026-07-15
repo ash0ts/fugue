@@ -1716,7 +1716,16 @@ def _command_env(base: dict[str, str], values: Any) -> dict[str, str]:
     for key, value in _dict(values).items():
         text = str(value)
         if text.startswith("${") and text.endswith("}"):
-            text = base.get(text[2:-1], "")
+            source = text[2:-1]
+            if source == "LITELLM_MASTER_KEY":
+                # The bridge has a deliberate local default. Command adapters
+                # must resolve the same value instead of turning an absent
+                # process variable into an empty credential.
+                from fugue.model_plane import bridge_master_key
+
+                text = bridge_master_key(base)
+            else:
+                text = base.get(source, "")
         env[str(key)] = text
     return env
 

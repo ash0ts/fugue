@@ -17,6 +17,7 @@ from fugue.bench.context import (
     RepositorySnapshot,
     RetrievalHit,
     RetrievalQuery,
+    _command_env,
     _publish_cache_generation,
     context_cache_key,
     get_context_system,
@@ -126,6 +127,19 @@ def test_failed_context_build_is_not_published(tmp_path: Path) -> None:
     assert not (runtime.cache_root / key).exists()
     leftovers = list(runtime.cache_root.glob(f".{key}.*"))
     assert leftovers == [runtime.cache_root / f".{key}.lock"]
+
+
+def test_command_context_resolves_the_bridge_default_credential() -> None:
+    env = _command_env(
+        {},
+        {
+            "OPENAI_COMPATIBLE_API_KEY": "${LITELLM_MASTER_KEY}",
+            "UNSET_EXTERNAL_KEY": "${EXTERNAL_KEY}",
+        },
+    )
+
+    assert env["OPENAI_COMPATIBLE_API_KEY"] == "sk-fugue-local"
+    assert env["UNSET_EXTERNAL_KEY"] == ""
 
 
 def test_cache_publication_restores_previous_generation_on_replace_failure(
