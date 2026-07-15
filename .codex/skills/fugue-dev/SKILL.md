@@ -1,87 +1,60 @@
 ---
 name: fugue-dev
-description: Use when modifying Fugue experiments, candidate resolution, Harbor rendering, context or integration bindings, operator lifecycle, evaluation, packaging, serving, curation, or their tests. Preserves Fugue 0.1 identity, reproducibility, and safety contracts.
+description: Use when modifying Fugue experiments, candidate resolution, context or integration bindings, Harbor rendering, run lifecycle, evaluation publication, packaging, serving, curation, or their tests. Preserves Fugue identity, reproducibility, and evidence contracts.
 ---
 
 # Fugue Development
 
-Preserve these invariants across schema, implementation, UI, and tests.
+Preserve these invariants across schema, execution, presentation, and tests.
 
-## Candidate identity
+## Identity and planning
 
-- Resolve one canonical, immutable candidate representation and reuse it for
-  rendering, snapshots, results, presets, export, and packaging.
-- Version candidate identity. Hash only behavior-affecting harness, model route,
-  prompt, reviewed skills, context delivery/configuration, typed integrations,
-  and advanced agent settings.
-- Keep experiment and variant names, labels, run names, preset names, scoring or
-  judge configuration, UI state, and trial index out of candidate identity.
-- Put Fugue source/runtime topology, Harbor, concurrency, and instrumentation
-  policy in a separate execution fingerprint and lock generated runtime assets.
-- Identify comparison examples by dataset, workload, and task. Trial index is a
-  separate cell coordinate.
+- Resolve one immutable candidate and reuse it everywhere. Version its identity.
+- Candidate identity contains behavior only: harness, model route, prompt,
+  reviewed skills, context interface/delivery/configuration, typed integrations,
+  and advanced agent settings. Presentation, scoring, run, preset, and trial
+  state never affect it.
+- Operational runtime, Harbor, gateway, tracing, and scheduling details belong
+  only to the execution fingerprint.
+- Require authored context delivery. Resolve typed capabilities for the exact
+  workload, context, delivery, harness, and provider route before binding.
 
-## Experiment and evaluation contracts
+## Execution and evidence
 
-- Experiment YAML is strict. Use `skills`; do not add legacy aliases.
-- Integrations are typed and additive across experiment and variant scopes.
-  Reject duplicate effective IDs. Never expose raw public MCP configuration.
-- Context definitions declare supported deliveries and serving deliveries.
-  Pass delivery into binding; portable delivery must not inject native MCP, and
-  native MCP must preserve the upstream interface.
-- Scorer selections are typed. Rubric scoring requires an explicit judge model.
-- Evaluation generation is explicit, exact about suite/workload/size, and
-  side-effect free during preview. Keep deterministic outcomes, judge scores,
-  and judge errors separate.
-- Only Agent-backed predictions may name or link Agent conversations. Direct
-  provider diagnostics keep ordinary traces and mark Agent linking not applicable.
-- One Agent cell is one adapter-resolved native conversation. Root, chat, and
-  tool spans share its identity; the evaluation link targets that exact root.
+- `OperatorService` owns resolve, immutable secret-free snapshot, preparation,
+  render/plan, atomic input lock, running transition, and cell execution in that
+  order. Nothing executes before the lock is durable.
+- Setup is the only stateful preparation boundary. Preview and active trials do
+  not install packages, download runtimes, start services, use the Docker
+  socket, or mutate the production checkout.
+- Record assigned and confirmed skill/context registration separately. A
+  required treatment does not execute when registration failed. Invocation
+  evidence stays explicit and may remain unavailable; assignment is not use.
+- Normalize every logical outcome into one versioned prediction row. Keep raw
+  retrieval and episode measurements separate. Reconcile every planned
+  coordinate to terminal, not applicable, or explicitly cancelled.
+- Publish idempotently by project, prediction identity, scorer version, and
+  revision. Explicit revisions name what they supersede and why.
+- Agent cells have one native conversation and one matching `invoke_agent`
+  root. Direct diagnostics never synthesize Agent identity, conversations, or
+  roots. Preserve unavailable usage instead of zero.
 
-## Run lifecycle
+## Public contracts and release safety
 
-- `OperatorService` owns one run transaction: resolve, snapshot the experiment,
-  prepare context, render and plan, atomically write the immutable secret-free
-  input lock, transition to running, then execute cells.
-- A failure before the running transition records a failed starting run and
-  executes no cell. CLI and TUI delegate to the operator rather than duplicating
-  orchestration.
-- Cancellation stops child process groups, but the operator remains the single
-  writer for cell, prediction, and run terminal state during graceful shutdown.
-- Group results by candidate. Display a unique short prefix, retain full IDs in
-  JSON and snapshots, and reject ambiguous input prefixes.
-- Keep execution state, deterministic benchmark outcome, and judge or rubric
-  results separate. Packaging requires terminal, scored applicable cells and a
-  deterministic pass; failures need explicit override and unscored cells block.
-- Treat task output collection as workload transport, not candidate identity.
-  Scope outputs to their producing task, deduplicate Harbor conventions, and
-  relocate only exact declared output; never synthesize missing content.
+- Keep experiment YAML strict: `skills`, required delivery, additive typed
+  integrations, typed scorers, and no raw public MCP configuration. Generated
+  evaluation is explicit and preview remains side-effect free.
+- Package a candidate only when every applicable cell is terminal and at least
+  one deterministic outcome passed. Terminal unscored cells are permitted but
+  cannot satisfy the pass requirement; failures require explicit override.
+- Package only clean tracked inputs with an explicit runtime allowlist. Reject
+  drift, unsafe links or remotes, submodules, secrets, and unsupported serving
+  contracts.
+- Keep serving optional, isolated, and bounded. Admission, request size,
+  readiness, cancellation, and exactly-once execution remain testable.
+- Curator output stays inside its immutable declaration allowlist. It cannot
+  modify code or tests, and it cannot bypass reviewed skill-source setup.
 
-## Packaging and serving
-
-- Package only from clean production and Fugue checkouts, using a tracked
-  runtime allowlist. Reject lock drift, dirty source, submodules, escaping
-  symlinks, credential-bearing remotes, secrets, and unsupported integrations.
-- Package context only when its selected delivery declares tested serving
-  support. Do not silently convert delivery during packaging.
-- Keep serving optional and outside the operator path. Isolate each execution,
-  bound request size and admission, terminate the process group on cancellation,
-  and remove request state.
-- Tracing is best effort but candidate execution is exactly once. Preserve
-  unavailable usage instead of synthesizing zero.
-
-## Curator boundary
-
-- Curator proposals may change only declared skill sources, context systems,
-  and controlled experiments. They may not change code, tests, workflows,
-  dependencies, datasets, presets, README, or vendored skill content.
-- A skill proposal adds a pinned source and experiment. Human review through
-  the reviewed skill-source setup remains mandatory; automation cannot vendor
-  or approve unreviewed content.
-
-## Validation
-
-When changing a contract, update its parser, resolver, operator consumers,
-presentation, checked-in configurations, and focused tests together. Verify
-preview side-effect freedom, snapshot-before-cell ordering, identity boundaries,
-and failure behavior—not only the happy path.
+When a contract changes, update its parser, resolver, operator consumer,
+snapshot/result representation, presentation, checked-in configurations, and
+focused failure tests together.
