@@ -3,6 +3,7 @@ title: Project RAG
 description: Local hybrid repository RAG implementation exposed through MCP.
 provider: fugue.bench.context:CommandContextProvider
 version: git@d5abf98a48b60d35b73745e47e1aacca3963a6f0
+support: experimental
 capabilities: [prepare, bind]
 required_commands: [uvx]
 license: MIT

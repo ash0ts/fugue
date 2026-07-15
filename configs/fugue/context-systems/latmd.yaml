@@ -3,6 +3,7 @@ title: lat.md
 description: Experimental pinned lat.md lattice and MCP integration; validate with the opt-in runtime preflight before use.
 provider: fugue.bench.context:LatMdContextProvider
 version: lat.md@0.11.0
+support: experimental
 capabilities: [prepare, retrieve, bind, ingest, sequence]
 required_commands: [npx]
 required_env: [LAT_LLM_KEY, FUGUE_ENABLE_EXPERIMENTAL_LATMD]

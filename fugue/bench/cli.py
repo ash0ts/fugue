@@ -59,6 +59,7 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_project_slug,
 )
+from fugue.preflight import validate_harbor_job_configs
 
 FUGUE_THEME = Theme(
     {
@@ -179,7 +180,29 @@ def _parser() -> FugueArgumentParser:
     operation.add_argument("--check", action="store_true", help="Run observational live preflight")
     operation.add_argument("--start-bridge", action="store_true", help="Start the local LiteLLM bridge")
     operation.add_argument("--prepare-context", action="store_true", help="Build selected context artifacts")
+    operation.add_argument(
+        "--skills",
+        action="store_true",
+        help="Fetch and inspect selected remote skills without executing repository code",
+    )
+    operation.add_argument(
+        "--approve-skill",
+        metavar="ID=DIGEST",
+        help="Approve an inspected remote skill at exactly this sha256 digest",
+    )
     setup.add_argument("--rebuild", action="store_true", help="Ignore reusable context cache entries")
+    setup.add_argument(
+        "--refresh-skills",
+        action="store_true",
+        help="Refresh moving Git refs while inspecting remote skills",
+    )
+    setup.add_argument(
+        "--acknowledge-risk",
+        action="append",
+        default=[],
+        metavar="FINDING",
+        help="Acknowledge a named review finding during skill approval",
+    )
     _add_common_args(setup, json_output=True)
     setup.set_defaults(handler=_setup)
 
@@ -502,6 +525,9 @@ def _run_worker(args: argparse.Namespace) -> int:
         )
         _print_context_preparation(preparation)
         rendered = service.rendered_jobs(request, run_id=run_id, experiment=experiment)
+        validate_harbor_job_configs(
+            [job.config_path for job in rendered if job.applicable]
+        )
         for job in rendered:
             if not job.applicable:
                 CONSOLE.print(f"[yellow]skip[/] {job.job_name}: {job.skip_reason}")
@@ -924,6 +950,31 @@ def _setup(args: argparse.Namespace) -> int:
             print(as_json(records))
         else:
             _print_context_preparation(records)
+        return 0
+    if args.skills:
+        inspections = service.prepare_skills(request, refresh=args.refresh_skills)
+        if args.json:
+            print(as_json(inspections))
+        else:
+            CONSOLE.print_json(as_json(inspections))
+            CONSOLE.print(
+                "[fugue.muted]Review the inventory and findings, then approve with "
+                "--approve-skill ID=sha256:…[/]"
+            )
+        return 0
+    if args.approve_skill:
+        skill_id, separator, digest = args.approve_skill.partition("=")
+        if not separator or not skill_id or not digest:
+            raise ValueError("--approve-skill must use ID=DIGEST")
+        entry = service.approve_skill(
+            skill_id,
+            digest,
+            acknowledged_findings=tuple(args.acknowledge_risk),
+        )
+        if args.json:
+            print(as_json(entry))
+        else:
+            CONSOLE.print_json(as_json(entry))
         return 0
     status = service.status(request)
     if args.json:

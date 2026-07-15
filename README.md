@@ -1,9 +1,15 @@
 # Fugue
 
 Fugue plans, runs, and analyzes controlled agent experiments across Hermes,
-OpenClaw, Claude Code, and Codex. Harbor executes each experiment cell; W&B
-Weave records agent conversations and traces; Fugue keeps the comparison
-matrix, local run state, and normalized outcomes coherent.
+OpenClaw, Claude Code, and Codex. The Harbor evaluation framework executes each
+experiment cell; W&B Weave records agent conversations and traces; Fugue keeps
+the comparison matrix, local run state, and normalized outcomes coherent.
+
+Fugue is an experiment-composition layer, not a memory-only framework. A
+variant can independently select prompts, Agent Skills, context providers,
+MCP/service integrations, agent settings, and verifier settings. Fugue targets
+`harbor==0.18.0` (the agent-evaluation framework, not the unrelated self-hosted
+LLM-stack project named Harbor) and Python 3.12 or newer.
 
 ```mermaid
 flowchart LR
@@ -22,9 +28,10 @@ flowchart LR
 ## Quick Start
 
 ```bash
-uv venv
+uv venv --python 3.12
 source .venv/bin/activate
 uv pip install -e ".[dev]"
+uv tool install --python 3.12 harbor==0.18.0 --with-editable .
 cp .env.example .env
 ```
 
@@ -91,7 +98,7 @@ flowchart TB
     HOME --> R["run: preview or execute"]
     HOME --> RS["runs: inspect, export, open"]
     HOME --> A["analyze: resolve scope, then report"]
-    HOME --> S["setup: check, bridge, context"]
+    HOME --> S["setup: check, bridge, context, skills"]
     HOME --> T["tui: full-screen workspace"]
 ```
 
@@ -128,6 +135,20 @@ fugue setup \
 Preflight never starts containers or writes bridge files. `--start-bridge` and
 `--prepare-context` are explicit mutations.
 
+Remote skills have a separate review boundary:
+
+```bash
+fugue setup --experiment my-study --skills
+fugue setup --approve-skill hallmark=sha256:REVIEWED_DIGEST \
+  --acknowledge-risk network-access
+```
+
+The first command fetches Git objects, inspects only the declared skill
+subdirectory, and writes a review record. It does not check out or run the
+repository's installer, hooks, package scripts, or plugin code. The second
+command locks one exact bundle digest after explicit review. A moving ref is
+never injected directly into a trial.
+
 Model precedence is:
 
 ```text
@@ -138,8 +159,25 @@ Target, builder, judge, composer, and analyst routes are resolved separately.
 
 ## Plan Experiments
 
-Saved experiments live under `configs/fugue/experiments/`. Prompts and skills
-live under `configs/fugue/prompts/` and `configs/fugue/skills/`.
+Saved experiments live under `configs/fugue/experiments/`. Prompts and local
+skills live under `configs/fugue/prompts/` and `configs/fugue/skills/`.
+Reviewed remote skill declarations live under `configs/fugue/skill-sources/`;
+service/MCP adapters live under `configs/fugue/integrations/`.
+
+The canonical variant fields are `skills` and `integrations`:
+
+```yaml
+variants:
+  - id: hallmark-with-search
+    label: Hallmark + search service
+    skills: [hallmark]
+    integrations:
+      - id: repository-search
+        config: {top_k: 10}
+```
+
+The older `skill_ids` spelling is accepted for migration but new saves emit
+`skills`.
 
 Plan from natural language:
 
@@ -481,6 +519,33 @@ OpenClaw's headless benchmark config denies provider-backed or interactive
 tools that are unavailable in the container, including browser, web search,
 image, canvas, node, channel, and gateway administration tools. This keeps a
 missing external service from being counted as an agent reasoning error.
+
+Context systems and integrations declare one of `supported`, `experimental`,
+`not_applicable`, or `disabled`. Experimental adapters remain selectable but
+are identifiable in run provenance; disabled and not-applicable adapters never
+become failed benchmark trials.
+
+## Extension Model
+
+Use the narrowest extension point that represents the treatment:
+
+- `skills`: inert instruction bundles copied into Harbor's native agent skill
+  input. Local and reviewed remote bundles use full-directory hashes.
+- `context`: repository/task-derived state with a prepare/bind/retrieve/ingest
+  lifecycle and content-addressed caches.
+- `integrations`: explicitly selected MCP or HTTP services. Local Compose
+  services require digest-pinned images and hardened defaults; external
+  services require HTTPS and an explicit Harbor host allowlist.
+- `repository`: a benchmark task's immutable Git input, expressed as a URL and
+  full commit SHA.
+- `workload`/Harbor dataset: task provisioning, environment, submission, and
+  verification semantics.
+
+Do not turn an arbitrary third-party repository into executable setup code.
+Select a reviewed `SKILL.md` directory as a skill, or package service behavior
+in a reviewed digest-pinned image and declare an integration. See
+[`docs/extension-guide.md`](docs/extension-guide.md) for schemas, safety rules,
+the current support matrix, and conformance guidance.
 
 ## Weave Agent Model
 

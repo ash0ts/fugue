@@ -46,6 +46,7 @@ from fugue.bench.operator import (
     PreviewSummary,
     RunSummary,
 )
+from fugue.bench.sources import list_skill_source_ids
 
 HARNESS_LABELS = (
     ("Hermes", "hermes"),
@@ -225,8 +226,20 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
             yield Label("Skills", classes="muted")
             yield SelectionList(
                 *[
-                    (item.title, item.id, item.id in self.variant.skill_ids)
+                    (
+                        item.title,
+                        item.id,
+                        item.id in self.variant.selected_skill_ids,
+                    )
                     for item in list_skills(self.service.repo_root)
+                ],
+                *[
+                    (
+                        f"{item_id} (remote)",
+                        item_id,
+                        item_id in self.variant.selected_skill_ids,
+                    )
+                    for item_id in list_skill_source_ids(self.service.repo_root)
                 ],
                 id="variant-skills",
             )
@@ -274,9 +287,10 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                 id=variant_id,
                 label=label,
                 prompt_id=str(prompt_value) or None,
-                skill_ids=list(
+                skills=list(
                     self.query_one("#variant-skills", SelectionList).selected
                 ),
+                skill_ids=[],
                 context=context,
                 enabled=True,
             )
@@ -981,7 +995,7 @@ class FugueApp(App[None]):
                 "yes" if variant.id in selected else "no",
                 variant.label,
                 variant.prompt_id or "default",
-                ", ".join(variant.skill_ids) or "none",
+                ", ".join(variant.selected_skill_ids) or "none",
                 variant.context.system_id,
                 "custom" if _has_agent_config(variant) else "default",
                 key=variant.id,

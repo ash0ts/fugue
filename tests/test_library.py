@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fugue.bench.library import (
+    experiment_to_yaml,
     get_experiment,
     get_prompt,
     save_experiment,
@@ -92,6 +93,48 @@ manifest: datasets/pilot.yaml
     assert experiment.id == "experiment-b"
     assert [variant.id for variant in experiment.variants] == ["baseline"]
     assert experiment.variants[0].context.system_id == "none"
+
+
+def test_canonical_skills_and_integrations_round_trip_without_legacy_field(
+    tmp_path,
+) -> None:
+    experiment = save_experiment(
+        "extensible",
+        """
+id: extensible
+variants:
+  - id: treatment
+    label: Treatment
+    skills: [remote-skill]
+    integrations:
+      - id: repository-search
+        config: {top_k: 5}
+""",
+        tmp_path,
+    )
+
+    [variant] = experiment.variants
+    assert variant.selected_skill_ids == ["remote-skill"]
+    assert variant.integrations is not None
+    assert variant.integrations[0].config == {"top_k": 5}
+    serialized = experiment_to_yaml(experiment)
+    assert "skills:" in serialized
+    assert "skill_ids:" not in serialized
+
+
+def test_variant_rejects_mixed_canonical_and_legacy_skill_fields(tmp_path) -> None:
+    with pytest.raises(ValueError, match="both skills and skill_ids"):
+        save_experiment(
+            "mixed",
+            """
+id: mixed
+variants:
+  - id: mixed
+    skills: [one]
+    skill_ids: [two]
+""",
+            tmp_path,
+        )
 
 
 def test_unknown_variant_fields_are_rejected(tmp_path):

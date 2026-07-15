@@ -48,6 +48,13 @@ from fugue.bench.library import (
     validate_id,
 )
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
+from fugue.bench.sources import (
+    SkillInspection,
+    SkillLockEntry,
+    approve_skill_source,
+    list_skill_source_ids,
+    prepare_skill_source,
+)
 from fugue.bench.supervisor import ManagedRun, RunSupervisor
 from fugue.bench.workloads import load_workload_dataset
 from fugue.bridge import BridgeFiles, bridge_status, bridge_up
@@ -633,6 +640,44 @@ class OperatorService:
                 )
             )
         return tuple(records)
+
+    def prepare_skills(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+        refresh: bool = False,
+    ) -> tuple[SkillInspection, ...]:
+        """Fetch and inspect selected remote skill directories without executing them."""
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        remote_ids = set(list_skill_source_ids(self.repo_root))
+        selected_ids = dict.fromkeys(
+            skill_id
+            for variant in selected.variants
+            if variant.enabled
+            for skill_id in variant.selected_skill_ids
+            if skill_id in remote_ids
+        )
+        return tuple(
+            prepare_skill_source(skill_id, self.repo_root, refresh=refresh)
+            for skill_id in selected_ids
+        )
+
+    def approve_skill(
+        self,
+        skill_id: str,
+        digest: str,
+        *,
+        acknowledged_findings: tuple[str, ...] = (),
+    ) -> SkillLockEntry:
+        """Approve exactly one inspected skill digest and update the project lock."""
+        return approve_skill_source(
+            skill_id,
+            digest,
+            self.repo_root,
+            acknowledged_findings=acknowledged_findings,
+        )
 
     def experiment(self, experiment_id: str) -> ExperimentSpec:
         return get_experiment(experiment_id, self.repo_root)

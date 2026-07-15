@@ -7,7 +7,7 @@ name = "fugue"
 version = "0.1.0"
 description = "Harbor + Weave runner for comparing agent harnesses and context systems."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "httpx",
     "filelock==3.29.7",
@@ -40,7 +40,7 @@ include = ["fugue*"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

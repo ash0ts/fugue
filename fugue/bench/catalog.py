@@ -32,6 +32,7 @@ FILTER_FIELDS = {
     "preset_id",
     "prompt_id",
     "skill_id",
+    "integration_id",
     "context_system_id",
     "provider",
     "model",
@@ -127,10 +128,11 @@ class ExperimentCatalog:
                 raise ValueError(f"unsupported catalog filter: {key}")
             if key in {"preset_id", "prompt_id"}:
                 clauses.append(f"json_extract(payload, '$.{key}') = ?")
-            elif key == "skill_id":
+            elif key in {"skill_id", "integration_id"}:
+                field = "skill_ids" if key == "skill_id" else "integration_ids"
                 clauses.append(
-                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, '$.skill_ids')) "
-                    "WHERE json_each.value = ?)"
+                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, "
+                    f"'$.{field}')) WHERE json_each.value = ?)"
                 )
             else:
                 clauses.append(f"{key} = ?")
@@ -179,6 +181,16 @@ class ExperimentCatalog:
             else:
                 skills["none"] += 1
         result["skill_id"] = dict(sorted(skills.items()))
+        integrations: Counter[str] = Counter()
+        for row in values:
+            selected = row.get("integration_ids") or []
+            if isinstance(selected, str):
+                selected = [selected]
+            if selected:
+                integrations.update(str(item) for item in selected)
+            else:
+                integrations["none"] += 1
+        result["integration_id"] = dict(sorted(integrations.items()))
         return result
 
     def read_artifact(self, value: str | Path, *, max_bytes: int = 32_768) -> ArtifactExcerpt:
@@ -414,10 +426,12 @@ def _variant_intervention(variant: Any) -> str:
     values: list[str] = []
     if variant.prompt_id:
         values.append("prompt")
-    if variant.skill_ids:
+    if variant.selected_skill_ids:
         values.append("skill")
     if variant.context.system_id != "none":
         values.append("context")
+    if variant.integrations:
+        values.append("integration")
     if any(
         (
             variant.agent_kwargs,

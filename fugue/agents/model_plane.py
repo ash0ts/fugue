@@ -173,6 +173,7 @@ def _experiment_tags(
 ) -> list[str]:
     prompt_ids = _split_tags(os.environ.get("FUGUE_PROMPT_ID"))
     skill_ids = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
+    integration_ids = _split_tags(os.environ.get("FUGUE_INTEGRATION_IDS"))
     return _dedupe_tags(
         [
             *_split_tags(os.environ.get("FUGUE_TAGS")),
@@ -185,6 +186,7 @@ def _experiment_tags(
             f"context-system:{context_system_id}",
             *[f"prompt:{item_id}" for item_id in prompt_ids],
             *[f"skill:{item_id}" for item_id in skill_ids],
+            *[f"integration:{item_id}" for item_id in integration_ids],
             f"provider:{route.provider}",
             f"model:{route.display_model}",
         ]
@@ -483,6 +485,7 @@ class _TrialMetaMixin:
                 "FUGUE_CONTEXT_TRANSPORT", "portable"
             ),
             "context_version": os.environ.get("FUGUE_CONTEXT_VERSION"),
+            "context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT"),
             "context_config_hash": os.environ.get("FUGUE_CONTEXT_CONFIG_HASH"),
             "context_cache_keys": _json_env("FUGUE_CONTEXT_CACHE_KEYS"),
             "expected_evidence_paths": _json_env(
@@ -492,6 +495,13 @@ class _TrialMetaMixin:
             "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),
             "skill_ids": _split_tags(os.environ.get("FUGUE_SKILL_IDS")),
             "skill_hashes": _json_env("FUGUE_SKILL_HASHES"),
+            "skill_provenance": _json_env("FUGUE_SKILL_PROVENANCE"),
+            "integration_ids": _split_tags(
+                os.environ.get("FUGUE_INTEGRATION_IDS")
+            ),
+            "integration_provenance": _json_env(
+                "FUGUE_INTEGRATION_PROVENANCE"
+            ),
             "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
             "harbor_environment": os.environ.get("FUGUE_HARBOR_ENVIRONMENT"),
             "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
@@ -600,6 +610,7 @@ class _TrialMetaMixin:
             "fugue.context_registration_status": getattr(
                 self, "_context_registration_meta", {}
             ).get("status", "unavailable"),
+            "fugue.context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT", ""),
             "fugue.task_id": os.environ.get("FUGUE_TASK_NAME", ""),
             "fugue.trial_id": self.logs_dir.parent.name,
             "fugue.trial_index": int(os.environ.get("FUGUE_TRIAL_INDEX", "1")),
@@ -614,6 +625,9 @@ class _TrialMetaMixin:
             "fugue.model": route.display_model,
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
             "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", "").replace(",", "|"),
+            "fugue.integration_ids": os.environ.get(
+                "FUGUE_INTEGRATION_IDS", ""
+            ).replace(",", "|"),
             "fugue.tags": os.environ.get("FUGUE_TAGS", "").replace(",", "|"),
             "fugue.conversation_id": self.conversation_id,
         }

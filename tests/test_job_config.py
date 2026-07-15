@@ -10,6 +10,7 @@ from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
     FeatureVariant,
+    IntegrationSelection,
     save_prompt,
     save_skill,
 )
@@ -123,6 +124,75 @@ tasks:
     assert config["fugue"]["candidate_id"] == job.candidate_id
     assert config["fugue"]["trace_content"] == "full"
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
+
+
+def test_render_job_binds_explicit_integration_without_serializing_secret(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    integration = (
+        tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
+    )
+    integration.parent.mkdir(parents=True)
+    integration.write_text(
+        """
+id: retrieval
+version: "1"
+support: experimental
+runtime:
+  type: compose
+  image: ghcr.io/example/retrieval@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  service: retrieval
+  port: 8000
+interfaces:
+  - {type: mcp, name: retrieval, transport: streamable-http, path: /mcp}
+required_env: [RETRIEVAL_TOKEN]
+"""
+    )
+    experiment = ExperimentSpec(
+        id="integration-a",
+        title="Integration A",
+        variants=[
+            FeatureVariant(
+                id="retrieval",
+                label="Retrieval",
+                integrations=[IntegrationSelection("retrieval")],
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={"RETRIEVAL_TOKEN": "secret-value"},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    agent = job.config["agents"][0]
+    assert agent["env"] == {"RETRIEVAL_TOKEN": "${RETRIEVAL_TOKEN}"}
+    assert agent["mcp_servers"] == [
+        {
+            "name": "retrieval",
+            "transport": "streamable-http",
+            "url": "http://retrieval:8000/mcp",
+        }
+    ]
+    assert "secret-value" not in job.config_path.read_text()
+    assert job.env["RETRIEVAL_TOKEN"] == "secret-value"
+    assert job.integration_ids == ("retrieval",)
+    assert job.config["fugue"]["integrations"][0]["support"] == "experimental"
 
 
 def test_attempts_render_as_independent_comparable_trials(tmp_path: Path):

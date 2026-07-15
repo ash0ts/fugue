@@ -19,6 +19,28 @@ from fugue.model_plane import (
     trace_project_slug,
 )
 
+HARBOR_VERSION = "0.18.0"
+
+_HARBOR_CONFIG_VALIDATOR = """
+import json
+import sys
+from importlib.metadata import version
+from harbor.models.job.config import JobConfig
+
+expected = sys.argv[1]
+actual = version("harbor")
+if actual != expected:
+    raise RuntimeError(f"harbor=={expected} required; found {actual}")
+for value in sys.argv[2:]:
+    with open(value) as handle:
+        config = json.load(handle)
+    config.pop("fugue", None)
+    unknown = sorted(set(config) - set(JobConfig.model_fields))
+    if unknown:
+        raise ValueError("unknown Harbor fields: " + ", ".join(unknown))
+    JobConfig.model_validate(config)
+"""
+
 
 @dataclass(frozen=True)
 class PreflightCheck:
@@ -113,7 +135,55 @@ def _append_local_tool_checks(
             f"harbor found at {harbor}" if harbor else "harbor CLI not found",
         )
     )
+    checks.append(harbor_version_check())
     checks.append(harbor_import_check(repo_root))
+
+
+def harbor_version_check() -> PreflightCheck:
+    harbor = shutil.which("harbor")
+    if not harbor:
+        return PreflightCheck(
+            "harbor version", False, f"harbor=={HARBOR_VERSION} is required"
+        )
+    harbor_py = Path(harbor).resolve().parent / "python"
+    if not harbor_py.exists():
+        return PreflightCheck("harbor version", False, f"{harbor_py} not found")
+    command = [
+        harbor_py.as_posix(),
+        "-c",
+        "from importlib.metadata import version; print(version('harbor'))",
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    actual = result.stdout.strip() if result.returncode == 0 else ""
+    ok = actual == HARBOR_VERSION
+    return PreflightCheck(
+        "harbor version",
+        ok,
+        f"harbor=={actual} found" if ok else f"harbor=={HARBOR_VERSION} required; found {actual or 'unknown'}",
+    )
+
+
+def validate_harbor_job_configs(paths: list[Path]) -> None:
+    """Validate rendered JSON with the exact Python environment Harbor will use."""
+    if not paths:
+        return
+    harbor = shutil.which("harbor")
+    if not harbor:
+        raise RuntimeError(f"harbor=={HARBOR_VERSION} CLI is required")
+    harbor_py = Path(harbor).resolve().parent / "python"
+    if not harbor_py.exists():
+        raise RuntimeError(f"Harbor Python not found: {harbor_py}")
+    command = [
+        harbor_py.as_posix(),
+        "-c",
+        _HARBOR_CONFIG_VALIDATOR,
+        HARBOR_VERSION,
+        *[path.as_posix() for path in paths],
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"Harbor JobConfig validation failed: {detail}")
 
 
 def _check_provider_metadata(

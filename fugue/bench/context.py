@@ -30,6 +30,7 @@ CONTEXT_MANIFEST = "context-manifest.json"
 CONTEXT_INDEX = "index.json"
 
 ContextCapability = Literal["prepare", "retrieve", "bind", "ingest", "sequence"]
+SupportLevel = Literal["supported", "experimental", "not_applicable", "disabled"]
 PreflightPhase = Literal["all", "host", "runtime"]
 
 
@@ -40,6 +41,7 @@ class ContextSystemSpec:
     provider: str
     version: str
     capabilities: frozenset[ContextCapability]
+    support: SupportLevel = "supported"
     description: str = ""
     required_env: tuple[str, ...] = ()
     required_commands: tuple[str, ...] = ()
@@ -896,6 +898,9 @@ def load_context_system(path: Path) -> ContextSystemSpec:
     version = str(raw.get("version") or "").strip()
     if not provider or not version:
         raise ValueError(f"{path}: provider and version are required")
+    support = str(raw.get("support") or "supported")
+    if support not in {"supported", "experimental", "not_applicable", "disabled"}:
+        raise ValueError(f"{path}: unknown support level {support!r}")
     return ContextSystemSpec(
         id=system_id,
         title=str(raw.get("title") or system_id),
@@ -903,6 +908,7 @@ def load_context_system(path: Path) -> ContextSystemSpec:
         provider=provider,
         version=version,
         capabilities=capabilities,  # type: ignore[arg-type]
+        support=support,  # type: ignore[arg-type]
         required_env=tuple(str(item) for item in _list(raw.get("required_env"))),
         required_commands=tuple(
             str(item) for item in _list(raw.get("required_commands"))

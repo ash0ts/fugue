@@ -138,6 +138,50 @@ def test_start_bridge_loads_the_requested_experiment(
     assert captured["judge_model"] is None
 
 
+def test_prepare_skills_only_inspects_selected_remote_sources(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    source_root = tmp_path / "configs" / "fugue" / "skill-sources"
+    source_root.mkdir(parents=True)
+    (source_root / "remote.yaml").write_text(
+        """
+id: remote
+source:
+  type: git
+  url: https://github.com/example/skills
+  ref: 0000000000000000000000000000000000000000
+  path: skills/remote
+"""
+    )
+    (tmp_path / "configs" / "fugue" / "experiments" / "demo.yaml").write_text(
+        """
+id: demo
+title: Demo
+manifest: datasets/demo.yaml
+model: openai/gpt-5
+harnesses: [codex]
+variants:
+  - {id: remote, label: Remote, skills: [remote], context: {system_id: none}}
+"""
+    )
+    calls: list[tuple[str, bool]] = []
+
+    def fake_prepare(skill_id, repo_root, *, refresh=False):
+        assert repo_root == tmp_path
+        calls.append((skill_id, refresh))
+        return skill_id
+
+    monkeypatch.setattr("fugue.bench.operator.prepare_skill_source", fake_prepare)
+
+    records = service.prepare_skills(
+        ExperimentRequest(experiment_id="demo"), refresh=True
+    )
+
+    assert records == ("remote",)
+    assert calls == [("remote", True)]
+
+
 def test_ephemeral_experiment_launch_persists_runtime_snapshot(
     tmp_path: Path, monkeypatch
 ) -> None:

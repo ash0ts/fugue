@@ -3,6 +3,7 @@ title: GitNexus
 description: Local code knowledge graph with native MCP tools.
 provider: fugue.bench.context:GitNexusContextProvider
 version: gitnexus@1.6.3
+support: experimental
 capabilities: [prepare, bind]
 required_commands: [npx]
 license: PolyForm-Noncommercial-1.0.0

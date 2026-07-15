@@ -50,12 +50,21 @@ class ContextSelection:
 
 
 @dataclass(frozen=True)
+class IntegrationSelection:
+    id: str
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class FeatureVariant:
     id: str
     label: str
     prompt_id: str | None = None
+    skills: list[str] = field(default_factory=list)
+    # Compatibility input. New configurations serialize only ``skills``.
     skill_ids: list[str] = field(default_factory=list)
     context: ContextSelection = field(default_factory=ContextSelection)
+    integrations: list[IntegrationSelection] | None = None
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
@@ -65,8 +74,20 @@ class FeatureVariant:
     artifacts: list[Any] = field(default_factory=list)
     enabled: bool = True
 
+    def __post_init__(self) -> None:
+        if self.skills and self.skill_ids:
+            raise ValueError("variant may not set both skills and skill_ids")
+        if self.skill_ids:
+            object.__setattr__(self, "skills", list(self.skill_ids))
+
+    @property
+    def selected_skill_ids(self) -> list[str]:
+        return list(self.skills)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value.pop("skill_ids", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -118,6 +139,7 @@ class ExperimentSpec:
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    integrations: list[IntegrationSelection] = field(default_factory=list)
     workloads: list[WorkloadSpec] = field(default_factory=list)
     presets: list[PresetSpec] = field(default_factory=list)
     default_preset: str | None = None
@@ -126,7 +148,11 @@ class ExperimentSpec:
     quiet: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return _paths_to_strings(asdict(self))
+        value = _paths_to_strings(asdict(self))
+        value["variants"] = [
+            _paths_to_strings(variant.to_dict()) for variant in self.variants
+        ]
+        return value
 
 
 def library_root(repo_root: Path | None = None) -> Path:
@@ -321,6 +347,7 @@ def experiment_from_data(
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
         mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
+        integrations=_integration_selections(raw.get("integrations"), kind="experiment"),
         workloads=workloads,
         presets=presets,
         default_preset=default_preset,
@@ -351,9 +378,12 @@ def content_hashes_for_ids(
     skill_ids: list[str],
     repo_root: Path | None = None,
 ) -> dict[str, dict[str, str]]:
+    from fugue.bench.sources import resolve_skills
+
+    resolved = resolve_skills(skill_ids, repo_root or Path.cwd())
     return {
         "prompts": {item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids},
-        "skills": {item_id: get_skill(item_id, repo_root).sha256 for item_id in skill_ids},
+        "skills": {item.id: item.digest.removeprefix("sha256:") for item in resolved},
     }
 
 
@@ -374,16 +404,26 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     prompt_id = _optional_str(raw.get("prompt_id"))
     if prompt_id:
         validate_id(prompt_id, kind="prompt id")
+    if raw.get("skills") is not None and raw.get("skill_ids") is not None:
+        raise ValueError("variant may not set both skills and skill_ids")
+    skills = _string_list(raw.get("skills"))
     skill_ids = _string_list(raw.get("skill_ids"))
-    for skill_id in skill_ids:
+    selected_skills = skills or skill_ids
+    for skill_id in selected_skills:
         validate_id(skill_id, kind="skill id")
-    _require_unique(skill_ids, kind=f"variant {variant_id} skill")
+    _require_unique(selected_skills, kind=f"variant {variant_id} skill")
     return FeatureVariant(
         id=variant_id,
         label=str(raw.get("label") or variant_id),
         prompt_id=prompt_id,
+        skills=skills,
         skill_ids=skill_ids,
         context=_context_selection(raw.get("context")),
+        integrations=(
+            _integration_selections(raw.get("integrations"), kind=f"variant {variant_id}")
+            if "integrations" in raw
+            else None
+        ),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
         mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
@@ -413,6 +453,32 @@ def _context_selection(raw: Any) -> ContextSelection:
         transport=transport,
         config=_dict(raw.get("config")),
     )
+
+
+def _integration_selections(raw: Any, *, kind: str) -> list[IntegrationSelection]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{kind} integrations must be a list")
+    result: list[IntegrationSelection] = []
+    for index, value in enumerate(raw, start=1):
+        if isinstance(value, str):
+            integration_id = validate_id(value, kind="integration id")
+            result.append(IntegrationSelection(id=integration_id))
+            continue
+        if not isinstance(value, dict):
+            raise ValueError(f"{kind} integration {index} must be a string or mapping")
+        unknown = sorted(set(value) - {"id", "config"})
+        if unknown:
+            raise ValueError(
+                f"unknown {kind} integration field(s): {', '.join(unknown)}"
+            )
+        integration_id = validate_id(value.get("id"), kind="integration id")
+        result.append(
+            IntegrationSelection(id=integration_id, config=_dict(value.get("config")))
+        )
+    _require_unique([item.id for item in result], kind=f"{kind} integration")
+    return result
 
 
 def _workloads(raw: Any) -> list[WorkloadSpec]:
