@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
-        suite: [core, context]
+        suite: [core, context, dev]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -36,11 +36,44 @@ jobs:
       - name: Install context
         if: matrix.suite == 'context'
         run: uv sync --frozen --extra dev --extra context
-      - name: Test
+      - name: Install development tooling
+        if: matrix.suite == 'dev'
+        run: uv sync --frozen --extra dev
+      - name: Test core contracts
+        if: matrix.suite == 'core'
         env:
           PYTHONWARNINGS: error
           FUGUE_NO_ANIMATION: "1"
-        run: uv run pytest
+        run: >-
+          uv run pytest
+          tests/test_ai.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
+          tests/test_datasets.py tests/test_demo.py tests/test_evaluations.py
+          tests/test_execution.py tests/test_integrations.py tests/test_library.py
+          tests/test_manifest.py tests/test_model_plane.py tests/test_preflight.py
+          tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py
+          tests/test_tool_policy.py
+      - name: Test context and operator contracts
+        if: matrix.suite == 'context'
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_agent_tracing.py tests/test_artifacts.py tests/test_assistant.py
+          tests/test_bridge.py tests/test_codex_agent_runtime.py tests/test_codex_mcp.py
+          tests/test_context.py tests/test_context_contracts.py tests/test_context_study.py
+          tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
+          tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
+          tests/test_services.py
+      - name: Test development and release tooling
+        if: matrix.suite == 'dev'
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_curation.py tests/test_deployment.py tests/test_self_eval.py
+          tests/test_skill.py tests/test_tui.py
 
   quality:
     name: Quality, build, and command smoke
@@ -103,6 +136,61 @@ jobs:
         env:
           PYTHONWARNINGS: error
         run: uv run bash tests/compat/run.sh
+
+  managed-adapters:
+    name: Managed adapter / ${{ matrix.adapter }} / amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: [gitnexus, codegraph, semble, project-rag, latmd]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev --extra context
+      - name: Build and lock the pinned runtime
+        env:
+          ADAPTER: ${{ matrix.adapter }}
+        run: >-
+          uv run python -c
+          'import os; from pathlib import Path; from fugue.bench.runtime_manager import prepare_runtime;
+          prepare_runtime(os.environ["ADAPTER"], repo_root=Path.cwd())'
+      - name: Probe the installed executable without credentials or network
+        env:
+          ADAPTER: ${{ matrix.adapter }}
+        run: >-
+          uv run python -c
+          'import os; from pathlib import Path; from fugue.bench.runtime_manager import probe_runtime_install;
+          probe_runtime_install(os.environ["ADAPTER"], Path.cwd())'
+      - run: uv run pytest -q tests/test_runtime_manager.py tests/test_mcp_gateway.py
+
+  graphiti-service:
+    name: Graphiti managed Neo4j lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev --extra context
+      - name: Start and verify the pinned service
+        env:
+          FUGUE_NO_ANIMATION: "1"
+        run: |
+          uv run fugue setup --experiment repo-memory-impact --workloads continuity --systems graphiti --start-services --json
+          uv run fugue setup --experiment repo-memory-impact --workloads continuity --systems graphiti --service-status --json
+      - name: Preserve data while stopping the service
+        if: always()
+        env:
+          FUGUE_NO_ANIMATION: "1"
+        run: uv run fugue setup --experiment repo-memory-impact --workloads continuity --systems graphiti --stop-services --json
+      - run: uv run pytest -q tests/test_services.py
 
   curator:
     name: Curator compiler and policy
