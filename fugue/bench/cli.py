@@ -1190,6 +1190,7 @@ def _cells_table(run: Any) -> Table:
         "Candidate",
         "Execution",
         "Outcome",
+        "Reason",
         box=box.SIMPLE_HEAD,
     )
     for cell in run.cells:
@@ -1202,6 +1203,7 @@ def _cells_table(run: Any) -> Table:
             cell.candidate_id,
             _status_markup(cell.status),
             cell.benchmark_outcome.replace("_", " "),
+            cell.error or cell.skip_reason or "-",
         )
     if not run.cells:
         table.add_row(
@@ -1212,6 +1214,7 @@ def _cells_table(run: Any) -> Table:
             "waiting for planner",
             "-",
             _status_markup(run.status),
+            "-",
             "-",
         )
     return table

@@ -172,6 +172,7 @@ class CellSummary:
     task_id: str
     wall_time_sec: float | None = None
     error: str | None = None
+    skip_reason: str | None = None
     context_delivery: str = "portable"
     benchmark_outcome: str = "unscored"
     reward: float | None = None
@@ -2127,6 +2128,7 @@ class OperatorService:
                     else None
                 ),
                 error=item.get("error"),
+                skip_reason=item.get("skip_reason"),
                 context_delivery=str(item.get("context_delivery") or "portable"),
                 benchmark_outcome=str(item.get("benchmark_outcome") or "unscored"),
                 reward=(

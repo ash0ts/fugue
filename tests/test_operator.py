@@ -904,6 +904,45 @@ def test_candidate_summary_separates_execution_and_benchmark_outcomes(
     assert "1 failed benchmark cell(s)" in candidate.packageability_reason
 
 
+def test_run_summary_preserves_not_applicable_reason(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "not-applicable-reason"
+    candidate_id = "b" * 64
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {"status": "passed", "run_name": "n-a", "experiment_id": "demo"},
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {candidate_id: {"harness": "sequence"}},
+                "planned_matrix": [
+                    {"cell_id": "latmd", "candidate_id": candidate_id}
+                ],
+            }
+        )
+    )
+    (run_dir / "cells.jsonl").write_text(
+        json.dumps(
+            {
+                "cell_id": "latmd",
+                "candidate_id": candidate_id,
+                "status": "not_applicable",
+                "benchmark_outcome": "not_applicable",
+                "skip_reason": "LAT_LLM_KEY is missing",
+            }
+        )
+        + "\n"
+    )
+
+    [cell] = service.run_summary(run_id).cells
+
+    assert cell.skip_reason == "LAT_LLM_KEY is missing"
+
+
 def test_multi_file_plan_save_cleans_new_assets_when_commit_marker_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
