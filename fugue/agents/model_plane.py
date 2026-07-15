@@ -176,6 +176,34 @@ def _dedupe_tags(values: list[str]) -> list[str]:
     return out
 
 
+def _skill_registration_probe_command(
+    directory: str,
+    assigned: list[str],
+) -> str:
+    script = (
+        "import hashlib,json,sys;"
+        "from pathlib import Path;"
+        "root=Path(sys.argv[1]);"
+        "assigned=json.loads(sys.argv[2]);"
+        "files=sorted(root.rglob('SKILL.md')) if root.is_dir() else [];"
+        "registered=sorted({"
+        "(path.relative_to(root).parts[0] if len(path.relative_to(root).parts)>1 "
+        "else '.') for path in files});"
+        "digest=hashlib.sha256();"
+        "[(digest.update(path.relative_to(root).as_posix().encode()+b'\\0'),"
+        "digest.update(path.read_bytes())) for path in files];"
+        "payload={'skills_assigned':assigned,'skills_registered':registered,"
+        "'skill_files':[path.relative_to(root).as_posix() for path in files],"
+        "'registration_digest':('sha256:'+digest.hexdigest()) if files else None};"
+        "print(json.dumps(payload,sort_keys=True));"
+        "sys.exit(0 if len(registered)==len(assigned) else 2)"
+    )
+    return (
+        f"python3 -c {shlex.quote(script)} {shlex.quote(directory)} "
+        f"{shlex.quote(json.dumps(assigned))}"
+    )
+
+
 def _experiment_tags(
     harness: str, route: ModelRoute, context_system_id: str
 ) -> list[str]:
@@ -358,7 +386,9 @@ class _TrialMetaMixin:
             timeout_sec=30,
         )
         if result.return_code != 0:
-            detail = (result.stderr or result.stdout or "tool-result guard failed").strip()
+            detail = (
+                result.stderr or result.stdout or "tool-result guard failed"
+            ).strip()
             raise RuntimeError(detail[-2_000:])
 
     async def _begin_trial(
@@ -490,6 +520,16 @@ class _TrialMetaMixin:
         tags = _experiment_tags(harness, route, self.context_system_id)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
         variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
+        assigned_skills = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
+        skill_registration = getattr(
+            self,
+            "_skill_registration_meta",
+            {
+                "status": "pending" if assigned_skills else "not_assigned",
+                "skills_assigned": assigned_skills,
+                "skills_registered": [],
+            },
+        )
         meta = {
             "run_key": self.run_key,
             "run_id": os.environ.get("FUGUE_RUN_ID"),
@@ -523,14 +563,19 @@ class _TrialMetaMixin:
             "context_config_hash": os.environ.get("FUGUE_CONTEXT_CONFIG_HASH"),
             "context_cache_keys": _json_env("FUGUE_CONTEXT_CACHE_KEYS"),
             "expected_evidence_paths": _json_env("FUGUE_EXPECTED_EVIDENCE_PATHS"),
-            "expected_artifact_paths": _json_env(
-                "FUGUE_EXPECTED_ARTIFACT_PATHS"
-            ),
+            "expected_artifact_paths": _json_env("FUGUE_EXPECTED_ARTIFACT_PATHS"),
             "prompt_id": prompt_id,
             "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),
             "skill_ids": _split_tags(os.environ.get("FUGUE_SKILL_IDS")),
             "skill_hashes": _json_env("FUGUE_SKILL_HASHES"),
             "skill_provenance": _json_env("FUGUE_SKILL_PROVENANCE"),
+            "skills_assigned": assigned_skills,
+            "skills_registered": skill_registration.get("skills_registered", []),
+            "skill_registration": skill_registration,
+            "skill_invocation_evidence": {
+                "status": "unavailable",
+                "reason": "the harness does not emit skill-selection events",
+            },
             "integration_ids": _split_tags(os.environ.get("FUGUE_INTEGRATION_IDS")),
             "integration_provenance": _json_env("FUGUE_INTEGRATION_PROVENANCE"),
             "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
@@ -672,6 +717,61 @@ class _TrialMetaMixin:
         meta["context_registration"] = value
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
+    def _set_skill_registration(self, value: dict[str, Any]) -> None:
+        self._skill_registration_meta = value
+        try:
+            meta = json.loads(self._meta_path().read_text())
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        meta["skills_assigned"] = value.get("skills_assigned", [])
+        meta["skills_registered"] = value.get("skills_registered", [])
+        meta["skill_registration"] = value
+        self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
+
+    async def _verify_skill_registration(
+        self,
+        environment: BaseEnvironment,
+        directory: str,
+    ) -> None:
+        assigned = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
+        if not assigned:
+            self._set_skill_registration(
+                {
+                    "status": "not_assigned",
+                    "skills_assigned": [],
+                    "skills_registered": [],
+                    "registration_digest": None,
+                }
+            )
+            return
+        command = _skill_registration_probe_command(directory, assigned)
+        result = await self.exec_as_agent(
+            environment,
+            command=command,
+            timeout_sec=30,
+        )
+        lines = (result.stdout or "").strip().splitlines()
+        try:
+            payload = json.loads(lines[-1]) if lines else {}
+        except json.JSONDecodeError:
+            payload = {}
+        registration = {
+            "status": "registered" if result.return_code == 0 else "failed",
+            "skills_assigned": assigned,
+            "skills_registered": payload.get("skills_registered", []),
+            "registration_digest": payload.get("registration_digest"),
+            "directory": directory,
+        }
+        self._set_skill_registration(registration)
+        if result.return_code != 0:
+            detail = (
+                result.stderr or result.stdout or "required skills were not registered"
+            ).strip()
+            raise RuntimeError(
+                "skill registration probe failed before agent execution: "
+                f"{detail[-2_000:]}"
+            )
+
     def _extract_session_ids(self) -> list[str]:
         return []
 
@@ -720,9 +820,7 @@ class _TrialMetaMixin:
             ),
             "fugue.model_provider": route.provider,
             "fugue.model": route.display_model,
-            "fugue.tool_result_modalities": "|".join(
-                route.tool_result_modalities
-            ),
+            "fugue.tool_result_modalities": "|".join(route.tool_result_modalities),
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
             "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", "").replace(",", "|"),
             "fugue.integration_ids": os.environ.get(
@@ -1147,14 +1245,34 @@ class FugueHermes(_TrialMetaMixin, Hermes):
 
         mcp_command = self._build_register_mcp_servers_command()
         if mcp_command:
-            await self.exec_as_agent(
+            result = await self.exec_as_agent(
                 environment, command=mcp_command, env=env, timeout_sec=10
+            )
+            if result.return_code != 0:
+                detail = (result.stderr or result.stdout or "MCP setup failed").strip()
+                raise RuntimeError(detail[-2_000:])
+            self._set_context_registration(
+                {
+                    "status": "registered",
+                    "delivery": "native_mcp",
+                    "servers": sorted(server.name for server in self.mcp_servers),
+                    "probe": "/tmp/hermes/config.yaml",
+                }
             )
         skills_command = self._build_register_skills_command()
         if skills_command:
-            await self.exec_as_agent(
+            result = await self.exec_as_agent(
                 environment, command=skills_command, env=env, timeout_sec=10
             )
+            if result.return_code != 0:
+                detail = (
+                    result.stderr or result.stdout or "skill setup failed"
+                ).strip()
+                raise RuntimeError(detail[-2_000:])
+        await self._verify_skill_registration(
+            environment,
+            "/tmp/hermes/skills",
+        )
 
         run_cmd = (
             'export PATH="$HOME/.local/bin:$PATH" && '
@@ -1505,7 +1623,21 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
 
             skills_command = self._build_register_skills_command()
             if skills_command:
-                await self.exec_as_agent(environment, command=skills_command, env=env)
+                result = await self.exec_as_agent(
+                    environment,
+                    command=skills_command,
+                    env=env,
+                )
+                if result.return_code != 0:
+                    detail = (
+                        result.stderr or result.stdout or "skill setup failed"
+                    ).strip()
+                    raise RuntimeError(detail[-2_000:])
+            home = await self._detect_home(environment)
+            await self._verify_skill_registration(
+                environment,
+                f"{home}/.openclaw/skills",
+            )
 
             await self.exec_as_agent(
                 environment,
@@ -1514,6 +1646,15 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 timeout_sec=180,
             )
             gateway_started = True
+            if self.mcp_servers:
+                self._set_context_registration(
+                    {
+                        "status": "registered",
+                        "delivery": "native_mcp",
+                        "servers": sorted(server.name for server in self.mcp_servers),
+                        "probe": "openclaw gateway ready",
+                    }
+                )
 
             self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
                 self.conversation_id
@@ -1733,6 +1874,39 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 "claude-code",
                 PurePosixPath(self._CLAUDE_CONFIG_DIR) / "settings.json",
             )
+            setup_commands = [f"mkdir -p {shlex.quote(self._CLAUDE_CONFIG_DIR)}/skills"]
+            skills_command = self._build_register_skills_command()
+            if skills_command:
+                setup_commands.append(skills_command)
+            mcp_command = self._build_register_mcp_servers_command()
+            if mcp_command:
+                setup_commands.append(mcp_command)
+            registration = await self.exec_as_agent(
+                environment,
+                command=" && ".join(setup_commands),
+                env={"CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR},
+                timeout_sec=30,
+            )
+            if registration.return_code != 0:
+                detail = (
+                    registration.stderr
+                    or registration.stdout
+                    or "Claude registration failed"
+                ).strip()
+                raise RuntimeError(detail[-2_000:])
+            await self._verify_skill_registration(
+                environment,
+                f"{self._CLAUDE_CONFIG_DIR}/skills",
+            )
+            if mcp_command:
+                self._set_context_registration(
+                    {
+                        "status": "registered",
+                        "delivery": "native_mcp",
+                        "servers": sorted(server.name for server in self.mcp_servers),
+                        "probe": f"{self._CLAUDE_CONFIG_DIR}/.claude.json",
+                    }
+                )
             await super().run(instruction, environment, context)
             # Let the plugin daemon flush the final turn before teardown.
             await self.exec_as_agent(
@@ -1877,7 +2051,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
         config = render_codex_mcp_toml(self.mcp_servers)
         if not config:
             return None
-        return f"printf %s {shlex.quote(config)} >> \"$CODEX_HOME/config.toml\""
+        return f'printf %s {shlex.quote(config)} >> "$CODEX_HOME/config.toml"'
 
     @override
     async def run(
@@ -1981,6 +2155,11 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 setup_result.stderr or setup_result.stdout or "Codex setup failed"
             ).strip()
             raise RuntimeError(detail[-2_000:])
+        home = await self._detect_home(environment)
+        await self._verify_skill_registration(
+            environment,
+            f"{home}/.agents/skills",
+        )
         await self._install_tool_result_guard(
             environment,
             "codex",

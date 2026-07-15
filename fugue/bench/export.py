@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -295,6 +296,7 @@ class LiveEvaluationCoordinator:
                     root_span_id=root.get("span_id"),
                     eval_predict_and_score_call_id=call_id,
                 )
+            _set_adapter_outcome(row)
             if not self._pop_prediction(cell.id, active):
                 return
             owns_prediction = True
@@ -325,6 +327,7 @@ class LiveEvaluationCoordinator:
                 return
             row["trace_link_status"] = "failed"
             row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
+            _set_adapter_outcome(row)
             try:
                 active.prediction.output = _evaluation_output(row)
                 with active.session.lock:
@@ -638,6 +641,7 @@ class GeneratedEvaluationCoordinator:
             env=self.env,
             trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
         )
+        _set_adapter_outcome(row)
         with self._lock:
             with self.path.open("a") as handle:
                 handle.write(
@@ -827,9 +831,7 @@ def _verified_evaluation_root(
                 "no matching invoke_agent root reached Weave before the link deadline"
             )
         elif not roots:
-            row["trace_link_error"] = (
-                "no invoke_agent root matched the selected trace"
-            )
+            row["trace_link_error"] = "no invoke_agent root matched the selected trace"
         else:
             row["trace_link_error"] = (
                 "multiple invoke_agent roots matched the selected trace"
@@ -842,9 +844,7 @@ def _verified_evaluation_root(
     }
     if not root_conversation_id:
         row["trace_link_status"] = "attribute_missing"
-        row["trace_link_error"] = (
-            "native root is missing gen_ai.conversation.id"
-        )
+        row["trace_link_error"] = "native root is missing gen_ai.conversation.id"
         return None
     if conversation_ids != {root_conversation_id}:
         row["trace_link_status"] = "identity_mismatch"
@@ -988,13 +988,16 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         if not run_id and current_schema:
             raise ValueError("current-schema evaluation prediction is missing run_id")
         if not run_id:
-            run_id = "legacy-" + _stable_digest(
-                {
-                    "experiment_id": row.get("experiment_id"),
-                    "run_name": row.get("run_name"),
-                    "run_key": row.get("run_key"),
-                }
-            )[:16]
+            run_id = (
+                "legacy-"
+                + _stable_digest(
+                    {
+                        "experiment_id": row.get("experiment_id"),
+                        "run_name": row.get("run_name"),
+                        "run_key": row.get("run_key"),
+                    }
+                )[:16]
+            )
         if not candidate_id:
             raise ValueError("evaluation prediction is missing candidate_id")
         prediction_id = _stable_digest(
@@ -1010,15 +1013,15 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             row.get("source_record_type") or row.get("record_type") or "trial"
         )
         value = PredictionRowV2(
-                prediction_id=prediction_id,
-                run_id=run_id,
-                candidate_id=candidate_id,
-                comparison_example_id=comparison_id,
-                trial_index=trial_index,
-                execution_kind=execution_kind,
-                source_record_type=source_record_type,
-                payload=row,
-            ).to_dict()
+            prediction_id=prediction_id,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            comparison_example_id=comparison_id,
+            trial_index=trial_index,
+            execution_kind=execution_kind,
+            source_record_type=source_record_type,
+            payload=row,
+        ).to_dict()
         already_canonical = bool(row.get("prediction_schema_version"))
         if prediction_id in positions:
             prior_canonical = canonical_inputs[prediction_id]
@@ -1174,6 +1177,15 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
 def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
     response = summary.pop("_weave_agent_response", None)
     row.update(summary)
+    gateway_calls = int(row.get("weave_gateway_tool_call_count") or 0)
+    if row.get("context_assigned") and gateway_calls:
+        row["context_invoked"] = True
+        row["context_invocation_evidence"] = {
+            "status": "observed",
+            "source": "mcp_gateway_result_metadata",
+            "tool_calls": gateway_calls,
+            "gateway_call_ids": row.get("weave_gateway_call_ids") or [],
+        }
     _merge_error_events(row)
     if not isinstance(response, str) or not response.strip():
         return
@@ -1236,6 +1248,7 @@ def judge_qa_rows(
             answer = _trial_answer(row)
             if not reference or not answer:
                 row["judge_error"] = "missing local reference or agent answer"
+                _set_adapter_outcome(row)
                 continue
             started = time.perf_counter()
             try:
@@ -1272,6 +1285,7 @@ def judge_qa_rows(
                         "judge_error": f"{type(exc).__name__}: {exc}",
                     }
                 )
+            _set_adapter_outcome(row)
 
 
 def write_jsonl(
@@ -1331,13 +1345,28 @@ def publish_to_weave(
             continue
         publication_id = candidate["publication_id"]
         scope_id = candidate["evaluation_scope_id"]
-        lock = ledger / f"{publication_id}.lock"
+        # Different evaluation groupings can contain the same prediction. One
+        # project lock makes that overlap visible before either remote write.
+        lock = ledger / "publication-ledger.lock"
         with FileLock(lock, timeout=120):
+            reservation: list[tuple[Path, dict[str, Any] | None]] = []
             previous_marker, previous_revision = _latest_publication_marker(
                 ledger, publication_id
             )
             if previous_marker is not None and not republish:
                 try:
+                    reservation = _reserve_prediction_publication(
+                        ledger,
+                        project,
+                        candidate,
+                        revision=previous_revision,
+                    )
+                    _finalize_prediction_publication(
+                        ledger,
+                        project,
+                        candidate,
+                        revision=previous_revision,
+                    )
                     evaluations.append(
                         _published_evaluation_from_marker(
                             previous_marker,
@@ -1349,6 +1378,8 @@ def publish_to_weave(
                         )
                     )
                 except (OSError, ValueError) as exc:
+                    if reservation:
+                        _restore_prediction_publications(reservation)
                     failures.append(
                         f"{candidate['candidate_id']}: publication marker: {exc}"
                     )
@@ -1361,6 +1392,18 @@ def publish_to_weave(
                 if previous_marker is not None
                 else None
             )
+            try:
+                reservation = _reserve_prediction_publication(
+                    ledger,
+                    project,
+                    candidate,
+                    revision=revision,
+                )
+            except (OSError, ValueError) as exc:
+                failures.append(
+                    f"{candidate['candidate_id']}: publication ledger: {exc}"
+                )
+                continue
             if scope_id not in datasets:
                 dataset_name = _dataset_name(candidate)
                 dataset_cls = getattr(weave, "Dataset", None)
@@ -1397,6 +1440,7 @@ def publish_to_weave(
                     )
                 logger.log_summary()
             except Exception as exc:
+                _restore_prediction_publications(reservation)
                 if logger is not None:
                     try:
                         logger.fail(exc)
@@ -1437,15 +1481,21 @@ def publish_to_weave(
                 linking_failures=linking_failures,
                 publication_mode="post_hoc",
                 publication_schema_version=PUBLICATION_SCHEMA_VERSION,
+                scorer_version=candidate["scorer_version"],
+                prediction_ids=candidate["prediction_ids"],
                 revision=revision,
                 supersedes=supersedes,
-                republish_reason=(
-                    str(republish_reason).strip() if republish else None
-                ),
+                republish_reason=(str(republish_reason).strip() if republish else None),
                 active=True,
             )
             if previous_marker is not None:
                 _set_publication_marker_active(previous_marker, False)
+            _finalize_prediction_publication(
+                ledger,
+                project,
+                candidate,
+                revision=revision,
+            )
             evaluations.append(
                 PublishedEvaluation(
                     candidate_id=candidate["candidate_id"],
@@ -1589,6 +1639,99 @@ def _write_publication_marker(
     os.replace(temp, path)
 
 
+def _prediction_ledger_paths(
+    ledger: Path, project: str, candidate: dict[str, Any]
+) -> list[tuple[Path, dict[str, Any]]]:
+    root = ledger / "predictions"
+    root.mkdir(parents=True, exist_ok=True)
+    values: list[tuple[Path, dict[str, Any]]] = []
+    for prediction_id in candidate["prediction_ids"]:
+        identity = {
+            "project": project,
+            "prediction_id": prediction_id,
+            "scorer_version": candidate["scorer_version"],
+        }
+        values.append((root / f"{_stable_digest(identity)}.json", identity))
+    return values
+
+
+def _reserve_prediction_publication(
+    ledger: Path,
+    project: str,
+    candidate: dict[str, Any],
+    *,
+    revision: int,
+) -> list[tuple[Path, dict[str, Any] | None]]:
+    publication_id = candidate["publication_id"]
+    previous: list[tuple[Path, dict[str, Any] | None]] = []
+    for path, identity in _prediction_ledger_paths(ledger, project, candidate):
+        current = json.loads(path.read_text()) if path.is_file() else None
+        if current is not None and (
+            not isinstance(current, dict)
+            or current.get("project") != project
+            or current.get("prediction_id") != identity["prediction_id"]
+            or current.get("scorer_version") != identity["scorer_version"]
+        ):
+            raise ValueError(f"invalid prediction publication ledger entry: {path}")
+        if current is not None and current.get("state") == "pending":
+            raise ValueError(
+                "prediction publication has an unresolved pending reservation: "
+                f"{identity['prediction_id']}"
+            )
+        if current is not None and current.get("publication_id") != publication_id:
+            raise ValueError(
+                "prediction was already published under another active evaluation: "
+                f"{identity['prediction_id']}"
+            )
+        previous.append((path, current))
+    for path, identity in _prediction_ledger_paths(ledger, project, candidate):
+        _write_json_atomic(
+            path,
+            {
+                **identity,
+                "publication_id": publication_id,
+                "revision": revision,
+                "state": "pending",
+            },
+        )
+    return previous
+
+
+def _finalize_prediction_publication(
+    ledger: Path,
+    project: str,
+    candidate: dict[str, Any],
+    *,
+    revision: int,
+) -> None:
+    for path, identity in _prediction_ledger_paths(ledger, project, candidate):
+        _write_json_atomic(
+            path,
+            {
+                **identity,
+                "publication_id": candidate["publication_id"],
+                "revision": revision,
+                "state": "active",
+            },
+        )
+
+
+def _restore_prediction_publications(
+    previous: list[tuple[Path, dict[str, Any] | None]],
+) -> None:
+    for path, value in previous:
+        if value is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_json_atomic(path, value)
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
+    os.replace(temp, path)
+
+
 def _latest_publication_marker(
     ledger: Path, publication_id: str
 ) -> tuple[Path | None, int]:
@@ -1638,9 +1781,7 @@ def _published_evaluation_from_marker(
     }
     for metadata_field, expected_value in expected.items():
         if not expected_value or value.get(metadata_field) != expected_value:
-            raise ValueError(
-                f"{metadata_field} does not match the current evaluation"
-            )
+            raise ValueError(f"{metadata_field} does not match the current evaluation")
     name = value.get("name")
     if not isinstance(name, str) or not name.strip():
         raise ValueError("name must be a non-empty string")
@@ -1674,9 +1815,7 @@ def _published_evaluation_from_marker(
         linking_failures=tuple(item for item in linking_failures if item),
         publication_id=publication_id,
         revision=(
-            _publication_marker_count(value, "revision")
-            if "revision" in value
-            else 1
+            _publication_marker_count(value, "revision") if "revision" in value else 1
         ),
         supersedes=str(value["supersedes"]) if value.get("supersedes") else None,
         active=value.get("active") is not False,
@@ -1737,12 +1876,24 @@ def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         candidate_rows = [row for row, _ in ordered]
         scorers = _scorer_schema(candidate_rows)
+        scorer_version = _stable_digest(
+            {
+                "scorers": scorers,
+                "asset_hashes": sorted(
+                    {
+                        _stable_digest(row.get("evaluation_scorer_hashes") or {})
+                        for row in candidate_rows
+                    }
+                ),
+            }
+        )
+        prediction_ids = [_evaluation_row_id(row) for row in candidate_rows]
         scope_id = _stable_digest({"examples": dataset_examples, "scorers": scorers})
         publication_id = _stable_digest(
             {
                 "candidate_id": candidate_id,
                 "evaluation_scope_id": scope_id,
-                "rows": [_evaluation_row_id(row) for row in candidate_rows],
+                "rows": prediction_ids,
             }
         )
         candidates.append(
@@ -1754,6 +1905,8 @@ def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "prediction_inputs": prediction_inputs,
                 "dataset_examples": dataset_examples,
                 "scorers": scorers,
+                "scorer_version": scorer_version,
+                "prediction_ids": prediction_ids,
             }
         )
     return candidates
@@ -2388,12 +2541,21 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
     root_spans = [_root_span_summary(span) for span in roots]
     chat_spans = [span for span in values if _span_operation(span) == "chat"]
     tool_spans = [span for span in values if _span_operation(span) == "execute_tool"]
+    gateway_call_ids = sorted(
+        {
+            call_id
+            for span in tool_spans
+            if (call_id := _gateway_call_id(span)) is not None
+        }
+    )
     return {
         "weave_span_count": len(values),
         "weave_observability_status": "available",
         "weave_turn_count": operations.count("invoke_agent"),
         "weave_llm_call_count": operations.count("chat"),
         "weave_tool_call_count": operations.count("execute_tool"),
+        "weave_gateway_tool_call_count": len(gateway_call_ids),
+        "weave_gateway_call_ids": gateway_call_ids,
         "weave_error_count": sum(_span_has_error(span) for span in values),
         "weave_terminal_error_count": sum(_span_has_error(span) for span in roots),
         "weave_model_error_count": sum(_span_has_error(span) for span in chat_spans),
@@ -2433,6 +2595,30 @@ def _latest_agent_response(spans: list[dict[str, Any]]) -> str | None:
             content = message.get("content")
             if isinstance(content, str) and content.strip():
                 return content.strip()
+    return None
+
+
+def _gateway_call_id(span: dict[str, Any]) -> str | None:
+    for source in (span, _raw_span(span)):
+        value = _nested_value(source, "fugue_gateway_call_id")
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _nested_value(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        if key in value:
+            return value[key]
+        for item in value.values():
+            found = _nested_value(item, key)
+            if found not in (None, ""):
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _nested_value(item, key)
+            if found not in (None, ""):
+                return found
     return None
 
 
@@ -2883,6 +3069,63 @@ def _merge_error_events(row: dict[str, Any]) -> None:
         row[f"{origin}_error_count"] = sum(
             event.get("origin") == origin for event in values
         )
+    _set_adapter_outcome(row, values)
+
+
+def _set_adapter_outcome(
+    row: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
+) -> None:
+    values = events if events is not None else list(row.get("error_events") or [])
+    terminal = [event for event in values if event.get("terminal")]
+    recoverable = [event for event in values if event.get("recoverable")]
+    status = str(row.get("status") or "")
+    if status in {"cancelled", "not_applicable"}:
+        execution_state = status
+    elif terminal:
+        execution_state = "failed"
+    elif row.get("record_type") == "trial" or row.get("reward") is not None:
+        execution_state = "completed"
+    else:
+        execution_state = "unknown"
+    if row.get("reward") is None:
+        deterministic = "unscored"
+    elif row.get("pass") is True:
+        deterministic = "passed"
+    else:
+        deterministic = "failed"
+    if row.get("judge_error"):
+        judge = "failed"
+    elif row.get("judge_overall") is not None:
+        judge = "scored"
+    elif row.get("judge_model") or row.get("evaluation_rubrics"):
+        judge = "pending"
+    else:
+        judge = "not_requested"
+    observability = str(row.get("weave_observability_status") or "unavailable")
+    row["adapter_outcome"] = {
+        "execution": {
+            "state": execution_state,
+            "fatal_error_ids": [str(event.get("id")) for event in terminal],
+        },
+        "exploratory_tools": {
+            "state": "recoverable_failures" if recoverable else "clean",
+            "recoverable_error_ids": [str(event.get("id")) for event in recoverable],
+        },
+        "provider": {
+            "state": (
+                "failed"
+                if any(event.get("origin") == "provider" for event in terminal)
+                else "available"
+            )
+        },
+        "deterministic_verification": {"state": deterministic},
+        "rubric_evaluation": {"state": judge},
+        "observability": {
+            "state": observability,
+            "trace_link_status": row.get("trace_link_status"),
+        },
+    }
 
 
 def _error_match_key(event: dict[str, Any]) -> tuple[str, str, str, bool]:
@@ -3039,6 +3282,18 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "skill_ids": meta.get("skill_ids", []),
         "skill_hashes": meta.get("skill_hashes", {}),
         "skill_provenance": meta.get("skill_provenance", []),
+        "skills_assigned": meta.get("skills_assigned", meta.get("skill_ids", [])),
+        "skills_registered": meta.get("skills_registered", []),
+        "skill_registration": meta.get("skill_registration", {}),
+        "skill_registration_status": (
+            meta.get("skill_registration", {}).get("status")
+            if isinstance(meta.get("skill_registration"), dict)
+            else "unavailable"
+        ),
+        "skill_invocation_evidence": meta.get(
+            "skill_invocation_evidence",
+            {"status": "unavailable"},
+        ),
         "integration_ids": meta.get("integration_ids", []),
         "integration_provenance": meta.get("integration_provenance", []),
         "harbor_config": meta.get("harbor_config"),
@@ -3074,6 +3329,13 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_assigned": context_assigned,
         "context_available": context_assigned and context_registered,
         "context_invoked": context_events["context_query_count"] > 0,
+        "context_invocation_evidence": {
+            "status": (
+                "observed" if context_events["context_query_count"] > 0 else "not_observed"
+            ),
+            "source": "local_context_events",
+            "tool_calls": context_events["context_query_count"],
+        },
         **context_events,
         **evidence,
         "inspected_paths": trajectory_activity["inspected_paths"],

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from fugue.agent_tracing import (
     openclaw_conversation_id,
     stable_agent_name,
 )
+from fugue.agents.model_plane import _skill_registration_probe_command
 
 AGENT_MODEL_PLANE = (
     Path(__file__).resolve().parents[1] / "fugue" / "agents" / "model_plane.py"
@@ -45,20 +48,26 @@ def test_openclaw_trial_identity_preserves_stable_agent_name() -> None:
 
 
 def test_conversation_names_are_human_readable_and_bounded() -> None:
-    assert agent_conversation_name(
-        run_name="standup-skills-full",
-        task_id="paper-anonymizer",
-        variant_id="with-pdf-skill",
-        trial_index=1,
-    ) == "standup-skills-full · paper-anonymizer · with-pdf-skill · t001"
-    assert len(
+    assert (
         agent_conversation_name(
-            run_name="x" * 300,
-            task_id="task",
-            variant_id="baseline",
-            trial_index=0,
+            run_name="standup-skills-full",
+            task_id="paper-anonymizer",
+            variant_id="with-pdf-skill",
+            trial_index=1,
         )
-    ) == 256
+        == "standup-skills-full · paper-anonymizer · with-pdf-skill · t001"
+    )
+    assert (
+        len(
+            agent_conversation_name(
+                run_name="x" * 300,
+                task_id="task",
+                variant_id="baseline",
+                trial_index=0,
+            )
+        )
+        == 256
+    )
 
 
 def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
@@ -77,7 +86,7 @@ def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
 def test_model_plane_normalizes_only_declared_artifact_transport() -> None:
     source = AGENT_MODEL_PLANE.read_text()
 
-    assert 'FUGUE_EXPECTED_ARTIFACT_PATHS' in source
+    assert "FUGUE_EXPECTED_ARTIFACT_PATHS" in source
     assert "artifact_recoveries(expected, repo_root)" in source
     assert '"artifact_normalization"' in source
 
@@ -87,6 +96,36 @@ def test_trace_content_is_explicit() -> None:
     assert normalize_trace_content(" metadata ") == "metadata"
     with pytest.raises(ValueError, match="full.*metadata"):
         normalize_trace_content("redacted")
+
+
+def test_skill_registration_probe_requires_every_assigned_skill(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    (root / "pdf").mkdir(parents=True)
+    (root / "pdf" / "SKILL.md").write_text("# PDF\n")
+
+    complete = subprocess.run(
+        _skill_registration_probe_command(root.as_posix(), ["pdf"]),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(complete.stdout)
+
+    assert complete.returncode == 0
+    assert payload["skills_registered"] == ["pdf"]
+    assert payload["registration_digest"].startswith("sha256:")
+
+    incomplete = subprocess.run(
+        _skill_registration_probe_command(root.as_posix(), ["pdf", "missing"]),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert incomplete.returncode == 2
 
 
 def test_trial_trace_attributes_are_flat_and_comparable() -> None:
@@ -144,7 +183,7 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert "weave-codex@" in source
     assert "weave-codex run -- codex exec" in source
     assert "weave-codex install" not in source
-    assert "tool_result_guard_cli_flags(self.model_route, \"codex\")" in source
+    assert 'tool_result_guard_cli_flags(self.model_route, "codex")' in source
     assert "set -o pipefail" in source
     assert "emitter pattern missing" in source
     assert "baggage pattern missing" in source

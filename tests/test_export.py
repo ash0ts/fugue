@@ -134,9 +134,7 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["context_system_id"] == "rag-bm25"
     assert row["context_version"] == "1"
     assert row["context_cache_keys"] == {"bridge-check": "cache123"}
-    assert row["expected_artifact_paths"] == [
-        "/logs/artifacts/fugue-answer.md"
-    ]
+    assert row["expected_artifact_paths"] == ["/logs/artifacts/fugue-answer.md"]
     assert row["artifact_normalization"][0]["status"] == "recovered"
     assert row["context_assigned"] is True
     assert row["context_available"] is True
@@ -402,8 +400,13 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert scores == {"reward": 1.0, "passed": True}
         assert logger.summary is True
         assert logger.failed is None
-    markers = list((tmp_path / "v4").glob("**/*.json"))
+    markers = [
+        path
+        for path in (tmp_path / "v4").glob("**/*.json")
+        if path.parent.name != "predictions"
+    ]
     assert len(markers) == 2
+    assert len(list((tmp_path / "v4").glob("**/predictions/*.json"))) == 1
     marker_values = [json.loads(path.read_text()) for path in markers]
     assert sorted(value["revision"] for value in marker_values) == [1, 2]
     assert sum(value["active"] is True for value in marker_values) == 1
@@ -518,35 +521,39 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
         "execution_fingerprint": "fingerprint-a",
         "trial_index": 1,
     }
-    rows = [
-        {
-            **common,
-            "record_type": "episode",
-            "sequence_id": "maintainer-preferences",
-            "comparison_example_id": f"episode-{index}",
-            "write_latency_ms": 2.0,
-            "storage_bytes": 100 + index,
-        }
-        for index in range(2)
-    ] + [
-        {
-            **common,
-            "record_type": "retrieval",
-            "sequence_id": "maintainer-preferences",
-            "comparison_example_id": f"probe-{index}",
-            "mrr": float(index),
-            "query_latency_ms": 3.0,
-        }
-        for index in range(2)
-    ] + [
-        {
-            **common,
-            "record_type": "cell",
-            "workload_id": "continuity",
-            "comparison_example_id": "sequence-cell",
-            "status": "passed",
-        }
-    ]
+    rows = (
+        [
+            {
+                **common,
+                "record_type": "episode",
+                "sequence_id": "maintainer-preferences",
+                "comparison_example_id": f"episode-{index}",
+                "write_latency_ms": 2.0,
+                "storage_bytes": 100 + index,
+            }
+            for index in range(2)
+        ]
+        + [
+            {
+                **common,
+                "record_type": "retrieval",
+                "sequence_id": "maintainer-preferences",
+                "comparison_example_id": f"probe-{index}",
+                "mrr": float(index),
+                "query_latency_ms": 3.0,
+            }
+            for index in range(2)
+        ]
+        + [
+            {
+                **common,
+                "record_type": "cell",
+                "workload_id": "continuity",
+                "comparison_example_id": "sequence-cell",
+                "status": "passed",
+            }
+        ]
+    )
 
     result = publish_to_weave(
         rows,
@@ -607,9 +614,7 @@ def test_direct_evaluation_projection_requires_a_completed_cell() -> None:
 
     projected = export._evaluation_rows(rows)
 
-    assert [row["comparison_example_id"] for row in projected] == [
-        "published-query"
-    ]
+    assert [row["comparison_example_id"] for row in projected] == ["published-query"]
     assert projected[0]["dataset"] == "retrieval-dataset"
     assert projected[0]["workload_id"] == "retrieval"
 
@@ -1431,9 +1436,7 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
     assert prediction.output["trace_link_status"] == "cancelled"
     statuses = [
         json.loads(line)["status"]
-        for line in (
-            tmp_path / ".fugue/runtime/run-poll-cancel/evaluations.jsonl"
-        )
+        for line in (tmp_path / ".fugue/runtime/run-poll-cancel/evaluations.jsonl")
         .read_text()
         .splitlines()
     ]
@@ -1653,6 +1656,12 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
                     "gen_ai.operation.name": "execute_tool",
                     "gen_ai.conversation.id": resolved,
                 },
+                "output": {
+                    "_meta": {
+                        "fugue_gateway_call_id": "gateway-a",
+                        "fugue_context_system_id": "gitnexus",
+                    }
+                },
             },
         ]
     )
@@ -1661,6 +1670,15 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
     assert summary["weave_turn_count"] == 1
     assert summary["weave_llm_call_count"] == 1
     assert summary["weave_tool_call_count"] == 1
+    assert summary["weave_gateway_tool_call_count"] == 1
+    assert summary["weave_gateway_call_ids"] == ["gateway-a"]
+
+    row = {"context_assigned": True}
+    export._apply_trace_summary(row, dict(summary))
+    assert row["context_invoked"] is True
+    assert row["context_invocation_evidence"]["source"] == (
+        "mcp_gateway_result_metadata"
+    )
 
 
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
@@ -2092,6 +2110,9 @@ def test_completed_evaluation_recovers_setup_failure_and_fingerprint(
     )
     assert row["harness_adapter_error_count"] == 1
     assert row["error_events"][0]["terminal"] is True
+    assert row["adapter_outcome"]["execution"]["state"] == "failed"
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == ("unscored")
+    assert row["adapter_outcome"]["exploratory_tools"]["state"] == "clean"
 
 
 def test_weave_publication_never_republishes_finalized_live_predictions(
@@ -2189,6 +2210,76 @@ def test_weave_publication_rejects_duplicate_candidate_examples(
             ledger_root=tmp_path,
             env={"WANDB_API_KEY": "test-only"},
         )
+
+
+def test_publication_ledger_rejects_prediction_overlap_across_evaluations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    published: list[str] = []
+
+    class FakeLogger:
+        ui_url = "https://wandb.invalid/evaluation"
+
+        def __init__(self, **kwargs) -> None:
+            self._pseudo_evaluation = None
+            self.model = None
+
+        def log_example(self, inputs, output, scores) -> None:
+            published.append(inputs["comparison_example_id"])
+
+        def log_summary(self) -> None:
+            pass
+
+        def fail(self, exception) -> None:
+            raise AssertionError(exception)
+
+    monkeypatch.setattr(
+        export,
+        "initialize_weave",
+        lambda project, env: SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    common = {
+        "schema_version": 2,
+        "prediction_schema_version": 2,
+        "record_type": "trial",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "workload_id": "retrieval",
+        "dataset": "fixture",
+        "execution_kind": "provider_diagnostic",
+        "trial_index": 1,
+        "status": "passed",
+    }
+    first_row = {
+        **common,
+        "prediction_id": "prediction-a",
+        "comparison_example_id": "example-a",
+        "task_name": "task-a",
+    }
+    second_row = {
+        **common,
+        "prediction_id": "prediction-b",
+        "comparison_example_id": "example-b",
+        "task_name": "task-b",
+    }
+
+    first = publish_to_weave(
+        [first_row],
+        "entity/project",
+        ledger_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+    overlapping = publish_to_weave(
+        [first_row, second_row],
+        "entity/project",
+        ledger_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+
+    assert first.published == 1
+    assert overlapping.published == 0
+    assert "already published" in overlapping.failures[0]
+    assert published == ["example-a"]
 
 
 def test_calls_query_uses_current_shape_and_decodes_ndjson() -> None:
