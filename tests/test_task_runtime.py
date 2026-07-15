@@ -28,6 +28,29 @@ def _fixture(tmp_path: Path):
     return load_manifest(manifest_path), dataset
 
 
+def _verifier_fixture(tmp_path: Path):
+    manifest, dataset = _fixture(tmp_path)
+    (dataset / "tests").mkdir()
+    script = (
+        "#!/bin/sh\n"
+        "pip3 install --break-system-packages \\\n"
+        "    pytest==8.4.1 \\\n"
+        "    pytest-json-ctrf==0.3.5\n"
+        "pytest -q\n"
+    )
+    (dataset / "tests" / "test.sh").write_text(script)
+    manifest_path = tmp_path / "verifier-manifest.yaml"
+    manifest_path.write_text(
+        "dataset:\n  path: dataset\n"
+        "harnesses:\n  - {name: codex, agent: fugue.agents:FugueCodex}\n"
+        "tasks:\n  - id: task-one\n    metadata: {architecture: arm64}\n"
+        "    verifier_runtime:\n"
+        "      python_packages: [pytest==8.4.1, pytest-json-ctrf==0.3.5]\n"
+        f"      test_script_sha256: {task_runtime.hashlib.sha256(script.encode()).hexdigest()}\n"
+    )
+    return load_manifest(manifest_path), dataset
+
+
 def test_task_preparation_locks_image_and_disables_trial_network(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -73,6 +96,55 @@ def test_task_preparation_locks_image_and_disables_trial_network(
         "--platform",
         "linux/arm64",
     ]
+
+
+def test_task_preparation_locks_verifier_dependencies_before_the_trial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest, source = _verifier_fixture(tmp_path)
+    build_dockerfile = ""
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs):
+        nonlocal build_dockerfile
+        commands.append(command)
+        if command[1] == "build":
+            build_dockerfile = (Path(command[-1]) / "Dockerfile").read_text()
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Id": "sha256:" + "a" * 64,
+                            "Architecture": "arm64",
+                            "Os": "linux",
+                        }
+                    ]
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(task_runtime.shutil, "which", lambda name: "/docker")
+    monkeypatch.setattr(task_runtime, "_resolve_task_source", lambda *args: source)
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+
+    lock = task_runtime.prepare_task_runtime(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+
+    assert "pytest==8.4.1 pytest-json-ctrf==0.3.5" in build_dockerfile
+    assert any(command[1:4] == ["run", "--rm", "--network"] for command in commands)
+    prepared = Path(lock["dataset_path"]) / "task-one" / "tests" / "test.sh"
+    prepared_source = prepared.read_text()
+    assert "pip3 install" not in prepared_source
+    assert "Setup locked these verifier dependencies" in prepared_source
+    assert lock["verifier_runtime"] == {
+        "python_packages": ["pytest==8.4.1", "pytest-json-ctrf==0.3.5"],
+        "test_script_sha256": manifest.tasks[0].verifier_runtime.test_script_sha256,
+    }
 
 
 def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:

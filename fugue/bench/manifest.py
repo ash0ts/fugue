@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,31 @@ class HarnessSpec:
 
 
 @dataclass(frozen=True)
+class VerifierRuntimeSpec:
+    python_packages: tuple[str, ...]
+    test_script_sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.python_packages:
+            raise ValueError("verifier runtime requires at least one Python package")
+        for package in self.python_packages:
+            if not re.fullmatch(r"[A-Za-z0-9_.-]+==[A-Za-z0-9_.+!-]+", package):
+                raise ValueError(
+                    "verifier runtime Python packages must use exact name==version pins"
+                )
+        if len(self.test_script_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in self.test_script_sha256
+        ):
+            raise ValueError("verifier runtime test script requires a lowercase SHA-256")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "python_packages": list(self.python_packages),
+            "test_script_sha256": self.test_script_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class TaskSpec:
     id: str
     repo: str | None = None
@@ -116,6 +142,7 @@ class TaskSpec:
     artifacts: tuple[Any, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     repository: RepositorySpec | FixtureRepositorySpec | None = None
+    verifier_runtime: VerifierRuntimeSpec | None = None
 
     @property
     def repo_slug(self) -> str:
@@ -253,6 +280,32 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
                     else None
                 ),
             )
+    verifier_runtime_raw = item.get("verifier_runtime")
+    verifier_runtime = None
+    if verifier_runtime_raw is not None:
+        if not isinstance(verifier_runtime_raw, dict):
+            raise ValueError(f"{manifest_path}: verifier_runtime must be a mapping")
+        unknown = sorted(
+            set(verifier_runtime_raw) - {"python_packages", "test_script_sha256"}
+        )
+        if unknown:
+            raise ValueError(
+                f"{manifest_path}: unknown verifier_runtime field(s): "
+                + ", ".join(unknown)
+            )
+        packages = verifier_runtime_raw.get("python_packages")
+        if not isinstance(packages, list) or not all(
+            isinstance(package, str) for package in packages
+        ):
+            raise ValueError(
+                f"{manifest_path}: verifier_runtime.python_packages must be a list"
+            )
+        verifier_runtime = VerifierRuntimeSpec(
+            python_packages=tuple(packages),
+            test_script_sha256=str(
+                verifier_runtime_raw.get("test_script_sha256") or ""
+            ),
+        )
     return TaskSpec(
         id=str(item["id"]),
         repo=repository.slug if repository else item.get("repo"),
@@ -268,6 +321,7 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
         artifacts=tuple(artifacts),
         metadata=dict(item.get("metadata") or {}),
         repository=repository,
+        verifier_runtime=verifier_runtime,
     )
 
 

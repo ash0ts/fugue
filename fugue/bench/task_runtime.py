@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from filelock import FileLock
 from fugue.bench.manifest import BenchmarkManifest, TaskSpec
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 2
+TASK_RUNTIME_CONTRACT_VERSION = 3
 
 
 def prepare_task_runtime(
@@ -44,6 +46,9 @@ def prepare_task_runtime(
                 "task_id": task.id,
                 "architecture": architecture,
                 "source_sha256": source_digest,
+                "verifier_runtime": (
+                    task.verifier_runtime.to_dict() if task.verifier_runtime else None
+                ),
                 "trial_policy": {
                     "network_mode": "no-network",
                     "allowed_hosts": [],
@@ -58,34 +63,40 @@ def prepare_task_runtime(
                 return existing
 
         image = f"fugue-task-{_slug(task.id)}-{architecture}:{recipe_sha256[:12]}"
-        subprocess.run(
-            [
-                "docker",
-                "build",
-                "--provenance=false",
-                "--platform",
-                f"linux/{architecture}",
-                "--pull",
-                "-t",
-                image,
-                (source / "environment").as_posix(),
-            ],
-            cwd=repo_root,
-            check=True,
-            timeout=3600,
-        )
+        with tempfile.TemporaryDirectory(prefix="fugue-task-build-") as temporary_build:
+            build = Path(temporary_build) / "environment"
+            shutil.copytree(source / "environment", build, symlinks=True)
+            _extend_task_image(build / "Dockerfile", task)
+            subprocess.run(
+                [
+                    "docker",
+                    "build",
+                    "--provenance=false",
+                    "--platform",
+                    f"linux/{architecture}",
+                    "--pull",
+                    "-t",
+                    image,
+                    build.as_posix(),
+                ],
+                cwd=repo_root,
+                check=True,
+                timeout=3600,
+            )
         inspected = _inspect_image(image)
         if inspected.get("Architecture") != architecture:
             raise RuntimeError(
                 f"task {task.id} built for {inspected.get('Architecture') or 'unknown'}, "
                 f"expected {architecture}"
             )
+        _verify_task_image(image, task, architecture, repo_root)
 
         dataset_root = root / f"dataset-{recipe_sha256[:16]}"
         temporary = root / f".dataset-{uuid.uuid4().hex}.tmp"
         task_root = temporary / task.id
         shutil.copytree(source, task_root, symlinks=True)
         _reject_escaping_symlinks(task_root)
+        _remove_verifier_install(task_root, task)
         task_toml = task_root / "task.toml"
         value = toml.loads(task_toml.read_text())
         environment = value.setdefault("environment", {})
@@ -94,6 +105,7 @@ def prepare_task_runtime(
         environment["network_mode"] = "no-network"
         environment["allowed_hosts"] = []
         task_toml.write_text(toml.dumps(value))
+        prepared_source_sha256 = _tree_digest(task_root)
         if dataset_root.exists():
             shutil.rmtree(dataset_root)
         os.replace(temporary, dataset_root)
@@ -105,11 +117,15 @@ def prepare_task_runtime(
             "task_id": task.id,
             "architecture": architecture,
             "source_sha256": source_digest,
+            "prepared_source_sha256": prepared_source_sha256,
             "recipe_sha256": recipe_sha256,
             "image": image,
             "image_id": str(inspected["Id"]),
             "os": str(inspected.get("Os") or "linux"),
             "dataset_path": dataset_root.as_posix(),
+            "verifier_runtime": (
+                task.verifier_runtime.to_dict() if task.verifier_runtime else None
+            ),
         }
         _atomic_json(root / f"runtime-lock-{architecture}.json", lock)
         return lock
@@ -134,6 +150,9 @@ def read_task_runtime_lock(
         "dataset": manifest.dataset.harbor_ref,
         "task_id": task.id,
         "architecture": architecture,
+        "verifier_runtime": (
+            task.verifier_runtime.to_dict() if task.verifier_runtime else None
+        ),
     }
     if not isinstance(value, dict) or any(
         value.get(key) != item for key, item in required.items()
@@ -170,6 +189,104 @@ def task_architecture(task: TaskSpec) -> str:
             f"task {task.id} has unsupported architecture {architecture!r}"
         )
     return architecture
+
+
+def _extend_task_image(dockerfile: Path, task: TaskSpec) -> None:
+    runtime = task.verifier_runtime
+    if runtime is None:
+        return
+    source = dockerfile.read_text()
+    packages = " ".join(shlex.quote(package) for package in runtime.python_packages)
+    dockerfile.write_text(
+        source.rstrip()
+        + "\n\n# The verifier runs offline; setup owns this dependency layer.\n"
+        + "RUN pip3 install --break-system-packages --no-cache-dir "
+        + packages
+        + "\n"
+    )
+
+
+def _verify_task_image(
+    image: str,
+    task: TaskSpec,
+    architecture: str,
+    repo_root: Path,
+) -> None:
+    runtime = task.verifier_runtime
+    if runtime is None:
+        return
+    expected = {
+        package.rsplit("==", 1)[0]: package.rsplit("==", 1)[1]
+        for package in runtime.python_packages
+    }
+    script = (
+        "import importlib.metadata,json,sys;"
+        f"expected=json.loads({json.dumps(json.dumps(expected))});"
+        "actual={name:importlib.metadata.version(name) for name in expected};"
+        "sys.exit(0 if actual==expected else 1)"
+    )
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            f"linux/{architecture}",
+            image,
+            "python3",
+            "-c",
+            script,
+        ],
+        cwd=repo_root,
+        check=True,
+        timeout=120,
+    )
+
+
+def _remove_verifier_install(task_root: Path, task: TaskSpec) -> None:
+    runtime = task.verifier_runtime
+    if runtime is None:
+        return
+    script = task_root / "tests" / "test.sh"
+    if not script.is_file():
+        raise RuntimeError(f"task {task.id} has no tests/test.sh to lock")
+    source = script.read_text()
+    actual = hashlib.sha256(source.encode()).hexdigest()
+    if actual != runtime.test_script_sha256:
+        raise RuntimeError(
+            f"task {task.id} verifier script changed: expected "
+            f"{runtime.test_script_sha256}, got {actual}"
+        )
+    lines = source.splitlines(keepends=True)
+    matches: list[tuple[int, int, list[str]]] = []
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith(("pip install ", "pip3 install ")):
+            continue
+        end = index + 1
+        while end < len(lines) and lines[end - 1].rstrip().endswith("\\"):
+            end += 1
+        command = "".join(lines[index:end]).replace("\\\n", " ")
+        tokens = shlex.split(command)
+        packages = [token for token in tokens[2:] if not token.startswith("-")]
+        matches.append((index, end, packages))
+    expected = list(runtime.python_packages)
+    selected = [match for match in matches if match[2] == expected]
+    if len(selected) != 1:
+        raise RuntimeError(
+            f"task {task.id} verifier must contain one exact locked install block"
+        )
+    start, end, _ = selected[0]
+    lines[start:end] = [
+        "# Setup locked these verifier dependencies into the task image.\n"
+    ]
+    rewritten = "".join(lines)
+    if "pip install" in rewritten or "pip3 install" in rewritten:
+        raise RuntimeError(
+            f"task {task.id} verifier still contains a trial-time Python install"
+        )
+    script.write_text(rewritten)
 
 
 def _resolve_task_source(
