@@ -7,6 +7,10 @@ artifacts/
 reports/
 .fugue/
 
+# The export tests intentionally version a minimal synthetic Harbor job.
+!tests/fixtures/export/jobs/
+!tests/fixtures/export/jobs/**
+
 # Python
 __pycache__/
 *.pyc

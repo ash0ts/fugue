@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -211,6 +212,7 @@ def _build_jobs(
                     job_name=job_name,
                     env=env,
                     write=write_configs,
+                    reserved_ports=_reserved_context_ports(binding),
                 )
                 if skill_setup_reason:
                     applicable = False
@@ -423,6 +425,21 @@ def _job_config(
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in integration_binding.compose_files],
         ]
+    selected_mcp_servers = [
+        *(variant.mcp_servers or experiment.mcp_servers),
+        *context_binding.mcp_servers,
+        *integration_binding.mcp_servers,
+    ]
+    if _needs_mcp_proxy(selected_mcp_servers):
+        mounts = list(environment.get("mounts", []))
+        if not any(
+            isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
+            for item in mounts
+        ):
+            mounts.append(
+                _read_only_mount(repo_root / "fugue", "/fugue-src/fugue")
+            )
+        environment["mounts"] = mounts
     artifacts = _dedupe_values(
         [
             *(variant.artifacts or experiment.artifacts),
@@ -553,6 +570,24 @@ def _agent_config(
     integration_binding: IntegrationBinding,
     repo_root: Path,
 ) -> dict[str, Any]:
+    selected_mcp_servers = [
+        *(variant.mcp_servers or experiment.mcp_servers),
+        *binding.mcp_servers,
+        *integration_binding.mcp_servers,
+    ]
+    agent_env = _merge_dicts(
+        _merge_dicts(
+            _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
+        ),
+        integration_binding.env,
+    )
+    if _needs_mcp_proxy(selected_mcp_servers):
+        current_pythonpath = str(agent_env.get("PYTHONPATH") or "").strip()
+        agent_env["PYTHONPATH"] = (
+            f"/fugue-src:{current_pythonpath}"
+            if current_pythonpath
+            else "/fugue-src"
+        )
     config: dict[str, Any] = {
         "model_name": route.display_model,
         "include_logs": ["**/*"],
@@ -560,19 +595,8 @@ def _agent_config(
             _relative_or_absolute(item.path, repo_root) for item in resolved_skills
         ],
         "kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
-        "env": _merge_dicts(
-            _merge_dicts(
-                _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
-            ),
-            integration_binding.env,
-        ),
-        "mcp_servers": _instrument_mcp_servers(
-            [
-                *(variant.mcp_servers or experiment.mcp_servers),
-                *binding.mcp_servers,
-                *integration_binding.mcp_servers,
-            ]
-        ),
+        "env": agent_env,
+        "mcp_servers": _instrument_mcp_servers(selected_mcp_servers),
         "extra_allowed_hosts": list(integration_binding.allowed_hosts),
     }
     if _looks_like_import_path(harness.agent):
@@ -823,11 +847,6 @@ def _bind_fugue_context_runtime(
     compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
     compose = {
         "services": {
-            "main": {
-                "depends_on": {
-                    CONTEXT_RUNTIME_SERVICE: {"condition": "service_healthy"}
-                }
-            },
             CONTEXT_RUNTIME_SERVICE: {
                 "image": CONTEXT_RUNTIME_IMAGE,
                 "build": {
@@ -866,6 +885,7 @@ def _bind_fugue_context_runtime(
                     "FUGUE_CONTEXT_EVENTS_PATH=/tmp/fugue-context-events.jsonl",
                 ],
                 "extra_hosts": ["host.docker.internal:host-gateway"],
+                "network_mode": "service:main",
                 "volumes": [
                     {
                         "type": "bind",
@@ -898,7 +918,7 @@ def _bind_fugue_context_runtime(
         {
             "name": str(item.get("name") or CONTEXT_RUNTIME_SERVICE),
             "transport": "streamable-http",
-            "url": f"http://{CONTEXT_RUNTIME_SERVICE}:8000/mcp",
+            "url": "http://127.0.0.1:8000/mcp",
         }
         if _is_fugue_context_server(item)
         else item
@@ -932,6 +952,15 @@ def _bind_fugue_context_runtime(
         mcp_servers=native_servers,
         compose_files=(*binding.compose_files, compose_path),
     )
+
+
+def _reserved_context_ports(binding: ContextBinding) -> dict[int, str]:
+    result: dict[int, str] = {}
+    for server in binding.mcp_servers:
+        parsed = urlparse(str(server.get("url") or ""))
+        if parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port:
+            result[parsed.port] = str(server.get("name") or "context runtime")
+    return result
 
 
 def _is_fugue_context_server(server: dict[str, Any]) -> bool:
@@ -1137,9 +1166,18 @@ def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]
             proxy_args.extend(["--cwd", str(cwd)])
         proxy_args.extend(["--", *upstream])
         server["command"] = "python"
-        server["args"] = ["/fugue-src/fugue/mcp_proxy.py", *proxy_args]
+        server["args"] = ["-m", "fugue.mcp_proxy", *proxy_args]
         servers.append(server)
     return servers
+
+
+def _needs_mcp_proxy(values: list[dict[str, Any]]) -> bool:
+    return any(
+        str(value.get("transport") or ("stdio" if value.get("command") else "sse"))
+        == "stdio"
+        and bool(value.get("command"))
+        for value in values
+    )
 
 
 def _content_hashes(

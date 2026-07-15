@@ -29,6 +29,7 @@ MAX_SKILL_FILE_BYTES = 5 * 1024 * 1024
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _LFS_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
 _RASTER_MAGIC = (
     b"\x89PNG\r\n\x1a\n",
@@ -245,6 +246,8 @@ def load_skill_source(skill_id: str, repo_root: Path) -> SkillSourceSpec:
     )
     if source.path is None:
         raise ValueError(f"{path}: remote skill sources require an explicit path")
+    if not _SHA_RE.fullmatch(source.ref):
+        raise ValueError(f"{path}: remote skill sources require a full commit SHA")
     return SkillSourceSpec(id=skill_id, source=source)
 
 
@@ -303,6 +306,8 @@ def _prepare_skill_source(
     ).strip()
     if not _SHA_RE.fullmatch(commit):
         raise ValueError(f"could not resolve {canonical}@{source.ref} to a commit")
+    if commit != source.ref:
+        raise ValueError(f"{canonical}@{source.ref} does not identify a commit directly")
     inspection, blobs = _inspect_skill_tree(spec, bare, commit)
     _materialize_skill(repo_root, inspection, blobs)
     review_path = _review_path(repo_root, skill_id)
@@ -432,19 +437,72 @@ def load_skill_lock(repo_root: Path) -> dict[str, SkillLockEntry]:
         raise ValueError(f"{path}: skills must be a mapping")
     result: dict[str, SkillLockEntry] = {}
     for skill_id, item in values.items():
+        skill_id = str(skill_id)
+        _validate_id(skill_id, "skill lock id")
         if not isinstance(item, dict):
             raise ValueError(f"{path}: lock entry {skill_id} must be a mapping")
-        result[str(skill_id)] = SkillLockEntry(
-            id=str(item.get("id") or skill_id),
-            source_url=str(item["source_url"]),
-            requested_ref=str(item["requested_ref"]),
-            resolved_commit=str(item["resolved_commit"]),
-            source_path=str(item["source_path"]),
-            declared_name=str(item["declared_name"]),
-            digest=str(item["digest"]),
-            inventory_digest=str(item["inventory_digest"]),
-            total_files=int(item["total_files"]),
-            total_bytes=int(item["total_bytes"]),
+        unknown = sorted(
+            set(item)
+            - {
+                "id",
+                "source_url",
+                "requested_ref",
+                "resolved_commit",
+                "source_path",
+                "declared_name",
+                "digest",
+                "inventory_digest",
+                "total_files",
+                "total_bytes",
+                "license_status",
+                "findings",
+                "approved_findings",
+                "policy_version",
+            }
+        )
+        if unknown:
+            raise ValueError(
+                f"{path}: unknown lock entry field(s): {', '.join(unknown)}"
+            )
+        entry_id = str(item.get("id") or skill_id)
+        if entry_id != skill_id:
+            raise ValueError(
+                f"{path}: lock entry id {entry_id!r} does not match {skill_id!r}"
+            )
+        source_url = str(item["source_url"])
+        if canonical_git_url(source_url) != source_url:
+            raise ValueError(f"{path}: lock entry {skill_id} source URL is not canonical")
+        requested_ref = str(item["requested_ref"])
+        resolved_commit = str(item["resolved_commit"])
+        if not _SHA_RE.fullmatch(requested_ref) or resolved_commit != requested_ref:
+            raise ValueError(
+                f"{path}: lock entry {skill_id} must identify one pinned commit"
+            )
+        source_path = validate_relative_source_path(str(item["source_path"]))
+        declared_name = _validate_id(str(item["declared_name"]), "skill name")
+        digest = str(item["digest"])
+        inventory_digest = str(item["inventory_digest"])
+        if not _DIGEST_RE.fullmatch(digest) or not _DIGEST_RE.fullmatch(
+            inventory_digest
+        ):
+            raise ValueError(f"{path}: lock entry {skill_id} has an invalid digest")
+        total_files = _bounded_lock_integer(
+            item["total_files"], maximum=MAX_SKILL_FILES, field="total_files", path=path
+        )
+        total_bytes = _bounded_lock_integer(
+            item["total_bytes"], maximum=MAX_SKILL_BYTES, field="total_bytes", path=path
+        )
+        result[skill_id] = SkillLockEntry(
+            id=entry_id,
+            source_url=source_url,
+            requested_ref=requested_ref,
+            resolved_commit=resolved_commit,
+            source_path=source_path,
+            declared_name=declared_name,
+            digest=digest,
+            inventory_digest=inventory_digest,
+            total_files=total_files,
+            total_bytes=total_bytes,
             license_status=str(item["license_status"]),
             findings=tuple(dict(value) for value in item.get("findings") or []),
             approved_findings=tuple(str(value) for value in item.get("approved_findings") or []),
@@ -533,7 +591,11 @@ def digest_local_skill(path: Path, *, fallback_name: str) -> tuple[str, str]:
     hasher = hashlib.sha256()
     count = 0
     total = 0
-    for file_path in sorted(path.rglob("*")):
+    file_paths = sorted(
+        path.rglob("*"),
+        key=lambda file_path: file_path.relative_to(path).as_posix(),
+    )
+    for file_path in file_paths:
         if file_path.is_symlink():
             raise ValueError(f"skill bundles may not contain symlinks: {file_path}")
         if not file_path.is_file():
@@ -551,7 +613,18 @@ def digest_local_skill(path: Path, *, fallback_name: str) -> tuple[str, str]:
 
 
 def skill_cache_path(repo_root: Path, digest: str, declared_name: str) -> Path:
+    if not _DIGEST_RE.fullmatch(digest):
+        raise ValueError(f"invalid skill digest: {digest!r}")
+    _validate_id(declared_name, "skill name")
     return repo_root / SKILL_CACHE_ROOT / digest.removeprefix("sha256:") / declared_name
+
+
+def _bounded_lock_integer(
+    value: Any, *, maximum: int, field: str, path: Path
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+        raise ValueError(f"{path}: lock entry {field} is outside the safety limit")
+    return value
 
 
 def _inspect_skill_tree(
@@ -582,8 +655,6 @@ def _inspect_skill_tree(
     files: list[SourceFile] = []
     blobs: dict[str, bytes] = {}
     total = 0
-    bundle_hash = hashlib.sha256()
-    inventory_hash = hashlib.sha256()
     text_parts: list[tuple[str, str]] = []
     prefix = source_path.rstrip("/") + "/"
     for record in records:
@@ -616,8 +687,13 @@ def _inspect_skill_tree(
         digest = hashlib.sha256(content).hexdigest()
         files.append(SourceFile(path=relative, mode=mode, size=size, sha256=digest))
         blobs[relative] = content
-        _update_bundle_hash(bundle_hash, relative, mode, content)
-        inventory_hash.update(f"{relative}\0{mode}\0{size}\0{digest}\0".encode())
+    bundle_hash = hashlib.sha256()
+    inventory_hash = hashlib.sha256()
+    for item in sorted(files, key=lambda value: value.path):
+        _update_bundle_hash(bundle_hash, item.path, item.mode, blobs[item.path])
+        inventory_hash.update(
+            f"{item.path}\0{item.mode}\0{item.size}\0{item.sha256}\0".encode()
+        )
     skill_content = blobs.get("SKILL.md")
     if skill_content is None:
         raise ValueError(f"remote skill path lacks SKILL.md: {source_path}")
