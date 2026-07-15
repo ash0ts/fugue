@@ -589,6 +589,7 @@ def _runtime_versions(repo_root: Path) -> dict[str, str]:
 
 
 def _write_assets(candidate: dict[str, Any], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
     for kind in ("prompt", "skill"):
         for item_id, asset in (candidate.get(f"{kind}_assets") or {}).items():
             path = (

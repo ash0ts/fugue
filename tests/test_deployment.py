@@ -12,6 +12,7 @@ from test_operator import make_operator_repo
 from fugue.bench import deployment
 from fugue.bench.deployment import (
     _deployment_candidate,
+    _write_assets,
     candidate_packageability,
     package_candidate,
 )
@@ -499,6 +500,14 @@ def test_context_preparation_uses_only_the_tracked_workspace(
         allow_failed=True,
         build=False,
     )
+
+
+def test_packaging_materializes_an_empty_asset_root(tmp_path: Path) -> None:
+    destination = tmp_path / "assets"
+
+    _write_assets({"prompt_assets": {}, "skill_assets": {}}, destination)
+
+    assert destination.is_dir()
 
 
 def test_packaging_rejects_mcp_without_a_declared_serving_contract() -> None:
