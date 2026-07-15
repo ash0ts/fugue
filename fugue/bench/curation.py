@@ -21,6 +21,7 @@ from fugue.bench.context import (
     load_context_system,
     preflight_context,
 )
+from fugue.bench.context_contracts import resolve_context_capabilities
 from fugue.bench.library import experiment_from_yaml
 from fugue.bench.sources import (
     SKILL_SOURCE_ROOT,
@@ -546,10 +547,21 @@ async def validate_context_proposal(
         for workload in experiment.workloads
         if spec.id in workload.systems
     ]
+    matching_variants = [
+        variant for variant in experiment.variants if variant.context.system_id == spec.id
+    ]
     matching_workloads = [
         workload
         for workload in assigned_workloads
-        if set(workload.required_capabilities) <= spec.capabilities
+        if any(
+            resolve_context_capabilities(
+                spec,
+                delivery=variant.context.delivery,
+                runner=workload.runner,
+                additional=workload.required_capabilities,
+            ).applicable
+            for variant in matching_variants
+        )
     ]
     if experiment.id != candidate.target_experiment:
         errors.append("context experiment does not match candidate evidence")
@@ -559,9 +571,6 @@ async def validate_context_proposal(
         errors.append("context proposal is not assigned to an applicable workload")
     if len(matching_workloads) != len(assigned_workloads):
         errors.append("context proposal is assigned to an incompatible workload")
-    matching_variants = [
-        variant for variant in experiment.variants if variant.context.system_id == spec.id
-    ]
     if not matching_variants:
         errors.append("context proposal requires an experiment variant")
     elif any(variant.context.delivery not in spec.deliveries for variant in matching_variants):

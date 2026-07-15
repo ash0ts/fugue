@@ -41,7 +41,7 @@ candidate:
   model: openai/gpt-5
   prompt_id: fugue-maintainer
   skills: [fugue-maintainer]
-  context: {system_id: agentsmd}
+  context: {system_id: agentsmd, delivery: portable}
 evidence:
   suite_id: fugue-maintainer-v1
   suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -226,6 +226,49 @@ id: bad-transport
 variants:
   - id: rag
     context: {system_id: rag-bm25, delivery: magic}
+""",
+            tmp_path,
+        )
+
+
+def test_non_none_context_requires_explicit_delivery(tmp_path):
+    with pytest.raises(ValueError, match="requires an explicit context delivery"):
+        save_experiment(
+            "implicit-delivery",
+            """
+id: implicit-delivery
+variants:
+  - id: rag
+    context: {system_id: rag-bm25}
+""",
+            tmp_path,
+        )
+
+
+def test_string_context_cannot_hide_non_none_delivery(tmp_path):
+    with pytest.raises(ValueError, match="mapping with explicit delivery"):
+        save_experiment(
+            "string-context",
+            """
+id: string-context
+variants:
+  - id: rag
+    context: rag-bm25
+""",
+            tmp_path,
+        )
+
+
+def test_unknown_required_context_capability_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="unknown context capabilities: remember"):
+        save_experiment(
+            "bad-capability",
+            """
+id: bad-capability
+workloads:
+  - id: memory
+    runner: retrieval
+    required_capabilities: [remember]
 """,
             tmp_path,
         )

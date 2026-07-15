@@ -30,6 +30,7 @@ variants:
       - repository-orientation
     context:
       system_id: agentsmd
+      delivery: portable
 n_attempts: 1
 n_concurrent: 2
 jobs_dir: jobs/pilot

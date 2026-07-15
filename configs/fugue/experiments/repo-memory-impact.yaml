@@ -53,20 +53,20 @@ presets:
       continuity: {n_tasks: 2}
 variants:
   - {id: none, label: No added context, context: {system_id: none}}
-  - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd}}
-  - {id: openwiki, label: OpenWiki, context: {system_id: openwiki}}
-  - {id: gitnexus, label: GitNexus, context: {system_id: gitnexus}}
-  - {id: codegraph, label: CodeGraph, context: {system_id: codegraph}}
-  - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap}}
-  - {id: semble, label: Semble, context: {system_id: semble}}
-  - {id: project-rag, label: Project RAG, context: {system_id: project-rag}}
+  - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd, delivery: portable}}
+  - {id: openwiki, label: OpenWiki, context: {system_id: openwiki, delivery: portable}}
+  - {id: gitnexus, label: GitNexus, context: {system_id: gitnexus, delivery: native_mcp}}
+  - {id: codegraph, label: CodeGraph, context: {system_id: codegraph, delivery: native_mcp}}
+  - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap, delivery: portable}}
+  - {id: semble, label: Semble, context: {system_id: semble, delivery: native_mcp}}
+  - {id: project-rag, label: Project RAG, context: {system_id: project-rag, delivery: native_mcp}}
   - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25, delivery: portable}}
   - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense, delivery: portable}}
   - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid, delivery: portable}}
-  - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log}}
-  - {id: latmd, label: lat.md, context: {system_id: latmd}}
-  - {id: mem0, label: Mem0, context: {system_id: mem0}}
-  - {id: graphiti, label: Graphiti, context: {system_id: graphiti}}
+  - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log, delivery: portable}}
+  - {id: latmd, label: lat.md, context: {system_id: latmd, delivery: native_mcp}}
+  - {id: mem0, label: Mem0, context: {system_id: mem0, delivery: portable}}
+  - {id: graphiti, label: Graphiti, context: {system_id: graphiti, delivery: portable}}
 n_attempts: 1
 n_concurrent: 2
 jobs_dir: jobs/repo-memory-impact

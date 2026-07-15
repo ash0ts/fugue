@@ -8,6 +8,13 @@ from typing import Any, Literal
 
 import yaml
 
+from fugue.bench.context_contracts import (
+    ContextCapability,
+    ContextDelivery,
+    WorkloadRunner,
+    context_capabilities,
+)
+
 CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
 SKILLS_DIR = "skills"
@@ -46,7 +53,7 @@ class Skill:
 @dataclass(frozen=True)
 class ContextSelection:
     system_id: str = "none"
-    delivery: Literal["portable", "native_mcp"] = "portable"
+    delivery: ContextDelivery = "portable"
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -216,11 +223,11 @@ def scorer_reference(scorer: ScorerSelection) -> str:
 @dataclass(frozen=True)
 class WorkloadSpec:
     id: str
-    runner: str
+    runner: WorkloadRunner
     manifest: Path | None = None
     dataset: str | None = None
     systems: list[str] = field(default_factory=list)
-    required_capabilities: list[str] = field(default_factory=list)
+    required_capabilities: list[ContextCapability] = field(default_factory=list)
     n_tasks: int | None = None
     n_attempts: int | None = None
     artifacts: list[Any] = field(default_factory=list)
@@ -666,11 +673,19 @@ def _context_selection(raw: Any) -> ContextSelection:
         return ContextSelection()
     if isinstance(raw, str):
         system_id = validate_id(raw, kind="context system id")
-        return ContextSelection(system_id=system_id)
+        if system_id != "none":
+            raise ValueError(
+                "non-none variant context must be a mapping with explicit delivery"
+            )
+        return ContextSelection()
     if not isinstance(raw, dict):
         raise ValueError("variant context must be a string or mapping")
     _reject_unknown(raw, ContextSelection, kind="variant context")
     system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
+    if system_id != "none" and not str(raw.get("delivery") or "").strip():
+        raise ValueError(
+            f"context system {system_id} requires an explicit context delivery"
+        )
     delivery = str(raw.get("delivery") or "portable")
     if delivery not in {"portable", "native_mcp"}:
         raise ValueError(f"unknown context delivery: {delivery}")
@@ -720,6 +735,12 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
         runner = str(value.get("runner") or "harbor")
         if runner not in {"harbor", "retrieval", "sequence"}:
             raise ValueError(f"unknown workload runner: {runner}")
+        required_capabilities = sorted(
+            context_capabilities(
+                _string_list(value.get("required_capabilities")),
+                kind=f"workload {workload_id}",
+            )
+        )
         workloads.append(
             WorkloadSpec(
                 id=workload_id,
@@ -727,7 +748,7 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
                 manifest=Path(str(value["manifest"])) if value.get("manifest") else None,
                 dataset=_optional_str(value.get("dataset")),
                 systems=_string_list(value.get("systems")),
-                required_capabilities=_string_list(value.get("required_capabilities")),
+                required_capabilities=required_capabilities,
                 n_tasks=_positive_int(
                     value.get("n_tasks"), kind=f"workload {workload_id} n_tasks"
                 ),

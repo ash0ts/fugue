@@ -33,6 +33,7 @@ from fugue.bench.context import (
 from fugue.bench.context import (
     prepare_context as build_context,
 )
+from fugue.bench.context_contracts import resolve_context_capabilities
 from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
 from fugue.bench.execution import (
@@ -1185,7 +1186,6 @@ class OperatorService:
             or workload.n_tasks
             or preset.n_tasks
         )
-        required = set(workload.required_capabilities or [workload.runner])
         runtime = ContextRuntime(
             repo_root=self.repo_root,
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
@@ -1202,21 +1202,20 @@ class OperatorService:
                 ),
                 "portable",
             )
-            missing = sorted(required - set(spec.capabilities))
             license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
             license_blocked = spec.requires_license_approval and env.get(
                 license_env, ""
             ).lower() not in {"1", "true", "yes"}
-            skip_reason = None
-            if delivery not in spec.deliveries:
-                skip_reason = (
-                    f"context system {system_id} does not support {delivery} delivery"
-                )
-            elif missing:
-                skip_reason = f"missing context capabilities: {', '.join(missing)}"
-            elif license_blocked:
+            resolution = resolve_context_capabilities(
+                spec,
+                delivery=delivery,
+                runner=workload.runner,
+                additional=workload.required_capabilities,
+            )
+            skip_reason = resolution.reason
+            if skip_reason is None and license_blocked:
                 skip_reason = f"license approval required via {license_env}"
-            else:
+            elif skip_reason is None:
                 failed = [
                     check
                     for check in asyncio.run(
@@ -2301,11 +2300,22 @@ def _preparation_targets(
             )
             or []
         )
-        required = set(workload.required_capabilities)
         system_ids = [
             system_id
             for system_id in system_ids
-            if required <= set(get_context_system(system_id, repo_root).capabilities)
+            if resolve_context_capabilities(
+                get_context_system(system_id, repo_root),
+                delivery=next(
+                    (
+                        variant.context.delivery
+                        for variant in experiment.variants
+                        if variant.context.system_id == system_id
+                    ),
+                    "portable",
+                ),
+                runner=workload.runner,
+                additional=workload.required_capabilities,
+            ).applicable
         ]
         limit = (
             preset_workload_int(preset, workload.id, "n_tasks")

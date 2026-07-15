@@ -33,6 +33,11 @@ from fugue.bench.context import (
     preflight_context,
     run_async,
 )
+from fugue.bench.context_contracts import (
+    ContextCapability,
+    ContextDelivery,
+    resolve_context_capabilities,
+)
 from fugue.bench.evaluations import load_cases, scorer_bundle
 from fugue.bench.integrations import (
     IntegrationBinding,
@@ -142,7 +147,7 @@ def _build_jobs(
     write_configs: bool,
     workload_id: str = "harbor",
     preset_id: str | None = None,
-    required_capabilities: list[str] | None = None,
+    required_capabilities: list[ContextCapability] | None = None,
     workload_artifacts: list[Any] | None = None,
     scorer_refs: list[str] | None = None,
     asset_overlay: dict[str, str] | None = None,
@@ -1143,17 +1148,18 @@ def _snapshot_for_task(
 
 def _applicability(
     spec: ContextSystemSpec,
-    required_capabilities: list[str],
+    required_capabilities: list[ContextCapability],
     runtime: ContextRuntime,
-    delivery: str,
+    delivery: ContextDelivery,
 ) -> tuple[bool, str | None]:
-    if spec.support in {"not_applicable", "disabled"}:
-        return False, f"context system {spec.id} is {spec.support}"
-    if delivery not in spec.deliveries:
-        return False, f"context system {spec.id} does not support {delivery} delivery"
-    missing = sorted(set(required_capabilities) - set(spec.capabilities))
-    if missing:
-        return False, f"missing context capabilities: {', '.join(missing)}"
+    resolution = resolve_context_capabilities(
+        spec,
+        delivery=delivery,
+        runner="harbor",
+        additional=required_capabilities,
+    )
+    if not resolution.applicable:
+        return False, resolution.reason
     checks = run_async(preflight_context(spec, runtime))
     failed = [
         check

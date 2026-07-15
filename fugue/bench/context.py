@@ -26,6 +26,13 @@ from typing import Any, Literal, Protocol
 import yaml
 from filelock import FileLock
 
+from fugue.bench.context_contracts import (
+    CONTEXT_CAPABILITIES,
+    CONTEXT_DELIVERIES,
+    ContextCapability,
+    ContextDelivery,
+    SupportLevel,
+)
 from fugue.bench.library import validate_id
 
 CONTEXT_SYSTEMS_DIR = Path("configs") / "fugue" / "context-systems"
@@ -33,11 +40,6 @@ DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v2"
 CONTEXT_MANIFEST = "context-manifest.json"
 CONTEXT_INDEX = "index.json"
 
-ContextCapability = Literal[
-    "prepare", "retrieve", "bind", "ingest", "sequence", "serve"
-]
-ContextDelivery = Literal["portable", "native_mcp"]
-SupportLevel = Literal["supported", "experimental", "not_applicable", "disabled"]
 PreflightPhase = Literal["all", "host", "runtime"]
 
 
@@ -1140,12 +1142,11 @@ def load_context_system(path: Path) -> ContextSystemSpec:
         raise ValueError(f"{path}: unknown fields: {', '.join(unknown)}")
     system_id = validate_id(raw.get("id") or path.stem, kind="context system id")
     capabilities = frozenset(str(item) for item in _list(raw.get("capabilities")))
-    allowed = {"prepare", "retrieve", "bind", "ingest", "sequence", "serve"}
-    invalid = sorted(capabilities - allowed)
+    invalid = sorted(capabilities - CONTEXT_CAPABILITIES)
     if invalid:
         raise ValueError(f"{path}: unknown capabilities: {', '.join(invalid)}")
     deliveries = frozenset(str(item) for item in _list(raw.get("deliveries")))
-    invalid_deliveries = sorted(deliveries - {"portable", "native_mcp"})
+    invalid_deliveries = sorted(deliveries - CONTEXT_DELIVERIES)
     if invalid_deliveries or not deliveries:
         detail = ", ".join(invalid_deliveries) or "none declared"
         raise ValueError(f"{path}: invalid context deliveries: {detail}")
