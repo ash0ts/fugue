@@ -551,6 +551,53 @@ def test_isolated_command_does_not_mutate_the_source_checkout(tmp_path: Path) ->
     ).stdout
 
 
+def test_isolated_command_initializes_checked_in_fixture_as_repository(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("# Fixture\n")
+    spec = ContextSystemSpec(
+        id="isolated-fixture",
+        title="Isolated fixture",
+        provider="fugue.bench.context:IsolatedCommandContextProvider",
+        version="test",
+        capabilities=frozenset({"prepare"}),
+        deliveries=frozenset({"portable"}),
+        config={
+            "prepare": {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    (
+                        "from pathlib import Path; "
+                        "assert Path('.git').exists(); "
+                        "Path('FIXTURE_READY').write_text('ready')"
+                    ),
+                ],
+                "copy_paths": ["FIXTURE_READY"],
+            }
+        },
+    )
+
+    prepared = asyncio.run(
+        load_provider(spec).prepare(
+            spec,
+            RepositorySnapshot("task", "fixture/repo", "fixture-base", source),
+            ContextRuntime(
+                tmp_path,
+                tmp_path / "cache",
+                {},
+                output_dir=tmp_path / "output",
+            ),
+        )
+    )
+
+    assert (prepared.path / "artifact/FIXTURE_READY").read_text() == "ready"
+    assert not (source / ".git").exists()
+    assert not (source / "FIXTURE_READY").exists()
+
+
 def test_context_command_timeout_terminates_the_process_group(tmp_path: Path) -> None:
     pid_path = tmp_path / "pid"
     command = [

@@ -887,38 +887,47 @@ async def _isolated_repository(
         home = isolated / "home"
         home.mkdir()
         clone_env = {**runtime.env, "GIT_LFS_SKIP_SMUDGE": "1"}
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "--no-hardlinks",
-                "--no-recurse-submodules",
-                snapshot.checkout.as_posix(),
-                checkout.as_posix(),
-            ],
-            env=clone_env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "git",
-                "-C",
-                checkout.as_posix(),
-                "checkout",
-                "--quiet",
-                "--detach",
-                snapshot.commit,
-            ],
-            env=clone_env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        if (snapshot.checkout / ".git").exists():
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-hardlinks",
+                    "--no-recurse-submodules",
+                    snapshot.checkout.as_posix(),
+                    checkout.as_posix(),
+                ],
+                env=clone_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "-C",
+                    checkout.as_posix(),
+                    "checkout",
+                    "--quiet",
+                    "--detach",
+                    snapshot.commit,
+                ],
+                env=clone_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            await asyncio.to_thread(
+                _copy_repository_snapshot,
+                snapshot.checkout,
+                checkout,
+                ignored=(".fugue",),
+            )
+            await asyncio.to_thread(_initialize_fixture_repository, checkout)
         original_home = Path.home()
         isolated_env = {
             **runtime.env,
