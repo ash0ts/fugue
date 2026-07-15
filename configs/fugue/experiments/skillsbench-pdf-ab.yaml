@@ -33,7 +33,3 @@ environment:
   type: docker
   cpu_enforcement_policy: auto
   memory_enforcement_policy: auto
-artifacts:
-  - /root/sc100-filled.pdf
-  - /root/diff_report.json
-  - /root/redacted

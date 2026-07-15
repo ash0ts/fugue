@@ -2744,6 +2744,8 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_support": meta.get("context_support"),
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
+        "expected_artifact_paths": meta.get("expected_artifact_paths", []),
+        "artifact_normalization": meta.get("artifact_normalization", []),
         "prompt_hashes": meta.get("prompt_hashes", {}),
         "skill_ids": meta.get("skill_ids", []),
         "skill_hashes": meta.get("skill_hashes", {}),

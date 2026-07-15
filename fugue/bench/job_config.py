@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from fugue.artifacts import artifact_source_paths, harbor_artifacts
 from fugue.bench.candidates import (
     CANDIDATE_IDENTITY_SCHEMA_VERSION,
     ResolvedCandidate,
@@ -419,6 +420,9 @@ def _build_jobs(
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
                     execution_fingerprint=resolved_candidate.execution_fingerprint,
+                    expected_artifact_paths=config.get("fugue", {}).get(
+                        "expected_artifact_paths", []
+                    ),
                 )
                 rendered.append(
                     RenderedJob(
@@ -533,14 +537,16 @@ def _job_config(
         ):
             mounts.append(_read_only_mount(repo_root / "fugue", "/fugue-src/fugue"))
         environment["mounts"] = mounts
-    artifacts = _dedupe_values(
+    expected_artifacts = _dedupe_values(
         [
             *(variant.artifacts or experiment.artifacts),
+            *(tasks[0].artifacts if tasks else ()),
             *workload_artifacts,
             *context_binding.artifacts,
             *integration_binding.artifacts,
         ]
     )
+    artifacts = harbor_artifacts(expected_artifacts)
     config: dict[str, Any] = {
         "job_name": job_name,
         "jobs_dir": jobs_dir.as_posix(),
@@ -617,6 +623,7 @@ def _job_config(
         "model": route.display_model,
         "trace_content": experiment.trace_content,
         "scorer_hashes": scorer_hashes,
+        "expected_artifact_paths": artifact_source_paths(expected_artifacts),
     }
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
@@ -757,6 +764,7 @@ def _job_env(
     comparison_example_id: str,
     candidate_id: str,
     execution_fingerprint: str,
+    expected_artifact_paths: list[str],
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = _content_hashes(
@@ -805,6 +813,9 @@ def _job_env(
                     if task.expected_paths
                 },
                 sort_keys=True,
+            ),
+            "FUGUE_EXPECTED_ARTIFACT_PATHS": json.dumps(
+                expected_artifact_paths, sort_keys=True
             ),
             "FUGUE_PROMPT_ID": ",".join(prompt_ids),
             "FUGUE_PROMPT_HASHES": json.dumps(hashes["prompts"], sort_keys=True),
@@ -1213,7 +1224,6 @@ def _candidate_agent_configuration(
             "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
             "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
             "environment": _merge_dicts(experiment.environment, variant.environment),
-            "artifacts": [*experiment.artifacts, *variant.artifacts],
         }
     )
 

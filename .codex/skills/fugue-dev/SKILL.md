@@ -53,6 +53,9 @@ Preserve these invariants across schema, implementation, UI, and tests.
 - Keep execution state, deterministic benchmark outcome, and judge or rubric
   results separate. Packaging requires terminal, scored applicable cells and a
   deterministic pass; failures need explicit override and unscored cells block.
+- Treat task output collection as workload transport, not candidate identity.
+  Scope outputs to their producing task, deduplicate Harbor conventions, and
+  relocate only exact declared output; never synthesize missing content.
 
 ## Packaging and serving
 

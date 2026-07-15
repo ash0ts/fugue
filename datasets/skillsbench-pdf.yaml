@@ -20,7 +20,10 @@ harnesses:
 tasks:
   - id: court-form-filling
     notes: Fill and validate a structured court PDF form.
+    artifacts: [/root/sc100-filled.pdf]
   - id: pdf-excel-diff
     notes: Extract a PDF table and compare it with an Excel workbook.
+    artifacts: [/root/diff_report.json]
   - id: paper-anonymizer
     notes: Redact identifying information from research papers.
+    artifacts: [/root/redacted]

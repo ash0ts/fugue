@@ -89,6 +89,7 @@ class TaskSpec:
     base_commit: str | None = None
     notes: str | None = None
     expected_paths: tuple[str, ...] = ()
+    artifacts: tuple[Any, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     repository: RepositorySpec | None = None
 
@@ -184,6 +185,9 @@ def load_manifest(path: Path | str, *, text: str | None = None) -> BenchmarkMani
 def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
     if not isinstance(item, dict):
         raise ValueError(f"{manifest_path}: task must be a mapping")
+    artifacts = item.get("artifacts") or []
+    if not isinstance(artifacts, list):
+        raise ValueError(f"{manifest_path}: task artifacts must be a list")
     repository_raw = item.get("repository")
     if repository_raw is not None and (item.get("repo") or item.get("base_commit")):
         raise ValueError(
@@ -210,6 +214,7 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
         base_commit=repository.commit if repository else item.get("base_commit"),
         notes=item.get("notes"),
         expected_paths=tuple(str(path) for path in item.get("expected_paths", [])),
+        artifacts=tuple(artifacts),
         metadata=dict(item.get("metadata") or {}),
         repository=repository,
     )

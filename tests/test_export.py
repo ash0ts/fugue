@@ -71,6 +71,14 @@ def _write_export_fixture(tmp_path: Path) -> Path:
                 "context_config_hash": "context123",
                 "context_cache_keys": {"bridge-check": "cache123"},
                 "context_artifact": {"context_system_id": "rag-bm25"},
+                "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+                "artifact_normalization": [
+                    {
+                        "status": "recovered",
+                        "source": "/workspace/logs/artifacts/fugue-answer.md",
+                        "target": "/logs/artifacts/fugue-answer.md",
+                    }
+                ],
                 "agent_config_hash": "abc123",
                 "evaluation_scope_id": "scope-123",
                 "tags": ["fugue", "run:fixture-exp", "harness:hermes"],
@@ -106,6 +114,10 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["context_system_id"] == "rag-bm25"
     assert row["context_version"] == "1"
     assert row["context_cache_keys"] == {"bridge-check": "cache123"}
+    assert row["expected_artifact_paths"] == [
+        "/logs/artifacts/fugue-answer.md"
+    ]
+    assert row["artifact_normalization"][0]["status"] == "recovered"
     assert row["context_assigned"] is True
     assert row["context_available"] is True
     assert row["context_invoked"] is False

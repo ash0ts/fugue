@@ -127,6 +127,32 @@ def test_pilot_canary_declares_gold_evidence_paths() -> None:
     )
 
 
+def test_skillsbench_artifacts_are_scoped_to_the_task_that_produces_them() -> None:
+    manifest = load_manifest(
+        Path(__file__).parents[1] / "datasets" / "skillsbench-pdf.yaml"
+    )
+
+    assert {task.id: task.artifacts for task in manifest.tasks} == {
+        "court-form-filling": ("/root/sc100-filled.pdf",),
+        "pdf-excel-diff": ("/root/diff_report.json",),
+        "paper-anonymizer": ("/root/redacted",),
+    }
+
+
+def test_manifest_rejects_scalar_task_artifacts(tmp_path: Path) -> None:
+    path = tmp_path / "bad-artifacts.yaml"
+    path.write_text(
+        """
+dataset: {ref: test/dataset}
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks: [{id: task, artifacts: /root/result.json}]
+"""
+    )
+
+    with pytest.raises(ValueError, match="task artifacts must be a list"):
+        load_manifest(path)
+
+
 def test_manifest_rejects_duplicate_ids_and_nonpositive_execution_values(
     tmp_path: Path,
 ) -> None:

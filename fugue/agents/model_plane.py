@@ -61,6 +61,7 @@ from fugue.agent_tracing import (
     openclaw_agent_id,
     stable_agent_name,
 )
+from fugue.artifacts import artifact_recoveries
 from fugue.model_plane import (
     BRIDGE_BASE_URL_CONTAINER,
     ModelRoute,
@@ -520,6 +521,9 @@ class _TrialMetaMixin:
             "context_config_hash": os.environ.get("FUGUE_CONTEXT_CONFIG_HASH"),
             "context_cache_keys": _json_env("FUGUE_CONTEXT_CACHE_KEYS"),
             "expected_evidence_paths": _json_env("FUGUE_EXPECTED_EVIDENCE_PATHS"),
+            "expected_artifact_paths": _json_env(
+                "FUGUE_EXPECTED_ARTIFACT_PATHS"
+            ),
             "prompt_id": prompt_id,
             "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),
             "skill_ids": _split_tags(os.environ.get("FUGUE_SKILL_IDS")),
@@ -561,6 +565,12 @@ class _TrialMetaMixin:
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
         try:
+            artifact_normalization = await self._normalize_artifact_paths(environment)
+        except Exception as exc:
+            artifact_normalization = [
+                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            ]
+        try:
             repo_root = await self._container_repo_root(environment)
             result = await self.exec_as_agent(
                 environment,
@@ -580,15 +590,66 @@ class _TrialMetaMixin:
             )
         except Exception:
             pass
-        self._meta_end(changed_paths=changed_paths)
+        self._meta_end(
+            changed_paths=changed_paths,
+            artifact_normalization=artifact_normalization,
+        )
 
-    def _meta_end(self, *, changed_paths: list[str] | None = None) -> None:
+    async def _normalize_artifact_paths(
+        self, environment: BaseEnvironment
+    ) -> list[dict[str, str]]:
+        expected = _json_env("FUGUE_EXPECTED_ARTIFACT_PATHS")
+        if not isinstance(expected, list):
+            return []
+        repo_root = await self._container_repo_root(environment)
+        commands: list[str] = []
+        for recovery in artifact_recoveries(expected, repo_root):
+            target = PurePosixPath(recovery.target)
+            for candidate_text in recovery.candidates:
+                candidate = PurePosixPath(candidate_text)
+                commands.append(
+                    f"if [ ! -e {shlex.quote(target.as_posix())} ] "
+                    f"&& [ -f {shlex.quote(candidate.as_posix())} ]; then "
+                    f"mkdir -p {shlex.quote(target.parent.as_posix())} && "
+                    f"mv {shlex.quote(candidate.as_posix())} "
+                    f"{shlex.quote(target.as_posix())} && "
+                    "printf 'FUGUE_ARTIFACT_RECOVERED\\t%s\\t%s\\n' "
+                    f"{shlex.quote(target.as_posix())} "
+                    f"{shlex.quote(candidate.as_posix())}; fi"
+                )
+        if not commands:
+            return []
+        result = await self.exec_as_agent(
+            environment,
+            command="; ".join([*commands, "true"]),
+            timeout_sec=30,
+        )
+        recovered: list[dict[str, str]] = []
+        for line in (result.stdout or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0] == "FUGUE_ARTIFACT_RECOVERED":
+                recovered.append(
+                    {
+                        "status": "recovered",
+                        "target": parts[1],
+                        "source": parts[2],
+                    }
+                )
+        return recovered
+
+    def _meta_end(
+        self,
+        *,
+        changed_paths: list[str] | None = None,
+        artifact_normalization: list[dict[str, str]] | None = None,
+    ) -> None:
         try:
             meta = json.loads(self._meta_path().read_text())
         except (OSError, json.JSONDecodeError):
             meta = {}
         meta["ended_at"] = datetime.now(UTC).isoformat()
         meta["changed_paths"] = changed_paths or []
+        meta["artifact_normalization"] = artifact_normalization or []
         try:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids

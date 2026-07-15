@@ -131,6 +131,70 @@ tasks:
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
 
 
+def test_task_outputs_do_not_change_candidate_identity_or_overlap_harbor_artifacts(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "tasks.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks:
+  - {id: first, artifacts: [/root/first.json]}
+  - {id: second, artifacts: [/root/second.json]}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="task-artifacts",
+        title="Task artifacts",
+        variants=[FeatureVariant(id="baseline", label="Baseline")],
+    )
+
+    jobs = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+        workload_artifacts=["/logs/artifacts/fugue-answer.md"],
+    )
+
+    assert len(jobs) == 2
+    assert jobs[0].candidate_id == jobs[1].candidate_id
+    assert jobs[0].agent_config_hash == jobs[1].agent_config_hash
+    [with_collection] = render_jobs(
+        experiment=ExperimentSpec(
+            id="task-artifacts-renamed",
+            title="Task artifacts renamed",
+            variants=[FeatureVariant(id="renamed", label="Renamed")],
+            artifacts=["/root/operator-only.json"],
+        ),
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit-renamed",
+        n_tasks=1,
+    )
+    assert with_collection.candidate_id == jobs[0].candidate_id
+    assert with_collection.agent_config_hash == jobs[0].agent_config_hash
+    for job, output in zip(
+        jobs, ("/root/first.json", "/root/second.json"), strict=True
+    ):
+        assert job.config["artifacts"] == [output, "/logs/artifacts"]
+        assert job.config["fugue"]["expected_artifact_paths"] == [
+            output,
+            "/logs/artifacts/fugue-answer.md",
+        ]
+        assert json.loads(job.env["FUGUE_EXPECTED_ARTIFACT_PATHS"]) == [
+            output,
+            "/logs/artifacts/fugue-answer.md",
+        ]
+
+
 def test_render_job_binds_explicit_integration_without_serializing_secret(
     tmp_path: Path,
 ) -> None:

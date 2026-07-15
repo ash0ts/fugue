@@ -55,6 +55,14 @@ def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
     assert "dict.fromkeys([self.trace_conversation_id, *native_ids])" in source
 
 
+def test_model_plane_normalizes_only_declared_artifact_transport() -> None:
+    source = AGENT_MODEL_PLANE.read_text()
+
+    assert 'FUGUE_EXPECTED_ARTIFACT_PATHS' in source
+    assert "artifact_recoveries(expected, repo_root)" in source
+    assert '"artifact_normalization"' in source
+
+
 def test_trace_content_is_explicit() -> None:
     assert normalize_trace_content(None) == "full"
     assert normalize_trace_content(" metadata ") == "metadata"
