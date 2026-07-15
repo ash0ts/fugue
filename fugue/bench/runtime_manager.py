@@ -947,7 +947,6 @@ def render_runtime_compose(
             service: {
                 "image": lock["image_id"],
                 "pull_policy": "never",
-                "user": f"{os.getuid()}:{os.getgid()}",
                 "network_mode": "service:main",
                 "read_only": True,
                 "security_opt": ["no-new-privileges:true"],

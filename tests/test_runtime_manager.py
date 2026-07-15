@@ -178,7 +178,6 @@ def test_runtime_compose_uses_isolated_sidecar_and_read_only_repository(
 
     compose = runtime_manager.yaml.safe_load(path.read_text())
     service = compose["services"]["fugue-semble"]
-    assert service["user"] == f"{os.getuid()}:{os.getgid()}"
     assert service["network_mode"] == "service:main"
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
