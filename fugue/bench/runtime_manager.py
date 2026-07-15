@@ -14,6 +14,8 @@ import yaml
 
 RUNTIME_ROOT = Path(".fugue/runtime/context-runtimes")
 GATEWAY_PORT = 8765
+GITNEXUS_VECTOR_MODE = "hybrid_vector"
+GITNEXUS_VECTOR_DIMENSIONS = 384
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class ManagedMCPRuntimeSpec:
     @property
     def recipe_sha256(self) -> str:
         gateway = Path(__file__).resolve().parents[1] / "mcp_gateway.py"
+        build_assets = _runtime_build_assets(self.system_id)
         return _digest(
             {
                 "spec": asdict(self),
@@ -50,6 +53,10 @@ class ManagedMCPRuntimeSpec:
                 "entrypoint_sha256": hashlib.sha256(
                     _gateway_entrypoint().encode()
                 ).hexdigest(),
+                "build_assets": {
+                    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in build_assets
+                },
             }
         )
 
@@ -97,6 +104,13 @@ _SEMBLE_COMMAND = (
 )
 
 
+def _runtime_build_assets(system_id: str) -> tuple[Path, ...]:
+    root = Path(__file__).resolve().parents[2] / "configs/fugue/runtime" / system_id
+    if not root.is_dir():
+        return ()
+    return tuple(path for path in sorted(root.iterdir()) if path.is_file())
+
+
 def _node_runtime(
     package: str,
     command: tuple[str, ...],
@@ -114,6 +128,50 @@ COPY start-gateway /opt/fugue/start-gateway
 RUN chmod 0555 /opt/fugue/start-gateway
 ENTRYPOINT [\"/opt/fugue/start-gateway\"]
 CMD {json.dumps(list(command))}
+"""
+
+
+def _gitnexus_runtime() -> str:
+    revision = "d8c86521100d3556476a063fc2342036d45c106f"
+    model = "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve"
+    return f"""FROM {_NODE_IMAGE}
+ARG TARGETARCH
+ENV ONNXRUNTIME_NODE_INSTALL=skip
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates curl build-essential git && rm -rf /var/lib/apt/lists/*
+RUN {_GATEWAY_INSTALL}
+WORKDIR /opt/gitnexus-runtime
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm_config_nodedir=/usr/local npm rebuild --foreground-scripts tree-sitter tree-sitter-c tree-sitter-c-sharp tree-sitter-cpp tree-sitter-go tree-sitter-java tree-sitter-javascript tree-sitter-php tree-sitter-python tree-sitter-ruby tree-sitter-rust tree-sitter-typescript && node -e "for (const p of ['tree-sitter','tree-sitter-c','tree-sitter-c-sharp','tree-sitter-cpp','tree-sitter-go','tree-sitter-java','tree-sitter-javascript','tree-sitter-php','tree-sitter-python','tree-sitter-ruby','tree-sitter-rust','tree-sitter-typescript']) require(p)"
+RUN set -eu; case "$TARGETARCH" in \
+      amd64) ladybug=4d2d045404f8e31cd6d5bd8aec0adac64ce5bef8c904ab79408a5a3dbc8dce56; ortlib=92ba8e44d31b80a34f5e805076a044122c3be1fffe0d88ed790de7267b0b2682; ortbinding=a7191fbfe8045d4d5d312e5ecd8f5dd6970e804dd340c98be8a0af8daf7908cc; platform=x64 ;; \
+      arm64) ladybug=33cf6cb1f188cac902412fc60f7fb1e79c7e1a92c34b373e6679ef8c02ff620b; ortlib=33032cb5b91c12edbf028d7c69fa40a31848d66c0095448758af237d5e0b07db; ortbinding=39c8f903505611115a62d8527b2c2df4bb5e27a35cfd81d1f2082eeb59518a4e; platform=arm64 ;; \
+      *) echo "unsupported GitNexus architecture: $TARGETARCH" >&2; exit 2 ;; \
+    esac; \
+    source="node_modules/@ladybugdb/core-linux-$platform/lbugjs.node"; \
+    echo "$ladybug  $source" | sha256sum -c -; \
+    cp "$source" node_modules/@ladybugdb/core/lbugjs.node; \
+    ort=node_modules/onnxruntime-node/bin/napi-v6/linux/$platform; \
+    echo "$ortlib  $ort/libonnxruntime.so.1" | sha256sum -c -; \
+    echo "$ortbinding  $ort/onnxruntime_binding.node" | sha256sum -c -
+COPY patch-runtime.mjs ./
+RUN node patch-runtime.mjs /opt/gitnexus-runtime/node_modules/gitnexus
+RUN ln -s /opt/gitnexus-runtime/node_modules/gitnexus/dist/cli/index.js /usr/local/bin/gitnexus
+RUN set -eu; root=/opt/gitnexus-models/Snowflake/snowflake-arctic-embed-xs; mkdir -p "$root/onnx"; \
+    curl -fsSL "{model}/{revision}/config.json" -o "$root/config.json"; \
+    curl -fsSL "{model}/{revision}/onnx/model.onnx" -o "$root/onnx/model.onnx"; \
+    curl -fsSL "{model}/{revision}/tokenizer.json" -o "$root/tokenizer.json"; \
+    curl -fsSL "{model}/{revision}/tokenizer_config.json" -o "$root/tokenizer_config.json"; \
+    echo "d7d071046ab952af96b7abad788db7ab3fc997b465e1b9914ff39707092254ec  $root/config.json" | sha256sum -c -; \
+    echo "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c  $root/onnx/model.onnx" | sha256sum -c -; \
+    echo "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854  $root/tokenizer.json" | sha256sum -c -; \
+    echo "9ca59277519f6e3692c8685e26b94d4afca2d5438deff66483db495e48735810  $root/tokenizer_config.json" | sha256sum -c -
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ORT_LOG_LEVEL=3
+COPY mcp_gateway.py /opt/fugue/mcp_gateway.py
+COPY start-gateway /opt/fugue/start-gateway
+RUN chmod 0555 /opt/fugue/start-gateway /usr/local/bin/gitnexus
+ENTRYPOINT [\"/opt/fugue/start-gateway\"]
+CMD [\"gitnexus\", \"mcp\"]
 """
 
 
@@ -160,16 +218,22 @@ CMD [\"/opt/codegraph/bin/codegraph\", \"serve\", \"--mcp\"]
 RUNTIMES = {
     "gitnexus": ManagedMCPRuntimeSpec(
         "gitnexus",
-        "gitnexus@1.6.3",
-        _node_runtime(
-            "gitnexus@1.6.3",
-            ("gitnexus", "mcp"),
-            ignore_scripts=False,
-        ),
+        "gitnexus@1.6.3+fugue-vector.6",
+        _gitnexus_runtime(),
         ("gitnexus", "mcp"),
         package_integrity=(
             "sha512-Yvhc70ESXFHPMtXHSddDgNL3dUxdvmA+"
             "CmxoadFBB7rTxIcXi8vrY/jhMvjvzJpBxp4JKi+lD8Pt1m1wL88Mtg=="
+        ),
+        asset_integrities=(
+            (
+                "Snowflake/snowflake-arctic-embed-xs",
+                "git:d8c86521100d3556476a063fc2342036d45c106f",
+            ),
+            ("embedding_dimensions", "384"),
+            ("onnxruntime-node", "version:1.24.3;cpu-only"),
+            ("lexical_index", "flat-bm25-v1"),
+            ("vector_index", "flat-cosine-v1;max-nodes:50000"),
         ),
         prepare_command=(
             "gitnexus",
@@ -179,7 +243,23 @@ RUNTIMES = {
             "/workspace/repository",
         ),
         repository_state_paths=(".gitnexus",),
-        runtime_env=(("GITNEXUS_HOME", "/workspace/state/home/.gitnexus"),),
+        runtime_env=(
+            ("GITNEXUS_HOME", "/workspace/state/home/.gitnexus"),
+            ("HF_HUB_OFFLINE", "1"),
+            ("TRANSFORMERS_OFFLINE", "1"),
+            (
+                "FUGUE_GITNEXUS_MODEL_DIGEST",
+                "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
+            ),
+        ),
+        probe_command=(
+            "node",
+            "-e",
+            "import('/opt/gitnexus-runtime/node_modules/gitnexus/dist/mcp/core/"
+            "embedder.js').then(async m => { const v=await m.embedQuery('offline "
+            "semantic readiness'); if(v.length!==384) process.exit(2); "
+            "console.log(v.length) })",
+        ),
     ),
     "codegraph": ManagedMCPRuntimeSpec(
         "codegraph",
@@ -214,16 +294,16 @@ RUNTIMES = {
             "tree-sitter-language-pack==1.6.2",
             _SEMBLE_COMMAND,
             post_install=(
-                "/opt/gateway/bin/python -c \"from huggingface_hub import "
+                '/opt/gateway/bin/python -c "from huggingface_hub import '
                 "snapshot_download; snapshot_download(repo_id='minishlab/"
                 "potion-code-16M-v2', revision='e9d2a44ca6a05ac6685f3b23709ea57e"
                 "b7352d5b', local_dir='/opt/semble-model')\" && "
-                "/opt/gateway/bin/python -c \"import tree_sitter_language_pack "
+                '/opt/gateway/bin/python -c "import tree_sitter_language_pack '
                 "as pack; languages='"
                 + _SEMBLE_LANGUAGES
                 + "'.split(','); pack.configure(cache_dir='/opt/tree-sitter-"
                 "languages'); pack.download(languages); "
-                "[pack.get_parser(name) for name in languages]\""
+                '[pack.get_parser(name) for name in languages]"'
             ),
         ),
         _SEMBLE_COMMAND,
@@ -306,6 +386,29 @@ def runtime_spec(system_id: str) -> ManagedMCPRuntimeSpec | None:
     return RUNTIMES.get(system_id)
 
 
+def gitnexus_retrieval_mode(config: dict[str, Any] | None) -> str:
+    selected = config or {}
+    mode = str(selected.get("retrieval_mode") or "")
+    if mode not in {"bm25", GITNEXUS_VECTOR_MODE}:
+        raise ValueError("GitNexus retrieval_mode must be bm25 or hybrid_vector")
+    if mode == GITNEXUS_VECTOR_MODE:
+        expected = {
+            "embedding_model": "Snowflake/snowflake-arctic-embed-xs",
+            "embedding_revision": "d8c86521100d3556476a063fc2342036d45c106f",
+            "embedding_dimensions": GITNEXUS_VECTOR_DIMENSIONS,
+            "vector_required": True,
+        }
+        mismatched = [
+            name for name, value in expected.items() if selected.get(name) != value
+        ]
+        if mismatched:
+            raise ValueError(
+                "GitNexus hybrid_vector requires the pinned vector contract: "
+                + ", ".join(mismatched)
+            )
+    return mode
+
+
 def prepare_runtime(
     system_id: str,
     *,
@@ -323,8 +426,18 @@ def prepare_runtime(
     gateway = Path(__file__).resolve().parents[1] / "mcp_gateway.py"
     shutil.copy2(gateway, build / "mcp_gateway.py")
     (build / "start-gateway").write_text(_gateway_entrypoint())
+    for asset in _runtime_build_assets(system_id):
+        shutil.copy2(asset, build / asset.name)
     subprocess.run(
-        ["docker", "build", "--pull", "-t", spec.image, build.as_posix()],
+        [
+            "docker",
+            "build",
+            "--provenance=false",
+            "--pull",
+            "-t",
+            spec.image,
+            build.as_posix(),
+        ],
         cwd=repo_root,
         check=True,
         timeout=1800,
@@ -378,7 +491,7 @@ def runtime_ready(system_id: str, repo_root: Path) -> tuple[bool, str]:
         return False, "context system has no managed MCP runtime"
     lock = read_runtime_lock(system_id, repo_root)
     if lock is None:
-        return False, "run fugue setup --prepare-context to build the pinned runtime"
+        return False, "run fugue setup --prepare to build the pinned runtime"
     try:
         inspected = _inspect_image(str(lock["image"]))
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -412,7 +525,7 @@ def probe_runtime_install(system_id: str, repo_root: Path) -> None:
             "/tmp:rw,noexec,nosuid,size=64m",
             "--entrypoint",
             command[0],
-            str(lock["image"]),
+            str(lock["image_id"]),
             *command[1:],
         ],
         cwd=repo_root,
@@ -427,6 +540,8 @@ def prepare_runtime_repository(
     repo_root: Path,
     artifact: Path,
     env: dict[str, str],
+    config: dict[str, Any] | None = None,
+    semantic_probe: Any = None,
 ) -> None:
     spec = RUNTIMES.get(system_id)
     if spec is None or not spec.prepare_command:
@@ -449,9 +564,73 @@ def prepare_runtime_repository(
         **os.environ,
         **{name: value for name, value in env.items() if name in {"LAT_LLM_KEY"}},
     }
+    mode = gitnexus_retrieval_mode(config) if system_id == "gitnexus" else None
+    runtime_values = {
+        **dict(spec.runtime_env),
+        **(
+            {"FUGUE_GITNEXUS_VECTOR_REQUIRED": "1"}
+            if mode == GITNEXUS_VECTOR_MODE
+            else {}
+        ),
+    }
     runtime_env = [
-        item for name, value in spec.runtime_env for item in ("--env", f"{name}={value}")
+        item
+        for name, value in runtime_values.items()
+        for item in ("--env", f"{name}={value}")
     ]
+    prepare_command = list(spec.prepare_command)
+    _run_repository_prepare(
+        repo_root=repo_root,
+        repository=repository,
+        home=home,
+        spec=spec,
+        image=str(lock["image_id"]),
+        command=prepare_command,
+        selected_env=selected_env,
+        runtime_env=runtime_env,
+        docker_env=docker_env,
+    )
+    if mode == GITNEXUS_VECTOR_MODE:
+        nodes, _ = _gitnexus_graph_stats(artifact)
+        if nodes > 50_000:
+            raise RuntimeError(
+                "GitNexus hybrid_vector is not applicable: graph has "
+                f"{nodes} nodes; upstream vector safety limit is 50000"
+            )
+        vector_command = list(spec.prepare_command)
+        vector_command.insert(2, "--embeddings")
+        _run_repository_prepare(
+            repo_root=repo_root,
+            repository=repository,
+            home=home,
+            spec=spec,
+            image=str(lock["image_id"]),
+            command=vector_command,
+            selected_env=selected_env,
+            runtime_env=runtime_env,
+            docker_env=docker_env,
+        )
+        _probe_gitnexus_index(
+            repo_root,
+            artifact,
+            str(lock["image_id"]),
+            runtime_values,
+            semantic_probe=semantic_probe,
+        )
+
+
+def _run_repository_prepare(
+    *,
+    repo_root: Path,
+    repository: Path,
+    home: Path,
+    spec: ManagedMCPRuntimeSpec,
+    image: str,
+    command: list[str],
+    selected_env: list[str],
+    runtime_env: list[str],
+    docker_env: dict[str, str],
+) -> None:
     subprocess.run(
         [
             "docker",
@@ -477,15 +656,207 @@ def prepare_runtime_repository(
             "--workdir",
             spec.repository_mount,
             "--entrypoint",
-            spec.prepare_command[0],
-            str(lock["image"]),
-            *spec.prepare_command[1:],
+            command[0],
+            image,
+            *command[1:],
         ],
         cwd=repo_root,
         env=docker_env,
         check=True,
         timeout=1800,
     )
+
+
+def _gitnexus_graph_stats(artifact: Path) -> tuple[int, int]:
+    metadata_path = artifact / "repository/.gitnexus/meta.json"
+    if not metadata_path.is_file():
+        raise RuntimeError("GitNexus setup did not create graph metadata")
+    metadata = json.loads(metadata_path.read_text())
+    stats = metadata.get("stats") if isinstance(metadata, dict) else None
+    if not isinstance(stats, dict):
+        raise RuntimeError("GitNexus setup produced invalid graph metadata")
+    return int(stats.get("nodes") or 0), int(stats.get("embeddings") or 0)
+
+
+def _probe_gitnexus_index(
+    repo_root: Path,
+    artifact: Path,
+    image: str,
+    runtime_env: dict[str, str],
+    *,
+    semantic_probe: Any = None,
+) -> None:
+    nodes, embeddings = _gitnexus_graph_stats(artifact)
+    if nodes > 50_000:
+        raise RuntimeError(
+            "GitNexus hybrid_vector is not applicable: graph has "
+            f"{nodes} nodes; upstream vector safety limit is 50000"
+        )
+    if embeddings <= 0:
+        raise RuntimeError("GitNexus hybrid setup produced zero embeddings")
+    query = "semantic implementation relationship"
+    expected_path = None
+    if semantic_probe is not None:
+        if not isinstance(semantic_probe, dict):
+            raise ValueError("GitNexus semantic_probe must be a mapping")
+        query = str(semantic_probe.get("query") or "").strip()
+        expected_path = str(semantic_probe.get("expected_path") or "").strip()
+        if not query or not expected_path or expected_path.startswith("/"):
+            raise ValueError(
+                "GitNexus semantic_probe requires query and relative expected_path"
+            )
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--mount",
+        (
+            f"type=bind,src={(artifact / 'repository').resolve()},"
+            "dst=/workspace/repository"
+        ),
+        "--mount",
+        f"type=bind,src={(artifact / 'home').resolve()},dst=/workspace/state/home",
+        "--env",
+        "HOME=/workspace/state/home",
+    ]
+    for name, value in runtime_env.items():
+        command.extend(("--env", f"{name}={value}"))
+    command.extend(
+        (
+            "--workdir",
+            "/workspace/repository",
+            "--entrypoint",
+            "gitnexus",
+            image,
+            "query",
+            query,
+            "--limit",
+            "1",
+        )
+    )
+    result = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    evidence = f"{result.stdout}\n{result.stderr}"
+    if result.returncode:
+        raise RuntimeError(
+            "GitNexus offline semantic query failed: " + evidence.strip()[-2_000:]
+        )
+    if '"vector_search_succeeded":true' not in evidence:
+        raise RuntimeError(
+            "GitNexus offline semantic query did not report successful vector search"
+        )
+    if expected_path and expected_path not in result.stdout:
+        raise RuntimeError(
+            "GitNexus semantic contract did not retrieve expected path: "
+            + expected_path
+        )
+
+
+def query_gitnexus(
+    *,
+    repo_root: Path,
+    artifact: Path,
+    config: dict[str, Any],
+    query: str,
+    top_k: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    mode = gitnexus_retrieval_mode(config)
+    lock = read_runtime_lock("gitnexus", repo_root)
+    if lock is None:
+        raise RuntimeError("managed runtime for gitnexus is not prepared")
+    runtime_values = {
+        **dict(RUNTIMES["gitnexus"].runtime_env),
+        **(
+            {"FUGUE_GITNEXUS_VECTOR_REQUIRED": "1"}
+            if mode == GITNEXUS_VECTOR_MODE
+            else {}
+        ),
+    }
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--mount",
+        f"type=bind,src={(artifact / 'repository').resolve()},dst=/workspace/repository",
+        "--mount",
+        f"type=bind,src={(artifact / 'home').resolve()},dst=/workspace/state/home",
+        "--env",
+        "HOME=/workspace/state/home",
+    ]
+    for name, value in runtime_values.items():
+        command.extend(("--env", f"{name}={value}"))
+    command.extend(
+        (
+            "--workdir",
+            "/workspace/repository",
+            "--entrypoint",
+            "gitnexus",
+            str(lock["image_id"]),
+            "query",
+            query,
+            "--limit",
+            str(top_k),
+        )
+    )
+    result = subprocess.run(
+        command,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if result.returncode:
+        detail = f"{result.stdout}\n{result.stderr}".strip()[-2_000:]
+        raise RuntimeError(f"GitNexus offline query failed: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitNexus offline query returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("GitNexus offline query returned a non-object result")
+    telemetry: dict[str, Any] = {"retrieval_mode": mode}
+    for line in result.stderr.splitlines():
+        marker = "FUGUE_GITNEXUS_VECTOR "
+        if marker not in line:
+            continue
+        try:
+            value = json.loads(line.split(marker, 1)[1])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            telemetry.update(value)
+    if "model_digest" in telemetry:
+        telemetry["vector_model_digest"] = telemetry.pop("model_digest")
+    if "query_latency_ms" in telemetry:
+        telemetry["vector_query_latency_ms"] = telemetry.pop("query_latency_ms")
+    if mode == GITNEXUS_VECTOR_MODE and telemetry.get("vector_search_succeeded") is not True:
+        raise RuntimeError("GitNexus hybrid query did not execute vector retrieval")
+    return payload, telemetry
 
 
 def run_runtime_command(
@@ -504,10 +875,7 @@ def run_runtime_command(
     if not command or command[0] != spec.upstream_command[0]:
         raise ValueError(f"managed runtime {system_id} rejected an unknown command")
     selected_env = [
-        item
-        for name in ("LAT_LLM_KEY",)
-        if env.get(name)
-        for item in ("--env", name)
+        item for name in ("LAT_LLM_KEY",) if env.get(name) for item in ("--env", name)
     ]
     docker_env = {
         **os.environ,
@@ -536,7 +904,7 @@ def run_runtime_command(
             spec.repository_mount,
             "--entrypoint",
             command[0],
-            str(lock["image"]),
+            str(lock["image_id"]),
             *command[1:],
         ],
         cwd=repo_root,
@@ -557,16 +925,22 @@ def render_runtime_compose(
     job_name: str,
     env_names: tuple[str, ...],
     write: bool,
+    context_config: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     spec = RUNTIMES[system_id]
     lock = read_runtime_lock(system_id, repo_root)
     if lock is None:
         raise RuntimeError(f"managed runtime for {system_id} is not prepared")
     service = f"fugue-{system_id}"
+    mode = gitnexus_retrieval_mode(context_config) if system_id == "gitnexus" else None
+    context_env = (
+        {"FUGUE_GITNEXUS_VECTOR_REQUIRED": "1"} if mode == GITNEXUS_VECTOR_MODE else {}
+    )
     compose = {
         "services": {
             service: {
-                "image": lock["image"],
+                "image": lock["image_id"],
+                "pull_policy": "never",
                 "network_mode": "service:main",
                 "read_only": True,
                 "security_opt": ["no-new-privileges:true"],
@@ -579,6 +953,7 @@ def render_runtime_compose(
                     ),
                 ],
                 "tmpfs": [
+                    "/tmp:rw,noexec,nosuid,size=64m",
                     f"{spec.state_mount}:rw,noexec,nosuid,size=2g",
                     *[
                         f"{spec.repository_mount}/{path}:rw,noexec,nosuid,size=2g"
@@ -588,6 +963,7 @@ def render_runtime_compose(
                 "environment": {
                     "HOME": "/workspace/state/home",
                     **dict(spec.runtime_env),
+                    **context_env,
                     "FUGUE_REPOSITORY_STATE_PATHS": " ".join(
                         spec.repository_state_paths
                     ),
@@ -633,6 +1009,8 @@ def render_runtime_compose(
         "recipe_sha256": lock["recipe_sha256"],
         "image": lock["image"],
         "image_id": lock["image_id"],
+        "retrieval_mode": mode,
+        "vector_required": mode == GITNEXUS_VECTOR_MODE,
     }
     return path, server, descriptor
 

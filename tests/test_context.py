@@ -49,8 +49,10 @@ from fugue.bench.scoring import (
 from fugue.bench.workloads import (
     RetrievalCase,
     WorkloadDataset,
+    _materialized_retrieval_cases,
     _write_rows,
     load_workload_dataset,
+    prepare_workload_dataset,
     run_retrieval_workload,
 )
 
@@ -229,9 +231,7 @@ def test_graphiti_retrieves_ranked_episodes_from_the_active_namespace(
                 episode_reranker_scores=[0.75],
             )
 
-        async def retrieve_episodes(
-            self, reference_time, *, last_n, group_ids, source
-        ):
+        async def retrieve_episodes(self, reference_time, *, last_n, group_ids, source):
             return [
                 SimpleNamespace(
                     uuid="episode-1",
@@ -294,12 +294,10 @@ def test_context_cache_is_content_addressed_and_reused(tmp_path: Path) -> None:
     assert first.metrics["builder_cost_usd"] is None
     assert first.metrics["index_size_bytes"] > 0
     assert json.loads((first.path / "context-manifest.json").read_text())[
-        "snapshot"
+        "repository"
     ] == {
         "commit": "abc123",
-        "dataset_id": "",
         "repo": "fixture/repo",
-        "task_id": "fixture__task",
     }
     assert list(runtime.cache_root.glob(".*.lock"))
 
@@ -735,6 +733,20 @@ def test_context_cache_key_tracks_builder_and_embedding_models(tmp_path: Path) -
     )
 
 
+def test_context_cache_key_is_repository_scoped_not_dataset_label_scoped(
+    tmp_path: Path,
+) -> None:
+    spec = get_context_system("rag-bm25", tmp_path)
+    first = RepositorySnapshot(
+        "task-a", "owner/repo", "abc123", Path("/tmp/repo"), "dataset-a@1"
+    )
+    renamed = RepositorySnapshot(
+        "task-b", "owner/repo", "abc123", Path("/tmp/repo"), "dataset-b@2"
+    )
+
+    assert context_cache_key(spec, first) == context_cache_key(spec, renamed)
+
+
 def test_rag_indexes_only_the_pinned_git_tree(
     tmp_path: Path,
 ) -> None:
@@ -833,9 +845,7 @@ def test_latmd_preparation_uses_the_pinned_runtime(
         calls.append(system_id)
         (artifact / "repository" / "lat.md").mkdir()
 
-    monkeypatch.setattr(
-        "fugue.bench.context.prepare_runtime_repository", fake_prepare
-    )
+    monkeypatch.setattr("fugue.bench.context.prepare_runtime_repository", fake_prepare)
     prepared = asyncio.run(
         load_provider(spec).prepare(
             spec,
@@ -865,11 +875,18 @@ def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
         output_dir=output,
     )
 
-    def fake_prepare_runtime(system_id, *, repo_root, artifact, env):
+    def fake_prepare_runtime(
+        system_id, *, repo_root, artifact, env, config, semantic_probe
+    ):
         assert system_id == "gitnexus"
+        assert config["retrieval_mode"] == "bm25"
+        assert semantic_probe is None
         repository = artifact / "repository"
         (repository / ".gitnexus").mkdir()
         (repository / ".gitnexus" / "graph.json").write_text("{}")
+        (repository / ".gitnexus" / "meta.json").write_text(
+            json.dumps({"stats": {"nodes": 1, "embeddings": 0}})
+        )
         registry = artifact / "home" / ".gitnexus" / "registry.json"
         registry.parent.mkdir(parents=True)
         registry.write_text(json.dumps({"/workspace/repository": {"ready": True}}))
@@ -963,6 +980,77 @@ cases:
                 attempts=0,
             )
         )
+
+
+def test_remote_retrieval_dataset_is_materialized_only_during_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = WorkloadDataset(
+        id="remote-retrieval",
+        runner="retrieval",
+        retrieval_cases=(
+            RetrievalCase("smoke", "fixture/repo", "abc", "smoke", ("a.py",)),
+        ),
+        source={
+            "version": "v1",
+            "counts": {"smoke": 1, "study": 2, "full": 2},
+            "materialize_command": ["arb", "--local-dir", "{output}"],
+        },
+    )
+    runtime = ContextRuntime(tmp_path, tmp_path / "cache", {})
+    calls: list[list[str]] = []
+
+    def materialize(command: list[str], **_: object) -> None:
+        calls.append(command)
+        root = Path(command[-1]) / "benchmark" / "v1"
+        root.mkdir(parents=True)
+        rows = [
+            {
+                "id": f"case-{index}",
+                "repo": "fixture/repo",
+                "commit": "abc",
+                "query": "find it",
+                "expected_paths": [f"src/{index}.py"],
+            }
+            for index in (1, 2)
+        ]
+        (root / "samples.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows)
+        )
+
+    monkeypatch.setattr("fugue.bench.workloads.subprocess.run", materialize)
+    assert prepare_workload_dataset(dataset, runtime, preset_id="smoke") is None
+    prepared = prepare_workload_dataset(dataset, runtime, preset_id="study")
+    assert prepared is not None
+    assert (prepared.status, prepared.sample_count) == ("built", 2)
+    assert len(calls) == 1
+
+    monkeypatch.setattr(
+        "fugue.bench.workloads.subprocess.run",
+        lambda *_args, **_kwargs: pytest.fail("trial attempted dataset download"),
+    )
+    cases = _materialized_retrieval_cases(dataset, runtime, "study")
+    assert [case.id for case in cases] == ["case-1", "case-2"]
+
+
+def test_remote_retrieval_trial_rejects_missing_setup(
+    tmp_path: Path,
+) -> None:
+    dataset = WorkloadDataset(
+        id="remote-retrieval",
+        runner="retrieval",
+        retrieval_cases=(
+            RetrievalCase("smoke", "fixture/repo", "abc", "smoke", ("a.py",)),
+        ),
+        source={
+            "version": "v1",
+            "counts": {"study": 2},
+            "materialize_command": ["arb", "--local-dir", "{output}"],
+        },
+    )
+    runtime = ContextRuntime(tmp_path, tmp_path / "cache", {})
+    with pytest.raises(RuntimeError, match="not prepared"):
+        _materialized_retrieval_cases(dataset, runtime, "study")
 
 
 def test_direct_workload_rows_append_safely_across_workers(tmp_path: Path) -> None:

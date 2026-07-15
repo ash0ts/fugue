@@ -35,7 +35,10 @@ from fugue.bench.context_contracts import (
 )
 from fugue.bench.library import validate_id
 from fugue.bench.runtime_manager import (
+    GITNEXUS_VECTOR_MODE,
+    gitnexus_retrieval_mode,
     prepare_runtime_repository,
+    query_gitnexus,
     run_runtime_command,
     runtime_ready,
     runtime_spec,
@@ -88,6 +91,7 @@ class RepositorySnapshot:
     commit: str
     checkout: Path
     dataset_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1000,12 +1004,16 @@ class GitNexusContextProvider(CommandContextProvider):
             repository,
             ignored=(".fugue", ".gitnexus"),
         )
+        if snapshot.repo.startswith("fixture/"):
+            await asyncio.to_thread(_initialize_fixture_repository, repository)
         await asyncio.to_thread(
             prepare_runtime_repository,
             spec.id,
             repo_root=runtime.repo_root,
             artifact=artifact,
             env=runtime.env,
+            config=spec.config,
+            semantic_probe=snapshot.metadata.get("semantic_probe"),
         )
         _write_managed_repository_instruction(spec, artifact)
         index = repository / ".gitnexus"
@@ -1014,7 +1022,96 @@ class GitNexusContextProvider(CommandContextProvider):
         registry = home / ".gitnexus" / "registry.json"
         if not registry.is_file():
             raise FileNotFoundError("GitNexus did not register the prepared repository")
-        return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
+        metadata_path = index / "meta.json"
+        if not metadata_path.is_file():
+            raise FileNotFoundError("GitNexus did not record graph metadata")
+        metadata = json.loads(metadata_path.read_text())
+        stats = metadata.get("stats") if isinstance(metadata, dict) else None
+        if not isinstance(stats, dict):
+            raise RuntimeError("GitNexus graph metadata has no stats")
+        mode = gitnexus_retrieval_mode(spec.config)
+        embeddings = int(stats.get("embeddings") or 0)
+        if mode == "bm25" and embeddings:
+            raise RuntimeError(
+                "GitNexus BM25 preparation unexpectedly built embeddings"
+            )
+        if mode == GITNEXUS_VECTOR_MODE and embeddings <= 0:
+            raise RuntimeError("GitNexus hybrid preparation produced zero embeddings")
+        metrics = {
+            **_tree_metrics(artifact),
+            "retrieval_mode": mode,
+            "graph_nodes": int(stats.get("nodes") or 0),
+            "embedding_count": embeddings,
+            "embedding_dimensions": 384 if mode == GITNEXUS_VECTOR_MODE else None,
+            "vector_required": mode == GITNEXUS_VECTOR_MODE,
+        }
+        return _prepared(spec, snapshot, runtime, metrics)
+
+    async def retrieve(
+        self,
+        spec: ContextSystemSpec,
+        query: RetrievalQuery,
+        prepared: PreparedContext,
+        runtime: ContextRuntime,
+    ) -> list[RetrievalHit]:
+        payload, telemetry = await asyncio.to_thread(
+            query_gitnexus,
+            repo_root=runtime.repo_root,
+            artifact=prepared.path / "artifact",
+            config=spec.config,
+            query=query.text,
+            top_k=query.top_k,
+        )
+        values = [
+            item
+            for key in ("definitions", "process_symbols", "processes")
+            for item in payload.get(key, [])
+            if isinstance(item, dict) and item.get("filePath")
+        ]
+        hits: list[RetrievalHit] = []
+        seen: set[str] = set()
+        for item in values:
+            path = str(item["filePath"])
+            if path in seen:
+                continue
+            seen.add(path)
+            hits.append(
+                RetrievalHit(
+                    path=path,
+                    score=1.0 / (len(hits) + 1),
+                    text=json.dumps(item, sort_keys=True),
+                    metadata={"retriever": "gitnexus", **telemetry},
+                )
+            )
+            if len(hits) >= query.top_k:
+                break
+        return hits
+
+
+def _initialize_fixture_repository(repository: Path) -> None:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+    }
+    subprocess.run(["git", "init", "--quiet"], cwd=repository, env=env, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=repository, env=env, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue",
+            "-c",
+            "user.email=fugue@example.invalid",
+            "commit",
+            "--quiet",
+            "--message",
+            "fixture snapshot",
+        ],
+        cwd=repository,
+        env=env,
+        check=True,
+    )
 
 
 def _write_managed_repository_instruction(
@@ -1053,7 +1150,9 @@ def _copy_repository_snapshot(
         try:
             (path.parent / link).resolve().relative_to(root)
         except ValueError as exc:
-            raise ValueError(f"repository symlink escapes checkout: {relative}") from exc
+            raise ValueError(
+                f"repository symlink escapes checkout: {relative}"
+            ) from exc
     shutil.copytree(
         source,
         target,
@@ -1314,8 +1413,6 @@ def context_cache_key(
     payload = {
         "repo": snapshot.repo,
         "commit": snapshot.commit,
-        "dataset": snapshot.dataset_id,
-        "task": snapshot.task_id,
         "system": spec.id,
         "version": spec.version,
         "config": spec.config,
@@ -1405,9 +1502,7 @@ async def prepare_context(
                 **prepared.manifest,
                 "schema_version": 2,
                 "system": spec.to_dict(),
-                "snapshot": {
-                    "task_id": snapshot.task_id,
-                    "dataset_id": snapshot.dataset_id,
+                "repository": {
                     "repo": snapshot.repo,
                     "commit": snapshot.commit,
                 },
@@ -1475,6 +1570,23 @@ async def query_context(
         "query_latency_ms": (time.perf_counter() - started) * 1000,
         "result_count": len(hits),
         "result_tokens": sum(_token_count(hit.text or "") for hit in hits),
+        **(
+            {
+                key: hits[0].metadata[key]
+                for key in (
+                    "retrieval_mode",
+                    "vector_search_attempted",
+                    "vector_search_succeeded",
+                    "semantic_result_count",
+                    "bm25_result_count",
+                    "vector_model_digest",
+                    "vector_query_latency_ms",
+                )
+                if key in hits[0].metadata
+            }
+            if hits
+            else {}
+        ),
     }
 
 
@@ -1532,8 +1644,6 @@ def checkout_repository(
     identity = hashlib.sha256(
         json.dumps(
             {
-                "dataset_id": dataset_id,
-                "task_id": task_id,
                 "repo": repo,
                 "commit": commit,
             },
@@ -1575,8 +1685,6 @@ def checkout_repository(
             (temp / ".fugue-snapshot.json").write_text(
                 json.dumps(
                     {
-                        "dataset_id": dataset_id,
-                        "task_id": task_id,
                         "repo": repo,
                         "commit": commit,
                     },

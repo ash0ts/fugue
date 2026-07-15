@@ -12,6 +12,37 @@ from pathlib import Path
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from fugue.mcp_gateway import _UpstreamStderr
+
+
+def test_gateway_collects_vector_telemetry_across_stderr_chunks(
+    capsys,
+) -> None:
+    stderr = _UpstreamStderr()
+    try:
+        stderr.write("GitNexus starting\nFUGUE_GITNEXUS_VEC")
+        stderr.write(
+            'TOR {"vector_search_attempted":true,"semantic_result_count":3}\n'
+        )
+        stderr.write(
+            'FUGUE_GITNEXUS_VECTOR {"vector_search_succeeded":true,'
+            '"bm25_result_count":2,"model_digest":"sha256:model"}\n'
+        )
+
+        assert stderr.vector() == {
+            "vector_search_attempted": True,
+            "vector_search_succeeded": True,
+            "semantic_result_count": 3,
+            "bm25_result_count": 2,
+            "model_digest": "sha256:model",
+        }
+        assert "GitNexus starting" in capsys.readouterr().err
+
+        stderr.reset_vector()
+        assert stderr.vector() == {}
+    finally:
+        stderr.close()
+
 
 def test_gateway_forwards_a_pinned_stdio_tool(tmp_path: Path) -> None:
     upstream = tmp_path / "echo_server.py"
