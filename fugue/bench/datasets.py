@@ -162,10 +162,8 @@ def _write_swe_qa_task(
                 str(row["question"]).strip(),
                 "",
                 "Explore the checked-out repository before answering. Write a grounded "
-                "answer to `/logs/artifacts/fugue-answer.md`. Also write "
-                "`/logs/artifacts/fugue-evidence.json` as a JSON object with a `paths` "
-                "array. Each item may be a path string or an object with `path`, optional "
-                "`start_line` and `end_line`, and a short `notes` field.",
+                "answer to `/logs/artifacts/fugue-answer.md`. Fugue records inspected "
+                "and changed files automatically.",
                 "",
             ]
         )
@@ -187,24 +185,16 @@ def _write_swe_qa_task(
     (root / "solution" / "solve.sh").write_text(
         "#!/bin/sh\nmkdir -p /logs/artifacts\n"
         "cp /solution/reference.md /logs/artifacts/fugue-answer.md\n"
-        "printf '{\"paths\": []}\\n' > /logs/artifacts/fugue-evidence.json\n"
     )
     (root / "tests" / "test.sh").write_text(
         "#!/bin/sh\n"
         "mkdir -p /logs/verifier\n"
         "python - <<'PY'\n"
-        "import json\n"
         "from pathlib import Path\n"
         "answer = Path('/logs/artifacts/fugue-answer.md')\n"
-        "evidence = Path('/logs/artifacts/fugue-evidence.json')\n"
         "ok = answer.is_file() and bool(answer.read_text().strip())\n"
-        "try:\n"
-        "    value = json.loads(evidence.read_text())\n"
-        "    ok = ok and isinstance(value, dict) and isinstance(value.get('paths'), list)\n"
-        "except Exception:\n"
-        "    ok = False\n"
         "Path('/logs/verifier/reward.json').write_text(" 
-        "json.dumps({'format_completion': float(ok)}))\n"
+        "__import__('json').dumps({'format_completion': float(ok)}))\n"
         "raise SystemExit(0 if ok else 1)\n"
         "PY\n"
     )

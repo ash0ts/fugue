@@ -27,7 +27,7 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_project_slug,
 )
-from fugue.redaction import redact_value
+from fugue.redaction import redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
 
@@ -193,6 +193,7 @@ class LiveEvaluationCoordinator:
         if active is None:
             return
         row = _completed_evaluation_row(cell, outcome, active.row)
+        _merge_error_events(row)
         row["evaluation_publication_mode"] = "live"
         row["evaluation_prediction_latency_sec"] = max(
             time.monotonic() - active.opened_monotonic, 0.0
@@ -200,6 +201,7 @@ class LiveEvaluationCoordinator:
         call_id = str(active.prediction.predict_and_score_call.id)
         try:
             _apply_trace_summary(row, self._wait_for_trace(row))
+            _merge_error_events(row)
             _apply_observed_identity(row)
             root = _verified_evaluation_root(row, call_id)
             if root is not None:
@@ -423,6 +425,7 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "variant_id": cell.variant_id,
         "prompt_id": env.get("FUGUE_PROMPT_ID"),
         "context_system_id": cell.context_system_id,
+        "context_transport": env.get("FUGUE_CONTEXT_TRANSPORT", "portable"),
         "context_version": env.get("FUGUE_CONTEXT_VERSION"),
         "context_config_hash": env.get("FUGUE_CONTEXT_CONFIG_HASH"),
         "agent_config_hash": env.get("FUGUE_AGENT_CONFIG_HASH"),
@@ -456,22 +459,47 @@ def _completed_evaluation_row(
     planned: dict[str, Any],
 ) -> dict[str, Any]:
     paths = _trial_result_paths(cell.result_path.parent)
+    trial_rows: list[dict[str, Any]] = []
     matching: list[dict[str, Any]] = []
     for path in paths:
         row = _row_from_trial(path)
+        trial_rows.append(row)
         if row.get("candidate_id") == cell.candidate_id and int(
             row.get("trial_index") or 1
         ) == cell.trial_index:
             matching.append(row)
-    row = matching[0] if len(matching) == 1 else dict(planned)
+    if len(matching) == 1:
+        row = matching[0]
+    elif len(trial_rows) == 1:
+        # Setup failures occur before fugue-meta.json is created. One Harbor
+        # job contains exactly one task/trial, so its sole result is still the
+        # authoritative runtime record for this planned cell.
+        row = trial_rows[0]
+    else:
+        row = dict(planned)
     for key, value in planned.items():
         row.setdefault(key, value)
     for key in (
         "comparison_example_id",
         "candidate_id",
+        "run_id",
+        "run_name",
+        "trial_index",
         "dataset",
         "workload_id",
         "task_name",
+        "harness",
+        "experiment_id",
+        "preset_id",
+        "variant_id",
+        "context_system_id",
+        "context_transport",
+        "model_provider",
+        "model",
+        "trace_project",
+        "weave_agent_name",
+        "planned_conversation_id",
+        "weave_conversation_id",
         "query_id",
         "sequence_id",
         "episode_id",
@@ -565,7 +593,9 @@ def export_rows(
     }
     for row in rows:
         if row.get("record_type") == "trial" and row.get("run_key") in live_by_run_key:
-            row.update(live_by_run_key[str(row["run_key"])])
+            _merge_live_evaluation_row(
+                row, live_by_run_key[str(row["run_key"])]
+            )
     if fetch_weave:
         run_keys = list(
             dict.fromkeys(str(row["run_key"]) for row in rows if row.get("run_key"))
@@ -604,7 +634,37 @@ def export_rows(
                     else None
                 )
                 _apply_observed_identity(row)
+    for row in rows:
+        if row.get("record_type") == "trial":
+            _merge_error_events(row)
+    _apply_runtime_equivalence(rows)
     return rows
+
+
+_LOCAL_RESULT_FIELDS = {
+    "agent_evidence_paths",
+    "changed_paths",
+    "citation_correctness",
+    "evaluation_scope_id",
+    "evidence_paths",
+    "evidence_recall",
+    "expected_evidence_paths",
+    "inspected_paths",
+    "local_error_events",
+    "runtime_fingerprints",
+}
+
+
+def _merge_live_evaluation_row(
+    row: dict[str, Any], live: dict[str, Any]
+) -> None:
+    local = {
+        key: value
+        for key, value in row.items()
+        if key in _LOCAL_RESULT_FIELDS or key.startswith("context_")
+    }
+    row.update(live)
+    row.update(local)
 
 
 def _apply_observed_identity(row: dict[str, Any]) -> None:
@@ -662,6 +722,7 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
 def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
     response = summary.pop("_weave_agent_response", None)
     row.update(summary)
+    _merge_error_events(row)
     if not isinstance(response, str) or not response.strip():
         return
     encoded = response.encode()
@@ -757,11 +818,24 @@ def judge_qa_rows(
                 )
 
 
-def write_jsonl(rows: list[dict[str, Any]], path: Path) -> None:
+def write_jsonl(
+    rows: list[dict[str, Any]],
+    path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    secrets = secrets_from_env(env or {})
     with path.open("w") as handle:
         for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+            handle.write(
+                json.dumps(
+                    redact_value(row, secrets=secrets),
+                    sort_keys=True,
+                    default=str,
+                )
+                + "\n"
+            )
 
 
 def publish_to_weave(
@@ -1025,6 +1099,7 @@ def _candidate_id_from_row(row: dict[str, Any]) -> str:
             "model": row.get("model"),
             "variant_id": row.get("variant_id"),
             "context_system_id": row.get("context_system_id"),
+            "context_transport": row.get("context_transport"),
             "context_version": row.get("context_version"),
             "context_config_hash": row.get("context_config_hash"),
             "prompt_id": row.get("prompt_id"),
@@ -1046,6 +1121,7 @@ def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:
             "harness": row.get("harness"),
             "variant_id": row.get("variant_id"),
             "context_system_id": row.get("context_system_id"),
+            "context_transport": row.get("context_transport"),
             "model_provider": row.get("model_provider"),
             "model_id": row.get("model"),
         }
@@ -1076,6 +1152,7 @@ def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "fugue.harness": row.get("harness"),
             "fugue.variant_id": row.get("variant_id"),
             "fugue.context_system_id": row.get("context_system_id"),
+            "fugue.context_transport": row.get("context_transport"),
             "fugue.prompt_id": row.get("prompt_id"),
             "fugue.skill_ids": "|".join(str(x) for x in row.get("skill_ids") or []),
             "fugue.model_provider": row.get("model_provider"),
@@ -1170,10 +1247,18 @@ _SCORE_ALIASES = {
     "weave_tool_call_count": "tool_calls",
     "weave_terminal_error_count": "terminal_errors",
     "weave_model_error_count": "model_errors",
-    "weave_tool_error_count": "recoverable_tool_errors",
+    "recoverable_error_count": "recoverable_tool_errors",
+    "agent_error_count": "agent_errors",
+    "benchmark_runtime_error_count": "benchmark_runtime_errors",
+    "harness_adapter_error_count": "harness_adapter_errors",
+    "context_system_error_count": "context_system_errors",
+    "provider_error_count": "provider_errors",
+    "fugue_error_count": "fugue_errors",
     "context_error_count": "context_errors",
     "context_query_count": "context_queries",
     "context_query_latency_ms": "context_query_latency_ms",
+    "context_registered": "context_registered",
+    "runtime_equivalent": "runtime_equivalent",
 }
 
 _COMMON_SCORERS = (
@@ -1190,9 +1275,17 @@ _COMMON_SCORERS = (
     "terminal_errors",
     "model_errors",
     "recoverable_tool_errors",
+    "agent_errors",
+    "benchmark_runtime_errors",
+    "harness_adapter_errors",
+    "context_system_errors",
+    "provider_errors",
+    "fugue_errors",
     "context_errors",
     "context_queries",
     "context_query_latency_ms",
+    "context_registered",
+    "runtime_equivalent",
 )
 
 
@@ -1559,6 +1652,11 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         for span in values
         if _span_has_error(span)
     )
+    error_events = [
+        _error_event_from_span(span)
+        for span in values
+        if _span_has_error(span)
+    ]
     root_id = next(
         (
             str(value)
@@ -1589,6 +1687,7 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
             _span_has_error(span) for span in tool_spans
         ),
         "weave_error_types": dict(sorted(error_types.items())),
+        "weave_error_events": error_events,
         "weave_tool_names": dict(sorted(tool_names.items())),
         "weave_agent_names": agent_names,
         "weave_conversation_ids": conversation_ids,
@@ -1841,6 +1940,8 @@ _REQUIRED_FUGUE_ATTRIBUTES = (
     "fugue.harness",
     "fugue.variant_id",
     "fugue.context_system_id",
+    "fugue.context_transport",
+    "fugue.context_registration_status",
     "fugue.task_id",
     "fugue.trial_index",
     "fugue.comparison_example_id",
@@ -1895,6 +1996,240 @@ def _span_error_type(span: dict[str, Any]) -> str:
     )
 
 
+def _error_event_from_span(span: dict[str, Any]) -> dict[str, Any]:
+    attrs = _span_attributes(span)
+    operation = _span_operation(span)
+    tool_name = str(
+        span.get("tool_name")
+        or attrs.get("gen_ai.tool.name")
+        or attrs.get("tool.name")
+        or ""
+    )
+    message = _span_error_message(span, attrs)
+    return _classify_error(
+        message,
+        tool_name=tool_name,
+        operation=operation,
+        source="weave_span",
+        terminal=operation == "invoke_agent",
+        event_key=str(
+            span.get("id") or span.get("span_id") or span.get("call_id") or ""
+        ),
+    )
+
+
+def _span_error_message(span: dict[str, Any], attrs: dict[str, Any]) -> str:
+    for value in (
+        span.get("error_message"),
+        span.get("status_message"),
+        span.get("exception_message"),
+        attrs.get("exception.message"),
+        attrs.get("error.message"),
+        span.get("error"),
+        span.get("output"),
+    ):
+        if isinstance(value, str) and value.strip():
+            return value[:2_000]
+        if isinstance(value, dict):
+            text = json.dumps(value, sort_keys=True, default=str)
+            if text != "{}":
+                return text[:2_000]
+    return _span_error_type(span)
+
+
+def _classify_error(
+    message: str,
+    *,
+    tool_name: str,
+    operation: str,
+    source: str,
+    terminal: bool = False,
+    event_key: str = "",
+) -> dict[str, Any]:
+    text = " ".join(message.split())[:2_000]
+    lowered = text.lower()
+    tool = tool_name.lower()
+    if "context" in tool or "fugue-context" in lowered:
+        origin, kind = "context_system", "context_failure"
+    elif any(
+        token in lowered
+        for token in (
+            "unknown variant `namespace`",
+            "expected `function`",
+            "badrequesterror",
+            "rate limit",
+            "quota",
+            "http 401",
+            "http 429",
+        )
+    ):
+        origin, kind = "provider", "provider_rejection"
+    elif any(
+        token in lowered
+        for token in ("disabled", "no provider", "tool unavailable", "not configured")
+    ):
+        origin, kind = "harness_adapter", "tool_unavailable"
+    elif operation == "adapter_setup":
+        origin, kind = "harness_adapter", "integration_failure"
+    elif operation == "verifier":
+        origin, kind = "benchmark_runtime", "verifier_failure"
+    elif operation == "framework":
+        origin, kind = "fugue", "framework_failure"
+    elif any(
+        token in lowered
+        for token in (
+            "modulenotfounderror",
+            "no module named",
+            "command not found",
+            "not built",
+            "missing dependency",
+        )
+    ):
+        origin, kind = "benchmark_runtime", "dependency_missing"
+    elif any(
+        token in lowered
+        for token in (
+            "must be a string",
+            "got dict",
+            "required field",
+            "old_string and new_string are identical",
+            "invalid arguments",
+        )
+    ):
+        origin, kind = "agent", "invalid_tool_arguments"
+    elif "syntaxerror" in lowered or "parse error" in lowered:
+        origin, kind = "agent", "generated_code_error"
+    elif "plugin" in lowered and any(
+        token in lowered for token in ("install", "load", "startup", "crash")
+    ):
+        origin, kind = "harness_adapter", "integration_failure"
+    elif any(token in lowered for token in ("exit code", "tool reported failure")):
+        origin, kind = "agent", "command_exit"
+    elif "fugue" in lowered and operation != "execute_tool":
+        origin, kind = "fugue", "framework_failure"
+    elif operation == "execute_tool":
+        origin, kind = "agent", "tool_failure"
+    elif operation == "chat":
+        origin, kind = "provider", "model_failure"
+    else:
+        origin, kind = "agent", "agent_failure"
+    identity = hashlib.sha256(
+        json.dumps(
+            {
+                "origin": origin,
+                "kind": kind,
+                "tool": tool,
+                "message": lowered[:500],
+                "event_key": event_key,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return {
+        "id": identity,
+        "origin": origin,
+        "kind": kind,
+        "recoverable": not terminal,
+        "terminal": terminal,
+        "phase": (
+            "agent" if operation in {"invoke_agent", "chat", "execute_tool"} else operation
+        ),
+        "tool_name": tool_name or None,
+        "source": source,
+        "message": text,
+    }
+
+
+def _merge_error_events(row: dict[str, Any]) -> None:
+    weave = [
+        event
+        for event in row.get("weave_error_events") or []
+        if isinstance(event, dict)
+    ]
+    local = [
+        event
+        for event in row.get("local_error_events") or []
+        if isinstance(event, dict)
+    ]
+    values = list({str(event.get("id")): event for event in weave}.values())
+    matched = Counter(_error_match_key(event) for event in values)
+    for event in local:
+        key = _error_match_key(event)
+        if matched[key]:
+            matched[key] -= 1
+            continue
+        values.append(event)
+    row["error_events"] = values
+    row["recoverable_error_count"] = sum(
+        bool(event.get("recoverable")) for event in values
+    )
+    for origin in (
+        "agent",
+        "benchmark_runtime",
+        "harness_adapter",
+        "context_system",
+        "provider",
+        "fugue",
+    ):
+        row[f"{origin}_error_count"] = sum(
+            event.get("origin") == origin for event in values
+        )
+
+
+def _error_match_key(event: dict[str, Any]) -> tuple[str, str, str, bool]:
+    return (
+        str(event.get("origin") or "unknown"),
+        str(event.get("kind") or "unknown"),
+        str(event.get("tool_name") or "").lower(),
+        bool(event.get("terminal")),
+    )
+
+
+def _apply_runtime_equivalence(rows: list[dict[str, Any]]) -> None:
+    cohorts: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("record_type") != "trial":
+            continue
+        key = (
+            str(row.get("run_id") or ""),
+            str(row.get("comparison_example_id") or row.get("task_name") or ""),
+            str(row.get("trial_index") or 1),
+            str(row.get("model") or ""),
+        )
+        cohorts.setdefault(key, []).append(row)
+    for cohort in cohorts.values():
+        digests = [
+            str(
+                ((row.get("runtime_fingerprints") or {}).get("pre_install") or {}).get(
+                    "comparable_digest"
+                )
+                or ""
+            )
+            for row in cohort
+        ]
+        available = [value for value in digests if value]
+        if len(available) != len(cohort):
+            status, equivalent = "unavailable", None
+        elif len(set(available)) == 1:
+            status, equivalent = "equivalent", True
+        else:
+            status, equivalent = "mismatch", False
+        for row in cohort:
+            row["runtime_equivalence_status"] = status
+            row["runtime_equivalent"] = equivalent
+            row["runtime_pre_install_digest"] = (
+                ((row.get("runtime_fingerprints") or {}).get("pre_install") or {}).get(
+                    "comparable_digest"
+                )
+            )
+            row["runtime_pre_execution_digest"] = (
+                (
+                    (row.get("runtime_fingerprints") or {}).get("pre_execution")
+                    or {}
+                ).get("comparable_digest")
+            )
+
+
 def _trial_result_paths(job: Path) -> list[Path]:
     if job.is_file() and job.name == "result.json":
         return [job]
@@ -1924,10 +2259,21 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         trial_dir,
         trial.get("task_name"),
         meta.get("expected_evidence_paths") or {},
+        changed_paths=meta.get("changed_paths") or [],
     )
+    trajectory_activity = _trajectory_activity(trial_dir)
+    terminal_error = _terminal_exception_event(exception)
     agent_response = _agent_response(trial_dir)
     context_system_id = meta.get("context_system_id", "none")
     context_assigned = context_system_id != "none"
+    context_registration = meta.get("context_registration") or {}
+    registration_status = context_registration.get("status")
+    context_registered = registration_status in {"registered", "static"}
+    if registration_status is None:
+        context_registered = bool(
+            context_events["context_telemetry_available"]
+            or meta.get("context_artifact")
+        )
     return {
         "schema_version": 1,
         "record_type": "trial",
@@ -1936,6 +2282,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "trial_index": _positive_int(meta.get("trial_index")) or 1,
         "comparison_example_id": meta.get("comparison_example_id"),
         "candidate_id": meta.get("candidate_id"),
+        "evaluation_scope_id": meta.get("evaluation_scope_id"),
         "job_name": meta.get("job_name") or trial_dir.parent.name,
         "task_name": trial.get("task_name"),
         "trial_name": trial.get("trial_name") or trial_dir.name,
@@ -1948,6 +2295,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "variant_id": meta.get("variant_id"),
         "prompt_id": meta.get("prompt_id"),
         "context_system_id": context_system_id,
+        "context_transport": meta.get("context_transport", "portable"),
         "context_version": meta.get("context_version"),
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
@@ -1982,16 +2330,29 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "n_output_tokens": agent_result.get("n_output_tokens"),
         "cost_usd": agent_result.get("cost_usd"),
         "exception_class": exception.get("exception_type"),
+        "runtime_fingerprints": _runtime_fingerprints(trial_dir, meta),
+        "context_registration": context_registration,
+        "context_registration_status": registration_status or "unavailable",
+        "context_registered": context_registered if context_assigned else None,
         "context_artifact": meta.get("context_artifact"),
         "context_assigned": context_assigned,
-        "context_available": context_assigned
-        and bool(
-            context_events["context_telemetry_available"]
-            or meta.get("context_artifact")
-        ),
+        "context_available": context_assigned and context_registered,
         "context_invoked": context_events["context_query_count"] > 0,
         **context_events,
         **evidence,
+        "inspected_paths": trajectory_activity["inspected_paths"],
+        "changed_paths": list(
+            dict.fromkeys(
+                [
+                    *evidence.get("changed_paths", []),
+                    *trajectory_activity["changed_paths"],
+                ]
+            )
+        ),
+        "local_error_events": [
+            *trajectory_activity["error_events"],
+            *([terminal_error] if terminal_error else []),
+        ],
         "weave_agent_name": meta.get("weave_agent_name"),
         "weave_conversation_key": meta.get("weave_conversation_key"),
         "weave_conversation_id": meta.get("weave_conversation_id"),
@@ -2031,6 +2392,23 @@ def _agent_response(trial_dir: Path) -> str | None:
         if isinstance(message, str) and message.strip():
             return message.strip()
     return None
+
+
+def _runtime_fingerprints(
+    trial_dir: Path, meta: dict[str, Any]
+) -> dict[str, Any]:
+    values = dict(meta.get("runtime_fingerprints") or {})
+    for stage in ("pre_install", "pre_execution"):
+        if stage in values:
+            continue
+        path = trial_dir / "agent" / f"runtime-fingerprint-{stage}.json"
+        try:
+            fingerprint = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(fingerprint, dict):
+            values[stage] = fingerprint
+    return values
 
 
 def _context_result_rows(path: Path) -> list[dict[str, Any]]:
@@ -2208,8 +2586,10 @@ def _evidence_summary(
     trial_dir: Path,
     task_name: str | None,
     expected_by_task: dict[str, Any],
+    *,
+    changed_paths: list[str],
 ) -> dict[str, Any]:
-    observed: list[str] = []
+    authored: list[str] = []
     for path in trial_dir.rglob("fugue-evidence.json"):
         try:
             payload = json.loads(path.read_text())
@@ -2225,19 +2605,171 @@ def _evidence_summary(
         for value in values[:100]:
             item = value.get("path") if isinstance(value, dict) else value
             if item:
-                observed.append(str(item)[:1_000])
+                authored.append(str(item)[:1_000])
     expected: list[str] = []
     for key, values in expected_by_task.items():
         if task_name == key or str(task_name or "").endswith(f"/{key}"):
             expected = [str(value) for value in values]
             break
+    activity = _trajectory_activity(trial_dir)
+    changed = [
+        value
+        for value in (_normalize_repo_path(item) for item in changed_paths)
+        if value
+    ]
+    observed = list(
+        dict.fromkeys([*activity["inspected_paths"], *changed, *authored])
+    )
     scores = score_evidence_paths(expected, observed)
     return {
-        "evidence_paths": list(dict.fromkeys(observed)),
+        "evidence_paths": observed,
+        "agent_evidence_paths": list(dict.fromkeys(authored)),
+        "changed_paths": list(dict.fromkeys(changed)),
         "expected_evidence_paths": expected,
         "evidence_recall": scores["evidence_recall"],
         "citation_correctness": scores["evidence_precision"],
     }
+
+
+_PATH_ARGUMENTS = {"path", "file_path", "filepath", "filename"}
+_READ_TOOLS = {"read", "read_file", "grep", "search", "search_files", "glob"}
+_WRITE_TOOLS = {"write", "write_file", "edit", "patch", "apply_patch"}
+_COMMAND_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_./-])(?:/testbed/|/workspace/repo/|\./)?"
+    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+)
+
+
+def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
+    path = trial_dir / "agent" / "trajectory.json"
+    try:
+        trajectory = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"inspected_paths": [], "changed_paths": [], "error_events": []}
+    inspected: list[str] = []
+    changed: list[str] = []
+    errors: list[dict[str, Any]] = []
+    steps = trajectory.get("steps", []) if isinstance(trajectory, dict) else []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        results = {
+            str(result.get("source_call_id") or ""): result
+            for result in ((step.get("observation") or {}).get("results") or [])
+            if isinstance(result, dict)
+        }
+        for call in step.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            tool_name = str(
+                call.get("function_name") or call.get("tool_name") or "unknown"
+            )
+            arguments = call.get("arguments") or {}
+            paths = _paths_from_tool_arguments(arguments)
+            normalized_name = tool_name.lower()
+            if normalized_name in _WRITE_TOOLS:
+                changed.extend(paths)
+            elif normalized_name in _READ_TOOLS:
+                inspected.extend(paths)
+            if isinstance(arguments, dict):
+                command = arguments.get("command")
+                if isinstance(command, str):
+                    inspected.extend(_paths_from_command(command))
+            call_id = str(call.get("tool_call_id") or call.get("id") or "")
+            result = results.get(call_id)
+            if result and _local_tool_result_failed(result):
+                errors.append(
+                    _classify_error(
+                        str(result.get("content") or "tool call failed"),
+                        tool_name=tool_name,
+                        operation="execute_tool",
+                        source="local_trajectory",
+                        event_key=call_id,
+                    )
+                )
+    return {
+        "inspected_paths": list(dict.fromkeys(inspected)),
+        "changed_paths": list(dict.fromkeys(changed)),
+        "error_events": errors,
+    }
+
+
+def _terminal_exception_event(exception: dict[str, Any]) -> dict[str, Any] | None:
+    exception_type = str(exception.get("exception_type") or "").strip()
+    message = str(exception.get("exception_message") or "").strip()
+    traceback = str(exception.get("exception_traceback") or "")
+    if not exception_type and not message:
+        return None
+    lowered_traceback = traceback.lower()
+    if "_setup_agent" in lowered_traceback or (
+        "harbor/agents/installed/" in lowered_traceback
+        and " in install" in lowered_traceback
+    ):
+        operation = "adapter_setup"
+    elif "verifier" in lowered_traceback:
+        operation = "verifier"
+    elif "fugue/" in lowered_traceback and "invoke" not in lowered_traceback:
+        operation = "framework"
+    else:
+        operation = "invoke_agent"
+    return _classify_error(
+        f"{exception_type}: {message}".strip(": "),
+        tool_name="",
+        operation=operation,
+        source="harbor_trial",
+        terminal=True,
+        event_key=exception_type,
+    )
+
+
+def _paths_from_tool_arguments(arguments: Any) -> list[str]:
+    if not isinstance(arguments, dict):
+        return []
+    paths: list[str] = []
+    for key, value in arguments.items():
+        if key.lower() not in _PATH_ARGUMENTS or not isinstance(value, str):
+            continue
+        normalized = _normalize_repo_path(value)
+        if normalized:
+            paths.append(normalized)
+    return paths
+
+
+def _paths_from_command(command: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            value
+            for value in (
+                _normalize_repo_path(match.group(0))
+                for match in _COMMAND_PATH_RE.finditer(command)
+            )
+            if value
+        )
+    )
+
+
+def _normalize_repo_path(value: str) -> str | None:
+    path = value.strip().strip("'\"")
+    for prefix in ("/testbed/", "/workspace/repo/"):
+        if path.startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    path = path.removeprefix("./")
+    if not path or path.startswith(("/", "../", "/logs/", ".fugue-context/")):
+        return None
+    return path[:1_000]
+
+
+def _local_tool_result_failed(result: dict[str, Any]) -> bool:
+    extra = result.get("extra") or {}
+    metadata = extra.get("tool_result_metadata") or {}
+    raw = metadata.get("raw_tool_result") or {}
+    return bool(
+        extra.get("tool_result_is_error")
+        or metadata.get("tool_result_is_error")
+        or raw.get("is_error")
+        or "[error] tool reported failure" in str(result.get("content") or "").lower()
+    )
 
 
 def _qa_references(repo_root: Path) -> dict[str, str]:
