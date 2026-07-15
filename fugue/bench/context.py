@@ -665,23 +665,58 @@ class GraphitiContextProvider(BaseContextProvider):
         prepared: PreparedContext,
         runtime: ContextRuntime,
     ) -> list[RetrievalHit]:
+        from datetime import UTC, datetime
+
+        from graphiti_core.nodes import EpisodeType
+        from graphiti_core.search.search_config import (
+            EpisodeReranker,
+            EpisodeSearchConfig,
+            EpisodeSearchMethod,
+            SearchConfig,
+        )
+
         graph = _graphiti(spec, runtime)
+        group_ids = [_namespace_id(prepared.path)]
         try:
-            values = await graph.search(
+            results = await graph.search_(
                 query.text,
-                group_ids=[_namespace_id(prepared.path)],
-                num_results=query.top_k,
+                config=SearchConfig(
+                    episode_config=EpisodeSearchConfig(
+                        search_methods=[EpisodeSearchMethod.bm25],
+                        reranker=EpisodeReranker.rrf,
+                    ),
+                    limit=query.top_k,
+                ),
+                group_ids=group_ids,
+            )
+            recent = await graph.retrieve_episodes(
+                datetime.now(UTC),
+                last_n=query.top_k,
+                group_ids=group_ids,
+                source=EpisodeType.text,
             )
         finally:
             await graph.close()
+        scores = {
+            str(getattr(item, "uuid", "")): float(
+                results.episode_reranker_scores[index]
+            )
+            for index, item in enumerate(results.episodes)
+            if index < len(results.episode_reranker_scores)
+        }
+        values = list(results.episodes)
+        seen = {str(getattr(item, "uuid", "")) for item in values}
+        values.extend(
+            item for item in recent if str(getattr(item, "uuid", "")) not in seen
+        )
         return [
             RetrievalHit(
-                path="GRAPHITI",
-                score=float(getattr(item, "score", 0) or 0),
-                text=str(getattr(item, "fact", None) or getattr(item, "name", item)),
+                path="MEMORY.md",
+                score=scores.get(str(getattr(item, "uuid", ""))),
+                text=str(getattr(item, "content", None) or getattr(item, "name", item)),
                 metadata={"uuid": str(getattr(item, "uuid", ""))},
             )
-            for item in values
+            for item in values[: query.top_k]
         ]
 
 
@@ -1988,7 +2023,6 @@ def _graphiti(spec: ContextSystemSpec, runtime: ContextRuntime) -> Any:
         llm_client=llm_client,
         embedder=LocalEmbedder(),
         cross_encoder=OpenAIRerankerClient(
-            client=llm_client,
             config=llm_config,
         ),
     )

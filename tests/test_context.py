@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ from fugue.bench.context import (
     AiderRepoMapContextProvider,
     ContextRuntime,
     ContextSystemSpec,
+    GraphitiContextProvider,
     PreparedContext,
     RepositorySnapshot,
     RetrievalHit,
@@ -203,6 +205,76 @@ def test_graphiti_binding_passes_required_env_by_reference(tmp_path: Path) -> No
 
     assert binding.env == {name: f"${{{name}}}" for name in spec.required_env}
     assert "private-password" not in json.dumps(binding.env)
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Support for class-based `config` is deprecated.*:"
+    "pydantic.warnings.PydanticDeprecatedSince20"
+)
+def test_graphiti_retrieves_ranked_episodes_from_the_active_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, object, list[str]]] = []
+
+    class FakeGraph:
+        async def search_(self, query, *, config, group_ids):
+            calls.append((query, config, group_ids))
+            return SimpleNamespace(
+                episodes=[
+                    SimpleNamespace(
+                        uuid="episode-1",
+                        content="Use pytest and keep tests in modeling/tests.",
+                    )
+                ],
+                episode_reranker_scores=[0.75],
+            )
+
+        async def retrieve_episodes(
+            self, reference_time, *, last_n, group_ids, source
+        ):
+            return [
+                SimpleNamespace(
+                    uuid="episode-1",
+                    content="Use pytest and keep tests in modeling/tests.",
+                ),
+                SimpleNamespace(
+                    uuid="episode-2",
+                    content="Do not add a standalone validation script.",
+                ),
+            ]
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "fugue.bench.context._graphiti", lambda spec, runtime: FakeGraph()
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = get_context_system("graphiti", repo_root)
+    prepared = PreparedContext("graphiti", "cache", tmp_path / "namespace", {}, {})
+    hits = asyncio.run(
+        GraphitiContextProvider().retrieve(
+            spec,
+            RetrievalQuery("probe", "How should this change be tested?"),
+            prepared,
+            ContextRuntime(repo_root, tmp_path / "cache", {}),
+        )
+    )
+
+    assert [(hit.path, hit.score, hit.text) for hit in hits] == [
+        ("MEMORY.md", 0.75, "Use pytest and keep tests in modeling/tests."),
+        ("MEMORY.md", None, "Do not add a standalone validation script."),
+    ]
+    assert hits[0].metadata == {"uuid": "episode-1"}
+    query, config, group_ids = calls[0]
+    assert query == "How should this change be tested?"
+    assert group_ids == [
+        hashlib.sha256(prepared.path.as_posix().encode()).hexdigest()[:24]
+    ]
+    assert config.edge_config is None
+    assert config.node_config is None
+    assert config.community_config is None
+    assert config.episode_config.reranker.value == "reciprocal_rank_fusion"
 
 
 def test_context_cache_is_content_addressed_and_reused(tmp_path: Path) -> None:
