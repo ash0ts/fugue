@@ -162,6 +162,26 @@ def load_integration(integration_id: str, repo_root: Path) -> IntegrationSpec:
     )
 
 
+def declared_mcp_servers(
+    selections: list[IntegrationSelection], repo_root: Path
+) -> tuple[dict[str, Any], ...]:
+    """Return reviewed MCP declarations without starting or contacting a service."""
+    values: list[dict[str, Any]] = []
+    for selection in selections:
+        spec = load_integration(selection.id, repo_root)
+        for interface in spec.interfaces:
+            if interface.type == "mcp":
+                values.append(
+                    {
+                        **_mcp_server(spec, interface),
+                        "integration_id": spec.id,
+                        "integration_version": spec.version,
+                        "allowed_tools": list(interface.allowed_tools),
+                    }
+                )
+    return tuple(values)
+
+
 def list_integrations(repo_root: Path) -> list[IntegrationSpec]:
     root = repo_root / INTEGRATION_ROOT
     if not root.is_dir():
@@ -282,9 +302,17 @@ def bind_integrations(
 
 def effective_selections(
     experiment: list[IntegrationSelection],
-    variant: list[IntegrationSelection] | None,
+    variant: list[IntegrationSelection],
 ) -> list[IntegrationSelection]:
-    return list(experiment if variant is None else variant)
+    effective = [*experiment, *variant]
+    ids = [item.id for item in effective]
+    duplicates = sorted({item_id for item_id in ids if ids.count(item_id) > 1})
+    if duplicates:
+        raise ValueError(
+            "duplicate integrations across experiment and variant: "
+            + ", ".join(duplicates)
+        )
+    return effective
 
 
 def _runtime(raw: Any, path: Path) -> IntegrationRuntime:

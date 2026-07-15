@@ -4,4 +4,6 @@ description: Native harness tools only; the control condition.
 provider: fugue.bench.context:EmptyContextProvider
 version: "1"
 capabilities: [prepare, retrieve, bind, ingest, sequence, serve]
+deliveries: [portable]
+serve_deliveries: [portable]
 license: Fugue

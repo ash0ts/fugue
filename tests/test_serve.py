@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import stat
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -15,8 +19,14 @@ from harbor import JobConfig
 
 from fugue.serve import runtime as serve_runtime
 from fugue.serve.app import create_app
-from fugue.serve.runtime import HarborWorkerBackend, WorkerRequest, render_conversation
+from fugue.serve.runtime import (
+    ConversationRequest,
+    HarborWorkerBackend,
+    WorkerRequest,
+    render_conversation,
+)
 from fugue.serve.worker import extract_final_answer
+from fugue.weave_support import trace_async_operation
 
 
 def _deployment() -> dict:
@@ -87,13 +97,20 @@ class FakeBackend:
         return self.answer
 
 
-def _client(backend: FakeBackend, **kwargs) -> TestClient:
+def _client(
+    backend: FakeBackend,
+    *,
+    env_overrides: dict[str, str] | None = None,
+    **kwargs,
+) -> TestClient:
+    env = {
+        "FUGUE_SERVE_API_KEY": "serve-secret",
+        "FUGUE_SERVE_CORS_ORIGINS": "https://app.example",
+    }
+    env.update(env_overrides or {})
     app = create_app(
         backend=backend,
-        env={
-            "FUGUE_SERVE_API_KEY": "serve-secret",
-            "FUGUE_SERVE_CORS_ORIGINS": "https://app.example",
-        },
+        env=env,
         **kwargs,
     )
     return TestClient(app)
@@ -195,7 +212,6 @@ def test_open_responses_2026_04_24_basic_and_streaming_subset() -> None:
         "top_logprobs",
         "temperature",
         "reasoning",
-        "usage",
         "max_output_tokens",
         "max_tool_calls",
         "store",
@@ -208,6 +224,7 @@ def test_open_responses_2026_04_24_basic_and_streaming_subset() -> None:
     assert required_resource_fields <= resource.keys()
     assert resource["object"] == "response"
     assert resource["status"] == "completed"
+    assert resource["usage"] is None
 
     streamed = client.post(
         "/v1/responses",
@@ -305,18 +322,78 @@ def test_worker_timeout_and_error_are_normalized() -> None:
     assert "worker broke" not in failed.text
 
 
-def test_websocket_and_compaction_are_explicitly_rejected() -> None:
+def test_websocket_is_absent_and_compaction_is_explicitly_rejected() -> None:
     client = _client(FakeBackend())
     compact = client.post(
         "/v1/responses/compact", headers=_auth(), json={"input": "hello"}
     )
     assert compact.status_code == 400
     assert compact.json()["error"]["code"] == "unsupported_feature"
-    with client.websocket_connect(
-        "/v1/responses", headers=_auth()
-    ) as websocket:
-        event = websocket.receive_json()
-    assert event["error"]["code"] == "unsupported_feature"
+    assert all(route.__class__.__name__ != "APIWebSocketRoute" for route in client.app.routes)
+
+
+def test_request_message_and_text_limits_are_enforced() -> None:
+    client = _client(FakeBackend())
+
+    too_large = client.post(
+        "/v1/responses",
+        headers={**_auth(), "Content-Type": "application/json"},
+        content=json.dumps({"input": "x" * (1024 * 1024)}),
+    )
+    assert too_large.status_code == 413
+    assert too_large.json()["error"]["code"] == "request_too_large"
+
+    too_many = client.post(
+        "/v1/chat/completions",
+        headers=_auth(),
+        json={"messages": [{"role": "user", "content": "x"}] * 129},
+    )
+    assert too_many.status_code == 400
+    assert "128-message" in too_many.json()["error"]["message"]
+
+    too_much_text = client.post(
+        "/v1/responses",
+        headers=_auth(),
+        json={"input": [{"role": "user", "content": "x" * (256 * 1024 + 1)}]},
+    )
+    assert too_much_text.status_code == 400
+    assert "256 KiB" in too_much_text.json()["error"]["message"]
+
+
+def test_full_admission_returns_429_with_retry_after() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingBackend(FakeBackend):
+        async def run(self, request: WorkerRequest) -> str:
+            self.requests.append(request)
+            started.set()
+            await asyncio.to_thread(release.wait)
+            return self.answer
+
+    backend = BlockingBackend()
+    client = _client(
+        backend,
+        env_overrides={
+            "FUGUE_SERVE_MAX_CONCURRENCY": "1",
+            "FUGUE_SERVE_QUEUE_DEPTH": "0",
+        },
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(
+            client.post,
+            "/v1/responses",
+            headers=_auth(),
+            json={"input": "first"},
+        )
+        assert started.wait(timeout=2)
+        rejected = client.post(
+            "/v1/responses", headers=_auth(), json={"input": "second"}
+        )
+        assert rejected.status_code == 429
+        assert rejected.headers["retry-after"] == "1"
+        release.set()
+        assert first.result(timeout=2).status_code == 200
 
 
 def test_harbor_config_preserves_candidate_and_enforces_request_policy(
@@ -338,7 +415,9 @@ def test_harbor_config_preserves_candidate_and_enforces_request_policy(
     task = tmp_path / "task"
     task.mkdir()
     request = WorkerRequest(
-        "req-1", "open-responses", ({"role": "user", "content": "hello"},)
+        "req-1",
+        "open-responses",
+        ConversationRequest.normalized(({"role": "user", "content": "hello"},)),
     )
     config = backend._job_config(request, task)
     validated = JobConfig.model_validate(config)
@@ -421,14 +500,18 @@ def test_one_isolated_worker_per_request_and_ephemeral_cleanup(
                 WorkerRequest(
                     "req-one",
                     "open-responses",
-                    ({"role": "user", "content": "one"},),
+                    ConversationRequest.normalized(
+                        ({"role": "user", "content": "one"},)
+                    ),
                 )
             ),
             backend._run_isolated(
                 WorkerRequest(
                     "req-two",
                     "chat-completions",
-                    ({"role": "user", "content": "two"},),
+                    ConversationRequest.normalized(
+                        ({"role": "user", "content": "two"},)
+                    ),
                 )
             ),
         )
@@ -437,6 +520,164 @@ def test_one_isolated_worker_per_request_and_ephemeral_cleanup(
     assert len(configs) == 2
     assert configs[0].parent != configs[1].parent
     assert not any(runtime.iterdir())
+
+
+def test_cancellation_terminates_process_group_and_removes_request_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "deployment.json"
+    spec_path.write_text(json.dumps(_deployment()))
+    runtime = tmp_path / "runtime"
+    backend = HarborWorkerBackend(
+        spec_path,
+        runtime_dir=runtime,
+        env={
+            "OPENAI_API_KEY": "model-secret",
+            "WANDB_API_KEY": "trace-secret",
+            "CUSTOM_TOKEN": "candidate-secret",
+        },
+    )
+    spawned = asyncio.Event()
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class Process:
+        returncode = None
+        pid = 1234
+        waits = 0
+
+        async def wait(self):
+            self.waits += 1
+            if self.waits == 1:
+                spawned.set()
+                await asyncio.Event().wait()
+            self.returncode = -15
+            return self.returncode
+
+    async def spawn(*args, **kwargs):
+        return Process()
+
+    def killpg(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    monkeypatch.setattr(serve_runtime.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(serve_runtime.os, "killpg", killpg)
+
+    async def cancel_request() -> None:
+        task = asyncio.create_task(
+            backend._run_isolated(
+                WorkerRequest(
+                    "req-cancel",
+                    "open-responses",
+                    ConversationRequest.normalized(
+                        ({"role": "user", "content": "cancel"},)
+                    ),
+                )
+            )
+        )
+        await spawned.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_request())
+    assert signals == [(1234, signal.SIGTERM)]
+    assert not any(runtime.iterdir())
+
+
+def test_docker_readiness_probe_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "deployment.json"
+    spec_path.write_text(json.dumps(_deployment()))
+    backend = HarborWorkerBackend(
+        spec_path,
+        env={
+            "FUGUE_SERVE_API_KEY": "serve-secret",
+            "FUGUE_SERVE_HARBOR_ENVIRONMENT": "docker",
+            "OPENAI_API_KEY": "model-secret",
+            "WANDB_API_KEY": "trace-secret",
+            "CUSTOM_TOKEN": "candidate-secret",
+        },
+    )
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(serve_runtime.shutil, "which", lambda name: "/usr/bin/docker")
+
+    def run(*args, **kwargs):
+        observed.update(kwargs)
+        raise subprocess.TimeoutExpired("docker", kwargs["timeout"])
+
+    monkeypatch.setattr(serve_runtime.subprocess, "run", run)
+    ready, missing = backend.readiness()
+
+    assert not ready
+    assert missing == ("docker-daemon",)
+    assert observed["timeout"] == 2
+
+
+def test_weave_failures_execute_candidate_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        return "answer"
+
+    class Weave:
+        def op(self, **kwargs):
+            def decorate(function):
+                async def publish(inputs):
+                    await function(inputs)
+                    raise RuntimeError("publication failed")
+
+                return publish
+
+            return decorate
+
+    monkeypatch.setattr("fugue.weave_support.initialize_weave", lambda *args: Weave())
+    result = asyncio.run(
+        trace_async_operation(
+            "serve",
+            {},
+            {"WANDB_API_KEY": "configured"},
+            operation,
+            lambda value: {"answer": value},
+        )
+    )
+
+    assert result == "answer"
+    assert calls == 1
+
+
+def test_weave_initialization_failure_executes_candidate_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        return "answer"
+
+    def fail_initialize(*args):
+        raise RuntimeError("initialization failed")
+
+    monkeypatch.setattr("fugue.weave_support.initialize_weave", fail_initialize)
+
+    result = asyncio.run(
+        trace_async_operation(
+            "serve",
+            {},
+            {"WANDB_API_KEY": "configured"},
+            operation,
+            lambda value: {"answer": value},
+        )
+    )
+
+    assert result == "answer"
+    assert calls == 1
 
 
 def test_history_rendering_and_native_final_answer_extraction(tmp_path: Path) -> None:

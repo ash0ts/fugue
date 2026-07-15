@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fugue.bench.candidates import resolve_candidate
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
@@ -26,9 +27,18 @@ from fugue.bench.context import (
     prepare_context as build_context,
 )
 from fugue.bench.datasets import materialize_manifest_dataset
-from fugue.bench.evaluations import evaluation_asset_path
-from fugue.bench.execution import latest_cell_records, new_run_id
+from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
+from fugue.bench.execution import (
+    execute_cells,
+    latest_cell_records,
+    mark_unfinished_cells,
+    new_run_id,
+    plan_cells,
+    write_run_manifest,
+)
 from fugue.bench.export import (
+    GeneratedEvaluationCoordinator,
+    LiveEvaluationCoordinator,
     PublishedEvaluation,
     export_rows,
     publish_to_weave,
@@ -40,6 +50,7 @@ from fugue.bench.library import (
     FeatureVariant,
     PresetSpec,
     WorkloadSpec,
+    experiment_from_data,
     experiment_to_yaml,
     experiment_with_overrides,
     get_agent_preset,
@@ -47,11 +58,11 @@ from fugue.bench.library import (
     list_agent_presets,
     list_experiments,
     save_experiment_data,
-    save_prompt,
-    save_skill,
+    scorer_reference,
     validate_id,
 )
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
+from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
 from fugue.bench.sources import (
     SkillInspection,
     SkillLockEntry,
@@ -72,7 +83,7 @@ from fugue.weave_support import trace_async_operation
 
 if TYPE_CHECKING:
     from fugue.bench.ai import AnalysisPreview, AnalysisResult, AnalysisSpec
-    from fugue.preflight import PreflightCheck
+from fugue.preflight import PreflightCheck, validate_harbor_job_configs
 
 
 @dataclass(frozen=True)
@@ -94,6 +105,7 @@ class ExperimentRequest:
     tags: tuple[str, ...] = ()
     jobs_dir: Path | None = None
     trace_content: str | None = None
+    agent_preset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +120,7 @@ class PreviewCellSummary:
     applicable: bool
     reason: str | None = None
     context_cache_ready: bool = False
-    context_transport: str = "portable"
+    context_delivery: str = "portable"
 
 
 @dataclass(frozen=True)
@@ -136,7 +148,7 @@ class CellSummary:
     task_id: str
     wall_time_sec: float | None = None
     error: str | None = None
-    context_transport: str = "portable"
+    context_delivery: str = "portable"
 
 
 @dataclass(frozen=True)
@@ -145,6 +157,20 @@ class AgentTraceRef:
     conversation_ids: tuple[str, ...] = ()
     trace_ids: tuple[str, ...] = ()
     root_span_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CandidateSummary:
+    candidate_id: str
+    display_id: str
+    configuration: dict[str, Any]
+    passed: int
+    failed: int
+    pending: int
+    not_applicable: int
+    completeness: float
+    packageable: bool
+    packageability_reason: str
 
 
 @dataclass(frozen=True)
@@ -159,6 +185,7 @@ class RunSummary:
     failed: int
     pending: int
     not_applicable: int
+    candidates: tuple[CandidateSummary, ...]
     log_path: Path
     observability_status: str | None = None
     evaluation_urls: tuple[str, ...] = ()
@@ -446,7 +473,10 @@ class OperatorService:
             list(request.workloads) or None,
         )
         generated_scoring = any(
-            any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+            any(
+                not scorer_reference(scorer).startswith("builtin:")
+                for scorer in workload.scorers
+            )
             for workload in selected_workloads
         )
         if generated_scoring and not (
@@ -687,7 +717,7 @@ class OperatorService:
             skill_id
             for variant in selected.variants
             if variant.enabled
-            for skill_id in variant.selected_skill_ids
+            for skill_id in variant.skills
             if skill_id in remote_ids
         )
         return tuple(
@@ -722,27 +752,29 @@ class OperatorService:
     def apply_agent_preset(
         self, experiment: ExperimentSpec, preset_id: str
     ) -> ExperimentSpec:
+        del experiment
         preset = get_agent_preset(preset_id, self.repo_root)
+        base = self.experiment(preset.base_experiment_id)
         variant = FeatureVariant(
             id=f"{preset.role}-recommended",
             label=f"Recommended {preset.role}",
             prompt_id=preset.prompt_id,
-            skill_ids=list(preset.skill_ids),
+            skills=list(preset.candidate.skills),
             context=preset.context,
+            integrations=list(preset.integrations),
             agent_kwargs=dict(preset.agent_kwargs),
             agent_env=dict(preset.agent_env),
-            mcp_servers=[dict(item) for item in preset.mcp_servers],
             environment=dict(preset.environment),
             verifier=dict(preset.verifier),
             retry=dict(preset.retry),
             artifacts=list(preset.artifacts),
         )
         return experiment_with_overrides(
-            experiment,
+            base,
             model=preset.model,
             harnesses=[preset.harness],
             variants=[variant.to_dict()],
-            tags=[*experiment.tags, "agent-preset", f"role:{preset.role}"],
+            tags=[*base.tags, "agent-preset", f"role:{preset.role}"],
         )
 
     def request_for_experiment(self, experiment: ExperimentSpec) -> ExperimentRequest:
@@ -794,17 +826,6 @@ class OperatorService:
                 )
             asset_paths.append(path)
 
-        for asset, path in zip(assets, asset_paths, strict=True):
-            if asset.kind == "prompt":
-                save_prompt(asset.id, asset.body, self.repo_root)
-            elif asset.kind == "skill":
-                save_skill(asset.id, asset.body, self.repo_root)
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-                staging.write_text(asset.body)
-                os.replace(staging, path)
-
         selected_variants = set(request.variants)
         data = experiment.to_dict()
         data.update(
@@ -837,7 +858,46 @@ class OperatorService:
         preset_ids = {item.id for item in experiment.presets}
         if request.preset in preset_ids:
             data["default_preset"] = request.preset
-        return save_experiment_data(experiment_id, data, self.repo_root)
+        # Validate the exact experiment and every asset before changing tracked files.
+        experiment_from_data(data, item_id=experiment_id)
+        staged: list[tuple[Path, Path, bytes | None]] = []
+        try:
+            for asset, path in zip(assets, asset_paths, strict=True):
+                body = str(asset.body)
+                if not body.strip():
+                    raise ValueError(f"proposed asset is empty: {path}")
+                if asset.kind == "evaluation_cases":
+                    load_cases(path, text=body)
+                elif asset.kind == "evaluation_rubric":
+                    load_rubric(path, text=body)
+                elif asset.kind == "evaluation_manifest":
+                    load_manifest(path, text=body)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_name(
+                    f".{path.name}.{os.getpid()}.{len(staged)}.tmp"
+                )
+                temporary.write_text(body, encoding="utf-8")
+                staged.append(
+                    (temporary, path, path.read_bytes() if path.exists() else None)
+                )
+            for temporary, path, _ in staged:
+                os.replace(temporary, path)
+            # The experiment is the commit marker and is always written last.
+            return save_experiment_data(experiment_id, data, self.repo_root)
+        except BaseException:
+            for temporary, path, original in reversed(staged):
+                temporary.unlink(missing_ok=True)
+                if original is None:
+                    path.unlink(missing_ok=True)
+                    parent = path.parent
+                    while parent != self.repo_root and not any(parent.iterdir()):
+                        parent.rmdir()
+                        parent = parent.parent
+                else:
+                    restore = path.with_name(f".{path.name}.{os.getpid()}.restore")
+                    restore.write_bytes(original)
+                    os.replace(restore, path)
+            raise
 
     def preview(self, request: ExperimentRequest) -> PreviewSummary:
         return self._preview(request)
@@ -918,7 +978,7 @@ class OperatorService:
                     applicable=job.applicable,
                     reason=job.skip_reason,
                     context_cache_ready=job.context_cache_ready,
-                    context_transport=job.context_transport,
+                    context_delivery=job.context_delivery,
                 )
                 for job in jobs
             ),
@@ -1041,7 +1101,7 @@ class OperatorService:
                         preset_id=preset.id if preset.id != "default" else None,
                         required_capabilities=workload.required_capabilities,
                         workload_artifacts=workload.artifacts,
-                        scorer_refs=workload.scorers,
+                        scorer_refs=[scorer_reference(item) for item in workload.scorers],
                         asset_overlay=asset_overlay,
                     )
                 )
@@ -1121,9 +1181,9 @@ class OperatorService:
         jobs: list[RenderedJob] = []
         for system_id in systems:
             spec = get_context_system(system_id, self.repo_root)
-            transport = next(
+            delivery = next(
                 (
-                    variant.context.transport
+                    variant.context.delivery
                     for variant in experiment.variants
                     if variant.context.system_id == system_id
                 ),
@@ -1135,7 +1195,11 @@ class OperatorService:
                 license_env, ""
             ).lower() not in {"1", "true", "yes"}
             skip_reason = None
-            if missing:
+            if delivery not in spec.deliveries:
+                skip_reason = (
+                    f"context system {system_id} does not support {delivery} delivery"
+                )
+            elif missing:
                 skip_reason = f"missing context capabilities: {', '.join(missing)}"
             elif license_blocked:
                 skip_reason = f"license approval required via {license_env}"
@@ -1189,7 +1253,7 @@ class OperatorService:
                     "workload_id": workload.id,
                     "runner": workload.runner,
                     "context_system_id": system_id,
-                    "context_transport": transport,
+                    "context_delivery": delivery,
                     "context_version": spec.version,
                     "dataset": dataset_path.as_posix(),
                     "task_count": task_count,
@@ -1203,23 +1267,35 @@ class OperatorService:
                     "dataset": dataset.id,
                     "workload": workload.id,
                     "task": dataset.id,
-                    "trial_index": 1,
                 }
             )
-            candidate_id = _stable_identity(
-                {
-                    "harness": "direct"
-                    if workload.runner == "retrieval"
-                    else "sequence",
-                    "model": route.display_model,
-                    "variant": system_id,
-                    "context": {
-                        "id": system_id,
-                        "version": spec.version,
-                        "transport": transport,
-                    },
-                }
+            direct_harness = (
+                "direct" if workload.runner == "retrieval" else "sequence"
             )
+            resolved_candidate = resolve_candidate(
+                harness=direct_harness,
+                model_route={
+                    "provider": route.provider,
+                    "model_id": route.model_id,
+                    "display_model": route.display_model,
+                },
+                prompt_digest=None,
+                skills=(),
+                context={
+                    "id": system_id,
+                    "version": spec.version,
+                    "config": spec.config,
+                    "delivery": delivery,
+                },
+                integrations=(),
+                agent={},
+                execution={
+                    "runner": workload.runner,
+                    "n_attempts": attempts,
+                    "trace_content": experiment.trace_content,
+                },
+            )
+            candidate_id = resolved_candidate.candidate_id
             jobs.append(
                 RenderedJob(
                     command=command,
@@ -1228,12 +1304,12 @@ class OperatorService:
                     env={
                         **direct_env,
                         "FUGUE_CONTEXT_SYSTEM_ID": system_id,
-                        "FUGUE_CONTEXT_TRANSPORT": transport,
+                        "FUGUE_CONTEXT_DELIVERY": delivery,
                     },
                     job_name=f"{_slug(run_name)}-{workload.id}-{system_id}",
-                    harness="direct" if workload.runner == "retrieval" else "sequence",
+                    harness=direct_harness,
                     context_system_id=system_id,
-                    context_transport=transport,
+                    context_delivery=delivery,
                     context_version=spec.version,
                     context_cache_keys={},
                     context_cache_ready=False,
@@ -1251,6 +1327,7 @@ class OperatorService:
                     trial_index=1,
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
+                    resolved_candidate=resolved_candidate,
                     applicable=skip_reason is None,
                     skip_reason=skip_reason,
                 )
@@ -1305,6 +1382,164 @@ class OperatorService:
         from fugue.bench.ai import ExperimentAnalyst
 
         return await ExperimentAnalyst(self).execute(preview, model=model)
+
+    def execute_run(
+        self,
+        request: ExperimentRequest,
+        *,
+        run_id: str,
+        experiment: ExperimentSpec | None = None,
+        cell_runner: Any = None,
+    ) -> RunSummary:
+        """Own the complete snapshot-before-execution run transaction."""
+        selected = experiment or self.experiment(request.experiment_id)
+        resolved = _experiment_with_request_overrides(selected, request)
+        run_dir = self.repo_root / ".fugue" / "runtime" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        write_run_manifest(
+            self.repo_root,
+            run_id,
+            {
+                "status": "starting",
+                "run_name": request.run_name or resolved.run_name or resolved.id,
+                "experiment_id": resolved.id,
+                "trace_content": request.trace_content or resolved.trace_content,
+            },
+        )
+        running = False
+        try:
+            snapshot_path = run_dir / "experiment.yaml"
+            temporary = snapshot_path.with_name(
+                f".{snapshot_path.name}.{os.getpid()}.tmp"
+            )
+            temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
+            os.replace(temporary, snapshot_path)
+            self.prepare_context(request, experiment=resolved, run_id=run_id)
+            rendered = self.rendered_jobs(
+                request, run_id=run_id, experiment=resolved
+            )
+            validate_harbor_job_configs(
+                [job.config_path for job in rendered if job.applicable]
+            )
+            run_name = (
+                rendered[0].run_name
+                if rendered
+                else request.run_name or resolved.run_name or resolved.id
+            )
+            cells = plan_cells(rendered, run_id=run_id, run_name=run_name)
+            run_snapshot = build_run_snapshot(
+                repo_root=self.repo_root,
+                run_id=run_id,
+                experiment=resolved,
+                request=asdict(request),
+                jobs=rendered,
+                cells=cells,
+                env=self.env,
+            )
+            write_run_input_lock(self.repo_root, run_snapshot)
+            job_dirs = sorted(
+                {
+                    str(job.config.get("jobs_dir"))
+                    for job in rendered
+                    if job.config.get("jobs_dir")
+                }
+            )
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "running",
+                    "started_at": _now(),
+                    "run_name": run_name,
+                    "experiment_id": resolved.id,
+                    "trace_project": trace_project_slug(
+                        rendered[0].env if rendered else self.env
+                    ),
+                    "cell_count": len(cells),
+                    "jobs_dirs": job_dirs,
+                    "input_lock": "input-lock.json",
+                    "snapshot_sha256": run_snapshot.snapshot_sha256,
+                },
+            )
+            running = True
+            run_env = rendered[0].env if rendered else self.env
+            live = None
+            observability_error = None
+            if (
+                cells
+                and run_env.get("WANDB_API_KEY", "").strip()
+                and run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
+                not in {"1", "true", "yes"}
+            ):
+                try:
+                    live = LiveEvaluationCoordinator(
+                        cells,
+                        repo_root=self.repo_root,
+                        project=trace_project_slug(run_env),
+                        env=run_env,
+                    )
+                except Exception as exc:
+                    observability_error = f"{type(exc).__name__}: {exc}"
+            local = (
+                GeneratedEvaluationCoordinator(
+                    cells, repo_root=self.repo_root, env=run_env
+                )
+                if live is None
+                and any(cell.evaluation_case is not None for cell in cells)
+                else None
+            )
+            outcomes = execute_cells(
+                cells,
+                repo_root=self.repo_root,
+                max_workers=request.n_concurrent or resolved.n_concurrent or 2,
+                runner=cell_runner,
+                cell_started=live.begin_cell if live is not None else None,
+                cell_finished=(
+                    live.finish_cell
+                    if live is not None
+                    else local.finish_cell if local is not None else None
+                ),
+            )
+            publication = live.finalize() if live is not None else None
+            failures = list(publication.failures if publication else ())
+            if observability_error:
+                failures.insert(0, observability_error)
+            failed = sum(item.status == "failed" for item in outcomes)
+            skipped = sum(item.status == "not_applicable" for item in outcomes)
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "failed" if failed else "passed",
+                    "ended_at": _now(),
+                    "passed_cells": len(outcomes) - failed - skipped,
+                    "failed_cells": failed,
+                    "not_applicable_cells": skipped,
+                    "observability_status": "failed" if failures else "passed",
+                    "evaluation_failures": failures,
+                },
+            )
+        except KeyboardInterrupt:
+            if running:
+                mark_unfinished_cells(run_dir, "interrupted", message="Run interrupted")
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {"status": "interrupted", "ended_at": _now(), "error": "Run interrupted"},
+            )
+        except Exception as exc:
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "failed",
+                    "ended_at": _now(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "phase": "running" if running else "starting",
+                },
+            )
+            raise
+        return self.run_summary(run_id)
 
     def launch(
         self,
@@ -1399,18 +1634,32 @@ class OperatorService:
         workspace: Path,
         image: str,
         platform: str = "linux/amd64",
+        allow_failed: bool = False,
     ) -> Any:
         from fugue.bench.deployment import package_candidate
 
+        resolved_id = self.resolve_candidate_id(run_id, candidate_id)
         return package_candidate(
             repo_root=self.repo_root,
             run_id=run_id,
-            candidate_id=candidate_id,
+            candidate_id=resolved_id,
             workspace=workspace,
             image=image,
             platform=platform,
+            allow_failed=allow_failed,
             env=self.env,
         )
+
+    def resolve_candidate_id(self, run_id: str, value: str) -> str:
+        candidates = [item.candidate_id for item in self.run_summary(run_id).candidates]
+        if value in candidates:
+            return value
+        matches = [candidate_id for candidate_id in candidates if candidate_id.startswith(value)]
+        if not matches:
+            raise ValueError(f"candidate prefix does not match this run: {value}")
+        if len(matches) > 1:
+            raise ValueError(f"candidate prefix is ambiguous: {value}")
+        return matches[0]
 
     def wait_for_run(self, run_id: str, *, poll_sec: float = 0.25) -> RunSummary:
         terminal = {"passed", "failed", "cancelled", "interrupted"}
@@ -1609,10 +1858,11 @@ class OperatorService:
                     else None
                 ),
                 error=item.get("error"),
-                context_transport=str(item.get("context_transport") or "portable"),
+                context_delivery=str(item.get("context_delivery") or "portable"),
             )
             for item in records
         )
+        candidates = _candidate_summaries(run.run_dir, cells, records)
         return RunSummary(
             run_id=run.run_id,
             run_name=run.run_name,
@@ -1624,6 +1874,7 @@ class OperatorService:
             failed=sum(cell.status in {"failed", "cancelled", "interrupted"} for cell in cells),
             pending=sum(cell.status in {"pending", "running"} for cell in cells),
             not_applicable=sum(cell.status == "not_applicable" for cell in cells),
+            candidates=candidates,
             log_path=run.log_path,
             observability_status=run.metadata.get("observability_status"),
             evaluation_urls=tuple(
@@ -1637,6 +1888,89 @@ class OperatorService:
                 if value
             ),
         )
+
+
+def _candidate_summaries(
+    run_dir: Path,
+    cells: tuple[CellSummary, ...],
+    records: list[dict[str, Any]],
+) -> tuple[CandidateSummary, ...]:
+    from fugue.bench.deployment import candidate_packageability
+
+    lock_path = run_dir / "input-lock.json"
+    try:
+        snapshot = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        snapshot = {"planned_matrix": []}
+    candidate_ids = sorted(
+        {
+            *(cell.candidate_id for cell in cells if cell.candidate_id),
+            *[str(value) for value in (snapshot.get("candidates") or {})],
+        }
+    )
+    prefixes = _unique_candidate_prefixes(candidate_ids)
+    definitions = snapshot.get("candidates") or {}
+    result: list[CandidateSummary] = []
+    for candidate_id in candidate_ids:
+        selected = [cell for cell in cells if cell.candidate_id == candidate_id]
+        passed = sum(cell.status == "passed" for cell in selected)
+        failed = sum(
+            cell.status in {"failed", "cancelled", "interrupted"}
+            for cell in selected
+        )
+        pending = sum(cell.status in {"pending", "running"} for cell in selected)
+        not_applicable = sum(cell.status == "not_applicable" for cell in selected)
+        planned = [
+            item
+            for item in snapshot.get("planned_matrix") or []
+            if item.get("candidate_id") == candidate_id
+            and item.get("applicable") is not False
+        ]
+        terminal = passed + failed
+        completeness = terminal / len(planned) if planned else 0.0
+        packageable, reason = candidate_packageability(
+            snapshot,
+            [item for item in records if item.get("candidate_id") == candidate_id],
+            candidate_id,
+        )
+        definition = definitions.get(candidate_id) or {}
+        model_route = definition.get("model_route") or {}
+        context = definition.get("context") or {}
+        result.append(
+            CandidateSummary(
+                candidate_id=candidate_id,
+                display_id=prefixes[candidate_id],
+                configuration={
+                    "harness": definition.get("harness"),
+                    "model": model_route.get("display_model")
+                    or model_route.get("model_id"),
+                    "context": context,
+                    "skills": definition.get("skills") or [],
+                    "integrations": definition.get("integrations") or [],
+                },
+                passed=passed,
+                failed=failed,
+                pending=pending,
+                not_applicable=not_applicable,
+                completeness=completeness,
+                packageable=packageable,
+                packageability_reason=reason,
+            )
+        )
+    return tuple(result)
+
+
+def _unique_candidate_prefixes(candidate_ids: list[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for candidate_id in candidate_ids:
+        length = 12
+        while any(
+            other != candidate_id and other.startswith(candidate_id[:length])
+            for other in candidate_ids
+        ):
+            length += 1
+        result[candidate_id] = candidate_id[:length]
+    return result
 
 
 def select_preset(experiment: ExperimentSpec, requested: str | None) -> PresetSpec:
@@ -1852,6 +2186,10 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _require_saved_evaluation_assets(
     repo_root: Path,
     experiment: ExperimentSpec,
@@ -1859,7 +2197,10 @@ def _require_saved_evaluation_assets(
     workloads: list[WorkloadSpec],
 ) -> None:
     generated = any(
-        any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+        any(
+            not scorer_reference(scorer).startswith("builtin:")
+            for scorer in workload.scorers
+        )
         for workload in workloads
     ) or experiment.evaluation_generation is not None
     if not generated:
@@ -1879,9 +2220,9 @@ def _require_saved_evaluation_assets(
         )
         required.append(manifest_path)
         required.extend(
-            _resolve(repo_root, Path(scorer))
+            _resolve(repo_root, Path(scorer_reference(scorer)))
             for scorer in workload.scorers
-            if not scorer.startswith("builtin:")
+            if not scorer_reference(scorer).startswith("builtin:")
         )
         if manifest_path.is_file():
             manifest = load_manifest(manifest_path)

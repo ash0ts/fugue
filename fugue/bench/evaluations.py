@@ -13,9 +13,13 @@ from typing import Any, Literal
 import httpx
 import yaml
 
+from fugue.bench.context import get_context_system
+from fugue.bench.integrations import declared_mcp_servers, effective_selections
 from fugue.bench.library import (
+    BuiltinScorerSelection,
     EvaluationSourceSpec,
     ExperimentSpec,
+    RubricScorerSelection,
     WorkloadSpec,
     get_prompt,
     get_skill,
@@ -120,10 +124,17 @@ def build_evaluation_draft(
     unknown = sorted(set(raw) - {"suite_id", "cases", "rubric"})
     if unknown:
         raise ValueError(f"unknown evaluation draft field(s): {', '.join(unknown)}")
+    configured = experiment.evaluation_generation
     suite_id = validate_id(
-        str(raw.get("suite_id") or f"{experiment.id}-capability-smoke"),
+        configured.suite_id
+        if configured is not None
+        else str(raw.get("suite_id") or f"{experiment.id}-capability-smoke"),
         kind="evaluation suite id",
     )
+    if raw.get("suite_id") and str(raw["suite_id"]) != suite_id:
+        raise ValueError(
+            f"evaluation suite id must be the configured value {suite_id!r}"
+        )
     _validate_capability_baselines(experiment)
     expected_size = (
         experiment.evaluation_generation.size
@@ -136,13 +147,8 @@ def build_evaluation_draft(
         for index, item in enumerate(raw.get("cases") or [], start=1)
     )
     _require_unique([str(item["id"]) for item in proposed], "evaluation case")
-    cases = _fill_case_gaps(
-        suite_id,
-        proposed,
-        expected_size=expected_size,
-        source_catalog=catalog,
-        repo_root=repo_root,
-    )
+    del repo_root
+    cases = proposed
     if len(cases) != expected_size:
         raise ValueError(
             f"evaluation suite {suite_id} requires exactly {expected_size} cases; "
@@ -206,7 +212,11 @@ def build_evaluation_draft(
             ("evaluation_manifest", manifest_body),
         )
     )
-    updated = attach_evaluation_suite(experiment, suite_id)
+    updated = attach_evaluation_suite(
+        experiment,
+        suite_id,
+        workload_id=(configured.workload_id if configured is not None else "capabilities"),
+    )
     coverage: dict[str, int] = {}
     for case in cases:
         family = str(case["family"])
@@ -267,28 +277,24 @@ def _fill_case_gaps(
 
 
 def attach_evaluation_suite(
-    experiment: ExperimentSpec, suite_id: str
+    experiment: ExperimentSpec, suite_id: str, *, workload_id: str
 ) -> ExperimentSpec:
     manifest_path = evaluation_asset_path("evaluation_manifest", suite_id)
     rubric_path = evaluation_asset_path("evaluation_rubric", suite_id).as_posix()
-    scorer_refs = ["builtin:harbor-outcome", rubric_path]
+    scorer_refs = [
+        BuiltinScorerSelection(type="builtin", id="harbor-outcome"),
+        RubricScorerSelection(type="rubric", path=rubric_path),
+    ]
     workloads = list(experiment.workloads)
     target_index = next(
         (
             index
             for index, workload in enumerate(workloads)
-            if workload.runner == "harbor" and workload.manifest is None
+            if workload.id == workload_id
         ),
         None,
     )
-    workload_id = "capabilities"
     if target_index is None:
-        used = {item.id for item in workloads}
-        if workload_id in used:
-            suffix = 2
-            while f"{workload_id}-{suffix}" in used:
-                suffix += 1
-            workload_id = f"{workload_id}-{suffix}"
         workloads.append(
             WorkloadSpec(
                 id=workload_id,
@@ -299,7 +305,15 @@ def attach_evaluation_suite(
         )
     else:
         current = workloads[target_index]
-        workload_id = current.id
+        if current.runner != "harbor":
+            raise ValueError(
+                f"evaluation workload {workload_id} already exists with runner "
+                f"{current.runner!r}"
+            )
+        if current.manifest not in {None, manifest_path}:
+            raise ValueError(
+                f"evaluation workload {workload_id} already targets another manifest"
+            )
         workloads[target_index] = replace(
             current,
             manifest=manifest_path,
@@ -332,24 +346,23 @@ def _validate_capability_baselines(experiment: ExperimentSpec) -> None:
             raise ValueError(
                 f"generated evaluation requires a baseline that omits skill {skill_id}"
             )
-    server_ids = {
-        str(server.get("name") or server.get("id") or "")
-        for variant in variants
-        for server in (variant.mcp_servers or experiment.mcp_servers)
-        if server.get("name") or server.get("id")
-    }
-    for server_id in sorted(server_ids):
-        if all(
-            server_id
-            in {
-                str(server.get("name") or server.get("id") or "")
-                for server in (variant.mcp_servers or experiment.mcp_servers)
-            }
-            for variant in variants
-        ):
+    feature_sets = []
+    for variant in variants:
+        features = {
+            *(f"skill:{value}" for value in variant.skills),
+            *(f"integration:{value.id}" for value in variant.integrations),
+        }
+        if variant.prompt_id:
+            features.add(f"prompt:{variant.prompt_id}")
+        if variant.context.system_id != "none":
+            features.add(
+                f"context:{variant.context.system_id}:{variant.context.delivery}"
+            )
+        feature_sets.append(features)
+    for feature in sorted(set().union(*feature_sets)):
+        if all(feature in values for values in feature_sets):
             raise ValueError(
-                "generated evaluation requires a baseline that omits MCP server "
-                f"{server_id}"
+                "generated evaluation requires a baseline that omits " + feature
             )
 
 
@@ -397,76 +410,76 @@ def source_catalog(
             remaining -= len(selected)
             values.append(replace(item, content=selected))
 
-    if not values:
-        asset_bodies = draft_assets or {}
-        for variant in experiment.variants:
-            if variant.prompt_id:
-                body = asset_bodies.get(("prompt", variant.prompt_id))
-                if body is not None:
-                    values.append(
-                        _source(
-                            f"prompt:{variant.prompt_id}",
-                            "prompt",
-                            variant.prompt_id,
-                            body,
-                            {"draft": True},
-                        )
-                    )
-                else:
-                    prompt = get_prompt(variant.prompt_id, repo_root)
-                    values.append(
-                        _source(
-                            f"prompt:{prompt.id}",
-                            "prompt",
-                            prompt.title,
-                            prompt.body[:MAX_SOURCE_CHARS],
-                            {"path": prompt.path},
-                        )
-                    )
-            for skill_id in variant.skill_ids:
-                body = asset_bodies.get(("skill", skill_id))
-                if body is not None:
-                    values.append(
-                        _source(
-                            f"skill:{skill_id}",
-                            "skill",
-                            skill_id,
-                            body,
-                            {"draft": True},
-                        )
-                    )
-                else:
-                    skill = get_skill(skill_id, repo_root)
-                    values.append(
-                        _source(
-                            f"skill:{skill.id}",
-                            "skill",
-                            skill.title,
-                            skill.body[:MAX_SOURCE_CHARS],
-                            {"path": skill.path},
-                        )
-                    )
-        for server in [
-            *experiment.mcp_servers,
-            *(
-                item
-                for variant in experiment.variants
-                for item in variant.mcp_servers
-            ),
-        ]:
-            public = _public_mcp_definition(server)
-            if public:
-                name = str(public.get("name") or public.get("id") or "mcp")
+    asset_bodies = draft_assets or {}
+    for variant in experiment.variants:
+        if variant.prompt_id:
+            body = asset_bodies.get(("prompt", variant.prompt_id))
+            if body is not None:
                 values.append(
                     _source(
-                        f"mcp:{name}",
-                        "mcp",
-                        name,
-                        json.dumps(public, sort_keys=True),
-                        {"discovery": "configuration"},
+                        f"prompt:{variant.prompt_id}",
+                        "prompt",
+                        variant.prompt_id,
+                        body,
+                        {"draft": True},
                     )
                 )
-    return tuple(_dedupe_sources(values))
+            else:
+                prompt = get_prompt(variant.prompt_id, repo_root)
+                values.append(
+                    _source(
+                        f"prompt:{prompt.id}",
+                        "prompt",
+                        prompt.title,
+                        prompt.body[:MAX_SOURCE_CHARS],
+                        {"path": prompt.path},
+                    )
+                )
+        for skill_id in variant.skill_ids:
+            body = asset_bodies.get(("skill", skill_id))
+            if body is not None:
+                values.append(
+                    _source(
+                        f"skill:{skill_id}",
+                        "skill",
+                        skill_id,
+                        body,
+                        {"draft": True},
+                    )
+                )
+            else:
+                skill = get_skill(skill_id, repo_root)
+                values.append(
+                    _source(
+                        f"skill:{skill.id}",
+                        "skill",
+                        skill.title,
+                        skill.body[:MAX_SOURCE_CHARS],
+                        {"path": skill.path},
+                    )
+                )
+    for server in _declared_mcp_servers(experiment, repo_root):
+        public = _public_mcp_definition(server)
+        if public:
+            name = str(public.get("name") or public.get("id") or "mcp")
+            values.append(
+                _source(
+                    f"mcp:{name}",
+                    "mcp",
+                    name,
+                    json.dumps(public, sort_keys=True),
+                    {"discovery": "configuration"},
+                )
+            )
+    bounded: list[EvaluationSource] = []
+    remaining = MAX_SOURCE_TOTAL_CHARS
+    for item in _dedupe_sources(values):
+        if remaining <= 0:
+            break
+        content = item.content[: min(MAX_SOURCE_CHARS, remaining)]
+        remaining -= len(content)
+        bounded.append(replace(item, content=content))
+    return tuple(bounded)
 
 
 def load_cases(
@@ -1238,7 +1251,7 @@ def _configured_source(
             )
         ]
     assert source.kind == "mcp" and source.server is not None
-    server = _mcp_server(experiment, source.server)
+    server = _mcp_server(experiment, source.server, repo_root)
     public = _public_mcp_definition(server)
     declaration = {
         "server": source.server,
@@ -1348,15 +1361,53 @@ def _discover_mcp_source(
         return pool.submit(asyncio.run, bounded()).result()
 
 
-def _mcp_server(experiment: ExperimentSpec, server_id: str) -> dict[str, Any]:
-    values = [
-        *experiment.mcp_servers,
-        *(item for variant in experiment.variants for item in variant.mcp_servers),
-    ]
+def _mcp_server(
+    experiment: ExperimentSpec, server_id: str, repo_root: Path
+) -> dict[str, Any]:
+    values = _declared_mcp_servers(experiment, repo_root)
     for value in values:
         if str(value.get("name") or value.get("id") or "") == server_id:
             return value
     raise ValueError(f"unknown MCP server for evaluation source: {server_id}")
+
+
+def _declared_mcp_servers(
+    experiment: ExperimentSpec, repo_root: Path
+) -> tuple[dict[str, Any], ...]:
+    values: dict[str, dict[str, Any]] = {}
+    for variant in experiment.variants:
+        selections = effective_selections(
+            experiment.integrations,
+            variant.integrations,
+        )
+        servers = list(declared_mcp_servers(selections, repo_root))
+        if variant.context.delivery == "native_mcp":
+            spec = get_context_system(variant.context.system_id, repo_root)
+            config = _merge_mapping(spec.config, variant.context.config)
+            servers.extend(
+                dict(item)
+                for item in (config.get("binding") or {}).get("mcp_servers") or []
+                if isinstance(item, dict)
+            )
+        for server in servers:
+            name = str(server.get("name") or server.get("id") or "")
+            if not name:
+                continue
+            previous = values.get(name)
+            if previous is not None and previous != server:
+                raise ValueError(f"MCP declaration {name!r} differs across variants")
+            values[name] = server
+    return tuple(values[name] for name in sorted(values))
+
+
+def _merge_mapping(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(left)
+    for key, value in right.items():
+        if isinstance(result.get(key), dict) and isinstance(value, Mapping):
+            result[key] = _merge_mapping(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def _public_mcp_definition(value: Mapping[str, Any]) -> dict[str, Any]:

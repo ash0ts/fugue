@@ -108,7 +108,7 @@ def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) ->
 
     assert preview.cells == expected_cells
     assert preview.applicable_cells <= preview.cells
-    assert preview.estimated_trials <= preview.cells
+    assert preview.estimated_trials >= preview.applicable_cells
     assert preview.harnesses == ("claude-code", "codex", "hermes", "openclaw")
     assert preview.workloads == ("coding", "continuity", "qa", "retrieval")
     assert set(preview.systems) <= set(preset.systems)

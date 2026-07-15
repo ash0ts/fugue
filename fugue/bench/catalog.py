@@ -441,7 +441,7 @@ def _variant_intervention(variant: Any) -> str:
     values: list[str] = []
     if variant.prompt_id:
         values.append("prompt")
-    if variant.selected_skill_ids:
+    if variant.skills:
         values.append("skill")
     if variant.context.system_id != "none":
         values.append("context")
@@ -451,7 +451,6 @@ def _variant_intervention(variant: Any) -> str:
         (
             variant.agent_kwargs,
             variant.agent_env,
-            variant.mcp_servers,
             variant.environment,
             variant.verifier,
             variant.retry,

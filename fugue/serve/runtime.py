@@ -5,20 +5,68 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
+
 from fugue.weave_support import trace_async_operation
+
+
+@dataclass(frozen=True)
+class ConversationRequest:
+    messages: tuple[dict[str, str], ...]
+
+    @classmethod
+    def normalized(
+        cls, messages: tuple[dict[str, str], ...]
+    ) -> ConversationRequest:
+        if not messages:
+            raise ValueError("a non-empty text message history is required")
+        if len(messages) > 128:
+            raise ValueError("message history exceeds the 128-message limit")
+        normalized: list[dict[str, str]] = []
+        total = 0
+        for message in messages:
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "")
+            if role not in {"system", "developer", "user", "assistant"}:
+                raise ValueError(f"unsupported message role: {role or 'missing'}")
+            if not content.strip():
+                raise ValueError("messages must contain non-empty text")
+            total += len(content.encode("utf-8"))
+            normalized.append({"role": role, "content": content})
+        if total > 256 * 1024:
+            raise ValueError("message text exceeds the 256 KiB limit")
+        return cls(messages=tuple(normalized))
+
+    def render_json(self) -> str:
+        return json.dumps(
+            {
+                "instruction": (
+                    "Continue this stateless conversation and return only the "
+                    "assistant's next response."
+                ),
+                "messages": list(self.messages),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ) + "\n"
 
 
 @dataclass(frozen=True)
 class WorkerRequest:
     request_id: str
     protocol: str
-    messages: tuple[dict[str, str], ...]
+    conversation: ConversationRequest
+
+    @property
+    def messages(self) -> tuple[dict[str, str], ...]:
+        return self.conversation.messages
 
 
 class WorkerBackend(Protocol):
@@ -69,9 +117,27 @@ class HarborWorkerBackend:
         )
         if not self.env.get("FUGUE_SERVE_API_KEY", "").strip():
             missing = (*missing, "FUGUE_SERVE_API_KEY")
-        harbor_environment = self._harbor_environment()
-        if harbor_environment == "docker" and shutil.which("docker") is None:
-            missing = (*missing, "docker")
+        probe_url = self.env.get("FUGUE_SERVE_HARBOR_PROBE_URL", "").strip()
+        if probe_url:
+            try:
+                response = httpx.get(probe_url, timeout=2.0)
+                response.raise_for_status()
+            except Exception:
+                missing = (*missing, "harbor-remote")
+        elif self._harbor_environment() == "docker":
+            if shutil.which("docker") is None:
+                missing = (*missing, "docker")
+            else:
+                try:
+                    subprocess.run(
+                        ["docker", "info"],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    missing = (*missing, "docker-daemon")
         return not missing, missing
 
     async def run(self, request: WorkerRequest) -> str:
@@ -103,7 +169,7 @@ class HarborWorkerBackend:
             task_dir = request_dir / "task"
             task_dir.mkdir()
             (task_dir / "instruction.md").write_text(
-                render_conversation(request.messages), encoding="utf-8"
+                request.conversation.render_json(), encoding="utf-8"
             )
             (task_dir / "task.toml").write_text(
                 self._task_toml(), encoding="utf-8"
@@ -307,22 +373,7 @@ class HarborWorkerBackend:
 
 
 def render_conversation(messages: tuple[dict[str, str], ...]) -> str:
-    lines = [
-        "Continue this stateless conversation. Treat the complete history below as authoritative.",
-        "Return only the assistant's next response to the user.",
-        "",
-        "<conversation>",
-    ]
-    for message in messages:
-        lines.extend(
-            [
-                f"<{message['role']}>",
-                message["content"],
-                f"</{message['role']}>",
-            ]
-        )
-    lines.append("</conversation>")
-    return "\n".join(lines).rstrip() + "\n"
+    return ConversationRequest.normalized(messages).render_json()
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:

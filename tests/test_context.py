@@ -110,6 +110,7 @@ def test_failed_context_build_is_not_published(tmp_path: Path) -> None:
         provider="fugue.bench.context:CommandContextProvider",
         version="1",
         capabilities=frozenset({"prepare"}),
+        deliveries=frozenset({"portable"}),
         config={
             "prepare": {
                 "command": [sys.executable, "-c", "raise RuntimeError('boom')"]
@@ -524,6 +525,6 @@ def test_portable_bm25_registers_across_all_four_harnesses(
     }
     rag_rows = [row for row in rows if row["context_system_id"] == "rag-bm25"]
     assert len(rag_rows) == 4
-    assert all(row["context_transport"] == "portable" for row in rag_rows)
+    assert all(row["context_delivery"] == "portable" for row in rag_rows)
     assert all(row["context_registered"] is True for row in rag_rows)
     assert all(row["runtime_equivalent"] is True for row in rows)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tarfile
 import tomllib
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -89,19 +91,27 @@ def test_self_eval_smoke_preview_is_48_side_effect_free(role: str):
     assert before == after
 
 
-def test_maintainer_mutations_apply_to_the_current_base_contract():
+def test_maintainer_mutations_apply_to_the_pinned_base_contract(tmp_path: Path):
     paths = sorted(
         Path("datasets/fugue-self-eval/v1/maintainer").glob(
             "*/environment/mutation.patch"
         )
     )
+    archive = subprocess.run(
+        ["git", "archive", BASE_COMMIT],
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=BytesIO(archive)) as source:
+        source.extractall(tmp_path, filter="data")
 
     assert len(paths) == 12
     for path in paths:
         solution_patch = path.parents[1] / "solution/mutation.patch"
         assert solution_patch.read_bytes() == path.read_bytes()
         result = subprocess.run(
-            ["git", "apply", "--check", path.as_posix()],
+            ["git", "apply", "--check", path.resolve().as_posix()],
+            cwd=tmp_path,
             check=False,
             capture_output=True,
             text=True,

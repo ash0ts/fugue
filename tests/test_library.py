@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fugue.bench.library import (
-    experiment_to_yaml,
     experiment_from_data,
+    experiment_to_yaml,
     get_agent_preset,
     get_experiment,
     get_prompt,
@@ -13,6 +15,14 @@ from fugue.bench.library import (
     save_skill,
     validate_id,
 )
+
+
+def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
+    for path in sorted(Path("configs/fugue/experiments").glob("*.yaml")):
+        source = path.read_text(encoding="utf-8")
+        assert "skill_ids:" not in source
+        assert "mcp_servers:" not in source
+        get_experiment(path.stem)
 
 
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
@@ -26,17 +36,19 @@ id: maintainer-best
 title: Maintainer best
 role: maintainer
 base_experiment_id: fugue-maintainer-self-eval
-harness: codex
-model: openai/gpt-5
-prompt_id: fugue-maintainer
-skill_ids: [fugue-maintainer]
-context: {system_id: agentsmd}
-suite_id: fugue-maintainer-v1
-suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-base_commit: 96512017842d68add2546a057f0601de3eaf610e
-run_ids: [run-1]
-analysis_snapshot: snapshot-1
-metrics: {pass_rate: 0.9, cost_per_success: 0.12}
+candidate:
+  harness: codex
+  model: openai/gpt-5
+  prompt_id: fugue-maintainer
+  skills: [fugue-maintainer]
+  context: {system_id: agentsmd}
+evidence:
+  suite_id: fugue-maintainer-v1
+  suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  base_commit: 96512017842d68add2546a057f0601de3eaf610e
+  run_ids: [run-1]
+  analysis_snapshot: snapshot-1
+  metrics: {pass_rate: 0.9, cost_per_success: 0.12}
 """
     )
 
@@ -91,10 +103,10 @@ variants:
   - id: prompt-skill
     label: Prompt plus skill
     prompt_id: prompt-a
-    skill_ids: [skill-a]
+    skills: [skill-a]
     context:
       system_id: agentsmd
-      transport: native_mcp
+      delivery: native_mcp
       config: {depth: 2}
     agent_kwargs:
       temperature: 0
@@ -123,8 +135,8 @@ presets:
         "agentsmd",
     ]
     assert experiment.variants[1].context.config == {"depth": 2}
-    assert experiment.variants[0].context.transport == "portable"
-    assert experiment.variants[1].context.transport == "native_mcp"
+    assert experiment.variants[0].context.delivery == "portable"
+    assert experiment.variants[1].context.delivery == "native_mcp"
     assert experiment.variants[1].prompt_id == "prompt-a"
     assert experiment.variants[1].skill_ids == ["skill-a"]
     assert experiment.variants[1].agent_kwargs == {"temperature": 0}
@@ -168,7 +180,7 @@ variants:
     )
 
     [variant] = experiment.variants
-    assert variant.selected_skill_ids == ["remote-skill"]
+    assert variant.skills == ["remote-skill"]
     assert variant.integrations is not None
     assert variant.integrations[0].config == {"top_k": 5}
     serialized = experiment_to_yaml(experiment)
@@ -176,8 +188,8 @@ variants:
     assert "skill_ids:" not in serialized
 
 
-def test_variant_rejects_mixed_canonical_and_legacy_skill_fields(tmp_path) -> None:
-    with pytest.raises(ValueError, match="both skills and skill_ids"):
+def test_variant_rejects_legacy_skill_field(tmp_path) -> None:
+    with pytest.raises(ValueError, match="unknown variant field.*skill_ids"):
         save_experiment(
             "mixed",
             """
@@ -205,15 +217,15 @@ variants:
         )
 
 
-def test_invalid_context_transport_is_rejected(tmp_path):
-    with pytest.raises(ValueError, match="context transport"):
+def test_invalid_context_delivery_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="context delivery"):
         save_experiment(
             "bad-transport",
             """
 id: bad-transport
 variants:
   - id: rag
-    context: {system_id: rag-bm25, transport: magic}
+    context: {system_id: rag-bm25, delivery: magic}
 """,
             tmp_path,
         )
@@ -273,6 +285,8 @@ def test_evaluation_generation_and_scorers_are_strictly_parsed():
             "id": "generated",
             "judge_model": "openai/gpt-5-mini",
             "evaluation_generation": {
+                "suite_id": "generated",
+                "workload_id": "capabilities",
                 "size": 8,
                 "sources": [
                     {"kind": "seed", "text": "Test skill behavior."},
@@ -290,8 +304,11 @@ def test_evaluation_generation_and_scorers_are_strictly_parsed():
                     "id": "capabilities",
                     "runner": "harbor",
                     "scorers": [
-                        "builtin:harbor-outcome",
-                        "configs/fugue/evaluations/generated/rubric.yaml",
+                        {"type": "builtin", "id": "harbor-outcome"},
+                        {
+                            "type": "rubric",
+                            "path": "configs/fugue/evaluations/generated/rubric.yaml",
+                        },
                     ],
                 }
             ],
@@ -305,7 +322,7 @@ def test_evaluation_generation_and_scorers_are_strictly_parsed():
         "file",
         "mcp",
     ]
-    assert experiment.workloads[0].scorers[-1].endswith("rubric.yaml")
+    assert experiment.workloads[0].scorers[-1].path.endswith("rubric.yaml")
 
 
 @pytest.mark.parametrize(
@@ -321,7 +338,11 @@ def test_evaluation_generation_rejects_invalid_sources(field, value, message):
         experiment_from_data(
             {
                 "id": "invalid-generated",
-                "evaluation_generation": {field: value},
+                "evaluation_generation": {
+                    "suite_id": "invalid-generated",
+                    "workload_id": "capabilities",
+                    field: value,
+                },
             }
         )
 
@@ -344,7 +365,7 @@ def test_workload_rejects_unsafe_or_unsupported_scorer_refs(scorer):
                     {
                         "id": "capabilities",
                         "runner": "harbor",
-                        "scorers": [scorer],
+                        "scorers": [{"type": "rubric", "path": scorer}],
                     }
                 ],
             }
@@ -361,8 +382,8 @@ def test_workload_rejects_duplicate_scorers():
                         "id": "capabilities",
                         "runner": "harbor",
                         "scorers": [
-                            "builtin:harbor-outcome",
-                            "builtin:harbor-outcome",
+                            {"type": "builtin", "id": "harbor-outcome"},
+                            {"type": "builtin", "id": "harbor-outcome"},
                         ],
                     }
                 ],

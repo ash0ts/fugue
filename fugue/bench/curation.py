@@ -22,7 +22,12 @@ from fugue.bench.context import (
     preflight_context,
 )
 from fugue.bench.library import experiment_from_yaml
-from fugue.bench.operator import OperatorService
+from fugue.bench.sources import (
+    SKILL_SOURCE_ROOT,
+    canonical_git_url,
+    load_skill_source,
+    validate_relative_source_path,
+)
 
 CandidateKind = Literal["skill", "context_system"]
 
@@ -157,6 +162,26 @@ class CandidateRecord:
 
     @classmethod
     def from_data(cls, data: dict[str, Any]) -> CandidateRecord:
+        allowed = {
+            "kind",
+            "repository",
+            "path",
+            "commit",
+            "stars",
+            "last_push",
+            "archived",
+            "license",
+            "install_reference",
+            "capabilities",
+            "target_experiment",
+            "has_executable_files",
+            "requires_new_dependencies",
+            "requires_custom_provider",
+            "requires_new_dataset",
+        }
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            raise ValueError(f"unknown candidate field(s): {', '.join(unknown)}")
         kind = str(data.get("kind") or "").strip()
         if kind not in {"skill", "context_system"}:
             raise ValueError("candidate kind must be 'skill' or 'context_system'")
@@ -164,7 +189,11 @@ class CandidateRecord:
         if not _REPOSITORY_RE.fullmatch(repository):
             raise ValueError("repository must use the owner/name form")
         raw_path = data.get("path")
-        candidate_path = str(raw_path).strip().strip("/") if raw_path else None
+        candidate_path = (
+            validate_relative_source_path(str(raw_path).strip())
+            if raw_path
+            else None
+        )
         capabilities = tuple(
             sorted(set(_strings(data.get("capabilities"), name="capabilities")))
         )
@@ -173,7 +202,7 @@ class CandidateRecord:
             repository=repository,
             path=candidate_path,
             commit=_required_string(data.get("commit"), name="commit").lower(),
-            stars=_nonnegative_int(data.get("stars"), name="stars"),
+            stars=_integer(data.get("stars"), name="stars", minimum=0),
             last_push=_datetime(data.get("last_push"), name="last_push"),
             archived=_boolean(data.get("archived"), name="archived"),
             license=_required_string(data.get("license"), name="license"),
@@ -349,10 +378,16 @@ def validate_skill_bundle(
         return ("skills-ref==0.1.1 is required for skill validation",)
 
     errors.extend(str(error) for error in validate(skill_dir))
-    for path in sorted(item for item in skill_dir.rglob("*") if item.is_file()):
+    for path in sorted(skill_dir.rglob("*")):
         relative = path.relative_to(skill_dir)
         if path.is_symlink():
             errors.append(f"{relative}: symbolic links are not allowed")
+            continue
+        if not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(skill_dir.resolve()):
+            errors.append(f"{relative}: path escapes the skill bundle")
+            continue
         if path.stat().st_mode & 0o111:
             errors.append(f"{relative}: executable files are not allowed")
         if relative.parts[0] == "references":
@@ -385,22 +420,29 @@ def validate_skill_bundle(
 def validate_skill_proposal(
     candidate: CandidateRecord,
     *,
-    skill_dir: Path,
+    source_path: Path,
     experiment_path: Path,
     repo_root: Path,
 ) -> tuple[str, ...]:
-    errors = list(validate_skill_bundle(skill_dir))
-    skill_id = skill_dir.name
-    metadata = _skill_metadata(skill_dir / "SKILL.md")
-    expected_metadata = {
-        "repository": candidate.repository,
-        "path": candidate.path,
-        "commit": candidate.commit,
-        "license": candidate.license,
-    }
-    for field, expected in expected_metadata.items():
-        if _metadata_value(metadata, field) != expected:
-            errors.append(f"skill provenance {field} does not match candidate evidence")
+    errors: list[str] = []
+    expected_root = (repo_root / SKILL_SOURCE_ROOT).resolve()
+    if source_path.is_symlink() or not source_path.resolve().is_relative_to(expected_root):
+        return ("skill source declaration must be a regular safe allowlisted path",)
+    skill_id = source_path.stem
+    try:
+        source = load_skill_source(skill_id, repo_root).source
+    except (OSError, ValueError) as exc:
+        return (str(exc),)
+    if canonical_git_url(source.url).casefold() != (
+        f"https://github.com/{candidate.repository}".casefold()
+    ):
+        errors.append("skill source URL does not match candidate evidence")
+    if source.ref.casefold() != candidate.commit.casefold():
+        errors.append("skill source commit does not match candidate evidence")
+    if source.path != candidate.path:
+        errors.append("skill source path does not match candidate evidence")
+    if errors:
+        return tuple(sorted(set(errors)))
     experiment = experiment_from_yaml(
         experiment_path.read_text(), item_id=experiment_path.stem
     )
@@ -414,23 +456,38 @@ def validate_skill_proposal(
         / f"{candidate.target_experiment}.yaml"
     )
     base = experiment_from_yaml(base_path.read_text(), item_id=base_path.stem)
-    if experiment.manifest != base.manifest:
-        errors.append("proposal experiment must reuse the base dataset")
-    if experiment.harnesses != base.harnesses:
-        errors.append("proposal experiment must reuse the base harnesses")
-    baseline = [variant for variant in experiment.variants if not variant.skill_ids]
+    preserved_fields = (
+        "manifest",
+        "model",
+        "builder_model",
+        "judge_model",
+        "harnesses",
+        "n_attempts",
+        "n_concurrent",
+        "n_tasks",
+        "environment",
+        "artifacts",
+        "verifier",
+        "retry",
+        "agent_kwargs",
+        "agent_env",
+        "integrations",
+        "workloads",
+    )
+    for field in preserved_fields:
+        if getattr(experiment, field) != getattr(base, field):
+            errors.append(f"proposal experiment must preserve base {field}")
+    variants = [variant for variant in experiment.variants if variant.enabled]
+    baseline = [variant for variant in variants if not variant.skills]
     treatments = [
-        variant for variant in experiment.variants if skill_id in variant.skill_ids
+        variant for variant in variants if variant.skills == [skill_id]
     ]
-    if not baseline:
-        errors.append("proposal experiment requires a no-skill baseline")
-    if not treatments:
-        errors.append("proposal experiment requires a candidate-skill treatment")
-    runtime_root = repo_root / ".fugue"
-    existed_before = runtime_root.exists()
-    OperatorService(repo_root).preview_experiment(experiment)
-    if not existed_before and runtime_root.exists():
-        errors.append("proposal preview wrote runtime state")
+    if len(variants) != 2 or len(baseline) != 1 or len(treatments) != 1:
+        errors.append(
+            "proposal experiment requires exactly one baseline and one treatment"
+        )
+    elif _variant_without_skills(baseline[0]) != _variant_without_skills(treatments[0]):
+        errors.append("treatment must preserve the complete baseline control")
     return tuple(sorted(set(errors)))
 
 
@@ -442,14 +499,19 @@ async def validate_context_proposal(
     repo_root: Path,
 ) -> tuple[str, ...]:
     errors: list[str] = []
+    if context_path.is_symlink():
+        return ("context proposal path may not be a symbolic link",)
     spec = load_context_system(context_path)
     if spec.provider != "fugue.bench.context:CommandContextProvider":
         errors.append("context proposal must use CommandContextProvider")
     if spec.enabled_by_default:
         errors.append("context proposal must set enabled_by_default: false")
-    if not spec.source_url or not _github_repository(spec.source_url):
+    normalized_source = _normalized_github_source(spec.source_url or "")
+    if not normalized_source:
         errors.append("context proposal requires a GitHub source_url")
-    elif _github_repository(spec.source_url).casefold() != candidate.repository.casefold():
+    elif normalized_source.casefold() != (
+        f"https://github.com/{candidate.repository}".casefold()
+    ):
         errors.append("context source_url does not match candidate evidence")
     if spec.license != candidate.license:
         errors.append("context license does not match candidate evidence")
@@ -464,15 +526,30 @@ async def validate_context_proposal(
         for reference in proposal_references
     ):
         errors.append("context install reference does not match candidate evidence")
+    mcp_servers = [
+        item
+        for item in (spec.config.get("binding") or {}).get("mcp_servers") or []
+        if isinstance(item, dict)
+    ]
+    if not any(
+        candidate.install_reference in [str(value) for value in server.get("args") or []]
+        and str(server.get("command") or "") in {"uvx", "npx"}
+        for server in mcp_servers
+    ):
+        errors.append("context executable must use the exact evaluated install pin")
 
     experiment = experiment_from_yaml(
         experiment_path.read_text(), item_id=experiment_path.stem
     )
-    matching_workloads = [
+    assigned_workloads = [
         workload
         for workload in experiment.workloads
         if spec.id in workload.systems
-        and set(workload.required_capabilities) <= spec.capabilities
+    ]
+    matching_workloads = [
+        workload
+        for workload in assigned_workloads
+        if set(workload.required_capabilities) <= spec.capabilities
     ]
     if experiment.id != candidate.target_experiment:
         errors.append("context experiment does not match candidate evidence")
@@ -480,11 +557,20 @@ async def validate_context_proposal(
         errors.append("context proposal must extend repo-memory-impact")
     if not matching_workloads:
         errors.append("context proposal is not assigned to an applicable workload")
-    if not any(variant.context.system_id == spec.id for variant in experiment.variants):
+    if len(matching_workloads) != len(assigned_workloads):
+        errors.append("context proposal is assigned to an incompatible workload")
+    matching_variants = [
+        variant for variant in experiment.variants if variant.context.system_id == spec.id
+    ]
+    if not matching_variants:
         errors.append("context proposal requires an experiment variant")
+    elif any(variant.context.delivery not in spec.deliveries for variant in matching_variants):
+        errors.append("context proposal variant selects an unsupported delivery")
     if any(spec.id in preset.systems for preset in experiment.presets):
         errors.append("context proposal must remain outside default presets")
 
+    if errors:
+        return tuple(sorted(set(errors)))
     runtime = ContextRuntime(repo_root, repo_root / ".fugue" / "curation-preflight", {})
     await preflight_context(spec, runtime)
     prepared = PreparedContext(spec.id, "curation", repo_root, {}, {})
@@ -493,6 +579,7 @@ async def validate_context_proposal(
         prepared,
         TrialContext("repo-memory-impact", "curation", "curation", "codex"),
         runtime,
+        delivery=matching_variants[0].context.delivery,
     )
     return tuple(sorted(set(errors)))
 
@@ -560,13 +647,47 @@ def _metadata_value(metadata: dict[str, Any], field: str) -> str | None:
 
 def _github_repository(source_url: str) -> str | None:
     parsed = urlparse(source_url)
-    if parsed.hostname not in {"github.com", "www.github.com"}:
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"github.com", "www.github.com"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
         return None
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) < 2:
         return None
     repository = f"{parts[0]}/{parts[1].removesuffix('.git')}"
     return repository if _REPOSITORY_RE.fullmatch(repository) else None
+
+
+def _normalized_github_source(source_url: str) -> str | None:
+    parsed = urlparse(source_url.strip())
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"github.com", "www.github.com"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        return None
+    repository = f"{parts[0]}/{parts[1].removesuffix('.git')}"
+    if not _REPOSITORY_RE.fullmatch(repository):
+        return None
+    return f"https://github.com/{repository}"
+
+
+def _variant_without_skills(value: Any) -> dict[str, Any]:
+    data = value.to_dict()
+    for key in ("id", "label", "skills"):
+        data.pop(key, None)
+    return data
 
 
 def _nested_strings(value: Any) -> list[str]:
@@ -680,6 +801,14 @@ def _nonnegative_int(value: Any, *, name: str) -> int:
     if result < 0:
         raise ValueError(f"{name} must be non-negative")
     return result
+
+
+def _integer(value: Any, *, name: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
 
 
 def _positive_int(value: Any, *, name: str) -> int:

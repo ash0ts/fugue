@@ -5,12 +5,14 @@ provider: fugue.bench.context:Mem0ContextProvider
 version: mem0ai@0.1.118
 required_packages: [mem0, qdrant_client]
 capabilities: [prepare, retrieve, bind, ingest, sequence]
+deliveries: [portable, native_mcp]
 license: Apache-2.0
 source_url: https://github.com/mem0ai/mem0
 config:
   backend: mem0
   embedding_model: BAAI/bge-small-en-v1.5
   binding:
+    managed_runtime: fugue_context
     mcp_servers:
       - name: fugue-memory
         command: python

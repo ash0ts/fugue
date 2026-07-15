@@ -4,6 +4,8 @@ description: Deterministic repository structure and entry-point notes.
 provider: fugue.bench.context:AgentsMdContextProvider
 version: "1"
 capabilities: [prepare, bind, serve]
+deliveries: [portable]
+serve_deliveries: [portable]
 license: Fugue
 config:
   binding:

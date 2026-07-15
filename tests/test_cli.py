@@ -52,7 +52,7 @@ def test_runs_packages_one_explicit_candidate(
             [
                 "runs",
                 "run-1",
-                "--package",
+                "package",
                 "candidate-1",
                 "--workspace",
                 tmp_path.as_posix(),
@@ -73,6 +73,7 @@ def test_runs_packages_one_explicit_candidate(
         "workspace": tmp_path,
         "image": "example/fugue:test",
         "platform": "linux/amd64",
+        "allow_failed": False,
     }
     assert "deployment-1" in capsys.readouterr().out
 

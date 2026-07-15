@@ -224,6 +224,27 @@ def test_candidate_record_parses_json_evidence() -> None:
     assert candidate.marker.endswith(f":-@{COMMIT}")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("stars", 1.5, "stars must be an integer"),
+        ("path", "../escape", "source paths"),
+        ("unknown", True, "unknown candidate field"),
+    ],
+)
+def test_candidate_record_rejects_ambiguous_or_unsafe_evidence(
+    field: str, value: object, message: str
+) -> None:
+    data = {
+        **_skill().__dict__,
+        "last_push": NOW.isoformat(),
+        "capabilities": list(_skill().capabilities),
+        field: value,
+    }
+    with pytest.raises(ValueError, match=message):
+        CandidateRecord.from_data(data)
+
+
 def test_internal_evaluate_command_outputs_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -264,13 +285,27 @@ def test_checked_in_skills_conform_to_agent_skills_frontmatter() -> None:
         assert validate_skill_bundle(skill_dir, require_provenance=False) == ()
 
 
-def test_imported_skill_validation_and_preview_are_side_effect_free(
+def test_skill_bundle_rejects_symlink_traversal(tmp_path: Path) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: safe\ndescription: Safe.\n---\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret\n")
+    (skill / "references").mkdir()
+    (skill / "references/escape.md").symlink_to(outside)
+
+    errors = validate_skill_bundle(skill, require_provenance=False)
+
+    assert any("symbolic links are not allowed" in error for error in errors)
+
+
+def test_skill_source_proposal_is_pinned_controlled_and_side_effect_free(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "configs/fugue/context-systems").mkdir(parents=True)
     (tmp_path / "configs/fugue/experiments").mkdir(parents=True)
-    skill_dir = tmp_path / "configs/fugue/skills/repository-guide"
-    skill_dir.mkdir(parents=True)
+    source_path = tmp_path / "configs/fugue/skill-sources/repository-guide.yaml"
+    source_path.parent.mkdir(parents=True)
     (tmp_path / "datasets").mkdir()
     (tmp_path / "configs/fugue/context-systems/none.yaml").write_text(
         """id: none
@@ -278,6 +313,7 @@ title: No context
 provider: fugue.bench.context:EmptyContextProvider
 version: "1"
 capabilities: [prepare, retrieve, bind, ingest, sequence]
+deliveries: [portable]
 """
     )
     (tmp_path / "datasets/demo.yaml").write_text(
@@ -314,29 +350,23 @@ variants:
   - {id: baseline, label: No skill, context: {system_id: none}}
   - id: with-repository-guide
     label: Repository guide
-    skill_ids: [repository-guide]
+    skills: [repository-guide]
     context: {system_id: none}
 """
     )
-    (skill_dir / "SKILL.md").write_text(
-        """---
-name: repository-guide
-description: Use when orienting in an unfamiliar repository.
-metadata:
-  fugue-source-repository: community/example-skills
-  fugue-source-path: skills/repository-guide
-  fugue-source-commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  fugue-source-license: Apache-2.0
----
-# Repository guide
-
-Inspect the repository entry points before editing.
+    source_path.write_text(
+        """id: repository-guide
+source:
+  type: git
+  url: https://github.com/community/example-skills
+  ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  path: skills/repository-guide
 """
     )
 
     errors = validate_skill_proposal(
         _skill(),
-        skill_dir=skill_dir,
+        source_path=source_path,
         experiment_path=proposal,
         repo_root=tmp_path,
     )
@@ -355,6 +385,7 @@ title: Example context
 provider: fugue.bench.context:CommandContextProvider
 version: example-context@1.2.3
 capabilities: [bind]
+deliveries: [native_mcp]
 license: MIT
 source_url: https://github.com/community/example-context
 enabled_by_default: false
@@ -386,7 +417,7 @@ variants:
   - {id: none, label: None, context: {system_id: none}}
   - id: example-context
     label: Example context
-    context: {system_id: example-context}
+    context: {system_id: example-context, delivery: native_mcp}
 """
     )
 
@@ -398,3 +429,67 @@ variants:
 
     assert errors == ()
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_context_proposal_rejects_unpinned_executable_before_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context_path = tmp_path / "example-context.yaml"
+    context_path.write_text(
+        """id: example-context
+title: Example context
+provider: fugue.bench.context:CommandContextProvider
+version: example-context@1.2.3
+capabilities: [bind]
+deliveries: [native_mcp]
+license: MIT
+source_url: https://github.com/community/example-context
+enabled_by_default: false
+config:
+  binding:
+    mcp_servers:
+      - {name: example-context, command: uvx, args: [example-context]}
+"""
+    )
+    experiment_path = tmp_path / "repo-memory-impact.yaml"
+    experiment_path.write_text(
+        """id: repo-memory-impact
+workloads:
+  - {id: coding, runner: harbor, required_capabilities: [bind], systems: [example-context]}
+variants:
+  - {id: control, context: {system_id: none}}
+  - {id: treatment, context: {system_id: example-context, delivery: native_mcp}}
+"""
+    )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("invalid proposal reached context binding")
+
+    monkeypatch.setattr("fugue.bench.curation.bind_context", forbidden)
+    errors = asyncio.run(
+        validate_context_proposal(
+            _context(), context_path, experiment_path, repo_root=tmp_path
+        )
+    )
+
+    assert "context executable must use the exact evaluated install pin" in errors
+
+
+def test_curator_workflow_safe_output_allowlists_are_immutable() -> None:
+    live = (REPO_ROOT / ".github/workflows/fugue-curator.lock.yml").read_text()
+    dry = (
+        REPO_ROOT / ".github/workflows/fugue-curator-dry-run.lock.yml"
+    ).read_text()
+    allowed = (
+        '"allowed_files":["configs/fugue/skill-sources/**",'
+        '"configs/fugue/context-systems/**","configs/fugue/experiments/**"]'
+    )
+
+    assert allowed in live
+    assert '"report-as-issue":"false"' in live
+    assert '"report-as-issue":"false"' in dry
+    assert '"create_pull_request"' not in dry
+    assert '"tests/**"' not in live
+    assert '"README.md"' not in live.split('"allowed_files":', 1)[1].split(
+        "]", 1
+    )[0]

@@ -19,16 +19,49 @@ from ag_ui.core import (
     TextMessageStartEvent,
 )
 from ag_ui.encoder import EventEncoder
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from fugue.serve.runtime import (
+    ConversationRequest,
     HarborWorkerBackend,
     WorkerBackend,
     WorkerRequest,
     new_request_id,
 )
+
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
+
+
+class _Admission:
+    def __init__(self, concurrency: int, queue_depth: int) -> None:
+        if concurrency < 1 or queue_depth < 0:
+            raise ValueError("serving admission limits are invalid")
+        self._semaphore = asyncio.Semaphore(concurrency)
+        self._capacity = concurrency + queue_depth
+        self._admitted = 0
+        self._lock = asyncio.Lock()
+
+    async def reserve(self) -> _Reservation | None:
+        async with self._lock:
+            if self._admitted >= self._capacity:
+                return None
+            self._admitted += 1
+        return _Reservation(self)
+
+
+class _Reservation:
+    def __init__(self, admission: _Admission) -> None:
+        self._admission = admission
+
+    async def __aenter__(self) -> None:
+        await self._admission._semaphore.acquire()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._admission._semaphore.release()
+        async with self._admission._lock:
+            self._admission._admitted -= 1
 
 
 def create_app(
@@ -60,6 +93,10 @@ def create_app(
     )
     api_key = selected_env.get("FUGUE_SERVE_API_KEY", "")
     cors_origins = _csv(selected_env.get("FUGUE_SERVE_CORS_ORIGINS"))
+    admission = _Admission(
+        int(selected_env.get("FUGUE_SERVE_MAX_CONCURRENCY", "1")),
+        int(selected_env.get("FUGUE_SERVE_QUEUE_DEPTH", "8")),
+    )
 
     app = FastAPI(
         title="Fugue Candidate Service",
@@ -100,7 +137,12 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz():
-        ready, missing = backend.readiness()
+        try:
+            ready, missing = await asyncio.wait_for(
+                asyncio.to_thread(backend.readiness), timeout=2.0
+            )
+        except TimeoutError:
+            ready, missing = False, ("harbor-probe-timeout",)
         return JSONResponse(
             {
                 "status": "ready" if ready else "not_ready",
@@ -118,8 +160,12 @@ def create_app(
                 {
                     "id": model_id,
                     "object": "model",
-                    "created": int(time.time()),
+                    "created": int(deployment.get("model_created") or 0),
                     "owned_by": "fugue",
+                    "metadata": {
+                        "deployment_id": deployment["deployment_id"],
+                        "candidate_id": deployment["candidate_id"],
+                    },
                 }
             ],
         }
@@ -128,41 +174,12 @@ def create_app(
     async def compact_response():
         return _unsupported("compact responses are not supported", "compact")
 
-    @app.websocket("/v1/responses")
-    async def responses_websocket(websocket: WebSocket) -> None:
-        await websocket.accept()
-        authorization = websocket.headers.get("authorization", "")
-        if not api_key or not hmac.compare_digest(
-            authorization, f"Bearer {api_key}"
-        ):
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "code": "invalid_api_key",
-                        "message": "invalid or missing bearer token",
-                        "param": None,
-                    },
-                }
-            )
-        else:
-            await websocket.send_json(
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "invalid_request_error",
-                        "code": "unsupported_feature",
-                        "message": "WebSocket responses are not supported",
-                        "param": "websocket",
-                    },
-                }
-            )
-        await websocket.close(code=1008)
-
     @app.post("/v1/responses")
     async def responses(request: Request):
-        payload = await _json_body(request)
+        try:
+            payload = await _json_body(request)
+        except ValueError as exc:
+            return _error(str(exc), code="request_too_large", status=413)
         error = _responses_unsupported(payload)
         if error:
             return error
@@ -179,21 +196,32 @@ def create_app(
         except ValueError as exc:
             return _unsupported(str(exc), "input")
         request_id = new_request_id("resp")
-        worker_request = WorkerRequest(request_id, "open-responses", messages)
+        try:
+            conversation = ConversationRequest.normalized(messages)
+        except ValueError as exc:
+            return _unsupported(str(exc), "input")
+        worker_request = WorkerRequest(request_id, "open-responses", conversation)
+        reservation = await admission.reserve()
+        if reservation is None:
+            return _admission_error()
         if payload.get("stream") is True:
             return StreamingResponse(
-                _responses_stream(
-                    backend,
-                    worker_request,
-                    model_id=model_id,
-                    heartbeat_sec=heartbeat_sec,
-                    timeout_sec=timeout,
+                _reserved_stream(
+                    reservation,
+                    _responses_stream(
+                        backend,
+                        worker_request,
+                        model_id=model_id,
+                        heartbeat_sec=heartbeat_sec,
+                        timeout_sec=timeout,
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         try:
-            answer = await _run_backend(backend, worker_request, timeout)
+            async with reservation:
+                answer = await _run_backend(backend, worker_request, timeout)
         except TimeoutError:
             return _error("worker timed out", code="worker_timeout", status=504)
         except Exception:
@@ -202,7 +230,10 @@ def create_app(
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
-        payload = await _json_body(request)
+        try:
+            payload = await _json_body(request)
+        except ValueError as exc:
+            return _error(str(exc), code="request_too_large", status=413)
         error = _chat_unsupported(payload)
         if error:
             return error
@@ -211,21 +242,30 @@ def create_app(
         except ValueError as exc:
             return _unsupported(str(exc), "messages")
         request_id = new_request_id("chatcmpl")
-        worker_request = WorkerRequest(request_id, "chat-completions", messages)
+        worker_request = WorkerRequest(
+            request_id, "chat-completions", ConversationRequest.normalized(messages)
+        )
+        reservation = await admission.reserve()
+        if reservation is None:
+            return _admission_error()
         if payload.get("stream") is True:
             return StreamingResponse(
-                _chat_stream(
-                    backend,
-                    worker_request,
-                    model_id=model_id,
-                    heartbeat_sec=heartbeat_sec,
-                    timeout_sec=timeout,
+                _reserved_stream(
+                    reservation,
+                    _chat_stream(
+                        backend,
+                        worker_request,
+                        model_id=model_id,
+                        heartbeat_sec=heartbeat_sec,
+                        timeout_sec=timeout,
+                    ),
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         try:
-            answer = await _run_backend(backend, worker_request, timeout)
+            async with reservation:
+                answer = await _run_backend(backend, worker_request, timeout)
         except TimeoutError:
             return _error("worker timed out", code="worker_timeout", status=504)
         except Exception:
@@ -242,12 +282,14 @@ def create_app(
                     "finish_reason": "stop",
                 }
             ],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
     @app.post("/ag-ui")
     async def ag_ui(request: Request):
-        payload = await _json_body(request)
+        try:
+            payload = await _json_body(request)
+        except ValueError as exc:
+            return _error(str(exc), code="request_too_large", status=413)
         if payload.get("tools"):
             return _unsupported("client-provided tools are not supported", "tools")
         try:
@@ -257,16 +299,24 @@ def create_app(
         run_id = str(payload.get("runId") or new_request_id("run"))
         thread_id = str(payload.get("threadId") or new_request_id("thread"))
         worker_request = WorkerRequest(
-            new_request_id("agui"), "ag-ui", messages
+            new_request_id("agui"),
+            "ag-ui",
+            ConversationRequest.normalized(messages),
         )
+        reservation = await admission.reserve()
+        if reservation is None:
+            return _admission_error()
         return StreamingResponse(
-            _ag_ui_stream(
-                backend,
-                worker_request,
-                run_id=run_id,
-                thread_id=thread_id,
-                heartbeat_sec=heartbeat_sec,
-                timeout_sec=timeout,
+            _reserved_stream(
+                reservation,
+                _ag_ui_stream(
+                    backend,
+                    worker_request,
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    heartbeat_sec=heartbeat_sec,
+                    timeout_sec=timeout,
+                ),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -280,6 +330,14 @@ async def _run_backend(
 ) -> str:
     async with asyncio.timeout(timeout_sec):
         return await backend.run(request)
+
+
+async def _reserved_stream(
+    reservation: _Reservation, source: AsyncIterator[str]
+) -> AsyncIterator[str]:
+    async with reservation:
+        async for item in source:
+            yield item
 
 
 async def _wait_for_answer(
@@ -585,13 +643,9 @@ def _response_object(
         "top_logprobs": 0,
         "temperature": 1,
         "reasoning": {"effort": None, "summary": None},
-        "usage": {
-            "input_tokens": 0,
-            "input_tokens_details": {"cached_tokens": 0},
-            "output_tokens": 0,
-            "output_tokens_details": {"reasoning_tokens": 0},
-            "total_tokens": 0,
-        },
+        # Open Responses requires this field and permits null when the serving
+        # backend did not report measured token usage. Never synthesize zeros.
+        "usage": None,
         "max_output_tokens": None,
         "max_tool_calls": None,
         "store": False,
@@ -621,7 +675,7 @@ def _message_list(value: Any) -> tuple[dict[str, str], ...]:
             raise ValueError(f"unsupported message role: {role or 'missing'}")
         content = _text_content(item.get("content"))
         messages.append({"role": role, "content": content})
-    return tuple(messages)
+    return ConversationRequest.normalized(tuple(messages)).messages
 
 
 def _text_content(value: Any) -> str:
@@ -681,11 +735,25 @@ def _chat_unsupported(payload: dict[str, Any]) -> JSONResponse | None:
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_REQUEST_BODY_BYTES:
+            raise ValueError("request body exceeds the 1 MiB limit")
+        body.extend(chunk)
     try:
-        value = await request.json()
+        value = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _admission_error() -> JSONResponse:
+    return _error(
+        "serving admission queue is full",
+        code="rate_limit_exceeded",
+        status=429,
+        headers={"Retry-After": "1"},
+    )
 
 
 def _unsupported(message: str, parameter: str) -> JSONResponse:

@@ -353,7 +353,7 @@ class _TrialMetaMixin:
             registration_error = exc
             self._context_registration_meta = {
                 "status": "failed",
-                "transport": os.environ.get("FUGUE_CONTEXT_TRANSPORT", "portable"),
+                "delivery": os.environ.get("FUGUE_CONTEXT_DELIVERY", "portable"),
                 "error": f"{type(exc).__name__}: {exc}",
             }
         self._context_artifact_meta = await self._inject_context_artifact(environment)
@@ -381,11 +381,11 @@ class _TrialMetaMixin:
     async def _install_context_runtime(
         self, environment: BaseEnvironment
     ) -> dict[str, Any]:
-        transport = os.environ.get("FUGUE_CONTEXT_TRANSPORT", "portable")
+        delivery = os.environ.get("FUGUE_CONTEXT_DELIVERY", "portable")
         if self.context_system_id == "none":
-            return {"status": "not_assigned", "transport": transport}
+            return {"status": "not_assigned", "delivery": delivery}
         portable_command = os.environ.get("FUGUE_CONTEXT_COMMAND", "").strip()
-        if transport == "portable" and portable_command:
+        if delivery == "portable" and portable_command:
             result = await self.exec_as_agent(
                 environment,
                 command=(
@@ -406,7 +406,7 @@ class _TrialMetaMixin:
                 raise RuntimeError(str(payload.get("error") or "probe was not ready"))
             return {
                 "status": "registered",
-                "transport": transport,
+                "delivery": delivery,
                 "command": portable_command,
                 "context_system_id": payload.get("context_system_id"),
             }
@@ -425,7 +425,7 @@ class _TrialMetaMixin:
                 "status": (
                     "pending_native_registration" if servers else "static"
                 ),
-                "transport": transport,
+                "delivery": delivery,
                 "servers": len(servers),
             }
         required = {"python"}
@@ -449,7 +449,7 @@ class _TrialMetaMixin:
             raise RuntimeError(detail[:1_000])
         return {
             "status": "registered",
-            "transport": transport,
+            "delivery": delivery,
             "servers": len(servers),
         }
 
@@ -481,8 +481,8 @@ class _TrialMetaMixin:
             "preset_id": os.environ.get("FUGUE_PRESET_ID"),
             "variant_id": variant_id,
             "context_system_id": self.context_system_id,
-            "context_transport": os.environ.get(
-                "FUGUE_CONTEXT_TRANSPORT", "portable"
+            "context_delivery": os.environ.get(
+                "FUGUE_CONTEXT_DELIVERY", "portable"
             ),
             "context_version": os.environ.get("FUGUE_CONTEXT_VERSION"),
             "context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT"),
@@ -604,8 +604,8 @@ class _TrialMetaMixin:
             "fugue.harness": harness,
             "fugue.variant_id": os.environ.get("FUGUE_VARIANT_ID", "baseline"),
             "fugue.context_system_id": self.context_system_id,
-            "fugue.context_transport": os.environ.get(
-                "FUGUE_CONTEXT_TRANSPORT", "portable"
+            "fugue.context_delivery": os.environ.get(
+                "FUGUE_CONTEXT_DELIVERY", "portable"
             ),
             "fugue.context_registration_status": getattr(
                 self, "_context_registration_meta", {}

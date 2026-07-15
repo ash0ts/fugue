@@ -5,6 +5,7 @@ provider: fugue.bench.context:CommandContextProvider
 version: semble@0.5.1
 support: experimental
 capabilities: [prepare, bind]
+deliveries: [native_mcp]
 required_commands: [uvx]
 license: Apache-2.0
 source_url: https://github.com/MinishLab/semble

@@ -57,12 +57,13 @@ class PlannedCell:
     trial_index: int
     comparison_example_id: str
     candidate_id: str
+    execution_fingerprint: str
     config_path: Path
     result_path: Path
     command: tuple[str, ...]
     env: dict[str, str]
     n_attempts: int
-    context_transport: str = "portable"
+    context_delivery: str = "portable"
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -80,13 +81,14 @@ class PlannedCell:
             "task_id": self.task_id,
             "harness": self.harness,
             "context_system_id": self.context_system_id,
-            "context_transport": self.context_transport,
+            "context_delivery": self.context_delivery,
             "variant_id": self.variant_id,
             "model_provider": self.model_provider,
             "model": self.model,
             "trial_index": self.trial_index,
             "comparison_example_id": self.comparison_example_id,
             "candidate_id": self.candidate_id,
+            "execution_fingerprint": self.execution_fingerprint,
             "config_path": self.config_path.as_posix(),
             "result_path": self.result_path.as_posix(),
             "command": list(self.command),
@@ -143,6 +145,7 @@ def plan_cells(
                 trial_index=job.trial_index,
                 comparison_example_id=job.comparison_example_id,
                 candidate_id=job.candidate_id,
+                execution_fingerprint=job.resolved_candidate.execution_fingerprint,
                 config_path=job.config_path,
                 result_path=Path(str(job.config["jobs_dir"]))
                 / job.job_name
@@ -150,7 +153,7 @@ def plan_cells(
                 command=tuple(job.command),
                 env=job.env,
                 n_attempts=int(job.config.get("n_attempts") or 1),
-                context_transport=job.context_transport,
+                context_delivery=job.context_delivery,
                 evaluation_case=job.evaluation_case,
                 evaluation_rubrics=job.evaluation_rubrics,
                 scorer_hashes=job.scorer_hashes,

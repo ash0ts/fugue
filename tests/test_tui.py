@@ -214,6 +214,42 @@ def test_tui_applies_recommended_agent_preset_locally(
     asyncio.run(exercise())
 
 
+def test_tui_dirty_plan_shows_preset_replacement_diff_and_requires_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(110, 38)) as pilot:
+            await pilot.pause()
+            app._duplicate_variant()
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+
+            screen = app.screen
+            assert screen.__class__.__name__ == "ConfirmPresetReplacementScreen"
+            replacement = str(screen.query_one("#preset-replacement-diff").render())
+            assert "current/demo.yaml" in replacement
+            assert "maintainer-recommended" in replacement
+
+            await pilot.click("#cancel-run-confirm")
+            await pilot.pause()
+            assert len(app.plan.experiment.variants) == 2
+            assert app.plan.agent_preset_id is None
+
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+            await pilot.click("#confirm-run")
+            await pilot.pause()
+            assert app.plan.agent_preset_id == "demo-maintainer"
+            assert [item.id for item in app.plan.experiment.variants] == [
+                "maintainer-recommended"
+            ]
+
+    asyncio.run(exercise())
+
+
 def test_tui_ai_proposal_requires_explicit_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,8 +300,10 @@ def test_tui_generate_evaluation_reviews_and_saves_all_assets(
         {
             "judge_model": "openai/gpt-5-mini",
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
-            "evaluation_generation": {
-                "size": 8,
+                "evaluation_generation": {
+                    "suite_id": "tui-suite",
+                    "workload_id": "capabilities",
+                    "size": 8,
                 "sources": [
                     {
                         "kind": "seed",
@@ -357,7 +395,7 @@ def test_tui_generate_evaluation_reviews_and_saves_all_assets(
             assert len(calls) == 1
             assert calls[0][1]["base_experiment"].id == "demo"
             assert app.plan.proposal is draft
-            assert app.plan_step == "define-step"
+            assert app.plan_step == "compare-step"
             summary = str(app.query_one("#proposal-summary").render())
             assert "Evaluation: 8 cases" in summary
             assert "Provenance: 1 checksum-pinned sources" in summary
@@ -504,6 +542,6 @@ def test_memory_smoke_shows_unavailable_cells_without_counting_trials(
                 for cell in app.plan.preview.matrix_cells
                 if cell.harness == "codex" and cell.variant_id == "rag-bm25"
             )
-            assert codex_rag.context_transport == "portable"
+            assert codex_rag.context_delivery == "portable"
 
     asyncio.run(exercise())

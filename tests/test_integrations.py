@@ -244,7 +244,7 @@ interfaces:
     assert disabled.skip_reason == "integration disabled is disabled"
 
 
-def test_builtin_stdio_allowlist_and_variant_override_are_explicit(
+def test_builtin_stdio_allowlist_and_additive_selection_are_explicit(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "configs" / "fugue" / "integrations"
@@ -283,8 +283,10 @@ interfaces:
         },
     )
     inherited = [IntegrationSelection("stdio")]
-    assert effective_selections(inherited, None) == inherited
-    assert effective_selections(inherited, []) == []
+    assert effective_selections(inherited, []) == inherited
+    assert effective_selections([], inherited) == inherited
+    with pytest.raises(ValueError, match="duplicate integrations"):
+        effective_selections(inherited, inherited)
 
 
 @pytest.mark.parametrize(

@@ -1,855 +1,310 @@
 # Fugue
 
-Fugue plans, runs, and analyzes controlled agent experiments across Hermes,
-OpenClaw, Claude Code, and Codex. The Harbor evaluation framework executes each
-experiment cell; W&B Weave records agent conversations and traces; Fugue keeps
-the comparison matrix, local run state, and normalized outcomes coherent.
+Fugue is a local-first operator for controlled agent experiments. It resolves
+an experiment into comparable candidates, renders Harbor jobs, executes the
+exact matrix, records native W&B Weave traces, and exports reproducible results.
+Fugue 0.1 supports Hermes, OpenClaw, Claude Code, and Codex on Python 3.12+.
 
-Fugue is an experiment-composition layer, not a memory-only framework. A
-variant can independently select prompts, Agent Skills, context providers,
-MCP/service integrations, agent settings, and verifier settings. Fugue targets
-`harbor==0.18.0` (the agent-evaluation framework, not the unrelated self-hosted
-LLM-stack project named Harbor) and Python 3.12 or newer.
+The core workflow is deliberately small:
 
-```mermaid
-flowchart LR
-    USER["Natural language or saved experiment"] --> PLAN["Fugue Plan"]
-    PLAN --> OP["OperatorService"]
-    OP --> MATRIX["Harness x variant x task x trial"]
-    MATRIX --> HARBOR["Harbor jobs"]
-    HARBOR --> LOCAL["Durable local run state"]
-    HARBOR --> WEAVE["Weave agent traces"]
-    LOCAL --> SCOPE["Deterministic analysis scope"]
-    WEAVE --> ENRICH["Narrow trace enrichment"]
-    SCOPE --> REPORT["Evidence-backed report"]
-    ENRICH --> REPORT
-```
+1. Define or load an experiment.
+2. Preview the exact candidate × task × trial matrix.
+3. Prepare reviewed skills and declared context explicitly.
+4. Run through the durable operator transaction.
+5. Inspect candidates and export normalized JSONL.
 
-## Quick Start
+Generated evaluations, self-evaluation, automated curation, and candidate
+serving are advanced or experimental extensions. None runs implicitly.
+
+## Install
+
+[`uv`](https://docs.astral.sh/uv/) is the recommended environment manager.
 
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e ".[dev]"
-uv tool install --python 3.12 harbor==0.18.0 --with-editable .
+uv sync --extra dev
 cp .env.example .env
 ```
 
-Install `.[context]` as well when running local RAG or persistent-memory
-providers.
+Configure W&B for tracing and the credentials required by the selected model
+route:
 
-At minimum, configure W&B for tracing and the selected model provider:
-
-```bash
+```dotenv
 WANDB_API_KEY=
-WANDB_ENTITY=wandb
+WANDB_ENTITY=
 WANDB_PROJECT=fugue-experiments
 
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
-
-FUGUE_MODEL=wandb/zai-org/GLM-5.2
-LITELLM_MASTER_KEY=sk-fugue-local
+FUGUE_MODEL=openai/gpt-5
 ```
 
-`WANDB_API_KEY` is always required for Weave tracing. It also pays for model
-calls when the selected route starts with `wandb/`. OpenAI and Anthropic keys
-are needed only when their provider route is selected.
+Model selection precedence is CLI override, experiment configuration,
+environment, then Fugue’s default. Builder and judge models are independent
+roles and must be selected explicitly when their features are used.
 
-For W&B Inference routes, Fugue sends `WANDB_ENTITY/WANDB_PROJECT` as the
-`OpenAI-Project` request header. Model usage and Weave traces therefore land in
-the same project by default; `WEAVE_PROJECT=entity/project` overrides both.
-Agent spans use Weave's dedicated Agents OTLP endpoint and route with the same
-project. Its Basic authentication header is created only in the trial process
-environment and is never written to generated Harbor or plugin configuration.
+## Preview and run
 
-Run bare `fugue` in a terminal to open the Rich command center:
-
-```bash
-fugue
-```
-
-It shows the active model and Weave project, operational readiness, recent
-runs, and a harness sequencer. The full-screen workspace remains available as:
-
-```bash
-fugue tui
-fugue tui --screen results
-```
-
-## Command Model
-
-Fugue has six explicit commands plus the bare command center:
-
-```text
-fugue
-fugue plan
-fugue run
-fugue runs
-fugue analyze
-fugue setup
-fugue tui
-```
-
-```mermaid
-flowchart TB
-    HOME["fugue command center"]
-    HOME --> P["plan: design an experiment"]
-    HOME --> R["run: preview or execute"]
-    HOME --> RS["runs: inspect, export, open"]
-    HOME --> A["analyze: resolve scope, then report"]
-    HOME --> S["setup: check, bridge, context, skills"]
-    HOME --> T["tui: full-screen workspace"]
-```
-
-Commands accept `--json` where structured automation is useful. JSON mode does
-not emit Rich decoration or interactive prompts.
-
-## Setup
-
-Show setup for an experiment:
-
-```bash
-fugue setup --experiment pilot
-```
-
-Run observational checks, start the explicit local bridge, or prepare selected
-context systems:
-
-```bash
-fugue setup --experiment pilot --check
-
-fugue setup \
-  --experiment pilot \
-  --model wandb/zai-org/GLM-5.2 \
-  --start-bridge
-
-fugue setup \
-  --experiment repo-memory-impact \
-  --preset smoke \
-  --workloads coding \
-  --systems none,rag-bm25 \
-  --prepare-context
-```
-
-Preflight never starts containers or writes bridge files. `--start-bridge` and
-`--prepare-context` are explicit mutations.
-
-Remote skills have a separate review boundary:
-
-```bash
-fugue setup --experiment my-study --skills
-fugue setup --approve-skill hallmark=sha256:REVIEWED_DIGEST \
-  --acknowledge-risk network-access
-```
-
-The first command fetches Git objects, inspects only the declared skill
-subdirectory, and writes a review record. It does not check out or run the
-repository's installer, hooks, package scripts, or plugin code. The second
-command locks one exact bundle digest after explicit review. Moving refs are
-rejected rather than injected into a trial. Once approved, the selected bundle is
-available inside the Harbor sandbox, where the agent may follow its
-instructions or run acknowledged scripts.
-
-Model precedence is:
-
-```text
-CLI override > experiment/harness configuration > environment > Fugue default
-```
-
-Target, builder, judge, composer, and analyst routes are resolved separately.
-
-## Plan Experiments
-
-Saved experiments live under `configs/fugue/experiments/`. Prompts and local
-skills live under `configs/fugue/prompts/` and `configs/fugue/skills/`.
-Reviewed remote skill declarations live under `configs/fugue/skill-sources/`;
-service/MCP adapters live under `configs/fugue/integrations/`.
-
-The canonical variant fields are `skills` and `integrations`:
-
-```yaml
-variants:
-  - id: hallmark-with-search
-    label: Hallmark + search service
-    skills: [hallmark]
-    integrations:
-      - id: repository-search
-        config: {top_k: 10}
-```
-
-The older `skill_ids` spelling is accepted for migration but new saves emit
-`skills`.
-
-Plan from natural language:
-
-```bash
-fugue plan \
-  "Compare BM25 with no context across every harness for one coding task" \
-  --from repo-memory-impact
-```
-
-Fugue grounds the request in checked-in manifests, prompts, skills, context
-systems, presets, and model routes. It then validates the generated experiment
-and renders a side-effect-free matrix preview.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as Experiment planner
-    participant O as OperatorService
-    participant T as Rich or Textual
-    U->>C: Describe comparison
-    C->>O: Request repository catalog
-    C->>O: Submit ExperimentSpec
-    O->>O: Strict validation and preview
-    O-->>T: Draft, diff, cells, trials, warnings
-    T-->>U: Continue in TUI, save, run, or discard
-    U->>T: Explicit approval
-```
-
-Scripted save and launch remain explicit:
-
-```bash
-fugue plan "Create a smaller PDF skill comparison" \
-  --from skillsbench-pdf-ab \
-  --save pdf-skill-smoke
-
-fugue plan "Run the checked-in configuration unchanged" \
-  --from pilot \
-  --run \
-  --yes
-```
-
-Generated prompt, skill, and evaluation assets must be saved before the draft
-can run. When an experiment has no suitable dataset or scorer, planning can
-generate a reviewable eight-case suite under
-`configs/fugue/evaluations/<suite-id>/`:
-
-```yaml
-judge_model: openai/gpt-5-mini
-evaluation_generation:
-  size: 8
-  sources:
-    - {kind: seed, text: "Evaluate the repository-search skill."}
-    - {kind: file, path: README.md}
-    - kind: mcp
-      server: docs
-      tools: [search]
-      resources: ["docs://schema"]
-workloads:
-  - id: capabilities
-    runner: harbor
-    scorers:
-      - builtin:harbor-outcome
-      - configs/fugue/evaluations/repository-search/rubric.yaml
-```
-
-Generation may list bounded MCP tool schemas and read only the resource URIs
-named in the experiment; it never invokes an MCP tool. The preview shows case
-coverage, source hashes, rubric dimensions, and the diffs for `cases.jsonl`,
-`rubric.yaml`, and `manifest.yaml` without writing files or preparing runtime
-state. A saved generated suite is materialized atomically into the
-content-addressed `.fugue/cache/datasets/generated/` cache when execution is
-prepared.
-
-### Textual planning workflow
-
-The TUI keeps experiment design focused on the comparison rather than the
-underlying schema:
-
-```bash
-fugue tui
-```
-
-```mermaid
-flowchart LR
-    DEFINE["Define: describe an intent or load an experiment"]
-    COMPARE["Compare: variants, harnesses, coverage, size"]
-    REVIEW["Review: exact cells, trials, readiness"]
-    RUNS["Runs: live cells and logs"]
-    DEFINE --> COMPARE --> REVIEW --> RUNS
-    REVIEW -->|Missing setup| SETUP["Setup: bridge, credentials, context"]
-    SETUP --> REVIEW
-```
-
-- **Define** accepts a natural-language request or a saved experiment. AI
-  proposals remain local until `Use proposal` is selected.
-- **Compare** shows only the controlled variables: variants, harnesses,
-  evaluation coverage, and run size. Variant edits remain in memory until an
-  explicit save or run. `Generate evaluation` creates a proposal that must be
-  reviewed and accepted before it is attached to the plan.
-- **Review** automatically renders the exact matrix and explains unavailable
-  cells or setup blockers before enabling `Run experiment`.
-- **Advanced** contains model-role overrides, concurrency, tags, run name, and
-  trace policy. Checked-in experiment defaults remain authoritative otherwise.
-
-Use `n` and `p` to move between planning steps. `1` through `4` continue to
-switch between Plan, Runs, Results, and Setup. Pressing `r` from Define or
-Compare opens Review; it never launches an experiment without review.
-
-For the eight-cell memory smoke in the TUI:
-
-1. Load `Repository context-system impact` in Define.
-2. In Compare, keep the `smoke` size, select only `Coding`, and enable `No
-   added context` plus `Fugue BM25`.
-3. Keep all four harnesses selected and open Review.
-4. Use `Open Setup` if BM25 needs preparation, then return and run the eight
-   displayed cells.
-
-## Run Experiments
-
-Preview is side-effect free: it does not write runtime state, generated
-JobConfigs, downloads, indexes, or experiment files.
+Preview never downloads sources, prepares context, calls a model, writes job
+configuration, or mutates runtime state:
 
 ```bash
 fugue run pilot --preview
 ```
 
-Start a durable run and wait while Rich renders the live cell matrix:
+Check dependencies and prepare only what the selected experiment requires:
+
+```bash
+fugue setup --experiment pilot --check
+fugue setup --experiment pilot --skills
+fugue setup --experiment repo-memory-impact --prepare-context
+```
+
+Remote skills are fetched for review but not executed. Approve one exact
+reviewed digest before it can enter a run:
+
+```bash
+fugue setup --approve-skill hallmark=sha256:REVIEWED_DIGEST \
+  --acknowledge-risk network-access
+```
+
+Start a run and wait, or return while the same durable worker continues:
 
 ```bash
 fugue run pilot
-```
-
-Return immediately while the same managed run continues in its process group:
-
-```bash
 fugue run pilot --detach
 ```
 
-```mermaid
-flowchart TD
-    REQUEST["ExperimentRequest"] --> PREP["Prepare datasets and context"]
-    PREP --> CONFIG["One JobConfig per planned cell"]
-    CONFIG --> STATE[".fugue/runtime/run-id"]
-    STATE --> WORKERS["Bounded concurrent workers"]
-    WORKERS --> H1["Hermes"]
-    WORKERS --> H2["OpenClaw"]
-    WORKERS --> H3["Claude Code"]
-    WORKERS --> H4["Codex"]
-    H1 --> CELLS["cells.jsonl and per-cell logs"]
-    H2 --> CELLS
-    H3 --> CELLS
-    H4 --> CELLS
-    CELLS --> FINAL["passed / failed / not_applicable"]
-```
+Before the first cell starts, `OperatorService` resolves the full plan,
+persists the experiment snapshot, prepares context, renders jobs, plans cells,
+and atomically writes `.fugue/runtime/RUN_ID/input-lock.json`. A failure before
+that commit leaves the run failed in its `starting` phase and executes no cell.
 
-Every run receives an immutable generated run ID. The requested run name is a
-human grouping label only. One failed cell does not stop sibling cells.
+## Inspect runs
 
-## Inspect Runs
+Run operations use nested actions:
 
 ```bash
 fugue runs
 fugue runs RUN_ID
-fugue runs RUN_ID --logs --follow
-fugue runs RUN_ID --logs --cell CELL_ID
-fugue runs RUN_ID --cancel
+fugue runs RUN_ID logs
+fugue runs RUN_ID logs --follow
+fugue runs RUN_ID cancel
+fugue runs RUN_ID export --out reports/run.jsonl --fetch-weave
+fugue runs RUN_ID open agents
 ```
 
-Every managed Harbor run now opens its Weave evaluation predictions before the
-agent cells start. Export writes normalized JSONL, verifies those live links,
-and backfills rows only when live publication was unavailable:
+Each run groups cells by behavioral candidate and shows passed, failed,
+pending, and not-applicable counts, completeness, and the exact packageability
+reason. The terminal displays a unique candidate prefix; JSON and snapshots
+retain the full SHA-256 identifier.
+
+Candidate identity contains only behavior-affecting inputs: harness, provider
+and model route, prompt digest, reviewed skill digests, context definition and
+delivery, typed integrations, and advanced agent configuration. Experiment
+names, variant IDs and labels, preset names, run names, judge/scorer state, and
+trial ordinals do not affect it. Runtime, Harbor, concurrency, and tracing
+policy instead affect a separate execution fingerprint.
+
+## Experiment contract
+
+Saved experiments live in `configs/fugue/experiments/`. The public YAML schema
+is strict: use `skills`, use `context.delivery`, and select typed integrations.
+Raw MCP server configuration is an internal rendering detail.
+
+```yaml
+id: search-comparison
+title: Repository search comparison
+manifest: datasets/pilot.yaml
+model: openai/gpt-5
+harnesses: [codex]
+
+integrations:
+  - id: shared-observer
+
+variants:
+  - id: baseline
+    label: Baseline
+    context: {system_id: none, delivery: portable}
+
+  - id: treatment
+    label: Reviewed search treatment
+    prompt_id: search-instructions
+    skills: [hallmark]
+    context: {system_id: agentsmd, delivery: portable}
+    integrations:
+      - id: repository-search
+        config: {top_k: 10}
+```
+
+Experiment integrations apply to every variant. Variant integrations are
+additions. Duplicate IDs in the effective list are rejected; there is no
+inherit/replace/null tri-state. To vary configuration, declare the integration
+only on the variants that need it.
+
+Context definitions declare their supported deliveries. `portable` never
+injects native MCP, while `native_mcp` preserves the provider interface.
+Selecting an unsupported delivery makes the cell `not_applicable` before
+binding. Research adapters remain outside default presets until their pinned
+Harbor runtimes pass live integration tests.
+
+## Plan in Rich or Textual
+
+Run bare `fugue` for the Rich command center, or open the full workspace:
 
 ```bash
-fugue runs RUN_ID \
-  --export \
-  --out reports/run.jsonl \
-  --fetch-weave \
-  --to-weave
+fugue
+fugue tui
 ```
 
-Compatible candidates share one Weave Evaluation definition and dataset. Each
-harness/variant is a distinct model run against that definition:
+Textual keeps one in-memory plan:
 
-```mermaid
-flowchart LR
-    PLAN["Planned cells"] --> SCOPE["Scope: benchmark + workload + examples + scorers"]
-    SCOPE --> DATASET["Shared Weave Dataset: one row per task/query/episode"]
-    SCOPE --> EVAL["Shared Evaluation definition"]
-    PLAN --> CANDIDATES["Candidate models: harness + model + variant + context"]
-    CANDIDATES --> PREDICT["Open prediction before Harbor cell"]
-    EVAL --> PREDICT
-    PREDICT --> AGENT["Native invoke_agent / chat / tool spans"]
-    AGENT --> LINK["Verified genai_span_ref + observed conversation"]
-    LINK --> SCORES["Outcome / retrieval / latency / tokens / cost / errors"]
-    SCORES --> SUMMARY["log_summary()"]
-    SUMMARY --> LEDGER["Publication ledger v3"]
-```
+- Define selects intent or a saved experiment.
+- Compare shows variants, evaluation coverage, and generated-evaluation
+  proposals.
+- Review owns the exact matrix and launch authority.
 
-Candidate dimensions and trial ordinals never enter dataset inputs. Repeated
-trials for the same task appear as repeated predictions under one example.
-Evaluation attributes describe only the shared scope; candidate configuration
-lives on the model object and run metadata. Administrative cell and
-preparation records remain local. Missing usage is `N/A`; zero is reserved for
-a measured zero.
+Proposals update the plan only after acceptance and still require an explicit
+save before execution. Multi-file evaluation saves validate and stage every
+asset, write the experiment last as the commit marker, and remove newly created
+orphan assets if saving fails. Agent presets live under Advanced and start a
+new plan from their declared base experiment; a dirty plan requires a
+replacement-diff confirmation.
 
-The live prediction stays open for the Harbor cell, so Weave's prediction
-latency covers execution rather than export overhead. Fugue accepts a trace
-link only when the native root matches the run key, task, stable agent name,
-and exact `predict_and_score` call id. A network or ingestion failure does not
-change the Harbor outcome; it marks the run's observability status as failed
-and leaves an idempotent backfill for export.
-
-```mermaid
-sequenceDiagram
-    participant F as Fugue worker
-    participant W as Weave EvaluationLogger
-    participant H as Harbor cell
-    participant A as Native harness plugin
-    F->>W: log_prediction(shared example)
-    W-->>F: predict_and_score call id
-    F->>H: run with weave.eval.* attributes
-    H->>A: invoke agent
-    A->>W: invoke_agent, chat, execute_tool spans
-    H-->>F: Harbor result and artifacts
-    F->>W: resolve native root and attach genai_span_ref
-    F->>W: scores and prediction output
-    F->>W: log_summary()
-```
-
-Open the stable W&B destinations:
+Natural-language planning is explicit and produces an untrusted draft that is
+parsed and previewed before it can be saved:
 
 ```bash
-fugue runs RUN_ID --open agents
-fugue runs RUN_ID --open trace --cell CELL_ID
-fugue runs RUN_ID --open project
+fugue plan \
+  "Compare BM25 with no context across every harness for one coding task" \
+  --from repo-memory-impact
+
+fugue plan "Create a smaller PDF skill comparison" \
+  --from skillsbench-pdf-ab \
+  --save pdf-skill-smoke
 ```
 
-Fugue opens an exact trace only when a verified URL exists. Otherwise it opens
-Weave Agents and prints the conversation ID rather than inventing a URL.
+## Results and analysis
 
-## Analyze Results
+Local export is normalized JSONL. Comparison example identity contains only
+dataset, workload, and task; trial index is a separate cell coordinate.
+Deterministic outcomes, rubric scores, and judge errors remain separate—Fugue
+does not invent a composite score or convert a judge outage into a Harbor
+failure. Unmeasured token usage remains unavailable rather than becoming zero.
 
-Ask a comparative question:
+Analysis first resolves and displays an immutable local scope. `--yes` is the
+explicit boundary for model interpretation and report writing:
 
 ```bash
 fugue analyze \
-  "Which context system improved coding outcomes without excessive latency?" \
+  "Which context improved coding outcomes without excessive latency?" \
   --filter experiment_id=repo-memory-impact
+
+fugue analyze --saved fugue-maintainer-selection --yes
 ```
 
-Analysis has an explicit confirmation boundary:
+## Advanced: generated evaluations
 
-```mermaid
-flowchart LR
-    Q["Natural-language question"] --> SPEC["AnalysisSpec"]
-    SPEC --> LOCAL["Local catalog filter"]
-    LOCAL --> SNAP["Immutable row snapshot"]
-    SNAP --> PREVIEW["Scope and deterministic aggregates"]
-    PREVIEW --> CONFIRM{"Confirm report?"}
-    CONFIRM -->|No| STOP["No Weave query or report write"]
-    CONFIRM -->|Yes| WEAVE["Narrow Weave enrichment"]
-    WEAVE --> MODEL["Evidence-bound interpretation"]
-    MODEL --> REPORT["report.md + scope + evidence"]
+Generation is a separate explicit action; ordinary preview cannot read MCP,
+call a model, write assets, or merge hidden files from disk. A generation
+request names its exact suite, workload, size, and typed sources:
+
+```yaml
+judge_model: openai/gpt-5-mini
+evaluation_generation:
+  suite_id: repository-search-v1
+  workload_id: capabilities
+  size: 8
+  sources:
+    - {kind: seed, text: "Evaluate reviewed repository search behavior."}
+    - {kind: file, path: README.md}
+
+workloads:
+  - id: capabilities
+    runner: harbor
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+      - type: rubric
+        path: configs/fugue/evaluations/repository-search-v1/rubric.yaml
 ```
 
-For automation, `--yes` confirms report generation:
+Rubric scorers require an explicit judge model. Generation must produce the
+configured case count and required strata. Existing suites require an explicit
+regenerate/overwrite confirmation, and workload collisions fail instead of
+silently renaming or modifying another workload.
+
+## Advanced: candidate packaging and serving
+
+Packaging requires a clean tracked Fugue source checkout and a clean production
+workspace. It copies only an explicit Git-tracked runtime allowlist and rejects
+submodules, escaping symlinks, credential-bearing remotes, secrets, dirty
+source, integrations, and input-lock drift.
 
 ```bash
-fugue analyze "Compare PDF skill lift by harness" \
-  --filter experiment_id=skillsbench-pdf-ab \
-  --save pdf-skill-lift \
-  --yes
-
-fugue analyze --list
-fugue analyze --saved pdf-skill-lift --yes
-```
-
-Official arithmetic is deterministic Python over the immutable snapshot. The
-model interprets aggregates and must cite registered evidence IDs. Hybrid mode
-starts from local outcomes and requests only matching Weave run keys and
-conversation IDs.
-
-## Context Systems
-
-Context providers implement preparation, binding, retrieval, and optional
-ingestion without changing the experiment runner. Cached indexes live under
-`.fugue/cache/context/v2`; per-run state lives under `.fugue/runtime/`.
-
-```mermaid
-flowchart LR
-    TASK["Dataset + task + repository commit"] --> KEY["Content-addressed key"]
-    KEY --> LOCK["Process-safe build lock"]
-    LOCK --> PROVIDER["Context provider prepare"]
-    PROVIDER --> CACHE["Atomic cache publication"]
-    CACHE --> TRANSPORT{"Context transport"}
-    TRANSPORT -->|portable| SIDECAR["Pinned Fugue sidecar"]
-    SIDECAR --> COMMAND["fugue-context query"]
-    TRANSPORT -->|native_mcp| MCP["Provider-native MCP tools"]
-    COMMAND --> CELL["Harbor cell"]
-    MCP --> CELL
-```
-
-Default studies use only systems with runnable prerequisites. CodeGraph,
-GitNexus, Project-RAG, Semble, and lat.md remain explicit research adapters
-until their pinned Harbor runtimes pass integration tests. Unsupported cells
-are recorded as `not_applicable`, never as failed trials.
-
-`ContextSelection.transport` makes the treatment interface explicit:
-
-- `portable` is the default for Fugue BM25, dense, and hybrid RAG. A pinned
-  sidecar owns the index and every harness receives the same bounded command:
-  `fugue-context query --text "..." --top-k 10`.
-- `native_mcp` is for studies of a provider's native tool interface. It is a
-  distinct treatment, not a fallback for portable retrieval.
-
-Portable RAG does not expose the cache as a static repository mount. Every
-cell runs a deterministic registration probe before the agent starts. Fugue
-reports context as assigned, registered, and invoked separately; zero agent
-queries remain a valid intent-to-treat result when the probe passed.
-
-Codex exposes native MCP tools as Responses namespaces. Native OpenAI routes
-are eligible only after that compatibility probe passes. W&B and Anthropic
-bridge routes currently accept function tools only, so `native_mcp` Codex
-cells on those routes are `not_applicable`. Portable context remains available
-to W&B-routed Codex because it is a shell command, not a Responses namespace.
-
-```mermaid
-flowchart TB
-    SELECT["rag-bm25 treatment"] --> SIDE["fugue-context sidecar"]
-    SIDE --> PROBE["Registration probe"]
-    PROBE --> H["Hermes: fugue-context query"]
-    PROBE --> O["OpenClaw: fugue-context query"]
-    PROBE --> C["Claude Code: fugue-context query"]
-    PROBE --> X["Codex: fugue-context query"]
-    H --> EVENTS["Normalized retrieval events"]
-    O --> EVENTS
-    C --> EVENTS
-    X --> EVENTS
-```
-
-### Error ownership and comparability
-
-Fugue merges native Harbor trajectories with Weave spans and de-duplicates
-the same logical failure. Errors are attributed to one of six actionable
-owners: agent behavior, benchmark runtime, harness adapter, context system,
-model provider, or Fugue. Recoverable tool errors do not become terminal agent
-failures merely because they appeared in a trace.
-
-```mermaid
-flowchart LR
-    LOCAL["Harbor trajectory"] --> MERGE["Normalized error events"]
-    WEAVE["Weave spans"] --> MERGE
-    MERGE --> AGENT["agent"]
-    MERGE --> RUNTIME["benchmark runtime"]
-    MERGE --> ADAPTER["harness adapter"]
-    MERGE --> CONTEXT["context system"]
-    MERGE --> PROVIDER["provider"]
-    MERGE --> FUGUE["Fugue"]
-```
-
-Each harness records a pre-install fingerprint and a pre-execution
-fingerprint. Cohort comparability uses the pre-install benchmark environment;
-if package, Python, or platform digests differ, rows are marked
-`runtime_equivalence_status=mismatch` and should not be used for causal lift
-claims. File evidence is derived from normalized read/search trajectories,
-the final git diff, and benchmark expected paths. Agents are not asked to
-author a special evidence JSON file.
-
-OpenClaw's headless benchmark config denies provider-backed or interactive
-tools that are unavailable in the container, including browser, web search,
-image, canvas, node, channel, and gateway administration tools. This keeps a
-missing external service from being counted as an agent reasoning error.
-
-Context systems and integrations declare one of `supported`, `experimental`,
-`not_applicable`, or `disabled`. Experimental adapters remain selectable but
-are identifiable in run provenance; disabled and not-applicable adapters never
-become failed benchmark trials.
-
-## Extension Model
-
-Use the narrowest extension point that represents the treatment:
-
-- `skills`: inert instruction bundles copied into Harbor's native agent skill
-  input. Local and reviewed remote bundles use full-directory hashes.
-- `context`: repository/task-derived state with a prepare/bind/retrieve/ingest
-  lifecycle and content-addressed caches.
-- `integrations`: explicitly selected MCP or HTTP services. Local Compose
-  services require digest-pinned images and hardened defaults; external
-  services require HTTPS and an explicit Harbor host allowlist. Compose
-  services share the trial network namespace, use loopback endpoints, and
-  must declare non-conflicting ports.
-- `repository`: a benchmark task's immutable Git input, expressed as a URL and
-  full commit SHA.
-- `workload`/Harbor dataset: task provisioning, environment, submission, and
-  verification semantics.
-
-Do not turn an arbitrary third-party repository into executable setup code.
-Select a reviewed `SKILL.md` directory as a skill, or package service behavior
-in a reviewed digest-pinned image and declare an integration. See
-[`docs/extension-guide.md`](docs/extension-guide.md) for schemas, safety rules,
-the current support matrix, and conformance guidance.
-
-## Candidate Serving
-
-Every new run writes an immutable `input-lock.json` beside its durable state.
-After reviewing results, select a candidate explicitly and package it with a
-clean production checkout:
-
-```bash
-fugue runs RUN_ID --package CANDIDATE_ID \
+fugue runs RUN_ID package CANDIDATE_PREFIX \
   --workspace /path/to/clean/production-checkout \
   --image example/fugue-service:candidate \
-  --platform linux/amd64 \
   --yes
 ```
 
-Packaging never chooses a winner. It accepts passed or failed terminal runs,
-validates every selected cell against the immutable lock, rejects changed
-prompt/skill/context assets, prepares the selected context against the
-production corpus, and copies only Git-tracked files. Generated deployment
-state lives at `.fugue/runtime/deployments/DEPLOYMENT_ID` and contains no
-runtime credentials.
+All applicable cells for the candidate must be terminal and at least one must
+pass. Failed cells require both `--allow-failed` and confirmation. Another
+candidate may fail the overall run without blocking a complete candidate.
 
-The resulting Python 3.13 image is both the HTTP gateway and the prebuilt
-Harbor worker image. Its serving dependencies are installed from the packaged,
-frozen `uv.lock`. For local Docker, share the Docker socket and a host path used
-for ephemeral request state:
+Serving is an optional Python 3.13 feature, outside the operator path:
 
 ```bash
-mkdir -p /tmp/fugue-serve
-docker run --rm -p 8000:8000 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /tmp/fugue-serve:/tmp/fugue-serve \
-  -e FUGUE_SERVE_RUNTIME_DIR=/tmp/fugue-serve/requests \
-  -e FUGUE_SERVE_API_KEY \
-  -e FUGUE_SERVE_CORS_ORIGINS=https://app.example.com \
-  -e OPENAI_API_KEY \
-  -e WANDB_API_KEY \
-  example/fugue-service:candidate
+uv sync --extra dev --extra serve --python 3.13
+python -m fugue.serve
 ```
 
-The gateway provides `/v1/responses`, `/v1/chat/completions`, `/ag-ui`,
-`/v1/models`, `/healthz`, and `/readyz`. Requests are stateless and must send
-the complete text history. Client-provided tools, media, stored responses,
-response compaction, and WebSockets are rejected; packaged candidate tools and
-context remain available inside the isolated worker. Set
-`FUGUE_SERVE_HARBOR_ENVIRONMENT` to a configured remote Harbor environment and
-use a registry image for production execution.
+The stateless text-only gateway implements the documented Open Responses,
+Chat Completions, and AG-UI subset. Defaults are one executing request and an
+eight-request queue. Configure `FUGUE_SERVE_MAX_CONCURRENCY` and
+`FUGUE_SERVE_QUEUE_DEPTH` to change them. Admission overflow returns 429 with
+`Retry-After`. Requests are limited to 1 MiB, 128 messages, and 256 KiB of text.
+Cancellation terminates the isolated Harbor process group and removes request
+state. `/readyz` performs a bounded Docker daemon or configured remote probe.
 
-The opt-in compatibility suite exercises the official OpenAI client, pinned
-`@ai-sdk/open-responses@2.0.10`, and the Open Responses `2026-04-24` basic and
-streaming compliance tests at commit
-`92c12d96d7b61d6d15e2214daa5e9c6000ab6e1c`:
+Stored conversations, server-side tools, media, compaction, WebSockets,
+registry push, deployment management, and autoscaling are not part of 0.1.
 
-```bash
-uv sync --extra serve --extra dev --python 3.13
-tests/compat/run.sh
-```
+## Experimental: self-evaluation
 
-## Weave Agent Model
+`fugue-maintainer-v1` and `fugue-operator-v1` are separate suites pinned to
+Fugue commit `96512017842d68add2546a057f0601de3eaf610e`. Their tasks, mutations,
+fixtures, and verifiers remain unchanged. Fugue 0.1 ships no promoted agent
+preset and makes no efficacy claim; a release-current benchmark requires a
+separately reviewed v2.
 
-Harness identities are stable across experiments:
+## Experimental: curator
 
-```text
-hermes-agent
-openclaw
-claude-code
-codex
-```
+The curator has two wrappers over one shared policy:
 
-```mermaid
-flowchart TD
-    AGENT["Stable harness agent"] --> CONV["Trial conversation"]
-    CONV --> TURN["invoke_agent turn"]
-    TURN --> CHAT["chat spans"]
-    TURN --> TOOL["execute_tool spans"]
-    TURN --> SUB["sub-agent spans"]
-    CONV --> ATTR["fugue.run / experiment / variant / context transport / task / trial"]
-    ATTR --> ID["candidate + comparison example identities"]
-```
+- `fugue-curator-dry-run.md` is manual and read-only. It cannot edit or create
+  a pull request, and no-op reports do not create issues.
+- `fugue-curator.md` is manual or scheduled only when the repository variable
+  `FUGUE_CURATOR_ENABLED` is `true`. It may create at most one draft PR.
 
-Native harness integrations own model and tool spans. Fugue supplies stable
-conversation identity and flat filterable attributes without duplicating
-instrumentation. Full trace content is the default and may include prompts,
-responses, reasoning, tool arguments, and tool results. Use metadata mode only
-for integrations that can guarantee suppression. Usage is summed from `chat`
-spans when available, with root aggregates used only as a fallback so nested
-totals are never counted twice.
-
-Fugue stores planned and observed conversation identities separately. The
-observed native conversation is used for evaluation links; the deterministic
-planned id remains correlation metadata. Context experiments separately report
-whether context was assigned, available, invoked, and successfully returned
-results. Registration, runtime equivalence, and error provenance are published
-as separate scores. A configured retrieval system with zero calls is an unused
-treatment, not evidence that retrieval helped.
-
-## Included Demos
-
-### PDF Skill A/B
-
-```bash
-fugue setup --experiment skillsbench-pdf-ab --check
-fugue setup --experiment skillsbench-pdf-ab --start-bridge
-fugue run skillsbench-pdf-ab --preview
-fugue run skillsbench-pdf-ab --detach
-```
-
-This compares a Fugue-authored PDF workflow skill with a no-skill baseline
-across four harnesses and three SkillsBench tasks. It is not an official
-SkillsBench leaderboard reproduction.
-
-### Context A/B Smoke
-
-```bash
-fugue setup \
-  --experiment repo-memory-impact \
-  --preset smoke \
-  --workloads coding \
-  --systems none,rag-bm25 \
-  --prepare-context
-
-fugue run repo-memory-impact \
-  --preset smoke \
-  --workloads coding \
-  --systems none,rag-bm25 \
-  --harnesses hermes,openclaw,claude-code,codex \
-  -k 1 -n 2 -l 1 \
-  --preview
-```
-
-Remove `--preview` to launch the eight-cell comparison.
-
-## Improve Fugue With Fugue
-
-Fugue includes two self-evaluation suites pinned to source commit
-`96512017842d68add2546a057f0601de3eaf610e`:
-
-- `fugue-maintainer-v1` measures agents repairing Fugue contracts.
-- `fugue-operator-v1` measures agents planning, inspecting, exporting, and
-  interpreting experiments through the public operator interface.
-
-Each suite has six development tasks and six holdout tasks. Maintainer tasks
-apply one reviewed mutation to the pinned source. Operator tasks use deterministic
-experiments, run state, logs, and result fixtures without nested model calls.
-Benchmark definitions, reference solutions, and verifiers are never mounted in
-the agent workspace.
-
-```mermaid
-flowchart LR
-    BASE["Pinned Fugue source"] --> TASKS["Maintainer mutations or operator scenarios"]
-    TASKS --> CELLS["Harness x treatment x task x trial"]
-    CELLS --> HARBOR["Harbor verifier outcomes"]
-    HARBOR --> ROWS["Normalized trial rows"]
-    ROWS --> GATE["Complete-grid quality gate"]
-    GATE --> CI["Paired task bootstrap"]
-    CI --> TIES["Cost, latency, recoverable-error tie-breakers"]
-    TIES --> PROPOSAL["Review-only promotion bundle"]
-    PROPOSAL --> PR["Human-reviewed preset PR"]
-```
-
-The four cumulative treatments are baseline, role prompt, role prompt plus
-skill, and role prompt plus skill plus deterministic `AGENTS.md` context. This
-uses only context behavior available on the pinned main branch.
-
-Preview the 48-trial maintainer smoke:
-
-```bash
-fugue setup --experiment fugue-maintainer-self-eval --check
-fugue run fugue-maintainer-self-eval \
-  --preset smoke \
-  --tags campaign:maintainer-smoke-01,phase:smoke \
-  --preview
-```
-
-Replace the experiment id with `fugue-operator-self-eval` for the operator
-track. Remove `--preview` or add `--detach` to launch. Use the smoke results to
-shortlist exact candidates, then run each candidate separately during model and
-holdout sweeps so harness/model/variant Cartesian products do not introduce
-unrequested configurations.
-
-```bash
-CAMPAIGN=maintainer-holdout-01
-
-fugue run fugue-maintainer-self-eval \
-  --preset holdout \
-  --harnesses codex \
-  --variants role-prompt-skill \
-  --model openai/gpt-5 \
-  --tags campaign:$CAMPAIGN,phase:holdout \
-  --detach
-
-fugue analyze \
-  --saved fugue-maintainer-selection \
-  --filter tag=campaign:$CAMPAIGN \
-  --yes
-```
-
-The analyst computes the official selection in deterministic Python. A model
-may explain the result but cannot change eligibility, confidence intervals, or
-the winner. Confirmed self-evaluation analysis writes:
-
-```text
-reports/self-eval/<campaign>/promotion.json
-reports/self-eval/<campaign>/promotion.md
-reports/self-eval/<campaign>/candidate-preset.yaml
-```
-
-These are review artifacts. Fugue never writes a tracked preset or changes a
-default automatically. After review, place an approved preset under
-`configs/fugue/agent-presets/` in a separate PR. The planning agent and Textual
-Plan screen then expose it as an optional starting configuration.
-
-```mermaid
-sequenceDiagram
-    participant U as Researcher
-    participant F as Fugue
-    participant H as Harbor
-    participant W as Weave
-    U->>F: Preview and launch exact candidates
-    F->>H: Run pinned tasks
-    H-->>F: Verifier outcomes and artifacts
-    F->>W: Agent traces and evaluation predictions
-    U->>F: Confirm deterministic analysis scope
-    F-->>U: Selection evidence and candidate preset
-    U->>U: Review and open promotion PR
-```
-
-## Automated Curation
-
-The authored GitHub Agentic Workflow in
-`.github/workflows/fugue-curator.md` searches public GitHub skills and
-prospective context/MCP integrations for additions to Fugue's existing
-comparison lanes. It runs Mondays at 14:00 UTC, proposes no more than one draft
-pull request, and never merges or enables an integration automatically.
-
-Candidate evidence is evaluated by the checked-in policy in
-`configs/fugue/curation.yaml`. The internal command accepts a JSON record and
-returns deterministic eligibility reasons without extending the public `fugue`
-CLI:
-
-```bash
-python -m fugue.bench.curation evaluate \
-  --candidate /tmp/candidate.json \
-  --policy configs/fugue/curation.yaml \
-  --repo-root . \
-  --as-of 2026-07-14T14:00:00Z
-```
-
-The workflow can change only skills, context-system definitions, derived
-experiments, their tests, and the relevant README entry. Dependency manifests,
-runtime code, workflows, secrets, datasets, presets, and arbitrary files are
-blocked. Imported skills are instruction/reference-only and validated with
-`skills-ref==0.1.1`; proposed context systems use the declarative
-`CommandContextProvider`, remain disabled by default, and stay outside presets
-until a human completes runtime integration testing.
-
-Rollout requires the `COPILOT_GITHUB_TOKEN` repository secret. First run a
-manual dispatch with `dry_run=true`, then one manual live canary with
-`dry_run=false`. Set the `FUGUE_CURATOR_ENABLED` repository variable to `true`
-only after reviewing both runs; scheduled executions are gated on that variable.
+Curator output is restricted to skill-source declarations, context-system
+definitions, and controlled experiments. It cannot change code, tests,
+workflows, dependencies, datasets, presets, README, or vendored skill content.
+Skill proposals still require human review through `fugue setup --skills`.
 
 ## Development
 
 ```bash
-python -m compileall fugue
-python -m ruff check .
-python -m pytest
+uv lock --check
+uv run ruff check .
+PYTHONWARNINGS=error uv run python -m compileall -q fugue tests
+PYTHONWARNINGS=error uv run pytest
+uv build
 ```
 
-Generated state belongs under `.fugue/`, `jobs/`, or `reports/`. Saved
-experiments, prompts, skills, analyses, and context-system definitions belong
-under `configs/fugue/`.
+Core and context suites support Python 3.12 and 3.13. Serving and protocol
+compatibility run on Python 3.13. See `docs/extension-guide.md` for context and
+integration definitions, and `docs/releases/0.1.md` for release scope and
+manual gates.
+
+Fugue is licensed under the Apache License 2.0. See `LICENSE`.

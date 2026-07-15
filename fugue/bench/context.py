@@ -32,6 +32,7 @@ CONTEXT_INDEX = "index.json"
 ContextCapability = Literal[
     "prepare", "retrieve", "bind", "ingest", "sequence", "serve"
 ]
+ContextDelivery = Literal["portable", "native_mcp"]
 SupportLevel = Literal["supported", "experimental", "not_applicable", "disabled"]
 PreflightPhase = Literal["all", "host", "runtime"]
 
@@ -43,6 +44,8 @@ class ContextSystemSpec:
     provider: str
     version: str
     capabilities: frozenset[ContextCapability]
+    deliveries: frozenset[ContextDelivery]
+    serve_deliveries: frozenset[ContextDelivery] = frozenset()
     support: SupportLevel = "supported"
     description: str = ""
     required_env: tuple[str, ...] = ()
@@ -60,6 +63,8 @@ class ContextSystemSpec:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["capabilities"] = sorted(self.capabilities)
+        data["deliveries"] = sorted(self.deliveries)
+        data["serve_deliveries"] = sorted(self.serve_deliveries)
         data["path"] = self.path.as_posix() if self.path else None
         return data
 
@@ -87,10 +92,32 @@ class PreparedContext:
 class ContextBinding:
     extra_instruction_paths: tuple[Path, ...] = ()
     mcp_servers: tuple[dict[str, Any], ...] = ()
+    delivery: ContextDelivery = "portable"
+    managed_runtime: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     mounts: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
     artifacts: tuple[Any, ...] = ()
+
+
+def context_behavior_definition(spec: ContextSystemSpec) -> dict[str, Any]:
+    """Return only context definition fields that can affect candidate behavior."""
+
+    return {
+        "id": spec.id,
+        "provider": spec.provider,
+        "version": spec.version,
+        "config": spec.config,
+    }
+
+
+def context_behavior_digest(spec: ContextSystemSpec) -> str:
+    payload = json.dumps(
+        context_behavior_definition(spec),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -164,6 +191,7 @@ class ContextProvider(Protocol):
         prepared: PreparedContext,
         trial: TrialContext,
         runtime: ContextRuntime,
+        delivery: ContextDelivery,
     ) -> ContextBinding: ...
 
     async def retrieve(
@@ -220,16 +248,28 @@ class BaseContextProvider:
         prepared: PreparedContext,
         trial: TrialContext,
         runtime: ContextRuntime,
+        delivery: ContextDelivery,
     ) -> ContextBinding:
         binding = spec.config.get("binding") or {}
         instruction_paths = tuple(
             _resolve_template_path(path, prepared, runtime)
             for path in _list(binding.get("extra_instruction_paths"))
         )
-        mcp_servers = tuple(
+        declared_mcp_servers = tuple(
             _expand_value(item, spec=spec, prepared=prepared, runtime=runtime)
             for item in _dict_list(binding.get("mcp_servers"))
         )
+        managed_runtime = str(binding.get("managed_runtime") or "") or None
+        if managed_runtime not in {None, "fugue_context"}:
+            raise ValueError(
+                f"context system {spec.id} declares unknown managed runtime "
+                f"{managed_runtime}"
+            )
+        if delivery == "portable" and declared_mcp_servers and not managed_runtime:
+            raise ValueError(
+                f"context system {spec.id} has no portable implementation"
+            )
+        mcp_servers = declared_mcp_servers if delivery == "native_mcp" else ()
         env = {
             str(key): str(
                 _expand_value(value, spec=spec, prepared=prepared, runtime=runtime)
@@ -239,6 +279,8 @@ class BaseContextProvider:
         return ContextBinding(
             extra_instruction_paths=instruction_paths,
             mcp_servers=mcp_servers,
+            delivery=delivery,
+            managed_runtime=managed_runtime,
             env=env,
             mounts=tuple(_dict_list(binding.get("mounts"))),
             compose_files=tuple(Path(item) for item in _list(binding.get("compose_files"))),
@@ -890,12 +932,34 @@ def load_context_system(path: Path) -> ContextSystemSpec:
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: context system must be a mapping")
+    known = {
+        "id", "title", "description", "provider", "version", "capabilities",
+        "deliveries", "serve_deliveries", "support", "required_env",
+        "required_commands", "required_packages", "runtime_image", "license",
+        "license_url", "source_url", "enabled_by_default",
+        "requires_license_approval", "config",
+    }
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise ValueError(f"{path}: unknown fields: {', '.join(unknown)}")
     system_id = validate_id(raw.get("id") or path.stem, kind="context system id")
     capabilities = frozenset(str(item) for item in _list(raw.get("capabilities")))
     allowed = {"prepare", "retrieve", "bind", "ingest", "sequence", "serve"}
     invalid = sorted(capabilities - allowed)
     if invalid:
         raise ValueError(f"{path}: unknown capabilities: {', '.join(invalid)}")
+    deliveries = frozenset(str(item) for item in _list(raw.get("deliveries")))
+    invalid_deliveries = sorted(deliveries - {"portable", "native_mcp"})
+    if invalid_deliveries or not deliveries:
+        detail = ", ".join(invalid_deliveries) or "none declared"
+        raise ValueError(f"{path}: invalid context deliveries: {detail}")
+    serve_deliveries = frozenset(
+        str(item) for item in _list(raw.get("serve_deliveries"))
+    )
+    if not serve_deliveries <= deliveries:
+        raise ValueError(f"{path}: serve_deliveries must be supported deliveries")
+    if serve_deliveries and "serve" not in capabilities:
+        raise ValueError(f"{path}: serve_deliveries require the serve capability")
     provider = str(raw.get("provider") or "").strip()
     version = str(raw.get("version") or "").strip()
     if not provider or not version:
@@ -910,6 +974,8 @@ def load_context_system(path: Path) -> ContextSystemSpec:
         provider=provider,
         version=version,
         capabilities=capabilities,  # type: ignore[arg-type]
+        deliveries=deliveries,  # type: ignore[arg-type]
+        serve_deliveries=serve_deliveries,  # type: ignore[arg-type]
         support=support,  # type: ignore[arg-type]
         required_env=tuple(str(item) for item in _list(raw.get("required_env"))),
         required_commands=tuple(
@@ -1074,10 +1140,16 @@ async def bind_context(
     prepared: PreparedContext,
     trial: TrialContext,
     runtime: ContextRuntime,
+    *,
+    delivery: ContextDelivery,
 ) -> ContextBinding:
+    if delivery not in spec.deliveries:
+        raise ValueError(
+            f"context system {spec.id} does not support {delivery} delivery"
+        )
     provider = load_provider(spec)
     try:
-        return await provider.bind(spec, prepared, trial, runtime)
+        return await provider.bind(spec, prepared, trial, runtime, delivery)
     finally:
         await provider.close()
 

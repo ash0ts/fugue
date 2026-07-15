@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from fugue.bench.job_config import render_jobs
@@ -44,7 +43,7 @@ tasks:
                 id="prompt-skill",
                 label="Prompt + skill",
                 prompt_id="prompt-a",
-                skill_ids=["skill-a"],
+                skills=["skill-a"],
                 context=ContextSelection(system_id="agentsmd"),
                 agent_kwargs={"temperature": 0},
                 agent_env={"FUGUE_AGENT_MODE": "strict"},
@@ -418,6 +417,49 @@ tasks:
     assert jobs[1].job_name.endswith("-t002")
 
 
+def test_presentation_and_scoring_do_not_change_candidate_identity(tmp_path: Path):
+    manifest_path = tmp_path / "tasks.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="presentation-only",
+        title="Presentation only",
+        variants=[
+            FeatureVariant(id="first-name", label="First label"),
+            FeatureVariant(
+                id="renamed",
+                label="Different label",
+                verifier={"type": "pytest"},
+            ),
+        ],
+    )
+
+    jobs = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    assert len(jobs) == 2
+    assert jobs[0].candidate_id == jobs[1].candidate_id
+    assert jobs[0].resolved_candidate.definition == jobs[1].resolved_candidate.definition
+    assert (
+        jobs[0].resolved_candidate.execution_fingerprint
+        != jobs[1].resolved_candidate.execution_fingerprint
+    )
+
+
 def test_missing_context_capability_is_not_applicable(tmp_path: Path):
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
@@ -496,9 +538,9 @@ tasks:
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == (
         "http://fugue-context:8001"
     )
-    assert job.context_transport == "portable"
-    assert job.config["fugue"]["context_transport"] == "portable"
-    assert job.env["FUGUE_CONTEXT_TRANSPORT"] == "portable"
+    assert job.context_delivery == "portable"
+    assert job.config["fugue"]["context_delivery"] == "portable"
+    assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
     [compose_path] = job.config["environment"]["extra_docker_compose"]
     compose_text = (tmp_path / compose_path).read_text()
     assert "secret" not in compose_text
@@ -527,7 +569,7 @@ tasks:
     assert "artifacts" not in job.config
 
 
-def test_context_and_integration_shared_ports_may_not_collide(tmp_path: Path) -> None:
+def test_portable_context_does_not_inject_native_mcp_or_collide(tmp_path: Path) -> None:
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
         """
@@ -566,16 +608,21 @@ interfaces:
         ],
     )
 
-    with pytest.raises(ValueError, match="fugue-context and api both use port 8000"):
-        render_jobs(
-            experiment=experiment,
-            manifest=load_manifest(manifest_path),
-            manifest_path=manifest_path,
-            repo_root=tmp_path,
-            env={},
-            model="openai/gpt-5",
-            run_id="unit",
-        )
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    assert job.applicable is True
+    assert "mcp_servers" not in job.config["agents"][0]
+    assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == (
+        "fugue-context"
+    )
 
 
 def test_bridged_codex_native_mcp_is_explicitly_not_applicable(tmp_path: Path):
@@ -596,9 +643,9 @@ tasks:
             FeatureVariant(
                 id="rag",
                 label="RAG",
-                context=ContextSelection(
-                    system_id="rag-bm25", transport="native_mcp"
-                ),
+                    context=ContextSelection(
+                        system_id="rag-bm25", delivery="native_mcp"
+                    ),
             )
         ],
     )
@@ -614,14 +661,11 @@ tasks:
     )
 
     agent = job.config["agents"][0]
-    assert agent["mcp_servers"] == [
-        {
-            "name": "fugue-context",
-            "transport": "streamable-http",
-            "url": "http://127.0.0.1:8000/mcp",
-        }
-    ]
-    assert job.config["environment"]["extra_docker_compose"]
+    [server] = agent["mcp_servers"]
+    assert server["name"] == "fugue-context"
+    assert server["transport"] == "stdio"
+    assert "fugue.context_server" in server["args"]
+    assert "extra_docker_compose" not in job.config["environment"]
     assert any(
         mount["target"] == "/fugue-context"
         for mount in job.config["environment"]["mounts"]
@@ -692,9 +736,9 @@ tasks:
             FeatureVariant(
                 id="rag",
                 label="RAG",
-                context=ContextSelection(
-                    system_id="rag-bm25", transport="native_mcp"
-                ),
+                    context=ContextSelection(
+                        system_id="rag-bm25", delivery="native_mcp"
+                    ),
             )
         ],
     )
@@ -710,14 +754,11 @@ tasks:
     )
 
     assert job.applicable is True
-    assert job.context_transport == "native_mcp"
-    assert job.config["agents"][0]["mcp_servers"] == [
-        {
-            "name": "fugue-context",
-            "transport": "streamable-http",
-            "url": "http://fugue-context:8000/mcp",
-        }
-    ]
+    assert job.context_delivery == "native_mcp"
+    [server] = job.config["agents"][0]["mcp_servers"]
+    assert server["name"] == "fugue-context"
+    assert server["transport"] == "stdio"
+    assert "fugue.context_server" in server["args"]
 
 
 def test_portable_context_contract_is_identical_for_all_harnesses(tmp_path: Path):
@@ -807,9 +848,7 @@ tasks:
     )
 
     assert job.applicable is False
-    assert job.skip_reason == (
-        "runtime:image: provider MCP binding has no pinned runtime_image"
-    )
+    assert job.skip_reason == "context system codegraph does not support portable delivery"
 
 
 def test_metadata_trace_policy_rejects_unsupported_harness(tmp_path: Path):

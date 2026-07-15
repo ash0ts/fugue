@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import sys
 
 
 def main() -> None:
+    if sys.version_info < (3, 13):
+        raise RuntimeError("candidate serving requires Python 3.13 or newer")
     try:
         import uvicorn
     except ImportError as exc:  # pragma: no cover - exercised in the image

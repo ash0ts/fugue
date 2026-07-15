@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from fugue.bench.candidates import ResolvedCandidate, resolve_candidate
 from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
     ContextBinding,
@@ -19,18 +20,19 @@ from fugue.bench.context import (
     RepositorySnapshot,
     TrialContext,
     bind_context,
+    context_behavior_digest,
     context_cache_key,
     expected_prepared_context,
     get_context_system,
     preflight_context,
     run_async,
 )
+from fugue.bench.evaluations import load_cases, scorer_bundle
 from fugue.bench.integrations import (
     IntegrationBinding,
     bind_integrations,
     effective_selections,
 )
-from fugue.bench.evaluations import load_cases, scorer_bundle
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
@@ -55,7 +57,7 @@ class RenderedJob:
     job_name: str
     harness: str
     context_system_id: str
-    context_transport: str
+    context_delivery: str
     context_version: str
     context_cache_keys: dict[str, str]
     context_cache_ready: bool
@@ -73,6 +75,7 @@ class RenderedJob:
     trial_index: int
     comparison_example_id: str
     candidate_id: str
+    resolved_candidate: ResolvedCandidate
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -184,6 +187,7 @@ def _build_jobs(
                 spec,
                 required_capabilities or [],
                 runtime,
+                variant.context.delivery,
             )
             if experiment.trace_content == "metadata" and harness.name == "claude-code":
                 base_applicable = False
@@ -191,7 +195,7 @@ def _build_jobs(
                     "Claude Code tracing cannot guarantee metadata-only capture; "
                     "use trace_content: full or exclude claude-code"
                 )
-            skill_ids = variant.selected_skill_ids
+            skill_ids = variant.skills
             try:
                 resolved_skills = resolve_skills(skill_ids, repo_root)
                 skill_setup_reason = None
@@ -246,7 +250,7 @@ def _build_jobs(
                         integration_binding.mcp_servers
                         or (
                             binding.mcp_servers
-                            and variant.context.transport == "native_mcp"
+                            and variant.context.delivery == "native_mcp"
                         )
                     )
                     and route.provider != "openai"
@@ -269,21 +273,47 @@ def _build_jobs(
                     workload_id=workload_id,
                     task_id=tasks[0].id,
                 )
-                candidate_id = _candidate_id(
-                    experiment=experiment,
-                    variant=variant,
-                    harness=harness,
-                    route=route,
-                    context_spec=spec,
+                content_hashes = _content_hashes(
+                    prompt_ids=[variant.prompt_id] if variant.prompt_id else [],
                     resolved_skills=resolved_skills,
-                    integration_binding=integration_binding,
-                    agent_config_hash=agent_config_hash,
                     repo_root=repo_root,
                 )
+                resolved_candidate = resolve_candidate(
+                    harness=harness,
+                    model_route=_candidate_model_route(route),
+                    prompt_digest=next(
+                        iter(content_hashes["prompts"].values()), None
+                    ),
+                    skills=[item.provenance() for item in resolved_skills],
+                    context={
+                        "id": spec.id,
+                        "version": spec.version,
+                        "config_hash": _context_config_hash(spec),
+                        "delivery": variant.context.delivery,
+                    },
+                    integrations=integration_binding.provenance,
+                    agent=_candidate_agent_configuration(experiment, variant),
+                    execution={
+                        "harbor_version": HARBOR_VERSION,
+                        "harbor_config": {
+                            "n_attempts": 1,
+                            "n_concurrent": selected_concurrent,
+                            "verifier": _merge_dicts(
+                                experiment.verifier, variant.verifier
+                            ),
+                            "retry": _merge_dicts(
+                                experiment.retry, variant.retry
+                            ),
+                        },
+                        "trace_content": experiment.trace_content,
+                        "instrumentation": "weave",
+                    },
+                )
+                candidate_id = resolved_candidate.candidate_id
                 context_instruction = _context_instruction_path(
                     runtime_root,
                     spec,
-                    transport=variant.context.transport,
+                    delivery=variant.context.delivery,
                     write=write_configs,
                     collect_evidence=bool(required_capabilities),
                 )
@@ -314,6 +344,7 @@ def _build_jobs(
                     trial_index=trial_index,
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
+                    execution_fingerprint=resolved_candidate.execution_fingerprint,
                     applicable=applicable,
                     skip_reason=skip_reason,
                     collect_evidence=bool(required_capabilities),
@@ -363,7 +394,7 @@ def _build_jobs(
                         job_name=job_name,
                         harness=harness.name,
                         context_system_id=spec.id,
-                        context_transport=variant.context.transport,
+                        context_delivery=variant.context.delivery,
                         context_version=spec.version,
                         context_cache_keys=cache_keys,
                         context_cache_ready=cache_ready,
@@ -381,6 +412,7 @@ def _build_jobs(
                         trial_index=trial_index,
                         comparison_example_id=comparison_example_id,
                         candidate_id=candidate_id,
+                        resolved_candidate=resolved_candidate,
                         evaluation_case=evaluation_cases.get(tasks[0].id),
                         evaluation_rubrics=evaluation_rubrics,
                         scorer_hashes=dict(scorer_hashes),
@@ -425,6 +457,7 @@ def _job_config(
     trial_index: int,
     comparison_example_id: str,
     candidate_id: str,
+    execution_fingerprint: str,
     applicable: bool,
     skip_reason: str | None,
     collect_evidence: bool,
@@ -449,7 +482,6 @@ def _job_config(
             *[path.as_posix() for path in integration_binding.compose_files],
         ]
     selected_mcp_servers = [
-        *(variant.mcp_servers or experiment.mcp_servers),
         *context_binding.mcp_servers,
         *integration_binding.mcp_servers,
     ]
@@ -512,13 +544,14 @@ def _job_config(
         "trial_index": trial_index,
         "comparison_example_id": comparison_example_id,
         "candidate_id": candidate_id,
+        "execution_fingerprint": execution_fingerprint,
         "workload_id": workload_id,
         "preset_id": preset_id,
         "variant_id": variant.id,
         "variant_label": variant.label,
         "prompt_id": variant.prompt_id,
         "context_system_id": context_spec.id,
-        "context_transport": variant.context.transport,
+        "context_delivery": variant.context.delivery,
         "context_version": context_spec.version,
         "context_support": context_spec.support,
         "context_config_hash": _context_config_hash(context_spec),
@@ -616,7 +649,6 @@ def _agent_config(
     repo_root: Path,
 ) -> dict[str, Any]:
     selected_mcp_servers = [
-        *(variant.mcp_servers or experiment.mcp_servers),
         *binding.mcp_servers,
         *integration_binding.mcp_servers,
     ]
@@ -730,7 +762,7 @@ def _job_env(
             "FUGUE_PRESET_ID": preset_id or "",
             "FUGUE_VARIANT_ID": variant.id,
             "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
-            "FUGUE_CONTEXT_TRANSPORT": variant.context.transport,
+            "FUGUE_CONTEXT_DELIVERY": variant.context.delivery,
             "FUGUE_CONTEXT_VERSION": context_spec.version,
             "FUGUE_CONTEXT_SUPPORT": context_spec.support,
             "FUGUE_CONTEXT_CONFIG_HASH": _context_config_hash(context_spec),
@@ -809,6 +841,12 @@ def _context_binding(
     job_name: str,
     write: bool,
 ) -> tuple[ContextBinding, dict[str, str], bool]:
+    if variant.context.delivery not in spec.deliveries:
+        return (
+            ContextBinding(),
+            {},
+            False,
+        )
     snapshots = [
         _snapshot_for_task(task, runtime.repo_root, dataset_id) for task in tasks
     ]
@@ -823,19 +861,27 @@ def _context_binding(
         task_id=snapshots[0].task_id,
         harness=harness.name,
     )
-    binding = run_async(bind_context(spec, prepared, trial, runtime))
-    if spec.id != "none":
-        fugue_runtime = any(
-            _is_fugue_context_server(item) for item in binding.mcp_servers
+    binding = run_async(
+        bind_context(
+            spec,
+            prepared,
+            trial,
+            runtime,
+            delivery=variant.context.delivery,
         )
-        portable = fugue_runtime and variant.context.transport == "portable"
+    )
+    if spec.id != "none":
+        portable = (
+            binding.managed_runtime == "fugue_context"
+            and variant.context.delivery == "portable"
+        )
         mounts = (
             []
             if portable
             else [_read_only_mount(prepared.path, "/fugue-context")]
         )
         env = dict(binding.env)
-        if fugue_runtime:
+        if portable:
             binding = _bind_fugue_context_runtime(
                 binding=binding,
                 spec=spec,
@@ -843,7 +889,7 @@ def _context_binding(
                 runtime=runtime,
                 runtime_root=runtime_root,
                 job_name=job_name,
-                transport=variant.context.transport,
+                delivery=variant.context.delivery,
                 write=write,
             )
             env = dict(binding.env)
@@ -886,7 +932,7 @@ def _bind_fugue_context_runtime(
     runtime: ContextRuntime,
     runtime_root: Path,
     job_name: str,
-    transport: str,
+    delivery: str,
     write: bool,
 ) -> ContextBinding:
     compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
@@ -946,7 +992,7 @@ def _bind_fugue_context_runtime(
                         "python",
                         "-c",
                         "import socket; socket.create_connection(("
-                        f"'127.0.0.1', {8001 if transport == 'portable' else 8000}"
+                        f"'127.0.0.1', {8001 if delivery == 'portable' else 8000}"
                         "), 2).close()",
                     ],
                     "interval": "2s",
@@ -959,42 +1005,26 @@ def _bind_fugue_context_runtime(
     if write:
         compose_path.parent.mkdir(parents=True, exist_ok=True)
         compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
-    native_servers = tuple(
-        {
-            "name": str(item.get("name") or CONTEXT_RUNTIME_SERVICE),
-            "transport": "streamable-http",
-            "url": "http://127.0.0.1:8000/mcp",
-        }
-        if _is_fugue_context_server(item)
-        else item
-        for item in binding.mcp_servers
-    )
-    if transport == "portable":
-        return replace(
-            binding,
-            mcp_servers=(),
-            env={
-                **binding.env,
-                "FUGUE_CONTEXT_COMMAND": "fugue-context",
-                "FUGUE_CONTEXT_QUERY_URL": (
-                    f"http://{CONTEXT_RUNTIME_SERVICE}:8001"
-                ),
-                "FUGUE_CONTEXT_EVENTS_PATH": (
-                    "/logs/artifacts/fugue-context-events.jsonl"
-                ),
-            },
-            mounts=(
-                *binding.mounts,
-                _read_only_mount(
-                    CONTEXT_CLIENT_PATH,
-                    "/usr/local/bin/fugue-context",
-                ),
-            ),
-            compose_files=(*binding.compose_files, compose_path),
-        )
+    if delivery != "portable":
+        raise ValueError("managed Fugue context runtime is portable-only here")
     return replace(
         binding,
-        mcp_servers=native_servers,
+        mcp_servers=(),
+        env={
+            **binding.env,
+            "FUGUE_CONTEXT_COMMAND": "fugue-context",
+            "FUGUE_CONTEXT_QUERY_URL": f"http://{CONTEXT_RUNTIME_SERVICE}:8001",
+            "FUGUE_CONTEXT_EVENTS_PATH": (
+                "/logs/artifacts/fugue-context-events.jsonl"
+            ),
+        },
+        mounts=(
+            *binding.mounts,
+            _read_only_mount(
+                CONTEXT_CLIENT_PATH,
+                "/usr/local/bin/fugue-context",
+            ),
+        ),
         compose_files=(*binding.compose_files, compose_path),
     )
 
@@ -1006,14 +1036,6 @@ def _reserved_context_ports(binding: ContextBinding) -> dict[int, str]:
         if parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port:
             result[parsed.port] = str(server.get("name") or "context runtime")
     return result
-
-
-def _is_fugue_context_server(server: dict[str, Any]) -> bool:
-    command = [
-        str(server.get("command") or ""),
-        *[str(item) for item in server.get("args", [])],
-    ]
-    return "fugue.context_server" in command
 
 
 def _read_only_mount(source: Path, target: str) -> dict[str, Any]:
@@ -1054,9 +1076,12 @@ def _applicability(
     spec: ContextSystemSpec,
     required_capabilities: list[str],
     runtime: ContextRuntime,
+    delivery: str,
 ) -> tuple[bool, str | None]:
     if spec.support in {"not_applicable", "disabled"}:
         return False, f"context system {spec.id} is {spec.support}"
+    if delivery not in spec.deliveries:
+        return False, f"context system {spec.id} does not support {delivery} delivery"
     missing = sorted(set(required_capabilities) - set(spec.capabilities))
     if missing:
         return False, f"missing context capabilities: {', '.join(missing)}"
@@ -1077,7 +1102,7 @@ def _context_instruction_path(
     runtime_root: Path,
     spec: ContextSystemSpec,
     *,
-    transport: str,
+    delivery: str,
     write: bool,
     collect_evidence: bool,
 ) -> Path | None:
@@ -1089,13 +1114,13 @@ def _context_instruction_path(
         path.parent.mkdir(parents=True, exist_ok=True)
         interface = (
             "Query it with `fugue-context query --text \"your question\" --top-k 10`. "
-            if transport == "portable" and spec.id.startswith("rag-")
+            if delivery == "portable" and spec.id.startswith("rag-")
             else "Use its injected files or configured native tools when useful. "
         )
         path.write_text(
             "# Fugue Context\n\n"
             f"This trial provides the `{spec.id}` context system through the "
-            f"`{transport}` transport. {interface}"
+            f"`{delivery}` delivery. {interface}"
             "Verify important evidence against the repository. Fugue records file "
             "and context utilization automatically.\n"
         )
@@ -1111,25 +1136,70 @@ def _agent_config_hash(
     integration_binding: IntegrationBinding,
 ) -> str:
     payload = {
-        "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
-        "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
-        "mcp_servers": [
-            *(variant.mcp_servers or experiment.mcp_servers),
+        **_candidate_agent_configuration(experiment, variant),
+        "derived_mcp_servers": [
             *binding.mcp_servers,
             *integration_binding.mcp_servers,
         ],
-        "environment": _merge_dicts(experiment.environment, variant.environment),
-        "verifier": _merge_dicts(experiment.verifier, variant.verifier),
-        "retry": _merge_dicts(experiment.retry, variant.retry),
-        "artifacts": variant.artifacts or experiment.artifacts,
         "context": {"id": spec.id, "version": spec.version, "config": spec.config},
-        "context_transport": variant.context.transport,
+        "context_delivery": variant.context.delivery,
         "skills": [item.provenance() for item in resolved_skills],
         "integrations": list(integration_binding.provenance),
         "allowed_hosts": list(integration_binding.allowed_hosts),
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _candidate_agent_configuration(
+    experiment: ExperimentSpec, variant: FeatureVariant
+) -> dict[str, Any]:
+    return _identity_configuration(
+        {
+            "agent_kwargs": _merge_dicts(
+                experiment.agent_kwargs, variant.agent_kwargs
+            ),
+            "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
+            "environment": _merge_dicts(
+                experiment.environment, variant.environment
+            ),
+            "artifacts": [*experiment.artifacts, *variant.artifacts],
+        }
+    )
+
+
+def _identity_configuration(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            tokens = set(name.lower().replace("-", "_").split("_"))
+            sensitive = bool(
+                tokens & {"token", "secret", "password", "credential"}
+                or {"api", "key"} <= tokens
+                or {"private", "key"} <= tokens
+            )
+            result[name] = (
+                f"${{{name}}}"
+                if sensitive and isinstance(item, str)
+                else _identity_configuration(item)
+            )
+        return result
+    if isinstance(value, list | tuple):
+        return [_identity_configuration(item) for item in value]
+    return value
+
+
+def _candidate_model_route(route: ModelRoute) -> dict[str, Any]:
+    return {
+        "provider": route.provider,
+        "model_id": route.model_id,
+        "display_model": route.display_model,
+        "chat_base_url": route.chat_base_url,
+        "responses_base_url": route.responses_base_url,
+        "messages_base_url": route.messages_base_url,
+        "litellm_model": route.litellm_model,
+    }
 
 
 def _comparison_example_id(
@@ -1140,42 +1210,6 @@ def _comparison_example_id(
             "dataset": dataset_id,
             "workload": workload_id,
             "task": task_id,
-        }
-    )
-
-
-def _candidate_id(
-    *,
-    experiment: ExperimentSpec,
-    variant: FeatureVariant,
-    harness: HarnessSpec,
-    route: ModelRoute,
-    context_spec: ContextSystemSpec,
-    resolved_skills: list[ResolvedSkill],
-    integration_binding: IntegrationBinding,
-    agent_config_hash: str,
-    repo_root: Path,
-) -> str:
-    prompt_ids = [variant.prompt_id] if variant.prompt_id else []
-    return _stable_id(
-        {
-            "harness": harness.name,
-            "model": route.display_model,
-            "variant": variant.id,
-            "context": {
-                "id": context_spec.id,
-                "version": context_spec.version,
-                "config_hash": _context_config_hash(context_spec),
-                "transport": variant.context.transport,
-            },
-            "content_hashes": _content_hashes(
-                prompt_ids=prompt_ids,
-                resolved_skills=resolved_skills,
-                repo_root=repo_root,
-            ),
-            "integrations": list(integration_binding.provenance),
-            "agent_config_hash": agent_config_hash,
-            "trace_content": experiment.trace_content,
         }
     )
 
@@ -1266,13 +1300,7 @@ def _validate_harbor_job_config(config: dict[str, Any]) -> None:
 
 
 def _context_config_hash(spec: ContextSystemSpec) -> str:
-    payload = {
-        "provider": spec.provider,
-        "version": spec.version,
-        "support": spec.support,
-        "config": spec.config,
-    }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return context_behavior_digest(spec)
 
 
 def _merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

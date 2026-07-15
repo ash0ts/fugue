@@ -45,15 +45,16 @@ from fugue.bench.library import (
     list_experiments,
     list_prompts,
     list_skills,
+    scorer_reference,
     validate_id,
 )
 from fugue.bench.manifest import load_manifest
-from fugue.bench.sources import list_skill_source_ids, load_skill_source
 from fugue.bench.scoring import (
     CandidateSelection,
     SelectionPolicy,
     select_candidate_configuration,
 )
+from fugue.bench.sources import list_skill_source_ids, load_skill_source
 from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
 from fugue.redaction import redact_value
 
@@ -1408,24 +1409,28 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
         "title": f"Recommended Fugue {role}",
         "role": role,
         "base_experiment_id": experiment.id,
-        "harness": selected_rows[0].get("harness"),
-        "model": selected_rows[0].get("model"),
-        "prompt_id": variant.prompt_id,
-        "skill_ids": variant.skill_ids,
-        "context": asdict(variant.context),
-        "agent_kwargs": variant.agent_kwargs,
-        "agent_env": variant.agent_env,
-        "mcp_servers": variant.mcp_servers,
-        "environment": variant.environment,
-        "verifier": variant.verifier,
-        "retry": variant.retry,
-        "artifacts": variant.artifacts,
-        "suite_id": suite_id,
-        "suite_digest": suite_digest,
-        "base_commit": base_commit,
-        "run_ids": list(result.scope.runs),
-        "analysis_snapshot": result.snapshot.digest,
-        "metrics": metrics,
+        "candidate": {
+            "harness": selected_rows[0].get("harness"),
+            "model": selected_rows[0].get("model"),
+            "prompt_id": variant.prompt_id,
+            "skills": variant.skills,
+            "context": asdict(variant.context),
+            "integrations": [asdict(item) for item in variant.integrations],
+            "agent_kwargs": variant.agent_kwargs,
+            "agent_env": variant.agent_env,
+            "environment": variant.environment,
+            "verifier": variant.verifier,
+            "retry": variant.retry,
+            "artifacts": variant.artifacts,
+        },
+        "evidence": {
+            "suite_id": suite_id,
+            "suite_digest": suite_digest,
+            "base_commit": base_commit,
+            "run_ids": list(result.scope.runs),
+            "analysis_snapshot": result.snapshot.digest,
+            "metrics": metrics,
+        },
     }
     (output / "candidate-preset.yaml").write_text(
         yaml.safe_dump(redact_value(candidate), sort_keys=False)
@@ -1502,7 +1507,7 @@ def _validate_experiment_references(
     for variant in experiment.variants:
         if variant.prompt_id and ("prompt", variant.prompt_id) not in asset_ids:
             get_prompt(variant.prompt_id, repo_root)
-        for skill_id in variant.selected_skill_ids:
+        for skill_id in variant.skills:
             if ("skill", skill_id) not in asset_ids:
                 try:
                     get_skill(skill_id, repo_root)
@@ -1515,10 +1520,10 @@ def _validate_experiment_references(
     paths.extend(item.manifest for item in experiment.workloads if item.manifest)
     paths.extend(Path(item.dataset) for item in experiment.workloads if item.dataset)
     paths.extend(
-        Path(scorer)
+        Path(scorer_reference(scorer))
         for item in experiment.workloads
         for scorer in item.scorers
-        if not scorer.startswith("builtin:")
+        if not scorer_reference(scorer).startswith("builtin:")
     )
     virtual_paths = set(overlay or {})
     for path in paths:

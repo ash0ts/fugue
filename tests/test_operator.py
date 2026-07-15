@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from fugue.bench.execution import write_run_manifest
-from fugue.bench.library import EvaluationGenerationSpec, WorkloadSpec
+from fugue.bench.ai import AssetDraft
+from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
+from fugue.bench.library import (
+    EvaluationGenerationSpec,
+    RubricScorerSelection,
+    WorkloadSpec,
+)
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
+from fugue.bench.reproducibility import build_run_snapshot, verify_snapshot
 from fugue.preflight import PreflightCheck
 
 
@@ -27,6 +34,8 @@ description: Control
 provider: fugue.bench.context:EmptyContextProvider
 version: "1"
 capabilities: [prepare, retrieve, bind, ingest, sequence, serve]
+deliveries: [portable]
+serve_deliveries: [portable]
 license: Fugue
 """
     )
@@ -70,17 +79,19 @@ id: demo-maintainer
 title: Demo maintainer
 role: maintainer
 base_experiment_id: demo
-harness: codex
-model: openai/gpt-5
-prompt_id: demo-prompt
-skill_ids: [demo-skill]
-context: {system_id: none}
-suite_id: demo-v1
-suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-run_ids: [run-1]
-analysis_snapshot: snapshot-1
-metrics: {pass_rate: 1.0}
+candidate:
+  harness: codex
+  model: openai/gpt-5
+  prompt_id: demo-prompt
+  skills: [demo-skill]
+  context: {system_id: none}
+evidence:
+  suite_id: demo-v1
+  suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  run_ids: [run-1]
+  analysis_snapshot: snapshot-1
+  metrics: {pass_rate: 1.0}
 """
     )
     (tmp_path / ".env").write_text(
@@ -135,7 +146,10 @@ def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
     experiment = replace(
         service.experiment("demo"),
         judge_model="openai/gpt-5-mini",
-        evaluation_generation=EvaluationGenerationSpec(),
+        evaluation_generation=EvaluationGenerationSpec(
+            suite_id="missing-suite",
+            workload_id="capabilities",
+        ),
         workloads=[
             WorkloadSpec(
                 id="capabilities",
@@ -144,7 +158,10 @@ def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
                     "configs/fugue/evaluations/missing-suite/manifest.yaml"
                 ),
                 scorers=[
-                    "configs/fugue/evaluations/missing-suite/rubric.yaml"
+                    RubricScorerSelection(
+                        type="rubric",
+                        path="configs/fugue/evaluations/missing-suite/rubric.yaml",
+                    )
                 ],
             )
         ],
@@ -171,7 +188,10 @@ def test_generated_evaluation_preflight_requires_explicit_judge(
                 runner="harbor",
                 manifest=Path("datasets/demo.yaml"),
                 scorers=[
-                    "configs/fugue/evaluations/generated/rubric.yaml"
+                    RubricScorerSelection(
+                        type="rubric",
+                        path="configs/fugue/evaluations/generated/rubric.yaml",
+                    )
                 ],
             )
         ],
@@ -217,6 +237,185 @@ def test_operator_applies_agent_preset_without_saving(tmp_path: Path) -> None:
     assert experiment.variants[0].prompt_id == "demo-prompt"
     assert experiment.variants[0].skill_ids == ["demo-skill"]
     assert service.experiment("demo").variants[0].id == "baseline"
+
+
+def test_execute_run_persists_snapshot_before_first_cell(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "transaction-order"
+    observed: list[str] = []
+
+    def runner(command, **kwargs):
+        lock_path = tmp_path / ".fugue/runtime" / run_id / "input-lock.json"
+        lock = json.loads(lock_path.read_text())
+        manifest = read_run_manifest(lock_path.parent)
+        assert verify_snapshot(lock)
+        assert manifest is not None
+        assert manifest["status"] == "running"
+        assert manifest["snapshot_sha256"] == lock["snapshot_sha256"]
+        observed.append(command[0])
+        return subprocess.CompletedProcess(command, 0)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id=run_id,
+        cell_runner=runner,
+    )
+
+    assert observed == ["harbor"]
+    assert result.status == "passed"
+
+
+def test_execute_run_planning_failure_records_starting_failure_without_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "planning-failure"
+
+    def fail_render(*args, **kwargs):
+        raise ValueError("invalid exact plan")
+
+    monkeypatch.setattr(service, "rendered_jobs", fail_render)
+
+    with pytest.raises(ValueError, match="invalid exact plan"):
+        service.execute_run(ExperimentRequest(experiment_id="demo"), run_id=run_id)
+
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    manifest = read_run_manifest(run_dir)
+    assert manifest is not None
+    assert manifest["status"] == "failed"
+    assert manifest["phase"] == "starting"
+    assert not (run_dir / "input-lock.json").exists()
+    assert not (run_dir / "cells.jsonl").exists()
+
+
+def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    baseline = experiment.variants[0]
+    experiment = replace(
+        experiment,
+        variants=[
+            baseline,
+            replace(
+                baseline,
+                id="renamed",
+                label="Renamed only",
+                verifier={"type": "pytest"},
+            ),
+        ],
+    )
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="pure-candidate",
+        experiment=experiment,
+    )
+    cells = plan_cells(jobs, run_id="pure-candidate", run_name="pure candidate")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="pure-candidate",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    assert len(snapshot["candidates"]) == 1
+    assert len(snapshot["candidate_runtime"]) == 1
+    assert len(snapshot["runtime"]["executions"]) == 2
+    assert {item["candidate_id"] for item in snapshot["planned_matrix"]} == set(
+        snapshot["candidates"]
+    )
+
+
+def test_candidate_prefixes_are_display_only_and_must_resolve_uniquely(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "candidate-prefixes"
+    first = "abc" + "1" * 61
+    second = "abc" + "2" * 61
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {"status": "passed", "run_name": "prefixes", "experiment_id": "demo"},
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {
+                    first: {"harness": "codex"},
+                    second: {"harness": "codex"},
+                },
+                "planned_matrix": [],
+            }
+        )
+    )
+
+    summary = service.run_summary(run_id)
+
+    assert {item.candidate_id for item in summary.candidates} == {first, second}
+    assert all(len(item.display_id) == 12 for item in summary.candidates)
+    assert service.resolve_candidate_id(run_id, first[:12]) == first
+    with pytest.raises(ValueError, match="ambiguous"):
+        service.resolve_candidate_id(run_id, "abc")
+
+
+def test_multi_file_plan_save_cleans_new_assets_when_commit_marker_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    assets = (
+        AssetDraft("prompt", "new-prompt", "New prompt", "# Prompt\n"),
+        AssetDraft("skill", "new-skill", "New skill", "# Skill\n"),
+    )
+
+    def fail_save(*args, **kwargs):
+        raise OSError("experiment commit marker failed")
+
+    monkeypatch.setattr("fugue.bench.operator.save_experiment_data", fail_save)
+
+    with pytest.raises(OSError, match="commit marker"):
+        service.save_working_experiment(
+            experiment,
+            service.request_for_experiment(experiment),
+            experiment_id="save-failure",
+            assets=assets,
+        )
+
+    assert not (tmp_path / "configs/fugue/prompts/new-prompt.md").exists()
+    assert not (tmp_path / "configs/fugue/skills/new-skill").exists()
+    assert not (tmp_path / "configs/fugue/experiments/save-failure.yaml").exists()
+
+
+def test_plan_save_validates_evaluation_assets_before_writing(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    invalid = AssetDraft(
+        "evaluation_rubric",
+        "invalid-suite",
+        "rubric.yaml",
+        "schema_version: 1\nid: invalid-suite\ndimensions: []\n",
+    )
+
+    with pytest.raises(ValueError, match="dimensions are required"):
+        service.save_working_experiment(
+            experiment,
+            service.request_for_experiment(experiment),
+            experiment_id="invalid-assets",
+            assets=(invalid,),
+        )
+
+    assert not (
+        tmp_path / "configs/fugue/evaluations/invalid-suite"
+    ).exists()
 
 
 def test_start_bridge_loads_the_requested_experiment(

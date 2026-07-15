@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import os
 import sys
 import webbrowser
@@ -37,8 +38,10 @@ from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
     FeatureVariant,
+    experiment_to_yaml,
     list_prompts,
     list_skills,
+    scorer_reference,
     validate_id,
 )
 from fugue.bench.operator import (
@@ -232,7 +235,7 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                     (
                         item.title,
                         item.id,
-                        item.id in self.variant.selected_skill_ids,
+                        item.id in self.variant.skills,
                     )
                     for item in list_skills(self.service.repo_root)
                 ],
@@ -240,7 +243,7 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                     (
                         f"{item_id} (remote)",
                         item_id,
-                        item_id in self.variant.selected_skill_ids,
+                        item_id in self.variant.skills,
                     )
                     for item_id in list_skill_source_ids(self.service.repo_root)
                 ],
@@ -293,7 +296,6 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                 skills=list(
                     self.query_one("#variant-skills", SelectionList).selected
                 ),
-                skill_ids=[],
                 context=context,
                 enabled=True,
             )
@@ -383,6 +385,48 @@ class ConfirmRunScreen(ModalScreen[bool]):
             with Horizontal(classes="button-row"):
                 yield Button("Run experiment", id="confirm-run", variant="primary")
                 yield Button("Cancel", id="cancel-run-confirm")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-run")
+
+
+class ConfirmPresetReplacementScreen(ModalScreen[bool]):
+    DEFAULT_CSS = """
+    ConfirmPresetReplacementScreen { align: center middle; background: #000000 60%; }
+    #confirm-preset-panel {
+        width: 92%;
+        max-width: 96;
+        height: 28;
+        padding: 1 2;
+        border: solid #F59E0B;
+        background: #1A1C1F;
+    }
+    #preset-replacement-scroll { height: 17; border: solid #363B44; padding: 0 1; }
+    """
+
+    def __init__(self, preset_id: str, replacement_diff: str) -> None:
+        super().__init__()
+        self.preset_id = preset_id
+        self.replacement_diff = replacement_diff
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-preset-panel"):
+            yield Label("REPLACE THE CURRENT PLAN?", classes="section-title")
+            yield Static(
+                f"Preset {self.preset_id} starts from its declared base experiment. "
+                "The current dirty plan, proposal, and unsaved assets will be replaced."
+            )
+            yield VerticalScroll(
+                Static(
+                    self.replacement_diff,
+                    markup=False,
+                    id="preset-replacement-diff",
+                ),
+                id="preset-replacement-scroll",
+            )
+            with Horizontal(classes="button-row"):
+                yield Button("Replace plan", id="confirm-run", variant="warning")
+                yield Button("Keep current plan", id="cancel-run-confirm")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "confirm-run")
@@ -565,25 +609,18 @@ class FugueApp(App[None]):
                     allow_blank=False,
                     id="experiment-select",
                 )
-                yield Label("RECOMMENDED AGENT CONFIGURATION", classes="section-title")
-                yield Select(
-                    [("None", "__none__"), *self.service.agent_preset_items()],
-                    value="__none__",
-                    allow_blank=False,
-                    id="agent-preset-select",
-                )
                 yield Static(id="define-summary")
+                with Horizontal(classes="button-row"):
+                    yield Button("Continue", id="define-next", variant="primary")
+            with VerticalScroll(id="compare-step", classes="plan-step plan-pane"):
+                yield Label("BUILD THE COMPARISON", classes="section-title")
+                yield Static(id="compare-sentence")
                 with Vertical(id="proposal-panel", classes="hidden"):
                     yield Static(id="proposal-summary")
                     with Horizontal(classes="button-row"):
                         yield Button("Use proposal", id="use-proposal", variant="primary")
                         yield Button("Refine", id="refine-proposal")
                         yield Button("Discard", id="discard-proposal")
-                with Horizontal(classes="button-row"):
-                    yield Button("Continue", id="define-next", variant="primary")
-            with VerticalScroll(id="compare-step", classes="plan-step plan-pane"):
-                yield Label("BUILD THE COMPARISON", classes="section-title")
-                yield Static(id="compare-sentence")
                 yield Label("Variants", classes="muted")
                 yield DataTable(
                     id="variant-table",
@@ -594,6 +631,16 @@ class FugueApp(App[None]):
                     yield Button("Add", id="add-variant")
                     yield Button("Duplicate", id="duplicate-variant")
                     yield Button("Edit", id="edit-variant")
+                preset_items = self.service.agent_preset_items()
+                if preset_items:
+                    with Collapsible(title="Advanced", collapsed=True):
+                        yield Label("Start a new plan from an agent preset")
+                        yield Select(
+                            [("None", "__none__"), *preset_items],
+                            value="__none__",
+                            allow_blank=False,
+                            id="agent-preset-select",
+                        )
                     yield Button("Remove", id="remove-variant")
                     yield Button("Enable / disable", id="toggle-variant")
                 yield Label("Harnesses", classes="muted")
@@ -681,6 +728,8 @@ class FugueApp(App[None]):
                 yield Button("Export", id="export-run")
                 yield Button("Open Agents", id="open-agents", variant="primary")
             yield DataTable(id="runs-table", cursor_type="row", zebra_stripes=True)
+            yield Label("CANDIDATES", classes="section-title")
+            yield DataTable(id="candidates-table", cursor_type="row", zebra_stripes=True)
             yield Label("CELLS", classes="section-title")
             yield DataTable(id="cells-table", cursor_type="row", zebra_stripes=True)
             yield Label("LOG", classes="section-title")
@@ -884,21 +933,57 @@ class FugueApp(App[None]):
         self._refresh_setup()
 
     def _apply_agent_preset(self, preset_id: str) -> None:
+        if self.plan.dirty or self.plan.proposal is not None or self.plan.assets:
+            try:
+                proposed = self.service.apply_agent_preset(
+                    self.plan.experiment, preset_id
+                )
+            except Exception as exc:
+                self.notify(str(exc), severity="error")
+                return
+            replacement_diff = "\n".join(
+                difflib.unified_diff(
+                    experiment_to_yaml(self.plan.experiment).splitlines(),
+                    experiment_to_yaml(proposed).splitlines(),
+                    fromfile=f"current/{self.plan.experiment.id}.yaml",
+                    tofile=f"preset/{proposed.id}.yaml",
+                    lineterm="",
+                )
+            )
+            self.push_screen(
+                ConfirmPresetReplacementScreen(preset_id, replacement_diff),
+                lambda confirmed: self._apply_agent_preset_confirmed(
+                    preset_id, confirmed
+                ),
+            )
+            return
+        self._apply_agent_preset_confirmed(preset_id, True)
+
+    def _apply_agent_preset_confirmed(
+        self, preset_id: str, confirmed: bool
+    ) -> None:
+        if not confirmed:
+            self._render_plan()
+            return
         experiment = self.service.apply_agent_preset(
             self.plan.experiment, preset_id
+        )
+        request = replace(
+            self.service.request_for_experiment(experiment),
+            agent_preset_id=preset_id,
         )
         self.experiment_id = experiment.id
         self.selected_variant_id = experiment.variants[0].id
         self.plan = PlanState(
-            base_experiment_id=self.plan.base_experiment_id,
+            base_experiment_id=experiment.id,
             experiment=experiment,
-            request=self.service.request_for_experiment(experiment),
+            request=request,
             dirty=True,
             agent_preset_id=preset_id,
         )
         self._render_plan()
         self._queue_preview()
-        self.notify("Recommended configuration applied locally")
+        self.notify("New plan started from the selected preset")
 
     def _render_plan(self) -> None:
         self._syncing = True
@@ -911,9 +996,9 @@ class FugueApp(App[None]):
                 value for _, value in self.service.experiment_items()
             }:
                 selector.value = self.plan.base_experiment_id
-            self.query_one("#agent-preset-select", Select).value = (
-                self.plan.agent_preset_id or "__none__"
-            )
+            preset_selects = list(self.query("#agent-preset-select"))
+            if preset_selects:
+                preset_selects[0].value = self.plan.agent_preset_id or "__none__"
             self._render_define_summary()
             self._render_proposal()
             self._render_variants()
@@ -1052,7 +1137,7 @@ class FugueApp(App[None]):
                 "yes" if variant.id in selected else "no",
                 variant.label,
                 variant.prompt_id or "default",
-                ", ".join(variant.selected_skill_ids) or "none",
+                ", ".join(variant.skills) or "none",
                 variant.context.system_id,
                 "custom" if _has_agent_config(variant) else "default",
                 key=variant.id,
@@ -1167,7 +1252,7 @@ class FugueApp(App[None]):
 
     def _show_evaluation_proposal(self, draft: Any) -> None:
         self._show_proposal(draft)
-        self._show_plan_step("define-step")
+        self._show_plan_step("compare-step")
 
     @work(thread=True, exclusive=True, group="composer")
     def _compose_ai_worker(self, request: str) -> None:
@@ -1453,7 +1538,7 @@ class FugueApp(App[None]):
         contexts = ", ".join(
             sorted(
                 {
-                    f"{item.context_system_id} ({item.context_transport})"
+                    f"{item.context_system_id} ({item.context_delivery})"
                     for item in preview.matrix_cells
                     if item.context_system_id != "none"
                 }
@@ -1530,7 +1615,10 @@ class FugueApp(App[None]):
         if not status.trace_key_present:
             blockers.append("Weave tracing requires WANDB_API_KEY")
         generated_scoring = any(
-            any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+            any(
+                not scorer_reference(scorer).startswith("builtin:")
+                for scorer in workload.scorers
+            )
             for workload in self.plan.experiment.workloads
         )
         explicit_judge = (
@@ -1766,13 +1854,48 @@ class FugueApp(App[None]):
 
     def _show_run(self, run_id: str) -> None:
         run = self.service.run_summary(run_id)
+        candidates = self.query_one("#candidates-table", DataTable)
+        candidates.clear(columns=True)
+        candidates.add_columns(
+            "Candidate",
+            "Configuration",
+            "Pass",
+            "Fail",
+            "Pending",
+            "N/A",
+            "Complete",
+            "Packageability",
+        )
+        for candidate in run.candidates:
+            configuration = candidate.configuration
+            context = configuration.get("context") or {}
+            summary = ", ".join(
+                str(value)
+                for value in (
+                    configuration.get("harness"),
+                    configuration.get("model"),
+                    context.get("id") if isinstance(context, dict) else context,
+                )
+                if value
+            )
+            candidates.add_row(
+                candidate.display_id,
+                summary or "resolved candidate",
+                str(candidate.passed),
+                str(candidate.failed),
+                str(candidate.pending),
+                str(candidate.not_applicable),
+                f"{candidate.completeness:.0%}",
+                candidate.packageability_reason,
+                key=candidate.candidate_id,
+            )
         cells = self.query_one("#cells-table", DataTable)
         cells.clear(columns=True)
         cells.add_columns(
             "Harness",
             "Variant",
             "Context",
-            "Transport",
+            "Delivery",
             "Task",
             "Candidate",
             "Status",
@@ -1783,7 +1906,7 @@ class FugueApp(App[None]):
                 cell.harness,
                 cell.variant_id,
                 cell.context_system_id,
-                cell.context_transport,
+                cell.context_delivery,
                 cell.task_id,
                 cell.candidate_id,
                 cell.status.replace("_", " "),
@@ -1884,7 +2007,7 @@ class FugueApp(App[None]):
                 str(row.get("experiment_id") or "unknown"),
                 str(row.get("variant_id") or "baseline"),
                 str(row.get("context_system_id") or "none"),
-                str(row.get("context_transport") or "portable"),
+                str(row.get("context_delivery") or "portable"),
                 str(row.get("model") or "unknown"),
             )
             groups[key].append(row)
@@ -2349,7 +2472,6 @@ def _has_agent_config(variant: FeatureVariant) -> bool:
         (
             variant.agent_kwargs,
             variant.agent_env,
-            variant.mcp_servers,
             variant.environment,
             variant.verifier,
             variant.retry,
@@ -2366,7 +2488,6 @@ def _variant_advanced_summary(variant: FeatureVariant) -> str:
         for label, value in (
             ("agent kwargs", variant.agent_kwargs),
             ("agent env", variant.agent_env),
-            ("MCP servers", variant.mcp_servers),
             ("environment", variant.environment),
             ("verifier", variant.verifier),
             ("retry", variant.retry),

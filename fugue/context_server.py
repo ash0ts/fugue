@@ -157,7 +157,7 @@ def _start_portable_server(
                 return
             self._send(
                 HTTPStatus.OK,
-                {"ok": True, "context_system_id": system_id, "transport": "portable"},
+                {"ok": True, "context_system_id": system_id, "delivery": "portable"},
             )
 
         def do_POST(self) -> None:  # noqa: N802

@@ -46,7 +46,7 @@ class Skill:
 @dataclass(frozen=True)
 class ContextSelection:
     system_id: str = "none"
-    transport: Literal["portable", "native_mcp"] = "portable"
+    delivery: Literal["portable", "native_mcp"] = "portable"
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,23 +57,23 @@ class IntegrationSelection:
 
 
 @dataclass(frozen=True)
-class AgentPreset:
-    id: str
-    title: str
-    role: Literal["maintainer", "operator"]
-    base_experiment_id: str
+class AgentCandidateSpec:
     harness: str
     model: str
     prompt_id: str | None = None
-    skill_ids: list[str] = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
     context: ContextSelection = field(default_factory=ContextSelection)
+    integrations: list[IntegrationSelection] = field(default_factory=list)
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
-    mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
     verifier: dict[str, Any] = field(default_factory=dict)
     retry: dict[str, Any] = field(default_factory=dict)
     artifacts: list[Any] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentPresetEvidence:
     suite_id: str = ""
     suite_digest: str = ""
     base_commit: str = ""
@@ -81,8 +81,90 @@ class AgentPreset:
     analysis_snapshot: str = ""
     metrics: dict[str, float | int | None] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class AgentPreset:
+    id: str
+    title: str
+    role: Literal["maintainer", "operator"]
+    base_experiment_id: str
+    candidate: AgentCandidateSpec
+    evidence: AgentPresetEvidence
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def harness(self) -> str:
+        return self.candidate.harness
+
+    @property
+    def model(self) -> str:
+        return self.candidate.model
+
+    @property
+    def prompt_id(self) -> str | None:
+        return self.candidate.prompt_id
+
+    @property
+    def skill_ids(self) -> list[str]:
+        return list(self.candidate.skills)
+
+    @property
+    def context(self) -> ContextSelection:
+        return self.candidate.context
+
+    @property
+    def integrations(self) -> list[IntegrationSelection]:
+        return list(self.candidate.integrations)
+
+    @property
+    def agent_kwargs(self) -> dict[str, Any]:
+        return dict(self.candidate.agent_kwargs)
+
+    @property
+    def agent_env(self) -> dict[str, str]:
+        return dict(self.candidate.agent_env)
+
+    @property
+    def environment(self) -> dict[str, Any]:
+        return dict(self.candidate.environment)
+
+    @property
+    def verifier(self) -> dict[str, Any]:
+        return dict(self.candidate.verifier)
+
+    @property
+    def retry(self) -> dict[str, Any]:
+        return dict(self.candidate.retry)
+
+    @property
+    def artifacts(self) -> list[Any]:
+        return list(self.candidate.artifacts)
+
+    @property
+    def suite_id(self) -> str:
+        return self.evidence.suite_id
+
+    @property
+    def suite_digest(self) -> str:
+        return self.evidence.suite_digest
+
+    @property
+    def base_commit(self) -> str:
+        return self.evidence.base_commit
+
+    @property
+    def run_ids(self) -> list[str]:
+        return list(self.evidence.run_ids)
+
+    @property
+    def analysis_snapshot(self) -> str:
+        return self.evidence.analysis_snapshot
+
+    @property
+    def metrics(self) -> dict[str, float | int | None]:
+        return dict(self.evidence.metrics)
 
 
 @dataclass(frozen=True)
@@ -91,33 +173,44 @@ class FeatureVariant:
     label: str
     prompt_id: str | None = None
     skills: list[str] = field(default_factory=list)
-    # Compatibility input. New configurations serialize only ``skills``.
-    skill_ids: list[str] = field(default_factory=list)
     context: ContextSelection = field(default_factory=ContextSelection)
-    integrations: list[IntegrationSelection] | None = None
+    integrations: list[IntegrationSelection] = field(default_factory=list)
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
-    mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     environment: dict[str, Any] = field(default_factory=dict)
     verifier: dict[str, Any] = field(default_factory=dict)
     retry: dict[str, Any] = field(default_factory=dict)
     artifacts: list[Any] = field(default_factory=list)
     enabled: bool = True
 
-    def __post_init__(self) -> None:
-        if self.skills and self.skill_ids:
-            raise ValueError("variant may not set both skills and skill_ids")
-        if self.skill_ids:
-            object.__setattr__(self, "skills", list(self.skill_ids))
-
     @property
-    def selected_skill_ids(self) -> list[str]:
+    def skill_ids(self) -> list[str]:
+        """Internal/export metadata spelling; experiment input is strictly `skills`."""
         return list(self.skills)
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value.pop("skill_ids", None)
-        return value
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BuiltinScorerSelection:
+    type: Literal["builtin"]
+    id: Literal["harbor-outcome"]
+
+
+@dataclass(frozen=True)
+class RubricScorerSelection:
+    type: Literal["rubric"]
+    path: str
+
+
+ScorerSelection = BuiltinScorerSelection | RubricScorerSelection
+
+
+def scorer_reference(scorer: ScorerSelection) -> str:
+    if isinstance(scorer, BuiltinScorerSelection):
+        return f"builtin:{scorer.id}"
+    return scorer.path
 
 
 @dataclass(frozen=True)
@@ -131,12 +224,12 @@ class WorkloadSpec:
     n_tasks: int | None = None
     n_attempts: int | None = None
     artifacts: list[Any] = field(default_factory=list)
-    scorers: list[str] = field(default_factory=list)
+    scorers: list[ScorerSelection] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class EvaluationSourceSpec:
-    kind: str
+    kind: Literal["seed", "file", "mcp"]
     path: str | None = None
     text: str | None = None
     server: str | None = None
@@ -146,6 +239,8 @@ class EvaluationSourceSpec:
 
 @dataclass(frozen=True)
 class EvaluationGenerationSpec:
+    suite_id: str
+    workload_id: str
     size: int = 8
     sources: list[EvaluationSourceSpec] = field(default_factory=list)
 
@@ -185,7 +280,6 @@ class ExperimentSpec:
     retry: dict[str, Any] = field(default_factory=dict)
     agent_kwargs: dict[str, Any] = field(default_factory=dict)
     agent_env: dict[str, str] = field(default_factory=dict)
-    mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     integrations: list[IntegrationSelection] = field(default_factory=list)
     workloads: list[WorkloadSpec] = field(default_factory=list)
     evaluation_generation: EvaluationGenerationSpec | None = None
@@ -201,7 +295,6 @@ class ExperimentSpec:
             _paths_to_strings(variant.to_dict()) for variant in self.variants
         ]
         return value
-
 
 def library_root(repo_root: Path | None = None) -> Path:
     root = repo_root or Path.cwd()
@@ -312,27 +405,35 @@ def get_agent_preset(
     role = str(raw.get("role") or "")
     if role not in {"maintainer", "operator"}:
         raise ValueError("agent preset role must be maintainer or operator")
-    harness = str(raw.get("harness") or "")
+    candidate_raw = raw.get("candidate") or {}
+    evidence_raw = raw.get("evidence") or {}
+    if not isinstance(candidate_raw, dict):
+        raise ValueError("agent preset candidate must be a mapping")
+    if not isinstance(evidence_raw, dict):
+        raise ValueError("agent preset evidence must be a mapping")
+    _reject_unknown(candidate_raw, AgentCandidateSpec, kind="agent preset candidate")
+    _reject_unknown(evidence_raw, AgentPresetEvidence, kind="agent preset evidence")
+    harness = str(candidate_raw.get("harness") or "")
     if harness not in {"hermes", "openclaw", "claude-code", "codex"}:
         raise ValueError(f"unknown agent preset harness: {harness or '<empty>'}")
-    model = str(raw.get("model") or "").strip()
+    model = str(candidate_raw.get("model") or "").strip()
     if not model:
         raise ValueError("agent preset model is required")
-    prompt_id = _optional_str(raw.get("prompt_id"))
+    prompt_id = _optional_str(candidate_raw.get("prompt_id"))
     if prompt_id:
         validate_id(prompt_id, kind="prompt id")
         get_prompt(prompt_id, repo_root)
-    skill_ids = _string_list(raw.get("skill_ids"))
+    skill_ids = _string_list(candidate_raw.get("skills"))
     _require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
     for skill_id in skill_ids:
         get_skill(skill_id, repo_root)
-    suite_digest = str(raw.get("suite_digest") or "")
+    suite_digest = str(evidence_raw.get("suite_digest") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", suite_digest):
         raise ValueError("agent preset suite_digest must be a SHA-256 digest")
-    base_commit = str(raw.get("base_commit") or "")
+    base_commit = str(evidence_raw.get("base_commit") or "")
     if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
         raise ValueError("agent preset base_commit must be a full Git commit")
-    metrics = _dict(raw.get("metrics"))
+    metrics = _dict(evidence_raw.get("metrics"))
     if any(value is not None and not isinstance(value, (int, float)) for value in metrics.values()):
         raise ValueError("agent preset metrics must be numeric or null")
     return AgentPreset(
@@ -342,24 +443,33 @@ def get_agent_preset(
         base_experiment_id=validate_id(
             raw.get("base_experiment_id") or "pilot", kind="experiment id"
         ),
-        harness=harness,
-        model=model,
-        prompt_id=prompt_id,
-        skill_ids=skill_ids,
-        context=_context_selection(raw.get("context")),
-        agent_kwargs=_dict(raw.get("agent_kwargs")),
-        agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
-        mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
-        environment=_dict(raw.get("environment")),
-        verifier=_dict(raw.get("verifier")),
-        retry=_dict(raw.get("retry")),
-        artifacts=_list(raw.get("artifacts")),
-        suite_id=str(raw.get("suite_id") or ""),
-        suite_digest=suite_digest,
-        base_commit=base_commit,
-        run_ids=_string_list(raw.get("run_ids")),
-        analysis_snapshot=str(raw.get("analysis_snapshot") or ""),
-        metrics={str(key): value for key, value in metrics.items()},
+        candidate=AgentCandidateSpec(
+            harness=harness,
+            model=model,
+            prompt_id=prompt_id,
+            skills=skill_ids,
+            context=_context_selection(candidate_raw.get("context")),
+            integrations=_integration_selections(
+                candidate_raw.get("integrations"), kind="agent preset candidate"
+            ),
+            agent_kwargs=_dict(candidate_raw.get("agent_kwargs")),
+            agent_env={
+                str(k): str(v)
+                for k, v in _dict(candidate_raw.get("agent_env")).items()
+            },
+            environment=_dict(candidate_raw.get("environment")),
+            verifier=_dict(candidate_raw.get("verifier")),
+            retry=_dict(candidate_raw.get("retry")),
+            artifacts=_list(candidate_raw.get("artifacts")),
+        ),
+        evidence=AgentPresetEvidence(
+            suite_id=str(evidence_raw.get("suite_id") or ""),
+            suite_digest=suite_digest,
+            base_commit=base_commit,
+            run_ids=_string_list(evidence_raw.get("run_ids")),
+            analysis_snapshot=str(evidence_raw.get("analysis_snapshot") or ""),
+            metrics={str(key): value for key, value in metrics.items()},
+        ),
     )
 
 
@@ -468,7 +578,6 @@ def experiment_from_data(
         retry=_dict(raw.get("retry")),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
-        mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
         integrations=_integration_selections(raw.get("integrations"), kind="experiment"),
         workloads=workloads,
         evaluation_generation=_evaluation_generation(raw.get("evaluation_generation")),
@@ -527,29 +636,23 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     prompt_id = _optional_str(raw.get("prompt_id"))
     if prompt_id:
         validate_id(prompt_id, kind="prompt id")
-    if raw.get("skills") is not None and raw.get("skill_ids") is not None:
-        raise ValueError("variant may not set both skills and skill_ids")
+    if raw.get("skill_ids") is not None:
+        raise ValueError("unknown variant field(s): skill_ids; use skills")
     skills = _string_list(raw.get("skills"))
-    skill_ids = _string_list(raw.get("skill_ids"))
-    selected_skills = skills or skill_ids
-    for skill_id in selected_skills:
+    for skill_id in skills:
         validate_id(skill_id, kind="skill id")
-    _require_unique(selected_skills, kind=f"variant {variant_id} skill")
+    _require_unique(skills, kind=f"variant {variant_id} skill")
     return FeatureVariant(
         id=variant_id,
         label=str(raw.get("label") or variant_id),
         prompt_id=prompt_id,
         skills=skills,
-        skill_ids=skill_ids,
         context=_context_selection(raw.get("context")),
-        integrations=(
-            _integration_selections(raw.get("integrations"), kind=f"variant {variant_id}")
-            if "integrations" in raw
-            else None
+        integrations=_integration_selections(
+            raw.get("integrations"), kind=f"variant {variant_id}"
         ),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
-        mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
         environment=_dict(raw.get("environment")),
         verifier=_dict(raw.get("verifier")),
         retry=_dict(raw.get("retry")),
@@ -568,12 +671,12 @@ def _context_selection(raw: Any) -> ContextSelection:
         raise ValueError("variant context must be a string or mapping")
     _reject_unknown(raw, ContextSelection, kind="variant context")
     system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
-    transport = str(raw.get("transport") or "portable")
-    if transport not in {"portable", "native_mcp"}:
-        raise ValueError(f"unknown context transport: {transport}")
+    delivery = str(raw.get("delivery") or "portable")
+    if delivery not in {"portable", "native_mcp"}:
+        raise ValueError(f"unknown context delivery: {delivery}")
     return ContextSelection(
         system_id=system_id,
-        transport=transport,
+        delivery=delivery,
         config=_dict(raw.get("config")),
     )
 
@@ -684,15 +787,39 @@ def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:
                 resources=resources,
             )
         )
-    return EvaluationGenerationSpec(size=size, sources=sources)
+    suite_id = validate_id(raw.get("suite_id"), kind="evaluation suite id")
+    workload_id = validate_id(raw.get("workload_id"), kind="evaluation workload id")
+    return EvaluationGenerationSpec(
+        suite_id=suite_id,
+        workload_id=workload_id,
+        size=size,
+        sources=sources,
+    )
 
 
-def _scorer_refs(value: Any, workload_id: str) -> list[str]:
-    refs = _string_list(value)
-    _require_unique(refs, kind=f"workload {workload_id} scorer")
-    for ref in refs:
-        if ref == "builtin:harbor-outcome":
+def _scorer_refs(value: Any, workload_id: str) -> list[ScorerSelection]:
+    values = _list(value)
+    result: list[ScorerSelection] = []
+    for index, raw in enumerate(values, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"workload {workload_id} scorer {index} must be a typed mapping"
+            )
+        scorer_type = str(raw.get("type") or "")
+        if scorer_type == "builtin":
+            unknown = sorted(set(raw) - {"type", "id"})
+            scorer_id = str(raw.get("id") or "")
+            if unknown or scorer_id != "harbor-outcome":
+                raise ValueError(
+                    f"workload {workload_id} builtin scorer must be harbor-outcome"
+                )
+            result.append(BuiltinScorerSelection(type="builtin", id="harbor-outcome"))
             continue
+        if scorer_type != "rubric" or sorted(set(raw) - {"type", "path"}):
+            raise ValueError(
+                f"workload {workload_id} scorer {index} type must be builtin or rubric"
+            )
+        ref = str(raw.get("path") or "")
         path = _safe_repo_path(ref, kind=f"workload {workload_id} scorer")
         if path.suffix not in {".yaml", ".yml"}:
             raise ValueError(
@@ -703,7 +830,10 @@ def _scorer_refs(value: Any, workload_id: str) -> list[str]:
             raise ValueError(
                 f"workload {workload_id} scorer must live under {prefix}: {ref}"
             )
-    return refs
+        result.append(RubricScorerSelection(type="rubric", path=ref))
+    refs = [scorer_reference(item) for item in result]
+    _require_unique(refs, kind=f"workload {workload_id} scorer")
+    return result
 
 
 def _safe_repo_path(value: str, *, kind: str) -> Path:

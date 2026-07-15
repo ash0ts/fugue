@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import shlex
 import sys
 import time
 import webbrowser
@@ -29,19 +28,7 @@ from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
     ContextRuntime,
 )
-from fugue.bench.deployment import write_run_input_lock
-from fugue.bench.execution import (
-    execute_cells,
-    mark_unfinished_cells,
-    new_run_id,
-    plan_cells,
-    write_run_manifest,
-)
-from fugue.bench.export import (
-    GeneratedEvaluationCoordinator,
-    LiveEvaluationCoordinator,
-)
-from fugue.bench.job_config import RenderedJob
+from fugue.bench.execution import new_run_id
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
@@ -59,11 +46,6 @@ from fugue.bench.workloads import (
     run_retrieval_workload,
     run_sequence_workload,
 )
-from fugue.model_plane import (
-    resolve_model_route,
-    trace_project_slug,
-)
-from fugue.preflight import validate_harbor_job_configs
 
 FUGUE_THEME = Theme(
     {
@@ -87,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     if raw_argv[:1] == ["_context-evaluate"]:
         return _internal_context_evaluate(raw_argv[1:])
+    raw_argv = _normalize_runs_argv(raw_argv)
     parser = _parser()
     args = parser.parse_args(raw_argv)
     args._raw_argv = raw_argv
@@ -140,26 +123,35 @@ def _parser() -> FugueArgumentParser:
     run.set_defaults(handler=_run_command)
 
     runs = subparsers.add_parser("runs", help="Inspect and manage durable runs")
-    runs.add_argument("run_id", nargs="?", help="Managed run id; omit to list recent runs")
+    runs.add_argument("--run-id", help=argparse.SUPPRESS)
     runs.add_argument("--limit", type=_positive_cli_int, default=20, help="Maximum recent runs to list")
-    action = runs.add_mutually_exclusive_group()
-    action.add_argument("--logs", action="store_true", help="Read run or selected-cell logs")
-    action.add_argument("--cancel", action="store_true", help="Cancel the managed process group")
-    action.add_argument("--export", action="store_true", dest="export_run", help="Write normalized JSONL")
-    action.add_argument("--open", choices=("agents", "trace", "project"), help="Open the stable W&B destination")
-    action.add_argument("--package", metavar="CANDIDATE_ID", help="Package one explicit candidate for serving")
-    runs.add_argument("--follow", action="store_true", help="Follow logs until the run finishes")
-    runs.add_argument("--cell", help="Select one cell for logs or trace lookup")
-    runs.add_argument("--out", type=Path, help="Export destination")
-    runs.add_argument("--fetch-weave", action="store_true", help="Enrich exported rows with Weave summaries")
-    runs.add_argument("--to-weave", action="store_true", help="Publish normalized evaluations once")
-    runs.add_argument("--republish", action="store_true", help="Intentionally bypass the publication ledger")
-    runs.add_argument("--print", action="store_true", dest="print_only", help="Print a link instead of opening it")
-    runs.add_argument("--workspace", type=Path, help="Clean production Git checkout to package")
-    runs.add_argument("--image", help="Local OCI image name and tag")
-    runs.add_argument("--platform", default="linux/amd64", help="OCI target platform")
-    runs.add_argument("--yes", action="store_true", help="Confirm packaging without prompting")
     _add_common_args(runs, json_output=True)
+    run_actions = runs.add_subparsers(dest="runs_action", metavar="ACTION")
+    logs = run_actions.add_parser("logs", help="Read run or selected-cell logs")
+    logs.add_argument("--follow", action="store_true")
+    logs.add_argument("--cell")
+    _add_common_args(logs, json_output=True)
+    cancel = run_actions.add_parser("cancel", help="Cancel the managed process group")
+    _add_common_args(cancel, json_output=True)
+    export_run = run_actions.add_parser("export", help="Write normalized JSONL")
+    export_run.add_argument("--out", type=Path)
+    export_run.add_argument("--fetch-weave", action="store_true")
+    export_run.add_argument("--to-weave", action="store_true")
+    export_run.add_argument("--republish", action="store_true")
+    _add_common_args(export_run, json_output=True)
+    package = run_actions.add_parser("package", help="Package one candidate")
+    package.add_argument("candidate")
+    package.add_argument("--workspace", type=Path, required=True)
+    package.add_argument("--image", required=True)
+    package.add_argument("--platform", default="linux/amd64")
+    package.add_argument("--allow-failed", action="store_true")
+    package.add_argument("--yes", action="store_true")
+    _add_common_args(package, json_output=True)
+    open_run = run_actions.add_parser("open", help="Open a W&B destination")
+    open_run.add_argument("destination", choices=("agents", "trace", "project"))
+    open_run.add_argument("--cell")
+    open_run.add_argument("--print", action="store_true", dest="print_only")
+    _add_common_args(open_run, json_output=True)
     runs.set_defaults(handler=_runs)
 
     analyze = subparsers.add_parser("analyze", help="Analyze experiment results with Fugue AI")
@@ -220,6 +212,13 @@ def _parser() -> FugueArgumentParser:
     tui.add_argument("--experiment", default="pilot")
     tui.set_defaults(handler=_tui)
     return parser
+
+
+def _normalize_runs_argv(argv: list[str]) -> list[str]:
+    """Keep the public `runs RUN_ID [ACTION]` grammar unambiguous to argparse."""
+    if len(argv) < 2 or argv[0] != "runs" or argv[1].startswith("-"):
+        return argv
+    return ["runs", "--run-id", argv[1], *argv[2:]]
 
 
 def _add_common_args(parser: argparse.ArgumentParser, *, json_output: bool = False) -> None:
@@ -516,227 +515,21 @@ def _run_worker(args: argparse.Namespace) -> int:
     experiment = _load_experiment_arg(args)
     service = OperatorService(args.repo_root, args.env_file)
     request = _request_from_args(args, experiment.id)
-    write_run_manifest(
-        args.repo_root,
-        run_id,
-        {
-            "status": "starting",
-            "run_name": args.run_name or experiment.run_name or experiment.id,
-            "experiment_id": experiment.id,
-            "experiment_snapshot": (
-                str(args.experiment_file)
-                if getattr(args, "experiment_file", None)
-                else None
-            ),
-            "trace_content": args.trace_content or experiment.trace_content,
-            "detached": bool(getattr(args, "run_id", None)),
-        },
+    final = service.execute_run(
+        request,
+        run_id=run_id,
+        experiment=experiment,
     )
-    try:
-        preparation = service.prepare_context(
-            request,
-            experiment=experiment,
-            run_id=run_id,
-        )
-        _print_context_preparation(preparation)
-        rendered = service.rendered_jobs(request, run_id=run_id, experiment=experiment)
-        validate_harbor_job_configs(
-            [job.config_path for job in rendered if job.applicable]
-        )
-        write_run_input_lock(
-            args.repo_root,
-            run_id,
-            experiment,
-            rendered,
-            env=service.env,
-        )
-        for job in rendered:
-            if not job.applicable:
-                CONSOLE.print(f"[yellow]skip[/] {job.job_name}: {job.skip_reason}")
-                continue
-            CONSOLE.print("[cyan]+[/] " + " ".join(shlex.quote(part) for part in job.command))
-            print(f"# config: {job.config_path}")
-        run_name = rendered[0].run_name if rendered else _run_name(args.run_name, {})
-        cells = plan_cells(rendered, run_id=run_id, run_name=run_name)
-        job_dirs = sorted(
-            {
-                str(job.config.get("jobs_dir"))
-                for job in rendered
-                if job.config.get("jobs_dir")
-            }
-        )
-        write_run_manifest(
-            args.repo_root,
-            run_id,
-            {
-                "status": "running",
-                "started_at": _now(),
-                "run_name": run_name,
-                "experiment_id": experiment.id,
-                "routes": _run_route_metadata(rendered),
-                "trace_project": (
-                    trace_project_slug(rendered[0].env)
-                    if rendered
-                    else trace_project_slug(load_env(args.env_file))
-                ),
-                "cell_count": len(cells),
-                "jobs_dirs": job_dirs,
-                "trace_content": args.trace_content or experiment.trace_content,
-            },
-        )
-        concurrency = args.n_concurrent or experiment.n_concurrent or 2
-        live_evaluations = None
-        observability_error = None
-        run_env = rendered[0].env if rendered else load_env(args.env_file)
-        if (
-            cells
-            and run_env.get("WANDB_API_KEY", "").strip()
-            and run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
-            not in {"1", "true", "yes"}
-        ):
-            try:
-                live_evaluations = LiveEvaluationCoordinator(
-                    cells,
-                    repo_root=args.repo_root,
-                    project=trace_project_slug(run_env),
-                    env=run_env,
-                )
-            except Exception as exc:
-                observability_error = f"{type(exc).__name__}: {exc}"
-                CONSOLE.print(
-                    "[yellow]Weave live evaluation unavailable:[/] "
-                    f"{observability_error}"
-                )
-        local_evaluations = (
-            GeneratedEvaluationCoordinator(
-                cells,
-                repo_root=args.repo_root,
-                env=run_env,
-            )
-            if live_evaluations is None
-            and any(cell.evaluation_case is not None for cell in cells)
-            else None
-        )
-        outcomes = execute_cells(
-            cells,
-            repo_root=args.repo_root,
-            max_workers=concurrency,
-            cell_started=(
-                live_evaluations.begin_cell if live_evaluations is not None else None
-            ),
-            cell_finished=(
-                live_evaluations.finish_cell
-                if live_evaluations is not None
-                else (
-                    local_evaluations.finish_cell
-                    if local_evaluations is not None
-                    else None
-                )
-            ),
-        )
-        publication = live_evaluations.finalize() if live_evaluations else None
-        publication_failures = list(publication.failures if publication else ())
-        if observability_error:
-            publication_failures.insert(0, observability_error)
-        failed = sum(outcome.status == "failed" for outcome in outcomes)
-        skipped = sum(outcome.status == "not_applicable" for outcome in outcomes)
-        status = "failed" if failed else "passed"
-        write_run_manifest(
-            args.repo_root,
-            run_id,
-            {
-                "status": status,
-                "ended_at": _now(),
-                "passed_cells": len(outcomes) - failed - skipped,
-                "failed_cells": failed,
-                "not_applicable_cells": skipped,
-                "observability_status": (
-                    "failed" if publication_failures else "passed"
-                ),
-                "evaluation_runs": (
-                    [
-                        {
-                            "candidate_id": item.candidate_id,
-                            "name": item.name,
-                            "url": item.url,
-                            "evaluation_ref": item.evaluation_ref,
-                            "model_ref": item.model_ref,
-                            "linked_predictions": item.linked_predictions,
-                        }
-                        for item in publication.evaluations
-                    ]
-                    if publication
-                    else []
-                ),
-                "evaluation_failures": publication_failures,
-            },
-        )
+    if getattr(args, "json", False):
+        from fugue.bench.operator import as_json
+
+        print(as_json(final))
+    else:
         CONSOLE.print(
-            f"[bold]run {run_id}[/]: {len(outcomes) - failed - skipped} passed, "
-            f"{failed} failed, {skipped} not applicable"
+            f"[bold]run {run_id}[/]: {final.passed} passed, "
+            f"{final.failed} failed, {final.not_applicable} not applicable"
         )
-        return 1 if failed else 0
-    except KeyboardInterrupt:
-        message = "Run interrupted from the terminal."
-        mark_unfinished_cells(
-            args.repo_root / ".fugue" / "runtime" / run_id,
-            "interrupted",
-            message=message,
-        )
-        write_run_manifest(
-            args.repo_root,
-            run_id,
-            {"status": "interrupted", "ended_at": _now(), "error": message},
-        )
-        return 130
-    except Exception as exc:
-        write_run_manifest(
-            args.repo_root,
-            run_id,
-            {
-                "status": "failed",
-                "ended_at": _now(),
-                "error": f"{type(exc).__name__}: {exc}",
-            },
-        )
-        raise
-
-
-def _run_route_metadata(rendered: list[RenderedJob]) -> dict[str, Any]:
-    if not rendered:
-        return {"target": [], "builder": None, "judge": None}
-    first = rendered[0]
-    target = sorted(
-        {
-            (job.route.provider, job.route.display_model, job.route.api_key_env)
-            for job in rendered
-        }
-    )
-    return {
-        "target": [
-            {"provider": provider, "model": model, "api_key_env": key}
-            for provider, model, key in target
-        ],
-        "builder": _resolved_role_metadata(
-            first.env.get("FUGUE_BUILDER_MODEL"), first.env
-        ),
-        "judge": _resolved_role_metadata(
-            first.env.get("FUGUE_JUDGE_MODEL"), first.env
-        ),
-    }
-
-
-def _resolved_role_metadata(
-    model: str | None, env: dict[str, str]
-) -> dict[str, str] | None:
-    if not model:
-        return None
-    route = resolve_model_route(model, env)
-    return {
-        "provider": route.provider,
-        "model": route.display_model,
-        "api_key_env": route.api_key_env,
-    }
+    return 0 if final.status == "passed" else 1
 
 
 def _load_experiment_arg(args: argparse.Namespace) -> ExperimentSpec:
@@ -1028,7 +821,7 @@ def _runs(args: argparse.Namespace) -> int:
 
     service = OperatorService(args.repo_root, args.env_file)
     if not args.run_id:
-        if any((args.logs, args.cancel, args.export_run, args.open, args.package)):
+        if args.runs_action:
             raise ValueError("a run id is required for this action")
         runs = service.runs()[: args.limit]
         if args.json:
@@ -1051,7 +844,7 @@ def _runs(args: argparse.Namespace) -> int:
         else:
             CONSOLE.print("[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]")
         return 0
-    if args.logs:
+    if args.runs_action == "logs":
         if args.follow:
             try:
                 for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
@@ -1061,30 +854,30 @@ def _runs(args: argparse.Namespace) -> int:
         else:
             print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
         return 0
-    if args.cancel:
+    if args.runs_action == "cancel":
         run = service.supervisor.cancel(args.run_id)
         if args.json:
             print(as_json(service.run_summary(args.run_id)))
         else:
             CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
         return 0
-    if args.package:
-        if args.workspace is None or not args.image:
-            raise ValueError("--package requires --workspace and --image")
+    if args.runs_action == "package":
         if not args.yes:
             if not CONSOLE.is_terminal:
                 raise ValueError("use --yes to confirm packaging non-interactively")
             if not Confirm.ask(
-                f"Package candidate {args.package} from run {args.run_id} "
+                f"Package candidate {args.candidate} from run {args.run_id} "
+                f"(allow failed: {'yes' if args.allow_failed else 'no'}) "
                 f"as {args.image}?"
             ):
                 return 1
         result = service.package_candidate(
             args.run_id,
-            args.package,
+            args.candidate,
             workspace=args.workspace,
             image=args.image,
             platform=args.platform,
+            allow_failed=args.allow_failed,
         )
         if args.json:
             print(as_json(result))
@@ -1095,7 +888,7 @@ def _runs(args: argparse.Namespace) -> int:
             )
             CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
         return 0
-    if args.export_run:
+    if args.runs_action == "export":
         summary = service.export_run(
             args.run_id,
             out=args.out,
@@ -1121,11 +914,11 @@ def _runs(args: argparse.Namespace) -> int:
                 CONSOLE.print(f"[red]Publication failed:[/] {failure}")
             CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
         return 0
-    if args.open:
+    if args.runs_action == "open":
         links = service.run_links(args.run_id)
-        url = links.project if args.open == "project" else links.agents
+        url = links.project if args.destination == "project" else links.agents
         conversation_id = None
-        if args.open == "trace":
+        if args.destination == "trace":
             url = links.trace or links.agents
             refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
             conversation_id = next(
@@ -1151,6 +944,7 @@ def _runs(args: argparse.Namespace) -> int:
         print(as_json(run))
     else:
         CONSOLE.print(_run_panel(run))
+        CONSOLE.print(_candidates_table(run))
         CONSOLE.print(_cells_table(run))
     return 0
 
@@ -1160,7 +954,7 @@ def _print_started_run(run: Any) -> None:
         Panel(
             f"[fugue.success]started[/] [bold]{run.run_id}[/]\n"
             f"Logs: [fugue.cyan]{run.log_path}[/]\n"
-            f"Follow: [bold]fugue runs {run.run_id} --logs --follow[/]",
+            f"Follow: [bold]fugue runs {run.run_id} logs --follow[/]",
             title=run.run_name,
             border_style="fugue.success",
         )
@@ -1194,7 +988,7 @@ def _cells_table(run: Any) -> Table:
             cell.harness,
             cell.variant_id,
             cell.context_system_id,
-            cell.context_transport,
+            cell.context_delivery,
             cell.task_id,
             cell.candidate_id,
             _status_markup(cell.status),
@@ -1202,6 +996,39 @@ def _cells_table(run: Any) -> Table:
     if not run.cells:
         table.add_row(
             "-", "-", "-", "-", "waiting for planner", _status_markup(run.status)
+        )
+    return table
+
+
+def _candidates_table(run: Any) -> Table:
+    table = Table(
+        "Candidate",
+        "Configuration",
+        "Passed",
+        "Failed",
+        "Pending",
+        "N/A",
+        "Packageability",
+        box=box.SIMPLE_HEAD,
+    )
+    for candidate in run.candidates:
+        configuration = candidate.configuration
+        table.add_row(
+            candidate.display_id,
+            " / ".join(
+                str(value)
+                for value in (
+                    configuration.get("harness"),
+                    configuration.get("model"),
+                    (configuration.get("context") or {}).get("id"),
+                )
+                if value
+            ),
+            str(candidate.passed),
+            str(candidate.failed),
+            str(candidate.pending),
+            str(candidate.not_applicable),
+            candidate.packageability_reason,
         )
     return table
 
@@ -1280,8 +1107,8 @@ def _context_evaluate(args: argparse.Namespace) -> int:
         None,
     )
     runtime_env = load_env(args.env_file)
-    runtime_env["FUGUE_CONTEXT_TRANSPORT"] = (
-        variant.context.transport if variant is not None else "portable"
+    runtime_env["FUGUE_CONTEXT_DELIVERY"] = (
+        variant.context.delivery if variant is not None else "portable"
     )
     runtime = ContextRuntime(
         repo_root=args.repo_root,

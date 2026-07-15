@@ -1,148 +1,78 @@
 ---
 name: fugue-dev
-description: Use when modifying the Fugue repository, especially provider routing, context-system plugins and caching, Harbor JobConfig rendering, experiments/prompts/skills, workload runners, the Textual terminal operator, Weave agent observability/export, or tests. Helps preserve Fugue's provider-neutral experiment contracts and avoid memory-specific or legacy compatibility surfaces.
+description: Use when modifying Fugue experiments, candidate resolution, Harbor rendering, context or integration bindings, operator lifecycle, evaluation, packaging, serving, curation, or their tests. Preserves Fugue 0.1 identity, reproducibility, and safety contracts.
 ---
 
 # Fugue Development
 
-## Core Model
+Preserve these invariants across schema, implementation, UI, and tests.
 
-Use the product vocabulary consistently:
+## Candidate identity
 
-- `Experiment`: a saved reusable run definition in `configs/fugue/experiments/*.yaml`.
-- `Prompt`: a portable prompt file in `configs/fugue/prompts/*.md`.
-- `Skill`: a Harbor skill in `configs/fugue/skills/<id>/SKILL.md`.
-- `FeatureVariant`: a named comparison bundle of prompt, skills, one `ContextSelection`, and advanced Harbor config.
-- `ContextSystem`: a repo-backed plugin definition with explicit prepare, bind, retrieve, ingest, and sequence capabilities.
-- `Workload`: a `harbor`, `retrieval`, or `sequence` evaluation lane selected through an experiment preset.
-- `Run ID`: an immutable generated execution identity with durable state under `.fugue/runtime/<run-id>/`.
-- `Run name`: the W&B/Weave grouping name for one execution.
+- Resolve one canonical, immutable candidate representation and reuse it for
+  rendering, snapshots, results, presets, export, and packaging.
+- Version candidate identity. Hash only behavior-affecting harness, model route,
+  prompt, reviewed skills, context delivery/configuration, typed integrations,
+  and advanced agent settings.
+- Keep experiment and variant names, labels, run names, preset names, scoring or
+  judge configuration, UI state, and trial index out of candidate identity.
+- Put runtime, Harbor, concurrency, and instrumentation policy in a separate
+  execution fingerprint.
+- Identify comparison examples by dataset, workload, and task. Trial index is a
+  separate cell coordinate.
 
-Do not add user-facing `profile`, `instruction`, `condition`, `variant_key`, or `memory_variant` compatibility paths. This is a net-new repo; prefer one clean contract.
+## Experiment and evaluation contracts
 
-## Architecture Rules
+- Experiment YAML is strict. Use `skills`; do not add legacy aliases.
+- Integrations are typed and additive across experiment and variant scopes.
+  Reject duplicate effective IDs. Never expose raw public MCP configuration.
+- Context definitions declare supported deliveries and serving deliveries.
+  Pass delivery into binding; portable delivery must not inject native MCP, and
+  native MCP must preserve the upstream interface.
+- Scorer selections are typed. Rubric scoring requires an explicit judge model.
+- Evaluation generation is explicit, exact about suite/workload/size, and
+  side-effect free during preview. Keep deterministic outcomes, judge scores,
+  and judge errors separate.
 
-- W&B/Weave is always the trace plane. Model calls route through `wandb/...`, `openai/...`, or `anthropic/...`.
-- W&B Inference calls must carry `OpenAI-Project` for the resolved trace project. Use `provider_request_headers` for direct HTTP, `provider_client_env` for OpenAI-compatible SDKs (`OPENAI_PROJECT` and `OPENAI_PROJECT_ID` are both required across versions), and the same header in generated LiteLLM config.
-- Weave agent spans must use the Agents OTLP endpoint with `project_id` and Basic `api:<WANDB_API_KEY>` headers. Build those headers only in the trial process environment with `weave_agents_otel_headers`; never serialize them into Harbor configs, plugin YAML, logs, or metadata.
-- Keep provider selection in `fugue/model_plane.py`; keep experiment library logic in `fugue/bench/library.py`; keep Harbor JobConfig rendering in `fugue/bench/job_config.py`.
-- Saved authoring state belongs under `configs/fugue/`. Generated runtime state belongs under ignored `.fugue/runtime/` or job/report/artifact directories.
-- Preview APIs must be side-effect free: no config writes, downloads, index builds, saved experiment writes, or generated context instructions.
-- Render/run paths may write generated JobConfigs and runtime files.
-- Context preparation is content-addressed under `.fugue/cache/context`; include repository commit, provider/version/config, builder model, and embedding model in cache keys. Publish atomically under a lock.
-- Only advertise a capability a provider implements. Unsupported cells are `not_applicable`/`N/A`, not failures or zero scores.
-- Treat `ContextSelection.transport` as part of treatment identity. `portable` means every harness receives the same bounded `fugue-context query` command backed by a pinned sidecar; `native_mcp` means the provider's native MCP interface is itself under study.
-- Default Fugue BM25, dense, and hybrid RAG to `portable`. Never expose their prepared cache as a static agent mount. Probe registration before agent execution and report assigned, registered, and invoked separately.
-- Preserve third-party native context interfaces. Wrap stdio MCP with `fugue.mcp_proxy` for bounded, redacted telemetry instead of replacing upstream tools.
-- Codex native MCP tools use Responses namespaces. Until a bridge advertises and passes namespace-tool compatibility, render bridged Codex `native_mcp` cells as `not_applicable`. Portable context remains eligible because it does not enter the model tool namespace.
-- Never serialize raw API keys. Use env var names and presence booleans only.
-- Keep operator behavior in `fugue.bench.operator`; both Rich commands and Textual consume those presentation-neutral services.
-- Keep experiment selection, overrides, and job planning in `OperatorService`; the CLI only translates arguments and executes the returned plan.
-- Keep the public operator surface to bare `fugue` plus `plan`, `run`, `runs`, `analyze`, `setup`, and `tui`. Do not expose catalog, asset CRUD, bridge, export, preflight, or context internals as separate top-level commands.
-- Rich is the lightweight command center and Textual is the full-screen workspace. Share typed requests and results, never Rich renderables or CLI subprocess calls.
-- Keep AI transport normalization in `fugue.assistant`, experiment/result indexing in `fugue.bench.catalog`, and grounded composer/analyst behavior in `fugue.bench.ai`. CLI and Textual must consume these services instead of embedding prompts or model calls.
-- Composer output is an untrusted draft. Parse it through `ExperimentSpec`, validate every prompt/skill/context/manifest reference, and run side-effect-free preview before exposing Apply, Save, or Run.
-- Analyst arithmetic is deterministic Python over an immutable catalog snapshot. The model may interpret aggregates and inspect bounded evidence, but it must not calculate official metrics or cite evidence ids that do not exist.
-- Pair variants through the deterministic `comparison_example_id`, which identifies the shared task/query/episode and excludes `trial_index`. Trial ordinal is a separate prediction coordinate. Never pair by Harbor directory names or list position.
-- `.fugue/cache/catalog/v2` is rebuildable local generated state. Hybrid analysis starts from a local cohort and queries Weave only for its run keys and conversation IDs. Saved analysis definitions belong in `configs/fugue/analyses`; generated reports and evidence belong in `reports/analyses`.
-- Assistant tools may read only bounded, redacted Fugue metadata and result artifacts. Never expose arbitrary filesystem, shell, environment, or Python execution to an assistant model.
-- Keep `fugue.tui` presentation-only. Long operations run in workers or detached process groups and communicate through durable state/events; never block Textual's event loop.
-- Keep TUI planning intent-first: Define chooses natural language or a saved experiment, Compare edits variants/harnesses/coverage/size, and Review owns the exact matrix and launch authority. Low-frequency model roles, concurrency, tags, and tracing stay under Advanced.
-- Use one in-memory plan state for the working `ExperimentSpec`, `ExperimentRequest`, draft assets, dirty state, and latest `PreviewSummary`. Widgets render that state; do not add parallel applied-draft or form-reconstruction paths.
-- Automatic Plan previews must remain debounced, side-effect free, and stale-result safe. `PreviewSummary.matrix_cells` is the shared Rich/Textual source for trial counts, applicability, and cache readiness.
-- Variant edits remain in memory until explicit save or run. An AI proposal is untrusted until accepted, and generated prompt or skill assets must be saved before execution.
-- The `r` shortcut navigates to Review before launch. Full-content tracing requires confirmation at launch, not a persistent warning competing with primary configuration.
-- Textual has one durable launch mode. Do not add cosmetic attached/detached controls; use `fugue run --detach` for the explicit headless option.
-- Run state is append-friendly and recoverable: atomic `run.json`, `events.jsonl`, `cells.jsonl`, combined logs, and per-cell logs. A cell failure must not stop independent cells.
-- Capture pre-install and pre-execution runtime fingerprints. Compare benchmark cohorts using the pre-install digest and mark mismatches non-comparable; do not explain dependency differences from outcomes alone.
-- Derive inspected, changed, expected, and relevant files from normalized trajectories, the final git diff, and benchmark metadata. Never require an agent-authored evidence JSON artifact.
-- Normalize errors to one owner: `agent`, `benchmark_runtime`, `harness_adapter`, `context_system`, `provider`, or `fugue`. Merge local trajectory and Weave observations by logical occurrence so the same tool failure is not counted twice.
-- Pin harness and tracing-plugin versions. Do not add `latest` installs or reinstall the same harness through a tracing plugin setup path.
-- OpenClaw headless runs must deny tools whose external providers or interactive surfaces are unavailable. Keep those adapter omissions distinct from agent-selected tool failures.
-- The browser frontend has been removed. Do not add FastAPI, static web assets, or HTTP job abstractions back into the operator path.
-- Preflight is observational. Starting the bridge and preparing context are explicit `fugue setup` actions.
-- Experiment YAML is strict. Do not add compatibility aliases for removed fields.
-- JSONL is the only normalized local export format.
-- CodeGraph, GitNexus, Project-RAG, Semble, and lat.md are opt-in research adapters until their pinned Harbor MCP runtimes pass integration tests. Preserve their definitions without placing them in default presets.
+## Run lifecycle
 
-## Weave Agent Contract
+- `OperatorService` owns one run transaction: resolve, snapshot the experiment,
+  prepare context, render and plan, atomically write the immutable secret-free
+  input lock, transition to running, then execute cells.
+- A failure before the running transition records a failed starting run and
+  executes no cell. CLI and TUI delegate to the operator rather than duplicating
+  orchestration.
+- Group results by candidate. Display a unique short prefix, retain full IDs in
+  JSON and snapshots, and reject ambiguous input prefixes.
+- A candidate is packageable only when all planned applicable cells are
+  terminal and at least one passed. Failed cells require explicit override and
+  confirmation; unrelated run failure does not block a complete candidate.
 
-- Use stable harness agent names: `hermes-agent`, `openclaw`, `claude-code`, and `codex`. Experiments, variants, and trials are attributes, never agent identities.
-- Set `gen_ai.agent.name`, deterministic `gen_ai.conversation.id`, and flat `fugue.*` attributes for run, experiment, workload, harness, variant, context, task, trial, model, prompt, skills, tags, and run key.
-- Native harness integrations own `invoke_agent`, `chat`, and `execute_tool` spans. Never add wrapper spans that duplicate native turns, model calls, or tools.
-- Store deterministic Fugue conversation identity and native session IDs in trial metadata. Export joins Agents spans by conversation ID and `fugue.run_key`, not by per-trial agent names.
-- `trace_content` defaults to `full`. Metadata mode must fail preflight or render `not_applicable` when an integration cannot guarantee content suppression.
-- Trace the operator agents with stable names `fugue-experiment-composer` and `fugue-analysis-agent`. Validation repairs retain one session identity. Do not persist a second write-only assistant session store.
-- Live traces and evaluation predictions are emitted during execution. Export owns normalized JSONL plus idempotent verification/backfill; it must skip rows already finalized in publication ledger v3.
-- Render one Harbor JobConfig per `harness x variant x task x trial`, with Harbor `n_attempts=1`. Keep `trial_index`, `comparison_example_id`, `candidate_id`, and run keys deterministic and present in config, trial metadata, cells, exports, and trace attributes.
-- Partition publication by exact shared example and scorer scope, then candidate. Dataset inputs contain only invariant benchmark/example identity. Candidate fields belong in a uniquely named model object; Evaluation attributes remain scope-only so candidates reuse one Evaluation definition.
-- Open `EvaluationLogger.log_prediction()` before each Harbor cell and finish it after resolving the authoritative native root. Inject the exact `weave.eval.*` link attributes, attach `genai_span_ref`, call `log_summary()` without a custom nested summary, and write a v3 marker only after successful finalization. Do not publish administrative cell or preparation rows.
-- Keep `planned_conversation_id` and `observed_conversation_id` separate. Evaluation output and deep links use only an observed native root that matches run key, task, stable agent name, and prediction call id.
-- Report context transport, assignment, registration, availability, invocation, query/result counts, latency, and errors separately. Never infer context use from prompt text or static mount names.
-- Prefer measured child `chat` usage. Use root aggregate usage only when child usage is absent; never add both. Preserve missing usage as `None` with an unavailable status rather than zero.
-- Query Calls through `WF_TRACE_SERVER_URL` or `https://trace.wandb.ai`, use the current Calls filter schema and NDJSON response shape, and surface transport errors. Raw resource attributes are diagnostic fallback only; normalized Agents rows should expose flat `fugue.*` span attributes.
-- Analysis must stop after `AnalysisPreview` until the user confirms report generation. Local scope resolution cannot query Weave, call the report model, or write a report.
+## Packaging and serving
 
-## Metadata And Tags
+- Package only from clean production and Fugue checkouts, using a tracked
+  runtime allowlist. Reject lock drift, dirty source, submodules, escaping
+  symlinks, credential-bearing remotes, secrets, and unsupported integrations.
+- Package context only when its selected delivery declares tested serving
+  support. Do not silently convert delivery during packaging.
+- Keep serving optional and outside the operator path. Isolate each execution,
+  bound request size and admission, terminate the process group on cancellation,
+  and remove request state.
+- Tracing is best effort but candidate execution is exactly once. Preserve
+  unavailable usage instead of synthesizing zero.
 
-Trial metadata and exported rows should make comparison easy:
+## Curator boundary
 
-- Include `experiment_id`, `preset_id`, `workload_id`, `run_name`, `variant_id`, `context_system_id`, `context_transport`, `context_version`, `context_config_hash`, cache keys, prompt/skill ids and hashes, agent config hash, harness, model role/provider/model, trace project, runtime equivalence, error provenance, and local artifact paths.
-- Tags should include `fugue`, experiment, preset, workload, variant, context system, prompt, skill, harness, provider, model, and run name where applicable.
-- Results should group by experiment, workload, context system, variant, prompt, skill, harness, and provider. Keep outcome, retrieval, evidence, efficiency, and utilization metrics separate; do not invent a composite score.
-
-## Self-Improvement Contract
-
-- Treat `fugue-maintainer-v1` and `fugue-operator-v1` as separate benchmarks.
-  Do not combine their candidates or promote one universal agent configuration.
-- Self-evaluation v1 is pinned to Fugue commit
-  `96512017842d68add2546a057f0601de3eaf610e`. Changing the source commit,
-  mutations, task instructions, fixtures, or verifiers creates a new suite
-  version and requires benchmark review separate from a preset promotion.
-- Maintainer tasks contain one deterministic source mutation. The mutated task
-  must fail and its reference reversal must pass before the task enters a suite.
-- Operator tasks exercise public Fugue behavior over deterministic fixtures.
-  Do not invoke Fugue's composer or analyst model inside those Harbor tasks;
-  nested model calls confound the outer harness/model candidate.
-- Candidate identity is the exact harness, model, prompt and skill hashes,
-  context configuration, and agent configuration already recorded by Fugue.
-- Official selection requires a complete unique candidate/example/trial grid.
-  Use the deterministic paired task bootstrap and quality-first policy in
-  `fugue.bench.scoring`; never ask the analyst model to choose the winner.
-- Missing cost remains unavailable. Among quality-competitive candidates, prefer
-  measured cost per success, then median wall time, recoverable-error rate, and
-  deterministic candidate id.
-- A confirmed self-evaluation analysis writes review artifacts under
-  `reports/self-eval/`. It must never write `configs/fugue/agent-presets`, alter
-  defaults, or open a PR implicitly.
-- Tracked agent presets must include suite digest, pinned source commit, run ids,
-  analysis snapshot, and measured metrics. Presets contain no credentials and
-  are applied only when a user or composer explicitly selects them.
-
-## Change Workflow
-
-1. Read the relevant tests and local module before editing. Use `rg` first.
-2. If changing schema, update `library.py`, `job_config.py`, operator/CLI callers, metadata/export, and tests together.
-3. If changing terminal behavior, keep Plan, Runs, Results, and Setup coherent; add a Textual Pilot test for the workflow.
-4. If changing provider behavior, validate routing, required env vars, generated bridge config, and adapter expectations.
-5. Keep edits scoped. Avoid broad refactors unless they reduce real duplication or remove a stale abstraction.
+- Curator proposals may change only declared skill sources, context systems,
+  and controlled experiments. They may not change code, tests, workflows,
+  dependencies, datasets, presets, README, or vendored skill content.
+- A skill proposal adds a pinned source and experiment. Human review through
+  the reviewed skill-source setup remains mandatory; automation cannot vendor
+  or approve unreviewed content.
 
 ## Validation
 
-Run the light checks before handing off:
-
-```bash
-python -m compileall fugue
-python -m ruff check .
-python -m pytest
-```
-
-For terminal changes, run Textual headlessly and smoke Rich output:
-
-```bash
-FUGUE_NO_ANIMATION=1 python -m pytest tests/test_tui.py
-fugue setup
-fugue runs
-```
-
-Check that Plan preview does not write `.fugue/runtime`, live runs persist durable state, Results shows local summaries, and Weave actions never expose credentials or invent unverified trace URLs.
+When changing a contract, update its parser, resolver, operator consumers,
+presentation, checked-in configurations, and focused tests together. Verify
+preview side-effect freedom, snapshot-before-cell ordering, identity boundaries,
+and failure behavior—not only the happy path.

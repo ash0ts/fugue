@@ -34,6 +34,7 @@ def _cell(run_id: str, name: str, *, applicable: bool = True) -> PlannedCell:
         trial_index=1,
         comparison_example_id=f"example-{name}",
         candidate_id="candidate-codex-baseline",
+        execution_fingerprint="execution-a",
         config_path=Path(f"{name}.json"),
         result_path=Path("jobs") / name / "result.json",
         command=(name,),

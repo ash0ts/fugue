@@ -5,6 +5,7 @@ provider: fugue.bench.context:CommandContextProvider
 version: git@d5abf98a48b60d35b73745e47e1aacca3963a6f0
 support: experimental
 capabilities: [prepare, bind]
+deliveries: [native_mcp]
 required_commands: [uvx]
 license: MIT
 source_url: https://github.com/Brainwires/project-rag

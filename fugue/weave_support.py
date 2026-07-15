@@ -63,15 +63,36 @@ async def trace_async_operation(
 
     try:
         weave = initialize_weave(trace_project_slug(env), env)
-    except RuntimeError:
+    except Exception:
         return await operation()
-    result: Any = None
+    sentinel = object()
+    result: Any = sentinel
+    operation_error: BaseException | None = None
+    started = False
 
-    @weave.op(name=name)
-    async def traced(inputs: dict[str, Any]) -> Any:
-        nonlocal result
-        result = await operation()
+    async def traced_operation(inputs: dict[str, Any]) -> Any:
+        nonlocal result, operation_error, started
+        started = True
+        try:
+            result = await operation()
+        except BaseException as exc:
+            operation_error = exc
+            raise
         return summarize(result)
 
-    await traced(metadata)
+    try:
+        traced = weave.op(name=name)(traced_operation)
+    except Exception:
+        return await operation()
+
+    try:
+        await traced(metadata)
+    except BaseException:
+        if operation_error is not None:
+            raise operation_error from None
+        if not started:
+            return await operation()
+        if result is not sentinel:
+            return result
+        raise
     return result

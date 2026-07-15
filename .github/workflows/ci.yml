@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+        suite: [core, context]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Install core
+        if: matrix.suite == 'core'
+        run: uv sync --frozen --extra dev
+      - name: Install context
+        if: matrix.suite == 'context'
+        run: uv sync --frozen --extra dev --extra context
+      - name: Test
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: uv run pytest
+
+  quality:
+    name: Quality, build, and command smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev
+      - run: uv lock --check
+      - run: uv run ruff check .
+      - name: Compile with warnings as errors
+        env:
+          PYTHONWARNINGS: error
+        run: uv run python -m compileall -q fugue tests
+      - run: uv build
+      - name: README command smoke
+        env:
+          FUGUE_NO_ANIMATION: "1"
+        run: |
+          uv run fugue --help
+          uv run fugue run pilot --preview --json
+          uv run fugue runs --json
+      - name: Validate repository skill
+        run: uv run pytest -q tests/test_skill.py
+
+  serving:
+    name: Python 3.13 serving and protocol compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/compat/package-lock.json
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev --extra serve
+      - run: uv run pytest -q tests/test_serve.py
+      - name: Open Responses and client compatibility
+        run: uv run bash tests/compat/run.sh
+
+  curator:
+    name: Curator compiler and policy
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra dev
+      - name: Install pinned gh-aw compiler
+        run: gh extension install github/gh-aw --pin v0.81.6
+      - name: Compile curator workflows
+        run: >-
+          gh aw compile fugue-curator fugue-curator-dry-run
+          --action-mode action --action-tag v0.81.6
+      - name: Generated locks are current
+        run: git diff --exit-code -- .github/workflows/fugue-curator.lock.yml .github/workflows/fugue-curator-dry-run.lock.yml
+      - name: Assert immutable safe-output policy
+        run: uv run pytest -q tests/test_curation.py

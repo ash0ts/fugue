@@ -635,8 +635,8 @@ def _add_runtime_correlation(
                 "variant_id": spec.id,
                 "context_version": spec.version,
                 "context_config_hash": config_hash,
-                "context_transport": runtime.env.get(
-                    "FUGUE_CONTEXT_TRANSPORT", "portable"
+                "context_delivery": runtime.env.get(
+                    "FUGUE_CONTEXT_DELIVERY", "portable"
                 ),
                 "trace_project": trace_project,
                 "model_role": "context_builder",

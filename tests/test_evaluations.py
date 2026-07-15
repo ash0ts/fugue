@@ -41,6 +41,8 @@ def _experiment(*, size: int = 8):
             ],
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "evaluation_generation": {
+                "suite_id": "capability-suite",
+                "workload_id": "capabilities",
                 "size": size,
                 "sources": [
                     {
@@ -88,6 +90,19 @@ def _rubric() -> dict:
     }
 
 
+def _write_docs_integration(repo_root: Path) -> None:
+    root = repo_root / "configs/fugue/integrations"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "docs.yaml").write_text(
+        """id: docs
+version: docs-server@1.0.0
+runtime: {type: builtin, command: [docs-server]}
+interfaces:
+  - {type: mcp, name: docs, transport: stdio, allowed_tools: [search]}
+"""
+    )
+
+
 def _draft(tmp_path: Path):
     experiment = _experiment()
     sources = source_catalog(experiment, tmp_path)
@@ -127,10 +142,11 @@ def test_evaluation_draft_is_stratified_grounded_and_reviewable(
     assert workload.manifest == Path(
         "configs/fugue/evaluations/capability-suite/manifest.yaml"
     )
-    assert workload.scorers == [
-        "builtin:harbor-outcome",
-        "configs/fugue/evaluations/capability-suite/rubric.yaml",
-    ]
+    assert [item.type for item in workload.scorers] == ["builtin", "rubric"]
+    assert workload.scorers[0].id == "harbor-outcome"
+    assert workload.scorers[1].path == (
+        "configs/fugue/evaluations/capability-suite/rubric.yaml"
+    )
 
 
 @pytest.mark.parametrize(
@@ -166,7 +182,7 @@ def test_evaluation_draft_rejects_invalid_case_sets(
     with pytest.raises(ValueError, match=message):
         build_evaluation_draft(
             {
-                "suite_id": "invalid-suite",
+                "suite_id": "capability-suite",
                 "cases": mutate(_cases()),
                 "rubric": _rubric(),
             },
@@ -186,7 +202,7 @@ def test_evaluation_rejects_unknown_sources_and_invalid_thresholds(
     with pytest.raises(ValueError, match="unknown source ref"):
         build_evaluation_draft(
             {
-                "suite_id": "ungrounded",
+                "suite_id": "capability-suite",
                 "cases": invalid_cases,
                 "rubric": _rubric(),
             },
@@ -200,7 +216,7 @@ def test_evaluation_rejects_unknown_sources_and_invalid_thresholds(
     with pytest.raises(ValueError, match="threshold must be 0..1"):
         build_evaluation_draft(
             {
-                "suite_id": "bad-threshold",
+                "suite_id": "capability-suite",
                 "cases": _cases(),
                 "rubric": rubric,
             },
@@ -216,7 +232,7 @@ def test_evaluation_rejects_unknown_sources_and_invalid_thresholds(
     with pytest.raises(ValueError, match="repository-relative"):
         build_evaluation_draft(
             {
-                "suite_id": "unsafe-attachment",
+                "suite_id": "capability-suite",
                 "cases": unsafe_cases,
                 "rubric": _rubric(),
             },
@@ -232,7 +248,7 @@ def test_evaluation_rejects_unknown_sources_and_invalid_thresholds(
     with pytest.raises(ValueError, match="artifact path must start"):
         build_evaluation_draft(
             {
-                "suite_id": "unsafe-artifact",
+                "suite_id": "capability-suite",
                 "cases": unsafe_artifact_cases,
                 "rubric": _rubric(),
             },
@@ -245,6 +261,9 @@ def test_evaluation_rejects_unknown_sources_and_invalid_thresholds(
 def test_generated_evaluation_requires_feature_omission_baseline(
     tmp_path: Path,
 ) -> None:
+    skill = tmp_path / "configs/fugue/skills/always-on/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Always on\n")
     experiment = experiment_from_data(
         {
             **_experiment().to_dict(),
@@ -252,12 +271,12 @@ def test_generated_evaluation_requires_feature_omission_baseline(
                 {
                     "id": "one",
                     "label": "One",
-                    "skill_ids": ["always-on"],
+                    "skills": ["always-on"],
                 },
                 {
                     "id": "two",
                     "label": "Two",
-                    "skill_ids": ["always-on"],
+                    "skills": ["always-on"],
                 },
             ],
         }
@@ -265,7 +284,7 @@ def test_generated_evaluation_requires_feature_omission_baseline(
     with pytest.raises(ValueError, match="baseline that omits skill always-on"):
         build_evaluation_draft(
             {
-                "suite_id": "no-baseline",
+                "suite_id": "capability-suite",
                 "cases": _cases(),
                 "rubric": _rubric(),
             },
@@ -274,7 +293,7 @@ def test_generated_evaluation_requires_feature_omission_baseline(
             source_catalog=source_catalog(experiment, tmp_path),
         )
 
-def test_partial_generation_fills_saved_gaps_and_detects_source_drift(
+def test_partial_generation_never_merges_hidden_saved_cases(
     tmp_path: Path,
 ) -> None:
     experiment, initial = _draft(tmp_path)
@@ -284,26 +303,7 @@ def test_partial_generation_fills_saved_gaps_and_detects_source_drift(
         path.write_text(item.body)
 
     updated = {**_cases()[0], "instruction": "Updated boundary instruction."}
-    _, repaired = build_evaluation_draft(
-        {
-            "suite_id": "capability-suite",
-            "cases": [updated],
-            "rubric": _rubric(),
-        },
-        _experiment(),
-        generator_model="openai/gpt-5-mini",
-        source_catalog=source_catalog(_experiment(), tmp_path),
-        repo_root=tmp_path,
-    )
-
-    assert len(repaired.cases) == 8
-    assert repaired.cases[0]["instruction"] == "Updated boundary instruction."
-
-    cases_path = tmp_path / initial.files[0].path
-    rows = [json.loads(line) for line in cases_path.read_text().splitlines()]
-    rows[1]["source_refs"][0]["sha256"] = "0" * 64
-    cases_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    with pytest.raises(ValueError, match="source drifted"):
+    with pytest.raises(ValueError, match="requires exactly 8 cases"):
         build_evaluation_draft(
             {
                 "suite_id": "capability-suite",
@@ -370,6 +370,8 @@ def test_generated_evaluation_lifecycle_preview_save_prepare_and_render(
             "title": "Generated lifecycle",
             "judge_model": "openai/gpt-5-mini",
             "evaluation_generation": {
+                "suite_id": "lifecycle-suite",
+                "workload_id": "capabilities",
                 "size": 8,
                 "sources": [
                     {
@@ -384,7 +386,7 @@ def test_generated_evaluation_lifecycle_preview_save_prepare_and_render(
                 {
                     "id": "with-skill",
                     "label": "With skill",
-                    "skill_ids": ["demo-skill"],
+                    "skills": ["demo-skill"],
                 },
             ],
         }
@@ -470,7 +472,7 @@ def test_attachment_checksum_and_repository_boundary_are_enforced(
     experiment = _experiment()
     _, draft = build_evaluation_draft(
         {
-            "suite_id": "attachment-suite",
+            "suite_id": "capability-suite",
             "cases": cases,
             "rubric": _rubric(),
         },
@@ -485,7 +487,7 @@ def test_attachment_checksum_and_repository_boundary_are_enforced(
         path.write_text(item.body)
     fixture.write_text("changed")
     manifest = load_manifest(
-        tmp_path / "configs/fugue/evaluations/attachment-suite/manifest.yaml"
+        tmp_path / "configs/fugue/evaluations/capability-suite/manifest.yaml"
     )
     with pytest.raises(ValueError, match="attachment checksum mismatch"):
         materialize_manifest_dataset(manifest, tmp_path)
@@ -672,11 +674,14 @@ def test_artifact_assertions_bound_the_structured_judge_score(
 def test_preview_source_resolution_never_opens_mcp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _write_docs_integration(tmp_path)
     experiment = experiment_from_data(
         {
             "id": "mcp-preview",
-            "mcp_servers": [{"name": "docs", "command": "docs-server"}],
+            "integrations": [{"id": "docs"}],
             "evaluation_generation": {
+                "suite_id": "mcp-preview-suite",
+                "workload_id": "capabilities",
                 "sources": [
                     {
                         "kind": "mcp",
@@ -703,6 +708,7 @@ def test_preview_source_resolution_never_opens_mcp(
 def test_generation_discovers_only_mcp_schemas_and_explicit_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _write_docs_integration(tmp_path)
     operations: list[tuple[str, str | None]] = []
 
     class AsyncContext:
@@ -764,14 +770,10 @@ def test_generation_discovers_only_mcp_schemas_and_explicit_resources(
     experiment = experiment_from_data(
         {
             "id": "mcp-generation",
-            "mcp_servers": [
-                {
-                    "name": "docs",
-                    "command": "docs-server",
-                    "env": {"DOCS_TOKEN": "secret-value"},
-                }
-            ],
+            "integrations": [{"id": "docs"}],
             "evaluation_generation": {
+                "suite_id": "mcp-generation-suite",
+                "workload_id": "capabilities",
                 "sources": [
                     {
                         "kind": "mcp",

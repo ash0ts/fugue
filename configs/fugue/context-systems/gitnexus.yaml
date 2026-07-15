@@ -5,6 +5,7 @@ provider: fugue.bench.context:GitNexusContextProvider
 version: gitnexus@1.6.3
 support: experimental
 capabilities: [prepare, bind]
+deliveries: [native_mcp]
 required_commands: [npx]
 license: PolyForm-Noncommercial-1.0.0
 license_url: https://github.com/abhigyanpatwari/GitNexus/blob/main/LICENSE

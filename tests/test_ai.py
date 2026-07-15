@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from test_operator import make_operator_repo
 
 from fugue.assistant import AssistantAgent, AssistantModelClient
@@ -121,8 +122,10 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
             "id": "generated-demo",
             "title": "Generated demo",
             "judge_model": "openai/gpt-5-mini",
-            "evaluation_generation": {
-                "size": 8,
+                "evaluation_generation": {
+                    "suite_id": "generated-suite",
+                    "workload_id": "capabilities",
+                    "size": 8,
                 "sources": [
                     {"kind": "seed", "text": "The demo skill requires focused search."}
                 ],
@@ -133,7 +136,7 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
                 {
                     "id": "with-skill",
                     "label": "With skill",
-                    "skill_ids": ["demo-skill"],
+                    "skills": ["demo-skill"],
                 },
             ],
         }
@@ -236,7 +239,9 @@ def test_composer_catalog_exposes_evidence_backed_agent_presets(tmp_path: Path):
     catalog = composer._catalog_summary(service.experiment("demo"))
 
     assert [item["id"] for item in catalog["agent_presets"]] == ["demo-maintainer"]
-    assert catalog["agent_presets"][0]["metrics"] == {"pass_rate": 1.0}
+    assert catalog["agent_presets"][0]["evidence"]["metrics"] == {
+        "pass_rate": 1.0
+    }
 
 
 def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> None:
@@ -378,6 +383,10 @@ def test_confirmed_self_eval_analysis_writes_review_only_promotion_bundle(
     assert promotion.is_file()
     assert json.loads(promotion.read_text())["selected_candidate_id"] == "candidate-b"
     assert preset.is_file()
+    preset_data = yaml.safe_load(preset.read_text())
+    assert preset_data["candidate"]["skills"] == []
+    assert preset_data["evidence"]["suite_id"] == "demo-v1"
+    assert "skill_ids" not in preset_data
     assert not (tmp_path / "configs/fugue/agent-presets/fugue-maintainer-recommended.yaml").exists()
 
 

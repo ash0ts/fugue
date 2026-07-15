@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -12,11 +12,12 @@ from test_operator import make_operator_repo
 from fugue.bench import deployment
 from fugue.bench.deployment import (
     _deployment_candidate,
+    candidate_packageability,
     package_candidate,
-    write_run_input_lock,
 )
 from fugue.bench.execution import plan_cells, write_run_manifest
 from fugue.bench.operator import ExperimentRequest
+from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
 
 
 def _git(path: Path, *args: str) -> None:
@@ -50,32 +51,50 @@ def _packaging_run(tmp_path: Path, *, run_status: str = "failed"):
     service = make_operator_repo(repo)
     shutil.copyfile(Path(__file__).parents[1] / "pyproject.toml", repo / "pyproject.toml")
     shutil.copyfile(Path(__file__).parents[1] / "uv.lock", repo / "uv.lock")
-    (repo / "README.md").write_text("# Fixture\n")
+    shutil.copyfile(Path(__file__).parents[1] / "LICENSE", repo / "LICENSE")
     shutil.copytree(Path(__file__).parents[1] / "fugue", repo / "fugue")
+    (repo / ".gitignore").write_text(".fugue/\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(
+        repo,
+        "-c",
+        "user.name=Fugue Tests",
+        "-c",
+        "user.email=fugue@example.com",
+        "commit",
+        "-qm",
+        "fixture",
+    )
     experiment = service.experiment("demo")
     variant = replace(
         experiment.variants[0],
         prompt_id="demo-prompt",
-        skill_ids=["demo-skill"],
+        skills=["demo-skill"],
         agent_env={
             "CUSTOM_TOKEN": "trace-secret-value",
             "SHORT_SECRET": "x",
         },
     )
-    experiment = replace(experiment, variants=[variant])
+    experiment = replace(experiment, variants=[variant], n_attempts=2)
     run_id = "run-package"
+    request = ExperimentRequest(experiment_id="demo", n_attempts=2)
     jobs = service.rendered_jobs(
-        ExperimentRequest(experiment_id="demo"),
+        request,
         run_id=run_id,
         experiment=experiment,
     )
-    write_run_input_lock(
-        repo,
-        run_id,
-        experiment,
-        jobs,
+    cells = plan_cells(jobs, run_id=run_id, run_name="package fixture")
+    snapshot = build_run_snapshot(
+        repo_root=repo,
+        run_id=run_id,
+        experiment=experiment,
+        request=asdict(request),
+        jobs=jobs,
+        cells=cells,
         env={"CUSTOM_TOKEN": "trace-secret-value", "SHORT_SECRET": "x"},
     )
+    write_run_input_lock(repo, snapshot)
     write_run_manifest(
         repo,
         run_id,
@@ -85,9 +104,14 @@ def _packaging_run(tmp_path: Path, *, run_status: str = "failed"):
             "experiment_id": "demo",
         },
     )
-    [cell] = plan_cells(jobs, run_id=run_id, run_name="package fixture")
     cells_path = repo / ".fugue/runtime" / run_id / "cells.jsonl"
-    cells_path.write_text(json.dumps(cell.record("failed")) + "\n")
+    cells_path.write_text(
+        "\n".join(
+            json.dumps(cell.record("passed" if index == 0 else "failed"))
+            for index, cell in enumerate(cells)
+        )
+        + "\n"
+    )
     return repo, run_id, jobs[0].candidate_id
 
 
@@ -101,6 +125,7 @@ def test_packages_explicit_imperfect_candidate_reproducibly(tmp_path: Path) -> N
         candidate_id=candidate_id,
         workspace=workspace,
         image="example/fugue:test",
+        allow_failed=True,
         build=False,
     )
     second = package_candidate(
@@ -109,6 +134,7 @@ def test_packages_explicit_imperfect_candidate_reproducibly(tmp_path: Path) -> N
         candidate_id=candidate_id,
         workspace=workspace,
         image="example/fugue:test",
+        allow_failed=True,
         build=False,
     )
 
@@ -166,6 +192,7 @@ def test_packaging_fails_closed_without_lock_or_with_changed_assets(
             candidate_id=candidate_id,
             workspace=workspace,
             image="example/fugue:test",
+            allow_failed=True,
             build=False,
         )
     lock_path.write_text(lock_body)
@@ -177,10 +204,29 @@ def test_packaging_fails_closed_without_lock_or_with_changed_assets(
             candidate_id=candidate_id,
             workspace=workspace,
             image="example/fugue:test",
+            allow_failed=True,
             build=False,
         )
 
 
+def test_packaging_rejects_input_lock_tampering(tmp_path: Path) -> None:
+    repo, run_id, candidate_id = _packaging_run(tmp_path)
+    workspace = _workspace(tmp_path / "workspace")
+    lock_path = repo / ".fugue/runtime" / run_id / "input-lock.json"
+    lock = json.loads(lock_path.read_text())
+    lock["runtime"]["injected"] = True
+    lock_path.write_text(json.dumps(lock))
+
+    with pytest.raises(ValueError, match="input lock is corrupt"):
+        package_candidate(
+            repo_root=repo,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            workspace=workspace,
+            image="example/fugue:test",
+            allow_failed=True,
+            build=False,
+        )
 def test_packaging_rejects_dirty_or_secret_bearing_workspace(tmp_path: Path) -> None:
     repo, run_id, candidate_id = _packaging_run(tmp_path)
     dirty = _workspace(tmp_path / "dirty")
@@ -192,6 +238,7 @@ def test_packaging_rejects_dirty_or_secret_bearing_workspace(tmp_path: Path) -> 
             candidate_id=candidate_id,
             workspace=dirty,
             image="example/fugue:test",
+            allow_failed=True,
             build=False,
         )
 
@@ -203,17 +250,133 @@ def test_packaging_rejects_dirty_or_secret_bearing_workspace(tmp_path: Path) -> 
             candidate_id=candidate_id,
             workspace=secret,
             image="example/fugue:test",
+            allow_failed=True,
             build=False,
         )
+
+
+def test_packaging_rejects_dirty_runtime_source(tmp_path: Path) -> None:
+    repo, run_id, candidate_id = _packaging_run(tmp_path)
+    workspace = _workspace(tmp_path / "workspace")
+    (repo / "fugue/__init__.py").write_text("# dirty runtime\n")
+
+    with pytest.raises(ValueError, match="runtime source must be a clean"):
+        package_candidate(
+            repo_root=repo,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            workspace=workspace,
+            image="example/fugue:test",
+            allow_failed=True,
+            build=False,
+        )
+
+
+def test_packaging_rejects_escaping_symlink_and_credential_remote(
+    tmp_path: Path,
+) -> None:
+    repo, run_id, candidate_id = _packaging_run(tmp_path)
+    workspace = _workspace(tmp_path / "workspace")
+    (workspace / "app.py").unlink()
+    (workspace / "app.py").symlink_to("../outside.py")
+    _git(workspace, "add", "app.py")
+    _git(
+        workspace,
+        "-c",
+        "user.name=Fugue Tests",
+        "-c",
+        "user.email=fugue@example.com",
+        "commit",
+        "-qm",
+        "escaping link",
+    )
+
+    with pytest.raises(ValueError, match="symlink escapes"):
+        package_candidate(
+            repo_root=repo,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            workspace=workspace,
+            image="example/fugue:test",
+            allow_failed=True,
+            build=False,
+        )
+
+    safe = _workspace(tmp_path / "remote")
+    _git(safe, "remote", "add", "origin", "https://token:secret@example.com/repo.git")
+    with pytest.raises(ValueError, match="credential-bearing Git remote"):
+        package_candidate(
+            repo_root=repo,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            workspace=safe,
+            image="example/fugue:test",
+            allow_failed=True,
+            build=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("planned", "records", "allow_failed", "expected", "reason"),
+    (
+        ([], [], False, False, "not present"),
+        ([{"cell_id": "n", "applicable": False}], [], False, False, "not applicable"),
+        ([{"cell_id": "a"}], [], False, False, "no durable state"),
+        ([{"cell_id": "a"}], [{"cell_id": "a", "status": "running"}], False, False, "not terminal"),
+        ([{"cell_id": "a"}], [{"cell_id": "a", "status": "failed"}], True, False, "no passed"),
+        (
+            [{"cell_id": "a"}, {"cell_id": "b"}],
+            [
+                {"cell_id": "a", "status": "passed"},
+                {"cell_id": "b", "status": "failed"},
+            ],
+            False,
+            False,
+            "--allow-failed",
+        ),
+        (
+            [{"cell_id": "a"}, {"cell_id": "b"}],
+            [
+                {"cell_id": "a", "status": "passed"},
+                {"cell_id": "b", "status": "failed"},
+            ],
+            True,
+            True,
+            "explicitly allowed",
+        ),
+    ),
+)
+def test_candidate_packageability_explains_every_terminal_state(
+    planned: list[dict],
+    records: list[dict],
+    allow_failed: bool,
+    expected: bool,
+    reason: str,
+) -> None:
+    snapshot = {
+        "planned_matrix": [
+            {**item, "candidate_id": "candidate-a"} for item in planned
+        ]
+    }
+
+    packageable, detail = candidate_packageability(
+        snapshot,
+        records,
+        "candidate-a",
+        allow_failed=allow_failed,
+    )
+
+    assert packageable is expected
+    assert reason in detail
 
 
 def test_packaging_rejects_inconsistent_candidate_rows(tmp_path: Path) -> None:
     repo, run_id, candidate_id = _packaging_run(tmp_path)
     workspace = _workspace(tmp_path / "workspace")
     cells_path = repo / ".fugue/runtime" / run_id / "cells.jsonl"
-    record = json.loads(cells_path.read_text())
-    record["model"] = "openai/different-model"
-    cells_path.write_text(json.dumps(record) + "\n")
+    records = [json.loads(line) for line in cells_path.read_text().splitlines()]
+    records[0]["model"] = "openai/different-model"
+    cells_path.write_text("\n".join(json.dumps(row) for row in records) + "\n")
 
     with pytest.raises(ValueError, match="disagrees on model"):
         package_candidate(
@@ -222,6 +385,7 @@ def test_packaging_rejects_inconsistent_candidate_rows(tmp_path: Path) -> None:
             candidate_id=candidate_id,
             workspace=workspace,
             image="example/fugue:test",
+            allow_failed=True,
             build=False,
         )
 
@@ -246,11 +410,12 @@ def test_context_preparation_uses_only_the_tracked_workspace(
         candidate_id=candidate_id,
         workspace=workspace,
         image="example/fugue:test",
+        allow_failed=True,
         build=False,
     )
 
 
-def test_rag_packaging_preserves_candidate_tools_and_uses_local_context() -> None:
+def test_packaging_rejects_mcp_without_a_declared_serving_contract() -> None:
     candidate = {
         "context": {"id": "rag-bm25"},
         "agent": {
@@ -265,12 +430,5 @@ def test_rag_packaging_preserves_candidate_tools_and_uses_local_context() -> Non
         "skill_assets": {},
     }
 
-    packaged = _deployment_candidate(candidate, prepared_paths=[])
-
-    assert [item["name"] for item in packaged["agent"]["mcp_servers"]] == [
-        "candidate-tool",
-        "fugue-context",
-    ]
-    assert packaged["agent"]["mcp_servers"][-1]["transport"] == "stdio"
-    assert "FUGUE_CONTEXT_ENDPOINT" not in packaged["agent"]["env"]
-    assert packaged["agent"]["env"]["FUGUE_REPO_ROOT"] == "/fugue-src"
+    with pytest.raises(ValueError, match="MCP-free serving delivery"):
+        _deployment_candidate(candidate, prepared_paths=[])

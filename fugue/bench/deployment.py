@@ -10,9 +10,9 @@ import subprocess
 import tomllib
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlparse
 
 from filelock import FileLock
@@ -23,29 +23,16 @@ from fugue.bench.context import (
     RepositorySnapshot,
     TrialContext,
     bind_context,
+    context_behavior_digest,
     get_context_system,
     prepare_context,
 )
 from fugue.bench.execution import latest_cell_records, read_run_manifest
-from fugue.bench.library import ExperimentSpec, get_prompt, get_skill
+from fugue.bench.library import get_prompt
+from fugue.bench.reproducibility import INPUT_LOCK_NAME, verify_snapshot
+from fugue.bench.sources import resolve_skill
 
-if TYPE_CHECKING:
-    from fugue.bench.job_config import RenderedJob
-
-
-INPUT_LOCK_NAME = "input-lock.json"
 DEPLOYMENTS_DIR = Path(".fugue/runtime/deployments")
-SERVE_CONTEXT_SYSTEMS = frozenset(
-    {
-        "none",
-        "agentsmd",
-        "openwiki",
-        "aider-repomap",
-        "rag-bm25",
-        "rag-dense",
-        "rag-hybrid",
-    }
-)
 SERVE_PROTOCOLS = ("open-responses", "chat-completions", "ag-ui")
 SERVE_PROTOCOL_VERSIONS = {
     "open-responses": "2026-04-24",
@@ -74,7 +61,6 @@ DEFAULT_RESOURCES = {
 PYTHON_RUNTIME_VERSION = "3.13"
 HARBOR_RUNTIME_VERSION = "0.18.0"
 UV_RUNTIME_VERSION = "0.11.27"
-_TERMINAL_RUN_STATES = {"passed", "failed", "cancelled", "interrupted"}
 _SENSITIVE_NAME = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
@@ -99,109 +85,46 @@ class DeploymentResult:
     built: bool
 
 
-def write_run_input_lock(
-    repo_root: Path,
-    run_id: str,
-    experiment: ExperimentSpec,
-    jobs: list[RenderedJob],
+def candidate_packageability(
+    snapshot: dict[str, Any],
+    records: list[dict[str, Any]],
+    candidate_id: str,
     *,
-    env: dict[str, str] | None = None,
-) -> Path:
-    """Persist replay-affecting run inputs once, without serializing secrets."""
-    secret_names = {
-        value: name
-        for name, value in (env or {}).items()
-        if _SENSITIVE_NAME.search(name) and len(value) >= 8
-    }
-    candidates: dict[str, dict[str, Any]] = {}
-    variants = {variant.id: variant for variant in experiment.variants}
-    for job in jobs:
-        meta = dict(job.config.get("fugue") or {})
-        variant = variants.get(job.variant_id)
-        if variant is None:
-            raise ValueError(f"rendered job references unknown variant: {job.variant_id}")
-        context_spec = get_context_system(job.context_system_id, repo_root)
-        context_source_sha256 = _sha256_json(
-            {**context_spec.to_dict(), "path": None}
+    allow_failed: bool = False,
+) -> tuple[bool, str]:
+    planned = [
+        item
+        for item in snapshot.get("planned_matrix") or []
+        if item.get("candidate_id") == candidate_id
+    ]
+    if not planned:
+        return False, "candidate is not present in the planned matrix"
+    applicable = [item for item in planned if item.get("applicable") is not False]
+    if not applicable:
+        return False, "all planned cells are not applicable"
+    latest = {str(item.get("cell_id")): item for item in records}
+    missing = [item for item in applicable if str(item.get("cell_id")) not in latest]
+    if missing:
+        return False, f"{len(missing)} planned applicable cell(s) have no durable state"
+    statuses = [
+        str(latest[str(item.get("cell_id"))].get("status") or "unknown")
+        for item in applicable
+    ]
+    pending = sum(status in {"pending", "running", "starting", "unknown"} for status in statuses)
+    if pending:
+        return False, f"{pending} planned applicable cell(s) are not terminal"
+    passed = statuses.count("passed")
+    if not passed:
+        return False, "candidate has no passed applicable cells"
+    failed = sum(status in {"failed", "cancelled", "interrupted"} for status in statuses)
+    if failed and not allow_failed:
+        return (
+            False,
+            f"candidate has {failed} failed cell(s); pass --allow-failed and confirm",
         )
-        if variant.context.config:
-            context_spec = replace(
-                context_spec,
-                config=_merge_dicts(context_spec.config, variant.context.config),
-            )
-        prompt_ids = [job.prompt_id] if job.prompt_id else []
-        prompt_assets = {
-            item_id: _asset_record(get_prompt(item_id, repo_root))
-            for item_id in prompt_ids
-        }
-        skill_assets = {
-            item_id: _asset_record(get_skill(item_id, repo_root))
-            for item_id in job.skill_ids
-        }
-        required_env = {job.route.api_key_env, "WANDB_API_KEY"}
-        required_env.update(context_spec.required_env)
-        agent = _portable_config(
-            dict((job.config.get("agents") or [{}])[0]),
-            required_env,
-            secret_names,
-        )
-        agent.pop("skills", None)
-        environment_source = dict(job.config.get("environment") or {})
-        # Task-specific prepared-context mounts and generated compose files are
-        # replay coordinates, not candidate identity. Packaging prepares and
-        # binds the chosen context again against the production workspace.
-        environment_source.pop("mounts", None)
-        environment_source.pop("extra_docker_compose", None)
-        environment = _portable_config(
-            environment_source, required_env, secret_names
-        )
-        candidate = {
-            "candidate_id": job.candidate_id,
-            "experiment_id": experiment.id,
-            "harness": job.harness,
-            "variant_id": job.variant_id,
-            "variant_label": job.variant_label,
-            "model_provider": job.route.provider,
-            "model": job.route.display_model,
-            "model_route": asdict(job.route),
-            "model_api_key_env": job.route.api_key_env,
-            "trace_content": experiment.trace_content,
-            "context": {
-                **context_spec.to_dict(),
-                "path": None,
-            },
-            "context_config_hash": meta.get("context_config_hash"),
-            "context_source_sha256": context_source_sha256,
-            "agent_config_hash": job.agent_config_hash,
-            "content_hashes": meta.get("content_hashes") or {},
-            "prompt_assets": prompt_assets,
-            "skill_assets": skill_assets,
-            "agent": agent,
-            "environment": environment,
-            "required_env": sorted(name for name in required_env if name),
-        }
-        candidate["configuration_sha256"] = _sha256_json(candidate)
-        existing = candidates.get(job.candidate_id)
-        if existing is not None and existing != candidate:
-            raise ValueError(
-                f"candidate {job.candidate_id} rendered with inconsistent inputs"
-            )
-        candidates[job.candidate_id] = candidate
-
-    experiment_required_env: set[str] = set()
-    payload: dict[str, Any] = {
-        "schema_version": 1,
-        "run_id": run_id,
-        "experiment": _portable_config(
-            experiment.to_dict(), experiment_required_env, secret_names
-        ),
-        "candidates": candidates,
-    }
-    payload["lock_sha256"] = _sha256_json(payload)
-    _assert_no_secret_values(payload, env or {})
-    path = repo_root / ".fugue/runtime" / run_id / INPUT_LOCK_NAME
-    _write_immutable_json(path, payload)
-    return path
+    if failed:
+        return True, f"packageable with {failed} failed cell(s) explicitly allowed"
+    return True, "all planned applicable cells completed and at least one passed"
 
 
 def package_candidate(
@@ -212,6 +135,7 @@ def package_candidate(
     workspace: Path,
     image: str,
     platform: str = "linux/amd64",
+    allow_failed: bool = False,
     env: dict[str, str] | None = None,
     build: bool = True,
     runner: Callable[..., Any] = subprocess.run,
@@ -222,19 +146,15 @@ def package_candidate(
     manifest = read_run_manifest(run_dir)
     if manifest is None:
         raise FileNotFoundError(f"run not found: {run_id}")
-    status = str(manifest.get("status") or "unknown")
-    if status not in _TERMINAL_RUN_STATES:
-        raise ValueError(f"run {run_id} is not terminal: {status}")
-
     lock_path = run_dir / INPUT_LOCK_NAME
     lock = _read_json(lock_path, label="run input lock")
-    if lock.get("lock_sha256") != _sha256_json(
-        {key: value for key, value in lock.items() if key != "lock_sha256"}
-    ):
+    if not verify_snapshot(lock):
         raise ValueError(f"run input lock is corrupt: {lock_path}")
     candidates = lock.get("candidates") or {}
-    candidate = candidates.get(candidate_id) if isinstance(candidates, dict) else None
-    if not isinstance(candidate, dict):
+    definition = candidates.get(candidate_id) if isinstance(candidates, dict) else None
+    runtimes = lock.get("candidate_runtime") or {}
+    candidate = runtimes.get(candidate_id) if isinstance(runtimes, dict) else None
+    if not isinstance(definition, dict) or not isinstance(candidate, dict):
         raise ValueError(f"candidate is not present in the run input lock: {candidate_id}")
     if candidate.get("harness") not in SERVE_HARNESSES:
         raise ValueError(
@@ -248,15 +168,29 @@ def package_candidate(
     ]
     if not records:
         raise ValueError(f"candidate has no durable run cells: {candidate_id}")
+    packageable, reason = candidate_packageability(
+        lock, records, candidate_id, allow_failed=allow_failed
+    )
+    if not packageable:
+        raise ValueError(reason)
     _validate_candidate_records(repo_root, candidate, records)
     _validate_locked_assets(repo_root, candidate)
 
+    if candidate.get("integration_ids"):
+        raise ValueError(
+            "0.1 packaging does not support candidates with integrations"
+        )
+
     context = dict(candidate.get("context") or {})
     context_id = str(context.get("id") or "")
-    if context_id not in SERVE_CONTEXT_SYSTEMS:
-        raise ValueError(f"context system is not approved for serving: {context_id}")
-    if "serve" not in set(context.get("capabilities") or []):
-        raise ValueError(f"context system does not advertise serve capability: {context_id}")
+    delivery = str((definition.get("context") or {}).get("delivery") or "portable")
+    source_experiment_id = str((lock.get("experiment") or {}).get("id") or "")
+    if not source_experiment_id:
+        raise ValueError("run input lock is missing its resolved experiment id")
+    if delivery not in set(context.get("serve_deliveries") or []):
+        raise ValueError(
+            f"context system {context_id} has no tested packaged {delivery} delivery"
+        )
 
     workspace_meta, tracked = _tracked_workspace(workspace, env or {})
     runtime_source = _runtime_source_metadata(repo_root)
@@ -266,7 +200,7 @@ def package_candidate(
         "source_run_id": run_id,
         "candidate_id": candidate_id,
         "candidate_configuration_sha256": candidate["configuration_sha256"],
-        "input_lock_sha256": lock["lock_sha256"],
+        "input_lock_sha256": lock["snapshot_sha256"],
         "workspace": workspace_meta,
         "runtime_source": runtime_source,
         "runtime_versions": runtime_versions,
@@ -294,6 +228,8 @@ def package_candidate(
                     workspace=staging / "workspace",
                     workspace_meta=workspace_meta,
                     candidate=candidate,
+                    experiment_id=source_experiment_id,
+                    delivery=delivery,
                     destination=staging / "context",
                     env=env or {},
                 )
@@ -312,11 +248,11 @@ def package_candidate(
                 spec = {
                     **identity,
                     "deployment_id": deployment_id,
-                    "experiment_id": candidate["experiment_id"],
+                    "experiment_id": source_experiment_id,
                     "harness": candidate["harness"],
                     "model_provider": candidate["model_provider"],
                     "model": candidate["model"],
-                    "variant_id": candidate["variant_id"],
+                    "variant_id": f"candidate-{candidate_id[:12]}",
                     "context_system_id": context_id,
                     "context_version": context.get("version"),
                     "context_config_hash": candidate.get("context_config_hash"),
@@ -332,7 +268,15 @@ def package_candidate(
                         "candidate_configuration_sha256": candidate[
                             "configuration_sha256"
                         ],
-                        "input_lock_sha256": lock["lock_sha256"],
+                        "input_lock_sha256": lock["snapshot_sha256"],
+                        "source_experiment_id": source_experiment_id,
+                        "source_variant_ids": sorted(
+                            {
+                                str(item.get("variant_id") or "")
+                                for item in records
+                                if item.get("variant_id")
+                            }
+                        ),
                         "workspace": workspace_meta,
                         "runtime_source": runtime_source,
                     },
@@ -387,7 +331,6 @@ def _validate_candidate_records(
 ) -> None:
     expected = {
         "harness": candidate.get("harness"),
-        "variant_id": candidate.get("variant_id"),
         "context_system_id": (candidate.get("context") or {}).get("id"),
         "model_provider": candidate.get("model_provider"),
         "model": candidate.get("model"),
@@ -416,15 +359,21 @@ def _validate_candidate_records(
 
 
 def _validate_locked_assets(repo_root: Path, candidate: dict[str, Any]) -> None:
-    for kind, getter in (("prompt", get_prompt), ("skill", get_skill)):
-        assets = candidate.get(f"{kind}_assets") or {}
-        for item_id, locked in assets.items():
-            current = getter(item_id, repo_root)
-            if current.sha256 != locked.get("sha256") or current.body != locked.get("body"):
-                raise ValueError(f"{kind} asset changed since the run: {item_id}")
+    for item_id, locked in (candidate.get("prompt_assets") or {}).items():
+        current = get_prompt(item_id, repo_root)
+        if current.sha256 != locked.get("sha256") or current.body != locked.get("body"):
+            raise ValueError(f"prompt asset changed since the run: {item_id}")
+    for item_id, locked in (candidate.get("skill_assets") or {}).items():
+        current = resolve_skill(item_id, repo_root)
+        skill_file = current.path / "SKILL.md" if current.path.is_dir() else current.path
+        if (
+            current.digest.removeprefix("sha256:") != locked.get("sha256")
+            or skill_file.read_text(encoding="utf-8") != locked.get("body")
+        ):
+            raise ValueError(f"skill asset changed since the run: {item_id}")
     context = candidate.get("context") or {}
     current = get_context_system(str(context.get("id") or ""), repo_root)
-    source_sha256 = _sha256_json({**current.to_dict(), "path": None})
+    source_sha256 = context_behavior_digest(current)
     if source_sha256 != candidate.get("context_source_sha256"):
         raise ValueError(f"context asset changed since the run: {current.id}")
 
@@ -462,7 +411,11 @@ def _tracked_workspace(
         if mode == "160000":
             raise ValueError(f"tracked submodules are not supported: {relative}")
         source = workspace / relative
-        data = os.readlink(source).encode() if mode == "120000" else source.read_bytes()
+        if mode == "120000":
+            _validate_symlink(workspace, source, relative)
+            data = os.readlink(source).encode()
+        else:
+            data = source.read_bytes()
         if _sensitive_workspace_path(path) or any(secret in data for secret in secrets):
             raise ValueError(f"tracked workspace file may contain a secret: {relative}")
         digest.update(f"{mode} {relative}\0".encode())
@@ -472,7 +425,9 @@ def _tracked_workspace(
     return (
         {
             "commit": _git(workspace, "rev-parse", "HEAD").strip(),
-            "remote": _optional_git(workspace, "remote", "get-url", "origin"),
+            "remote": _safe_remote(
+                _optional_git(workspace, "remote", "get-url", "origin")
+            ),
             "digest": digest.hexdigest(),
             "files": len(tracked),
         },
@@ -504,6 +459,9 @@ def _copy_runtime_source(repo_root: Path, destination: Path) -> None:
 
 
 def _runtime_source_metadata(repo_root: Path) -> dict[str, Any]:
+    status = _git(repo_root, "status", "--porcelain", "--untracked-files=all")
+    if status.strip():
+        raise ValueError("Fugue runtime source must be a clean tracked checkout")
     digest = hashlib.sha256()
     files = _runtime_source_files(repo_root)
     for relative in files:
@@ -513,25 +471,70 @@ def _runtime_source_metadata(repo_root: Path) -> dict[str, Any]:
         digest.update(b"\0")
     return {
         "commit": _optional_git(repo_root, "rev-parse", "HEAD"),
+        "remote": _safe_remote(
+            _optional_git(repo_root, "remote", "get-url", "origin")
+        ),
         "digest": digest.hexdigest(),
         "files": len(files),
     }
 
 
 def _runtime_source_files(repo_root: Path) -> list[Path]:
-    files = [Path("pyproject.toml"), Path("uv.lock"), Path("README.md")]
-    files.extend(
-        path.relative_to(repo_root)
-        for path in (repo_root / "fugue").rglob("*")
-        if path.is_file()
-        and "__pycache__" not in path.parts
-        and path.suffix not in {".pyc", ".pyo"}
-    )
-    files.extend(
-        path.relative_to(repo_root)
-        for path in (repo_root / "configs/fugue/context-systems").glob("*.yaml")
-    )
-    return sorted(set(files), key=lambda item: item.as_posix())
+    tracked = {
+        Path(line)
+        for line in _git(repo_root, "ls-files").splitlines()
+        if line.strip()
+    }
+    fixed = {Path("pyproject.toml"), Path("uv.lock"), Path("LICENSE")}
+    files = {
+        path
+        for path in tracked
+        if path in fixed
+        or (
+            len(path.parts) >= 2
+            and path.parts[0] == "fugue"
+            and path.suffix == ".py"
+        )
+        or (
+            len(path.parts) == 4
+            and path.parts[:3] == ("configs", "fugue", "context-systems")
+            and path.suffix in {".yaml", ".yml"}
+        )
+    }
+    missing = sorted(path for path in fixed if path not in tracked)
+    if missing:
+        raise ValueError(
+            "required runtime source is not tracked: "
+            + ", ".join(path.as_posix() for path in missing)
+        )
+    for relative in files:
+        source = repo_root / relative
+        if source.is_symlink():
+            raise ValueError(
+                f"runtime source allowlist may not contain symlinks: {relative}"
+            )
+    return sorted(files, key=lambda item: item.as_posix())
+
+
+def _validate_symlink(root: Path, source: Path, relative: str) -> None:
+    target = Path(os.readlink(source))
+    if target.is_absolute():
+        raise ValueError(f"absolute symlink target is not allowed: {relative}")
+    try:
+        (source.parent / target).resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"symlink escapes the checkout: {relative}") from exc
+
+
+def _safe_remote(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.username or parsed.password:
+        raise ValueError("credential-bearing Git remote URLs are not allowed")
+    if re.search(r"(?:token|password|credential)=", value, re.IGNORECASE):
+        raise ValueError("credential-bearing Git remote URLs are not allowed")
+    return value
 
 
 def _runtime_versions(repo_root: Path) -> dict[str, str]:
@@ -562,6 +565,8 @@ def _prepare_serving_context(
     workspace: Path,
     workspace_meta: dict[str, Any],
     candidate: dict[str, Any],
+    experiment_id: str,
+    delivery: str,
     destination: Path,
     env: dict[str, str],
 ) -> list[str]:
@@ -587,12 +592,13 @@ def _prepare_serving_context(
             spec,
             prepared,
             TrialContext(
-                experiment_id=str(candidate["experiment_id"]),
+                experiment_id=experiment_id,
                 workload_id="serve",
                 task_id="production-workspace",
                 harness=str(candidate["harness"]),
             ),
             runtime,
+            delivery=delivery,
         )
     )
     paths: list[str] = []
@@ -612,49 +618,14 @@ def _deployment_candidate(
 ) -> dict[str, Any]:
     value = json.loads(json.dumps(candidate))
     agent = dict(value.get("agent") or {})
+    if agent.get("mcp_servers"):
+        raise ValueError(
+            "packaged contexts must use a declared MCP-free serving delivery"
+        )
     skill_ids = sorted((value.get("skill_assets") or {}).keys())
     agent["skills"] = [
         f"/opt/fugue/deployment/assets/skills/{item_id}" for item_id in skill_ids
     ]
-    context_id = str((value.get("context") or {}).get("id") or "none")
-    if context_id.startswith("rag-"):
-        existing_servers = [
-            item
-            for item in (agent.get("mcp_servers") or [])
-            if item.get("name") != "fugue-context"
-        ]
-        agent["mcp_servers"] = [
-            *existing_servers,
-            {
-                "name": "fugue-context",
-                "transport": "stdio",
-                "command": "python",
-                "args": [
-                    "/fugue-src/fugue/mcp_proxy.py",
-                    "--name",
-                    "fugue-context",
-                    "--cwd",
-                    "/workspace",
-                    "--",
-                    "python",
-                    "-m",
-                    "fugue.context_server",
-                    "--system",
-                    context_id,
-                    "--prepared",
-                    "/fugue-context",
-                ],
-            }
-        ]
-        agent_env = dict(agent.get("env") or {})
-        agent_env.pop("FUGUE_CONTEXT_ENDPOINT", None)
-        agent_env.update(
-            {
-                "FUGUE_REPO_ROOT": "/fugue-src",
-                "PYTHONPATH": "/fugue-src",
-            }
-        )
-        agent["env"] = agent_env
     value["agent"] = agent
     environment = dict(value.get("environment") or {})
     environment.pop("mounts", None)
@@ -715,63 +686,11 @@ CMD ["python", "-m", "fugue.serve"]
 """
 
 
-def _portable_config(
-    value: Any, required_env: set[str], secret_names: dict[str, str]
-) -> Any:
-    if isinstance(value, list):
-        return [
-            _portable_config(item, required_env, secret_names) for item in value
-        ]
-    if not isinstance(value, dict):
-        if isinstance(value, str) and value in secret_names:
-            name = secret_names[value]
-            required_env.add(name)
-            return f"${{{name}}}"
-        return value
-    result: dict[str, Any] = {}
-    for key, item in value.items():
-        if (
-            key == "env" or str(key).endswith("_env")
-        ) and isinstance(item, dict):
-            env_values: dict[str, str] = {}
-            for name, env_value in item.items():
-                name = str(name)
-                if _SENSITIVE_NAME.search(name):
-                    required_env.add(name)
-                    env_values[name] = f"${{{name}}}"
-                elif str(env_value) in secret_names:
-                    secret_name = secret_names[str(env_value)]
-                    required_env.add(secret_name)
-                    env_values[name] = f"${{{secret_name}}}"
-                else:
-                    env_values[name] = str(env_value)
-            result[key] = env_values
-        else:
-            result[str(key)] = _portable_config(
-                item, required_env, secret_names
-            )
-    return result
-
-
 def _assert_no_secret_values(value: Any, env: dict[str, str]) -> None:
     body = json.dumps(value, sort_keys=True, default=str)
     for name, secret in env.items():
         if _SENSITIVE_NAME.search(name) and len(secret) >= 8 and secret in body:
             raise ValueError(f"refusing to serialize runtime secret: {name}")
-
-
-def _asset_record(asset: Any) -> dict[str, str]:
-    return {"sha256": str(asset.sha256), "body": str(asset.body)}
-
-
-def _merge_dicts(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    result = dict(left)
-    for key, value in right.items():
-        if isinstance(result.get(key), dict) and isinstance(value, dict):
-            result[key] = _merge_dicts(result[key], value)
-        else:
-            result[key] = value
-    return result
 
 
 def _sensitive_workspace_path(path: PurePosixPath) -> bool:
@@ -781,19 +700,6 @@ def _sensitive_workspace_path(path: PurePosixPath) -> bool:
         or name.endswith((".pem", ".p12", ".pfx"))
         or name in {"id_rsa", "id_ed25519"}
     )
-
-
-def _write_immutable_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(f"{path}.lock"):
-        if path.exists():
-            existing = _read_json(path, label=path.name)
-            if existing != value:
-                raise ValueError(f"immutable runtime input already exists: {path}")
-            return
-        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        _write_json(temp, value)
-        os.replace(temp, path)
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
