@@ -14,7 +14,7 @@ tasks:
     repository:
       type: fixture
       path: datasets/repo-memory/gitnexus-contract/gitnexus-vector-lexical-mismatch/environment/repository
-      sha256: 5f484f63ff701da94640e744a613aa28426220112a79b073c3d12ff63911bb3e
+      sha256: 936d4c9b87bd2eb9d3242ed90a6dd713400a660dffa0ab7d9e546d303890584b
     expected_paths: [src/relay/amber_lantern.py]
     metadata:
       architecture: arm64

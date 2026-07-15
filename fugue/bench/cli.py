@@ -220,6 +220,10 @@ def _parser() -> FugueArgumentParser:
     setup.add_argument("--workloads")
     setup.add_argument("--systems")
     setup.add_argument("--harnesses")
+    setup.add_argument("--variants")
+    setup.add_argument("-k", "--n-attempts", type=int)
+    setup.add_argument("-n", "--n-concurrent", type=int)
+    setup.add_argument("-l", "--n-tasks", type=int)
     setup.add_argument("--trace-content", choices=("full", "metadata"))
     operation = setup.add_mutually_exclusive_group()
     operation.add_argument(
@@ -919,9 +923,13 @@ def _setup(args: argparse.Namespace) -> int:
         workloads=tuple(_csv(args.workloads) or []),
         systems=tuple(_csv(args.systems) or []),
         harnesses=tuple(_csv(args.harnesses) or []),
+        variants=tuple(_csv(args.variants) or []),
         model=args.model,
         builder_model=args.builder_model,
         judge_model=args.judge_model,
+        n_attempts=args.n_attempts,
+        n_tasks=args.n_tasks,
+        n_concurrent=args.n_concurrent,
         trace_content=args.trace_content,
     )
     if args.check:

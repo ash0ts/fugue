@@ -8,7 +8,12 @@ import pytest
 
 from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.cli import main
-from fugue.bench.operator import OperatorService, PreviewSummary, load_env
+from fugue.bench.operator import (
+    OperatorService,
+    PreviewSummary,
+    SetupPreparation,
+    load_env,
+)
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 
 
@@ -88,6 +93,43 @@ def test_setup_exposes_explicit_managed_service_lifecycle(
 def test_setup_service_actions_are_mutually_exclusive() -> None:
     with pytest.raises(SystemExit, match="2"):
         main(["setup", "--start-services", "--stop-services"])
+
+
+def test_setup_prepare_accepts_exact_plan_selectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[object] = []
+
+    def prepare(self, request, **_kwargs):
+        captured.append(request)
+        return SetupPreparation(context=(), agent_runtimes=())
+
+    monkeypatch.setattr(OperatorService, "prepare", prepare)
+    assert (
+        main(
+            [
+                "setup",
+                "--prepare",
+                "--variants",
+                "none,gitnexus-vector",
+                "--harnesses",
+                "codex",
+                "--n-tasks",
+                "1",
+                "--n-attempts",
+                "2",
+                "--n-concurrent",
+                "4",
+                "--repo-root",
+                tmp_path.as_posix(),
+            ]
+        )
+        == 0
+    )
+    request = captured[0]
+    assert request.variants == ("none", "gitnexus-vector")
+    assert request.harnesses == ("codex",)
+    assert (request.n_tasks, request.n_attempts, request.n_concurrent) == (1, 2, 4)
 
 
 def test_runs_packages_one_explicit_candidate(
