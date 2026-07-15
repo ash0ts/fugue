@@ -35,6 +35,7 @@ from fugue.model_plane import ModelRoute, resolve_model_route, select_model
 
 CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
 CONTEXT_RUNTIME_SERVICE = "fugue-context"
+CONTEXT_CLIENT_PATH = Path(__file__).resolve().parents[1] / "context_client.py"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class RenderedJob:
     job_name: str
     harness: str
     context_system_id: str
+    context_transport: str
     context_version: str
     context_cache_keys: dict[str, str]
     context_cache_ready: bool
@@ -188,6 +190,7 @@ def _build_jobs(
                     applicable
                     and harness.name == "codex"
                     and binding.mcp_servers
+                    and variant.context.transport == "native_mcp"
                     and route.provider != "openai"
                 ):
                     applicable = False
@@ -215,6 +218,7 @@ def _build_jobs(
                 context_instruction = _context_instruction_path(
                     runtime_root,
                     spec,
+                    transport=variant.context.transport,
                     write=write_configs,
                     collect_evidence=bool(required_capabilities),
                 )
@@ -289,6 +293,7 @@ def _build_jobs(
                         job_name=job_name,
                         harness=harness.name,
                         context_system_id=spec.id,
+                        context_transport=variant.context.transport,
                         context_version=spec.version,
                         context_cache_keys=cache_keys,
                         context_cache_ready=cache_ready,
@@ -408,6 +413,7 @@ def _job_config(
         "variant_label": variant.label,
         "prompt_id": variant.prompt_id,
         "context_system_id": context_spec.id,
+        "context_transport": variant.context.transport,
         "context_version": context_spec.version,
         "context_config_hash": _context_config_hash(context_spec),
         "context_cache_keys": context_cache_keys,
@@ -572,6 +578,7 @@ def _job_env(
             "FUGUE_PRESET_ID": preset_id or "",
             "FUGUE_VARIANT_ID": variant.id,
             "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
+            "FUGUE_CONTEXT_TRANSPORT": variant.context.transport,
             "FUGUE_CONTEXT_VERSION": context_spec.version,
             "FUGUE_CONTEXT_CONFIG_HASH": _context_config_hash(context_spec),
             "FUGUE_CONTEXT_CACHE_KEYS": json.dumps(context_cache_keys, sort_keys=True),
@@ -658,11 +665,17 @@ def _context_binding(
     )
     binding = run_async(bind_context(spec, prepared, trial, runtime))
     if spec.id != "none":
-        mounts = [
-            _read_only_mount(prepared.path, "/fugue-context"),
-        ]
+        fugue_runtime = any(
+            _is_fugue_context_server(item) for item in binding.mcp_servers
+        )
+        portable = fugue_runtime and variant.context.transport == "portable"
+        mounts = (
+            []
+            if portable
+            else [_read_only_mount(prepared.path, "/fugue-context")]
+        )
         env = dict(binding.env)
-        if any(_is_fugue_context_server(item) for item in binding.mcp_servers):
+        if fugue_runtime:
             binding = _bind_fugue_context_runtime(
                 binding=binding,
                 spec=spec,
@@ -670,8 +683,10 @@ def _context_binding(
                 runtime=runtime,
                 runtime_root=runtime_root,
                 job_name=job_name,
+                transport=variant.context.transport,
                 write=write,
             )
+            env = dict(binding.env)
         elif binding.mcp_servers:
             mounts.extend(
                 [
@@ -711,6 +726,7 @@ def _bind_fugue_context_runtime(
     runtime: ContextRuntime,
     runtime_root: Path,
     job_name: str,
+    transport: str,
     write: bool,
 ) -> ContextBinding:
     compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
@@ -756,7 +772,7 @@ def _bind_fugue_context_runtime(
                     "OPENAI_API_KEY",
                     "WANDB_API_KEY",
                     "FUGUE_BRIDGE_BASE_URL=http://host.docker.internal:4000",
-                    "FUGUE_CONTEXT_EVENTS_PATH=/logs/artifacts/fugue-context-events.jsonl",
+                    "FUGUE_CONTEXT_EVENTS_PATH=/tmp/fugue-context-events.jsonl",
                 ],
                 "extra_hosts": ["host.docker.internal:host-gateway"],
                 "volumes": [
@@ -773,7 +789,9 @@ def _bind_fugue_context_runtime(
                         "CMD",
                         "python",
                         "-c",
-                        "import socket; socket.create_connection(('127.0.0.1', 8000), 2).close()",
+                        "import socket; socket.create_connection(("
+                        f"'127.0.0.1', {8001 if transport == 'portable' else 8000}"
+                        "), 2).close()",
                     ],
                     "interval": "2s",
                     "timeout": "3s",
@@ -785,7 +803,7 @@ def _bind_fugue_context_runtime(
     if write:
         compose_path.parent.mkdir(parents=True, exist_ok=True)
         compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
-    servers = tuple(
+    native_servers = tuple(
         {
             "name": str(item.get("name") or CONTEXT_RUNTIME_SERVICE),
             "transport": "streamable-http",
@@ -795,9 +813,32 @@ def _bind_fugue_context_runtime(
         else item
         for item in binding.mcp_servers
     )
+    if transport == "portable":
+        return replace(
+            binding,
+            mcp_servers=(),
+            env={
+                **binding.env,
+                "FUGUE_CONTEXT_COMMAND": "fugue-context",
+                "FUGUE_CONTEXT_QUERY_URL": (
+                    f"http://{CONTEXT_RUNTIME_SERVICE}:8001"
+                ),
+                "FUGUE_CONTEXT_EVENTS_PATH": (
+                    "/logs/artifacts/fugue-context-events.jsonl"
+                ),
+            },
+            mounts=(
+                *binding.mounts,
+                _read_only_mount(
+                    CONTEXT_CLIENT_PATH,
+                    "/usr/local/bin/fugue-context",
+                ),
+            ),
+            compose_files=(*binding.compose_files, compose_path),
+        )
     return replace(
         binding,
-        mcp_servers=servers,
+        mcp_servers=native_servers,
         compose_files=(*binding.compose_files, compose_path),
     )
 
@@ -869,31 +910,27 @@ def _context_instruction_path(
     runtime_root: Path,
     spec: ContextSystemSpec,
     *,
+    transport: str,
     write: bool,
     collect_evidence: bool,
 ) -> Path | None:
-    if spec.id == "none" and not collect_evidence:
+    del collect_evidence
+    if spec.id == "none":
         return None
     path = runtime_root / "context-instructions" / f"{spec.id}.md"
     if write:
         path.parent.mkdir(parents=True, exist_ok=True)
-        context_text = ""
-        if spec.id != "none":
-            context_text = (
-                f"This trial provides the `{spec.id}` context system. "
-                "Use its injected `.fugue-context/artifact/` files or configured MCP "
-                "tools when they help answer the task. Verify important evidence "
-                "against the repository.\n\n"
-            )
+        interface = (
+            "Query it with `fugue-context query --text \"your question\" --top-k 10`. "
+            if transport == "portable" and spec.id.startswith("rag-")
+            else "Use its injected files or configured native tools when useful. "
+        )
         path.write_text(
-            "# Fugue Trial Evidence\n\n"
-            + context_text
-            + "Before finishing, write `/logs/artifacts/fugue-evidence.json` with "
-            "serialized UTF-8 JSON text containing `paths`, the repository-relative "
-            "files that "
-            "materially supported the answer, and optional `notes`. Use an empty "
-            "`paths` list when no repository evidence was used; do not pass an "
-            "in-memory object directly to a file-write tool.\n"
+            "# Fugue Context\n\n"
+            f"This trial provides the `{spec.id}` context system through the "
+            f"`{transport}` transport. {interface}"
+            "Verify important evidence against the repository. Fugue records file "
+            "and context utilization automatically.\n"
         )
     return path
 
@@ -916,6 +953,7 @@ def _agent_config_hash(
         "retry": _merge_dicts(experiment.retry, variant.retry),
         "artifacts": variant.artifacts or experiment.artifacts,
         "context": {"id": spec.id, "version": spec.version, "config": spec.config},
+        "context_transport": variant.context.transport,
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
@@ -954,6 +992,7 @@ def _candidate_id(
                 "id": context_spec.id,
                 "version": context_spec.version,
                 "config_hash": _context_config_hash(context_spec),
+                "transport": variant.context.transport,
             },
             "content_hashes": content_hashes_for_ids(
                 prompt_ids=prompt_ids,

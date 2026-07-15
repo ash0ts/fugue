@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -45,6 +45,7 @@ class Skill:
 @dataclass(frozen=True)
 class ContextSelection:
     system_id: str = "none"
+    transport: Literal["portable", "native_mcp"] = "portable"
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -404,7 +405,14 @@ def _context_selection(raw: Any) -> ContextSelection:
         raise ValueError("variant context must be a string or mapping")
     _reject_unknown(raw, ContextSelection, kind="variant context")
     system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
-    return ContextSelection(system_id=system_id, config=_dict(raw.get("config")))
+    transport = str(raw.get("transport") or "portable")
+    if transport not in {"portable", "native_mcp"}:
+        raise ValueError(f"unknown context transport: {transport}")
+    return ContextSelection(
+        system_id=system_id,
+        transport=transport,
+        config=_dict(raw.get("config")),
+    )
 
 
 def _workloads(raw: Any) -> list[WorkloadSpec]:

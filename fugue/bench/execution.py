@@ -62,6 +62,7 @@ class PlannedCell:
     command: tuple[str, ...]
     env: dict[str, str]
     n_attempts: int
+    context_transport: str = "portable"
     applicable: bool = True
     skip_reason: str | None = None
 
@@ -75,6 +76,7 @@ class PlannedCell:
             "task_id": self.task_id,
             "harness": self.harness,
             "context_system_id": self.context_system_id,
+            "context_transport": self.context_transport,
             "variant_id": self.variant_id,
             "model_provider": self.model_provider,
             "model": self.model,
@@ -144,6 +146,7 @@ def plan_cells(
                 command=tuple(job.command),
                 env=job.env,
                 n_attempts=int(job.config.get("n_attempts") or 1),
+                context_transport=job.context_transport,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
             )

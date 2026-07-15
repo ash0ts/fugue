@@ -60,9 +60,9 @@ variants:
   - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap}}
   - {id: semble, label: Semble, context: {system_id: semble}}
   - {id: project-rag, label: Project RAG, context: {system_id: project-rag}}
-  - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25}}
-  - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense}}
-  - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid}}
+  - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25, transport: portable}}
+  - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense, transport: portable}}
+  - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid, transport: portable}}
   - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log}}
   - {id: latmd, label: lat.md, context: {system_id: latmd}}
   - {id: mem0, label: Mem0, context: {system_id: mem0}}
