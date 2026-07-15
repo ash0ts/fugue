@@ -15,8 +15,7 @@ Tracing plane — every harness ships its Weave plugin inside the container:
                 with entity/project + ``hooks.allowConversationAccess``.
 - Claude Code-> ``npm i -g weave-claude-code`` + non-interactive
                 ``--source=local`` install against the run's CLAUDE_CONFIG_DIR.
-- Codex      -> ``npm i -g weave-codex`` + Stop hook merged into
-                ``$CODEX_HOME/hooks.json`` and explicit headless hook trust.
+- Codex      -> ``npm i -g weave-codex`` + its synchronous headless collector.
 
 Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
 with the run key, harness, model, experiment, variant, context system,
@@ -1663,15 +1662,10 @@ class FugueCodex(_TrialMetaMixin, Codex):
     Model plane: OpenAI models use the native Responses API. Other providers
     go through the LiteLLM bridge's Responses endpoint.
 
-    Tracing: weave-codex merges a Stop hook into ``$CODEX_HOME/hooks.json``
-    (it honors CODEX_HOME, verified in its constants.js). The hook spawns a
-    *detached* collector that reads rollout files from ``$CODEX_HOME`` — so
-    cleanup waits for the collector log to go quiet before deleting it.
-
-    Hook trust (verified on codex 0.143.0): the ``bypass_hook_trust = true``
-    config key from the weave-codex README does NOT unlock headless runs —
-    the untrusted hook is silently skipped. The working mechanism is the
-    ``--dangerously-bypass-hook-trust`` CLI flag on ``codex exec``.
+    Tracing: weave-codex's headless ``run`` wrapper collects the rollout after
+    ``codex exec`` exits. Codex does not fire its interactive Stop hook for a
+    failed turn, so wrapper ownership is required to trace both outcomes and
+    avoids racing a detached collector during cleanup.
 
     weave-codex hardcodes ``agent_name=codex`` in its spans; install() patches
     its emit.js to honor ``WEAVE_CODEX_AGENT_NAME`` so the stable harness
@@ -1759,9 +1753,6 @@ class FugueCodex(_TrialMetaMixin, Codex):
         )
 
     def _build_model_config_toml(self) -> str:
-        # Hook trust is handled by --dangerously-bypass-hook-trust on the exec
-        # invocation; the README's `bypass_hook_trust` config key is a no-op
-        # for headless runs on codex 0.143.0 (verified: hook never fires).
         provider = _codex_provider_name(self.model_route)
         return (
             f'model = "{self.model_route.model_id}"\n'
@@ -1800,8 +1791,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
             # Codex reads the configured provider's key from OPENAI_API_KEY
             # regardless of whether it is native OpenAI or the local bridge.
             "OPENAI_API_KEY": _responses_key(self.model_route),
-            # The Stop-hook collector inherits codex's env; give it Weave
-            # credentials directly without writing the key into a command.
+            # The wrapper inherits these values; the key never enters a command.
             "WANDB_API_KEY": _require_trace_key(),
             "WEAVE_PROJECT": weave_project,
             # Consumed by the emit.js patch from install(); keeps all trials
@@ -1823,8 +1813,8 @@ class FugueCodex(_TrialMetaMixin, Codex):
             "mkdir -p ~/.weave-codex\n"
             f"cat > ~/.weave-codex/settings.json <<'JSON'\n{settings_json}\nJSON\n"
             "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi\n"
-            "{ weave-codex install && weave-codex status; } "
-            "2>&1 | tee /logs/agent/weave-codex-install.txt\n"
+            "weave-codex status --json "
+            "2>&1 | tee /logs/agent/weave-codex-status.json\n"
         )
 
         skills_command = self._build_register_skills_command()
@@ -1889,10 +1879,10 @@ class FugueCodex(_TrialMetaMixin, Codex):
             await self.exec_as_agent(
                 environment,
                 command=(
+                    "set -o pipefail; "
                     "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; "
-                    "codex exec "
+                    "weave-codex run -- codex exec "
                     "--dangerously-bypass-approvals-and-sandbox "
-                    "--dangerously-bypass-hook-trust "
                     "--skip-git-repo-check "
                     "--json "
                     f"{feature_flags}"
@@ -1904,26 +1894,6 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 env=env,
             )
         finally:
-            try:
-                # Wait for the detached weave-codex collector to finish
-                # exporting (log quiet for 2 consecutive seconds, max ~20s),
-                # then snapshot its log for debugging.
-                await self.exec_as_agent(
-                    environment,
-                    command=(
-                        "LOG=~/.weave-codex/logs/collector.log; "
-                        "for i in $(seq 1 10); do "
-                        '  s1=$(stat -c %s "$LOG" 2>/dev/null || echo 0); sleep 2; '
-                        '  s2=$(stat -c %s "$LOG" 2>/dev/null || echo 0); '
-                        '  [ "$s1" = "$s2" ] && [ "$i" -gt 2 ] && break; '
-                        "done; "
-                        'cp "$LOG" /logs/agent/weave-codex-collector.log 2>/dev/null || true'
-                    ),
-                    env=env,
-                    timeout_sec=60,
-                )
-            except Exception:
-                pass
             try:
                 await self.exec_as_agent(
                     environment,

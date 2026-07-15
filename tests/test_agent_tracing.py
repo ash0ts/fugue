@@ -114,6 +114,10 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert "--skip-browser --no-skills --non-interactive" in source
     assert "npm install -g weave-claude-code@" in source
     assert "weave-codex@" in source
+    assert "weave-codex run -- codex exec" in source
+    assert "weave-codex install" not in source
+    assert "--dangerously-bypass-hook-trust" not in source
+    assert "set -o pipefail" in source
     assert "emitter pattern missing" in source
     assert "baggage pattern missing" in source
     assert "processor pattern missing" in source

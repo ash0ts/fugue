@@ -87,6 +87,21 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
                 assert baseline_job.candidate_id != skilled_job.candidate_id
 
 
+def test_pdf_skill_keeps_visual_inspection_bounded_and_provider_neutral() -> None:
+    source = (
+        REPO_ROOT / "configs/fugue/skills/pdf-artifact-workflow/SKILL.md"
+    ).read_text()
+
+    assert "Structure and text are the default inspection path" in source
+    assert "documented contract to carry images as structured media" in source
+    assert "base64, data URLs, raw bytes" in source
+    for bound in ("one page or tight crop at a time", "100 DPI", "1200", "512 KiB"):
+        assert bound in source
+    assert "at most four previews" in source
+    for harness in ("Hermes", "OpenClaw", "Claude", "Codex"):
+        assert harness not in source
+
+
 def _assert_balanced_skill_pair(
     baseline: dict, skilled: dict, expected_artifacts: list[str], task_id: str
 ) -> None:
