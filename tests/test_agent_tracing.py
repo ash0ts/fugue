@@ -7,6 +7,7 @@ import pytest
 
 from fugue.agent_tracing import (
     agent_conversation_id,
+    agent_conversation_name,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
@@ -43,12 +44,30 @@ def test_openclaw_trial_identity_preserves_stable_agent_name() -> None:
     assert stable_agent_name("openclaw") == "openclaw"
 
 
+def test_conversation_names_are_human_readable_and_bounded() -> None:
+    assert agent_conversation_name(
+        run_name="standup-skills-full",
+        task_id="paper-anonymizer",
+        variant_id="with-pdf-skill",
+        trial_index=1,
+    ) == "standup-skills-full · paper-anonymizer · with-pdf-skill · t001"
+    assert len(
+        agent_conversation_name(
+            run_name="x" * 300,
+            task_id="task",
+            variant_id="baseline",
+            trial_index=0,
+        )
+    ) == 256
+
+
 def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
     source = AGENT_MODEL_PLANE.read_text()
 
     for harness in ("hermes", "openclaw", "claude-code", "codex", "letta"):
         assert f'TRACE_HARNESS = "{harness}"' in source
     assert '"gen_ai.conversation.id": self.trace_conversation_id' in source
+    assert '"weave.conversation.name": agent_conversation_name(' in source
     assert '"fugue.conversation_id": self.trace_conversation_id' in source
     assert '"planned_conversation_id": self.trace_conversation_id' in source
     assert '"FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id' not in source

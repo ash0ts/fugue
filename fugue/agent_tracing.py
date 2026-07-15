@@ -39,6 +39,18 @@ def agent_conversation_id(harness: str, run_or_cohort_key: str) -> str:
     return resolved
 
 
+def agent_conversation_name(
+    *, run_name: str, task_id: str, variant_id: str, trial_index: int
+) -> str:
+    labels = [
+        value.strip()
+        for value in (run_name, task_id, variant_id)
+        if value and value.strip()
+    ]
+    labels.append(f"t{max(1, trial_index):03d}")
+    return " · ".join(labels)[:256]
+
+
 def normalize_trace_content(value: str | None) -> str:
     selected = str(value or "full").strip().lower()
     if selected not in {"full", "metadata"}:

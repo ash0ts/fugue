@@ -56,6 +56,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 from fugue.agent_tracing import (
     agent_conversation_id,
+    agent_conversation_name,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
@@ -674,9 +675,16 @@ class _TrialMetaMixin:
         return []
 
     def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
+        trial_index = int(os.environ.get("FUGUE_TRIAL_INDEX", "1"))
         attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
             "gen_ai.conversation.id": self.trace_conversation_id,
+            "weave.conversation.name": agent_conversation_name(
+                run_name=_experiment_name(),
+                task_id=os.environ.get("FUGUE_TASK_NAME", ""),
+                variant_id=os.environ.get("FUGUE_VARIANT_ID", "baseline"),
+                trial_index=trial_index,
+            ),
             "fugue.run_key": self.run_key,
             "fugue.run_id": os.environ.get("FUGUE_RUN_ID", ""),
             "fugue.run_name": _experiment_name(),
@@ -697,7 +705,7 @@ class _TrialMetaMixin:
             "fugue.context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT", ""),
             "fugue.task_id": os.environ.get("FUGUE_TASK_NAME", ""),
             "fugue.trial_id": self.logs_dir.parent.name,
-            "fugue.trial_index": int(os.environ.get("FUGUE_TRIAL_INDEX", "1")),
+            "fugue.trial_index": trial_index,
             "fugue.comparison_example_id": os.environ.get(
                 "FUGUE_COMPARISON_EXAMPLE_ID", ""
             ),
