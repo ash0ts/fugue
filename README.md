@@ -93,12 +93,23 @@ fugue runs RUN_ID logs --follow
 fugue runs RUN_ID cancel
 fugue runs RUN_ID export --out reports/run.jsonl --fetch-weave
 fugue runs RUN_ID open agents
+fugue runs RUN_ID open evaluation
+fugue runs RUN_ID open evaluation --cell CELL_ID
 ```
 
 Each run groups cells by behavioral candidate and shows passed, failed,
 pending, and not-applicable counts, completeness, and the exact packageability
 reason. The terminal displays a unique candidate prefix; JSON and snapshots
 retain the full SHA-256 identifier.
+
+Live runs publish one Weave evaluation per candidate and workload. Fugue keeps
+the returned evaluation URLs in the run manifest and attaches each verified
+agent root to its prediction with Weave's GenAI span reference. Open the
+evaluation to compare candidates, then select a prediction to navigate into the
+linked agent conversation and trace. This follows Weave's documented
+[evaluation comparison](https://docs.wandb.ai/weave/guides/evaluation/evaluation_logger)
+and [trace/thread](https://docs.wandb.ai/weave/guides/tracking/threads) model;
+Fugue does not construct undocumented conversation URLs.
 
 Candidate identity contains only behavior-affecting inputs: harness, provider
 and model route, prompt digest, reviewed skill digests, context definition and

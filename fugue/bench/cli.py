@@ -148,7 +148,9 @@ def _parser() -> FugueArgumentParser:
     package.add_argument("--yes", action="store_true")
     _add_common_args(package, json_output=True)
     open_run = run_actions.add_parser("open", help="Open a W&B destination")
-    open_run.add_argument("destination", choices=("agents", "trace", "project"))
+    open_run.add_argument(
+        "destination", choices=("agents", "evaluation", "trace", "project")
+    )
     open_run.add_argument("--cell")
     open_run.add_argument("--print", action="store_true", dest="print_only")
     _add_common_args(open_run, json_output=True)
@@ -918,6 +920,11 @@ def _runs(args: argparse.Namespace) -> int:
         links = service.run_links(args.run_id)
         url = links.project if args.destination == "project" else links.agents
         conversation_id = None
+        if args.destination == "evaluation":
+            evaluation = service.run_evaluation(args.run_id, cell_id=args.cell)
+            if evaluation is None or evaluation.url is None:
+                raise ValueError("run has no linked Weave evaluation")
+            url = evaluation.url
         if args.destination == "trace":
             url = links.trace or links.agents
             refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
@@ -962,11 +969,24 @@ def _print_started_run(run: Any) -> None:
 
 
 def _run_panel(run: Any) -> Panel:
-    return Panel(
+    details = (
         f"{_status_markup(run.status)}  "
         f"[fugue.success]{run.passed} passed[/]  "
         f"[fugue.coral]{run.failed} failed[/]  "
-        f"{run.pending} pending  {run.not_applicable} not applicable",
+        f"{run.pending} pending  {run.not_applicable} not applicable"
+    )
+    if run.evaluations:
+        details += "\n\nWeave evaluations:"
+        for evaluation in run.evaluations:
+            if evaluation.url:
+                details += (
+                    f"\n  [link={evaluation.url}]{evaluation.name}[/link] "
+                    f"({evaluation.linked_predictions}/{evaluation.examples} linked)"
+                )
+    for failure in run.evaluation_failures:
+        details += f"\n[fugue.coral]Observability:[/] {failure}"
+    return Panel(
+        details,
         title=f"{run.run_name}  [{run.run_id}]",
         border_style="fugue.cyan" if run.status in {"starting", "running"} else "fugue.gold",
     )

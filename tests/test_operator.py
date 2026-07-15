@@ -9,6 +9,7 @@ import pytest
 
 from fugue.bench.ai import AssetDraft
 from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
+from fugue.bench.export import PublicationResult, PublishedEvaluation
 from fugue.bench.library import (
     EvaluationGenerationSpec,
     RubricScorerSelection,
@@ -239,10 +240,41 @@ def test_operator_applies_agent_preset_without_saving(tmp_path: Path) -> None:
     assert service.experiment("demo").variants[0].id == "baseline"
 
 
-def test_execute_run_persists_snapshot_before_first_cell(tmp_path: Path) -> None:
+def test_execute_run_persists_snapshot_before_first_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     service = make_operator_repo(tmp_path)
     run_id = "transaction-order"
     observed: list[str] = []
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell):
+            return None
+
+        def finish_cell(self, cell, outcome) -> None:
+            pass
+
+        def finalize(self) -> PublicationResult:
+            return PublicationResult(
+                published=1,
+                skipped=0,
+                evaluations=(
+                    PublishedEvaluation(
+                        candidate_id="candidate-a",
+                        name="Demo evaluation",
+                        examples=1,
+                        url="https://wandb.ai/team/project/r/call/eval-1",
+                        linked_predictions=1,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
 
     def runner(command, **kwargs):
         lock_path = tmp_path / ".fugue/runtime" / run_id / "input-lock.json"
@@ -263,6 +295,13 @@ def test_execute_run_persists_snapshot_before_first_cell(tmp_path: Path) -> None
 
     assert observed == ["harbor"]
     assert result.status == "passed"
+    assert result.evaluation_urls == (
+        "https://wandb.ai/team/project/r/call/eval-1",
+    )
+    assert service.run_evaluation(run_id) == result.evaluations[0]
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
+    assert manifest is not None
+    assert manifest["evaluation_runs"][0]["linked_predictions"] == 1
 
 
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
@@ -526,6 +565,15 @@ def test_run_links_use_the_project_recorded_at_launch(tmp_path: Path) -> None:
             "run_name": "Original project",
             "experiment_id": "demo",
             "trace_project": "other-team/original-project",
+            "evaluation_runs": [
+                {
+                    "candidate_id": "candidate-a",
+                    "name": "Original evaluation",
+                    "examples": 2,
+                    "url": "https://wandb.ai/other-team/original-project/r/call/eval-1",
+                    "linked_predictions": 2,
+                }
+            ],
         },
     )
 
@@ -533,6 +581,9 @@ def test_run_links_use_the_project_recorded_at_launch(tmp_path: Path) -> None:
 
     assert links.agents == (
         "https://wandb.ai/other-team/original-project/weave/agents"
+    )
+    assert service.run_evaluation("run-original-project").url == (
+        "https://wandb.ai/other-team/original-project/r/call/eval-1"
     )
 
 

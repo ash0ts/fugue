@@ -726,6 +726,7 @@ class FugueApp(App[None]):
                 yield Button("Combined log", id="all-run-logs")
                 yield Button("Cancel", id="cancel-run", variant="warning")
                 yield Button("Export", id="export-run")
+                yield Button("Open Eval / Trace", id="open-trace")
                 yield Button("Open Agents", id="open-agents", variant="primary")
             yield DataTable(id="runs-table", cursor_type="row", zebra_stripes=True)
             yield Label("CANDIDATES", classes="section-title")
@@ -886,6 +887,7 @@ class FugueApp(App[None]):
             "cancel-run": self.action_cancel,
             "export-run": self.action_export,
             "open-agents": self.action_open_agents,
+            "open-trace": self.action_open_trace,
             "results-agents": self.action_open_agents,
             "analyze-ai": self._analyze_with_ai,
             "generate-analysis": self._generate_analysis,
@@ -1810,6 +1812,14 @@ class FugueApp(App[None]):
 
     def action_open_trace(self) -> None:
         if self.selected_run_id:
+            evaluation = self.service.run_evaluation(
+                self.selected_run_id,
+                cell_id=self.selected_cell_id,
+            )
+            if evaluation is not None and evaluation.url:
+                webbrowser.open(evaluation.url)
+                self.notify("Opened the linked Weave evaluation and agent trace")
+                return
             references = self.service.run_trace_refs(
                 self.selected_run_id,
                 cell_id=self.selected_cell_id,

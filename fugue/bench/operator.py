@@ -188,8 +188,12 @@ class RunSummary:
     candidates: tuple[CandidateSummary, ...]
     log_path: Path
     observability_status: str | None = None
-    evaluation_urls: tuple[str, ...] = ()
+    evaluations: tuple[PublishedEvaluation, ...] = ()
     evaluation_failures: tuple[str, ...] = ()
+
+    @property
+    def evaluation_urls(self) -> tuple[str, ...]:
+        return tuple(item.url for item in self.evaluations if item.url)
 
 
 @dataclass(frozen=True)
@@ -1516,6 +1520,11 @@ class OperatorService:
                     "failed_cells": failed,
                     "not_applicable_cells": skipped,
                     "observability_status": "failed" if failures else "passed",
+                    "evaluation_runs": [
+                        asdict(item) for item in publication.evaluations
+                    ]
+                    if publication
+                    else [],
                     "evaluation_failures": failures,
                 },
             )
@@ -1827,6 +1836,25 @@ class OperatorService:
         project = str(run.metadata.get("trace_project") or "").strip() or None
         return self.deep_links(project=project)
 
+    def run_evaluation(
+        self, run_id: str, *, cell_id: str | None = None
+    ) -> PublishedEvaluation | None:
+        run = self.run_summary(run_id)
+        candidate_id = None
+        if cell_id:
+            cell = next((item for item in run.cells if item.cell_id == cell_id), None)
+            if cell is None:
+                raise ValueError(f"cell not found in {run_id}: {cell_id}")
+            candidate_id = cell.candidate_id
+        return next(
+            (
+                item
+                for item in run.evaluations
+                if item.url and (candidate_id is None or item.candidate_id == candidate_id)
+            ),
+            None,
+        )
+
     @staticmethod
     def _role_status(
         role: str, model: str, env: dict[str, str]
@@ -1863,6 +1891,23 @@ class OperatorService:
             for item in records
         )
         candidates = _candidate_summaries(run.run_dir, cells, records)
+        evaluations = tuple(
+            PublishedEvaluation(
+                candidate_id=str(item.get("candidate_id") or ""),
+                name=str(item.get("name") or "evaluation"),
+                examples=int(item.get("examples") or 0),
+                url=str(item["url"]) if item.get("url") else None,
+                evaluation_ref=(
+                    str(item["evaluation_ref"])
+                    if item.get("evaluation_ref")
+                    else None
+                ),
+                model_ref=str(item["model_ref"]) if item.get("model_ref") else None,
+                linked_predictions=int(item.get("linked_predictions") or 0),
+            )
+            for item in run.metadata.get("evaluation_runs", [])
+            if isinstance(item, dict)
+        )
         return RunSummary(
             run_id=run.run_id,
             run_name=run.run_name,
@@ -1877,11 +1922,7 @@ class OperatorService:
             candidates=candidates,
             log_path=run.log_path,
             observability_status=run.metadata.get("observability_status"),
-            evaluation_urls=tuple(
-                str(item["url"])
-                for item in run.metadata.get("evaluation_runs", [])
-                if isinstance(item, dict) and item.get("url")
-            ),
+            evaluations=evaluations,
             evaluation_failures=tuple(
                 str(value)
                 for value in run.metadata.get("evaluation_failures", [])
