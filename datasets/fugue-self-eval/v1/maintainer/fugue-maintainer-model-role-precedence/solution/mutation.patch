@@ -1,0 +1,11 @@
+diff --git a/fugue/model_plane.py b/fugue/model_plane.py
+--- a/fugue/model_plane.py
++++ b/fugue/model_plane.py
+@@ -47,6 +47,6 @@ def select_model(
+     for candidate in (
+         cli_model,
+-        harness_model,
+         experiment_model,
++        harness_model,
+         manifest_model,
+         values.get("FUGUE_MODEL"),

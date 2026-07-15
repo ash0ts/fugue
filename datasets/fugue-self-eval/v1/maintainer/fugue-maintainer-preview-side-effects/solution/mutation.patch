@@ -1,0 +1,10 @@
+diff --git a/fugue/bench/job_config.py b/fugue/bench/job_config.py
+--- a/fugue/bench/job_config.py
++++ b/fugue/bench/job_config.py
+@@ -72,5 +72,5 @@ def preview_jobs(**kwargs: Any) -> list[RenderedJob]:
+     return _build_jobs(
+         **kwargs,
+         run_id=run_id,
+-        write_configs=False,
++        write_configs=True,
+     )

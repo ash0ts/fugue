@@ -1,0 +1,69 @@
+dataset:
+  path: datasets/fugue-self-eval/v1/operator
+
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 2
+jobs_dir: jobs/fugue-operator-self-eval
+
+harnesses:
+  - {name: hermes, agent: "fugue.agents:FugueHermes"}
+  - {name: openclaw, agent: "fugue.agents:FugueOpenClaw"}
+  - {name: claude-code, agent: "fugue.agents:FugueClaudeCode"}
+  - {name: codex, agent: "fugue.agents:FugueCodex"}
+
+tasks:
+  - id: fugue-operator-exact-matrix-preview
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: preview
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: preview
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  - id: fugue-operator-author-valid-experiment
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: planning
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: planning
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  - id: fugue-operator-diagnose-readiness
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: setup
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: setup
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  - id: fugue-operator-locate-failed-cell
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: runs
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: runs
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  - id: fugue-operator-inspect-cell-logs
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: runs
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: runs
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  - id: fugue-operator-export-normalized-jsonl
+    repo: ash0ts/fugue
+    base_commit: 96512017842d68add2546a057f0601de3eaf610e
+    notes: export
+    metadata:
+      suite: fugue-operator-v1
+      split: development
+      category: export
+      source_commit: 96512017842d68add2546a057f0601de3eaf610e
