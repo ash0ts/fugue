@@ -37,19 +37,23 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     assert full.workload_overrides["qa"] == {"n_tasks": 24}
     assert systems["gitnexus"].requires_license_approval is True
     assert systems["project-rag"].version.startswith("git@d5abf98")
-    assert {
+    research_systems = {
         "codegraph",
         "gitnexus",
+        "openwiki",
         "project-rag",
         "semble",
         "latmd",
         "graphiti",
-    }.isdisjoint(smoke.systems)
+    }
+    assert research_systems.isdisjoint(smoke.systems)
+    assert research_systems.isdisjoint(full.systems)
     assert all(
         systems[system_id].enabled_by_default is False
         for system_id in (
             "codegraph",
             "gitnexus",
+            "openwiki",
             "project-rag",
             "semble",
             "latmd",

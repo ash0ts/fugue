@@ -31,7 +31,7 @@ workloads:
 presets:
   smoke:
     workloads: [retrieval, qa, coding, continuity]
-    systems: [none, agentsmd, openwiki, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
+    systems: [none, agentsmd, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
     harnesses: [hermes, openclaw, claude-code, codex]
     n_attempts: 1
     n_concurrent: 2
@@ -42,7 +42,7 @@ presets:
       continuity: {n_tasks: 1}
   full:
     workloads: [retrieval, qa, coding, continuity]
-    systems: [none, agentsmd, openwiki, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
+    systems: [none, agentsmd, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
     harnesses: [hermes, openclaw, claude-code, codex]
     n_attempts: 2
     n_concurrent: 2
