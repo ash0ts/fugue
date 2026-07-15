@@ -36,8 +36,16 @@ def _experiment(*, size: int = 8):
             "judge_model": "openai/gpt-5-mini",
             "harnesses": ["codex"],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
-                {"id": "with-skill", "label": "With skill"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
+                {
+                    "id": "with-skill",
+                    "label": "With skill",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
             ],
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "evaluation_generation": {
@@ -272,11 +280,13 @@ def test_generated_evaluation_requires_feature_omission_baseline(
                     "id": "one",
                     "label": "One",
                     "skills": ["always-on"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
                 {
                     "id": "two",
                     "label": "Two",
                     "skills": ["always-on"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }
@@ -382,11 +392,16 @@ def test_generated_evaluation_lifecycle_preview_save_prepare_and_render(
             },
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
                 {
                     "id": "with-skill",
                     "label": "With skill",
                     "skills": ["demo-skill"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }

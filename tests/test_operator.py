@@ -73,7 +73,7 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: baseline, label: Baseline, context: {system_id: none}}
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
 n_attempts: 1
 n_concurrent: 1
 jobs_dir: jobs/demo
@@ -97,7 +97,7 @@ candidate:
   model: openai/gpt-5
   prompt_id: demo-prompt
   skills: [demo-skill]
-  context: {system_id: none}
+  context: {system_id: none, delivery: portable}
 evidence:
   suite_id: demo-v1
   suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -996,7 +996,7 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: remote, label: Remote, skills: [remote], context: {system_id: none}}
+  - {id: remote, label: Remote, skills: [remote], context: {system_id: none, delivery: portable}}
 """
     )
     calls: list[tuple[str, bool]] = []

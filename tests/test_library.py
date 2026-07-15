@@ -99,7 +99,7 @@ manifest: datasets/pilot.yaml
 variants:
   - id: baseline
     label: Baseline
-    context: {system_id: none}
+    context: {system_id: none, delivery: portable}
   - id: prompt-skill
     label: Prompt plus skill
     prompt_id: prompt-a
@@ -172,6 +172,7 @@ variants:
   - id: treatment
     label: Treatment
     skills: [remote-skill]
+    context: {system_id: none, delivery: portable}
     integrations:
       - id: repository-search
         config: {top_k: 5}
@@ -240,6 +241,33 @@ id: implicit-delivery
 variants:
   - id: rag
     context: {system_id: rag-bm25}
+""",
+            tmp_path,
+        )
+
+
+def test_none_context_requires_explicit_delivery(tmp_path):
+    with pytest.raises(ValueError, match="requires an explicit context delivery"):
+        save_experiment(
+            "implicit-none-delivery",
+            """
+id: implicit-none-delivery
+variants:
+  - id: baseline
+    context: {system_id: none}
+""",
+            tmp_path,
+        )
+
+
+def test_authored_variant_requires_explicit_context(tmp_path):
+    with pytest.raises(ValueError, match="mapping with explicit delivery"):
+        save_experiment(
+            "implicit-context",
+            """
+id: implicit-context
+variants:
+  - id: baseline
 """,
             tmp_path,
         )
@@ -441,8 +469,8 @@ def test_experiment_rejects_duplicate_ids_and_nonpositive_counts(tmp_path):
             """
 id: duplicates
 variants:
-  - {id: same, label: One}
-  - {id: same, label: Two}
+  - {id: same, label: One, context: {system_id: none, delivery: portable}}
+  - {id: same, label: Two, context: {system_id: none, delivery: portable}}
 """,
             tmp_path,
         )

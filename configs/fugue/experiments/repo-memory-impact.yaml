@@ -52,7 +52,7 @@ presets:
       coding: {n_tasks: 12}
       continuity: {n_tasks: 2}
 variants:
-  - {id: none, label: No added context, context: {system_id: none}}
+  - {id: none, label: No added context, context: {system_id: none, delivery: portable}}
   - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd, delivery: portable}}
   - {id: openwiki, label: OpenWiki, context: {system_id: openwiki, delivery: portable}}
   - {id: gitnexus, label: GitNexus, context: {system_id: gitnexus, delivery: native_mcp}}

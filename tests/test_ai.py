@@ -132,11 +132,16 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
             },
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
                 {
                     "id": "with-skill",
                     "label": "With skill",
                     "skills": ["demo-skill"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }

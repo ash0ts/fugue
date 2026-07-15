@@ -47,12 +47,14 @@ variants:
     label: No skill
     context:
       system_id: none
+      delivery: portable
   - id: with-pdf-skill
     label: PDF artifact workflow
     skills:
       - pdf-artifact-workflow
     context:
       system_id: none
+      delivery: portable
 n_attempts: 1
 n_concurrent: 4
 n_tasks: 3

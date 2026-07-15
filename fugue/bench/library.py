@@ -674,23 +674,24 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
 
 def _context_selection(raw: Any) -> ContextSelection:
     if raw in (None, ""):
-        return ContextSelection()
+        raise ValueError(
+            "variant context must be a mapping with explicit delivery and system_id"
+        )
     if isinstance(raw, str):
-        system_id = validate_id(raw, kind="context system id")
-        if system_id != "none":
-            raise ValueError(
-                "non-none variant context must be a mapping with explicit delivery"
-            )
-        return ContextSelection()
+        raise ValueError(
+            "variant context must be a mapping with explicit delivery and system_id"
+        )
     if not isinstance(raw, dict):
-        raise ValueError("variant context must be a string or mapping")
+        raise ValueError("variant context must be a mapping")
     _reject_unknown(raw, ContextSelection, kind="variant context")
-    system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
-    if system_id != "none" and not str(raw.get("delivery") or "").strip():
+    if not str(raw.get("system_id") or "").strip():
+        raise ValueError("variant context requires an explicit context system_id")
+    system_id = validate_id(raw["system_id"], kind="context system id")
+    if not str(raw.get("delivery") or "").strip():
         raise ValueError(
             f"context system {system_id} requires an explicit context delivery"
         )
-    delivery = str(raw.get("delivery") or "portable")
+    delivery = str(raw["delivery"])
     if delivery not in {"portable", "native_mcp"}:
         raise ValueError(f"unknown context delivery: {delivery}")
     return ContextSelection(

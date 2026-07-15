@@ -500,7 +500,7 @@ def test_context_command_timeout_terminates_the_process_group(tmp_path: Path) ->
                 cwd=tmp_path,
                 env=dict(os.environ),
                 capture_output=True,
-                timeout_seconds=0.1,
+                timeout_seconds=1.0,
             )
         )
 

@@ -72,6 +72,7 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_entity_project,
 )
+from fugue.registration import skill_registration_probe_command
 from fugue.tool_policy import (
     HarnessToolPolicy,
     tool_result_guard_cli_flags,
@@ -174,34 +175,6 @@ def _dedupe_tags(values: list[str]) -> list[str]:
             seen.add(tag)
             out.append(tag)
     return out
-
-
-def _skill_registration_probe_command(
-    directory: str,
-    assigned: list[str],
-) -> str:
-    script = (
-        "import hashlib,json,sys;"
-        "from pathlib import Path;"
-        "root=Path(sys.argv[1]);"
-        "assigned=json.loads(sys.argv[2]);"
-        "files=sorted(root.rglob('SKILL.md')) if root.is_dir() else [];"
-        "registered=sorted({"
-        "(path.relative_to(root).parts[0] if len(path.relative_to(root).parts)>1 "
-        "else '.') for path in files});"
-        "digest=hashlib.sha256();"
-        "[(digest.update(path.relative_to(root).as_posix().encode()+b'\\0'),"
-        "digest.update(path.read_bytes())) for path in files];"
-        "payload={'skills_assigned':assigned,'skills_registered':registered,"
-        "'skill_files':[path.relative_to(root).as_posix() for path in files],"
-        "'registration_digest':('sha256:'+digest.hexdigest()) if files else None};"
-        "print(json.dumps(payload,sort_keys=True));"
-        "sys.exit(0 if len(registered)==len(assigned) else 2)"
-    )
-    return (
-        f"python3 -c {shlex.quote(script)} {shlex.quote(directory)} "
-        f"{shlex.quote(json.dumps(assigned))}"
-    )
 
 
 def _experiment_tags(
@@ -744,7 +717,7 @@ class _TrialMetaMixin:
                 }
             )
             return
-        command = _skill_registration_probe_command(directory, assigned)
+        command = skill_registration_probe_command(directory, assigned)
         result = await self.exec_as_agent(
             environment,
             command=command,

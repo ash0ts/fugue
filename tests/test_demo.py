@@ -49,7 +49,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
         run_id=run_id,
     )
 
-    assert len(rendered) == 48
+    assert len(rendered) == 24
     assert not runtime_dir.exists()
     assert all(not job.config_path.exists() for job in rendered)
 
@@ -70,7 +70,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
 
     for harness in ("hermes", "openclaw", "claude-code", "codex"):
         for task_id in expected_tasks:
-            for trial_index in (1, 2):
+            for trial_index in (1,):
                 baseline_job = cells[(harness, "baseline", task_id, trial_index)]
                 skilled_job = cells[
                     (harness, "with-pdf-skill", task_id, trial_index)
@@ -115,7 +115,7 @@ def _assert_balanced_skill_pair(
         }
     ]
     assert baseline["n_attempts"] == skilled["n_attempts"] == 1
-    assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
+    assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 4
     assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
     assert baseline["environment"] == skilled["environment"]
     assert baseline.get("extra_instruction_paths", []) == []

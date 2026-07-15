@@ -16,7 +16,7 @@ from fugue.agent_tracing import (
     openclaw_conversation_id,
     stable_agent_name,
 )
-from fugue.agents.model_plane import _skill_registration_probe_command
+from fugue.registration import skill_registration_probe_command
 
 AGENT_MODEL_PLANE = (
     Path(__file__).resolve().parents[1] / "fugue" / "agents" / "model_plane.py"
@@ -106,7 +106,7 @@ def test_skill_registration_probe_requires_every_assigned_skill(
     (root / "pdf" / "SKILL.md").write_text("# PDF\n")
 
     complete = subprocess.run(
-        _skill_registration_probe_command(root.as_posix(), ["pdf"]),
+        skill_registration_probe_command(root.as_posix(), ["pdf"]),
         shell=True,
         check=False,
         capture_output=True,
@@ -119,7 +119,7 @@ def test_skill_registration_probe_requires_every_assigned_skill(
     assert payload["registration_digest"].startswith("sha256:")
 
     incomplete = subprocess.run(
-        _skill_registration_probe_command(root.as_posix(), ["pdf", "missing"]),
+        skill_registration_probe_command(root.as_posix(), ["pdf", "missing"]),
         shell=True,
         check=False,
         capture_output=True,

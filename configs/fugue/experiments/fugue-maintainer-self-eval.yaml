@@ -37,9 +37,9 @@ presets:
     workload_overrides:
       holdout: {n_tasks: 6}
 variants:
-  - {id: baseline, label: Baseline, context: {system_id: none}}
-  - {id: role-prompt, label: Role prompt, prompt_id: fugue-maintainer, context: {system_id: none}}
-  - {id: role-prompt-skill, label: Role prompt and skill, prompt_id: fugue-maintainer, skills: [fugue-maintainer], context: {system_id: none}}
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
+  - {id: role-prompt, label: Role prompt, prompt_id: fugue-maintainer, context: {system_id: none, delivery: portable}}
+  - {id: role-prompt-skill, label: Role prompt and skill, prompt_id: fugue-maintainer, skills: [fugue-maintainer], context: {system_id: none, delivery: portable}}
   - {id: role-prompt-skill-agentsmd, label: "Role prompt, skill, and repository map", prompt_id: fugue-maintainer, skills: [fugue-maintainer], context: {system_id: agentsmd, delivery: portable}}
 n_attempts: 1
 n_concurrent: 2
