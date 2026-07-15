@@ -129,6 +129,69 @@ def test_real_cell_fails_when_harbor_reports_trial_errors(
 
     assert outcome.status == "failed"
     assert outcome.error == "1 Harbor trial(s) errored"
+    assert outcome.benchmark_outcome == "unscored"
+
+
+@pytest.mark.parametrize(
+    ("reward", "expected"),
+    ((1.0, "passed"), (0.0, "failed"), (0.8, "failed"), (None, "unscored")),
+)
+def test_harbor_benchmark_outcome_is_separate_from_execution_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reward: float | None,
+    expected: str,
+) -> None:
+    run_id = new_run_id()
+    cell = _cell(run_id, "reward")
+    result_path = tmp_path / cell.result_path
+    result_path.parent.mkdir(parents=True)
+    reward_stats = {} if reward is None else {str(reward): ["trial-one"]}
+    result_path.write_text(
+        json.dumps(
+            {
+                "stats": {
+                    "n_errored_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "evals": {
+                        "agent__model__dataset": {
+                            "reward_stats": {"reward": reward_stats}
+                        }
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "passed"
+    assert outcome.benchmark_outcome == expected
+    assert outcome.reward == reward
+    [record] = latest_cell_records(
+        tmp_path / ".fugue" / "runtime" / run_id / "cells.jsonl"
+    )
+    assert record["benchmark_outcome"] == expected
+    assert record["reward"] == reward
+
+
+def test_provider_diagnostic_does_not_require_a_harbor_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = new_run_id()
+    cell = replace(
+        _cell(run_id, "diagnostic"),
+        execution_kind="provider_diagnostic",
+        harness="direct",
+    )
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "passed"
+    assert outcome.benchmark_outcome == "unscored"
+    assert outcome.error is None
 
 
 def test_execution_rejects_mixed_runs_and_duplicate_cells(tmp_path: Path) -> None:

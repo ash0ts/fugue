@@ -92,6 +92,10 @@ def candidate_packageability(
     *,
     allow_failed: bool = False,
 ) -> tuple[bool, str]:
+    runtime = (snapshot.get("candidate_runtime") or {}).get(candidate_id) or {}
+    harness = runtime.get("harness")
+    if harness and harness not in SERVE_HARNESSES:
+        return False, f"candidate harness is not supported for serving: {harness}"
     planned = [
         item
         for item in snapshot.get("planned_matrix") or []
@@ -113,18 +117,47 @@ def candidate_packageability(
     pending = sum(status in {"pending", "running", "starting", "unknown"} for status in statuses)
     if pending:
         return False, f"{pending} planned applicable cell(s) are not terminal"
-    passed = statuses.count("passed")
+    passed = sum(
+        status == "passed"
+        and str(latest[str(item.get("cell_id"))].get("benchmark_outcome"))
+        == "passed"
+        for item, status in zip(applicable, statuses, strict=True)
+    )
+    benchmark_failed = sum(
+        str(latest[str(item.get("cell_id"))].get("benchmark_outcome"))
+        == "failed"
+        for item in applicable
+    )
+    execution_failed = sum(
+        status in {"failed", "cancelled", "interrupted"} for status in statuses
+    )
+    unscored = sum(
+        status == "passed"
+        and str(latest[str(item.get("cell_id"))].get("benchmark_outcome"))
+        not in {"passed", "failed"}
+        for item, status in zip(applicable, statuses, strict=True)
+    )
+    if unscored:
+        return False, f"candidate has {unscored} unscored applicable cell(s)"
     if not passed:
         return False, "candidate has no passed applicable cells"
-    failed = sum(status in {"failed", "cancelled", "interrupted"} for status in statuses)
+    failed = benchmark_failed + execution_failed
     if failed and not allow_failed:
         return (
             False,
-            f"candidate has {failed} failed cell(s); pass --allow-failed and confirm",
+            "candidate has "
+            f"{benchmark_failed} failed benchmark cell(s) and "
+            f"{execution_failed} execution failure(s); "
+            "pass --allow-failed and confirm",
         )
     if failed:
-        return True, f"packageable with {failed} failed cell(s) explicitly allowed"
-    return True, "all planned applicable cells completed and at least one passed"
+        return (
+            True,
+            "packageable with "
+            f"{benchmark_failed} failed benchmark cell(s) and "
+            f"{execution_failed} execution failure(s) explicitly allowed",
+        )
+    return True, "all planned applicable cells completed and passed"
 
 
 def package_candidate(

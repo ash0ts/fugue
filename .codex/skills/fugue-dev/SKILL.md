@@ -50,9 +50,9 @@ Preserve these invariants across schema, implementation, UI, and tests.
   writer for cell, prediction, and run terminal state during graceful shutdown.
 - Group results by candidate. Display a unique short prefix, retain full IDs in
   JSON and snapshots, and reject ambiguous input prefixes.
-- A candidate is packageable only when all planned applicable cells are
-  terminal and at least one passed. Failed cells require explicit override and
-  confirmation; unrelated run failure does not block a complete candidate.
+- Keep execution state, deterministic benchmark outcome, and judge or rubric
+  results separate. Packaging requires terminal, scored applicable cells and a
+  deterministic pass; failures need explicit override and unscored cells block.
 
 ## Packaging and serving
 

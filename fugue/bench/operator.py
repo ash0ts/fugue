@@ -159,6 +159,8 @@ class CellSummary:
     wall_time_sec: float | None = None
     error: str | None = None
     context_delivery: str = "portable"
+    benchmark_outcome: str = "unscored"
+    reward: float | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,8 @@ class CandidateSummary:
     configuration: dict[str, Any]
     passed: int
     failed: int
+    execution_failed: int
+    unscored: int
     pending: int
     not_applicable: int
     completeness: float
@@ -2004,6 +2008,14 @@ class OperatorService:
                 ),
                 error=item.get("error"),
                 context_delivery=str(item.get("context_delivery") or "portable"),
+                benchmark_outcome=str(
+                    item.get("benchmark_outcome") or "unscored"
+                ),
+                reward=(
+                    float(item["reward"])
+                    if item.get("reward") is not None
+                    else None
+                ),
             )
             for item in records
         )
@@ -2087,9 +2099,14 @@ def _candidate_summaries(
     result: list[CandidateSummary] = []
     for candidate_id in candidate_ids:
         selected = [cell for cell in cells if cell.candidate_id == candidate_id]
-        passed = sum(cell.status == "passed" for cell in selected)
-        failed = sum(
+        passed = sum(cell.benchmark_outcome == "passed" for cell in selected)
+        failed = sum(cell.benchmark_outcome == "failed" for cell in selected)
+        execution_failed = sum(
             cell.status in {"failed", "cancelled", "interrupted"} for cell in selected
+        )
+        unscored = sum(
+            cell.status == "passed" and cell.benchmark_outcome == "unscored"
+            for cell in selected
         )
         pending = sum(cell.status in {"pending", "running"} for cell in selected)
         not_applicable = sum(cell.status == "not_applicable" for cell in selected)
@@ -2099,7 +2116,10 @@ def _candidate_summaries(
             if item.get("candidate_id") == candidate_id
             and item.get("applicable") is not False
         ]
-        terminal = passed + failed
+        terminal = sum(
+            cell.status in {"passed", "failed", "cancelled", "interrupted"}
+            for cell in selected
+        )
         completeness = terminal / len(planned) if planned else 0.0
         packageable, reason = candidate_packageability(
             snapshot,
@@ -2123,6 +2143,8 @@ def _candidate_summaries(
                 },
                 passed=passed,
                 failed=failed,
+                execution_failed=execution_failed,
+                unscored=unscored,
                 pending=pending,
                 not_applicable=not_applicable,
                 completeness=completeness,

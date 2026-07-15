@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -41,6 +42,7 @@ RunStatus = Literal[
 ]
 EventCallback = Callable[[dict[str, Any]], None]
 ExecutionKind = Literal["agent", "provider_diagnostic"]
+BenchmarkOutcome = Literal["passed", "failed", "unscored", "not_applicable"]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
 
@@ -111,6 +113,15 @@ class CellOutcome:
     status: CellStatus
     returncode: int | None = None
     error: str | None = None
+    benchmark_outcome: BenchmarkOutcome = "unscored"
+    reward: float | None = None
+
+
+@dataclass(frozen=True)
+class _HarborJobResult:
+    error: str | None
+    benchmark_outcome: BenchmarkOutcome
+    reward: float | None = None
 
 
 def new_run_id() -> str:
@@ -205,14 +216,24 @@ def execute_cells(
         if cell.applicable:
             runnable.append(cell)
         else:
-            store.append_cell(cell.record("not_applicable"))
+            store.append_cell(
+                cell.record(
+                    "not_applicable", benchmark_outcome="not_applicable"
+                )
+            )
             store.append_event(
                 "cell_state",
                 cell=cell,
                 status="not_applicable",
                 message=cell.skip_reason,
             )
-            outcomes.append(CellOutcome(cell.id, "not_applicable"))
+            outcomes.append(
+                CellOutcome(
+                    cell.id,
+                    "not_applicable",
+                    benchmark_outcome="not_applicable",
+                )
+            )
 
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
@@ -223,6 +244,7 @@ def execute_cells(
                 cell.record(
                     "cancelled",
                     error=cancellation_message,
+                    benchmark_outcome=outcome.benchmark_outcome,
                     ended_at=ended.isoformat(),
                 )
             )
@@ -267,6 +289,7 @@ def execute_cells(
                 cell.record(
                     "cancelled",
                     error=cancellation_message,
+                    benchmark_outcome=outcome.benchmark_outcome,
                     started_at=started.isoformat(),
                     ended_at=ended.isoformat(),
                     wall_time_sec=(ended - started).total_seconds(),
@@ -301,11 +324,14 @@ def execute_cells(
                     cwd=repo_root,
                 )
                 returncode = int(result.returncode)
-            trial_error = (
-                _harbor_job_error(cell, repo_root)
-                if runner is None and returncode == 0
-                else None
+            harbor_result = (
+                _harbor_job_result(cell, repo_root)
+                if runner is None
+                and returncode == 0
+                and cell.execution_kind == "agent"
+                else _HarborJobResult(None, "unscored")
             )
+            trial_error = harbor_result.error
             cancellation_requested = bool(
                 cancellation_event is not None and cancellation_event.is_set()
             )
@@ -321,6 +347,8 @@ def execute_cells(
                 status,
                 returncode=returncode,
                 error=trial_error,
+                benchmark_outcome=harbor_result.benchmark_outcome,
+                reward=harbor_result.reward,
             )
         except Exception as exc:
             outcome = CellOutcome(
@@ -343,6 +371,8 @@ def execute_cells(
                 outcome.status,
                 returncode=outcome.returncode,
                 error=outcome.error,
+                benchmark_outcome=outcome.benchmark_outcome,
+                reward=outcome.reward,
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=(ended - started).total_seconds(),
@@ -354,6 +384,8 @@ def execute_cells(
             status=outcome.status,
             returncode=outcome.returncode,
             message=outcome.error,
+            benchmark_outcome=outcome.benchmark_outcome,
+            reward=outcome.reward,
             wall_time_sec=(ended - started).total_seconds(),
         )
         return outcome
@@ -449,22 +481,60 @@ def _terminate_process_group(
             pass
 
 
-def _harbor_job_error(cell: PlannedCell, repo_root: Path) -> str | None:
+def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     path = cell.result_path
     if not path.is_absolute():
         path = repo_root / path
     try:
         result = json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
-        return f"Harbor did not produce a readable job result: {exc}"
+        return _HarborJobResult(
+            f"Harbor did not produce a readable job result: {exc}", "unscored"
+        )
     stats = result.get("stats") or {}
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
     if errored:
-        return f"{errored} Harbor trial(s) errored"
+        return _HarborJobResult(
+            f"{errored} Harbor trial(s) errored", "unscored"
+        )
     if cancelled:
-        return f"{cancelled} Harbor trial(s) were cancelled"
-    return None
+        return _HarborJobResult(
+            f"{cancelled} Harbor trial(s) were cancelled", "unscored"
+        )
+    rewards: list[float] = []
+    for evaluation in (stats.get("evals") or {}).values():
+        reward_buckets = (
+            ((evaluation or {}).get("reward_stats") or {}).get("reward") or {}
+        )
+        for raw_reward, trial_ids in reward_buckets.items():
+            try:
+                reward = float(raw_reward)
+            except (TypeError, ValueError):
+                return _HarborJobResult(
+                    f"Harbor job result contains an invalid reward: {raw_reward!r}",
+                    "unscored",
+                )
+            if not math.isfinite(reward):
+                return _HarborJobResult(
+                    f"Harbor job result contains a non-finite reward: {raw_reward!r}",
+                    "unscored",
+                )
+            count = len(trial_ids) if isinstance(trial_ids, list) else 1
+            rewards.extend([reward] * count)
+    if not rewards:
+        return _HarborJobResult(None, "unscored")
+    if len(rewards) != 1:
+        return _HarborJobResult(
+            f"Harbor job result contains {len(rewards)} rewards for one cell",
+            "unscored",
+        )
+    reward = rewards[0]
+    return _HarborJobResult(
+        None,
+        "passed" if reward == 1.0 else "failed",
+        reward,
+    )
 
 
 def update_run_manifest(
@@ -544,6 +614,7 @@ def mark_unfinished_cells(
             **record,
             "status": status,
             "error": message,
+            "benchmark_outcome": "unscored",
             "recorded_at": datetime.now(UTC).isoformat(),
             "ended_at": datetime.now(UTC).isoformat(),
         }

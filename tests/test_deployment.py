@@ -107,7 +107,13 @@ def _packaging_run(tmp_path: Path, *, run_status: str = "failed"):
     cells_path = repo / ".fugue/runtime" / run_id / "cells.jsonl"
     cells_path.write_text(
         "\n".join(
-            json.dumps(cell.record("passed" if index == 0 else "failed"))
+            json.dumps(
+                cell.record(
+                    "passed" if index == 0 else "failed",
+                    benchmark_outcome="passed" if index == 0 else "unscored",
+                    reward=1.0 if index == 0 else None,
+                )
+            )
             for index, cell in enumerate(cells)
         )
         + "\n"
@@ -327,7 +333,11 @@ def test_packaging_rejects_escaping_symlink_and_credential_remote(
         (
             [{"cell_id": "a"}, {"cell_id": "b"}],
             [
-                {"cell_id": "a", "status": "passed"},
+                {
+                    "cell_id": "a",
+                    "status": "passed",
+                    "benchmark_outcome": "passed",
+                },
                 {"cell_id": "b", "status": "failed"},
             ],
             False,
@@ -337,7 +347,11 @@ def test_packaging_rejects_escaping_symlink_and_credential_remote(
         (
             [{"cell_id": "a"}, {"cell_id": "b"}],
             [
-                {"cell_id": "a", "status": "passed"},
+                {
+                    "cell_id": "a",
+                    "status": "passed",
+                    "benchmark_outcome": "passed",
+                },
                 {"cell_id": "b", "status": "failed"},
             ],
             True,
@@ -368,6 +382,60 @@ def test_candidate_packageability_explains_every_terminal_state(
 
     assert packageable is expected
     assert reason in detail
+
+
+def test_candidate_packageability_uses_deterministic_outcome() -> None:
+    snapshot = {
+        "planned_matrix": [
+            {"cell_id": "pass", "candidate_id": "candidate-a"},
+            {"cell_id": "fail", "candidate_id": "candidate-a"},
+        ]
+    }
+    records = [
+        {
+            "cell_id": "pass",
+            "status": "passed",
+            "benchmark_outcome": "passed",
+        },
+        {
+            "cell_id": "fail",
+            "status": "passed",
+            "benchmark_outcome": "failed",
+        },
+    ]
+
+    blocked, reason = candidate_packageability(snapshot, records, "candidate-a")
+    allowed, allowed_reason = candidate_packageability(
+        snapshot, records, "candidate-a", allow_failed=True
+    )
+
+    assert blocked is False
+    assert "1 failed benchmark cell(s)" in reason
+    assert allowed is True
+    assert "explicitly allowed" in allowed_reason
+
+
+def test_candidate_packageability_blocks_unscored_and_direct_candidates() -> None:
+    snapshot = {
+        "candidate_runtime": {"candidate-a": {"harness": "codex"}},
+        "planned_matrix": [{"cell_id": "a", "candidate_id": "candidate-a"}],
+    }
+    records = [
+        {"cell_id": "a", "status": "passed", "benchmark_outcome": "unscored"}
+    ]
+
+    packageable, reason = candidate_packageability(
+        snapshot, records, "candidate-a", allow_failed=True
+    )
+    assert packageable is False
+    assert reason == "candidate has 1 unscored applicable cell(s)"
+
+    snapshot["candidate_runtime"]["candidate-a"]["harness"] = "direct"
+    packageable, reason = candidate_packageability(
+        snapshot, records, "candidate-a", allow_failed=True
+    )
+    assert packageable is False
+    assert reason == "candidate harness is not supported for serving: direct"
 
 
 def test_packaging_rejects_inconsistent_candidate_rows(tmp_path: Path) -> None:

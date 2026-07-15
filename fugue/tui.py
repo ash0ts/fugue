@@ -1870,7 +1870,9 @@ class FugueApp(App[None]):
             "Candidate",
             "Configuration",
             "Pass",
-            "Fail",
+            "Eval fail",
+            "Exec fail",
+            "Unscored",
             "Pending",
             "N/A",
             "Complete",
@@ -1893,6 +1895,8 @@ class FugueApp(App[None]):
                 summary or "resolved candidate",
                 str(candidate.passed),
                 str(candidate.failed),
+                str(candidate.execution_failed),
+                str(candidate.unscored),
                 str(candidate.pending),
                 str(candidate.not_applicable),
                 f"{candidate.completeness:.0%}",
@@ -1908,7 +1912,8 @@ class FugueApp(App[None]):
             "Delivery",
             "Task",
             "Candidate",
-            "Status",
+            "Execution",
+            "Outcome",
             "Time",
         )
         for cell in run.cells:
@@ -1920,6 +1925,7 @@ class FugueApp(App[None]):
                 cell.task_id,
                 cell.candidate_id,
                 cell.status.replace("_", " "),
+                cell.benchmark_outcome.replace("_", " "),
                 f"{cell.wall_time_sec:.1f}s" if cell.wall_time_sec is not None else "-",
                 key=cell.cell_id,
             )

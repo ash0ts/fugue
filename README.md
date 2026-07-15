@@ -140,10 +140,12 @@ fugue runs RUN_ID open evaluation
 fugue runs RUN_ID open evaluation --cell CELL_ID
 ```
 
-Each run groups cells by behavioral candidate and shows passed, failed,
-pending, and not-applicable counts, completeness, and the exact packageability
-reason. The terminal displays a unique candidate prefix; JSON and snapshots
-retain the full SHA-256 identifier.
+Each run groups cells by behavioral candidate and shows deterministic benchmark
+passes and failures separately from execution failures, unscored cells,
+pending cells, and not-applicable cells. Completeness follows the execution
+lifecycle; packageability follows the benchmark outcome. The terminal displays
+a unique candidate prefix; JSON and snapshots retain the full SHA-256
+identifier.
 
 Live runs publish one Weave evaluation per candidate and workload. Fugue keeps
 the returned evaluation URLs in the run manifest and attaches each verified
@@ -416,9 +418,12 @@ fugue runs RUN_ID package CANDIDATE_PREFIX \
   --yes
 ```
 
-All applicable cells for the candidate must be terminal and at least one must
-pass. Failed cells require both `--allow-failed` and confirmation. Another
-candidate may fail the overall run without blocking a complete candidate.
+All applicable cells for the candidate must be terminal and deterministically
+scored, and at least one benchmark outcome must pass. Benchmark or execution
+failures require both `--allow-failed` and confirmation; unscored cells block
+packaging. Judge and rubric results never replace the deterministic outcome.
+Another candidate may fail the overall run without blocking a complete
+candidate.
 
 Serving is an optional Python 3.13 feature, outside the operator path:
 

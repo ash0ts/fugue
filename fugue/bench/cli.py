@@ -1131,7 +1131,8 @@ def _cells_table(run: Any) -> Table:
         "Transport",
         "Task",
         "Candidate",
-        "Status",
+        "Execution",
+        "Outcome",
         box=box.SIMPLE_HEAD,
     )
     for cell in run.cells:
@@ -1143,10 +1144,18 @@ def _cells_table(run: Any) -> Table:
             cell.task_id,
             cell.candidate_id,
             _status_markup(cell.status),
+            cell.benchmark_outcome.replace("_", " "),
         )
     if not run.cells:
         table.add_row(
-            "-", "-", "-", "-", "waiting for planner", _status_markup(run.status)
+            "-",
+            "-",
+            "-",
+            "-",
+            "waiting for planner",
+            "-",
+            _status_markup(run.status),
+            "-",
         )
     return table
 
@@ -1156,7 +1165,9 @@ def _candidates_table(run: Any) -> Table:
         "Candidate",
         "Configuration",
         "Passed",
-        "Failed",
+        "Eval failed",
+        "Exec failed",
+        "Unscored",
         "Pending",
         "N/A",
         "Packageability",
@@ -1177,6 +1188,8 @@ def _candidates_table(run: Any) -> Table:
             ),
             str(candidate.passed),
             str(candidate.failed),
+            str(candidate.execution_failed),
+            str(candidate.unscored),
             str(candidate.pending),
             str(candidate.not_applicable),
             candidate.packageability_reason,

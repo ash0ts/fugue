@@ -629,6 +629,67 @@ def test_candidate_prefixes_are_display_only_and_must_resolve_uniquely(
         service.resolve_candidate_id(run_id, "abc")
 
 
+def test_candidate_summary_separates_execution_and_benchmark_outcomes(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "candidate-outcomes"
+    candidate_id = "a" * 64
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {"status": "passed", "run_name": "outcomes", "experiment_id": "demo"},
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {candidate_id: {"harness": "codex"}},
+                "candidate_runtime": {candidate_id: {"harness": "codex"}},
+                "planned_matrix": [
+                    {"cell_id": "pass", "candidate_id": candidate_id},
+                    {"cell_id": "fail", "candidate_id": candidate_id},
+                ],
+            }
+        )
+    )
+    (run_dir / "cells.jsonl").write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "cell_id": "pass",
+                    "candidate_id": candidate_id,
+                    "status": "passed",
+                    "benchmark_outcome": "passed",
+                    "reward": 1.0,
+                },
+                {
+                    "cell_id": "fail",
+                    "candidate_id": candidate_id,
+                    "status": "passed",
+                    "benchmark_outcome": "failed",
+                    "reward": 0.0,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = service.run_summary(run_id)
+    [candidate] = summary.candidates
+
+    assert summary.status == "passed"
+    assert candidate.passed == 1
+    assert candidate.failed == 1
+    assert candidate.execution_failed == 0
+    assert candidate.unscored == 0
+    assert candidate.completeness == 1.0
+    assert candidate.packageable is False
+    assert "1 failed benchmark cell(s)" in candidate.packageability_reason
+
+
 def test_multi_file_plan_save_cleans_new_assets_when_commit_marker_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
