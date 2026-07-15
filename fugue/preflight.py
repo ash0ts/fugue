@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_project_slug,
 )
+from fugue.weave_support import resolved_weave_trace_server_url
 
 HARBOR_VERSION = "0.18.0"
 
@@ -80,6 +82,8 @@ def run_preflight(
 
     if not missing_model_env(route, values):
         checks.append(_check_provider_metadata(route, values))
+    if not missing_trace_env(values):
+        checks.append(_check_weave_endpoint(values))
 
     status = bridge_status()
     checks.append(
@@ -159,7 +163,9 @@ def harbor_version_check() -> PreflightCheck:
     return PreflightCheck(
         "harbor version",
         ok,
-        f"harbor=={actual} found" if ok else f"harbor=={HARBOR_VERSION} required; found {actual or 'unknown'}",
+        f"harbor=={actual} found"
+        if ok
+        else f"harbor=={HARBOR_VERSION} required; found {actual or 'unknown'}",
     )
 
 
@@ -212,6 +218,26 @@ def _check_provider_metadata(
         "provider metadata",
         ok,
         f"GET /models returned {response.status_code}",
+    )
+
+
+def _check_weave_endpoint(
+    env: Mapping[str, str], timeout_sec: float = 20.0
+) -> PreflightCheck:
+    endpoint = resolved_weave_trace_server_url(env)
+    token = base64.b64encode(f"api:{env.get('WANDB_API_KEY', '')}".encode()).decode()
+    try:
+        response = httpx.get(
+            f"{endpoint}/server_info",
+            headers={"Authorization": f"Basic {token}"},
+            timeout=timeout_sec,
+        )
+    except httpx.HTTPError as exc:
+        return PreflightCheck("weave endpoint", False, f"{endpoint}: {exc}")
+    return PreflightCheck(
+        "weave endpoint",
+        response.status_code < 400,
+        f"{endpoint}/server_info returned {response.status_code}",
     )
 
 

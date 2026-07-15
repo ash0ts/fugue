@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from fugue.bench.context import list_context_systems
+from fugue.bench.context import ContextRuntime, get_context_system, list_context_systems
 from fugue.bench.library import get_experiment
 from fugue.bench.operator import (
     ExperimentRequest,
@@ -12,6 +12,7 @@ from fugue.bench.operator import (
     _preparation_targets,
     select_preset,
 )
+from fugue.bench.workloads import _add_runtime_correlation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,7 +60,10 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     assert "none" in retrieval.systems
 
     for spec in systems.values():
-        if spec.provider.endswith(":CommandContextProvider") and "retrieve" in spec.capabilities:
+        if (
+            spec.provider.endswith(":CommandContextProvider")
+            and "retrieve" in spec.capabilities
+        ):
             assert (spec.config.get("retrieve") or {}).get("command"), spec.id
 
     targets = _preparation_targets(
@@ -99,9 +103,7 @@ def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) ->
         if workload.runner == "harbor":
             task_count = preset.workload_overrides[workload.id]["n_tasks"]
             expected_cells += (
-                len(systems & variants_by_system)
-                * len(preset.harnesses)
-                * task_count
+                len(systems & variants_by_system) * len(preset.harnesses) * task_count
             )
         else:
             expected_cells += len(systems)
@@ -137,3 +139,35 @@ def test_explicit_experimental_system_remains_visible_as_not_applicable(
     assert preview.cells == 1
     assert preview.applicable_cells == 0
     assert preview.systems == ("codegraph",)
+
+
+def test_direct_measurements_receive_canonical_identity(tmp_path: Path) -> None:
+    spec = get_context_system("rag-bm25", REPO_ROOT)
+    runtime = ContextRuntime(
+        repo_root=tmp_path,
+        cache_root=tmp_path / ".cache",
+        env={
+            "FUGUE_CANDIDATE_ID": "candidate-a",
+            "FUGUE_EXECUTION_FINGERPRINT": "execution-a",
+            "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
+            "FUGUE_DATASET": "dataset-a",
+        },
+    )
+    rows = [
+        {
+            "record_type": "retrieval",
+            "workload_id": "retrieval",
+            "task_name": "task-a",
+            "query_id": "probe-a",
+            "attempt": attempt,
+        }
+        for attempt in (1, 2)
+    ]
+
+    _add_runtime_correlation(rows, spec, runtime, "run-a")
+
+    assert {row["candidate_id"] for row in rows} == {"candidate-a"}
+    assert {row["execution_fingerprint"] for row in rows} == {"execution-a"}
+    assert {row["execution_kind"] for row in rows} == {"provider_diagnostic"}
+    assert [row["trial_index"] for row in rows] == [1, 2]
+    assert len({row["comparison_example_id"] for row in rows}) == 1

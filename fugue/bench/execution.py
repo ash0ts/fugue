@@ -38,6 +38,7 @@ RunStatus = Literal[
     "interrupted",
 ]
 EventCallback = Callable[[dict[str, Any]], None]
+ExecutionKind = Literal["agent", "provider_diagnostic"]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
 
@@ -63,6 +64,7 @@ class PlannedCell:
     command: tuple[str, ...]
     env: dict[str, str]
     n_attempts: int
+    execution_kind: ExecutionKind = "agent"
     context_delivery: str = "portable"
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
@@ -89,6 +91,7 @@ class PlannedCell:
             "comparison_example_id": self.comparison_example_id,
             "candidate_id": self.candidate_id,
             "execution_fingerprint": self.execution_fingerprint,
+            "execution_kind": self.execution_kind,
             "config_path": self.config_path.as_posix(),
             "result_path": self.result_path.as_posix(),
             "command": list(self.command),
@@ -146,6 +149,7 @@ def plan_cells(
                 comparison_example_id=job.comparison_example_id,
                 candidate_id=job.candidate_id,
                 execution_fingerprint=job.resolved_candidate.execution_fingerprint,
+                execution_kind=job.execution_kind,
                 config_path=job.config_path,
                 result_path=Path(str(job.config["jobs_dir"]))
                 / job.job_name

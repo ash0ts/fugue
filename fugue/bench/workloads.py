@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from fugue.bench.candidates import comparison_example_id
 from fugue.bench.context import (
     ContextEvent,
     ContextRuntime,
@@ -402,8 +403,8 @@ async def _run_sequence_cohort(
                     "event_kind": event.kind,
                 },
                 runtime.env,
-                lambda provider=provider, event=event, namespace=namespace: provider.ingest(
-                    spec, event, namespace, runtime
+                lambda provider=provider, event=event, namespace=namespace: (
+                    provider.ingest(spec, event, namespace, runtime)
                 ),
                 lambda value: value,
             )
@@ -454,11 +455,13 @@ async def _run_sequence_cohort(
                         "query_id": query.id,
                     },
                     runtime.env,
-                    lambda provider=provider, query=query, prepared=prepared, namespace=namespace: provider.retrieve(
-                        spec,
-                        query,
-                        replace(prepared, path=namespace),
-                        runtime,
+                    lambda provider=provider, query=query, prepared=prepared, namespace=namespace: (
+                        provider.retrieve(
+                            spec,
+                            query,
+                            replace(prepared, path=namespace),
+                            runtime,
+                        )
                     ),
                     lambda value: {
                         "result_count": len(value),
@@ -528,8 +531,12 @@ def _sequence_case(raw: Any) -> SequenceCase:
             id=validate_id(item["id"], kind="sequence probe id"),
             after_episode=int(item["after_episode"]),
             query=str(item["query"]),
-            expected_paths=tuple(str(value) for value in item.get("expected_paths", [])),
-            expected_facts=tuple(str(value) for value in item.get("expected_facts", [])),
+            expected_paths=tuple(
+                str(value) for value in item.get("expected_paths", [])
+            ),
+            expected_facts=tuple(
+                str(value) for value in item.get("expected_facts", [])
+            ),
         )
         for item in raw.get("probes", [])
     )
@@ -537,9 +544,7 @@ def _sequence_case(raw: Any) -> SequenceCase:
         [str(event.episode) for event in events],
         f"sequence {sequence_id} episode",
     )
-    _require_unique_ids(
-        [probe.id for probe in probes], f"sequence {sequence_id} probe"
-    )
+    _require_unique_ids([probe.id for probe in probes], f"sequence {sequence_id} probe")
     if any(event.episode < 1 for event in events):
         raise ValueError(f"sequence {sequence_id} episodes must be positive")
     episode_ids = {event.episode for event in events}
@@ -563,9 +568,7 @@ def _validate_workload_counts(*, attempts: int, limit: int | None) -> None:
         raise ValueError("workload limit must be positive")
 
 
-def _require_unique_ids(
-    values: list[str], kind: str, path: Path | None = None
-) -> None:
+def _require_unique_ids(values: list[str], kind: str, path: Path | None = None) -> None:
     counts: dict[str, int] = {}
     for value in values:
         counts[value] = counts.get(value, 0) + 1
@@ -622,7 +625,12 @@ def _add_runtime_correlation(
         json.dumps(spec.config, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     trace_project = trace_project_slug(runtime.env)
+    candidate_id = runtime.env.get("FUGUE_CANDIDATE_ID")
+    execution_fingerprint = runtime.env.get("FUGUE_EXECUTION_FINGERPRINT")
+    identity_schema_version = runtime.env.get("FUGUE_IDENTITY_SCHEMA_VERSION")
+    dataset_id = runtime.env.get("FUGUE_DATASET")
     for row in rows:
+        logical_task_id = _logical_measurement_id(row)
         row.update(
             {
                 "run_id": run_id,
@@ -633,6 +641,7 @@ def _add_runtime_correlation(
                     f"{row.get('episode') or 0}:{row.get('query_id') or '-'}"
                 ),
                 "variant_id": spec.id,
+                "execution_kind": "provider_diagnostic",
                 "context_version": spec.version,
                 "context_config_hash": config_hash,
                 "context_delivery": runtime.env.get(
@@ -643,8 +652,34 @@ def _add_runtime_correlation(
                 "builder_model": route.display_model if route else None,
                 "model_provider": route.provider if route else None,
                 "embedding_model": spec.config.get("embedding_model"),
+                "trial_index": row.get("attempt"),
             }
         )
+        if candidate_id:
+            row["candidate_id"] = candidate_id
+        if execution_fingerprint:
+            row["execution_fingerprint"] = execution_fingerprint
+        if identity_schema_version:
+            row["identity_schema_version"] = int(identity_schema_version)
+        if dataset_id and logical_task_id:
+            row["comparison_example_id"] = comparison_example_id(
+                dataset_id=dataset_id,
+                workload_id=str(row.get("workload_id") or ""),
+                logical_task_id=logical_task_id,
+            )
+
+
+def _logical_measurement_id(row: dict[str, Any]) -> str:
+    task = str(row.get("task_name") or "")
+    record_type = str(row.get("record_type") or "measurement")
+    query = str(row.get("query_id") or "")
+    episode = row.get("episode")
+    if query:
+        suffix = f":after:{episode}" if episode is not None else ""
+        return f"{task}:probe:{query}{suffix}"
+    if episode is not None:
+        return f"{task}:episode:{episode}"
+    return f"{task}:{record_type}"
 
 
 def _trace_fields(

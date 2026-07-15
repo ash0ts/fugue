@@ -143,21 +143,15 @@ def build_run_snapshot(
             ),
             "context_source_sha256": context_behavior_digest(context),
             "agent_config_hash": job.agent_config_hash,
-            "content_hashes": (job.config.get("fugue") or {}).get(
-                "content_hashes"
-            )
+            "content_hashes": (job.config.get("fugue") or {}).get("content_hashes")
             or {},
-            "prompt_assets": {
-                job.prompt_id: assets[f"prompt:{job.prompt_id}"]
-            }
+            "prompt_assets": {job.prompt_id: assets[f"prompt:{job.prompt_id}"]}
             if job.prompt_id
             else {},
             "skill_assets": skill_assets,
             "integration_ids": list(job.integration_ids),
             "agent": agent,
-            "environment": _portable(
-                environment, candidate_required_env, secret_names
-            ),
+            "environment": _portable(environment, candidate_required_env, secret_names),
             "required_env": sorted(name for name in candidate_required_env if name),
         }
         required_env.update(candidate_required_env)
@@ -172,6 +166,7 @@ def build_run_snapshot(
             "cell_id": cell.id,
             "candidate_id": cell.candidate_id,
             "execution_fingerprint": cell.execution_fingerprint,
+            "execution_kind": cell.execution_kind,
             "comparison_example_id": cell.comparison_example_id,
             "trial_index": cell.trial_index,
             "workload_id": cell.workload_id,
@@ -183,9 +178,7 @@ def build_run_snapshot(
         for cell in cells
     )
     scorer_hashes = {
-        key: value
-        for job in jobs
-        for key, value in (job.scorer_hashes or {}).items()
+        key: value for job in jobs for key, value in (job.scorer_hashes or {}).items()
     }
     evaluation = {
         "judge_model": experiment.judge_model,
@@ -243,7 +236,9 @@ def write_run_input_lock(
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing != payload:
-            raise ValueError(f"run input lock already exists with different content: {path}")
+            raise ValueError(
+                f"run input lock already exists with different content: {path}"
+            )
         return path
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temporary.write_text(

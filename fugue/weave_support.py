@@ -11,6 +11,7 @@ _LOCK = Lock()
 
 WEAVE_AGENTS_BASE_URL = "https://trace.wandb.ai"
 WEAVE_AGENTS_OTEL_ENDPOINT = f"{WEAVE_AGENTS_BASE_URL}/agents/otel/v1/traces"
+DEFAULT_WANDB_BASE_URL = "https://api.wandb.ai"
 
 
 _WEAVE_ENV_KEYS = (
@@ -48,6 +49,33 @@ def weave_agents_otel_headers(project: str, api_key: str) -> str:
     """Return OTLP env headers without writing credentials to a config file."""
     token = base64.b64encode(f"api:{api_key}".encode()).decode()
     return f"project_id={project},Authorization=Basic%20{token}"
+
+
+def resolved_weave_trace_server_url(env: Mapping[str, str]) -> str:
+    """Resolve the same trace endpoint as the pinned Weave SDK without mutating env."""
+
+    explicit = env.get("WF_TRACE_SERVER_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    public = env.get("WANDB_PUBLIC_BASE_URL", "").strip()
+    if public:
+        base_url = public.rstrip("/")
+    else:
+        configured = env.get("WANDB_BASE_URL", "").strip()
+        if configured:
+            base_url = configured.rstrip("/")
+        else:
+            try:
+                from weave.trace.env import Settings
+
+                base_url = Settings().base_url.rstrip("/")
+            except ImportError:
+                base_url = DEFAULT_WANDB_BASE_URL
+    return (
+        WEAVE_AGENTS_BASE_URL
+        if base_url == DEFAULT_WANDB_BASE_URL
+        else f"{base_url}/traces"
+    )
 
 
 async def trace_async_operation(

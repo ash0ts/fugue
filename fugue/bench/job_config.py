@@ -11,7 +11,11 @@ from urllib.parse import urlparse
 
 import yaml
 
-from fugue.bench.candidates import ResolvedCandidate, resolve_candidate
+from fugue.bench.candidates import (
+    ResolvedCandidate,
+    comparison_example_id,
+    resolve_candidate,
+)
 from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
     ContextBinding,
@@ -76,6 +80,7 @@ class RenderedJob:
     comparison_example_id: str
     candidate_id: str
     resolved_candidate: ResolvedCandidate
+    execution_kind: str
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -139,15 +144,25 @@ def _build_jobs(
     variants = [variant for variant in experiment.variants if variant.enabled]
     if system_names:
         requested = set(system_names)
-        variants = [variant for variant in variants if variant.context.system_id in requested]
-        missing = sorted(requested - {variant.context.system_id for variant in variants})
+        variants = [
+            variant for variant in variants if variant.context.system_id in requested
+        ]
+        missing = sorted(
+            requested - {variant.context.system_id for variant in variants}
+        )
         if missing:
-            raise ValueError(f"context systems are not variants in this experiment: {', '.join(missing)}")
+            raise ValueError(
+                f"context systems are not variants in this experiment: {', '.join(missing)}"
+            )
     selected_jobs_dir = jobs_dir or experiment.jobs_dir or manifest.jobs_dir
     selected_attempts = n_attempts or experiment.n_attempts or manifest.k
-    selected_concurrent = n_concurrent or experiment.n_concurrent or manifest.n_concurrent
+    selected_concurrent = (
+        n_concurrent or experiment.n_concurrent or manifest.n_concurrent
+    )
     selected_n_tasks = n_tasks if n_tasks is not None else experiment.n_tasks
-    selected_tasks = manifest.tasks[:selected_n_tasks] if selected_n_tasks else manifest.tasks
+    selected_tasks = (
+        manifest.tasks[:selected_n_tasks] if selected_n_tasks else manifest.tasks
+    )
     task_groups = [
         ([task], trial_index)
         for task in selected_tasks
@@ -281,9 +296,7 @@ def _build_jobs(
                 resolved_candidate = resolve_candidate(
                     harness=harness,
                     model_route=_candidate_model_route(route),
-                    prompt_digest=next(
-                        iter(content_hashes["prompts"].values()), None
-                    ),
+                    prompt_digest=next(iter(content_hashes["prompts"].values()), None),
                     skills=[item.provenance() for item in resolved_skills],
                     context={
                         "id": spec.id,
@@ -301,9 +314,7 @@ def _build_jobs(
                             "verifier": _merge_dicts(
                                 experiment.verifier, variant.verifier
                             ),
-                            "retry": _merge_dicts(
-                                experiment.retry, variant.retry
-                            ),
+                            "retry": _merge_dicts(experiment.retry, variant.retry),
                         },
                         "trace_content": experiment.trace_content,
                         "instrumentation": "weave",
@@ -384,6 +395,7 @@ def _build_jobs(
                     trial_index=trial_index,
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
+                    execution_fingerprint=resolved_candidate.execution_fingerprint,
                 )
                 rendered.append(
                     RenderedJob(
@@ -413,6 +425,7 @@ def _build_jobs(
                         comparison_example_id=comparison_example_id,
                         candidate_id=candidate_id,
                         resolved_candidate=resolved_candidate,
+                        execution_kind="agent",
                         evaluation_case=evaluation_cases.get(tasks[0].id),
                         evaluation_rubrics=evaluation_rubrics,
                         scorer_hashes=dict(scorer_hashes),
@@ -491,9 +504,7 @@ def _job_config(
             isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
             for item in mounts
         ):
-            mounts.append(
-                _read_only_mount(repo_root / "fugue", "/fugue-src/fugue")
-            )
+            mounts.append(_read_only_mount(repo_root / "fugue", "/fugue-src/fugue"))
         environment["mounts"] = mounts
     artifacts = _dedupe_values(
         [
@@ -522,9 +533,7 @@ def _job_config(
                 repo_root=repo_root,
             )
         ],
-        "datasets": [
-            _dataset_config(manifest, repo_root, tasks)
-        ],
+        "datasets": [_dataset_config(manifest, repo_root, tasks)],
         "extra_instruction_paths": _extra_instruction_paths(
             repo_root=repo_root,
             context_instruction=context_instruction,
@@ -602,10 +611,7 @@ def _evaluation_cases(
     resolved = repo_root / relative
     if text is None and not resolved.is_file():
         return {}
-    return {
-        str(case["id"]): case
-        for case in load_cases(resolved, text=text)
-    }
+    return {str(case["id"]): case for case in load_cases(resolved, text=text)}
 
 
 def _dataset_config(
@@ -614,9 +620,7 @@ def _dataset_config(
     tasks: list[TaskSpec],
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "task_names": [
-            _harbor_task_name(manifest, task.id) for task in tasks
-        ],
+        "task_names": [_harbor_task_name(manifest, task.id) for task in tasks],
         "n_tasks": len(tasks),
     }
     if manifest.dataset.path:
@@ -661,9 +665,7 @@ def _agent_config(
     if _needs_mcp_proxy(selected_mcp_servers):
         current_pythonpath = str(agent_env.get("PYTHONPATH") or "").strip()
         agent_env["PYTHONPATH"] = (
-            f"/fugue-src:{current_pythonpath}"
-            if current_pythonpath
-            else "/fugue-src"
+            f"/fugue-src:{current_pythonpath}" if current_pythonpath else "/fugue-src"
         )
     config: dict[str, Any] = {
         "model_name": route.display_model,
@@ -727,6 +729,7 @@ def _job_env(
     trial_index: int,
     comparison_example_id: str,
     candidate_id: str,
+    execution_fingerprint: str,
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = _content_hashes(
@@ -740,7 +743,7 @@ def _job_env(
             "fugue",
             f"experiment-id:{experiment.id}",
             f"workload:{workload_id}",
-            *( [f"preset:{preset_id}"] if preset_id else []),
+            *([f"preset:{preset_id}"] if preset_id else []),
             f"variant:{variant.id}",
             f"context-system:{context_spec.id}",
             *[f"prompt:{item_id}" for item_id in prompt_ids],
@@ -806,6 +809,9 @@ def _job_env(
             "FUGUE_TRIAL_INDEX": str(trial_index),
             "FUGUE_COMPARISON_EXAMPLE_ID": comparison_example_id,
             "FUGUE_CANDIDATE_ID": candidate_id,
+            "FUGUE_EXECUTION_FINGERPRINT": execution_fingerprint,
+            "FUGUE_EXECUTION_KIND": "agent",
+            "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
             "FUGUE_TRACE_CONTENT": experiment.trace_content,
@@ -875,11 +881,7 @@ def _context_binding(
             binding.managed_runtime == "fugue_context"
             and variant.context.delivery == "portable"
         )
-        mounts = (
-            []
-            if portable
-            else [_read_only_mount(prepared.path, "/fugue-context")]
-        )
+        mounts = [] if portable else [_read_only_mount(prepared.path, "/fugue-context")]
         env = dict(binding.env)
         if portable:
             binding = _bind_fugue_context_runtime(
@@ -920,7 +922,10 @@ def _context_binding(
             env=env,
             mounts=tuple([*binding.mounts, *mounts]),
         )
-    cache_ready = all((runtime.cache_root / key / "context-manifest.json").is_file() for key in cache_keys.values())
+    cache_ready = all(
+        (runtime.cache_root / key / "context-manifest.json").is_file()
+        for key in cache_keys.values()
+    )
     return binding, cache_keys, cache_ready
 
 
@@ -1014,9 +1019,7 @@ def _bind_fugue_context_runtime(
             **binding.env,
             "FUGUE_CONTEXT_COMMAND": "fugue-context",
             "FUGUE_CONTEXT_QUERY_URL": f"http://{CONTEXT_RUNTIME_SERVICE}:8001",
-            "FUGUE_CONTEXT_EVENTS_PATH": (
-                "/logs/artifacts/fugue-context-events.jsonl"
-            ),
+            "FUGUE_CONTEXT_EVENTS_PATH": ("/logs/artifacts/fugue-context-events.jsonl"),
         },
         mounts=(
             *binding.mounts,
@@ -1054,9 +1057,7 @@ def _replace_container_paths(value: Any) -> Any:
     if isinstance(value, list):
         return [_replace_container_paths(item) for item in value]
     if isinstance(value, dict):
-        return {
-            str(key): _replace_container_paths(item) for key, item in value.items()
-        }
+        return {str(key): _replace_container_paths(item) for key, item in value.items()}
     return value
 
 
@@ -1113,7 +1114,7 @@ def _context_instruction_path(
     if write:
         path.parent.mkdir(parents=True, exist_ok=True)
         interface = (
-            "Query it with `fugue-context query --text \"your question\" --top-k 10`. "
+            'Query it with `fugue-context query --text "your question" --top-k 10`. '
             if delivery == "portable" and spec.id.startswith("rag-")
             else "Use its injected files or configured native tools when useful. "
         )
@@ -1156,13 +1157,9 @@ def _candidate_agent_configuration(
 ) -> dict[str, Any]:
     return _identity_configuration(
         {
-            "agent_kwargs": _merge_dicts(
-                experiment.agent_kwargs, variant.agent_kwargs
-            ),
+            "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
             "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
-            "environment": _merge_dicts(
-                experiment.environment, variant.environment
-            ),
+            "environment": _merge_dicts(experiment.environment, variant.environment),
             "artifacts": [*experiment.artifacts, *variant.artifacts],
         }
     )
@@ -1202,15 +1199,11 @@ def _candidate_model_route(route: ModelRoute) -> dict[str, Any]:
     }
 
 
-def _comparison_example_id(
-    *, dataset_id: str, workload_id: str, task_id: str
-) -> str:
-    return _stable_id(
-        {
-            "dataset": dataset_id,
-            "workload": workload_id,
-            "task": task_id,
-        }
+def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -> str:
+    return comparison_example_id(
+        dataset_id=dataset_id,
+        workload_id=workload_id,
+        logical_task_id=task_id,
     )
 
 
@@ -1318,7 +1311,9 @@ def _job_name(
     task_id: str | None = None,
     trial_index: int | None = None,
 ) -> str:
-    base = f"{_slug(run_name)}-{_slug(workload_id)}-{_slug(harness)}-{_slug(variant_id)}"
+    base = (
+        f"{_slug(run_name)}-{_slug(workload_id)}-{_slug(harness)}-{_slug(variant_id)}"
+    )
     if task_id:
         base += f"-{_slug(task_id)}"
     suffix = f"-t{trial_index:03d}" if trial_index is not None else ""

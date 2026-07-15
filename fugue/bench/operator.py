@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fugue.bench.candidates import resolve_candidate
+from fugue.bench.candidates import comparison_example_id, resolve_candidate
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
@@ -327,6 +327,7 @@ class OperatorService:
         if judge_model:
             routes.append(self._role_status("judge", judge_model, env))
         from fugue.assistant import select_assistant_model
+
         routes.append(
             self._role_status(
                 "composer",
@@ -339,15 +340,17 @@ class OperatorService:
         routes.append(
             self._role_status(
                 "analyst",
-                select_assistant_model("composer", experiment_model=selected_model, env=env),
+                select_assistant_model(
+                    "composer", experiment_model=selected_model, env=env
+                ),
                 env,
             )
         )
         trace_project = trace_project_slug(env)
         bridge = bridge_status()
         trace_content = (
-            (request.trace_content if request else None) or selected.trace_content
-        )
+            request.trace_content if request else None
+        ) or selected.trace_content
         key_names = ("WANDB_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
         preset = select_preset(selected, request.preset if request else None)
         workloads = select_workloads(
@@ -436,9 +439,7 @@ class OperatorService:
             or target_model
         )
         judge_model = (
-            request.judge_model
-            or selected.judge_model
-            or env.get("FUGUE_JUDGE_MODEL")
+            request.judge_model or selected.judge_model or env.get("FUGUE_JUDGE_MODEL")
         )
         checks = run_preflight(
             target_model,
@@ -483,9 +484,7 @@ class OperatorService:
             )
             for workload in selected_workloads
         )
-        if generated_scoring and not (
-            request.judge_model or selected.judge_model
-        ):
+        if generated_scoring and not (request.judge_model or selected.judge_model):
             checks.append(
                 PreflightCheck(
                     "generated evaluation judge model",
@@ -815,12 +814,7 @@ class OperatorService:
             if asset.kind == "prompt":
                 path = self.repo_root / "configs/fugue/prompts" / f"{asset.id}.md"
             elif asset.kind == "skill":
-                path = (
-                    self.repo_root
-                    / "configs/fugue/skills"
-                    / asset.id
-                    / "SKILL.md"
-                )
+                path = self.repo_root / "configs/fugue/skills" / asset.id / "SKILL.md"
             else:
                 path = self.repo_root / evaluation_asset_path(asset.kind, asset.id)
             if path.exists() and not replace_assets:
@@ -975,9 +969,7 @@ class OperatorService:
                             or (job.config.get("fugue") or {}).get("n_attempts")
                             or 1
                         )
-                        * int(
-                            (job.config.get("fugue") or {}).get("task_count") or 1
-                        )
+                        * int((job.config.get("fugue") or {}).get("task_count") or 1)
                     ),
                     applicable=job.applicable,
                     reason=job.skip_reason,
@@ -1105,7 +1097,9 @@ class OperatorService:
                         preset_id=preset.id if preset.id != "default" else None,
                         required_capabilities=workload.required_capabilities,
                         workload_artifacts=workload.artifacts,
-                        scorer_refs=[scorer_reference(item) for item in workload.scorers],
+                        scorer_refs=[
+                            scorer_reference(item) for item in workload.scorers
+                        ],
                         asset_overlay=asset_overlay,
                     )
                 )
@@ -1143,17 +1137,20 @@ class OperatorService:
                 f"workload {workload.id} runner {workload.runner} does not match "
                 f"{dataset.runner} dataset"
             )
-        systems = selected_system_ids(
-            experiment,
-            workload,
-            preset,
-            list(request.systems)
-            or (
-                [variant.context.system_id for variant in experiment.variants]
-                if request.variants
-                else None
-            ),
-        ) or []
+        systems = (
+            selected_system_ids(
+                experiment,
+                workload,
+                preset,
+                list(request.systems)
+                or (
+                    [variant.context.system_id for variant in experiment.variants]
+                    if request.variants
+                    else None
+                ),
+            )
+            or []
+        )
         selected_model = select_model(
             request.model,
             env=env,
@@ -1237,7 +1234,12 @@ class OperatorService:
                 "--attempts",
                 str(attempts),
                 "--concurrency",
-                str(request.n_concurrent or preset.n_concurrent or experiment.n_concurrent or 4),
+                str(
+                    request.n_concurrent
+                    or preset.n_concurrent
+                    or experiment.n_concurrent
+                    or 4
+                ),
                 "--repo-root",
                 self.repo_root.as_posix(),
             ]
@@ -1248,7 +1250,9 @@ class OperatorService:
                 if workload.runner == "retrieval"
                 else len(dataset.sequence_cases)
             )
-            count = int(((dataset.source.get("counts") or {}).get(preset.id)) or local_count)
+            count = int(
+                ((dataset.source.get("counts") or {}).get(preset.id)) or local_count
+            )
             task_count = min(count, limit) if limit else count
             config = {
                 "fugue": {
@@ -1266,16 +1270,12 @@ class OperatorService:
                     "skip_reason": skip_reason,
                 }
             }
-            comparison_example_id = _stable_identity(
-                {
-                    "dataset": dataset.id,
-                    "workload": workload.id,
-                    "task": dataset.id,
-                }
+            initial_comparison_example_id = comparison_example_id(
+                dataset_id=dataset.id,
+                workload_id=workload.id,
+                logical_task_id=dataset.id,
             )
-            direct_harness = (
-                "direct" if workload.runner == "retrieval" else "sequence"
-            )
+            direct_harness = "direct" if workload.runner == "retrieval" else "sequence"
             resolved_candidate = resolve_candidate(
                 harness=direct_harness,
                 model_route={
@@ -1307,6 +1307,12 @@ class OperatorService:
                     config=config,
                     env={
                         **direct_env,
+                        "FUGUE_CANDIDATE_ID": candidate_id,
+                        "FUGUE_EXECUTION_FINGERPRINT": resolved_candidate.execution_fingerprint,
+                        "FUGUE_EXECUTION_KIND": "provider_diagnostic",
+                        "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
+                        "FUGUE_DATASET": dataset.id,
+                        "FUGUE_WORKLOAD_ID": workload.id,
                         "FUGUE_CONTEXT_SYSTEM_ID": system_id,
                         "FUGUE_CONTEXT_DELIVERY": delivery,
                     },
@@ -1329,9 +1335,10 @@ class OperatorService:
                     run_name=run_name,
                     task_id=dataset.id,
                     trial_index=1,
-                    comparison_example_id=comparison_example_id,
+                    comparison_example_id=initial_comparison_example_id,
                     candidate_id=candidate_id,
                     resolved_candidate=resolved_candidate,
+                    execution_kind="provider_diagnostic",
                     applicable=skip_reason is None,
                     skip_reason=skip_reason,
                 )
@@ -1419,9 +1426,7 @@ class OperatorService:
             temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
             os.replace(temporary, snapshot_path)
             self.prepare_context(request, experiment=resolved, run_id=run_id)
-            rendered = self.rendered_jobs(
-                request, run_id=run_id, experiment=resolved
-            )
+            rendered = self.rendered_jobs(request, run_id=run_id, experiment=resolved)
             validate_harbor_job_configs(
                 [job.config_path for job in rendered if job.applicable]
             )
@@ -1501,7 +1506,9 @@ class OperatorService:
                 cell_finished=(
                     live.finish_cell
                     if live is not None
-                    else local.finish_cell if local is not None else None
+                    else local.finish_cell
+                    if local is not None
+                    else None
                 ),
             )
             publication = live.finalize() if live is not None else None
@@ -1534,7 +1541,11 @@ class OperatorService:
             write_run_manifest(
                 self.repo_root,
                 run_id,
-                {"status": "interrupted", "ended_at": _now(), "error": "Run interrupted"},
+                {
+                    "status": "interrupted",
+                    "ended_at": _now(),
+                    "error": "Run interrupted",
+                },
             )
         except Exception as exc:
             write_run_manifest(
@@ -1663,7 +1674,11 @@ class OperatorService:
         candidates = [item.candidate_id for item in self.run_summary(run_id).candidates]
         if value in candidates:
             return value
-        matches = [candidate_id for candidate_id in candidates if candidate_id.startswith(value)]
+        matches = [
+            candidate_id
+            for candidate_id in candidates
+            if candidate_id.startswith(value)
+        ]
         if not matches:
             raise ValueError(f"candidate prefix does not match this run: {value}")
         if len(matches) > 1:
@@ -1778,7 +1793,9 @@ class OperatorService:
             output_tokens=sum(int(row.get("n_output_tokens") or 0) for row in trials),
             average_reward=sum(rewards) / len(rewards) if rewards else None,
             average_wall_time_sec=sum(times) / len(times) if times else None,
-            tool_calls=sum(int(row.get("weave_tool_call_count") or 0) for row in trials),
+            tool_calls=sum(
+                int(row.get("weave_tool_call_count") or 0) for row in trials
+            ),
             turns=sum(int(row.get("weave_turn_count") or 0) for row in trials),
             context_assigned=sum(bool(row.get("context_assigned")) for row in trials),
             context_invoked=sum(bool(row.get("context_invoked")) for row in trials),
@@ -1804,8 +1821,7 @@ class OperatorService:
                 row.get("trace_link_status") == "linked" for row in trials
             ),
             unlinked_traces=sum(
-                row.get("trace_link_status") not in {None, "linked"}
-                for row in trials
+                row.get("trace_link_status") not in {None, "linked"} for row in trials
             ),
             usage_unavailable=sum(
                 row.get("weave_usage_status") == "unavailable" for row in trials
@@ -1850,15 +1866,14 @@ class OperatorService:
             (
                 item
                 for item in run.evaluations
-                if item.url and (candidate_id is None or item.candidate_id == candidate_id)
+                if item.url
+                and (candidate_id is None or item.candidate_id == candidate_id)
             ),
             None,
         )
 
     @staticmethod
-    def _role_status(
-        role: str, model: str, env: dict[str, str]
-    ) -> ModelRoleStatus:
+    def _role_status(role: str, model: str, env: dict[str, str]) -> ModelRoleStatus:
         route = resolve_model_route(model, env)
         return ModelRoleStatus(
             role=role,
@@ -1898,12 +1913,26 @@ class OperatorService:
                 examples=int(item.get("examples") or 0),
                 url=str(item["url"]) if item.get("url") else None,
                 evaluation_ref=(
-                    str(item["evaluation_ref"])
-                    if item.get("evaluation_ref")
-                    else None
+                    str(item["evaluation_ref"]) if item.get("evaluation_ref") else None
                 ),
                 model_ref=str(item["model_ref"]) if item.get("model_ref") else None,
-                linked_predictions=int(item.get("linked_predictions") or 0),
+                agent_predictions=int(
+                    item.get("agent_predictions")
+                    or max(
+                        int(item.get("examples") or 0)
+                        - int(item.get("direct_predictions") or 0),
+                        0,
+                    )
+                ),
+                linked_agent_predictions=int(
+                    item.get("linked_agent_predictions")
+                    or item.get("linked_predictions")
+                    or 0
+                ),
+                direct_predictions=int(item.get("direct_predictions") or 0),
+                linking_failures=tuple(
+                    str(value) for value in item.get("linking_failures", []) if value
+                ),
             )
             for item in run.metadata.get("evaluation_runs", [])
             if isinstance(item, dict)
@@ -1916,7 +1945,9 @@ class OperatorService:
             created_at=run.created_at,
             cells=cells,
             passed=sum(cell.status == "passed" for cell in cells),
-            failed=sum(cell.status in {"failed", "cancelled", "interrupted"} for cell in cells),
+            failed=sum(
+                cell.status in {"failed", "cancelled", "interrupted"} for cell in cells
+            ),
             pending=sum(cell.status in {"pending", "running"} for cell in cells),
             not_applicable=sum(cell.status == "not_applicable" for cell in cells),
             candidates=candidates,
@@ -1956,8 +1987,7 @@ def _candidate_summaries(
         selected = [cell for cell in cells if cell.candidate_id == candidate_id]
         passed = sum(cell.status == "passed" for cell in selected)
         failed = sum(
-            cell.status in {"failed", "cancelled", "interrupted"}
-            for cell in selected
+            cell.status in {"failed", "cancelled", "interrupted"} for cell in selected
         )
         pending = sum(cell.status in {"pending", "running"} for cell in selected)
         not_applicable = sum(cell.status == "not_applicable" for cell in selected)
@@ -2068,9 +2098,7 @@ def selected_system_ids(
         allowed = set(workload.systems) if workload.systems else None
         return [item for item in selected if allowed is None or item in allowed]
     values = [
-        variant.context.system_id
-        for variant in experiment.variants
-        if variant.enabled
+        variant.context.system_id for variant in experiment.variants if variant.enabled
     ]
     return list(dict.fromkeys(values)) or None
 
@@ -2114,12 +2142,15 @@ def _preparation_targets(
         )
     ]
     for workload in selected:
-        system_ids = selected_system_ids(
-            experiment,
-            workload,
-            preset,
-            requested_systems,
-        ) or []
+        system_ids = (
+            selected_system_ids(
+                experiment,
+                workload,
+                preset,
+                requested_systems,
+            )
+            or []
+        )
         required = set(workload.required_capabilities)
         system_ids = [
             system_id
@@ -2237,13 +2268,16 @@ def _require_saved_evaluation_assets(
     request: ExperimentRequest,
     workloads: list[WorkloadSpec],
 ) -> None:
-    generated = any(
+    generated = (
         any(
-            not scorer_reference(scorer).startswith("builtin:")
-            for scorer in workload.scorers
+            any(
+                not scorer_reference(scorer).startswith("builtin:")
+                for scorer in workload.scorers
+            )
+            for workload in workloads
         )
-        for workload in workloads
-    ) or experiment.evaluation_generation is not None
+        or experiment.evaluation_generation is not None
+    )
     if not generated:
         return
     if not (request.judge_model or experiment.judge_model):
@@ -2313,9 +2347,7 @@ def _run_tags(
     manifest_path: Path,
 ) -> list[str]:
     configured = [
-        part.strip()
-        for part in env.get("FUGUE_TAGS", "").split(",")
-        if part.strip()
+        part.strip() for part in env.get("FUGUE_TAGS", "").split(",") if part.strip()
     ]
     return _dedupe(
         [

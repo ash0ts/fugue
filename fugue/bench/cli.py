@@ -113,18 +113,37 @@ def _parser() -> FugueArgumentParser:
     plan.set_defaults(handler=_plan)
 
     run = subparsers.add_parser("run", help="Preview or run an experiment")
-    run.add_argument("experiment", nargs="?", help="Saved experiment id (default: pilot)")
+    run.add_argument(
+        "experiment", nargs="?", help="Saved experiment id (default: pilot)"
+    )
     _add_run_args(run)
-    run.add_argument("--preview", action="store_true", help="Show the matrix without writing runtime state")
-    run.add_argument("--detach", action="store_true", help="Start the durable run and return immediately")
-    run.add_argument("--json", action="store_true", help="Emit structured output without Rich decoration")
+    run.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show the matrix without writing runtime state",
+    )
+    run.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start the durable run and return immediately",
+    )
+    run.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit structured output without Rich decoration",
+    )
     run.add_argument("--run-id", help=argparse.SUPPRESS)
     run.add_argument("--experiment-file", type=Path, help=argparse.SUPPRESS)
     run.set_defaults(handler=_run_command)
 
     runs = subparsers.add_parser("runs", help="Inspect and manage durable runs")
     runs.add_argument("--run-id", help=argparse.SUPPRESS)
-    runs.add_argument("--limit", type=_positive_cli_int, default=20, help="Maximum recent runs to list")
+    runs.add_argument(
+        "--limit",
+        type=_positive_cli_int,
+        default=20,
+        help="Maximum recent runs to list",
+    )
     _add_common_args(runs, json_output=True)
     run_actions = runs.add_subparsers(dest="runs_action", metavar="ACTION")
     logs = run_actions.add_parser("logs", help="Read run or selected-cell logs")
@@ -156,20 +175,40 @@ def _parser() -> FugueArgumentParser:
     _add_common_args(open_run, json_output=True)
     runs.set_defaults(handler=_runs)
 
-    analyze = subparsers.add_parser("analyze", help="Analyze experiment results with Fugue AI")
+    analyze = subparsers.add_parser(
+        "analyze", help="Analyze experiment results with Fugue AI"
+    )
     analyze.add_argument("question", nargs="*")
     source = analyze.add_mutually_exclusive_group()
     source.add_argument("--saved", help="Run a saved analysis definition")
-    source.add_argument("--list", action="store_true", dest="list_saved", help="List saved analysis definitions")
-    analyze.add_argument("--filter", action="append", default=[], help="Required FIELD=VALUE scope filter")
+    source.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_saved",
+        help="List saved analysis definitions",
+    )
+    analyze.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        help="Required FIELD=VALUE scope filter",
+    )
     analyze.add_argument("--model", help="Analyst model route")
-    analyze.add_argument("--source", choices=("local", "hybrid"), help="Use local outcomes or narrow Weave enrichment")
+    analyze.add_argument(
+        "--source",
+        choices=("local", "hybrid"),
+        help="Use local outcomes or narrow Weave enrichment",
+    )
     analyze.add_argument("--save", help="Save the generated analysis definition")
-    analyze.add_argument("--yes", action="store_true", help="Confirm report generation without prompting")
+    analyze.add_argument(
+        "--yes", action="store_true", help="Confirm report generation without prompting"
+    )
     _add_common_args(analyze, json_output=True)
     analyze.set_defaults(handler=_analyze)
 
-    setup = subparsers.add_parser("setup", help="Inspect and prepare Fugue dependencies")
+    setup = subparsers.add_parser(
+        "setup", help="Inspect and prepare Fugue dependencies"
+    )
     setup.add_argument("--experiment", default="pilot")
     setup.add_argument("--model")
     setup.add_argument("--builder-model")
@@ -180,9 +219,17 @@ def _parser() -> FugueArgumentParser:
     setup.add_argument("--systems")
     setup.add_argument("--trace-content", choices=("full", "metadata"))
     operation = setup.add_mutually_exclusive_group()
-    operation.add_argument("--check", action="store_true", help="Run observational live preflight")
-    operation.add_argument("--start-bridge", action="store_true", help="Start the local LiteLLM bridge")
-    operation.add_argument("--prepare-context", action="store_true", help="Build selected context artifacts")
+    operation.add_argument(
+        "--check", action="store_true", help="Run observational live preflight"
+    )
+    operation.add_argument(
+        "--start-bridge", action="store_true", help="Start the local LiteLLM bridge"
+    )
+    operation.add_argument(
+        "--prepare-context",
+        action="store_true",
+        help="Build selected context artifacts",
+    )
     operation.add_argument(
         "--skills",
         action="store_true",
@@ -193,7 +240,9 @@ def _parser() -> FugueArgumentParser:
         metavar="ID=DIGEST",
         help="Approve an inspected remote skill at exactly this sha256 digest",
     )
-    setup.add_argument("--rebuild", action="store_true", help="Ignore reusable context cache entries")
+    setup.add_argument(
+        "--rebuild", action="store_true", help="Ignore reusable context cache entries"
+    )
     setup.add_argument(
         "--refresh-skills",
         action="store_true",
@@ -210,7 +259,9 @@ def _parser() -> FugueArgumentParser:
     setup.set_defaults(handler=_setup)
 
     tui = subparsers.add_parser("tui", help="Open the full-screen terminal workspace")
-    tui.add_argument("--screen", choices=("plan", "runs", "results", "setup"), default="plan")
+    tui.add_argument(
+        "--screen", choices=("plan", "runs", "results", "setup"), default="plan"
+    )
     tui.add_argument("--experiment", default="pilot")
     tui.set_defaults(handler=_tui)
     return parser
@@ -223,11 +274,21 @@ def _normalize_runs_argv(argv: list[str]) -> list[str]:
     return ["runs", "--run-id", argv[1], *argv[2:]]
 
 
-def _add_common_args(parser: argparse.ArgumentParser, *, json_output: bool = False) -> None:
-    parser.add_argument("--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS)
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
+def _add_common_args(
+    parser: argparse.ArgumentParser, *, json_output: bool = False
+) -> None:
+    parser.add_argument(
+        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS
+    )
     if json_output:
-        parser.add_argument("--json", action="store_true", help="Emit structured output without Rich decoration")
+        parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit structured output without Rich decoration",
+        )
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
@@ -237,13 +298,19 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--preset", help="Saved experiment preset")
     parser.add_argument("--workloads", help="Comma-separated workload subset")
     parser.add_argument("--systems", help="Comma-separated context-system subset")
-    parser.add_argument("--model", help="Model selector: wandb/..., openai/..., anthropic/...")
+    parser.add_argument(
+        "--model", help="Model selector: wandb/..., openai/..., anthropic/..."
+    )
     parser.add_argument("--judge-model", help="Independent model route for QA judging")
-    parser.add_argument("--builder-model", help="Model route used to build generated context")
+    parser.add_argument(
+        "--builder-model", help="Model route used to build generated context"
+    )
     parser.add_argument("-k", "--n-attempts", type=_positive_cli_int)
     parser.add_argument("-n", "--n-concurrent", type=_positive_cli_int)
     parser.add_argument("-l", "--n-tasks", type=_positive_cli_int)
-    parser.add_argument("--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+    )
     parser.add_argument("--jobs-dir", type=Path)
     parser.add_argument(
         "--run-name",
@@ -255,7 +322,9 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         choices=("full", "metadata"),
         help="Weave agent content capture policy (default: experiment or full)",
     )
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS
+    )
 
 
 def _positive_cli_int(value: str) -> int:
@@ -321,7 +390,9 @@ def _print_home(service: OperatorService) -> None:
         )
     )
     readiness = Table.grid(padding=(0, 2))
-    readiness.add_row("Credentials", _state(status.model_key_present and status.trace_key_present))
+    readiness.add_row(
+        "Credentials", _state(status.model_key_present and status.trace_key_present)
+    )
     readiness.add_row("Docker", _state(status.docker_present))
     readiness.add_row("Harbor", _state(status.harbor_present))
     readiness.add_row("Bridge", _state(status.bridge_ready))
@@ -336,7 +407,9 @@ def _print_home(service: OperatorService) -> None:
         Columns(
             (
                 Panel(identity, title="Workspace", border_style="fugue.cyan"),
-                Panel(readiness, title=f"Readiness {ready}/4", border_style="fugue.gold"),
+                Panel(
+                    readiness, title=f"Readiness {ready}/4", border_style="fugue.gold"
+                ),
                 Panel(latest_text, title="Latest run", border_style="fugue.coral"),
             ),
             equal=True,
@@ -366,7 +439,15 @@ def _sequencer(run: Any) -> Panel:
         ("CODEX", "codex"),
     ):
         status = statuses.get(harness, "pending")
-        glyph = "■" if status == "running" else "▪" if status == "passed" else "×" if status == "failed" else "·"
+        glyph = (
+            "■"
+            if status == "running"
+            else "▪"
+            if status == "passed"
+            else "×"
+            if status == "failed"
+            else "·"
+        )
         lines.append(f"{label:<10} {glyph * 12}  {status.replace('_', ' ')}")
     return Panel("\n".join(lines), title="Harness sequencer", border_style="fugue.cyan")
 
@@ -383,7 +464,11 @@ def _print_preview(preview: Any) -> None:
     CONSOLE.print(
         Group(
             Panel(summary, title="Experiment matrix", border_style="fugue.gold"),
-            Panel(Syntax(commands, "bash", word_wrap=True), title="Harbor commands", border_style="fugue.cyan"),
+            Panel(
+                Syntax(commands, "bash", word_wrap=True),
+                title="Harbor commands",
+                border_style="fugue.cyan",
+            ),
         )
     )
 
@@ -393,7 +478,9 @@ def _print_draft(draft: Any) -> None:
     if draft.assumptions:
         body.append("\nAssumptions: " + "; ".join(draft.assumptions))
     if draft.assets:
-        body.append("\nAssets: " + ", ".join(f"{item.kind}:{item.id}" for item in draft.assets))
+        body.append(
+            "\nAssets: " + ", ".join(f"{item.kind}:{item.id}" for item in draft.assets)
+        )
     CONSOLE.print(
         Panel(
             "\n".join(body),
@@ -403,7 +490,13 @@ def _print_draft(draft: Any) -> None:
     )
     _print_preview(draft.preview)
     if draft.diff:
-        CONSOLE.print(Panel(Syntax(draft.diff, "diff"), title="Proposed diff", border_style="fugue.cyan"))
+        CONSOLE.print(
+            Panel(
+                Syntax(draft.diff, "diff"),
+                title="Proposed diff",
+                border_style="fugue.cyan",
+            )
+        )
     for warning in draft.warnings:
         CONSOLE.print(f"[fugue.coral]warning[/] {warning}")
 
@@ -420,13 +513,13 @@ def _print_analysis_preview(preview: Any) -> None:
     table.add_row("Sources", ", ".join(scope.sources) or "local")
     if preview.selection is not None:
         table.add_row("Selection", preview.selection.decision.replace("_", " "))
-        table.add_row(
-            "Candidate", preview.selection.selected_candidate_id or "none"
-        )
+        table.add_row("Candidate", preview.selection.selected_candidate_id or "none")
         table.add_row("Selection reason", preview.selection.reason)
     if scope.missing_metrics:
         table.add_row("Missing metrics", ", ".join(scope.missing_metrics))
-    CONSOLE.print(Panel(table, title="Resolved analysis scope", border_style="fugue.cyan"))
+    CONSOLE.print(
+        Panel(table, title="Resolved analysis scope", border_style="fugue.cyan")
+    )
     for warning in scope.warnings:
         CONSOLE.print(f"[fugue.coral]warning[/] {warning}")
 
@@ -474,7 +567,9 @@ def _print_context_preparation(records: Any) -> None:
             record.detail,
         )
     if records:
-        CONSOLE.print(Panel(table, title="Context preparation", border_style="fugue.cyan"))
+        CONSOLE.print(
+            Panel(table, title="Context preparation", border_style="fugue.cyan")
+        )
     else:
         CONSOLE.print("[fugue.muted]No context artifacts were required.[/]")
 
@@ -485,7 +580,9 @@ def _run_command(args: argparse.Namespace) -> int:
     service = OperatorService(args.repo_root, args.env_file)
     experiment = _load_experiment_arg(args)
     request = _request_from_args(args, experiment.id)
-    inline_experiment = bool(args.experiment_file or args.manifest or not args.experiment)
+    inline_experiment = bool(
+        args.experiment_file or args.manifest or not args.experiment
+    )
     if args.preview:
         preview = (
             service.preview_experiment(experiment, request=request)
@@ -621,7 +718,9 @@ def _plan(args: argparse.Namespace) -> int:
         open_tui = action == "tui"
         run_requested = action in {"run", "both"}
         if action in {"save", "both"}:
-            save_id = Prompt.ask("Experiment id", default=f"{draft.experiment.id}-planned")
+            save_id = Prompt.ask(
+                "Experiment id", default=f"{draft.experiment.id}-planned"
+            )
     saved = (
         composer.save(
             draft,
@@ -643,14 +742,24 @@ def _plan(args: argparse.Namespace) -> int:
         return 0
     run = None
     if run_requested:
-        if draft.experiment.trace_content == "full" and CONSOLE.is_terminal and not args.yes:
-            if not Confirm.ask("Run with full prompt, response, and tool content in Weave?"):
+        if (
+            draft.experiment.trace_content == "full"
+            and CONSOLE.is_terminal
+            and not args.yes
+        ):
+            if not Confirm.ask(
+                "Run with full prompt, response, and tool content in Weave?"
+            ):
                 run_requested = False
         if not run_requested:
             return 0
-        saved = composer.save(
-            draft, experiment_id=save_id, replace_assets=args.replace_assets
-        ) if save_id and saved is None else saved
+        saved = (
+            composer.save(
+                draft, experiment_id=save_id, replace_assets=args.replace_assets
+            )
+            if save_id and saved is None
+            else saved
+        )
         if draft.assets and not saved:
             raise ValueError(
                 "save the experiment and all proposed assets before running; "
@@ -711,7 +820,9 @@ def _analyze(args: argparse.Namespace) -> int:
     else:
         question = " ".join(args.question).strip()
         if not question:
-            raise ValueError("analysis question is required unless --saved or --list is used")
+            raise ValueError(
+                "analysis question is required unless --saved or --list is used"
+            )
         spec = asyncio.run(
             analyst.plan(
                 question,
@@ -732,13 +843,17 @@ def _analyze(args: argparse.Namespace) -> int:
         if args.json:
             print(as_json(preview))
         else:
-            CONSOLE.print("[fugue.muted]Scope only. Use --yes to generate the report.[/]")
+            CONSOLE.print(
+                "[fugue.muted]Scope only. Use --yes to generate the report.[/]"
+            )
         return 0
     result = asyncio.run(analyst.execute(preview, model=args.model))
     if args.json:
         print(as_json(result))
     else:
-        CONSOLE.print(Panel(Markdown(result.report), title="Analysis", border_style="fugue.cyan"))
+        CONSOLE.print(
+            Panel(Markdown(result.report), title="Analysis", border_style="fugue.cyan")
+        )
         CONSOLE.print(f"Report: [fugue.cyan]{result.report_dir / 'report.md'}[/]")
     return 0
 
@@ -815,7 +930,12 @@ def _setup(args: argparse.Namespace) -> int:
         print(as_json(status))
     else:
         _print_setup(status)
-    return 0 if all(route.key_present for route in status.routes) and status.trace_key_present else 1
+    return (
+        0
+        if all(route.key_present for route in status.routes)
+        and status.trace_key_present
+        else 1
+    )
 
 
 def _runs(args: argparse.Namespace) -> int:
@@ -844,12 +964,16 @@ def _runs(args: argparse.Namespace) -> int:
         if runs:
             CONSOLE.print(table)
         else:
-            CONSOLE.print("[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]")
+            CONSOLE.print(
+                "[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]"
+            )
         return 0
     if args.runs_action == "logs":
         if args.follow:
             try:
-                for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
+                for chunk in service.supervisor.follow_log(
+                    args.run_id, cell_id=args.cell
+                ):
                     print(chunk, end="", flush=True)
             except KeyboardInterrupt:
                 return 130
@@ -908,8 +1032,13 @@ def _runs(args: argparse.Namespace) -> int:
                 for evaluation in summary.evaluations:
                     suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
                     CONSOLE.print(
-                        f"  {evaluation.name} ({evaluation.examples} examples){suffix}"
+                        f"  {evaluation.name} ({evaluation.examples} examples; "
+                        f"{evaluation.linked_agent_predictions}/"
+                        f"{evaluation.agent_predictions} Agent-linked; "
+                        f"{evaluation.direct_predictions} direct){suffix}"
                     )
+                    for reason in evaluation.linking_failures:
+                        CONSOLE.print(f"    [red]{reason}[/]")
             if summary.skipped:
                 CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
             for failure in summary.publication_failures:
@@ -929,11 +1058,7 @@ def _runs(args: argparse.Namespace) -> int:
             url = links.trace or links.agents
             refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
             conversation_id = next(
-                (
-                    value
-                    for reference in refs
-                    for value in reference.conversation_ids
-                ),
+                (value for reference in refs for value in reference.conversation_ids),
                 None,
             )
         if args.json:
@@ -981,14 +1106,20 @@ def _run_panel(run: Any) -> Panel:
             if evaluation.url:
                 details += (
                     f"\n  [link={evaluation.url}]{evaluation.name}[/link] "
-                    f"({evaluation.linked_predictions}/{evaluation.examples} linked)"
+                    f"({evaluation.linked_agent_predictions}/"
+                    f"{evaluation.agent_predictions} Agent-linked; "
+                    f"{evaluation.direct_predictions} direct)"
                 )
+            for reason in evaluation.linking_failures:
+                details += f"\n    [fugue.coral]{reason}[/]"
     for failure in run.evaluation_failures:
         details += f"\n[fugue.coral]Observability:[/] {failure}"
     return Panel(
         details,
         title=f"{run.run_name}  [{run.run_id}]",
-        border_style="fugue.cyan" if run.status in {"starting", "running"} else "fugue.gold",
+        border_style="fugue.cyan"
+        if run.status in {"starting", "running"}
+        else "fugue.gold",
     )
 
 
@@ -1077,7 +1208,11 @@ def _wait_for_run(service: OperatorService, run_id: str) -> int:
                     Group(
                         _run_panel(run),
                         _cells_table(run),
-                        Panel(log_tail or "Waiting for output...", title="Live log", border_style="fugue.muted"),
+                        Panel(
+                            log_tail or "Waiting for output...",
+                            title="Live log",
+                            border_style="fugue.muted",
+                        ),
                     )
                 )
                 if run.status in terminal:
@@ -1119,11 +1254,7 @@ def _context_evaluate(args: argparse.Namespace) -> int:
         raise ValueError(f"unknown direct workload: {args.workload}")
     dataset = load_workload_dataset(_resolve(args.repo_root, Path(workload.dataset)))
     variant = next(
-        (
-            item
-            for item in experiment.variants
-            if item.context.system_id == args.system
-        ),
+        (item for item in experiment.variants if item.context.system_id == args.system),
         None,
     )
     runtime_env = load_env(args.env_file)

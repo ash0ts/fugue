@@ -291,9 +291,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     }
     first = publish_to_weave(rows, project, ledger_root=tmp_path, env=env)
     second = publish_to_weave(rows, project, ledger_root=tmp_path)
-    third = publish_to_weave(
-        rows, project, ledger_root=tmp_path, republish=True
-    )
+    third = publish_to_weave(rows, project, ledger_root=tmp_path, republish=True)
 
     assert (first.published, first.skipped, first.failures) == (1, 0, ())
     assert (second.published, second.skipped) == (0, 1)
@@ -537,7 +535,9 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
     assert loggers[0].examples[0] == loggers[0].examples[1]
 
 
-def test_live_evaluation_links_native_root_and_finalizes_cleanly(tmp_path: Path) -> None:
+def test_live_evaluation_links_native_root_and_finalizes_cleanly(
+    tmp_path: Path,
+) -> None:
     loggers = []
     predictions = []
 
@@ -633,11 +633,13 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(tmp_path: Path)
                         "trace_id": "a" * 32,
                         "span_id": "b" * 16,
                         "run_key": (
-                            "run-a:coding:trial:task-a:codex:rag-bm25:"
-                            "rag-bm25:t001"
+                            "run-a:coding:trial:task-a:codex:rag-bm25:rag-bm25:t001"
                         ),
                         "harness": "codex",
                         "task_id": "task-a",
+                        "candidate_id": "candidate-a",
+                        "comparison_example_id": "example-a",
+                        "trial_index": 1,
                         "eval_predict_and_score_call_id": call_id,
                     }
                 ],
@@ -668,7 +670,9 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(tmp_path: Path)
 
     assert publication.published == 1
     assert publication.failures == ()
-    assert publication.evaluations[0].linked_predictions == 1
+    assert publication.evaluations[0].agent_predictions == 1
+    assert publication.evaluations[0].linked_agent_predictions == 1
+    assert publication.evaluations[0].direct_predictions == 0
     assert predictions[0].finished is True
     assert predictions[0].output["observed_conversation_id"] == "native-conversation"
     assert predictions[0].output["trace_link_status"] == "linked"
@@ -677,9 +681,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(tmp_path: Path)
     )
     assert live_row["evaluation_prediction_latency_sec"] >= 0
     assert predictions[0].predict_and_score_call.summary == {
-        "weave": {
-            "genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]
-        }
+        "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }
     assert loggers[0].summarized is True
     statuses = [
@@ -689,6 +691,70 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(tmp_path: Path)
         .splitlines()
     ]
     assert statuses == ["pending", "prediction_open", "trace_linked", "finalized"]
+
+
+def test_direct_diagnostic_does_not_open_or_synthesize_agent_prediction(
+    tmp_path: Path,
+) -> None:
+    class FailIfConstructed:
+        def __init__(self, **kwargs) -> None:
+            raise AssertionError(kwargs)
+
+    cell = PlannedCell(
+        id="cell-direct",
+        run_id="run-a",
+        run_name="memory-smoke",
+        workload_id="retrieval",
+        task_id="dataset-a",
+        harness="direct",
+        context_system_id="rag-bm25",
+        variant_id="rag-bm25",
+        model_provider="wandb",
+        model="wandb/test-model",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("dataset.yaml"),
+        result_path=Path("jobs/missing/result.json"),
+        command=("python", "-m", "fugue.bench.cli"),
+        env={"WANDB_API_KEY": "secret", "FUGUE_DATASET": "dataset-a"},
+        n_attempts=1,
+        execution_kind="provider_diagnostic",
+    )
+    fake_weave = SimpleNamespace(EvaluationLogger=FailIfConstructed)
+
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=fake_weave,
+    )
+    planned = export._planned_evaluation_row(cell)
+    export._apply_observed_identity(planned)
+
+    assert coordinator.begin_cell(cell) is None
+    assert coordinator.finalize().published == 0
+    assert planned["execution_kind"] == "provider_diagnostic"
+    assert planned["trace_link_status"] == "not_applicable"
+    assert "weave_agent_name" not in planned
+    assert "planned_conversation_id" not in planned
+    assert "weave_conversation_id" not in planned
+
+
+def test_current_identity_schema_requires_canonical_candidate_id() -> None:
+    with pytest.raises(ValueError, match="missing candidate_id"):
+        export._publication_candidates(
+            [
+                {
+                    "identity_schema_version": 1,
+                    "record_type": "retrieval",
+                    "comparison_example_id": "example-a",
+                    "trial_index": 1,
+                }
+            ]
+        )
 
 
 def test_live_evaluation_rows_recover_prediction_latency(tmp_path: Path) -> None:
@@ -889,9 +955,7 @@ def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
     changed["evaluation_rubrics"][0]["dimensions"][1]["criterion"] = (
         "Use a changed correctness definition."
     )
-    changed_scope = export._publication_candidates([changed])[0][
-        "evaluation_scope_id"
-    ]
+    changed_scope = export._publication_candidates([changed])[0]["evaluation_scope_id"]
     assert changed_scope != candidates[0]["evaluation_scope_id"]
 
 
@@ -1373,7 +1437,9 @@ def test_not_applicable_cell_does_not_report_a_missing_trace() -> None:
     assert row["weave_usage_status"] == "not_applicable"
 
 
-def test_native_chat_response_fills_full_trace_output_but_metadata_only_hashes() -> None:
+def test_native_chat_response_fills_full_trace_output_but_metadata_only_hashes() -> (
+    None
+):
     summary = _summarize_spans(
         [
             {
@@ -1444,7 +1510,11 @@ def test_error_provenance_distinguishes_agent_runtime_and_adapter_failures() -> 
         ("'content' must be a string, got dict", "write_file", "agent"),
         ("tool_result_error", "exec", "agent"),
         ("ModuleNotFoundError: No module named 'erfa'", "Bash", "benchmark_runtime"),
-        ("web_search is disabled: no provider configured", "web_search", "harness_adapter"),
+        (
+            "web_search is disabled: no provider configured",
+            "web_search",
+            "harness_adapter",
+        ),
         (
             "unknown variant `namespace`, expected `function`",
             "",
@@ -1482,7 +1552,9 @@ def test_terminal_harness_install_failure_is_owned_by_adapter() -> None:
     assert event["recoverable"] is False
 
 
-def test_error_events_merge_native_and_weave_occurrences_without_double_counting() -> None:
+def test_error_events_merge_native_and_weave_occurrences_without_double_counting() -> (
+    None
+):
     row: dict[str, object] = {
         "weave_error_events": [
             export._classify_error(
@@ -1513,7 +1585,9 @@ def test_error_events_merge_native_and_weave_occurrences_without_double_counting
     assert row["recoverable_error_count"] == 2
 
 
-def test_failed_context_registration_is_not_reported_as_available(tmp_path: Path) -> None:
+def test_failed_context_registration_is_not_reported_as_available(
+    tmp_path: Path,
+) -> None:
     jobs = _write_export_fixture(tmp_path)
     meta_path = next(jobs.rglob("fugue-meta.json"))
     meta = json.loads(meta_path.read_text())
@@ -1589,9 +1663,7 @@ def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:
             "comparison_example_id": "example",
             "trial_index": 1,
             "model": "wandb/model",
-            "runtime_fingerprints": {
-                "pre_install": {"comparable_digest": digest}
-            },
+            "runtime_fingerprints": {"pre_install": {"comparable_digest": digest}},
         }
         for digest in ("same", "same")
     ]

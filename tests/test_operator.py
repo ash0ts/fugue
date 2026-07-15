@@ -155,9 +155,7 @@ def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
             WorkloadSpec(
                 id="capabilities",
                 runner="harbor",
-                manifest=Path(
-                    "configs/fugue/evaluations/missing-suite/manifest.yaml"
-                ),
+                manifest=Path("configs/fugue/evaluations/missing-suite/manifest.yaml"),
                 scorers=[
                     RubricScorerSelection(
                         type="rubric",
@@ -267,7 +265,8 @@ def test_execute_run_persists_snapshot_before_first_cell(
                         name="Demo evaluation",
                         examples=1,
                         url="https://wandb.ai/team/project/r/call/eval-1",
-                        linked_predictions=1,
+                        agent_predictions=1,
+                        linked_agent_predictions=1,
                     ),
                 ),
             )
@@ -295,13 +294,12 @@ def test_execute_run_persists_snapshot_before_first_cell(
 
     assert observed == ["harbor"]
     assert result.status == "passed"
-    assert result.evaluation_urls == (
-        "https://wandb.ai/team/project/r/call/eval-1",
-    )
+    assert result.evaluation_urls == ("https://wandb.ai/team/project/r/call/eval-1",)
     assert service.run_evaluation(run_id) == result.evaluations[0]
     manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
     assert manifest is not None
-    assert manifest["evaluation_runs"][0]["linked_predictions"] == 1
+    assert manifest["evaluation_runs"][0]["agent_predictions"] == 1
+    assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
 
 
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
@@ -452,9 +450,7 @@ def test_plan_save_validates_evaluation_assets_before_writing(tmp_path: Path) ->
             assets=(invalid,),
         )
 
-    assert not (
-        tmp_path / "configs/fugue/evaluations/invalid-suite"
-    ).exists()
+    assert not (tmp_path / "configs/fugue/evaluations/invalid-suite").exists()
 
 
 def test_start_bridge_loads_the_requested_experiment(
@@ -534,10 +530,7 @@ def test_ephemeral_experiment_launch_persists_runtime_snapshot(
                 "run_name": values["run_name"],
                 "experiment_id": values["experiment_id"],
                 "combined_log": str(
-                    tmp_path
-                    / ".fugue/runtime"
-                    / values["run_id"]
-                    / "combined.log"
+                    tmp_path / ".fugue/runtime" / values["run_id"] / "combined.log"
                 ),
             },
         )
@@ -579,9 +572,7 @@ def test_run_links_use_the_project_recorded_at_launch(tmp_path: Path) -> None:
 
     links = service.run_links("run-original-project")
 
-    assert links.agents == (
-        "https://wandb.ai/other-team/original-project/weave/agents"
-    )
+    assert links.agents == ("https://wandb.ai/other-team/original-project/weave/agents")
     assert service.run_evaluation("run-original-project").url == (
         "https://wandb.ai/other-team/original-project/r/call/eval-1"
     )

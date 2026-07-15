@@ -8,6 +8,7 @@ from typing import Any
 
 CANDIDATE_IDENTITY_SCHEMA_VERSION = 1
 EXECUTION_IDENTITY_SCHEMA_VERSION = 1
+COMPARISON_IDENTITY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,21 @@ def resolve_candidate(
 def stable_digest(value: Any) -> str:
     payload = _canonical_json(value)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def comparison_example_id(
+    *, dataset_id: str, workload_id: str, logical_task_id: str
+) -> str:
+    """Identify one logical comparison example independently of its trial."""
+
+    return stable_digest(
+        {
+            "identity_schema_version": COMPARISON_IDENTITY_SCHEMA_VERSION,
+            "dataset": dataset_id.strip(),
+            "workload": workload_id.strip(),
+            "logical_task": logical_task_id.strip(),
+        }
+    )
 
 
 def _canonical_json(value: Any) -> str:
