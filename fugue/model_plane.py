@@ -17,6 +17,9 @@ BRIDGE_BASE_URL_HOST = "http://127.0.0.1:4000"
 BRIDGE_BASE_URL_CONTAINER = "http://host.docker.internal:4000"
 BRIDGE_MASTER_KEY_ENV = "LITELLM_MASTER_KEY"
 DEFAULT_BRIDGE_MASTER_KEY = "sk-fugue-local"
+WANDB_INFERENCE_PROJECT_HEADER = "OpenAI-Project"
+OPENAI_PROJECT_ENV = "OPENAI_PROJECT"
+OPENAI_PROJECT_ID_ENV = "OPENAI_PROJECT_ID"
 
 
 @dataclass(frozen=True)
@@ -151,4 +154,26 @@ def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
         "WANDB_ENTITY": entity,
         "WANDB_PROJECT": project,
         "WEAVE_PROJECT": f"{entity}/{project}",
+    }
+
+
+def provider_request_headers(
+    route: ModelRoute, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Return non-secret headers required by the selected model provider."""
+    if route.provider != "wandb":
+        return {}
+    return {WANDB_INFERENCE_PROJECT_HEADER: trace_project_slug(env)}
+
+
+def provider_client_env(
+    route: ModelRoute, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Return SDK environment needed for provider-specific request metadata."""
+    if route.provider != "wandb":
+        return {}
+    project = trace_project_slug(env)
+    return {
+        OPENAI_PROJECT_ENV: project,
+        OPENAI_PROJECT_ID_ENV: project,
     }

@@ -9,14 +9,14 @@ Tracing plane — every harness ships its Weave plugin inside the container:
 
 - Hermes     -> local hermes-otel checkout (HERMES_OTEL_CHECKOUT, default
                 ~/Documents/GitHub/hermes-otel) uploaded + pip-installed into
-                the hermes venv; ``type: weave`` backend with Fugue
-                resource attributes.
+                the hermes venv; W&B Agents OTLP backend with Fugue span
+                attributes.
 - OpenClaw   -> ``openclaw plugins install weave-openclaw``; config entry
                 with entity/project + ``hooks.allowConversationAccess``.
 - Claude Code-> ``npm i -g weave-claude-code`` + non-interactive
                 ``--source=local`` install against the run's CLAUDE_CONFIG_DIR.
 - Codex      -> ``npm i -g weave-codex`` + Stop hook merged into
-                ``$CODEX_HOME/hooks.json`` (+ ``bypass_hook_trust``).
+                ``$CODEX_HOME/hooks.json`` and explicit headless hook trust.
 
 Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
 with the run key, harness, model, experiment, variant, context system,
@@ -56,14 +56,21 @@ from harbor.models.trial.paths import EnvironmentPaths
 from fugue.agent_tracing import (
     conversation_id,
     normalize_trace_content,
+    openclaw_agent_id,
+    openclaw_conversation_id,
     stable_agent_name,
 )
 from fugue.model_plane import (
     BRIDGE_BASE_URL_CONTAINER,
     ModelRoute,
     bridge_master_key,
+    provider_client_env,
     resolve_model_route,
     trace_entity_project,
+)
+from fugue.weave_support import (
+    WEAVE_AGENTS_OTEL_ENDPOINT,
+    weave_agents_otel_headers,
 )
 
 # Local working tree of the hermes-otel plugin (uploaded into Hermes
@@ -255,6 +262,16 @@ def stage_hermes_otel_checkout() -> Path:
                 staged / dirname,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
+    tracer_path = staged / "tracer.py"
+    source = tracer_path.read_text()
+    needle = "attrs = dict(attributes or {})"
+    replacement = (
+        "attrs = {**(self.config.resource_attributes or {}), "
+        "**dict(attributes or {})}"
+    )
+    if needle not in source and replacement not in source:
+        raise RuntimeError("hermes-otel span attribute patch target was not found")
+    tracer_path.write_text(source.replace(needle, replacement))
     _STAGED_HERMES_OTEL = staged
     return staged
 
@@ -263,7 +280,7 @@ class _TrialMetaMixin:
     """Writes /logs/agent/fugue-meta.json (host side) per trial.
 
     The run key contains the immutable execution, workload, record type, task,
-    harness, context system, variant, and Harbor trial id. Weave traces are
+    harness, context system, variant, and Fugue trial index. Weave traces are
     joined back to trials through that key and the local metadata file.
     """
 
@@ -283,7 +300,7 @@ class _TrialMetaMixin:
             os.environ.get("FUGUE_HARNESS"),
             os.environ.get("FUGUE_CONTEXT_SYSTEM_ID"),
             os.environ.get("FUGUE_VARIANT_ID"),
-            self.logs_dir.parent.name,
+            f"t{int(os.environ.get('FUGUE_TRIAL_INDEX', '1')):03d}",
         )
         return ":".join(value for value in coordinates if value)
 
@@ -316,6 +333,13 @@ class _TrialMetaMixin:
         os.environ["FUGUE_WEAVE_CONVERSATION_ID"] = self.conversation_id
         os.environ["OTEL_RESOURCE_ATTRIBUTES"] = self._otel_resource_attributes(
             harness, route
+        )
+        os.environ["FUGUE_TRACE_ATTRIBUTES_JSON"] = json.dumps(
+            {
+                key: str(value)
+                for key, value in self._trace_attributes(harness, route).items()
+            },
+            sort_keys=True,
         )
         await self._install_context_runtime(environment)
         self._context_artifact_meta = await self._inject_context_artifact(environment)
@@ -360,6 +384,11 @@ class _TrialMetaMixin:
             "run_key": self.run_key,
             "run_id": os.environ.get("FUGUE_RUN_ID"),
             "harbor_trial_id": self.logs_dir.parent.name,
+            "trial_index": int(os.environ.get("FUGUE_TRIAL_INDEX", "1")),
+            "comparison_example_id": os.environ.get(
+                "FUGUE_COMPARISON_EXAMPLE_ID"
+            ),
+            "candidate_id": os.environ.get("FUGUE_CANDIDATE_ID"),
             "job_name": self.job_name,
             "harness": harness,
             "run_name": _experiment_name(),
@@ -389,6 +418,8 @@ class _TrialMetaMixin:
             "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
             "agent_config_hash": os.environ.get("FUGUE_AGENT_CONFIG_HASH"),
             "dataset": os.environ.get("FUGUE_DATASET"),
+            "repository": os.environ.get("FUGUE_REPOSITORY"),
+            "base_commit": os.environ.get("FUGUE_BASE_COMMIT"),
             "manifest_path": os.environ.get("FUGUE_MANIFEST_PATH"),
             "weave_entity": entity,
             "weave_project": project,
@@ -396,6 +427,13 @@ class _TrialMetaMixin:
             "weave_agent_name": stable_agent_name(harness),
             "weave_conversation_key": self.conversation_key,
             "weave_conversation_id": self.conversation_id,
+            "planned_conversation_id": self.conversation_id,
+            "eval_predict_and_score_call_id": os.environ.get(
+                "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
+            ),
+            "evaluation_scope_id": os.environ.get(
+                "FUGUE_EVALUATION_SCOPE_ID"
+            ),
             "trace_content": self.trace_content,
             "started_at": datetime.now(UTC).isoformat(),
         }
@@ -413,7 +451,9 @@ class _TrialMetaMixin:
         try:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids
-            meta["weave_conversation_ids"] = native_ids or [self.conversation_id]
+            meta["weave_conversation_ids"] = list(
+                dict.fromkeys([self.conversation_id, *native_ids])
+            )
         except (OSError, json.JSONDecodeError):
             meta["native_session_ids"] = []
             meta["weave_conversation_ids"] = [self.conversation_id]
@@ -422,13 +462,15 @@ class _TrialMetaMixin:
     def _extract_session_ids(self) -> list[str]:
         return []
 
-    def _otel_resource_attributes(self, harness: str, route: ModelRoute) -> str:
-        values = {
+    def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
+        attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
             "gen_ai.conversation.id": self.conversation_id,
             "fugue.run_key": self.run_key,
             "fugue.run_id": os.environ.get("FUGUE_RUN_ID", ""),
             "fugue.run_name": _experiment_name(),
+            "fugue.run_group": _run_group(),
+            "fugue.job_name": self.job_name,
             "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
             "fugue.workload_id": os.environ.get("FUGUE_WORKLOAD_ID", ""),
             "fugue.preset_id": os.environ.get("FUGUE_PRESET_ID", ""),
@@ -437,6 +479,14 @@ class _TrialMetaMixin:
             "fugue.context_system_id": self.context_system_id,
             "fugue.task_id": os.environ.get("FUGUE_TASK_NAME", ""),
             "fugue.trial_id": self.logs_dir.parent.name,
+            "fugue.trial_index": int(os.environ.get("FUGUE_TRIAL_INDEX", "1")),
+            "fugue.comparison_example_id": os.environ.get(
+                "FUGUE_COMPARISON_EXAMPLE_ID", ""
+            ),
+            "fugue.candidate_id": os.environ.get("FUGUE_CANDIDATE_ID", ""),
+            "fugue.evaluation_scope_id": os.environ.get(
+                "FUGUE_EVALUATION_SCOPE_ID", ""
+            ),
             "fugue.model_provider": route.provider,
             "fugue.model": route.display_model,
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
@@ -444,6 +494,27 @@ class _TrialMetaMixin:
             "fugue.tags": os.environ.get("FUGUE_TAGS", "").replace(",", "|"),
             "fugue.conversation_id": self.conversation_id,
         }
+        attributes.update(
+            {
+                key: value
+                for key, value in {
+                    "weave.eval.predict_and_score_call_id": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
+                    ),
+                    "weave.eval.project_id": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_PROJECT_ID"
+                    ),
+                    "weave.eval.evaluation_name": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_NAME"
+                    ),
+                }.items()
+                if value
+            }
+        )
+        return attributes
+
+    def _otel_resource_attributes(self, harness: str, route: ModelRoute) -> str:
+        values = self._trace_attributes(harness, route)
         inherited = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "").strip()
         encoded = ",".join(
             f"{key}={str(value).replace(',', '|')}"
@@ -451,6 +522,18 @@ class _TrialMetaMixin:
             if value not in (None, "")
         )
         return ",".join(part for part in (inherited, encoded) if part)
+
+    def _trace_environment(self, harness: str, route: ModelRoute) -> dict[str, str]:
+        return {
+            "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(harness, route),
+            "FUGUE_TRACE_ATTRIBUTES_JSON": json.dumps(
+                {
+                    key: str(value)
+                    for key, value in self._trace_attributes(harness, route).items()
+                },
+                sort_keys=True,
+            ),
+        }
 
     def _task_artifact_name(self) -> str:
         return os.environ.get("FUGUE_TASK_NAME") or self.logs_dir.parent.name.rsplit(
@@ -610,33 +693,18 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         import yaml
 
         entity, project = _weave_entity_project()
-        tags = _experiment_tags("hermes", self.model_route, self.context_system_id)
         config: dict[str, Any] = {
             "backends": [
-                {"type": "weave", "entity": entity, "project": project},
+                {
+                    "type": "otlp",
+                    "name": "W&B Weave",
+                    "endpoint": WEAVE_AGENTS_OTEL_ENDPOINT,
+                    "metrics": False,
+                },
             ],
-            "resource_attributes": {
-                "gen_ai.agent.name": stable_agent_name("hermes"),
-                "gen_ai.conversation.id": self.conversation_id,
-                "fugue.run_key": self.run_key,
-                "fugue.job_name": self.job_name,
-                "fugue.run_name": _experiment_name(),
-                "fugue.run_group": _run_group(),
-                "fugue.tags": ",".join(tags),
-                "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
-                "fugue.variant_id": os.environ.get("FUGUE_VARIANT_ID", "baseline"),
-                "fugue.context_system_id": self.context_system_id,
-                "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
-                "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", ""),
-                "fugue.harness": "hermes",
-                "fugue.model": self.model_route.display_model,
-                "fugue.model_provider": self.model_route.provider,
-                "fugue.workload_id": os.environ.get("FUGUE_WORKLOAD_ID", ""),
-                "fugue.preset_id": os.environ.get("FUGUE_PRESET_ID", ""),
-                "fugue.task_id": os.environ.get("FUGUE_TASK_NAME", ""),
-                "fugue.trial_id": self.logs_dir.parent.name,
-                "fugue.conversation_id": self.conversation_id,
-            },
+            "resource_attributes": self._trace_attributes(
+                "hermes", self.model_route
+            ),
             "capture_previews": self.capture_content,
             "force_flush_on_session_end": True,
         }
@@ -717,11 +785,17 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         await self._begin_trial("hermes", self.model_route, environment)
 
         entity, project = _weave_entity_project()
+        trace_key = _require_trace_key()
         env: dict[str, str] = {
+            **provider_client_env(self.model_route, os.environ),
+            **self._trace_environment("hermes", self.model_route),
             "TERMINAL_ENV": "local",
-            "WANDB_API_KEY": _require_trace_key(),
+            "WANDB_API_KEY": trace_key,
             "WANDB_ENTITY": entity,
             "WANDB_PROJECT": project,
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS": weave_agents_otel_headers(
+                f"{entity}/{project}", trace_key
+            ),
             "HARBOR_INSTRUCTION": instruction,
             # Per-span detail lands in the plugin dir's debug.log — the
             # fastest signal when validating trace delivery.
@@ -837,6 +911,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     _GATEWAY_LOG = "/logs/agent/openclaw-gateway.log"
     _GATEWAY_PID_FILE = "/tmp/openclaw-gateway.pid"
     _PLUGIN_PROJECT = "~/.openclaw/npm/projects/weave-openclaw"
+    _WEAVE_PLUGIN_VERSION = "0.1.1"
 
     @staticmethod
     @override
@@ -907,7 +982,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         consistent 2.x tree. Node_modules and the lockfile are removed first
         so npm actually honors the new override.
         """
-        fix_js = (
+        override_js = (
             "const fs = require('node:fs');"
             "const p = process.argv[1] + '/package.json';"
             "const j = JSON.parse(fs.readFileSync(p, 'utf8'));"
@@ -916,12 +991,27 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             "fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\\n');"
             "console.log('override weave ->', j.overrides['weave']);"
         )
+        trace_patch_js = (
+            "const fs = require('node:fs');"
+            "const weaveRoot = process.argv[1] + '/node_modules/weave/dist/genai/';"
+            "const needle = 'this.span = span;';"
+            "const repl = \"this.span = span; try { this.span.setAttributes(JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}')); } catch {}\";"
+            "for (const name of ['spanBase.js', 'spanBase.mjs']) {"
+            " const p = weaveRoot + name; let src = fs.readFileSync(p, 'utf8');"
+            " const matches = src.split(needle).length - 1;"
+            " if (matches !== 1 && !src.includes('FUGUE_TRACE_ATTRIBUTES_JSON'))"
+            "  { console.error('trace attrs patch: emitter pattern missing in ' + name); process.exit(1); }"
+            " src = src.replace(needle, repl); fs.writeFileSync(p, src);"
+            "}"
+            "console.log('patched OpenClaw Fugue trace attributes');"
+        )
         return (
-            "{ openclaw plugins install weave-openclaw && "
+            f"{{ openclaw plugins install weave-openclaw@{self._WEAVE_PLUGIN_VERSION} && "
             f"PLUGIN_DIR=$(cd {self._PLUGIN_PROJECT} && pwd) && "
-            f"node -e {shlex.quote(fix_js)} \"$PLUGIN_DIR\" && "
+            f"node -e {shlex.quote(override_js)} \"$PLUGIN_DIR\" && "
             'rm -rf "$PLUGIN_DIR/node_modules" "$PLUGIN_DIR/package-lock.json" && '
             'npm install --prefix "$PLUGIN_DIR" --no-audit --no-fund && '
+            f"node -e {shlex.quote(trace_patch_js)} \"$PLUGIN_DIR\" && "
             "node -e 'console.log(\"resolved weave:\", "
             "require(process.argv[1] + "
             "\"/node_modules/weave/package.json\").version, "
@@ -958,6 +1048,15 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             f"rm -f {self._GATEWAY_PID_FILE}; fi; sleep 3"
         )
 
+    def _register_trial_agent_command(self) -> str:
+        agent_id = openclaw_agent_id(self.conversation_id)
+        return (
+            "openclaw agents add "
+            f"{shlex.quote(agent_id)} --workspace . "
+            f"--model {shlex.quote(self.model_name)} "
+            "--non-interactive --json"
+        )
+
     @override
     async def run(
         self,
@@ -981,14 +1080,13 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         self._validate_provider(provider)
 
         env: dict[str, str] = {
+            **provider_client_env(self.model_route, os.environ),
+            **self._trace_environment("openclaw", self.model_route),
             "WANDB_API_KEY": _require_trace_key(),
             "OPENCLAW_GATEWAY_TOKEN": self._GATEWAY_TOKEN,
             "OPENCLAW_GATEWAY_PORT": str(self._GATEWAY_PORT),
             "OPENAI_API_KEY": _chat_key(self.model_route),
             "OPENAI_BASE_URL": _chat_base_url(self.model_route),
-            "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(
-                "openclaw", self.model_route
-            ),
             "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
         }
         for key in self._provider_env_keys(provider):
@@ -1023,7 +1121,12 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         try:
             await self.exec_as_agent(
                 environment,
-                command=_nvm22("openclaw setup --workspace ."),
+                command=_nvm22(
+                    "openclaw onboard --non-interactive --accept-risk "
+                    "--auth-choice skip --workspace . --skip-daemon "
+                    "--skip-channels --skip-skills --skip-hooks --skip-search "
+                    "--skip-ui --skip-health --json"
+                ),
                 env=env,
             )
 
@@ -1041,6 +1144,13 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 timeout_sec=600,
             )
 
+            await self.exec_as_agent(
+                environment,
+                command=_nvm22(self._register_trial_agent_command()),
+                env=env,
+                timeout_sec=120,
+            )
+
             skills_command = self._build_register_skills_command()
             if skills_command:
                 await self.exec_as_agent(environment, command=skills_command, env=env)
@@ -1053,6 +1163,9 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             )
             gateway_started = True
 
+            self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
+                self.conversation_id
+            )
             cli_flags = self.build_cli_flags()
             cli_flags_arg = (cli_flags + " ") if cli_flags else ""
             command = (
@@ -1085,9 +1198,10 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
 
     @override
     def _extract_session_ids(self) -> list[str]:
-        return self._regex_ids(
+        native_ids = self._regex_ids(
             self.logs_dir / "openclaw.txt", r'"sessionId"\s*:\s*"([^"]+)"'
         )
+        return [openclaw_conversation_id(self.conversation_id), *native_ids]
 
 
 class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
@@ -1104,6 +1218,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     """
 
     _CLAUDE_CONFIG_DIR = (EnvironmentPaths.agent_dir / "sessions").as_posix()
+    _WEAVE_PLUGIN_VERSION = "0.2.12"
 
     @staticmethod
     @override
@@ -1126,32 +1241,36 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         await super().install(environment)
-        # The plugin CLI + its daemon need node/npm (engines >= 18.19), which
-        # the claude bootstrap installer does not provide on debian.
+        # The plugin CLI + its daemon need node >= 18.19. Debian may provide an
+        # older executable, so checking only for npm is insufficient.
         await self.exec_as_root(
             environment,
             command=(
-                "command -v npm >/dev/null 2>&1 || { "
+                "node -e \"const [a,b]=process.versions.node.split('.').map(Number);"
+                "process.exit(a>18||(a===18&&b>=19)?0:1)\" 2>/dev/null || { "
                 "apt-get update && apt-get install -y --no-install-recommends "
-                "nodejs npm; }"
+                "ca-certificates curl && "
+                "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && "
+                "apt-get install -y --no-install-recommends nodejs; }"
             ),
             env={"DEBIAN_FRONTEND": "noninteractive"},
         )
         await self.exec_as_agent(
             environment,
-            command="npm install -g weave-claude-code && weave-claude-code --version",
+            command=(
+                f"npm install -g weave-claude-code@{self._WEAVE_PLUGIN_VERSION} && "
+                "weave-claude-code --version"
+            ),
             timeout_sec=600,
         )
 
     async def _install_weave_plugin(self, environment: BaseEnvironment) -> None:
         env = {
+            **self._trace_environment("claude-code", self.model_route),
             "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
             "WEAVE_PROJECT": _weave_project_slug(),
             "WANDB_API_KEY": _require_trace_key(),
             "IS_SANDBOX": "1",
-            "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(
-                "claude-code", self.model_route
-            ),
             "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
         }
         # Three container gotchas, all verified empirically:
@@ -1194,6 +1313,32 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             "fs.writeFileSync(p, src);"
             "console.log('patched transcript_path base check');"
         )
+        trace_attrs_js = (
+            "const fs = require('node:fs');"
+            "const root = process.argv[1] + '/dist/';"
+            "const spansPath = root + 'genaiSpans.js';"
+            "let spans = fs.readFileSync(spansPath, 'utf8');"
+            "const spansNeedle = \"entries[`${WEAVE_INTEGRATION_META_PREFIX}${key}`] = { value };\";"
+            "const spansRepl = \"entries[(key.startsWith('fugue.') || key.startsWith('weave.eval.')) ? key : `${WEAVE_INTEGRATION_META_PREFIX}${key}`] = { value: String(value) };\";"
+            "if (!spans.includes(spansNeedle) && !spans.includes(spansRepl))"
+            " { console.error('trace attrs patch: baggage pattern missing'); process.exit(1); }"
+            "spans = spans.split(spansNeedle).join(spansRepl);"
+            "const processorNeedle = 'if (key.startsWith(WEAVE_INTEGRATION_PREFIX)) {';"
+            "const processorRepl = \"if (key.startsWith(WEAVE_INTEGRATION_PREFIX) || key.startsWith('fugue.') || key.startsWith('weave.eval.')) {\";"
+            "if (!spans.includes(processorNeedle) && !spans.includes(processorRepl))"
+            " { console.error('trace attrs patch: processor pattern missing'); process.exit(1); }"
+            "spans = spans.split(processorNeedle).join(processorRepl);"
+            "fs.writeFileSync(spansPath, spans);"
+            "const daemonPath = root + 'daemon.js';"
+            "let daemon = fs.readFileSync(daemonPath, 'utf8');"
+            "const daemonNeedle = \"meta: { claude_code_app_version: claudeCodeAppVersion },\";"
+            "const daemonRepl = \"meta: { claude_code_app_version: claudeCodeAppVersion, ...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}') },\";"
+            "if (!daemon.includes(daemonNeedle) && !daemon.includes(daemonRepl))"
+            " { console.error('trace attrs patch: daemon pattern missing'); process.exit(1); }"
+            "daemon = daemon.split(daemonNeedle).join(daemonRepl);"
+            "fs.writeFileSync(daemonPath, daemon);"
+            "console.log('patched Fugue trace attribute baggage');"
+        )
         await self.exec_as_agent(
             environment,
             command=(
@@ -1202,6 +1347,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 '{ NPM_ROOT="$(npm root -g)" && '
                 f"node -e {shlex.quote(marketplace_js)} \"$NPM_ROOT/weave-claude-code\" && "
                 f"node -e {shlex.quote(transcript_js)} \"$NPM_ROOT/weave-claude-code\" && "
+                f"node -e {shlex.quote(trace_attrs_js)} \"$NPM_ROOT/weave-claude-code\" && "
                 "weave-claude-code install --non-interactive --source=local && "
                 'weave-claude-code config set weave_project "$WEAVE_PROJECT" && '
                 'weave-claude-code config set wandb_api_key "$WANDB_API_KEY" && '
@@ -1218,6 +1364,12 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         await self._begin_trial("claude-code", self.model_route, environment)
+        self._resolved_env_vars.update(
+            {
+                **self._trace_environment("claude-code", self.model_route),
+                "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
+            }
+        )
         try:
             await self._install_weave_plugin(environment)
             await super().run(instruction, environment, context)
@@ -1274,6 +1426,25 @@ class FugueCodex(_TrialMetaMixin, Codex):
     CLI_FLAGS = [
         flag for flag in Codex.CLI_FLAGS if flag.kwarg != "reasoning_effort"
     ]
+    _CODEX_VERSION = "0.143.0"
+    _WEAVE_PLUGIN_VERSION = "0.1.1"
+    _BRIDGED_DISABLED_FEATURES = (
+        "apps",
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "code_mode_host",
+        "computer_use",
+        "goals",
+        "image_generation",
+        "in_app_browser",
+        "multi_agent",
+        "plugins",
+        "remote_plugin",
+        "tool_suggest",
+        "unified_exec",
+        "workspace_dependencies",
+    )
 
     @staticmethod
     @override
@@ -1294,26 +1465,37 @@ class FugueCodex(_TrialMetaMixin, Codex):
         # The emit.js patch makes the span agent_name configurable via
         # WEAVE_CODEX_AGENT_NAME (upstream hardcodes 'codex'), which run()
         # sets to Fugue's stable harness identity.
-        agent_name_js = (
+        trace_patch_js = (
             "const fs = require('node:fs');"
             "const p = process.argv[1] + '/dist/spans/emit.js';"
             "let src = fs.readFileSync(p, 'utf8');"
             "const needle = \"const AGENT_NAME = 'codex';\";"
             "const repl = \"const AGENT_NAME = "
-            "process.env.WEAVE_CODEX_AGENT_NAME || 'codex';\";"
+            "process.env.WEAVE_CODEX_AGENT_NAME || 'codex';\\n"
+            "const FUGUE_TRACE_ATTRIBUTES = (() => { try { return JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}'); } catch { return {}; } })();\";"
             "if (!src.includes(needle) && !src.includes('WEAVE_CODEX_AGENT_NAME'))"
             " { console.error('agent-name patch: pattern missing'); process.exit(1); }"
             "src = src.split(needle).join(repl);"
+            "const attrsNeedle = 'const spanAttributes = {';"
+            "const attrsRepl = 'const spanAttributes = { ...FUGUE_TRACE_ATTRIBUTES,';"
+            "const count = src.split(attrsNeedle).length - 1;"
+            "if (count && count !== 3)"
+            " { console.error('trace attrs patch: expected 3 span objects, got ' + count); process.exit(1); }"
+            "if (!count && !src.includes(attrsRepl))"
+            " { console.error('trace attrs patch: span pattern missing'); process.exit(1); }"
+            "src = src.split(attrsNeedle).join(attrsRepl);"
             "fs.writeFileSync(p, src);"
-            "console.log('patched weave-codex agent name env override');"
+            "console.log('patched weave-codex identity and Fugue trace attributes');"
         )
         await self.exec_as_agent(
             environment,
             command=(
                 "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; "
-                "npm install -g weave-codex && command -v weave-codex && "
+                f"npm install -g @openai/codex@{self._CODEX_VERSION} "
+                f"weave-codex@{self._WEAVE_PLUGIN_VERSION} && "
+                "codex --version && command -v weave-codex && "
                 'NPM_ROOT="$(npm root -g)" && '
-                f"node -e {shlex.quote(agent_name_js)} \"$NPM_ROOT/weave-codex\""
+                f"node -e {shlex.quote(trace_patch_js)} \"$NPM_ROOT/weave-codex\""
             ),
             timeout_sec=600,
         )
@@ -1343,10 +1525,20 @@ class FugueCodex(_TrialMetaMixin, Codex):
 
         cli_flags = self.build_cli_flags()
         cli_flags_arg = (cli_flags + " ") if cli_flags else ""
+        feature_flags = (
+            "--enable unified_exec "
+            if self.model_route.provider == "openai"
+            else "".join(
+                f"--disable {feature} "
+                for feature in self._BRIDGED_DISABLED_FEATURES
+            )
+        )
 
         remote_codex_home = self._REMOTE_CODEX_HOME.as_posix()
         weave_project = _weave_project_slug()
         env: dict[str, str] = {
+            **provider_client_env(self.model_route, os.environ),
+            **self._trace_environment("codex", self.model_route),
             "CODEX_HOME": remote_codex_home,
             # Codex reads the configured provider's key from OPENAI_API_KEY
             # regardless of whether it is native OpenAI or the local bridge.
@@ -1359,9 +1551,6 @@ class FugueCodex(_TrialMetaMixin, Codex):
             # grouped under the stable Codex agent.
             "WEAVE_CODEX_AGENT_NAME": stable_agent_name("codex"),
             "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
-            "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(
-                "codex", self.model_route
-            ),
         }
 
         config_toml = self._build_model_config_toml()
@@ -1405,7 +1594,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
                     "--dangerously-bypass-hook-trust "
                     "--skip-git-repo-check "
                     "--json "
-                    "--enable unified_exec "
+                    f"{feature_flags}"
                     f"{cli_flags_arg}"
                     "-- "
                     f"{escaped_instruction} "
@@ -1537,6 +1726,7 @@ class FugueLetta(_TrialMetaMixin, BaseInstalledAgent):
             else _require_model_key(self.model_route)
         )
         env = {
+            **provider_client_env(self.model_route, os.environ),
             "FUGUE_LETTA_API_KEY": model_key,
             "LETTA_LOCAL_BACKEND_DIR": "/logs/agent/letta-state",
             "WANDB_API_KEY": _require_trace_key(),

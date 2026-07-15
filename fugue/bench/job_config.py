@@ -60,6 +60,9 @@ class RenderedJob:
     run_id: str
     run_name: str
     task_id: str
+    trial_index: int
+    comparison_example_id: str
+    candidate_id: str
     applicable: bool = True
     skip_reason: str | None = None
 
@@ -123,7 +126,11 @@ def _build_jobs(
     selected_concurrent = n_concurrent or experiment.n_concurrent or manifest.n_concurrent
     selected_n_tasks = n_tasks if n_tasks is not None else experiment.n_tasks
     selected_tasks = manifest.tasks[:selected_n_tasks] if selected_n_tasks else manifest.tasks
-    task_groups = [[task] for task in selected_tasks]
+    task_groups = [
+        ([task], trial_index)
+        for task in selected_tasks
+        for trial_index in range(1, selected_attempts + 1)
+    ]
     selected_run_name = run_name or experiment.run_name or experiment.id
     selected_tags = [*experiment.tags, *(tags or [])]
     runtime = ContextRuntime(
@@ -155,13 +162,14 @@ def _build_jobs(
                     "Claude Code tracing cannot guarantee metadata-only capture; "
                     "use trace_content: full or exclude claude-code"
                 )
-            for tasks in task_groups:
+            for tasks, trial_index in task_groups:
                 job_name = _job_name(
                     run_name=selected_run_name,
                     workload_id=workload_id,
                     harness=harness.name,
                     variant_id=variant.id,
                     task_id=tasks[0].id,
+                    trial_index=trial_index,
                 )
                 binding, cache_keys, cache_ready = _context_binding(
                     spec=spec,
@@ -176,8 +184,34 @@ def _build_jobs(
                     job_name=job_name,
                     write=write_configs,
                 )
+                if (
+                    applicable
+                    and harness.name == "codex"
+                    and binding.mcp_servers
+                    and route.provider != "openai"
+                ):
+                    applicable = False
+                    skip_reason = (
+                        "Codex MCP tools require Responses namespace support; "
+                        f"the {route.provider} bridge accepts function tools only"
+                    )
                 skill_ids = list(variant.skill_ids)
                 agent_config_hash = _agent_config_hash(experiment, variant, spec, binding)
+                comparison_example_id = _comparison_example_id(
+                    dataset_id=manifest.dataset.harbor_ref,
+                    workload_id=workload_id,
+                    task_id=tasks[0].id,
+                )
+                candidate_id = _candidate_id(
+                    experiment=experiment,
+                    variant=variant,
+                    harness=harness,
+                    route=route,
+                    context_spec=spec,
+                    skill_ids=skill_ids,
+                    agent_config_hash=agent_config_hash,
+                    repo_root=repo_root,
+                )
                 context_instruction = _context_instruction_path(
                     runtime_root,
                     spec,
@@ -198,7 +232,7 @@ def _build_jobs(
                     agent_config_hash=agent_config_hash,
                     job_name=job_name,
                     jobs_dir=selected_jobs_dir,
-                    n_attempts=selected_attempts,
+                    n_attempts=1,
                     n_concurrent=selected_concurrent,
                     tasks=tasks,
                     repo_root=repo_root,
@@ -206,6 +240,9 @@ def _build_jobs(
                     preset_id=preset_id,
                     run_id=run_id,
                     run_name=selected_run_name,
+                    trial_index=trial_index,
+                    comparison_example_id=comparison_example_id,
+                    candidate_id=candidate_id,
                     applicable=applicable,
                     skip_reason=skip_reason,
                     collect_evidence=bool(required_capabilities),
@@ -237,7 +274,11 @@ def _build_jobs(
                     workload_id=workload_id,
                     preset_id=preset_id,
                     run_id=run_id,
+                    task=tasks[0],
                     task_id=tasks[0].id,
+                    trial_index=trial_index,
+                    comparison_example_id=comparison_example_id,
+                    candidate_id=candidate_id,
                 )
                 rendered.append(
                     RenderedJob(
@@ -262,6 +303,9 @@ def _build_jobs(
                         run_id=run_id,
                         run_name=selected_run_name,
                         task_id=tasks[0].id,
+                        trial_index=trial_index,
+                        comparison_example_id=comparison_example_id,
+                        candidate_id=candidate_id,
                         applicable=applicable,
                         skip_reason=skip_reason,
                     )
@@ -292,6 +336,9 @@ def _job_config(
     preset_id: str | None,
     run_id: str,
     run_name: str,
+    trial_index: int,
+    comparison_example_id: str,
+    candidate_id: str,
     applicable: bool,
     skip_reason: str | None,
     collect_evidence: bool,
@@ -314,17 +361,6 @@ def _job_config(
             *(variant.artifacts or experiment.artifacts),
             *workload_artifacts,
             *context_binding.artifacts,
-            *(
-                ["/logs/artifacts/fugue-context-events.jsonl"]
-                if (context_spec.id != "none" or context_binding.mcp_servers)
-                and not any(
-                    isinstance(item, dict)
-                    and item.get("service") == CONTEXT_RUNTIME_SERVICE
-                    for item in context_binding.artifacts
-                )
-                else []
-            ),
-            *(["/logs/artifacts/fugue-evidence.json"] if collect_evidence else []),
         ]
     )
     config: dict[str, Any] = {
@@ -363,6 +399,9 @@ def _job_config(
         "experiment_id": experiment.id,
         "run_id": run_id,
         "run_name": run_name,
+        "trial_index": trial_index,
+        "comparison_example_id": comparison_example_id,
+        "candidate_id": candidate_id,
         "workload_id": workload_id,
         "preset_id": preset_id,
         "variant_id": variant.id,
@@ -385,6 +424,8 @@ def _job_config(
             task.id: list(task.expected_paths) for task in tasks if task.expected_paths
         },
         "task_id": tasks[0].id,
+        "repository": tasks[0].repo,
+        "base_commit": tasks[0].base_commit,
         "model_provider": route.provider,
         "model": route.display_model,
         "trace_content": experiment.trace_content,
@@ -398,7 +439,9 @@ def _dataset_config(
     tasks: list[TaskSpec],
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
-        "task_names": [task.id for task in tasks],
+        "task_names": [
+            _harbor_task_name(manifest, task.id) for task in tasks
+        ],
         "n_tasks": len(tasks),
     }
     if manifest.dataset.path:
@@ -408,6 +451,15 @@ def _dataset_config(
         config["name"] = manifest.dataset.ref
         config["ref"] = manifest.dataset.version
     return _drop_empty(config)
+
+
+def _harbor_task_name(manifest: BenchmarkManifest, task_id: str) -> str:
+    """Qualify package task filters while keeping Fugue task ids portable."""
+    dataset_ref = manifest.dataset.ref or ""
+    if "/" not in dataset_ref or "/" in task_id:
+        return task_id
+    package_org = dataset_ref.split("/", 1)[0]
+    return f"{package_org}/{task_id}"
 
 
 def _agent_config(
@@ -440,7 +492,6 @@ def _agent_config(
     }
     if _looks_like_import_path(harness.agent):
         config["import_path"] = harness.agent
-        config["name"] = harness.name
     else:
         config["name"] = harness.agent
     return _drop_empty(config)
@@ -482,7 +533,11 @@ def _job_env(
     workload_id: str,
     preset_id: str | None,
     run_id: str,
+    task: TaskSpec,
     task_id: str,
+    trial_index: int,
+    comparison_example_id: str,
+    candidate_id: str,
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = content_hashes_for_ids(
@@ -547,6 +602,11 @@ def _job_env(
             "FUGUE_HARNESS": harness.name,
             "FUGUE_JOB_NAME": job_name,
             "FUGUE_TASK_NAME": task_id,
+            "FUGUE_REPOSITORY": task.repo or "",
+            "FUGUE_BASE_COMMIT": task.base_commit or "",
+            "FUGUE_TRIAL_INDEX": str(trial_index),
+            "FUGUE_COMPARISON_EXAMPLE_ID": comparison_example_id,
+            "FUGUE_CANDIDATE_ID": candidate_id,
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
             "FUGUE_TRACE_CONTENT": experiment.trace_content,
@@ -735,16 +795,10 @@ def _bind_fugue_context_runtime(
         else item
         for item in binding.mcp_servers
     )
-    event_artifact = {
-        "source": "/logs/artifacts/fugue-context-events.jsonl",
-        "destination": "fugue-context-events.jsonl",
-        "service": CONTEXT_RUNTIME_SERVICE,
-    }
     return replace(
         binding,
         mcp_servers=servers,
         compose_files=(*binding.compose_files, compose_path),
-        artifacts=(*binding.artifacts, event_artifact),
     )
 
 
@@ -835,9 +889,11 @@ def _context_instruction_path(
             "# Fugue Trial Evidence\n\n"
             + context_text
             + "Before finishing, write `/logs/artifacts/fugue-evidence.json` with "
-            "a JSON object containing `paths`, the repository-relative files that "
+            "serialized UTF-8 JSON text containing `paths`, the repository-relative "
+            "files that "
             "materially supported the answer, and optional `notes`. Use an empty "
-            "`paths` list when no repository evidence was used.\n"
+            "`paths` list when no repository evidence was used; do not pass an "
+            "in-memory object directly to a file-write tool.\n"
         )
     return path
 
@@ -863,6 +919,56 @@ def _agent_config_hash(
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _comparison_example_id(
+    *, dataset_id: str, workload_id: str, task_id: str
+) -> str:
+    return _stable_id(
+        {
+            "dataset": dataset_id,
+            "workload": workload_id,
+            "task": task_id,
+        }
+    )
+
+
+def _candidate_id(
+    *,
+    experiment: ExperimentSpec,
+    variant: FeatureVariant,
+    harness: HarnessSpec,
+    route: ModelRoute,
+    context_spec: ContextSystemSpec,
+    skill_ids: list[str],
+    agent_config_hash: str,
+    repo_root: Path,
+) -> str:
+    prompt_ids = [variant.prompt_id] if variant.prompt_id else []
+    return _stable_id(
+        {
+            "harness": harness.name,
+            "model": route.display_model,
+            "variant": variant.id,
+            "context": {
+                "id": context_spec.id,
+                "version": context_spec.version,
+                "config_hash": _context_config_hash(context_spec),
+            },
+            "content_hashes": content_hashes_for_ids(
+                prompt_ids=prompt_ids,
+                skill_ids=skill_ids,
+                repo_root=repo_root,
+            ),
+            "agent_config_hash": agent_config_hash,
+            "trace_content": experiment.trace_content,
+        }
+    )
+
+
+def _stable_id(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -905,11 +1011,14 @@ def _job_name(
     harness: str,
     variant_id: str,
     task_id: str | None = None,
+    trial_index: int | None = None,
 ) -> str:
     base = f"{_slug(run_name)}-{_slug(workload_id)}-{_slug(harness)}-{_slug(variant_id)}"
     if task_id:
         base += f"-{_slug(task_id)}"
-    return base[:120].rstrip("-") or "fugue"
+    suffix = f"-t{trial_index:03d}" if trial_index is not None else ""
+    base = base[: 120 - len(suffix)].rstrip("-") or "fugue"
+    return f"{base}{suffix}"
 
 
 def _resource_summary(environment: dict[str, Any]) -> dict[str, Any]:

@@ -14,6 +14,7 @@ from fugue.model_plane import (
     ModelRoute,
     missing_model_env,
     missing_trace_env,
+    provider_request_headers,
     resolve_model_route,
     trace_project_slug,
 )
@@ -118,7 +119,10 @@ def _append_local_tool_checks(
 def _check_provider_metadata(
     route: ModelRoute, env: Mapping[str, str], timeout_sec: float = 20.0
 ) -> PreflightCheck:
-    headers = {"Authorization": f"Bearer {env.get(route.api_key_env, '')}"}
+    headers = {
+        "Authorization": f"Bearer {env.get(route.api_key_env, '')}",
+        **provider_request_headers(route, env),
+    }
     if route.provider == "anthropic":
         return PreflightCheck(
             "provider metadata",

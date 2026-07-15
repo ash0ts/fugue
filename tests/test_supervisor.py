@@ -5,6 +5,7 @@ import sys
 import time
 from pathlib import Path
 
+from fugue.bench import supervisor as supervisor_module
 from fugue.bench.execution import write_run_manifest
 from fugue.bench.supervisor import RunSupervisor
 
@@ -57,3 +58,27 @@ def test_orphaned_run_is_marked_interrupted(tmp_path: Path) -> None:
 
     assert run.status == "interrupted"
     assert "terminal state" in str(run.metadata["error"])
+
+
+def test_permission_error_does_not_mark_live_run_interrupted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    write_run_manifest(
+        tmp_path,
+        "run-restricted",
+        {
+            "status": "running",
+            "pid": 123,
+            "run_name": "Restricted",
+            "experiment_id": "demo",
+        },
+    )
+
+    def deny_signal(pid: int, signal: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(supervisor_module.os, "kill", deny_signal)
+
+    run = RunSupervisor(tmp_path).get("run-restricted")
+
+    assert run.status == "running"

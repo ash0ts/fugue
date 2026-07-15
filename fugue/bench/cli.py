@@ -36,6 +36,7 @@ from fugue.bench.execution import (
     plan_cells,
     write_run_manifest,
 )
+from fugue.bench.export import LiveEvaluationCoordinator
 from fugue.bench.job_config import RenderedJob
 from fugue.bench.library import (
     ExperimentSpec,
@@ -536,11 +537,43 @@ def _run_worker(args: argparse.Namespace) -> int:
             },
         )
         concurrency = args.n_concurrent or experiment.n_concurrent or 2
+        live_evaluations = None
+        observability_error = None
+        run_env = rendered[0].env if rendered else load_env(args.env_file)
+        if (
+            cells
+            and run_env.get("WANDB_API_KEY", "").strip()
+            and run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
+            not in {"1", "true", "yes"}
+        ):
+            try:
+                live_evaluations = LiveEvaluationCoordinator(
+                    cells,
+                    repo_root=args.repo_root,
+                    project=trace_project_slug(run_env),
+                    env=run_env,
+                )
+            except Exception as exc:
+                observability_error = f"{type(exc).__name__}: {exc}"
+                CONSOLE.print(
+                    "[yellow]Weave live evaluation unavailable:[/] "
+                    f"{observability_error}"
+                )
         outcomes = execute_cells(
             cells,
             repo_root=args.repo_root,
             max_workers=concurrency,
+            cell_started=(
+                live_evaluations.begin_cell if live_evaluations is not None else None
+            ),
+            cell_finished=(
+                live_evaluations.finish_cell if live_evaluations is not None else None
+            ),
         )
+        publication = live_evaluations.finalize() if live_evaluations else None
+        publication_failures = list(publication.failures if publication else ())
+        if observability_error:
+            publication_failures.insert(0, observability_error)
         failed = sum(outcome.status == "failed" for outcome in outcomes)
         skipped = sum(outcome.status == "not_applicable" for outcome in outcomes)
         status = "failed" if failed else "passed"
@@ -553,6 +586,25 @@ def _run_worker(args: argparse.Namespace) -> int:
                 "passed_cells": len(outcomes) - failed - skipped,
                 "failed_cells": failed,
                 "not_applicable_cells": skipped,
+                "observability_status": (
+                    "failed" if publication_failures else "passed"
+                ),
+                "evaluation_runs": (
+                    [
+                        {
+                            "candidate_id": item.candidate_id,
+                            "name": item.name,
+                            "url": item.url,
+                            "evaluation_ref": item.evaluation_ref,
+                            "model_ref": item.model_ref,
+                            "linked_predictions": item.linked_predictions,
+                        }
+                        for item in publication.evaluations
+                    ]
+                    if publication
+                    else []
+                ),
+                "evaluation_failures": publication_failures,
             },
         )
         CONSOLE.print(
@@ -938,7 +990,18 @@ def _runs(args: argparse.Namespace) -> int:
             print(as_json(summary))
         else:
             if summary.published:
-                CONSOLE.print(f"Published {summary.published} new evaluation row(s)")
+                CONSOLE.print(
+                    f"Published {summary.published} finalized candidate evaluation(s)"
+                )
+                for evaluation in summary.evaluations:
+                    suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
+                    CONSOLE.print(
+                        f"  {evaluation.name} ({evaluation.examples} examples){suffix}"
+                    )
+            if summary.skipped:
+                CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
+            for failure in summary.publication_failures:
+                CONSOLE.print(f"[red]Publication failed:[/] {failure}")
             CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
         return 0
     if args.open:

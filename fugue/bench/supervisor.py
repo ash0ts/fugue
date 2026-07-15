@@ -239,7 +239,9 @@ class RunSupervisor:
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except (OSError, ValueError):
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError):
         return False
     return True
 

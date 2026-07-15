@@ -31,10 +31,14 @@ def _cell(run_id: str, name: str, *, applicable: bool = True) -> PlannedCell:
         variant_id="baseline",
         model_provider="openai",
         model="openai/gpt-5",
+        trial_index=1,
+        comparison_example_id=f"example-{name}",
+        candidate_id="candidate-codex-baseline",
         config_path=Path(f"{name}.json"),
+        result_path=Path("jobs") / name / "result.json",
         command=(name,),
         env={},
-        n_attempts=2,
+        n_attempts=1,
         applicable=applicable,
         skip_reason=None if applicable else "unsupported",
     )
@@ -104,6 +108,24 @@ def test_run_ids_are_immutable_and_unique() -> None:
     assert new_run_id() != new_run_id()
 
 
+def test_real_cell_fails_when_harbor_reports_trial_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = new_run_id()
+    cell = _cell(run_id, "errored")
+    result_path = tmp_path / cell.result_path
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps({"stats": {"n_errored_trials": 1, "n_cancelled_trials": 0}})
+    )
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "failed"
+    assert outcome.error == "1 Harbor trial(s) errored"
+
+
 def test_execution_rejects_mixed_runs_and_duplicate_cells(tmp_path: Path) -> None:
     first = _cell("run-a", "same")
     second_run = _cell("run-b", "other")
@@ -111,6 +133,31 @@ def test_execution_rejects_mixed_runs_and_duplicate_cells(tmp_path: Path) -> Non
         execute_cells([first, second_run], repo_root=tmp_path, max_workers=1)
     with pytest.raises(ValueError, match="cell ids must be unique"):
         execute_cells([first, first], repo_root=tmp_path, max_workers=1)
+
+
+def test_cell_lifecycle_overlays_env_without_changing_outcome(tmp_path: Path) -> None:
+    cell = _cell("run-live", "live")
+    observed = {}
+    finished = []
+
+    def runner(command, **kwargs):
+        observed.update(kwargs["env"])
+        return SimpleNamespace(returncode=0)
+
+    outcomes = execute_cells(
+        [cell],
+        repo_root=tmp_path,
+        max_workers=1,
+        runner=runner,
+        cell_started=lambda value: {"FUGUE_WEAVE_EVAL_NAME": value.id},
+        cell_finished=lambda value, outcome: finished.append(
+            (value.id, outcome.status)
+        ),
+    )
+
+    assert outcomes[0].status == "passed"
+    assert observed["FUGUE_WEAVE_EVAL_NAME"] == cell.id
+    assert finished == [(cell.id, "passed")]
 
 
 def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -> None:

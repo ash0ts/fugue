@@ -70,5 +70,3 @@ variants:
 n_attempts: 1
 n_concurrent: 2
 jobs_dir: jobs/repo-memory-impact
-artifacts:
-  - /logs/artifacts/fugue-context-events.jsonl

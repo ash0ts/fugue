@@ -13,6 +13,7 @@ import yaml
 from fugue.model_plane import (
     BRIDGE_MASTER_KEY_ENV,
     ModelRoute,
+    provider_request_headers,
     resolve_model_route,
 )
 
@@ -30,7 +31,12 @@ class BridgeFiles:
     compose_path: Path
 
 
-def _litellm_params(route: ModelRoute, *, concrete: bool = False) -> dict[str, Any]:
+def _litellm_params(
+    route: ModelRoute,
+    *,
+    concrete: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     params: dict[str, Any] = {
         "model": (
             route.litellm_model.replace("*", route.model_id)
@@ -43,6 +49,9 @@ def _litellm_params(route: ModelRoute, *, concrete: bool = False) -> dict[str, A
         params["api_base"] = route.chat_base_url
     if route.provider == "anthropic" and route.messages_base_url:
         params["api_base"] = route.messages_base_url
+    headers = provider_request_headers(route, env)
+    if headers:
+        params["extra_headers"] = headers
     return params
 
 
@@ -51,6 +60,7 @@ def litellm_config_for_route(
     *,
     builder_route: ModelRoute | None = None,
     judge_route: ModelRoute | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     roles = {
         "fugue-target": route,
@@ -59,11 +69,16 @@ def litellm_config_for_route(
     }
     return {
         "model_list": [
-            {"model_name": "*", "litellm_params": _litellm_params(route)},
+            {
+                "model_name": "*",
+                "litellm_params": _litellm_params(route, env=env),
+            },
             *[
                 {
                     "model_name": name,
-                    "litellm_params": _litellm_params(role_route, concrete=True),
+                    "litellm_params": _litellm_params(
+                        role_route, concrete=True, env=env
+                    ),
                 }
                 for name, role_route in roles.items()
             ],
@@ -118,6 +133,7 @@ def write_bridge_files(
     *,
     builder_route: ModelRoute | None = None,
     judge_route: ModelRoute | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> BridgeFiles:
     root = Path.cwd() if repo_root is None else Path(repo_root)
     runtime_dir = root / BRIDGE_RUNTIME_DIR
@@ -127,7 +143,10 @@ def write_bridge_files(
     config_path.write_text(
         yaml.safe_dump(
             litellm_config_for_route(
-                route, builder_route=builder_route, judge_route=judge_route
+                route,
+                builder_route=builder_route,
+                judge_route=judge_route,
+                env=env,
             ),
             sort_keys=False,
         )
@@ -163,9 +182,18 @@ def bridge_up(
         repo_root,
         builder_route=builder_route,
         judge_route=judge_route,
+        env=env,
     )
     subprocess.run(
-        ["docker", "compose", "-f", files.compose_path.as_posix(), "up", "-d"],
+        [
+            "docker",
+            "compose",
+            "-f",
+            files.compose_path.as_posix(),
+            "up",
+            "-d",
+            "--force-recreate",
+        ],
         cwd=Path.cwd() if repo_root is None else Path(repo_root),
         check=True,
         env=dict(env) if env is not None else None,

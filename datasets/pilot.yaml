@@ -21,6 +21,9 @@ tasks:
   - id: astropy__astropy-12907
     repo: astropy/astropy
     base_commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
+    expected_paths:
+      - astropy/modeling/separable.py
+      - astropy/modeling/tests/test_separable.py
   - id: astropy__astropy-13033
     repo: astropy/astropy
     base_commit: 298ccb478e6bf092953bca67a3d29dc6c35f6752

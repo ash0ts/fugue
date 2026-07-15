@@ -49,6 +49,13 @@ LITELLM_MASTER_KEY=sk-fugue-local
 calls when the selected route starts with `wandb/`. OpenAI and Anthropic keys
 are needed only when their provider route is selected.
 
+For W&B Inference routes, Fugue sends `WANDB_ENTITY/WANDB_PROJECT` as the
+`OpenAI-Project` request header. Model usage and Weave traces therefore land in
+the same project by default; `WEAVE_PROJECT=entity/project` overrides both.
+Agent spans use Weave's dedicated Agents OTLP endpoint and route with the same
+project. Its Basic authentication header is created only in the trial process
+environment and is never written to generated Harbor or plugin configuration.
+
 Run bare `fugue` in a terminal to open the Rich command center:
 
 ```bash
@@ -176,6 +183,49 @@ fugue plan "Run the checked-in configuration unchanged" \
 
 Generated prompt or skill assets must be saved before the draft can run.
 
+### Textual planning workflow
+
+The TUI keeps experiment design focused on the comparison rather than the
+underlying schema:
+
+```bash
+fugue tui
+```
+
+```mermaid
+flowchart LR
+    DEFINE["Define: describe an intent or load an experiment"]
+    COMPARE["Compare: variants, harnesses, coverage, size"]
+    REVIEW["Review: exact cells, trials, readiness"]
+    RUNS["Runs: live cells and logs"]
+    DEFINE --> COMPARE --> REVIEW --> RUNS
+    REVIEW -->|Missing setup| SETUP["Setup: bridge, credentials, context"]
+    SETUP --> REVIEW
+```
+
+- **Define** accepts a natural-language request or a saved experiment. AI
+  proposals remain local until `Use proposal` is selected.
+- **Compare** shows only the controlled variables: variants, harnesses,
+  evaluation coverage, and run size. Variant edits remain in memory until an
+  explicit save or run.
+- **Review** automatically renders the exact matrix and explains unavailable
+  cells or setup blockers before enabling `Run experiment`.
+- **Advanced** contains model-role overrides, concurrency, tags, run name, and
+  trace policy. Checked-in experiment defaults remain authoritative otherwise.
+
+Use `n` and `p` to move between planning steps. `1` through `4` continue to
+switch between Plan, Runs, Results, and Setup. Pressing `r` from Define or
+Compare opens Review; it never launches an experiment without review.
+
+For the eight-cell memory smoke in the TUI:
+
+1. Load `Repository context-system impact` in Define.
+2. In Compare, keep the `smoke` size, select only `Coding`, and enable `No
+   added context` plus `Fugue BM25`.
+3. Keep all four harnesses selected and open Review.
+4. Use `Open Setup` if BM25 needs preparation, then return and run the eight
+   displayed cells.
+
 ## Run Experiments
 
 Preview is side-effect free: it does not write runtime state, generated
@@ -227,7 +277,9 @@ fugue runs RUN_ID --logs --cell CELL_ID
 fugue runs RUN_ID --cancel
 ```
 
-Export normalized JSONL and optionally enrich/publish through Weave:
+Every managed Harbor run now opens its Weave evaluation predictions before the
+agent cells start. Export writes normalized JSONL, verifies those live links,
+and backfills rows only when live publication was unavailable:
 
 ```bash
 fugue runs RUN_ID \
@@ -235,6 +287,55 @@ fugue runs RUN_ID \
   --out reports/run.jsonl \
   --fetch-weave \
   --to-weave
+```
+
+Compatible candidates share one Weave Evaluation definition and dataset. Each
+harness/variant is a distinct model run against that definition:
+
+```mermaid
+flowchart LR
+    PLAN["Planned cells"] --> SCOPE["Scope: benchmark + workload + examples + scorers"]
+    SCOPE --> DATASET["Shared Weave Dataset: one row per task/query/episode"]
+    SCOPE --> EVAL["Shared Evaluation definition"]
+    PLAN --> CANDIDATES["Candidate models: harness + model + variant + context"]
+    CANDIDATES --> PREDICT["Open prediction before Harbor cell"]
+    EVAL --> PREDICT
+    PREDICT --> AGENT["Native invoke_agent / chat / tool spans"]
+    AGENT --> LINK["Verified genai_span_ref + observed conversation"]
+    LINK --> SCORES["Outcome / retrieval / latency / tokens / cost / errors"]
+    SCORES --> SUMMARY["log_summary()"]
+    SUMMARY --> LEDGER["Publication ledger v3"]
+```
+
+Candidate dimensions and trial ordinals never enter dataset inputs. Repeated
+trials for the same task appear as repeated predictions under one example.
+Evaluation attributes describe only the shared scope; candidate configuration
+lives on the model object and run metadata. Administrative cell and
+preparation records remain local. Missing usage is `N/A`; zero is reserved for
+a measured zero.
+
+The live prediction stays open for the Harbor cell, so Weave's prediction
+latency covers execution rather than export overhead. Fugue accepts a trace
+link only when the native root matches the run key, task, stable agent name,
+and exact `predict_and_score` call id. A network or ingestion failure does not
+change the Harbor outcome; it marks the run's observability status as failed
+and leaves an idempotent backfill for export.
+
+```mermaid
+sequenceDiagram
+    participant F as Fugue worker
+    participant W as Weave EvaluationLogger
+    participant H as Harbor cell
+    participant A as Native harness plugin
+    F->>W: log_prediction(shared example)
+    W-->>F: predict_and_score call id
+    F->>H: run with weave.eval.* attributes
+    H->>A: invoke agent
+    A->>W: invoke_agent, chat, execute_tool spans
+    H-->>F: Harbor result and artifacts
+    F->>W: resolve native root and attach genai_span_ref
+    F->>W: scores and prediction output
+    F->>W: log_summary()
 ```
 
 Open the stable W&B destinations:
@@ -311,6 +412,12 @@ GitNexus, Project-RAG, Semble, and lat.md remain explicit research adapters
 until their pinned Harbor runtimes pass integration tests. Unsupported cells
 are recorded as `not_applicable`, never as failed trials.
 
+Codex exposes MCP tools as Responses namespaces. Native OpenAI routes support
+that wire format; W&B and Anthropic bridge routes currently accept function
+tools only, so Codex plus an MCP-backed context system is reported as
+`not_applicable` before execution instead of silently mounting static context
+or recording a model failure.
+
 ## Weave Agent Model
 
 Harness identities are stable across experiments:
@@ -330,13 +437,23 @@ flowchart TD
     TURN --> TOOL["execute_tool spans"]
     TURN --> SUB["sub-agent spans"]
     CONV --> ATTR["fugue.run / experiment / variant / context / task / trial"]
+    ATTR --> ID["candidate + comparison example identities"]
 ```
 
 Native harness integrations own model and tool spans. Fugue supplies stable
 conversation identity and flat filterable attributes without duplicating
 instrumentation. Full trace content is the default and may include prompts,
 responses, reasoning, tool arguments, and tool results. Use metadata mode only
-for integrations that can guarantee suppression.
+for integrations that can guarantee suppression. Usage is summed from `chat`
+spans when available, with root aggregates used only as a fallback so nested
+totals are never counted twice.
+
+Fugue stores planned and observed conversation identities separately. The
+observed native conversation is used for evaluation links; the deterministic
+planned id remains correlation metadata. Context experiments separately report
+whether context was assigned, available, invoked, and successfully returned
+results. A configured retrieval system with zero calls is an unused treatment,
+not evidence that retrieval helped.
 
 ## Included Demos
 

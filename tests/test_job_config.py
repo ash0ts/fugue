@@ -27,6 +27,7 @@ harnesses:
     agent: fugue.agents:FugueCodex
 tasks:
   - id: astropy__astropy-12907
+    expected_paths: [astropy/modeling/separable.py]
 """
     )
     save_prompt("prompt-a", "# Prompt A\n", tmp_path)
@@ -85,6 +86,8 @@ tasks:
     assert "secret-openai" not in config_text
     assert "secret-wandb" not in config_text
     config = json.loads(config_text)
+    assert config["agents"][0]["import_path"] == "fugue.agents:FugueCodex"
+    assert "name" not in config["agents"][0]
     assert config["agents"][0]["model_name"] == "openai/gpt-5"
     assert config["agents"][0]["skills"] == ["configs/fugue/skills/skill-a"]
     assert config["agents"][0]["kwargs"] == {"temperature": 0}
@@ -95,6 +98,7 @@ tasks:
     assert any(path.endswith("/artifact/AGENTS.md") for path in instruction_paths)
     assert config["environment"]["override_memory_mb"] == 4096
     assert config["environment"]["type"] == "docker"
+    assert config["artifacts"] == ["/logs/artifacts"]
     assert any(
         mount["target"] == "/fugue-context"
         for mount in config["environment"]["mounts"]
@@ -107,8 +111,54 @@ tasks:
     assert config["fugue"]["context_version"] == "1"
     assert len(config["fugue"]["context_config_hash"]) == 64
     assert config["fugue"]["agent_config_hash"] == job.agent_config_hash
+    assert config["n_attempts"] == 1
+    assert config["fugue"]["trial_index"] == 1
+    assert config["fugue"]["comparison_example_id"] == job.comparison_example_id
+    assert config["fugue"]["expected_evidence_paths"] == {
+        "astropy__astropy-12907": ["astropy/modeling/separable.py"]
+    }
+    assert json.loads(job.env["FUGUE_EXPECTED_EVIDENCE_PATHS"]) == {
+        "astropy__astropy-12907": ["astropy/modeling/separable.py"]
+    }
+    assert config["fugue"]["candidate_id"] == job.candidate_id
     assert config["fugue"]["trace_content"] == "full"
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
+
+
+def test_attempts_render_as_independent_comparable_trials(tmp_path: Path):
+    manifest_path = tmp_path / "tasks.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="experiment-a",
+        title="Experiment A",
+        n_attempts=2,
+        variants=[FeatureVariant(id="baseline", label="Baseline")],
+    )
+
+    jobs = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    assert [job.trial_index for job in jobs] == [1, 2]
+    assert len({job.comparison_example_id for job in jobs}) == 1
+    assert len({job.candidate_id for job in jobs}) == 1
+    assert all(job.config["n_attempts"] == 1 for job in jobs)
+    assert jobs[0].job_name.endswith("-t001")
+    assert jobs[1].job_name.endswith("-t002")
 
 
 def test_missing_context_capability_is_not_applicable(tmp_path: Path):
@@ -196,16 +246,68 @@ tasks:
     service = compose["services"]["fugue-context"]
     assert service["image"] == "fugue-context-runtime:0.1.0"
     assert service["build"]["dockerfile"] == "Dockerfile.context"
+    dockerfile = Path(__file__).parents[1] / "Dockerfile.context"
+    assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
     assert "fugue.context_server" in service["command"]
     assert next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
     assert compose["services"]["main"]["depends_on"]["fugue-context"] == {
         "condition": "service_healthy"
     }
-    assert {
-        "source": "/logs/artifacts/fugue-context-events.jsonl",
-        "destination": "fugue-context-events.jsonl",
-        "service": "fugue-context",
-    } in job.config["artifacts"]
+    assert "artifacts" not in job.config
+
+
+def test_bridged_codex_context_mcp_is_explicitly_not_applicable(tmp_path: Path):
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="experiment-a",
+        title="Experiment A",
+        variants=[
+            FeatureVariant(
+                id="rag",
+                label="RAG",
+                context=ContextSelection(system_id="rag-bm25"),
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="wandb/zai-org/GLM-5.2",
+        run_id="unit",
+    )
+
+    agent = job.config["agents"][0]
+    assert agent["mcp_servers"] == [
+        {
+            "name": "fugue-context",
+            "transport": "streamable-http",
+            "url": "http://fugue-context:8000/mcp",
+        }
+    ]
+    assert job.config["environment"]["extra_docker_compose"]
+    assert any(
+        mount["target"] == "/fugue-context"
+        for mount in job.config["environment"]["mounts"]
+    )
+    assert "artifacts" not in job.config
+    assert job.applicable is False
+    assert job.skip_reason == (
+        "Codex MCP tools require Responses namespace support; "
+        "the wandb bridge accepts function tools only"
+    )
 
 
 def test_external_mcp_without_pinned_runtime_is_not_applicable(tmp_path: Path):
@@ -324,7 +426,9 @@ tasks:
     assert {tuple(job.context_cache_keys) for job in jobs} == {("task-a",), ("task-b",)}
     for job in jobs:
         [dataset] = job.config["datasets"]
-        assert dataset["task_names"] == list(job.context_cache_keys)
+        assert dataset["task_names"] == [
+            f"fixture/{task_id}" for task_id in job.context_cache_keys
+        ]
         mounts = job.config["environment"]["mounts"]
         context_mount = next(item for item in mounts if item["target"] == "/fugue-context")
         assert next(iter(job.context_cache_keys.values())) in context_mount["source"]

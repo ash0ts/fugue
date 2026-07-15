@@ -11,6 +11,7 @@ import httpx
 
 from fugue.model_plane import (
     ModelRoute,
+    provider_request_headers,
     resolve_model_route,
     select_model,
     trace_project_slug,
@@ -123,10 +124,14 @@ class AssistantModelClient:
             timeout=self.timeout_sec,
             transport=self.transport,
         ) as client:
+            provider_headers = provider_request_headers(self.route, self.env)
             if self.route.provider == "openai" and self.route.responses_base_url:
                 response = await client.post(
                     f"{self.route.responses_base_url}/responses",
-                    headers={"Authorization": f"Bearer {api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        **provider_headers,
+                    },
                     json=_responses_payload(
                         self.route,
                         messages,
@@ -144,6 +149,7 @@ class AssistantModelClient:
                         "x-api-key": api_key,
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
+                        **provider_headers,
                     },
                     json=_messages_payload(
                         self.route,
@@ -161,7 +167,10 @@ class AssistantModelClient:
                 )
             response = await client.post(
                 f"{self.route.chat_base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    **provider_headers,
+                },
                 json=_chat_payload(
                     self.route,
                     messages,

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import pytest
 
 from fugue.agent_tracing import (
     conversation_id,
     normalize_trace_content,
+    openclaw_agent_id,
+    openclaw_conversation_id,
     stable_agent_name,
+)
+
+AGENT_MODEL_PLANE = (
+    Path(__file__).resolve().parents[1] / "fugue" / "agents" / "model_plane.py"
 )
 
 
@@ -22,8 +29,65 @@ def test_harness_agents_are_stable_and_trials_are_deterministic() -> None:
     assert str(uuid.UUID(first)) == first
 
 
+def test_openclaw_trial_identity_preserves_stable_agent_name() -> None:
+    fugue_id = "872b3077-0f62-544d-8e09-aa437b84f029"
+
+    assert openclaw_agent_id(fugue_id) == f"fugue-{fugue_id}"
+    assert openclaw_conversation_id(fugue_id) == f"agent:fugue-{fugue_id}:main"
+    assert stable_agent_name("openclaw") == "openclaw"
+
+
 def test_trace_content_is_explicit() -> None:
     assert normalize_trace_content(None) == "full"
     assert normalize_trace_content(" metadata ") == "metadata"
     with pytest.raises(ValueError, match="full.*metadata"):
         normalize_trace_content("redacted")
+
+
+def test_trial_trace_attributes_are_flat_and_comparable() -> None:
+    source = AGENT_MODEL_PLANE.read_text()
+
+    for attribute in (
+        "fugue.run_id",
+        "fugue.experiment_id",
+        "fugue.workload_id",
+        "fugue.harness",
+        "fugue.variant_id",
+        "fugue.context_system_id",
+        "fugue.task_id",
+        "fugue.trial_index",
+        "fugue.comparison_example_id",
+        "fugue.candidate_id",
+        "fugue.evaluation_scope_id",
+        "fugue.model_provider",
+        "fugue.model",
+        "weave.eval.predict_and_score_call_id",
+        "weave.eval.project_id",
+        "weave.eval.evaluation_name",
+    ):
+        assert f'"{attribute}"' in source
+    assert "FUGUE_TRACE_ATTRIBUTES_JSON" in source
+    assert "key: str(value)" in source
+
+
+def test_hermes_staging_promotes_resource_attributes_to_spans() -> None:
+    source = AGENT_MODEL_PLANE.read_text()
+
+    assert "self.config.resource_attributes or {}" in source
+    assert "hermes-otel span attribute patch target was not found" in source
+
+
+def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
+    source = AGENT_MODEL_PLANE.read_text()
+
+    assert source.count('_WEAVE_PLUGIN_VERSION = "0.1.1"') == 2
+    assert '_WEAVE_PLUGIN_VERSION = "0.2.12"' in source
+    assert "openclaw plugins install weave-openclaw@" in source
+    assert "npm install -g weave-claude-code@" in source
+    assert "weave-codex@" in source
+    assert "emitter pattern missing" in source
+    assert "baggage pattern missing" in source
+    assert "processor pattern missing" in source
+    assert "key.startsWith('fugue.')" in source
+    assert "self._resolved_env_vars.update(" in source
+    assert "expected 3 span objects" in source

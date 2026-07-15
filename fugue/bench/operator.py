@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -26,7 +27,12 @@ from fugue.bench.context import (
 )
 from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.execution import latest_cell_records, new_run_id
-from fugue.bench.export import export_rows, publish_to_weave, write_jsonl
+from fugue.bench.export import (
+    PublishedEvaluation,
+    export_rows,
+    publish_to_weave,
+    write_jsonl,
+)
 from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
 from fugue.bench.library import (
     ExperimentSpec,
@@ -36,6 +42,10 @@ from fugue.bench.library import (
     experiment_with_overrides,
     get_experiment,
     list_experiments,
+    save_experiment_data,
+    save_prompt,
+    save_skill,
+    validate_id,
 )
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
 from fugue.bench.supervisor import ManagedRun, RunSupervisor
@@ -76,6 +86,20 @@ class ExperimentRequest:
 
 
 @dataclass(frozen=True)
+class PreviewCellSummary:
+    harness: str
+    variant_id: str
+    variant_label: str
+    context_system_id: str
+    workload_id: str
+    task_id: str
+    trial_count: int
+    applicable: bool
+    reason: str | None = None
+    context_cache_ready: bool = False
+
+
+@dataclass(frozen=True)
 class PreviewSummary:
     cells: int
     applicable_cells: int
@@ -85,6 +109,7 @@ class PreviewSummary:
     systems: tuple[str, ...]
     workloads: tuple[str, ...]
     commands: tuple[str, ...]
+    matrix_cells: tuple[PreviewCellSummary, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +146,9 @@ class RunSummary:
     pending: int
     not_applicable: int
     log_path: Path
+    observability_status: str | None = None
+    evaluation_urls: tuple[str, ...] = ()
+    evaluation_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,6 +164,11 @@ class ResultSummary:
     average_wall_time_sec: float | None
     tool_calls: int
     turns: int
+    context_assigned: int = 0
+    context_invoked: int = 0
+    linked_traces: int = 0
+    unlinked_traces: int = 0
+    usage_unavailable: int = 0
     rows: tuple[dict[str, Any], ...] = ()
     agent_traces: tuple[AgentTraceRef, ...] = ()
 
@@ -153,6 +186,9 @@ class ExportSummary:
     path: Path
     rows: int
     published: int = 0
+    skipped: int = 0
+    evaluations: tuple[PublishedEvaluation, ...] = ()
+    publication_failures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -209,24 +245,33 @@ class OperatorService:
     def env(self) -> dict[str, str]:
         return load_env(self.env_file)
 
-    def status(self, request: ExperimentRequest | None = None) -> OperatorStatus:
+    def status(
+        self,
+        request: ExperimentRequest | None = None,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> OperatorStatus:
         env = self.env
-        experiment = self.experiment(request.experiment_id if request else "pilot")
+        selected = experiment or self.experiment(
+            request.experiment_id if request else "pilot"
+        )
+        if request:
+            selected = _experiment_with_request_overrides(selected, request)
         selected_model = select_model(
             request.model if request else None,
             env=env,
-            experiment_model=experiment.model,
+            experiment_model=selected.model,
         )
         route = resolve_model_route(selected_model, env)
         builder_model = (
             (request.builder_model if request else None)
-            or experiment.builder_model
+            or selected.builder_model
             or env.get("FUGUE_BUILDER_MODEL")
             or selected_model
         )
         judge_model = (
             (request.judge_model if request else None)
-            or experiment.judge_model
+            or selected.judge_model
             or env.get("FUGUE_JUDGE_MODEL")
         )
         routes = [self._role_status("target", selected_model, env)]
@@ -246,21 +291,19 @@ class OperatorService:
         routes.append(
             self._role_status(
                 "analyst",
-                select_assistant_model(
-                    "analyst", experiment_model=selected_model, env=env
-                ),
+                select_assistant_model("composer", experiment_model=selected_model, env=env),
                 env,
             )
         )
         trace_project = trace_project_slug(env)
         bridge = bridge_status()
         trace_content = (
-            (request.trace_content if request else None) or experiment.trace_content
+            (request.trace_content if request else None) or selected.trace_content
         )
         key_names = ("WANDB_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-        preset = select_preset(experiment, request.preset if request else None)
+        preset = select_preset(selected, request.preset if request else None)
         workloads = select_workloads(
-            experiment,
+            selected,
             preset,
             list(request.workloads) if request and request.workloads else None,
         )
@@ -270,10 +313,21 @@ class OperatorService:
                 for workload in workloads
                 for system_id in (
                     selected_system_ids(
-                        experiment,
+                        selected,
                         workload,
                         preset,
-                        list(request.systems) if request and request.systems else None,
+                        (
+                            list(request.systems)
+                            if request and request.systems
+                            else (
+                                [
+                                    variant.context.system_id
+                                    for variant in selected.variants
+                                ]
+                                if request and request.variants
+                                else None
+                            )
+                        ),
                     )
                     or []
                 )
@@ -281,7 +335,7 @@ class OperatorService:
         ) or tuple(
             dict.fromkeys(
                 variant.context.system_id
-                for variant in experiment.variants
+                for variant in selected.variants
                 if variant.enabled
             )
         )
@@ -315,25 +369,27 @@ class OperatorService:
         request: ExperimentRequest,
         *,
         live: bool = True,
+        experiment: ExperimentSpec | None = None,
     ) -> tuple[PreflightCheck, ...]:
         from fugue.preflight import PreflightCheck, run_preflight
 
         env = self.env
-        experiment = self.experiment(request.experiment_id)
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
         target_model = select_model(
             request.model,
             env=env,
-            experiment_model=experiment.model,
+            experiment_model=selected.model,
         )
         builder_model = (
             request.builder_model
-            or experiment.builder_model
+            or selected.builder_model
             or env.get("FUGUE_BUILDER_MODEL")
             or target_model
         )
         judge_model = (
             request.judge_model
-            or experiment.judge_model
+            or selected.judge_model
             or env.get("FUGUE_JUDGE_MODEL")
         )
         checks = run_preflight(
@@ -357,8 +413,8 @@ class OperatorService:
                 present = False
                 detail = str(exc)
             checks.append(PreflightCheck(f"{role} model", present, detail))
-        trace_content = request.trace_content or experiment.trace_content
-        if trace_content == "metadata" and "claude-code" in experiment.harnesses:
+        trace_content = request.trace_content or selected.trace_content
+        if trace_content == "metadata" and "claude-code" in selected.harnesses:
             checks.append(
                 PreflightCheck(
                     "Claude Code trace content",
@@ -366,12 +422,17 @@ class OperatorService:
                     "weave-claude-code cannot guarantee metadata-only capture",
                 )
             )
-        preset = select_preset(experiment, request.preset)
-        systems = list(request.systems) or preset.systems or [
-            variant.context.system_id
-            for variant in experiment.variants
-            if variant.enabled
-        ]
+        preset = select_preset(selected, request.preset)
+        systems = list(request.systems) or (
+            [variant.context.system_id for variant in selected.variants]
+            if request.variants
+            else preset.systems
+            or [
+                variant.context.system_id
+                for variant in selected.variants
+                if variant.enabled
+            ]
+        )
         runtime = ContextRuntime(
             repo_root=self.repo_root,
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
@@ -388,7 +449,7 @@ class OperatorService:
                     )
                 )
         if preset.id == "full":
-            for workload in select_workloads(experiment, preset, None):
+            for workload in select_workloads(selected, preset, None):
                 if not workload.dataset:
                     continue
                 dataset = load_workload_dataset(
@@ -416,13 +477,18 @@ class OperatorService:
                 )
         return tuple(checks)
 
-    def start_bridge(self, request: ExperimentRequest) -> BridgeFiles:
+    def start_bridge(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> BridgeFiles:
         env = self.env
-        experiment = self.experiment(request.experiment_id)
+        selected = experiment or self.experiment(request.experiment_id)
         target = select_model(
             request.model,
             env=env,
-            experiment_model=experiment.model,
+            experiment_model=selected.model,
         )
         return bridge_up(
             target,
@@ -430,12 +496,12 @@ class OperatorService:
             env=env,
             builder_model=(
                 request.builder_model
-                or experiment.builder_model
+                or selected.builder_model
                 or env.get("FUGUE_BUILDER_MODEL")
             ),
             judge_model=(
                 request.judge_model
-                or experiment.judge_model
+                or selected.judge_model
                 or env.get("FUGUE_JUDGE_MODEL")
             ),
         )
@@ -449,6 +515,7 @@ class OperatorService:
         run_id: str | None = None,
     ) -> tuple[ContextPreparation, ...]:
         selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
         env = self.env
         env["FUGUE_BUILDER_MODEL"] = (
             request.builder_model
@@ -481,7 +548,14 @@ class OperatorService:
             experiment=selected,
             workloads=workloads,
             preset=preset,
-            requested_systems=list(request.systems) or None,
+            requested_systems=(
+                list(request.systems)
+                or (
+                    [variant.context.system_id for variant in selected.variants]
+                    if request.variants
+                    else None
+                )
+            ),
             manifest_override=request.manifest,
             repo_root=self.repo_root,
         )
@@ -561,6 +635,90 @@ class OperatorService:
     def experiment_items(self) -> list[tuple[str, str]]:
         return [(item.title, item.id) for item in list_experiments(self.repo_root)]
 
+    def request_for_experiment(self, experiment: ExperimentSpec) -> ExperimentRequest:
+        """Build UI selections without turning inherited settings into overrides."""
+        preset = select_preset(experiment, experiment.default_preset)
+        workloads = select_workloads(experiment, preset, None)
+        return ExperimentRequest(
+            experiment_id=experiment.id,
+            preset=preset.id if preset.id != "default" else None,
+            workloads=tuple(item.id for item in workloads),
+            harnesses=tuple(preset.harnesses or experiment.harnesses),
+            variants=tuple(
+                variant.id for variant in experiment.variants if variant.enabled
+            ),
+            run_name=experiment.run_name,
+            tags=tuple(experiment.tags),
+            jobs_dir=experiment.jobs_dir,
+        )
+
+    def save_working_experiment(
+        self,
+        experiment: ExperimentSpec,
+        request: ExperimentRequest,
+        *,
+        experiment_id: str,
+        title: str | None = None,
+        assets: tuple[Any, ...] = (),
+        replace_assets: bool = False,
+    ) -> ExperimentSpec:
+        """Persist one explicitly accepted TUI or assistant plan."""
+        experiment_id = validate_id(experiment_id, kind="experiment id")
+        for asset in assets:
+            if asset.kind == "prompt":
+                path = self.repo_root / "configs/fugue/prompts" / f"{asset.id}.md"
+                if path.exists() and not replace_assets:
+                    raise FileExistsError(
+                        f"prompt {asset.id} exists; confirm replacement explicitly"
+                    )
+                save_prompt(asset.id, asset.body, self.repo_root)
+            else:
+                path = (
+                    self.repo_root
+                    / "configs/fugue/skills"
+                    / asset.id
+                    / "SKILL.md"
+                )
+                if path.exists() and not replace_assets:
+                    raise FileExistsError(
+                        f"skill {asset.id} exists; confirm replacement explicitly"
+                    )
+                save_skill(asset.id, asset.body, self.repo_root)
+
+        selected_variants = set(request.variants)
+        data = experiment.to_dict()
+        data.update(
+            {
+                "id": experiment_id,
+                "title": title or experiment.title,
+                "model": request.model or experiment.model,
+                "builder_model": request.builder_model or experiment.builder_model,
+                "judge_model": request.judge_model or experiment.judge_model,
+                "run_name": request.run_name or experiment_id,
+                "tags": list(request.tags),
+                "harnesses": list(request.harnesses),
+                "n_attempts": request.n_attempts or experiment.n_attempts,
+                "n_tasks": request.n_tasks or experiment.n_tasks,
+                "n_concurrent": request.n_concurrent or experiment.n_concurrent,
+                "trace_content": request.trace_content or experiment.trace_content,
+                "variants": [
+                    {
+                        **variant.to_dict(),
+                        "enabled": (
+                            variant.id in selected_variants
+                            if selected_variants
+                            else variant.enabled
+                        ),
+                    }
+                    for variant in experiment.variants
+                ],
+            }
+        )
+        preset_ids = {item.id for item in experiment.presets}
+        if request.preset in preset_ids:
+            data["default_preset"] = request.preset
+        return save_experiment_data(experiment_id, data, self.repo_root)
+
     def preview(self, request: ExperimentRequest) -> PreviewSummary:
         return self._preview(request)
 
@@ -614,7 +772,31 @@ class OperatorService:
             variants=tuple(sorted({job.variant_id for job in jobs})),
             systems=tuple(sorted({job.context_system_id for job in jobs})),
             workloads=tuple(sorted({job.workload_id for job in jobs})),
-            commands=tuple(" ".join(job.command) for job in jobs),
+            commands=tuple(" ".join(job.command) for job in jobs if job.applicable),
+            matrix_cells=tuple(
+                PreviewCellSummary(
+                    harness=job.harness,
+                    variant_id=job.variant_id,
+                    variant_label=job.variant_label,
+                    context_system_id=job.context_system_id,
+                    workload_id=job.workload_id,
+                    task_id=job.task_id,
+                    trial_count=(
+                        int(
+                            job.config.get("n_attempts")
+                            or (job.config.get("fugue") or {}).get("n_attempts")
+                            or 1
+                        )
+                        * int(
+                            (job.config.get("fugue") or {}).get("task_count") or 1
+                        )
+                    ),
+                    applicable=job.applicable,
+                    reason=job.skip_reason,
+                    context_cache_ready=job.context_cache_ready,
+                )
+                for job in jobs
+            ),
         )
 
     def rendered_jobs(
@@ -659,6 +841,11 @@ class OperatorService:
                 )
             ]
         rendered: list[RenderedJob] = []
+        requested_systems = list(request.systems) or (
+            [variant.context.system_id for variant in selected.variants]
+            if request.variants
+            else None
+        )
         for workload in workloads:
             if workload.runner == "harbor":
                 manifest_path = _resolve(
@@ -689,7 +876,7 @@ class OperatorService:
                             selected,
                             workload,
                             preset,
-                            list(request.systems) or None,
+                            requested_systems,
                         ),
                         n_tasks=(
                             request.n_tasks
@@ -753,7 +940,15 @@ class OperatorService:
                 f"{dataset.runner} dataset"
             )
         systems = selected_system_ids(
-            experiment, workload, preset, list(request.systems) or None
+            experiment,
+            workload,
+            preset,
+            list(request.systems)
+            or (
+                [variant.context.system_id for variant in experiment.variants]
+                if request.variants
+                else None
+            ),
         ) or []
         selected_model = select_model(
             request.model,
@@ -854,6 +1049,24 @@ class OperatorService:
                     "skip_reason": skip_reason,
                 }
             }
+            comparison_example_id = _stable_identity(
+                {
+                    "dataset": dataset.id,
+                    "workload": workload.id,
+                    "task": dataset.id,
+                    "trial_index": 1,
+                }
+            )
+            candidate_id = _stable_identity(
+                {
+                    "harness": "direct"
+                    if workload.runner == "retrieval"
+                    else "sequence",
+                    "model": route.display_model,
+                    "variant": system_id,
+                    "context": {"id": system_id, "version": spec.version},
+                }
+            )
             jobs.append(
                 RenderedJob(
                     command=command,
@@ -877,6 +1090,9 @@ class OperatorService:
                     run_id=run_id,
                     run_name=run_name,
                     task_id=dataset.id,
+                    trial_index=1,
+                    comparison_example_id=comparison_example_id,
+                    candidate_id=candidate_id,
                     applicable=skip_reason is None,
                     skip_reason=skip_reason,
                 )
@@ -1077,15 +1293,29 @@ class OperatorService:
         output = out or self.repo_root / "reports" / f"{run_id}.jsonl"
         write_jsonl(rows, output)
         published = 0
+        skipped = 0
+        evaluations: tuple[PublishedEvaluation, ...] = ()
+        publication_failures: tuple[str, ...] = ()
         if to_weave:
-            published = publish_to_weave(
+            publication = publish_to_weave(
                 rows,
                 project,
                 ledger_root=self.repo_root / ".fugue" / "runtime" / "publications",
                 republish=republish,
                 env=self.env,
             )
-        return ExportSummary(path=output, rows=len(rows), published=published)
+            published = publication.published
+            skipped = publication.skipped
+            evaluations = publication.evaluations
+            publication_failures = publication.failures
+        return ExportSummary(
+            path=output,
+            rows=len(rows),
+            published=published,
+            skipped=skipped,
+            evaluations=evaluations,
+            publication_failures=publication_failures,
+        )
 
     def results(self, paths: list[Path] | None = None) -> ResultSummary:
         sources = paths or [
@@ -1114,6 +1344,18 @@ class OperatorService:
             average_wall_time_sec=sum(times) / len(times) if times else None,
             tool_calls=sum(int(row.get("weave_tool_call_count") or 0) for row in trials),
             turns=sum(int(row.get("weave_turn_count") or 0) for row in trials),
+            context_assigned=sum(bool(row.get("context_assigned")) for row in trials),
+            context_invoked=sum(bool(row.get("context_invoked")) for row in trials),
+            linked_traces=sum(
+                row.get("trace_link_status") == "linked" for row in trials
+            ),
+            unlinked_traces=sum(
+                row.get("trace_link_status") not in {None, "linked"}
+                for row in trials
+            ),
+            usage_unavailable=sum(
+                row.get("weave_usage_status") == "unavailable" for row in trials
+            ),
             rows=tuple(trials),
             agent_traces=_agent_trace_refs(trials),
         )
@@ -1185,6 +1427,17 @@ class OperatorService:
             pending=sum(cell.status in {"pending", "running"} for cell in cells),
             not_applicable=sum(cell.status == "not_applicable" for cell in cells),
             log_path=run.log_path,
+            observability_status=run.metadata.get("observability_status"),
+            evaluation_urls=tuple(
+                str(item["url"])
+                for item in run.metadata.get("evaluation_runs", [])
+                if isinstance(item, dict) and item.get("url")
+            ),
+            evaluation_failures=tuple(
+                str(value)
+                for value in run.metadata.get("evaluation_failures", [])
+                if value
+            ),
         )
 
 
@@ -1514,6 +1767,11 @@ def _result_identity(row: dict[str, Any]) -> tuple[str, str]:
         or json.dumps(row, sort_keys=True, default=str)
     )
     return record_type, str(identity)
+
+
+def _stable_identity(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _float(value: Any) -> float | None:

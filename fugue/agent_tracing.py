@@ -21,6 +21,16 @@ def conversation_id(run_or_cohort_key: str) -> str:
     return str(uuid.uuid5(CONVERSATION_NAMESPACE, run_or_cohort_key))
 
 
+def openclaw_agent_id(fugue_conversation_id: str) -> str:
+    """Return the per-trial OpenClaw agent id used to isolate its trace."""
+    return f"fugue-{fugue_conversation_id}"
+
+
+def openclaw_conversation_id(fugue_conversation_id: str) -> str:
+    """Return the conversation id emitted by OpenClaw for its main session."""
+    return f"agent:{openclaw_agent_id(fugue_conversation_id)}:main"
+
+
 def normalize_trace_content(value: str | None) -> str:
     selected = str(value or "full").strip().lower()
     if selected not in {"full", "metadata"}:

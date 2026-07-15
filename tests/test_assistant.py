@@ -76,6 +76,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
             )
         assert request.url.path.endswith("/chat/completions")
         assert body["tools"][0]["function"]["name"] == "submit"
+        assert request.headers["OpenAI-Project"] == "wandb/fugue-experiments"
         return httpx.Response(
             200,
             json={

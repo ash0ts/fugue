@@ -504,7 +504,7 @@ requires-dist = [
     { name = "rich-argparse", specifier = "==1.8.0" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "textual", specifier = "==8.2.8" },
-    { name = "weave" },
+    { name = "weave", specifier = "==0.53.1" },
 ]
 provides-extras = ["dev", "context"]
 

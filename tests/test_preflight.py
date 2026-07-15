@@ -80,3 +80,34 @@ def test_live_preflight_is_read_only(
 
     assert next(check for check in checks if check.name == "bridge health").ok is False
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_wandb_preflight_attributes_inference_to_trace_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured_headers: dict[str, str] = {}
+
+    def fake_get(url, *, headers, timeout):
+        del url, timeout
+        captured_headers.update(headers)
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr("fugue.preflight.httpx.get", fake_get)
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.preflight.bridge_status", lambda: {"ok": False, "error": "offline"}
+    )
+
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={
+            "WANDB_API_KEY": "test-only",
+            "WANDB_ENTITY": "team",
+            "WANDB_PROJECT": "billing-project",
+        },
+        live=True,
+    )
+
+    assert next(check for check in checks if check.name == "provider metadata").ok
+    assert captured_headers["OpenAI-Project"] == "team/billing-project"

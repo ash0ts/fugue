@@ -6,7 +6,7 @@ import os
 import subprocess
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,6 +38,8 @@ RunStatus = Literal[
     "interrupted",
 ]
 EventCallback = Callable[[dict[str, Any]], None]
+CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
+CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,11 @@ class PlannedCell:
     variant_id: str
     model_provider: str
     model: str
+    trial_index: int
+    comparison_example_id: str
+    candidate_id: str
     config_path: Path
+    result_path: Path
     command: tuple[str, ...]
     env: dict[str, str]
     n_attempts: int
@@ -72,7 +78,11 @@ class PlannedCell:
             "variant_id": self.variant_id,
             "model_provider": self.model_provider,
             "model": self.model,
+            "trial_index": self.trial_index,
+            "comparison_example_id": self.comparison_example_id,
+            "candidate_id": self.candidate_id,
             "config_path": self.config_path.as_posix(),
+            "result_path": self.result_path.as_posix(),
             "command": list(self.command),
             "n_attempts": self.n_attempts,
             "status": status,
@@ -108,6 +118,7 @@ def plan_cells(
                 job.harness,
                 job.context_system_id,
                 job.variant_id,
+                str(job.trial_index),
             )
         )
         digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
@@ -123,7 +134,13 @@ def plan_cells(
                 variant_id=job.variant_id,
                 model_provider=job.route.provider,
                 model=job.route.display_model,
+                trial_index=job.trial_index,
+                comparison_example_id=job.comparison_example_id,
+                candidate_id=job.candidate_id,
                 config_path=job.config_path,
+                result_path=Path(str(job.config["jobs_dir"]))
+                / job.job_name
+                / "result.json",
                 command=tuple(job.command),
                 env=job.env,
                 n_attempts=int(job.config.get("n_attempts") or 1),
@@ -141,6 +158,8 @@ def execute_cells(
     max_workers: int,
     runner: Callable[..., Any] | None = None,
     event_callback: EventCallback | None = None,
+    cell_started: CellStartedCallback | None = None,
+    cell_finished: CellFinishedCallback | None = None,
 ) -> list[CellOutcome]:
     if max_workers < 1:
         raise ValueError("cell concurrency must be positive")
@@ -178,19 +197,41 @@ def execute_cells(
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
+        execution_env = dict(cell.env)
+        if cell_started is not None:
+            try:
+                execution_env.update(cell_started(cell) or {})
+            except Exception as exc:
+                store.append_event(
+                    "observability_error",
+                    cell=cell,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
         try:
             if runner is None:
-                returncode = _run_cell_process(cell, repo_root, store)
+                returncode = _run_cell_process(cell, repo_root, store, execution_env)
             else:
                 result = runner(
                     list(cell.command),
                     check=False,
-                    env=cell.env,
+                    env=execution_env,
                     cwd=repo_root,
                 )
                 returncode = int(result.returncode)
-            status: CellStatus = "passed" if returncode == 0 else "failed"
-            outcome = CellOutcome(cell.id, status, returncode=returncode)
+            trial_error = (
+                _harbor_job_error(cell, repo_root)
+                if runner is None and returncode == 0
+                else None
+            )
+            status: CellStatus = (
+                "passed" if returncode == 0 and trial_error is None else "failed"
+            )
+            outcome = CellOutcome(
+                cell.id,
+                status,
+                returncode=returncode,
+                error=trial_error,
+            )
         except Exception as exc:
             outcome = CellOutcome(
                 cell.id,
@@ -198,6 +239,15 @@ def execute_cells(
                 error=f"{type(exc).__name__}: {exc}",
             )
         ended = datetime.now(UTC)
+        if cell_finished is not None:
+            try:
+                cell_finished(cell, outcome)
+            except Exception as exc:
+                store.append_event(
+                    "observability_error",
+                    cell=cell,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
         store.append_cell(
             cell.record(
                 outcome.status,
@@ -225,7 +275,12 @@ def execute_cells(
     return outcomes
 
 
-def _run_cell_process(cell: PlannedCell, repo_root: Path, store: _RunStore) -> int:
+def _run_cell_process(
+    cell: PlannedCell,
+    repo_root: Path,
+    store: _RunStore,
+    env: Mapping[str, str],
+) -> int:
     log_path = store.logs_dir / f"{cell.id}.log"
     process = subprocess.Popen(
         list(cell.command),
@@ -233,10 +288,10 @@ def _run_cell_process(cell: PlannedCell, repo_root: Path, store: _RunStore) -> i
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
-        env=cell.env,
+        env=dict(env),
         cwd=repo_root,
     )
-    secrets = secrets_from_env(cell.env)
+    secrets = secrets_from_env(env)
     with log_path.open("a") as log:
         assert process.stdout is not None
         for line in process.stdout:
@@ -246,6 +301,24 @@ def _run_cell_process(cell: PlannedCell, repo_root: Path, store: _RunStore) -> i
             print(safe_line, end="", flush=True)
             store.append_event("log", cell=cell, chunk=safe_line)
     return process.wait()
+
+
+def _harbor_job_error(cell: PlannedCell, repo_root: Path) -> str | None:
+    path = cell.result_path
+    if not path.is_absolute():
+        path = repo_root / path
+    try:
+        result = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        return f"Harbor did not produce a readable job result: {exc}"
+    stats = result.get("stats") or {}
+    errored = int(stats.get("n_errored_trials") or 0)
+    cancelled = int(stats.get("n_cancelled_trials") or 0)
+    if errored:
+        return f"{errored} Harbor trial(s) errored"
+    if cancelled:
+        return f"{cancelled} Harbor trial(s) were cancelled"
+    return None
 
 
 def write_run_manifest(repo_root: Path, run_id: str, values: dict[str, Any]) -> Path:

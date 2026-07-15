@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
             "/logs/artifacts/fugue-context-events.jsonl",
         )
     )
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.touch(exist_ok=True)
     started_at = time.perf_counter()
     server = FastMCP(
         f"Fugue context: {spec.title}",

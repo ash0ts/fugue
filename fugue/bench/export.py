@@ -4,19 +4,547 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
-from collections.abc import Mapping
-from datetime import datetime
+from collections import Counter
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 from filelock import FileLock
 
+from fugue.agent_tracing import conversation_id as fugue_conversation_id
+from fugue.agent_tracing import stable_agent_name
+from fugue.bench.execution import CellOutcome, PlannedCell
 from fugue.bench.scoring import latency_summary, score_evidence_paths
-from fugue.model_plane import ModelRoute, resolve_model_route, trace_project_slug
+from fugue.model_plane import (
+    ModelRoute,
+    provider_request_headers,
+    resolve_model_route,
+    trace_project_slug,
+)
 from fugue.redaction import redact_value
-from fugue.weave_support import initialize_weave
+from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
+
+
+@dataclass(frozen=True)
+class PublishedEvaluation:
+    candidate_id: str
+    name: str
+    examples: int
+    url: str | None = None
+    evaluation_ref: str | None = None
+    model_ref: str | None = None
+    linked_predictions: int = 0
+
+
+@dataclass(frozen=True)
+class PublicationResult:
+    published: int
+    skipped: int
+    evaluations: tuple[PublishedEvaluation, ...] = ()
+    failures: tuple[str, ...] = ()
+
+
+@dataclass
+class _LiveCandidate:
+    candidate: dict[str, Any]
+    logger: Any
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _LivePrediction:
+    session: _LiveCandidate
+    prediction: Any
+    row: dict[str, Any]
+    opened_monotonic: float
+
+
+class LiveEvaluationCoordinator:
+    """Own live Weave prediction calls while Harbor cells execute."""
+
+    def __init__(
+        self,
+        cells: list[PlannedCell],
+        *,
+        repo_root: Path,
+        project: str,
+        env: Mapping[str, str],
+        weave_module: Any | None = None,
+        summary_fetcher: Callable[..., dict[str, dict[str, Any]]] | None = None,
+        trace_timeout_sec: float | None = None,
+    ) -> None:
+        if not env.get("WANDB_API_KEY", "").strip():
+            raise RuntimeError("WANDB_API_KEY is required for live evaluations")
+        self.repo_root = repo_root
+        self.project = project
+        self.env = dict(env)
+        self.run_id = cells[0].run_id if cells else "unknown"
+        self.run_dir = repo_root / ".fugue" / "runtime" / self.run_id
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.events_path = self.run_dir / "evaluations.jsonl"
+        self.results_path = self.run_dir / "evaluation-results.jsonl"
+        self._event_lock = threading.Lock()
+        self._predictions: dict[str, _LivePrediction] = {}
+        self._prediction_lock = threading.Lock()
+        self._summary_fetcher = summary_fetcher or fetch_weave_summaries
+        configured_timeout = self.env.get("FUGUE_WEAVE_LINK_TIMEOUT_SEC")
+        self.trace_timeout_sec = (
+            trace_timeout_sec
+            if trace_timeout_sec is not None
+            else float(configured_timeout or 45)
+        )
+        self.weave = weave_module or initialize_weave(project, env)
+        logger_cls = getattr(self.weave, "EvaluationLogger", None)
+        if logger_cls is None:
+            raise RuntimeError("installed weave package has no EvaluationLogger")
+        dataset_cls = getattr(self.weave, "Dataset", None)
+        planned = [_planned_evaluation_row(cell) for cell in cells if cell.applicable]
+        candidates = _publication_candidates(planned)
+        datasets: dict[str, Any] = {}
+        self._sessions_by_cell: dict[str, _LiveCandidate] = {}
+        self._inputs_by_cell: dict[str, dict[str, Any]] = {}
+        for candidate in candidates:
+            scope_id = candidate["evaluation_scope_id"]
+            if scope_id not in datasets:
+                datasets[scope_id] = (
+                    dataset_cls(
+                        name=_dataset_name(candidate),
+                        rows=candidate["dataset_examples"],
+                    )
+                    if dataset_cls is not None
+                    else candidate["dataset_examples"]
+                )
+            attributes = getattr(self.weave, "attributes", None)
+            context = (
+                attributes(_evaluation_run_attributes(candidate))
+                if attributes is not None
+                else nullcontext()
+            )
+            with context:
+                logger = logger_cls(
+                    name=_evaluation_name(candidate),
+                    model=_evaluation_model(candidate),
+                    dataset=datasets[scope_id],
+                    eval_attributes=_evaluation_scope_attributes(candidate),
+                    scorers=candidate["scorers"],
+                )
+            session = _LiveCandidate(candidate=candidate, logger=logger)
+            for row, inputs in zip(
+                candidate["rows"], candidate["prediction_inputs"], strict=True
+            ):
+                cell_id = str(row["cell_id"])
+                self._sessions_by_cell[cell_id] = session
+                self._inputs_by_cell[cell_id] = inputs
+                self._append_event(
+                    "pending",
+                    cell_id=cell_id,
+                    candidate_id=candidate["candidate_id"],
+                    evaluation_scope_id=scope_id,
+                )
+        self._unique_sessions = tuple(
+            {
+                id(value): value for value in self._sessions_by_cell.values()
+            }.values()
+        )
+
+    def begin_cell(self, cell: PlannedCell) -> Mapping[str, str] | None:
+        session = self._sessions_by_cell.get(cell.id)
+        if session is None:
+            return None
+        with session.lock:
+            prediction = session.logger.log_prediction(
+                inputs=self._inputs_by_cell[cell.id]
+            )
+            prediction.__enter__()
+        with self._prediction_lock:
+            self._predictions[cell.id] = _LivePrediction(
+                session=session,
+                prediction=prediction,
+                row=_planned_evaluation_row(cell),
+                opened_monotonic=time.monotonic(),
+            )
+        call = prediction.predict_and_score_call
+        call_id = str(call.id)
+        self._append_event(
+            "prediction_open",
+            cell_id=cell.id,
+            candidate_id=cell.candidate_id,
+            eval_predict_and_score_call_id=call_id,
+        )
+        return {
+            "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": call_id,
+            "FUGUE_WEAVE_EVAL_PROJECT_ID": str(call.project_id),
+            "FUGUE_WEAVE_EVAL_NAME": _evaluation_name(session.candidate),
+            "FUGUE_EVALUATION_SCOPE_ID": session.candidate[
+                "evaluation_scope_id"
+            ],
+        }
+
+    def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
+        with self._prediction_lock:
+            active = self._predictions.pop(cell.id, None)
+        if active is None:
+            return
+        row = _completed_evaluation_row(cell, outcome, active.row)
+        row["evaluation_publication_mode"] = "live"
+        row["evaluation_prediction_latency_sec"] = max(
+            time.monotonic() - active.opened_monotonic, 0.0
+        )
+        call_id = str(active.prediction.predict_and_score_call.id)
+        try:
+            _apply_trace_summary(row, self._wait_for_trace(row))
+            _apply_observed_identity(row)
+            root = _verified_evaluation_root(row, call_id)
+            if root is not None:
+                _attach_genai_span_ref(
+                    active.prediction.predict_and_score_call,
+                    trace_id=str(root["trace_id"]),
+                    span_id=str(root["span_id"]),
+                )
+                row["trace_link_status"] = "linked"
+                row["trace_link_error"] = None
+                self._append_event(
+                    "trace_linked",
+                    cell_id=cell.id,
+                    candidate_id=cell.candidate_id,
+                    observed_conversation_id=row.get("observed_conversation_id"),
+                    trace_id=root.get("trace_id"),
+                    root_span_id=root.get("span_id"),
+                    eval_predict_and_score_call_id=call_id,
+                )
+            active.prediction.output = _evaluation_output(row)
+            with active.session.lock:
+                for name, value in _evaluation_scores(row).items():
+                    active.prediction.log_score(name, value)
+                active.prediction.__exit__(None, None, None)
+                active.session.rows.append(row)
+            self._append_result(row)
+            self._append_event(
+                "finalized",
+                cell_id=cell.id,
+                candidate_id=cell.candidate_id,
+                trace_link_status=row.get("trace_link_status"),
+                eval_predict_and_score_call_id=call_id,
+            )
+        except Exception as exc:
+            row["trace_link_status"] = "failed"
+            row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                active.prediction.output = _evaluation_output(row)
+                with active.session.lock:
+                    for name, value in _evaluation_scores(row).items():
+                        active.prediction.log_score(name, value)
+                    active.prediction.__exit__(None, None, None)
+                    active.session.rows.append(row)
+                self._append_result(row)
+            finally:
+                self._append_event(
+                    "failed",
+                    cell_id=cell.id,
+                    candidate_id=cell.candidate_id,
+                    error=row["trace_link_error"],
+                    eval_predict_and_score_call_id=call_id,
+                )
+
+    def finalize(self) -> PublicationResult:
+        evaluations: list[PublishedEvaluation] = []
+        failures: list[str] = []
+        ledger = (
+            self.repo_root
+            / ".fugue"
+            / "runtime"
+            / "publications"
+            / "v3"
+            / _safe_slug(self.project)
+        )
+        ledger.mkdir(parents=True, exist_ok=True)
+        for session in self._unique_sessions:
+            candidate_id = session.candidate["candidate_id"]
+            try:
+                with session.lock:
+                    session.logger.log_summary()
+            except Exception as exc:
+                try:
+                    session.logger.fail(exc)
+                except Exception:
+                    pass
+                failures.append(f"{candidate_id}: {type(exc).__name__}: {exc}")
+                continue
+            completed = _publication_candidates(session.rows)
+            if len(completed) != 1:
+                failures.append(
+                    f"{candidate_id}: live evaluation produced an invalid scope"
+                )
+                continue
+            published = completed[0]
+            if (
+                published["evaluation_scope_id"]
+                != session.candidate["evaluation_scope_id"]
+            ):
+                failures.append(
+                    f"{candidate_id}: evaluation scope changed during execution"
+                )
+                continue
+            url = getattr(session.logger, "ui_url", None)
+            evaluation_ref = _logger_ref(session.logger, "_pseudo_evaluation")
+            model_ref = _logger_ref(session.logger, "model")
+            linked = sum(
+                row.get("trace_link_status") == "linked" for row in session.rows
+            )
+            if linked != len(session.rows):
+                failures.append(
+                    f"{candidate_id}: {len(session.rows) - linked} prediction(s) "
+                    "finished without a verified native trace link"
+                )
+            marker = ledger / f"{published['publication_id']}.json"
+            _write_publication_marker(
+                marker,
+                self.project,
+                published["publication_id"],
+                name=_evaluation_name(session.candidate),
+                candidate_id=candidate_id,
+                evaluation_scope_id=published["evaluation_scope_id"],
+                examples=len(session.rows),
+                url=url,
+                evaluation_ref=evaluation_ref,
+                model_ref=model_ref,
+                linked_predictions=linked,
+                publication_mode="live",
+            )
+            evaluations.append(
+                PublishedEvaluation(
+                    candidate_id=candidate_id,
+                    name=_evaluation_name(session.candidate),
+                    examples=len(session.rows),
+                    url=url,
+                    evaluation_ref=evaluation_ref,
+                    model_ref=model_ref,
+                    linked_predictions=linked,
+                )
+            )
+        return PublicationResult(
+            published=len(evaluations),
+            skipped=0,
+            evaluations=tuple(evaluations),
+            failures=tuple(failures),
+        )
+
+    def _wait_for_trace(self, row: dict[str, Any]) -> dict[str, Any]:
+        deadline = time.monotonic() + max(self.trace_timeout_sec, 0)
+        conversation_ids = list(
+            dict.fromkeys(
+                str(value)
+                for value in [
+                    row.get("planned_conversation_id"),
+                    row.get("weave_conversation_id"),
+                    *(row.get("weave_conversation_ids") or []),
+                    *(row.get("native_session_ids") or []),
+                ]
+                if value
+            )
+        )
+        latest: dict[str, Any] = {}
+        while True:
+            values = self._summary_fetcher(
+                run_keys=[str(row["run_key"])],
+                conversation_ids_by_run={str(row["run_key"]): conversation_ids},
+                project=self.project,
+                timeout_sec=min(max(self.trace_timeout_sec, 1), 10),
+                env=self.env,
+            )
+            latest = values.get(str(row["run_key"]), {})
+            probe = {**row, **latest}
+            _apply_observed_identity(probe)
+            if probe.get("observed_conversation_id"):
+                return latest
+            if time.monotonic() >= deadline:
+                return latest
+            time.sleep(min(2, max(deadline - time.monotonic(), 0)))
+
+    def _append_event(self, status: str, **values: Any) -> None:
+        record = redact_value(
+            {
+                "schema_version": 1,
+                "run_id": self.run_id,
+                "status": status,
+                "recorded_at": datetime.now(UTC).isoformat(),
+                **values,
+            }
+        )
+        with self._event_lock:
+            with self.events_path.open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+    def _append_result(self, row: dict[str, Any]) -> None:
+        with self._event_lock:
+            with self.results_path.open("a") as handle:
+                handle.write(
+                    json.dumps(redact_value(row), sort_keys=True, default=str) + "\n"
+                )
+
+
+def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
+    env = cell.env
+    run_key = ":".join(
+        (
+            cell.run_id,
+            cell.workload_id,
+            "trial",
+            cell.task_id,
+            cell.harness,
+            cell.context_system_id,
+            cell.variant_id,
+            f"t{cell.trial_index:03d}",
+        )
+    )
+    expected_paths = _json_mapping(env.get("FUGUE_EXPECTED_EVIDENCE_PATHS"))
+    return {
+        "schema_version": 1,
+        "record_type": "trial",
+        "cell_id": cell.id,
+        "run_key": run_key,
+        "run_id": cell.run_id,
+        "run_name": cell.run_name,
+        "trial_index": cell.trial_index,
+        "comparison_example_id": cell.comparison_example_id,
+        "candidate_id": cell.candidate_id,
+        "task_name": cell.task_id,
+        "harness": cell.harness,
+        "experiment_id": env.get("FUGUE_EXPERIMENT_ID"),
+        "workload_id": cell.workload_id,
+        "preset_id": env.get("FUGUE_PRESET_ID"),
+        "variant_id": cell.variant_id,
+        "prompt_id": env.get("FUGUE_PROMPT_ID"),
+        "context_system_id": cell.context_system_id,
+        "context_version": env.get("FUGUE_CONTEXT_VERSION"),
+        "context_config_hash": env.get("FUGUE_CONTEXT_CONFIG_HASH"),
+        "agent_config_hash": env.get("FUGUE_AGENT_CONFIG_HASH"),
+        "skill_ids": [
+            value for value in env.get("FUGUE_SKILL_IDS", "").split(",") if value
+        ],
+        "tags": [value for value in env.get("FUGUE_TAGS", "").split(",") if value],
+        "dataset": env.get("FUGUE_DATASET"),
+        "repository": env.get("FUGUE_REPOSITORY"),
+        "base_commit": env.get("FUGUE_BASE_COMMIT"),
+        "expected_evidence_paths": expected_paths.get(cell.task_id),
+        "model_provider": cell.model_provider,
+        "model": cell.model,
+        "trace_project": env.get("WEAVE_PROJECT")
+        or (
+            f"{env.get('WANDB_ENTITY')}/{env.get('WANDB_PROJECT')}"
+            if env.get("WANDB_ENTITY") and env.get("WANDB_PROJECT")
+            else None
+        ),
+        "weave_agent_name": stable_agent_name(cell.harness),
+        "planned_conversation_id": fugue_conversation_id(run_key),
+        "weave_conversation_id": fugue_conversation_id(run_key),
+        "trace_content": env.get("FUGUE_TRACE_CONTENT", "full"),
+        "context_assigned": cell.context_system_id != "none",
+    }
+
+
+def _completed_evaluation_row(
+    cell: PlannedCell,
+    outcome: CellOutcome,
+    planned: dict[str, Any],
+) -> dict[str, Any]:
+    paths = _trial_result_paths(cell.result_path.parent)
+    matching: list[dict[str, Any]] = []
+    for path in paths:
+        row = _row_from_trial(path)
+        if row.get("candidate_id") == cell.candidate_id and int(
+            row.get("trial_index") or 1
+        ) == cell.trial_index:
+            matching.append(row)
+    row = matching[0] if len(matching) == 1 else dict(planned)
+    for key, value in planned.items():
+        row.setdefault(key, value)
+    for key in (
+        "comparison_example_id",
+        "candidate_id",
+        "dataset",
+        "workload_id",
+        "task_name",
+        "query_id",
+        "sequence_id",
+        "episode_id",
+        "repository",
+        "base_commit",
+        "expected_evidence_paths",
+    ):
+        if key in planned:
+            row[key] = planned[key]
+    if outcome.error and not row.get("exception_class"):
+        row["exception_class"] = "HarborCellError"
+        row["exception_message"] = outcome.error
+    if outcome.status == "failed" and row.get("pass") is None:
+        row["pass"] = False
+    return row
+
+
+def _verified_evaluation_root(
+    row: dict[str, Any], predict_and_score_call_id: str
+) -> dict[str, Any] | None:
+    observed = (
+        str(row.get("trace_id") or ""),
+        str(row.get("root_span_id") or ""),
+    )
+    roots = [
+        root
+        for root in row.get("weave_root_spans") or []
+        if isinstance(root, dict)
+        and (str(root.get("trace_id") or ""), str(root.get("span_id") or ""))
+        == observed
+    ]
+    if len(roots) != 1:
+        row["trace_link_status"] = "missing"
+        row["trace_link_error"] = "matching native root disappeared during linking"
+        return None
+    root = roots[0]
+    observed_call_id = str(root.get("eval_predict_and_score_call_id") or "")
+    if not observed_call_id:
+        row["trace_link_status"] = "attribute_missing"
+        row["trace_link_error"] = (
+            "native root is missing weave.eval.predict_and_score_call_id"
+        )
+        return None
+    if observed_call_id != predict_and_score_call_id:
+        row["trace_link_status"] = "attribute_mismatch"
+        row["trace_link_error"] = (
+            "native root points to a different evaluation prediction"
+        )
+        return None
+    return root
+
+
+def _attach_genai_span_ref(call: Any, *, trace_id: str, span_id: str) -> None:
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", trace_id):
+        raise ValueError("invalid OTel trace id returned by Weave Agents")
+    if not re.fullmatch(r"[0-9a-fA-F]{16}", span_id):
+        raise ValueError("invalid OTel span id returned by Weave Agents")
+    if call.summary is None:
+        call.summary = {}
+    weave_summary = call.summary.setdefault("weave", {})
+    weave_summary["genai_span_ref"] = [
+        {"trace_id": trace_id.lower(), "span_id": span_id.lower()}
+    ]
+
+
+def _json_mapping(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def export_rows(
@@ -31,20 +559,30 @@ def export_rows(
         *[row for job in jobs for row in _context_result_rows(job)],
         *[row for job in jobs for row in _cell_result_rows(job)],
     ]
+    live_rows = [row for job in jobs for row in _live_evaluation_rows(job)]
+    live_by_run_key = {
+        str(row["run_key"]): row for row in live_rows if row.get("run_key")
+    }
+    for row in rows:
+        if row.get("record_type") == "trial" and row.get("run_key") in live_by_run_key:
+            row.update(live_by_run_key[str(row["run_key"])])
     if fetch_weave:
         run_keys = list(
             dict.fromkeys(str(row["run_key"]) for row in rows if row.get("run_key"))
         )
         conversation_ids = {
-            str(row["run_key"]): [
-                str(value)
-                for value in (
-                    row.get("weave_conversation_ids")
-                    or row.get("native_session_ids")
-                    or []
+            str(row["run_key"]): list(
+                dict.fromkeys(
+                    str(value)
+                    for value in [
+                        row.get("planned_conversation_id"),
+                        row.get("weave_conversation_id"),
+                        *(row.get("weave_conversation_ids") or []),
+                        *(row.get("native_session_ids") or []),
+                    ]
+                    if value
                 )
-                if value
-            ]
+            )
             for row in rows
             if row.get("run_key")
         }
@@ -56,8 +594,91 @@ def export_rows(
         )
         for row in rows:
             if row.get("run_key"):
-                row.update(spans.get(str(row["run_key"]), {}))
+                summary = spans.get(str(row["run_key"]), {})
+                _apply_trace_summary(row, summary)
+                observed = summary.get("weave_agent_names") or []
+                expected = row.get("weave_agent_name")
+                row["weave_agent_name_match"] = (
+                    str(expected) in {str(value) for value in observed}
+                    if expected and observed
+                    else None
+                )
+                _apply_observed_identity(row)
     return rows
+
+
+def _apply_observed_identity(row: dict[str, Any]) -> None:
+    if row.get("status") == "not_applicable" or row.get("applicable") is False:
+        row.update(
+            {
+                "trace_link_status": "not_applicable",
+                "trace_link_error": None,
+                "weave_observability_status": "not_applicable",
+                "weave_usage_source": "not_applicable",
+                "weave_usage_status": "not_applicable",
+            }
+        )
+        return
+    expected_agent = str(row.get("weave_agent_name") or row.get("harness") or "")
+    expected_run_key = str(row.get("run_key") or "")
+    expected_task = str(row.get("task_name") or row.get("task_id") or "")
+    matches: dict[tuple[str, str], dict[str, Any]] = {}
+    for root in row.get("weave_root_spans") or []:
+        if not isinstance(root, dict):
+            continue
+        if expected_agent and str(root.get("agent_name") or "") != expected_agent:
+            continue
+        if expected_run_key and str(root.get("run_key") or "") != expected_run_key:
+            continue
+        if expected_task and not _task_ids_match(
+            expected_task, str(root.get("task_id") or "")
+        ):
+            continue
+        identity = (str(root.get("trace_id") or ""), str(root.get("span_id") or ""))
+        matches[identity] = root
+    if len(matches) != 1:
+        row["trace_link_status"] = "missing" if not matches else "ambiguous"
+        row["trace_link_error"] = (
+            "no matching native invoke_agent root"
+            if not matches
+            else "multiple matching native invoke_agent roots"
+        )
+        return
+    root = next(iter(matches.values()))
+    link_status = (
+        "linked" if row.get("trace_link_status") == "linked" else "observed"
+    )
+    row.update(
+        {
+            "observed_conversation_id": root.get("conversation_id"),
+            "trace_id": root.get("trace_id"),
+            "root_span_id": root.get("span_id"),
+            "trace_link_status": link_status,
+            "trace_link_error": None,
+        }
+    )
+
+
+def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
+    response = summary.pop("_weave_agent_response", None)
+    row.update(summary)
+    if not isinstance(response, str) or not response.strip():
+        return
+    encoded = response.encode()
+    if not row.get("agent_response_bytes"):
+        row["agent_response_bytes"] = len(encoded)
+    if not row.get("agent_response_sha256"):
+        row["agent_response_sha256"] = hashlib.sha256(encoded).hexdigest()
+    if row.get("trace_content") == "full" and not row.get("agent_response"):
+        row["agent_response"] = response[:8_000]
+
+
+def _task_ids_match(expected: str, observed: str) -> bool:
+    return bool(
+        expected == observed
+        or expected.endswith(f"/{observed}")
+        or observed.endswith(f"/{expected}")
+    )
 
 
 def filter_rows(
@@ -107,6 +728,7 @@ def judge_qa_rows(
                     client,
                     route,
                     api_key,
+                    env=env,
                     reference=reference,
                     answer=answer,
                     evidence_paths=[str(item) for item in row.get("evidence_paths") or []],
@@ -149,81 +771,567 @@ def publish_to_weave(
     ledger_root: Path | None = None,
     republish: bool = False,
     env: Mapping[str, str] | None = None,
-) -> int:
+) -> PublicationResult:
     project = project or _weave_project_from_env(env)
     weave = initialize_weave(project, env)
     logger_cls = getattr(weave, "EvaluationLogger", None)
     if logger_cls is None:
         raise RuntimeError("installed weave package has no EvaluationLogger")
-
-    logger = logger_cls(model="fugue", dataset="fugue-context-evaluation")
-    ledger = (ledger_root or Path(".fugue/runtime/publications")) / _safe_slug(project)
+    candidates = _publication_candidates(_evaluation_rows(rows))
+    ledger = (
+        (ledger_root or Path(".fugue/runtime/publications"))
+        / "v3"
+        / _safe_slug(project)
+    )
     ledger.mkdir(parents=True, exist_ok=True)
-    published = 0
-    for row in rows:
-        logged = _weave_safe_row(row)
-        publication_id = _publication_id(logged)
+    datasets: dict[str, Any] = {}
+    evaluations: list[PublishedEvaluation] = []
+    failures: list[str] = []
+    skipped = 0
+    for candidate in candidates:
+        if all(
+            row.get("evaluation_publication_mode") == "live"
+            for row in candidate["rows"]
+        ):
+            skipped += 1
+            continue
+        publication_id = candidate["publication_id"]
         marker = ledger / f"{publication_id}.json"
         with FileLock(marker.with_suffix(".lock"), timeout=120):
             if marker.is_file() and not republish:
+                skipped += 1
                 continue
-            scores = {
-                name: row[name]
-                for name in (
-                    "reward",
-                    "mrr",
-                    "ndcg_at_10",
-                    "recall_at_1",
-                    "recall_at_5",
-                    "recall_at_10",
-                    "recall_at_20",
-                    "evidence_recall",
-                    "citation_correctness",
-                    "fact_recall",
-                    "judge_correctness",
-                    "judge_completeness",
-                    "judge_groundedness",
-                    "judge_overall",
+            scope_id = candidate["evaluation_scope_id"]
+            if scope_id not in datasets:
+                dataset_name = _dataset_name(candidate)
+                dataset_cls = getattr(weave, "Dataset", None)
+                datasets[scope_id] = (
+                    dataset_cls(name=dataset_name, rows=candidate["dataset_examples"])
+                    if dataset_cls is not None
+                    else candidate["dataset_examples"]
                 )
-                if row.get(name) is not None
-            }
-            logger.log_example(
-                inputs={
-                    "publication_id": publication_id,
-                    "task": row.get("task_name"),
-                    "harness": row.get("harness"),
-                    "context_system_id": row.get("context_system_id"),
-                    "workload_id": row.get("workload_id"),
-                    "variant_id": row.get("variant_id"),
-                    "prompt_id": row.get("prompt_id"),
-                },
-                output=logged,
-                scores=scores,
+            name = _evaluation_name(candidate)
+            score_names = candidate["scorers"]
+            logger = None
+            try:
+                attributes = getattr(weave, "attributes", None)
+                context = (
+                    attributes(_evaluation_run_attributes(candidate))
+                    if attributes is not None
+                    else nullcontext()
+                )
+                with context:
+                    logger = logger_cls(
+                        name=name,
+                        model=_evaluation_model(candidate),
+                        dataset=datasets[scope_id],
+                        eval_attributes=_evaluation_scope_attributes(candidate),
+                        scorers=score_names,
+                    )
+                for row, inputs in zip(
+                    candidate["rows"], candidate["prediction_inputs"], strict=True
+                ):
+                    logger.log_example(
+                        inputs=inputs,
+                        output=_evaluation_output(row, post_hoc=True),
+                        scores=_evaluation_scores(row),
+                    )
+                logger.log_summary()
+            except Exception as exc:
+                if logger is not None:
+                    try:
+                        logger.fail(exc)
+                    except Exception:
+                        pass
+                failures.append(
+                    f"{candidate['candidate_id']}: {type(exc).__name__}: {exc}"
+                )
+                continue
+            url = getattr(logger, "ui_url", None)
+            evaluation_ref = _logger_ref(logger, "_pseudo_evaluation")
+            model_ref = _logger_ref(logger, "model")
+            linked_predictions = sum(
+                row.get("trace_link_status") == "linked" for row in candidate["rows"]
             )
-            _write_publication_marker(marker, project, publication_id)
-            published += 1
-    return published
+            _write_publication_marker(
+                marker,
+                project,
+                publication_id,
+                name=name,
+                candidate_id=candidate["candidate_id"],
+                evaluation_scope_id=scope_id,
+                examples=len(candidate["rows"]),
+                url=url,
+                evaluation_ref=evaluation_ref,
+                model_ref=model_ref,
+                linked_predictions=linked_predictions,
+            )
+            evaluations.append(
+                PublishedEvaluation(
+                    candidate_id=candidate["candidate_id"],
+                    name=name,
+                    examples=len(candidate["rows"]),
+                    url=url,
+                    evaluation_ref=evaluation_ref,
+                    model_ref=model_ref,
+                    linked_predictions=linked_predictions,
+                )
+            )
+    return PublicationResult(
+        published=len(evaluations),
+        skipped=skipped,
+        evaluations=tuple(evaluations),
+        failures=tuple(failures),
+    )
 
 
-def _publication_id(row: dict[str, Any]) -> str:
-    payload = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
+def _evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row.get("record_type") in {"trial", "retrieval", "episode"}
+    ]
 
 
-def _write_publication_marker(path: Path, project: str, publication_id: str) -> None:
+def _write_publication_marker(
+    path: Path, project: str, publication_id: str, **metadata: Any
+) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(
         json.dumps(
             {
                 "project": project,
                 "publication_id": publication_id,
-                "published_at": datetime.now().isoformat(),
+                "published_at": datetime.now(UTC).isoformat(),
+                **metadata,
             },
             sort_keys=True,
         )
         + "\n"
     )
     os.replace(temp, path)
+
+
+def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[
+        tuple[str, str, str, str, str],
+        list[tuple[dict[str, Any], dict[str, Any]]],
+    ] = {}
+    for row in rows:
+        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
+        inputs = _evaluation_inputs(row)
+        partition = (
+            candidate_id,
+            str(row.get("experiment_id") or ""),
+            str(row.get("workload_id") or ""),
+            str(row.get("dataset") or ""),
+            str(row.get("record_type") or ""),
+        )
+        grouped.setdefault(partition, []).append((row, inputs))
+
+    candidates: list[dict[str, Any]] = []
+    for partition, values in sorted(grouped.items()):
+        candidate_id = partition[0]
+        seen: set[tuple[str, int]] = set()
+        ordered = sorted(
+            values,
+            key=lambda item: (
+                item[1]["comparison_example_id"],
+                _positive_int(item[0].get("trial_index")) or 1,
+            ),
+        )
+        for row, inputs in ordered:
+            example_id = str(inputs["comparison_example_id"])
+            trial_index = _positive_int(row.get("trial_index")) or 1
+            identity = (example_id, trial_index)
+            if identity in seen:
+                raise ValueError(
+                    "duplicate evaluation trial for candidate "
+                    f"{candidate_id}: {example_id} trial {trial_index}"
+                )
+            seen.add(identity)
+        prediction_inputs = [inputs for _, inputs in ordered]
+        dataset_examples = list(
+            {
+                str(inputs["comparison_example_id"]): inputs
+                for inputs in prediction_inputs
+            }.values()
+        )
+        candidate_rows = [row for row, _ in ordered]
+        scorers = _scorer_schema(candidate_rows)
+        scope_id = _stable_digest(
+            {"examples": dataset_examples, "scorers": scorers}
+        )
+        publication_id = _stable_digest(
+            {
+                "candidate_id": candidate_id,
+                "evaluation_scope_id": scope_id,
+                "rows": [
+                    _evaluation_row_id(row) for row in candidate_rows
+                ],
+            }
+        )
+        candidates.append(
+            {
+                "candidate_id": candidate_id,
+                "evaluation_scope_id": scope_id,
+                "publication_id": publication_id,
+                "rows": candidate_rows,
+                "prediction_inputs": prediction_inputs,
+                "dataset_examples": dataset_examples,
+                "scorers": scorers,
+            }
+        )
+    return candidates
+
+
+def _evaluation_row_id(row: dict[str, Any]) -> str:
+    return _stable_digest(
+        {
+            "run_id": row.get("run_id"),
+            "candidate_id": row.get("candidate_id")
+            or _candidate_id_from_row(row),
+            "comparison_example_id": _evaluation_inputs(row)[
+                "comparison_example_id"
+            ],
+            "trial_index": _positive_int(row.get("trial_index")) or 1,
+            "status": _outcome_status(row),
+            "scores": _evaluation_scores(row),
+        }
+    )
+
+
+def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
+    values = {
+        "benchmark_id": row.get("dataset"),
+        "workload_id": row.get("workload_id"),
+        "task_id": row.get("task_name"),
+        "query_id": row.get("query_id"),
+        "sequence_id": row.get("sequence_id"),
+        "episode_id": row.get("episode_id") or row.get("episode"),
+        "repository": row.get("repository"),
+        "base_commit": row.get("base_commit"),
+        "expected_evidence_paths": row.get("expected_evidence_paths") or None,
+    }
+    comparison_id = row.get("comparison_example_id") or _stable_digest(values)
+    return {"comparison_example_id": comparison_id, **_drop_none(values)}
+
+
+def _candidate_id_from_row(row: dict[str, Any]) -> str:
+    return _stable_digest(
+        {
+            "harness": row.get("harness"),
+            "model_provider": row.get("model_provider"),
+            "model": row.get("model"),
+            "variant_id": row.get("variant_id"),
+            "context_system_id": row.get("context_system_id"),
+            "context_version": row.get("context_version"),
+            "context_config_hash": row.get("context_config_hash"),
+            "prompt_id": row.get("prompt_id"),
+            "prompt_hashes": row.get("prompt_hashes") or {},
+            "skill_ids": row.get("skill_ids") or [],
+            "skill_hashes": row.get("skill_hashes") or {},
+            "agent_config_hash": row.get("agent_config_hash"),
+        }
+    )
+
+
+def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:
+    row = candidate["rows"][0]
+    return _drop_none(
+        {
+            "name": _candidate_model_name(candidate),
+            "candidate_id": candidate["candidate_id"],
+            "agent_name": row.get("weave_agent_name") or row.get("harness"),
+            "harness": row.get("harness"),
+            "variant_id": row.get("variant_id"),
+            "context_system_id": row.get("context_system_id"),
+            "model_provider": row.get("model_provider"),
+            "model_id": row.get("model"),
+        }
+    )
+
+
+def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
+    row = candidate["rows"][0]
+    return _drop_none(
+        {
+            "fugue.evaluation_scope_id": candidate["evaluation_scope_id"],
+            "fugue.experiment_id": row.get("experiment_id"),
+            "fugue.workload_id": row.get("workload_id"),
+            "fugue.dataset": row.get("dataset"),
+            "fugue.record_type": row.get("record_type"),
+        }
+    )
+
+
+def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
+    rows = candidate["rows"]
+    row = rows[0]
+    run_ids = sorted({str(item["run_id"]) for item in rows if item.get("run_id")})
+    return _drop_none(
+        {
+            "fugue.candidate_id": candidate["candidate_id"],
+            "fugue.preset_id": row.get("preset_id"),
+            "fugue.harness": row.get("harness"),
+            "fugue.variant_id": row.get("variant_id"),
+            "fugue.context_system_id": row.get("context_system_id"),
+            "fugue.prompt_id": row.get("prompt_id"),
+            "fugue.skill_ids": "|".join(str(x) for x in row.get("skill_ids") or []),
+            "fugue.model_provider": row.get("model_provider"),
+            "fugue.model": row.get("model"),
+            "fugue.run_ids": "|".join(run_ids),
+            "fugue.run_name": row.get("run_name"),
+            "fugue.tags": "|".join(str(x) for x in row.get("tags") or []),
+        }
+    )
+
+
+def _evaluation_output(
+    row: dict[str, Any], *, post_hoc: bool = False
+) -> dict[str, Any]:
+    conversations = [
+        str(value)
+        for value in [
+            row.get("observed_conversation_id"),
+            *(row.get("weave_conversation_ids") or []),
+        ]
+        if value
+    ]
+    trace_ids = [str(value) for value in row.get("weave_trace_ids") or [] if value]
+    return _drop_none(
+        {
+            "status": _outcome_status(row),
+            "run_key": row.get("run_key"),
+            "observed_conversation_id": next(
+                iter(dict.fromkeys(conversations)), None
+            ),
+            "planned_conversation_id": row.get("planned_conversation_id")
+            or row.get("weave_conversation_id"),
+            "trace_id": trace_ids[0] if trace_ids else None,
+            "root_span_id": next(
+                (
+                    value
+                    for value in [
+                        row.get("root_span_id"),
+                        *(row.get("weave_root_span_ids") or []),
+                    ]
+                    if value
+                ),
+                None,
+            ),
+            "trace_link_status": (
+                "post_hoc_unlinked" if post_hoc else row.get("trace_link_status")
+            ),
+            "agent_name": row.get("weave_agent_name") or row.get("harness"),
+            "exception_type": row.get("exception_class"),
+            "evidence_paths": [str(x) for x in (row.get("evidence_paths") or [])[:20]],
+            "response": _bounded_agent_response(row),
+            "response_sha256": row.get("agent_response_sha256"),
+            "response_bytes": row.get("agent_response_bytes"),
+        }
+    )
+
+
+def _bounded_agent_response(row: dict[str, Any]) -> str | None:
+    if row.get("trace_content") != "full":
+        return None
+    value = row.get("agent_response")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value[:8_000]
+
+
+_DIRECT_SCORE_FIELDS = (
+    "reward",
+    "mrr",
+    "ndcg_at_10",
+    "recall_at_1",
+    "recall_at_5",
+    "recall_at_10",
+    "recall_at_20",
+    "evidence_recall",
+    "citation_correctness",
+    "fact_recall",
+    "judge_correctness",
+    "judge_completeness",
+    "judge_groundedness",
+    "judge_overall",
+)
+
+_SCORE_ALIASES = {
+    "wall_time_sec": "wall_time_seconds",
+    "evaluation_prediction_latency_sec": "prediction_latency_seconds",
+    "weave_agent_latency_sec": "agent_latency_seconds",
+    "weave_model_latency_sec": "model_latency_seconds",
+    "weave_input_tokens": "input_tokens",
+    "weave_output_tokens": "output_tokens",
+    "weave_total_cost_usd": "total_cost_usd",
+    "weave_tool_call_count": "tool_calls",
+    "weave_terminal_error_count": "terminal_errors",
+    "weave_model_error_count": "model_errors",
+    "weave_tool_error_count": "recoverable_tool_errors",
+    "context_error_count": "context_errors",
+    "context_query_count": "context_queries",
+    "context_query_latency_ms": "context_query_latency_ms",
+}
+
+_COMMON_SCORERS = (
+    "passed",
+    "reward",
+    "wall_time_seconds",
+    "prediction_latency_seconds",
+    "agent_latency_seconds",
+    "model_latency_seconds",
+    "input_tokens",
+    "output_tokens",
+    "total_cost_usd",
+    "tool_calls",
+    "terminal_errors",
+    "model_errors",
+    "recoverable_tool_errors",
+    "context_errors",
+    "context_queries",
+    "context_query_latency_ms",
+)
+
+
+def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
+    scores = {
+        name: row[name]
+        for name in _DIRECT_SCORE_FIELDS
+        if row.get(name) is not None
+    }
+    if row.get("pass") is not None:
+        scores["passed"] = bool(row["pass"])
+    for source, target in _SCORE_ALIASES.items():
+        if row.get(source) is not None:
+            scores[target] = row[source]
+    if (
+        "input_tokens" not in scores
+        and row.get("weave_usage_status") is None
+        and _measured_local_usage(row)
+    ):
+        scores["input_tokens"] = row.get("n_input_tokens")
+        scores["output_tokens"] = row.get("n_output_tokens")
+        if row.get("cost_usd") is not None:
+            scores["total_cost_usd"] = row["cost_usd"]
+    return {key: value for key, value in scores.items() if value is not None}
+
+
+def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
+    record_types = {str(row.get("record_type") or "trial") for row in rows}
+    values = set(_COMMON_SCORERS)
+    if "retrieval" in record_types:
+        values.update(
+            {
+                "mrr",
+                "ndcg_at_10",
+                "recall_at_1",
+                "recall_at_5",
+                "recall_at_10",
+                "recall_at_20",
+            }
+        )
+    if record_types & {"trial", "episode"}:
+        values.update(
+            {
+                "evidence_recall",
+                "citation_correctness",
+                "fact_recall",
+                "judge_correctness",
+                "judge_completeness",
+                "judge_groundedness",
+                "judge_overall",
+            }
+        )
+    return sorted(values)
+
+
+def _dataset_name(candidate: dict[str, Any]) -> str:
+    row = candidate["rows"][0]
+    return _safe_slug(
+        "-".join(
+            str(value)
+            for value in (
+                "fugue",
+                row.get("experiment_id") or "experiment",
+                row.get("workload_id") or "workload",
+                candidate["evaluation_scope_id"][:10],
+            )
+        )
+    )
+
+
+def _evaluation_name(candidate: dict[str, Any]) -> str:
+    row = candidate["rows"][0]
+    return " | ".join(
+        str(value)
+        for value in (
+            row.get("experiment_id") or "fugue",
+            row.get("workload_id") or "workload",
+            candidate["evaluation_scope_id"][:10],
+        )
+    )
+
+
+def _candidate_model_name(candidate: dict[str, Any]) -> str:
+    row = candidate["rows"][0]
+    model = str(row.get("model") or "model").split("/")[-1]
+    return _safe_slug(
+        "__".join(
+            (
+                str(row.get("harness") or "agent"),
+                str(
+                    row.get("variant_id")
+                    or row.get("context_system_id")
+                    or "baseline"
+                ),
+                model,
+            )
+        )
+    )[:128]
+
+
+def _logger_ref(logger: Any, attribute: str) -> str | None:
+    value = getattr(logger, attribute, None)
+    ref = getattr(value, "ref", None)
+    uri = getattr(ref, "uri", None)
+    return str(uri or ref) if ref else None
+
+
+def _outcome_status(row: dict[str, Any]) -> str:
+    if row.get("exception_class"):
+        return "error"
+    if row.get("pass") is True:
+        return "passed"
+    if row.get("pass") is False:
+        return "failed"
+    return "unscored"
+
+
+def _measured_local_usage(row: dict[str, Any]) -> bool:
+    return any(
+        key in row and row[key] is not None
+        for key in ("n_input_tokens", "n_output_tokens", "cost_usd")
+    )
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _drop_none(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _stable_digest(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _safe_slug(value: str) -> str:
@@ -266,7 +1374,13 @@ def fetch_weave_summaries(
     api_key = values.get("WANDB_API_KEY")
     if not api_key:
         raise RuntimeError("WANDB_API_KEY is required to fetch Weave spans")
-    base_url = values.get("WEAVE_BASE_URL", "https://api.wandb.ai").rstrip("/")
+    base_url = (
+        values.get("WF_TRACE_SERVER_URL")
+        or WEAVE_AGENTS_BASE_URL
+    ).rstrip("/")
+    agents_base_url = values.get(
+        "WEAVE_AGENTS_BASE_URL", WEAVE_AGENTS_BASE_URL
+    ).rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     summaries: dict[str, dict[str, Any]] = {}
     with httpx.Client(timeout=timeout_sec, headers=headers) as client:
@@ -275,7 +1389,7 @@ def fetch_weave_summaries(
                 _fetch_calls_spans(client, base_url, project, run_key)
                 + _fetch_agents_spans(
                     client,
-                    base_url,
+                    agents_base_url,
                     project,
                     (conversation_ids_by_run or {}).get(run_key, []),
                 )
@@ -290,9 +1404,7 @@ def _fetch_calls_spans(
     payload = {
         "project_id": f"{entity}/{name}",
         "filter": {
-            "op_name": ".*",
             "trace_roots_only": False,
-            "wb_user_ids": [],
         },
         "query": {
             "$expr": {
@@ -305,9 +1417,35 @@ def _fetch_calls_spans(
     }
     response = client.post(f"{base_url}/calls/stream_query", json=payload)
     if response.status_code >= 400:
+        raise RuntimeError(
+            f"Weave Calls query failed with HTTP {response.status_code}"
+        )
+    return _decode_call_stream(response.text)
+
+
+def _decode_call_stream(text: str) -> list[dict[str, Any]]:
+    stripped = text.strip()
+    if not stripped:
         return []
-    data = response.json()
-    return data if isinstance(data, list) else data.get("calls", [])
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(payload, list):
+                return [item for item in payload if isinstance(item, dict)]
+            if isinstance(payload, dict) and isinstance(payload.get("calls"), list):
+                return [item for item in payload["calls"] if isinstance(item, dict)]
+    calls: list[dict[str, Any]] = []
+    for line in stripped.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Weave Calls query returned invalid NDJSON") from exc
+        if isinstance(value, dict):
+            calls.append(value)
+    return calls
 
 
 def _fetch_agents_spans(
@@ -320,11 +1458,23 @@ def _fetch_agents_spans(
     for conversation_id in dict.fromkeys(conversation_ids):
         payload = {
             "project_id": project,
-            "filter": {"conversation_id": conversation_id},
+            "query": {
+                "$expr": {
+                    "$eq": [
+                        {"$getField": "conversation_id"},
+                        {"$literal": conversation_id},
+                    ]
+                }
+            },
+            "include_details": True,
+            "include_costs": True,
+            "limit": 10_000,
         }
         response = client.post(f"{base_url}/agents/spans/query", json=payload)
         if response.status_code >= 400:
-            continue
+            raise RuntimeError(
+                f"Weave Agents query failed with HTTP {response.status_code}"
+            )
         data = response.json()
         values = data if isinstance(data, list) else data.get("spans", [])
         spans.extend(value for value in values if isinstance(value, dict))
@@ -342,14 +1492,42 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         )
         unique[identity] = span
     values = list(unique.values())
+    if not values:
+        return {
+            "weave_span_count": 0,
+            "weave_observability_status": "unavailable",
+            "weave_agent_names": [],
+            "weave_conversation_ids": [],
+            "weave_trace_ids": [],
+            "weave_root_span_ids": [],
+            "weave_root_spans": [],
+            "weave_usage_status": "unavailable",
+            "weave_usage_source": "unavailable",
+            "weave_input_tokens": None,
+            "weave_output_tokens": None,
+            "weave_total_cost_usd": None,
+        }
     operations = [_span_operation(span) for span in values]
     attributes = [_span_attributes(span) for span in values]
-    text = json.dumps(values)
+    usage = _span_usage_summary(values, attributes)
+    fugue_attributes, attribute_status, missing_attributes = (
+        _fugue_attribute_summary(values)
+    )
     conversation_ids = sorted(
         {
             str(value)
-            for attrs in attributes
-            if (value := attrs.get("gen_ai.conversation.id"))
+            for span, attrs in zip(values, attributes, strict=True)
+            if (
+                value := span.get("conversation_id")
+                or attrs.get("gen_ai.conversation.id")
+            )
+        }
+    )
+    agent_names = sorted(
+        {
+            str(value)
+            for span, attrs in zip(values, attributes, strict=True)
+            if (value := span.get("agent_name") or attrs.get("gen_ai.agent.name"))
         }
     )
     trace_ids = sorted(
@@ -364,50 +1542,183 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         }
         - {"None"}
     )
-    call_ids = [
-        str(value)
+    roots = [
+        span
         for span in values
-        if (value := _span_value(span, "id") or _span_value(span, "call_id"))
+        if _span_operation(span) == "invoke_agent"
+        and not (_span_value(span, "parent_id") or _span_value(span, "parent_span_id"))
+    ]
+    tool_names = Counter(
+        str(value)
+        for span, attrs in zip(values, attributes, strict=True)
+        if _span_operation(span) == "execute_tool"
+        and (value := span.get("tool_name") or attrs.get("gen_ai.tool.name"))
+    )
+    error_types = Counter(
+        _span_error_type(span)
+        for span in values
+        if _span_has_error(span)
+    )
+    root_id = next(
+        (
+            str(value)
+            for span in roots
+            if (value := _span_value(span, "id") or _span_value(span, "span_id"))
+        ),
+        None,
+    )
+    root_spans = [_root_span_summary(span) for span in roots]
+    chat_spans = [span for span in values if _span_operation(span) == "chat"]
+    tool_spans = [
+        span for span in values if _span_operation(span) == "execute_tool"
     ]
     return {
         "weave_span_count": len(values),
+        "weave_observability_status": "available",
         "weave_turn_count": operations.count("invoke_agent"),
         "weave_llm_call_count": operations.count("chat"),
         "weave_tool_call_count": operations.count("execute_tool"),
         "weave_error_count": sum(_span_has_error(span) for span in values),
+        "weave_terminal_error_count": sum(
+            _span_has_error(span) for span in roots
+        ),
+        "weave_model_error_count": sum(
+            _span_has_error(span) for span in chat_spans
+        ),
+        "weave_tool_error_count": sum(
+            _span_has_error(span) for span in tool_spans
+        ),
+        "weave_error_types": dict(sorted(error_types.items())),
+        "weave_tool_names": dict(sorted(tool_names.items())),
+        "weave_agent_names": agent_names,
         "weave_conversation_ids": conversation_ids,
         "weave_trace_ids": trace_ids,
         "weave_root_span_ids": root_span_ids,
-        "weave_call_id": call_ids[0] if call_ids else None,
-        "weave_input_tokens": _sum_attribute(attributes, "gen_ai.usage.input_tokens"),
-        "weave_output_tokens": _sum_attribute(attributes, "gen_ai.usage.output_tokens"),
-        "context_read_count": text.count(".fugue-context")
-        + text.count("AGENTS.md")
-        + text.count("openwiki")
-        + text.count("context_search"),
+        "weave_root_spans": root_spans,
+        "weave_call_id": root_id,
+        "weave_agent_latency_sec": _root_latency(roots),
+        "weave_model_latency_sec": _root_latency(chat_spans),
+        "weave_fugue_attributes": fugue_attributes,
+        "weave_attribute_status": attribute_status,
+        "weave_missing_attributes": missing_attributes,
+        "_weave_agent_response": _latest_agent_response([*roots, *chat_spans]),
+        **usage,
     }
 
 
+def _latest_agent_response(spans: list[dict[str, Any]]) -> str | None:
+    ordered = sorted(
+        spans,
+        key=lambda span: str(span.get("ended_at") or span.get("end_time") or ""),
+        reverse=True,
+    )
+    for span in ordered:
+        messages = span.get("output_messages")
+        if not isinstance(messages, list):
+            continue
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return None
+
+
+def _root_span_summary(span: dict[str, Any]) -> dict[str, Any]:
+    attrs = _span_attributes(span)
+    return _drop_none(
+        {
+            "conversation_id": span.get("conversation_id")
+            or attrs.get("gen_ai.conversation.id"),
+            "agent_name": span.get("agent_name")
+            or attrs.get("gen_ai.agent.name"),
+            "trace_id": _span_value(span, "trace_id"),
+            "span_id": _span_value(span, "span_id") or _span_value(span, "id"),
+            "run_key": attrs.get("fugue.run_key"),
+            "harness": attrs.get("fugue.harness"),
+            "task_id": attrs.get("fugue.task_id"),
+            "eval_predict_and_score_call_id": attrs.get(
+                "weave.eval.predict_and_score_call_id"
+            ),
+        }
+    )
+
+
 def _span_attributes(span: dict[str, Any]) -> dict[str, Any]:
-    attributes = span.get("attributes") or {}
-    return attributes if isinstance(attributes, dict) else {}
+    merged: dict[str, Any] = {}
+    raw = _raw_span(span)
+    for source in (raw.get("attributes"), span.get("attributes")):
+        if isinstance(source, dict):
+            merged.update(_flatten_attributes(source))
+    for name in (
+        "custom_attrs_string",
+        "custom_attrs_int",
+        "custom_attrs_float",
+        "custom_attrs_bool",
+    ):
+        source = span.get(name)
+        if isinstance(source, dict):
+            merged.update(source)
+    return merged
+
+
+def _resource_attributes(span: dict[str, Any]) -> dict[str, Any]:
+    resource = _raw_span(span).get("resource") or {}
+    attributes = resource.get("attributes") if isinstance(resource, dict) else {}
+    return _flatten_attributes(attributes) if isinstance(attributes, dict) else {}
+
+
+def _raw_span(span: dict[str, Any]) -> dict[str, Any]:
+    raw = span.get("raw_span_dump") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _flatten_attributes(
+    value: dict[str, Any], prefix: str = ""
+) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, item in value.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            flattened.update(_flatten_attributes(item, name))
+        else:
+            flattened[name] = item
+    return flattened
 
 
 def _span_operation(span: dict[str, Any]) -> str:
     attrs = _span_attributes(span)
-    value = attrs.get("gen_ai.operation.name") or span.get("operation")
+    value = (
+        attrs.get("gen_ai.operation.name")
+        or span.get("operation_name")
+        or span.get("operation")
+    )
     if value:
         return str(value)
-    name = str(span.get("name") or span.get("op_name") or "")
+    name = str(
+        span.get("span_name") or span.get("name") or span.get("op_name") or ""
+    )
     return name.split(" ", 1)[0]
 
 
 def _span_value(span: dict[str, Any], key: str) -> Any:
-    return span.get(key) or _span_attributes(span).get(key)
+    if key in span and span[key] is not None:
+        return span[key]
+    return _span_attributes(span).get(key)
 
 
 def _span_has_error(span: dict[str, Any]) -> bool:
-    status = span.get("status") or _span_attributes(span).get("status")
+    status = (
+        span.get("status_code")
+        or span.get("status")
+        or _span_attributes(span).get("status")
+    )
     return bool(
         span.get("exception")
         or span.get("error")
@@ -415,14 +1726,173 @@ def _span_has_error(span: dict[str, Any]) -> bool:
     )
 
 
-def _sum_attribute(attributes: list[dict[str, Any]], key: str) -> int:
-    total = 0
-    for values in attributes:
-        try:
-            total += int(values.get(key) or 0)
-        except (TypeError, ValueError):
+def _span_usage_summary(
+    spans: list[dict[str, Any]], attributes: list[dict[str, Any]]
+) -> dict[str, Any]:
+    chat = [
+        (span, attrs)
+        for span, attrs in zip(spans, attributes, strict=True)
+        if _span_operation(span) == "chat"
+    ]
+    roots = [
+        (span, attrs)
+        for span, attrs in zip(spans, attributes, strict=True)
+        if _span_operation(span) == "invoke_agent"
+        and not (_span_value(span, "parent_id") or _span_value(span, "parent_span_id"))
+    ]
+    selected: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    source = "unavailable"
+    if _has_usage(chat):
+        selected = chat
+        source = "chat_sum"
+    elif _has_usage(roots):
+        selected = roots
+        source = "root_aggregate"
+
+    input_tokens = _sum_metric(
+        selected, "input_tokens", "gen_ai.usage.input_tokens", integer=True
+    )
+    output_tokens = _sum_metric(
+        selected, "output_tokens", "gen_ai.usage.output_tokens", integer=True
+    )
+    total_cost = _sum_cost(selected)
+    return {
+        "weave_input_tokens": input_tokens,
+        "weave_output_tokens": output_tokens,
+        "weave_total_cost_usd": total_cost,
+        "weave_usage_status": "available" if selected else "unavailable",
+        "weave_usage_source": source,
+        "weave_cost_status": "available" if total_cost is not None else "unavailable",
+    }
+
+
+def _has_usage(values: list[tuple[dict[str, Any], dict[str, Any]]]) -> bool:
+    return any(
+        attribute in attrs
+        or _number(span.get(field)) not in (None, 0.0)
+        for span, attrs in values
+        for field, attribute in (
+            ("input_tokens", "gen_ai.usage.input_tokens"),
+            ("output_tokens", "gen_ai.usage.output_tokens"),
+        )
+    )
+
+
+def _sum_metric(
+    values: list[tuple[dict[str, Any], dict[str, Any]]],
+    field: str,
+    attribute: str,
+    *,
+    integer: bool = False,
+) -> int | float | None:
+    if not values:
+        return None
+    observed = False
+    total = 0.0
+    for span, attrs in values:
+        value = attrs[attribute] if attribute in attrs else span.get(field)
+        number = _number(value)
+        if number is None:
             continue
-    return total
+        observed = True
+        total += number
+    if not observed:
+        return None
+    return int(total) if integer else total
+
+
+def _sum_cost(values: list[tuple[dict[str, Any], dict[str, Any]]]) -> float | None:
+    total = 0.0
+    observed = False
+    for span, attrs in values:
+        value = next(
+            (
+                source[key]
+                for source, key in (
+                    (attrs, "gen_ai.usage.cost"),
+                    (attrs, "gen_ai.usage.total_cost_usd"),
+                    (span, "total_cost_usd"),
+                    (span, "cost"),
+                )
+                if key in source and source[key] is not None
+            ),
+            None,
+        )
+        number = _number(value)
+        if number is None:
+            continue
+        observed = True
+        total += number
+    return total if observed else None
+
+
+def _number(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+_REQUIRED_FUGUE_ATTRIBUTES = (
+    "fugue.run_key",
+    "fugue.run_id",
+    "fugue.experiment_id",
+    "fugue.workload_id",
+    "fugue.harness",
+    "fugue.variant_id",
+    "fugue.context_system_id",
+    "fugue.task_id",
+    "fugue.trial_index",
+    "fugue.comparison_example_id",
+    "fugue.candidate_id",
+    "fugue.model_provider",
+    "fugue.model",
+)
+
+
+def _fugue_attribute_summary(
+    spans: list[dict[str, Any]],
+) -> tuple[dict[str, Any], str, list[str]]:
+    span_values: dict[str, Any] = {}
+    resource_values: dict[str, Any] = {}
+    for span in spans:
+        for key, value in _span_attributes(span).items():
+            if key.startswith("fugue.") and value not in (None, ""):
+                span_values.setdefault(key, value)
+        for key, value in _resource_attributes(span).items():
+            if key.startswith("fugue.") and value not in (None, ""):
+                resource_values.setdefault(key, value)
+    values = {**resource_values, **span_values}
+    missing = [key for key in _REQUIRED_FUGUE_ATTRIBUTES if key not in values]
+    if not values:
+        status = "missing"
+    elif not span_values:
+        status = "resource_only"
+    elif missing:
+        status = "partial"
+    else:
+        status = "complete"
+    return values, status, missing
+
+
+def _root_latency(roots: list[dict[str, Any]]) -> float | None:
+    durations: list[float] = []
+    for span in roots:
+        started = _parse_time(span.get("started_at") or span.get("start_time"))
+        ended = _parse_time(span.get("ended_at") or span.get("end_time"))
+        if started and ended:
+            durations.append((ended - started).total_seconds())
+    return sum(durations) if durations else None
+
+
+def _span_error_type(span: dict[str, Any]) -> str:
+    attrs = _span_attributes(span)
+    return str(
+        span.get("error_type")
+        or attrs.get("error.type")
+        or span.get("exception_type")
+        or "unknown"
+    )
 
 
 def _trial_result_paths(job: Path) -> list[Path]:
@@ -455,11 +1925,17 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         trial.get("task_name"),
         meta.get("expected_evidence_paths") or {},
     )
+    agent_response = _agent_response(trial_dir)
+    context_system_id = meta.get("context_system_id", "none")
+    context_assigned = context_system_id != "none"
     return {
         "schema_version": 1,
         "record_type": "trial",
         "run_key": meta.get("run_key") or trial.get("trial_name") or trial_dir.name,
         "run_id": meta.get("run_id"),
+        "trial_index": _positive_int(meta.get("trial_index")) or 1,
+        "comparison_example_id": meta.get("comparison_example_id"),
+        "candidate_id": meta.get("candidate_id"),
         "job_name": meta.get("job_name") or trial_dir.parent.name,
         "task_name": trial.get("task_name"),
         "trial_name": trial.get("trial_name") or trial_dir.name,
@@ -471,7 +1947,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "run_group": meta.get("run_group"),
         "variant_id": meta.get("variant_id"),
         "prompt_id": meta.get("prompt_id"),
-        "context_system_id": meta.get("context_system_id", "none"),
+        "context_system_id": context_system_id,
         "context_version": meta.get("context_version"),
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
@@ -484,6 +1960,8 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "agent_config_hash": meta.get("agent_config_hash"),
         "tags": meta.get("tags", []),
         "dataset": meta.get("dataset"),
+        "repository": meta.get("repository"),
+        "base_commit": meta.get("base_commit"),
         "manifest_path": meta.get("manifest_path"),
         "model_provider": meta.get("model_provider"),
         "builder_model": meta.get("builder_model"),
@@ -505,16 +1983,54 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "cost_usd": agent_result.get("cost_usd"),
         "exception_class": exception.get("exception_type"),
         "context_artifact": meta.get("context_artifact"),
+        "context_assigned": context_assigned,
+        "context_available": context_assigned
+        and bool(
+            context_events["context_telemetry_available"]
+            or meta.get("context_artifact")
+        ),
+        "context_invoked": context_events["context_query_count"] > 0,
         **context_events,
         **evidence,
         "weave_agent_name": meta.get("weave_agent_name"),
         "weave_conversation_key": meta.get("weave_conversation_key"),
         "weave_conversation_id": meta.get("weave_conversation_id"),
+        "planned_conversation_id": meta.get("planned_conversation_id")
+        or meta.get("weave_conversation_id"),
         "weave_conversation_ids": meta.get("weave_conversation_ids", []),
         "native_session_ids": meta.get("native_session_ids", []),
         "trace_content": meta.get("trace_content", "full"),
+        "agent_response": (
+            agent_response
+            if meta.get("trace_content", "full") == "full"
+            else None
+        ),
+        "agent_response_sha256": (
+            hashlib.sha256(agent_response.encode()).hexdigest()
+            if agent_response
+            else None
+        ),
+        "agent_response_bytes": len(agent_response.encode()) if agent_response else 0,
         "trial_dir": trial_dir.as_posix(),
     }
+
+
+def _agent_response(trial_dir: Path) -> str | None:
+    path = trial_dir / "agent" / "trajectory.json"
+    try:
+        trajectory = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    steps = trajectory.get("steps", []) if isinstance(trajectory, dict) else []
+    for step in reversed(steps):
+        if not isinstance(step, dict):
+            continue
+        if str(step.get("source") or "").lower() not in {"agent", "assistant"}:
+            continue
+        message = step.get("message") or step.get("content") or step.get("text")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
 
 
 def _context_result_rows(path: Path) -> list[dict[str, Any]]:
@@ -533,6 +2049,54 @@ def _context_result_rows(path: Path) -> list[dict[str, Any]]:
             row = json.loads(line)
             row.setdefault("trial_dir", candidate.parent.as_posix())
             rows.append(row)
+    return rows
+
+
+def _live_evaluation_rows(path: Path) -> list[dict[str, Any]]:
+    if path.is_file() and path.name == "evaluation-results.jsonl":
+        candidates = [path]
+    elif path.is_dir():
+        candidates = sorted(path.rglob("evaluation-results.jsonl"))
+    else:
+        candidates = []
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        lifecycle_times: dict[str, dict[str, datetime]] = {}
+        events_path = candidate.with_name("evaluations.jsonl")
+        if events_path.is_file():
+            for line in events_path.read_text(errors="replace").splitlines():
+                try:
+                    event = json.loads(line)
+                    recorded_at = datetime.fromisoformat(event["recorded_at"])
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+                if event.get("status") in {
+                    "prediction_open",
+                    "finalized",
+                    "failed",
+                } and event.get("cell_id"):
+                    lifecycle_times.setdefault(str(event["cell_id"]), {})[
+                        str(event["status"])
+                    ] = recorded_at
+        for line in candidate.read_text(errors="replace").splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                value.setdefault("evaluation_publication_mode", "live")
+                times = lifecycle_times.get(str(value.get("cell_id") or ""), {})
+                opened = times.get("prediction_open")
+                closed = times.get("finalized") or times.get("failed")
+                if (
+                    value.get("evaluation_prediction_latency_sec") is None
+                    and opened is not None
+                    and closed is not None
+                ):
+                    value["evaluation_prediction_latency_sec"] = max(
+                        (closed - opened).total_seconds(), 0.0
+                    )
+                rows.append(value)
     return rows
 
 
@@ -564,7 +2128,8 @@ def _cell_result_rows(path: Path) -> list[dict[str, Any]]:
                     "run_key": (
                         f"{item.get('run_id')}:{item.get('workload_id')}:cell:"
                         f"{item.get('task_id')}:{item.get('harness')}:"
-                        f"{item.get('context_system_id')}"
+                        f"{item.get('context_system_id')}:{item.get('variant_id')}:"
+                        f"t{int(item.get('trial_index') or 1):03d}"
                     ),
                     "trial_dir": candidate.parent.as_posix(),
                 }
@@ -605,7 +2170,16 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         if event.get("event") in {"retrieve", "mcp_tool_request"}
         and event.get("elapsed_ms") is not None
     ]
+    result_counts = [
+        int((event.get("metrics") or {}).get("result_count") or 0)
+        for event in logical_events
+    ]
+    result_tokens = [
+        int((event.get("metrics") or {}).get("result_tokens") or 0)
+        for event in logical_events
+    ]
     return {
+        "context_telemetry_available": bool(paths),
         "context_event_count": len(events),
         "context_call_count": len(logical_events),
         "context_query_count": len(logical_events),
@@ -619,6 +2193,8 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
             1 for event in events if event.get("layer") == "provider"
         ),
         "context_error_count": sum(1 for event in events if event.get("error")),
+        "context_result_count": sum(result_counts),
+        "context_result_tokens": sum(result_tokens),
         "context_query_latency_ms": (
             sum(latencies) / len(latencies) if latencies else None
         ),
@@ -701,6 +2277,7 @@ def _judge_request(
     route: ModelRoute,
     api_key: str,
     *,
+    env: Mapping[str, str],
     reference: str,
     answer: str,
     evidence_paths: list[str],
@@ -746,7 +2323,10 @@ CITED PATHS:
     else:
         response = client.post(
             f"{route.chat_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                **provider_request_headers(route, env),
+            },
             json={
                 "model": route.model_id,
                 "temperature": 0,

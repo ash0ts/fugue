@@ -56,6 +56,18 @@ tasks:
     assert manifest.tasks[0].metadata == {"source_index": 7}
 
 
+def test_pilot_canary_declares_gold_evidence_paths() -> None:
+    manifest = load_manifest(Path(__file__).parents[1] / "datasets" / "pilot.yaml")
+    task = next(
+        item for item in manifest.tasks if item.id == "astropy__astropy-12907"
+    )
+
+    assert task.expected_paths == (
+        "astropy/modeling/separable.py",
+        "astropy/modeling/tests/test_separable.py",
+    )
+
+
 def test_manifest_rejects_duplicate_ids_and_nonpositive_execution_values(
     tmp_path: Path,
 ) -> None:

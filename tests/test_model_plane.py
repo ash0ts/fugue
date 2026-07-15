@@ -8,12 +8,15 @@ from fugue.model_plane import (
     DEFAULT_WANDB_PROJECT,
     missing_model_env,
     missing_trace_env,
+    provider_client_env,
+    provider_request_headers,
     resolve_model_route,
     select_model,
     trace_entity_project,
     trace_env_defaults,
     trace_project_slug,
 )
+from fugue.weave_support import weave_agents_otel_headers
 
 
 def test_resolve_model_route_for_supported_providers() -> None:
@@ -91,3 +94,27 @@ def test_trace_project_defaults_to_wandb_shared_project() -> None:
         "custom",
         "project",
     )
+
+
+def test_wandb_model_requests_use_the_trace_project_for_billing() -> None:
+    wandb = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {"WEAVE_PROJECT": "team/experiment-project"}
+
+    assert provider_request_headers(wandb, env) == {
+        "OpenAI-Project": "team/experiment-project"
+    }
+    assert provider_client_env(wandb, env) == {
+        "OPENAI_PROJECT": "team/experiment-project",
+        "OPENAI_PROJECT_ID": "team/experiment-project",
+    }
+
+    openai = resolve_model_route("openai/gpt-5", {})
+    assert provider_request_headers(openai, env) == {}
+    assert provider_client_env(openai, env) == {}
+
+
+def test_weave_agents_otel_headers_route_without_exposing_plain_key() -> None:
+    headers = weave_agents_otel_headers("wandb/fugue-experiments", "test-key")
+
+    assert headers.startswith("project_id=wandb/fugue-experiments,Authorization=Basic%20")
+    assert "test-key" not in headers

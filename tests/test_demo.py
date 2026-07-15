@@ -46,11 +46,14 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
         run_id=run_id,
     )
 
-    assert len(rendered) == 24
+    assert len(rendered) == 48
     assert not runtime_dir.exists()
     assert all(not job.config_path.exists() for job in rendered)
 
-    cells = {(job.harness, job.variant_id, job.task_id): job for job in rendered}
+    cells = {
+        (job.harness, job.variant_id, job.task_id, job.trial_index): job
+        for job in rendered
+    }
     expected_artifacts = [
         "/root/sc100-filled.pdf",
         "/root/diff_report.json",
@@ -64,32 +67,49 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
 
     for harness in ("hermes", "openclaw", "claude-code", "codex"):
         for task_id in expected_tasks:
-            baseline = cells[(harness, "baseline", task_id)].config
-            skilled = cells[(harness, "with-pdf-skill", task_id)].config
+            for trial_index in (1, 2):
+                baseline_job = cells[(harness, "baseline", task_id, trial_index)]
+                skilled_job = cells[
+                    (harness, "with-pdf-skill", task_id, trial_index)
+                ]
+                _assert_balanced_skill_pair(
+                    baseline_job.config,
+                    skilled_job.config,
+                    expected_artifacts,
+                    task_id,
+                )
+                assert baseline_job.comparison_example_id == (
+                    skilled_job.comparison_example_id
+                )
+                assert baseline_job.candidate_id != skilled_job.candidate_id
 
-            assert baseline["datasets"] == skilled["datasets"]
-            assert baseline["datasets"] == [
-                {
-                    "name": "benchflow/skillsbench",
-                    "ref": "1.1",
-                    "task_names": [task_id],
-                    "n_tasks": 1,
-                }
-            ]
-            assert baseline["n_attempts"] == skilled["n_attempts"] == 2
-            assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
-            assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
-            assert baseline["environment"] == skilled["environment"]
-            assert baseline.get("extra_instruction_paths", []) == []
-            assert skilled.get("extra_instruction_paths", []) == []
 
-            baseline_agent = dict(baseline["agents"][0])
-            skilled_agent = dict(skilled["agents"][0])
-            assert baseline_agent.pop("skills", []) == []
-            assert skilled_agent.pop("skills") == [
-                "configs/fugue/skills/pdf-artifact-workflow"
-            ]
-            assert baseline_agent == skilled_agent
+def _assert_balanced_skill_pair(
+    baseline: dict, skilled: dict, expected_artifacts: list[str], task_id: str
+) -> None:
+    assert baseline["datasets"] == skilled["datasets"]
+    assert baseline["datasets"] == [
+        {
+            "name": "benchflow/skillsbench",
+            "ref": "1.1",
+            "task_names": [f"benchflow/{task_id}"],
+            "n_tasks": 1,
+        }
+    ]
+    assert baseline["n_attempts"] == skilled["n_attempts"] == 1
+    assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
+    assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
+    assert baseline["environment"] == skilled["environment"]
+    assert baseline.get("extra_instruction_paths", []) == []
+    assert skilled.get("extra_instruction_paths", []) == []
 
-            assert "secret-wandb" not in json.dumps(baseline)
-            assert "secret-wandb" not in json.dumps(skilled)
+    baseline_agent = dict(baseline["agents"][0])
+    skilled_agent = dict(skilled["agents"][0])
+    assert baseline_agent.pop("skills", []) == []
+    assert skilled_agent.pop("skills") == [
+        "configs/fugue/skills/pdf-artifact-workflow"
+    ]
+    assert baseline_agent == skilled_agent
+
+    assert "secret-wandb" not in json.dumps(baseline)
+    assert "secret-wandb" not in json.dumps(skilled)

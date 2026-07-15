@@ -35,9 +35,6 @@ from fugue.bench.library import (
     list_experiments,
     list_prompts,
     list_skills,
-    save_experiment,
-    save_prompt,
-    save_skill,
     validate_id,
 )
 from fugue.bench.manifest import load_manifest
@@ -257,29 +254,12 @@ class ExperimentComposer:
         experiment_id: str,
         replace_assets: bool = False,
     ) -> ExperimentSpec:
-        experiment_id = validate_id(experiment_id, kind="experiment id")
-        for asset in draft.assets:
-            if asset.kind == "prompt":
-                path = self.repo_root / "configs/fugue/prompts" / f"{asset.id}.md"
-                if path.exists() and not replace_assets:
-                    raise FileExistsError(
-                        f"prompt {asset.id} exists; confirm replacement explicitly"
-                    )
-                save_prompt(asset.id, asset.body, self.repo_root)
-            else:
-                path = self.repo_root / "configs/fugue/skills" / asset.id / "SKILL.md"
-                if path.exists() and not replace_assets:
-                    raise FileExistsError(
-                        f"skill {asset.id} exists; confirm replacement explicitly"
-                    )
-                save_skill(asset.id, asset.body, self.repo_root)
-        data = draft.experiment.to_dict()
-        data["id"] = experiment_id
-        data["run_name"] = data.get("run_name") or experiment_id
-        return save_experiment(
-            experiment_id,
-            yaml.safe_dump(data, sort_keys=False),
-            self.repo_root,
+        return self.operator.save_working_experiment(
+            draft.experiment,
+            self.operator.request_for_experiment(draft.experiment),
+            experiment_id=experiment_id,
+            assets=draft.assets,
+            replace_assets=replace_assets,
         )
 
     def _tools(self, base: ExperimentSpec) -> tuple[AssistantTool, ...]:

@@ -89,7 +89,44 @@ def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
     assert preview.cells == 1
     assert preview.estimated_trials == 1
     assert preview.harnesses == ("codex",)
+    assert len(preview.matrix_cells) == 1
+    assert preview.matrix_cells[0].task_id == "task-one"
+    assert preview.matrix_cells[0].trial_count == 1
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_request_for_experiment_keeps_inherited_scale_out_of_overrides(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+
+    request = service.request_for_experiment(experiment)
+
+    assert request.harnesses == ("codex",)
+    assert request.variants == ("baseline",)
+    assert request.n_attempts is None
+    assert request.n_tasks is None
+    assert request.n_concurrent is None
+
+
+def test_start_bridge_loads_the_requested_experiment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_bridge_up(target, **kwargs):
+        captured.update({"target": target, **kwargs})
+        return object()
+
+    monkeypatch.setattr("fugue.bench.operator.bridge_up", fake_bridge_up)
+
+    service.start_bridge(ExperimentRequest(experiment_id="demo"))
+
+    assert captured["target"] == "openai/gpt-5"
+    assert captured["builder_model"] is None
+    assert captured["judge_model"] is None
 
 
 def test_ephemeral_experiment_launch_persists_runtime_snapshot(

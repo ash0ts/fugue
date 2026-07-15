@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from threading import Lock
@@ -7,6 +8,9 @@ from typing import Any
 
 _INITIALIZED_PROJECTS: set[str] = set()
 _LOCK = Lock()
+
+WEAVE_AGENTS_BASE_URL = "https://trace.wandb.ai"
+WEAVE_AGENTS_OTEL_ENDPOINT = f"{WEAVE_AGENTS_BASE_URL}/agents/otel/v1/traces"
 
 
 _WEAVE_ENV_KEYS = (
@@ -38,6 +42,12 @@ def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
             weave.init(project)
             _INITIALIZED_PROJECTS.add(project)
     return weave
+
+
+def weave_agents_otel_headers(project: str, api_key: str) -> str:
+    """Return OTLP env headers without writing credentials to a config file."""
+    token = base64.b64encode(f"api:{api_key}".encode()).decode()
+    return f"project_id={project},Authorization=Basic%20{token}"
 
 
 async def trace_async_operation(
