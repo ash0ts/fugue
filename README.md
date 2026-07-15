@@ -16,6 +16,22 @@ The core workflow is deliberately small:
 Generated evaluations, self-evaluation, automated curation, and candidate
 serving are advanced or experimental extensions. None runs implicitly.
 
+```mermaid
+flowchart LR
+    USER["Saved experiment or planning intent"] --> RESOLVE["Resolve candidates once"]
+    RESOLVE --> OP["OperatorService transaction"]
+    OP --> MATRIX["Candidate x example x trial"]
+    MATRIX --> HARBOR["Harbor agent cells"]
+    MATRIX --> DIRECT["Provider diagnostics"]
+    HARBOR --> LOCAL["Durable local state"]
+    DIRECT --> LOCAL
+    HARBOR --> WEAVE["Weave Agent conversations"]
+    DIRECT --> OPS["Ordinary Weave operation calls"]
+    LOCAL --> EXPORT["Normalized export and analysis"]
+    WEAVE --> EXPORT
+    OPS --> EXPORT
+```
+
 ## Install
 
 [`uv`](https://docs.astral.sh/uv/) is the recommended environment manager.
@@ -43,6 +59,17 @@ FUGUE_MODEL=openai/gpt-5
 Model selection precedence is CLI override, experiment configuration,
 environment, then Fugue’s default. Builder and judge models are independent
 roles and must be selected explicitly when their features are used.
+
+```mermaid
+flowchart TB
+    HOME["fugue command center"]
+    HOME --> P["plan: design an experiment"]
+    HOME --> R["run: preview or execute"]
+    HOME --> RS["runs: inspect, log, cancel, export, package"]
+    HOME --> A["analyze: resolve scope, then report"]
+    HOME --> S["setup: check, bridge, skills, context"]
+    HOME --> T["tui: full-screen workspace"]
+```
 
 ## Preview and run
 
@@ -81,6 +108,22 @@ persists the experiment snapshot, prepares context, renders jobs, plans cells,
 and atomically writes `.fugue/runtime/RUN_ID/input-lock.json`. A failure before
 that commit leaves the run failed in its `starting` phase and executes no cell.
 
+```mermaid
+flowchart TD
+    REQUEST["ExperimentRequest"] --> RESOLVE["Resolve and validate exact plan"]
+    RESOLVE --> SNAPSHOT["Persist experiment snapshot"]
+    SNAPSHOT --> CONTEXT["Prepare required context"]
+    CONTEXT --> RENDER["Render jobs and planned cells"]
+    RENDER --> LOCK["Atomically write input-lock.json"]
+    LOCK --> RUNNING["Transition run to running"]
+    RUNNING --> WORKERS["Start bounded workers"]
+    RESOLVE -->|Failure| FAILED["Failed in starting; zero cells"]
+    SNAPSHOT -->|Failure| FAILED
+    CONTEXT -->|Failure| FAILED
+    RENDER -->|Failure| FAILED
+    LOCK -->|Failure| FAILED
+```
+
 ## Inspect runs
 
 Run operations use nested actions:
@@ -106,10 +149,49 @@ Live runs publish one Weave evaluation per candidate and workload. Fugue keeps
 the returned evaluation URLs in the run manifest and attaches each verified
 agent root to its prediction with Weave's GenAI span reference. Open the
 evaluation to compare candidates, then select a prediction to navigate into the
-linked agent conversation and trace. This follows Weave's documented
-[evaluation comparison](https://docs.wandb.ai/weave/guides/evaluation/evaluation_logger)
-and [trace/thread](https://docs.wandb.ai/weave/guides/tracking/threads) model;
-Fugue does not construct undocumented conversation URLs.
+linked agent conversation and trace.
+
+```mermaid
+flowchart LR
+    PLAN["Planned cells"] --> SCOPE["Dataset + workload + examples + scorers"]
+    SCOPE --> DATASET["Shared Weave Dataset"]
+    SCOPE --> EVAL["Evaluation definition"]
+    PLAN --> CANDIDATES["Resolved candidate models"]
+    CANDIDATES --> PREDICT["Open prediction before Agent execution"]
+    EVAL --> PREDICT
+    PREDICT --> AGENT["invoke_agent / chat / execute_tool"]
+    AGENT --> LINK["Verified genai_span_ref"]
+    LINK --> SCORES["Outcome, latency, usage, and errors"]
+    SCORES --> SUMMARY["Evaluation summary and stable URL"]
+    PLAN --> DIRECT["Direct provider diagnostics"]
+    DIRECT --> POSTHOC["Post-hoc scored rows; Agent link N/A"]
+```
+
+```mermaid
+sequenceDiagram
+    participant F as Fugue worker
+    participant W as Weave EvaluationLogger
+    participant H as Harbor cell
+    participant A as Native harness integration
+    F->>W: Open prediction for shared example
+    W-->>F: Exact predict_and_score call ID
+    F->>H: Execute with canonical correlation attributes
+    H->>A: Run one Agent trial
+    A->>W: One invoke_agent root with nested chat and tools
+    H-->>F: Harbor result and artifacts
+    F->>W: Resolve exact root and attach genai_span_ref
+    F->>W: Finalize scores and prediction output
+    F->>W: Log evaluation summary
+```
+
+This follows Weave's documented [EvaluationLogger](https://docs.wandb.ai/weave/guides/evaluation/evaluation_logger),
+[Agent data model](https://docs.wandb.ai/weave/guides/tracking/trace-agents),
+[supported Agent integrations](https://docs.wandb.ai/weave/guides/tracking/trace-agent-integrations),
+and [Agent activity views](https://docs.wandb.ai/weave/guides/tracking/view-agent-activity).
+Only agent-backed predictions receive conversation deep links. Retrieval and
+continuity diagnostics remain ordinary Weave operations and report Agent
+linking as `not_applicable`; Fugue never constructs undocumented URLs or fake
+Agent conversations.
 
 Candidate identity contains only behavior-affecting inputs: harness, provider
 and model route, prompt digest, reviewed skill digests, context definition and
@@ -160,6 +242,20 @@ Selecting an unsupported delivery makes the cell `not_applicable` before
 binding. Research adapters remain outside default presets until their pinned
 Harbor runtimes pass live integration tests.
 
+```mermaid
+flowchart LR
+    TASK["Dataset + task + repository commit"] --> KEY["Content-addressed key"]
+    KEY --> LOCK["Process-safe build lock"]
+    LOCK --> PREPARE["Context provider prepare"]
+    PREPARE --> CACHE["Atomic cache publication"]
+    CACHE --> DELIVERY{"Declared delivery"}
+    DELIVERY -->|portable| PORTABLE["Instructions, artifacts, or mounts"]
+    DELIVERY -->|native_mcp| MCP["Preserved upstream MCP interface"]
+    PORTABLE --> CELL["Harbor cell"]
+    MCP --> CELL
+    DELIVERY -->|unsupported| NA["not_applicable before binding"]
+```
+
 ## Plan in Rich or Textual
 
 Run bare `fugue` for the Rich command center, or open the full workspace:
@@ -170,6 +266,19 @@ fugue tui
 ```
 
 Textual keeps one in-memory plan:
+
+```mermaid
+flowchart LR
+    DEFINE["Define: intent or saved experiment"]
+    COMPARE["Compare: variants, coverage, proposals"]
+    REVIEW["Review: exact matrix and launch authority"]
+    RUNS["Runs: cells, candidates, and logs"]
+    DEFINE --> COMPARE --> REVIEW --> RUNS
+    COMPARE -->|Accept proposal| MEMORY["Update PlanState only"]
+    MEMORY --> COMPARE
+    REVIEW -->|Missing setup| SETUP["Setup: credentials, skills, context"]
+    SETUP --> REVIEW
+```
 
 - Define selects intent or a saved experiment.
 - Compare shows variants, evaluation coverage, and generated-evaluation
@@ -185,6 +294,21 @@ replacement-diff confirmation.
 
 Natural-language planning is explicit and produces an untrusted draft that is
 parsed and previewed before it can be saved:
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Experiment planner
+    participant O as OperatorService
+    participant V as Rich or Textual
+    U->>C: Describe a controlled comparison
+    C->>O: Read the repository catalog
+    C->>O: Propose a strict ExperimentSpec
+    O->>O: Validate and preview without side effects
+    O-->>V: Draft, diff, cells, trials, and blockers
+    V-->>U: Review, save, run, or discard
+    U->>V: Explicit approval
+```
 
 ```bash
 fugue plan \
@@ -207,12 +331,45 @@ failure. Unmeasured token usage remains unavailable rather than becoming zero.
 Analysis first resolves and displays an immutable local scope. `--yes` is the
 explicit boundary for model interpretation and report writing:
 
+```mermaid
+flowchart LR
+    Q["Comparative question"] --> SPEC["AnalysisSpec"]
+    SPEC --> LOCAL["Local catalog filter"]
+    LOCAL --> SNAP["Immutable row snapshot"]
+    SNAP --> PREVIEW["Scope and deterministic aggregates"]
+    PREVIEW --> CONFIRM{"Confirm interpretation?"}
+    CONFIRM -->|No| STOP["No remote query or report write"]
+    CONFIRM -->|Yes| WEAVE["Narrow Weave enrichment"]
+    WEAVE --> MODEL["Evidence-bound interpretation"]
+    MODEL --> REPORT["Report, scope, and evidence"]
+```
+
 ```bash
 fugue analyze \
   "Which context improved coding outcomes without excessive latency?" \
   --filter experiment_id=repo-memory-impact
 
 fugue analyze --saved fugue-maintainer-selection --yes
+```
+
+### Weave Agent hierarchy
+
+Harness identities are stable across experiments: `hermes-agent`, `openclaw`,
+`claude-code`, and `codex`. Each Harbor Agent trial is one conversation with
+one root turn. The harness integration owns model and tool spans; Fugue adds
+flat correlation attributes and verifies the observed root before linking it
+to an evaluation prediction.
+
+```mermaid
+flowchart TD
+    AGENT["Stable harness Agent"] --> CONV["One trial conversation"]
+    CONV --> TURN["One invoke_agent root turn"]
+    TURN --> CHAT["Nested chat spans"]
+    CHAT --> TOOL["Nested execute_tool spans"]
+    TURN --> ATTR["run, candidate, example, trial, evaluation call"]
+    ATTR --> LINK["Verified evaluation genai_span_ref"]
+    DIRECT["Provider diagnostic"] --> OPS["Ordinary Weave operation calls"]
+    OPS --> NOLINK["Agent linking not_applicable"]
 ```
 
 ## Advanced: generated evaluations

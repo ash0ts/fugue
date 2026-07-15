@@ -43,6 +43,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen --extra dev
       - run: uv lock --check
@@ -59,6 +62,10 @@ jobs:
           uv run fugue --help
           uv run fugue run pilot --preview --json
           uv run fugue runs --json
+      - name: Render README Mermaid diagrams
+        run: >-
+          npx --yes -p @mermaid-js/mermaid-cli@11.16.0
+          mmdc -i README.md -o /tmp/fugue-readme.md
       - name: Validate repository skill
         run: uv run pytest -q tests/test_skill.py
 
