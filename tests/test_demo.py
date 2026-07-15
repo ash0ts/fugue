@@ -57,11 +57,11 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
         (job.harness, job.variant_id, job.task_id, job.trial_index): job
         for job in rendered
     }
-    expected_artifacts = [
-        "/root/sc100-filled.pdf",
-        "/root/diff_report.json",
-        "/root/redacted",
-    ]
+    expected_artifacts = {
+        "court-form-filling": ["/root/sc100-filled.pdf"],
+        "pdf-excel-diff": ["/root/diff_report.json"],
+        "paper-anonymizer": ["/root/redacted"],
+    }
     expected_tasks = [
         "court-form-filling",
         "pdf-excel-diff",
@@ -78,7 +78,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
                 _assert_balanced_skill_pair(
                     baseline_job.config,
                     skilled_job.config,
-                    expected_artifacts,
+                    expected_artifacts[task_id],
                     task_id,
                 )
                 assert baseline_job.comparison_example_id == (
