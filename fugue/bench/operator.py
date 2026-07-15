@@ -1471,6 +1471,13 @@ class OperatorService:
                     if job.config.get("jobs_dir")
                 }
             )
+            job_paths = sorted(
+                {
+                    cell.result_path.parent.as_posix()
+                    for cell in cells
+                    if cell.applicable
+                }
+            )
             write_run_manifest(
                 self.repo_root,
                 run_id,
@@ -1484,6 +1491,7 @@ class OperatorService:
                     ),
                     "cell_count": len(cells),
                     "jobs_dirs": job_dirs,
+                    "job_paths": job_paths,
                     "input_lock": "input-lock.json",
                     "snapshot_sha256": run_snapshot.snapshot_sha256,
                 },
@@ -1780,10 +1788,7 @@ class OperatorService:
         self, run_id: str, *, cell_id: str | None = None
     ) -> tuple[AgentTraceRef, ...]:
         run = self.supervisor.get(run_id)
-        sources = [
-            self.repo_root / Path(str(path))
-            for path in run.metadata.get("jobs_dirs", [])
-        ]
+        sources = _run_job_paths(self.repo_root, run)
         rows = [
             row
             for row in export_rows([*sources, run.run_dir])
@@ -1814,12 +1819,9 @@ class OperatorService:
     ) -> ExportSummary:
         run = self.supervisor.get(run_id)
         project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
-        job_dirs = [
-            _resolve(self.repo_root, Path(str(path)))
-            for path in run.metadata.get("jobs_dirs", [])
-        ]
+        job_paths = _run_job_paths(self.repo_root, run)
         rows = export_rows(
-            [*job_dirs, run.run_dir],
+            [*job_paths, run.run_dir],
             fetch_weave=fetch_weave,
             weave_project=project,
             env=self.env,
@@ -2558,6 +2560,24 @@ def _env_id(value: str) -> str:
 
 def _resolve(root: Path, path: Path) -> Path:
     return path if path.is_absolute() else root / path
+
+
+def _run_job_paths(root: Path, run: ManagedRun) -> list[Path]:
+    """Return only Harbor job roots owned by this immutable run."""
+    configured = [Path(str(path)) for path in run.metadata.get("job_paths", [])]
+    if not configured:
+        configured = [
+            Path(str(record["result_path"])).parent
+            for record in latest_cell_records(run.run_dir / "cells.jsonl")
+            if record.get("result_path")
+        ]
+    if not configured:
+        # Schema-v1 runs created before exact job paths were recorded can only
+        # fall back to the shared parent. New runs must never use this branch.
+        configured = [
+            Path(str(path)) for path in run.metadata.get("jobs_dirs", [])
+        ]
+    return list(dict.fromkeys(_resolve(root, path) for path in configured))
 
 
 def _agent_trace_refs(rows: list[dict[str, Any]]) -> tuple[AgentTraceRef, ...]:

@@ -508,6 +508,39 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
     assert evaluations[1].direct_predictions == evaluations[1].examples == 4
 
 
+def test_run_export_reads_only_the_exact_planned_job_roots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "run-scoped"
+    selected = tmp_path / "jobs" / "demo" / "selected-job"
+    unrelated = tmp_path / "jobs" / "demo" / "older-job"
+    selected.mkdir(parents=True)
+    unrelated.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {
+            "status": "passed",
+            "run_name": "scoped export",
+            "experiment_id": "demo",
+            "jobs_dirs": ["jobs/demo"],
+            "job_paths": ["jobs/demo/selected-job"],
+        },
+    )
+    observed: list[Path] = []
+
+    def fake_export_rows(paths, **kwargs):
+        observed.extend(paths)
+        return []
+
+    monkeypatch.setattr(operator, "export_rows", fake_export_rows)
+
+    OperatorService(tmp_path).export_run(run_id)
+
+    assert observed == [selected, tmp_path / ".fugue" / "runtime" / run_id]
+    assert unrelated not in observed
+
+
 def test_export_recovers_direct_evaluation_after_marker_only_crash(
     tmp_path: Path, monkeypatch
 ) -> None:

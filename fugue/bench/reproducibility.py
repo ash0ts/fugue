@@ -220,6 +220,7 @@ def build_run_snapshot(
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,
             "config_path": cell.config_path.as_posix(),
+            "result_path": cell.result_path.as_posix(),
             "generated_runtime_asset_ids": list(
                 generated_runtime_assets_by_config.get(
                     cell.config_path.resolve().as_posix(),
