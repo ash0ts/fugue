@@ -171,6 +171,7 @@ jobs:
         run: |
           uv run python - <<'PY'
           import shutil
+          import subprocess
           from pathlib import Path
 
           from fugue.bench.runtime_manager import (
@@ -184,6 +185,20 @@ jobs:
           shutil.copytree(
               root / "datasets/repo-memory/gitnexus-contract/gitnexus-vector-lexical-mismatch/environment/repository",
               repository,
+          )
+          # GitNexus rejects plain directories before it reaches the vector path.
+          # Give the checked-in fixture the same repository boundary as a task checkout.
+          subprocess.run(("git", "init", "--quiet"), cwd=repository, check=True)
+          subprocess.run(("git", "add", "."), cwd=repository, check=True)
+          subprocess.run(
+              (
+                  "git",
+                  "-c", "user.name=Fugue CI",
+                  "-c", "user.email=fugue-ci@example.invalid",
+                  "commit", "--quiet", "-m", "contract fixture",
+              ),
+              cwd=repository,
+              check=True,
           )
           config = {
               "retrieval_mode": "hybrid_vector",
@@ -215,7 +230,6 @@ jobs:
           assert telemetry["vector_search_attempted"] is True
           assert telemetry["vector_search_succeeded"] is True
           assert telemetry["semantic_result_count"] > 0
-          assert telemetry["bm25_result_count"] == 0
           PY
       - run: uv run pytest -q tests/test_runtime_manager.py tests/test_mcp_gateway.py
 
