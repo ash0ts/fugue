@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from filelock import FileLock
 
 from fugue.bench.candidates import comparison_example_id
 from fugue.bench.context import (
@@ -607,9 +608,10 @@ def _base_row(
 def _write_rows(repo_root: Path, run_id: str, rows: list[dict[str, Any]]) -> Path:
     path = repo_root / ".fugue" / "runtime" / run_id / "context-results.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+    with FileLock(f"{path}.lock"):
+        with path.open("a") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
     return path
 
 

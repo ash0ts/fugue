@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -40,6 +40,7 @@ from fugue.bench.scoring import (
 from fugue.bench.workloads import (
     RetrievalCase,
     WorkloadDataset,
+    _write_rows,
     load_workload_dataset,
     run_retrieval_workload,
 )
@@ -746,6 +747,22 @@ cases:
                 attempts=0,
             )
         )
+
+
+def test_direct_workload_rows_append_safely_across_workers(tmp_path: Path) -> None:
+    batches = [
+        [{"worker": worker, "row": row} for row in range(100)]
+        for worker in range(8)
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        paths = list(pool.map(lambda rows: _write_rows(tmp_path, "run", rows), batches))
+
+    assert len(set(paths)) == 1
+    values = [json.loads(line) for line in paths[0].read_text().splitlines()]
+    assert len(values) == 800
+    assert {(value["worker"], value["row"]) for value in values} == {
+        (worker, row) for worker in range(8) for row in range(100)
+    }
 
 
 def test_retrieval_metrics_deduplicate_file_hits_and_stay_bounded() -> None:

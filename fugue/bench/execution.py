@@ -164,12 +164,10 @@ def plan_cells(
                 execution_fingerprint=job.resolved_candidate.execution_fingerprint,
                 execution_kind=job.execution_kind,
                 config_path=job.config_path,
-                result_path=Path(str(job.config["jobs_dir"]))
-                / job.job_name
-                / "result.json",
+                result_path=job.result_path,
                 command=tuple(job.command),
                 env=job.env,
-                n_attempts=int(job.config.get("n_attempts") or 1),
+                n_attempts=job.n_attempts,
                 context_delivery=job.context_delivery,
                 evaluation_case=job.evaluation_case,
                 evaluation_rubrics=job.evaluation_rubrics,

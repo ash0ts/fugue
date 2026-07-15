@@ -5,6 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fugue.bench.context import ContextRuntime, get_context_system, list_context_systems
+from fugue.bench.execution import plan_cells
 from fugue.bench.library import get_experiment
 from fugue.bench.operator import (
     ExperimentRequest,
@@ -123,6 +124,29 @@ def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) ->
     serialized = json.dumps(asdict(preview))
     assert "OPENAI_API_KEY" not in serialized
     assert "WANDB_API_KEY" not in serialized
+
+
+def test_repo_memory_direct_cells_use_direct_result_contract(monkeypatch) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+    request = ExperimentRequest(
+        experiment_id="repo-memory-impact",
+        preset="smoke",
+        model="openai/gpt-5",
+    )
+    jobs = service.rendered_jobs(request, run_id="direct-cell-plan", write_configs=False)
+    cells = plan_cells(jobs, run_id="direct-cell-plan", run_name="direct cell plan")
+    direct = [cell for cell in cells if cell.execution_kind == "provider_diagnostic"]
+
+    assert len(direct) == 8
+    assert {cell.n_attempts for cell in direct} == {1}
+    assert {cell.result_path for cell in direct} == {
+        REPO_ROOT
+        / ".fugue"
+        / "runtime"
+        / "direct-cell-plan"
+        / "context-results.jsonl"
+    }
 
 
 def test_explicit_experimental_system_remains_visible_as_not_applicable(

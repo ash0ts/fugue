@@ -946,12 +946,7 @@ class OperatorService:
             if not job.applicable:
                 continue
             task_count = int((job.config.get("fugue") or {}).get("task_count") or 1)
-            attempts = int(
-                job.config.get("n_attempts")
-                or (job.config.get("fugue") or {}).get("n_attempts")
-                or 1
-            )
-            estimated_trials += task_count * attempts
+            estimated_trials += task_count * job.n_attempts
         return PreviewSummary(
             cells=len(jobs),
             applicable_cells=sum(job.applicable for job in jobs),
@@ -977,14 +972,8 @@ class OperatorService:
                     context_system_id=job.context_system_id,
                     workload_id=job.workload_id,
                     task_id=job.task_id,
-                    trial_count=(
-                        int(
-                            job.config.get("n_attempts")
-                            or (job.config.get("fugue") or {}).get("n_attempts")
-                            or 1
-                        )
-                        * int((job.config.get("fugue") or {}).get("task_count") or 1)
-                    ),
+                    trial_count=job.n_attempts
+                    * int((job.config.get("fugue") or {}).get("task_count") or 1),
                     applicable=job.applicable,
                     reason=job.skip_reason,
                     context_cache_ready=job.context_cache_ready,
@@ -1320,6 +1309,11 @@ class OperatorService:
                 RenderedJob(
                     command=command,
                     config_path=dataset_path,
+                    result_path=self.repo_root
+                    / ".fugue"
+                    / "runtime"
+                    / run_id
+                    / "context-results.jsonl",
                     config=config,
                     env={
                         **direct_env,
@@ -1353,6 +1347,7 @@ class OperatorService:
                     run_name=run_name,
                     task_id=dataset.id,
                     trial_index=1,
+                    n_attempts=attempts,
                     comparison_example_id=initial_comparison_example_id,
                     candidate_id=candidate_id,
                     resolved_candidate=resolved_candidate,

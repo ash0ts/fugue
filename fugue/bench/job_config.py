@@ -65,6 +65,7 @@ PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION = 1
 class RenderedJob:
     command: list[str]
     config_path: Path
+    result_path: Path
     config: dict[str, Any]
     env: dict[str, str]
     job_name: str
@@ -86,6 +87,7 @@ class RenderedJob:
     run_name: str
     task_id: str
     trial_index: int
+    n_attempts: int
     comparison_example_id: str
     candidate_id: str
     resolved_candidate: ResolvedCandidate
@@ -428,6 +430,7 @@ def _build_jobs(
                     RenderedJob(
                         command=["harbor", "run", "--config", config_path.as_posix()],
                         config_path=config_path,
+                        result_path=selected_jobs_dir / job_name / "result.json",
                         config=config,
                         env=job_env,
                         job_name=job_name,
@@ -449,6 +452,7 @@ def _build_jobs(
                         run_name=selected_run_name,
                         task_id=tasks[0].id,
                         trial_index=trial_index,
+                        n_attempts=1,
                         comparison_example_id=comparison_example_id,
                         candidate_id=candidate_id,
                         resolved_candidate=resolved_candidate,
