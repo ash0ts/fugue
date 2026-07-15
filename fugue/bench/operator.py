@@ -1688,7 +1688,13 @@ def load_env(path: Path) -> dict[str, str]:
 def as_json(value: Any) -> str:
     if hasattr(value, "__dataclass_fields__"):
         value = asdict(value)
-    return json.dumps(value, indent=2, sort_keys=True, default=str)
+    return json.dumps(value, indent=2, sort_keys=True, default=_json_default)
+
+
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "__dataclass_fields__"):
+        return asdict(value)
+    return str(value)
 
 
 def _joined(values: tuple[str, ...]) -> str | None:

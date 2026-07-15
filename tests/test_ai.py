@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from pathlib import Path
 
 import httpx
+import pytest
 from test_operator import make_operator_repo
 
 from fugue.assistant import AssistantAgent, AssistantModelClient
@@ -136,6 +138,17 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
         assert "secret policy" in str(exc)
     else:
         raise AssertionError("secret-like artifact should be blocked")
+
+
+def test_catalog_connection_is_closed_after_context(tmp_path: Path) -> None:
+    catalog = ExperimentCatalog(tmp_path)
+    catalog.path.parent.mkdir(parents=True)
+
+    with catalog._connect() as connection:
+        connection.execute("SELECT 1")
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
 
 
 def test_analyst_snapshots_scope_and_requires_evidence(

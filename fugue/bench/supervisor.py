@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -71,6 +72,11 @@ class RunSupervisor:
                 text=True,
                 start_new_session=True,
             )
+        threading.Thread(
+            target=process.wait,
+            name=f"fugue-reaper-{run_id}",
+            daemon=True,
+        ).start()
         write_run_manifest(
             self.repo_root,
             run_id,

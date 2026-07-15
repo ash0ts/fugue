@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fugue.bench.execution import write_run_manifest
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
+from fugue.preflight import PreflightCheck
 
 
 def make_operator_repo(tmp_path: Path) -> OperatorService:
@@ -80,6 +81,14 @@ def test_operator_status_masks_secrets_and_links_to_agents(tmp_path: Path) -> No
     assert "model-secret" not in payload
     assert "trace-secret" not in payload
     assert "catalog_records" not in payload
+
+
+def test_operator_json_serializes_dataclasses_inside_collections() -> None:
+    payload = json.loads(
+        as_json([PreflightCheck(name="docker", ok=True, detail="available")])
+    )
+
+    assert payload == [{"detail": "available", "name": "docker", "ok": True}]
 
 
 def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
