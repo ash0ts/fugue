@@ -704,7 +704,7 @@ def _dockerfile(spec: dict[str, Any]) -> str:
 LABEL {label_lines}
 
 RUN apt-get update \\
-    && apt-get install -y --no-install-recommends ca-certificates curl docker-cli docker-compose git nodejs npm \\
+    && apt-get install -y --no-install-recommends ca-certificates curl docker-buildx docker-cli docker-compose git nodejs npm \\
     && rm -rf /var/lib/apt/lists/*
 
 COPY runtime-src /fugue-src

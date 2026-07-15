@@ -180,7 +180,7 @@ def test_packages_explicit_imperfect_candidate_reproducibly(tmp_path: Path) -> N
     assert "io.fugue.input-lock.digest" in dockerfile
     assert "io.fugue.runtime.digest" in dockerfile
     assert "python:3.13-slim" in dockerfile
-    assert "docker-cli docker-compose" in dockerfile
+    assert "docker-buildx docker-cli docker-compose" in dockerfile
     assert "uv==0.11.27" in dockerfile
     assert "uv sync --frozen --no-dev --extra serve" in dockerfile
 
