@@ -130,13 +130,18 @@ def _node_agent_dockerfile(harness: str, command: str, version: str) -> str:
     weave_cli = (
         ""
         if harness == "openclaw"
-        else " && ln -s ../node_modules/.bin/weave-claude-code bin/weave-claude-code"
+        else (
+            " && ln -s ../node_modules/.bin/weave-claude-code "
+            "bin/weave-claude-code && "
+            "ln -s ../lib/node_modules/npm/bin/npm-cli.js bin/npm"
+        )
     )
     weave_global_view = (
         ""
         if harness == "openclaw"
         else (
             "RUN mkdir -p lib/node_modules && "
+            "cp -a \"$(npm root -g)/npm\" lib/node_modules/npm && "
             "ln -s ../../node_modules/weave-claude-code "
             "lib/node_modules/weave-claude-code && "
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
@@ -208,13 +213,16 @@ RUNTIMES = {
     ),
     "claude-code": AgentRuntimeSpec(
         harness="claude-code",
-        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.2",
+        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.3",
         dockerfile=_node_agent_dockerfile("claude-code", "claude", "2.1.210"),
         probe=(
             "/bin/sh",
             "-c",
-            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH claude --version && "
+            f"export PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH && "
+            "claude --version && "
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
+            "npm root -g | "
+            f"grep -F {AGENT_RUNTIME_MOUNT}/lib/node_modules && "
             "test -s \"$(npm root -g)/weave-claude-code/"
             ".claude-plugin/marketplace.json\"",
         ),

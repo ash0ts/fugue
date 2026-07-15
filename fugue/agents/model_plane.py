@@ -1739,6 +1739,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             command=(
                 f"test -x {runtime}/bin/node && test -x {runtime}/bin/claude && "
                 f"test -x {runtime}/bin/weave-claude-code && "
+                f"test -x {runtime}/bin/npm && "
                 f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
                 f"ln -sf {runtime}/bin/claude /usr/local/bin/claude && "
                 f"ln -sf {runtime}/bin/weave-claude-code "
@@ -1797,7 +1798,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         await self.exec_as_agent(
             environment,
             command=(
-                'export PATH="$HOME/.local/bin:$PATH"; '
+                'export PATH="/opt/fugue-agent-runtime/bin:$HOME/.local/bin:$PATH"; '
                 "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime; "
                 'export npm_config_prefix="$NPM_CONFIG_PREFIX"; '
                 'mkdir -p "$CLAUDE_CONFIG_DIR"; '
