@@ -39,6 +39,7 @@ variants:
     skill_ids: [skill-a]
     context:
       system_id: agentsmd
+      transport: native_mcp
       config: {depth: 2}
     agent_kwargs:
       temperature: 0
@@ -67,6 +68,8 @@ presets:
         "agentsmd",
     ]
     assert experiment.variants[1].context.config == {"depth": 2}
+    assert experiment.variants[0].context.transport == "portable"
+    assert experiment.variants[1].context.transport == "native_mcp"
     assert experiment.variants[1].prompt_id == "prompt-a"
     assert experiment.variants[1].skill_ids == ["skill-a"]
     assert experiment.variants[1].agent_kwargs == {"temperature": 0}
@@ -100,6 +103,20 @@ id: old-experiment
 variants:
   - id: baseline
     memory: none
+""",
+            tmp_path,
+        )
+
+
+def test_invalid_context_transport_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="context transport"):
+        save_experiment(
+            "bad-transport",
+            """
+id: bad-transport
+variants:
+  - id: rag
+    context: {system_id: rag-bm25, transport: magic}
 """,
             tmp_path,
         )

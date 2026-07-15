@@ -1062,17 +1062,22 @@ def _run_panel(run: Any) -> Panel:
 
 
 def _cells_table(run: Any) -> Table:
-    table = Table("Harness", "Variant", "Context", "Task", "Status", box=box.SIMPLE_HEAD)
+    table = Table(
+        "Harness", "Variant", "Context", "Transport", "Task", "Status", box=box.SIMPLE_HEAD
+    )
     for cell in run.cells:
         table.add_row(
             cell.harness,
             cell.variant_id,
             cell.context_system_id,
+            cell.context_transport,
             cell.task_id,
             _status_markup(cell.status),
         )
     if not run.cells:
-        table.add_row("-", "-", "-", "waiting for planner", _status_markup(run.status))
+        table.add_row(
+            "-", "-", "-", "-", "waiting for planner", _status_markup(run.status)
+        )
     return table
 
 
@@ -1141,10 +1146,22 @@ def _context_evaluate(args: argparse.Namespace) -> int:
     if workload is None or not workload.dataset:
         raise ValueError(f"unknown direct workload: {args.workload}")
     dataset = load_workload_dataset(_resolve(args.repo_root, Path(workload.dataset)))
+    variant = next(
+        (
+            item
+            for item in experiment.variants
+            if item.context.system_id == args.system
+        ),
+        None,
+    )
+    runtime_env = load_env(args.env_file)
+    runtime_env["FUGUE_CONTEXT_TRANSPORT"] = (
+        variant.context.transport if variant is not None else "portable"
+    )
     runtime = ContextRuntime(
         repo_root=args.repo_root,
         cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
-        env=load_env(args.env_file),
+        env=runtime_env,
     )
     function = (
         run_retrieval_workload

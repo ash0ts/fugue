@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue import context_client
 from fugue.bench.context import (
     ContextRuntime,
     ContextSystemSpec,
@@ -23,6 +25,7 @@ from fugue.bench.context import (
     preflight_context,
     prepare_context,
 )
+from fugue.bench.export import export_rows
 from fugue.bench.scoring import (
     latency_summary,
     score_retrieval,
@@ -200,6 +203,51 @@ def test_context_cache_key_tracks_builder_and_embedding_models(tmp_path: Path) -
     )
 
 
+def test_rag_indexes_checkout_nested_under_ignored_cache_directory(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / ".fugue" / "cache" / "context" / "checkouts" / "repo"
+    source = checkout / "src" / "app.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def answer():\n    return 42\n")
+    snapshot = RepositorySnapshot(
+        task_id="fixture__task",
+        repo="fixture/repo",
+        commit="abc123",
+        checkout=checkout,
+    )
+    runtime = ContextRuntime(tmp_path, tmp_path / "context-cache", {})
+
+    prepared = asyncio.run(
+        prepare_context(get_context_system("rag-bm25", tmp_path), snapshot, runtime)
+    )
+
+    chunks = (prepared.path / "artifact" / "chunks.jsonl").read_text().splitlines()
+    assert len(chunks) == 1
+    assert json.loads(chunks[0])["path"] == "src/app.py"
+    assert prepared.metrics["files"] == 1
+
+
+def test_rag_rejects_empty_repository_instead_of_publishing_empty_index(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "empty"
+    checkout.mkdir()
+    snapshot = RepositorySnapshot(
+        task_id="fixture__task",
+        repo="fixture/repo",
+        commit="abc123",
+        checkout=checkout,
+    )
+    spec = get_context_system("rag-bm25", tmp_path)
+    runtime = ContextRuntime(tmp_path, tmp_path / "context-cache", {})
+
+    with pytest.raises(ValueError, match="no indexable repository text"):
+        asyncio.run(prepare_context(spec, snapshot, runtime))
+
+    assert not (runtime.cache_root / context_cache_key(spec, snapshot)).exists()
+
+
 def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -365,3 +413,117 @@ def test_empty_baselines_emit_scored_retrieval_rows(
     assert len(scored) == 1
     assert scored[0]["applicable"] is True
     assert scored[0]["recall_at_1"] == 0.0
+
+
+def test_portable_context_client_probes_and_records_bounded_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def request(url: str, body: dict[str, object] | None = None) -> dict[str, object]:
+        if body is None:
+            return {"ok": True, "context_system_id": "rag-bm25"}
+        return {
+            "ok": True,
+            "context_system_id": "rag-bm25",
+            "hits": [
+                {
+                    "path": "src/app.py",
+                    "score": 1.0,
+                    "text": body["query"],
+                }
+            ],
+            "metrics": {"result_count": 1, "query_latency_ms": 2.0},
+        }
+
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setenv("FUGUE_CONTEXT_EVENTS_PATH", events.as_posix())
+    monkeypatch.setattr(context_client, "_request", request)
+
+    assert context_client.main(["probe"]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+    assert (
+        context_client.main(
+            ["query", "--text", "find the parser", "--top-k", "3"]
+        )
+        == 0
+    )
+    response = json.loads(capsys.readouterr().out)
+    assert response["hits"][0]["path"] == "src/app.py"
+    [event] = [json.loads(line) for line in events.read_text().splitlines()]
+    assert event["layer"] == "portable_client"
+    assert event["metrics"]["result_count"] == 1
+
+
+@pytest.mark.skipif(
+    os.environ.get("FUGUE_RUN_PORTABLE_CONTEXT_INTEGRATION") != "1",
+    reason="requires Docker plus configured W&B Inference and Weave credentials",
+)
+def test_portable_bm25_registers_across_all_four_harnesses(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    jobs_dir = tmp_path / "portable-bm25-all-harnesses"
+    command = [
+        sys.executable,
+        "-m",
+        "fugue.bench.cli",
+        "run",
+        "repo-memory-impact",
+        "--preset",
+        "smoke",
+        "--workloads",
+        "coding",
+        "--systems",
+        "none,rag-bm25",
+        "--harnesses",
+        "hermes,openclaw,claude-code,codex",
+        "--model",
+        "wandb/zai-org/GLM-5.2",
+        "--jobs-dir",
+        jobs_dir.as_posix(),
+        "--run-name",
+        "portable-context-integration",
+        "-k",
+        "1",
+        "-n",
+        "2",
+        "-l",
+        "1",
+        "--trace-content",
+        "full",
+        "--json",
+        "--repo-root",
+        repo_root.as_posix(),
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=7_200,
+        check=False,
+    )
+    assert completed.returncode in {0, 1}, completed.stderr[-4_000:]
+    summary = json.loads(completed.stdout)
+    assert summary["status"] in {"passed", "failed"}
+    assert summary["passed"] + summary["failed"] == 8
+
+    rows = [
+        row
+        for row in export_rows([jobs_dir], env=os.environ)
+        if row.get("record_type") == "trial"
+    ]
+    assert len(rows) == 8
+    assert {row["harness"] for row in rows} == {
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex",
+    }
+    rag_rows = [row for row in rows if row["context_system_id"] == "rag-bm25"]
+    assert len(rag_rows) == 4
+    assert all(row["context_transport"] == "portable" for row in rag_rows)
+    assert all(row["context_registered"] is True for row in rag_rows)
+    assert all(row["runtime_equivalent"] is True for row in rows)

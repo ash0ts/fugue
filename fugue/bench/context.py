@@ -754,6 +754,11 @@ class RagContextProvider(BaseContextProvider):
             lines_per_chunk=int(spec.config.get("lines_per_chunk") or 80),
             overlap=int(spec.config.get("line_overlap") or 20),
         )
+        if not chunks:
+            raise ValueError(
+                f"{spec.id} found no indexable repository text under "
+                f"{snapshot.checkout}"
+            )
         chunks_path = artifact / "chunks.jsonl"
         with chunks_path.open("w") as handle:
             for chunk in chunks:
@@ -771,6 +776,7 @@ class RagContextProvider(BaseContextProvider):
         metrics.update(
             {
                 "chunks": len(chunks),
+                "files": len({str(chunk["path"]) for chunk in chunks}),
                 "embedding_model": spec.config.get("embedding_model"),
                 "mode": mode,
             }
@@ -1757,7 +1763,10 @@ def _repository_chunks(
     chunks: list[dict[str, Any]] = []
     step = max(1, lines_per_chunk - overlap)
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in _IGNORED_DIRS for part in path.parts):
+        relative_path = path.relative_to(root)
+        if not path.is_file() or any(
+            part in _IGNORED_DIRS for part in relative_path.parts
+        ):
             continue
         if path.suffix.lower() not in _TEXT_SUFFIXES or path.stat().st_size > 1_000_000:
             continue
@@ -1765,7 +1774,7 @@ def _repository_chunks(
             lines = path.read_text(errors="strict").splitlines()
         except (OSError, UnicodeError):
             continue
-        relative = path.relative_to(root).as_posix()
+        relative = relative_path.as_posix()
         for start in range(0, len(lines) or 1, step):
             selected = lines[start : start + lines_per_chunk]
             if not selected:
