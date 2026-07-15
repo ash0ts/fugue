@@ -9,6 +9,7 @@ import pytest
 from fugue.bench import export
 from fugue.bench.execution import CellOutcome, PlannedCell
 from fugue.bench.export import (
+    GeneratedEvaluationCoordinator,
     LiveEvaluationCoordinator,
     _fetch_agents_spans,
     _fetch_calls_spans,
@@ -783,6 +784,78 @@ def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
         "evaluation_scope_id"
     ]
     assert changed_scope != candidates[0]["evaluation_scope_id"]
+
+
+def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = {
+        "id": "case-a",
+        "instruction": "Answer from the source.",
+        "source_refs": [{"id": "seed:1", "sha256": "a" * 64}],
+        "expected": {"facts": ["grounded fact"]},
+        "scorer_dimensions": ["task_completion", "correctness"],
+    }
+    rubric = {
+        "id": "suite-a",
+        "dimensions": [
+            {"id": "task_completion", "criterion": "complete", "threshold": 0.7},
+            {"id": "correctness", "criterion": "correct", "threshold": 0.7},
+        ],
+    }
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="capabilities",
+        task_id="case-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="openai",
+        model="openai/gpt-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "missing" / "result.json",
+        command=("harbor", "run"),
+        env={
+            "FUGUE_DATASET": "generated/suite-a",
+            "FUGUE_JUDGE_MODEL": "openai/gpt-5-mini",
+        },
+        n_attempts=1,
+        evaluation_case=case,
+        evaluation_rubrics=(rubric,),
+        scorer_hashes={"rubric.yaml": "b" * 64},
+        scorer_refs=("rubric.yaml",),
+    )
+    calls = []
+
+    def score(row, **kwargs):
+        calls.append(kwargs)
+        row["evaluation_task_completion"] = 1
+        row["evaluation_correctness"] = 0.9
+
+    monkeypatch.setattr(export, "apply_generated_evaluation", score)
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell], repo_root=tmp_path, env={"PRIVATE_TOKEN": "secret-value"}
+    )
+
+    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+
+    result = json.loads(
+        (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
+    )
+    assert len(calls) == 1
+    assert calls[0]["judge_model"] == "openai/gpt-5-mini"
+    assert calls[0]["case"] == case
+    assert calls[0]["rubrics"] == (rubric,)
+    assert result["evaluation_publication_mode"] == "local"
+    assert result["evaluation_task_completion"] == 1
+    assert result["evaluation_correctness"] == 0.9
+    assert "evaluation_overall" not in result
+    assert "secret-value" not in json.dumps(result)
 
 
 def test_weave_publication_never_republishes_finalized_live_predictions(

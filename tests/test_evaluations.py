@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import sys
+import types
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from test_operator import make_operator_repo
 
 from fugue.bench import evaluations
+from fugue.bench.ai import AssetDraft
 from fugue.bench.datasets import DATASET_MANIFEST, materialize_manifest_dataset
 from fugue.bench.evaluations import (
     CASE_FILE,
@@ -353,6 +359,101 @@ def test_generated_harbor_dataset_is_atomic_reusable_and_checksum_pinned(
         materialize_manifest_dataset(drifted, tmp_path)
 
 
+def test_generated_evaluation_lifecycle_preview_save_prepare_and_render(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    raw = service.experiment("demo").to_dict()
+    raw.update(
+        {
+            "id": "generated-lifecycle",
+            "title": "Generated lifecycle",
+            "judge_model": "openai/gpt-5-mini",
+            "evaluation_generation": {
+                "size": 8,
+                "sources": [
+                    {
+                        "kind": "seed",
+                        "text": "The demo skill uses focused repository search.",
+                    }
+                ],
+            },
+            "workloads": [{"id": "capabilities", "runner": "harbor"}],
+            "variants": [
+                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "with-skill",
+                    "label": "With skill",
+                    "skill_ids": ["demo-skill"],
+                },
+            ],
+        }
+    )
+    experiment = experiment_from_data(raw)
+    updated, draft = build_evaluation_draft(
+        {
+            "suite_id": "lifecycle-suite",
+            "cases": _cases(),
+            "rubric": _rubric(),
+        },
+        experiment,
+        generator_model="openai/gpt-5-mini",
+        source_catalog=source_catalog(experiment, tmp_path),
+        repo_root=tmp_path,
+    )
+    assets = tuple(
+        AssetDraft(
+            kind=item.kind,
+            id=item.suite_id,
+            title=item.path.name,
+            body=item.body,
+        )
+        for item in draft.files
+    )
+    request = service.request_for_experiment(updated)
+
+    preview = service.preview_experiment(
+        updated,
+        request=request,
+        asset_overlay=draft.overlay,
+    )
+
+    assert preview.cells == 16
+    assert preview.estimated_trials == 16
+    assert not (tmp_path / "configs/fugue/evaluations/lifecycle-suite").exists()
+    assert not (tmp_path / ".fugue").exists()
+
+    saved = service.save_working_experiment(
+        updated,
+        request,
+        experiment_id="saved-generated-lifecycle",
+        assets=assets,
+    )
+    saved_request = service.request_for_experiment(saved)
+    preparation = service.prepare_context(saved_request, experiment=saved)
+
+    assert preparation == ()
+    manifest = load_manifest(
+        tmp_path / "configs/fugue/evaluations/lifecycle-suite/manifest.yaml"
+    )
+    dataset = tmp_path / manifest.dataset.path
+    assert (dataset / DATASET_MANIFEST).is_file()
+
+    rendered = service.rendered_jobs(
+        saved_request,
+        run_id="lifecycle-run",
+        experiment=saved,
+    )
+
+    assert len(rendered) == 16
+    assert all(job.config_path.is_file() for job in rendered)
+    assert all(job.evaluation_case is not None for job in rendered)
+    for task_id in {job.task_id for job in rendered}:
+        task_jobs = [job for job in rendered if job.task_id == task_id]
+        assert {job.variant_id for job in task_jobs} == {"baseline", "with-skill"}
+        assert len({job.comparison_example_id for job in task_jobs}) == 1
+
+
 def test_attachment_checksum_and_repository_boundary_are_enforced(
     tmp_path: Path,
 ) -> None:
@@ -499,6 +600,75 @@ def test_judge_failure_is_an_evaluation_error_not_a_harbor_failure(
     assert "evaluation_task_completion" not in row
 
 
+def test_artifact_assertions_bound_the_structured_judge_score(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    artifact = trial / "logs" / "artifacts" / "report.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"status": "complete"}')
+    case = {
+        **_cases(1)[0],
+        "scorer_dimensions": ["task_completion", "artifact_quality"],
+        "expected": {
+            "facts": [],
+            "tool_calls": [],
+            "artifacts": [
+                {
+                    "path": "/logs/artifacts/report.json",
+                    "checks": ["exists", "nonempty", "json"],
+                }
+            ],
+        },
+    }
+    rubric = {
+        "dimensions": [
+            {"id": "task_completion", "criterion": "complete", "threshold": 0.7},
+            {"id": "artifact_quality", "criterion": "valid", "threshold": 0.7},
+        ]
+    }
+    deterministic_inputs: list[dict] = []
+
+    def judge(**kwargs):
+        deterministic_inputs.append(kwargs["deterministic"])
+        return (
+            {
+                "scores": {"task_completion": 1, "artifact_quality": 1},
+                "reasons": {},
+            },
+            {},
+        )
+
+    complete = {"status": "passed", "pass": True}
+    apply_generated_evaluation(
+        complete,
+        case=case,
+        rubrics=[rubric],
+        judge_model="openai/gpt-5-mini",
+        env={},
+        trial_dir=trial,
+        judge_request=judge,
+    )
+
+    artifact.unlink()
+    missing = {"status": "passed", "pass": True}
+    apply_generated_evaluation(
+        missing,
+        case=case,
+        rubrics=[rubric],
+        judge_model="openai/gpt-5-mini",
+        env={},
+        trial_dir=trial,
+        judge_request=judge,
+    )
+
+    assert deterministic_inputs[0]["artifact_quality"] == 1
+    assert complete["evaluation_artifact_quality"] == 1
+    assert deterministic_inputs[1]["artifact_quality"] == 0
+    assert missing["evaluation_artifact_quality"] == 0
+    assert missing["pass"] is True
+
+
 def test_preview_source_resolution_never_opens_mcp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -528,3 +698,108 @@ def test_preview_source_resolution_never_opens_mcp(
     assert len(sources) == 1
     assert sources[0].metadata["discovery"] == "declared"
     assert "search" in sources[0].content
+
+
+def test_generation_discovers_only_mcp_schemas_and_explicit_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operations: list[tuple[str, str | None]] = []
+
+    class AsyncContext:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    class FakeSession:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def initialize(self):
+            operations.append(("initialize", None))
+
+        async def list_tools(self):
+            operations.append(("list_tools", None))
+            return SimpleNamespace(
+                tools=[
+                    SimpleNamespace(
+                        name="search",
+                        description="Search documentation",
+                        inputSchema={"type": "object"},
+                    ),
+                    SimpleNamespace(
+                        name="mutate",
+                        description="Must not be selected",
+                        inputSchema={"type": "object"},
+                    ),
+                ]
+            )
+
+        async def read_resource(self, uri):
+            operations.append(("read_resource", str(uri)))
+            return SimpleNamespace(
+                contents=[SimpleNamespace(text="Explicit schema resource")]
+            )
+
+    mcp_module = types.ModuleType("mcp")
+    mcp_module.ClientSession = FakeSession
+    mcp_module.StdioServerParameters = lambda **kwargs: SimpleNamespace(**kwargs)
+    client_module = types.ModuleType("mcp.client")
+    stdio_module = types.ModuleType("mcp.client.stdio")
+    stdio_module.stdio_client = lambda params: AsyncContext((object(), object()))
+    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
+    monkeypatch.setitem(sys.modules, "mcp.client", client_module)
+    monkeypatch.setitem(sys.modules, "mcp.client.stdio", stdio_module)
+
+    experiment = experiment_from_data(
+        {
+            "id": "mcp-generation",
+            "mcp_servers": [
+                {
+                    "name": "docs",
+                    "command": "docs-server",
+                    "env": {"DOCS_TOKEN": "secret-value"},
+                }
+            ],
+            "evaluation_generation": {
+                "sources": [
+                    {
+                        "kind": "mcp",
+                        "server": "docs",
+                        "tools": ["search"],
+                        "resources": ["docs://explicit"],
+                    }
+                ]
+            },
+        }
+    )
+
+    async def discover():
+        return source_catalog(experiment, tmp_path, allow_mcp_io=True)
+
+    sources = asyncio.run(discover())
+
+    assert operations == [
+        ("initialize", None),
+        ("list_tools", None),
+        ("read_resource", "docs://explicit"),
+    ]
+    assert {source.id for source in sources} == {
+        "mcp:docs",
+        "mcp:docs:tools",
+        "mcp:docs:resource:docs://explicit",
+    }
+    tools = next(source for source in sources if source.id == "mcp:docs:tools")
+    assert "search" in tools.content
+    assert "mutate" not in tools.content
+    assert "secret-value" not in json.dumps([source.public() for source in sources])
