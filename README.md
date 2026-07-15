@@ -85,14 +85,16 @@ Check dependencies and prepare only what the selected experiment requires:
 ```bash
 fugue setup --experiment pilot --check
 fugue setup --experiment pilot --skills
-fugue setup --experiment repo-memory-impact --prepare-context \
+fugue setup --experiment repo-memory-impact --prepare \
   --env-file /path/to/existing/.env
 ```
 
-`--check` is observational. `--prepare-context` is the explicit state-changing
-boundary that downloads or builds pinned context assets; preview and run never
-install an adapter or start a service. Graphiti has a separate local Neo4j
-lifecycle:
+`--check` is observational. `--prepare` is the plan-resolved state-changing
+boundary: it content-locks remote workload data, context indexes, harness
+runtimes, and unique task images for the selected architecture. Repeated setup
+reuses verified locks. `--prepare-context` remains a narrower adapter-only
+action. Preview and active trials never install, download, build, pull, start a
+service, or use the Docker socket. Graphiti has a separate local Neo4j lifecycle:
 
 ```bash
 fugue setup --experiment repo-memory-impact --systems graphiti \
@@ -226,7 +228,9 @@ uses the selected W&B bridge route, while each native-MCP cell receives a new,
 isolated `CODEX_HOME` containing only that route and its resolved allowlisted
 servers. Fugue never reads or mutates the user's global Codex credentials,
 skills, configuration, or MCP definitions, and it never downgrades native MCP
-to portable instructions.
+to portable instructions. The locked runtime contains Codex 0.143.0 and
+weave-codex 0.1.1; trial startup verifies the exact MCP inventory before the
+model turn.
 
 ## Experiment contract
 
@@ -287,6 +291,34 @@ task snapshot at `/workspace/repository` and a separate writable state area.
 The Fugue gateway preserves upstream MCP schemas and cancellation while adding
 cell correlation to tool results. Without a lat.md key, semantic lat.md cells
 are deterministically `not_applicable` and are not a release failure.
+
+GitNexus has two strict candidates. Their mode and model assets participate in
+candidate identity and context cache keys:
+
+```yaml
+context:
+  system_id: gitnexus
+  delivery: native_mcp
+  config: {retrieval_mode: bm25}
+```
+
+```yaml
+context:
+  system_id: gitnexus
+  delivery: native_mcp
+  config:
+    retrieval_mode: hybrid_vector
+    embedding_model: Snowflake/snowflake-arctic-embed-xs
+    embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
+    embedding_dimensions: 384
+    vector_required: true
+```
+
+Hybrid setup bundles and verifies the 384-dimensional model and CPU ONNX
+runtime, builds the index with networking disabled, and runs a semantic probe.
+It fails closed for an absent index, zero embeddings, wrong dimensions, failed
+vector query, or GitNexus's 50,000-node vector limit. It never reports BM25
+fallback as a vector result.
 
 ```mermaid
 flowchart LR
@@ -386,6 +418,30 @@ revision. An explicit republish creates a new active revision with a reason and
 `supersedes` link; it never merges evidence by a display label. Dashboard views
 should filter to the active revision and facet by source commit, snapshot
 digest, cohort, execution kind, harness, context system, and skill treatment.
+
+The hard-memory study is encoded as separate immutable cohorts. Discovery uses
+a fixed Latin-square harness assignment; holdout and control treatments must be
+selected from discovery results instead of being silently baked into the
+experiment:
+
+```bash
+fugue run repo-memory-impact --preset context-contract --preview
+fugue run repo-memory-impact --preset hard-calibration --preview
+fugue run repo-memory-impact --preset hard-discovery --preview
+fugue run repo-memory-impact --preset hard-holdout \
+  --variants none,TOP_TREATMENT_1,TOP_TREATMENT_2,TOP_TREATMENT_3 --preview
+fugue run repo-memory-impact --preset gitnexus-ablation --preview
+fugue run repo-memory-impact --preset retrieval-study --preview
+fugue run repo-memory-impact --preset gitnexus-retrieval-study --preview
+fugue run repo-memory-impact --preset continuity-study --preview
+```
+
+The planned prediction counts are 48 context-contract, 56 calibration, 80
+discovery, 192 holdout, 96 easy-control, 128 repository-QA, and 96 independent
+GitNexus ablation Agent predictions. Direct cohorts contain 900 general
+retrieval measurements, 450 GitNexus BM25/vector measurements, and 108
+continuity sequence attempts. The 225-probe retrieval source is materialized
+and locked by `setup --prepare`; a trial refuses to download it.
 
 Analysis first resolves and displays an immutable local scope. `--yes` is the
 explicit boundary for model interpretation and report writing:

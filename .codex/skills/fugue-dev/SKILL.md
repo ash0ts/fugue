@@ -27,6 +27,9 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Setup is the only stateful preparation boundary. Preview and active trials do
   not install packages, download runtimes, start services, use the Docker
   socket, or mutate the production checkout.
+- Vector treatments fail closed when vector indexing or retrieval is absent.
+  BM25 and vector modes are different candidates and cache entries; a vector
+  label may never conceal lexical fallback.
 - Record assigned and confirmed skill/context registration separately. A
   required treatment does not execute when registration failed. Invocation
   evidence stays explicit and may remain unavailable; assignment is not use.
@@ -38,6 +41,9 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Agent cells have one native conversation and one matching `invoke_agent`
   root. Direct diagnostics never synthesize Agent identity, conversations, or
   roots. Preserve unavailable usage instead of zero.
+- Codex native MCP, reviewed skills, and Agent/evaluation links require live
+  proof from the exact release head and runtime locks. Unit tests or evidence
+  from an earlier head cannot satisfy that release gate.
 
 ## Public contracts and release safety
 

@@ -60,11 +60,11 @@ jobs:
         run: >-
           uv run pytest
           tests/test_agent_tracing.py tests/test_artifacts.py tests/test_assistant.py
-          tests/test_bridge.py tests/test_codex_agent_runtime.py tests/test_codex_mcp.py
+          tests/test_bridge.py tests/test_codex_mcp.py
           tests/test_context.py tests/test_context_contracts.py tests/test_context_study.py
           tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
           tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
-          tests/test_services.py
+          tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
       - name: Test development and release tooling
         if: matrix.suite == 'dev'
         env:
@@ -131,7 +131,7 @@ jobs:
       - name: Test serving with warnings as errors
         env:
           PYTHONWARNINGS: error
-        run: uv run pytest -q tests/test_serve.py
+        run: uv run pytest -q tests/test_serve.py tests/test_codex_agent_runtime.py
       - name: Open Responses and client compatibility
         env:
           PYTHONWARNINGS: error
@@ -166,6 +166,57 @@ jobs:
           uv run python -c
           'import os; from pathlib import Path; from fugue.bench.runtime_manager import probe_runtime_install;
           probe_runtime_install(os.environ["ADAPTER"], Path.cwd())'
+      - name: Build and query the offline GitNexus vector fixture
+        if: matrix.adapter == 'gitnexus'
+        run: |
+          uv run python - <<'PY'
+          import shutil
+          from pathlib import Path
+
+          from fugue.bench.runtime_manager import (
+              prepare_runtime_repository,
+              query_gitnexus,
+          )
+
+          root = Path.cwd()
+          artifact = root / ".fugue" / "ci-gitnexus-vector"
+          repository = artifact / "repository"
+          shutil.copytree(
+              root / "datasets/repo-memory/gitnexus-contract/gitnexus-vector-lexical-mismatch/environment/repository",
+              repository,
+          )
+          config = {
+              "retrieval_mode": "hybrid_vector",
+              "embedding_model": "Snowflake/snowflake-arctic-embed-xs",
+              "embedding_revision": "d8c86521100d3556476a063fc2342036d45c106f",
+              "embedding_dimensions": 384,
+              "vector_required": True,
+          }
+          probe = {
+              "query": "hierarchical cleanup upstream grant invalid",
+              "expected_path": "src/relay/amber_lantern.py",
+          }
+          prepare_runtime_repository(
+              "gitnexus",
+              repo_root=root,
+              artifact=artifact,
+              env={},
+              config=config,
+              semantic_probe=probe,
+          )
+          payload, telemetry = query_gitnexus(
+              repo_root=root,
+              artifact=artifact,
+              config=config,
+              query=probe["query"],
+              top_k=5,
+          )
+          assert "src/relay/amber_lantern.py" in str(payload)
+          assert telemetry["vector_search_attempted"] is True
+          assert telemetry["vector_search_succeeded"] is True
+          assert telemetry["semantic_result_count"] > 0
+          assert telemetry["bm25_result_count"] == 0
+          PY
       - run: uv run pytest -q tests/test_runtime_manager.py tests/test_mcp_gateway.py
 
   graphiti-service:
