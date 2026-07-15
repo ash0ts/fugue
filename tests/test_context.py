@@ -12,6 +12,7 @@ import pytest
 
 from fugue import context_client
 from fugue.bench.context import (
+    AiderRepoMapContextProvider,
     ContextRuntime,
     ContextSystemSpec,
     RepositorySnapshot,
@@ -140,6 +141,160 @@ def test_command_context_resolves_the_bridge_default_credential() -> None:
 
     assert env["OPENAI_COMPATIBLE_API_KEY"] == "sk-fugue-local"
     assert env["UNSET_EXTERNAL_KEY"] == ""
+
+
+def test_aider_repomap_is_pinned_and_non_interactive() -> None:
+    spec = get_context_system("aider-repomap")
+    prepare = spec.config["prepare"]
+    command = prepare["command"]
+
+    assert command[:4] == ["uvx", "--from", "aider-chat==0.86.2", "aider"]
+    assert command[command.index("--model") + 1] == "openai/fugue-builder"
+    assert command[command.index("--openai-api-base") + 1] == (
+        "http://127.0.0.1:4000/v1"
+    )
+    assert command[command.index("--map-tokens") + 1] == "1024"
+    assert {
+        "--no-pretty",
+        "--no-show-model-warnings",
+        "--no-check-update",
+        "--no-show-release-notes",
+        "--no-gitignore",
+        "--no-analytics",
+        "--show-repo-map",
+    } <= set(command)
+    assert "--yes-always" not in command
+    assert "--exit" not in command
+    assert prepare["env"] == {"OPENAI_API_KEY": "${LITELLM_MASTER_KEY}"}
+
+
+def test_aider_repomap_isolates_source_and_strips_diagnostics(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "example.py").write_text("def example():\n    return 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "add", "example.py"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue Test",
+            "-c",
+            "user.email=fugue@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=source,
+        check=True,
+    )
+    marker = "Here is the map.\n"
+    raw = "startup warning\n" + marker + "example.py:\n  def example(): ..."
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "Path('.aider.tags.cache.v4').mkdir(); "
+            f"print({raw!r})"
+        ),
+    ]
+    spec = ContextSystemSpec(
+        id="aider-test",
+        title="Aider test",
+        provider="fugue.bench.context:AiderRepoMapContextProvider",
+        version="test",
+        capabilities=frozenset({"prepare"}),
+        deliveries=frozenset({"portable"}),
+        config={
+            "prepare": {
+                "command": command,
+                "stdout_path": "REPO_MAP.md",
+                "output_marker": marker,
+            }
+        },
+    )
+    output = tmp_path / "output"
+    before = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    prepared = asyncio.run(
+        AiderRepoMapContextProvider().prepare(
+            spec,
+            RepositorySnapshot("task", "fixture/repo", "HEAD", source),
+            ContextRuntime(tmp_path, tmp_path / "cache", {}, output_dir=output),
+        )
+    )
+
+    assert (prepared.path / "artifact" / "REPO_MAP.md").read_text() == (
+        marker + "example.py:\n  def example(): ...\n"
+    )
+    after = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert after == before
+    assert not (source / ".aider.tags.cache.v4").exists()
+
+
+@pytest.mark.parametrize("raw", ["startup only\n", "marker\n"])
+def test_aider_repomap_rejects_missing_or_empty_map(tmp_path: Path, raw: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "example.py").write_text("value = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(["git", "add", "example.py"], cwd=source, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue Test",
+            "-c",
+            "user.email=fugue@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=source,
+        check=True,
+    )
+    spec = ContextSystemSpec(
+        id="aider-test",
+        title="Aider test",
+        provider="fugue.bench.context:AiderRepoMapContextProvider",
+        version="test",
+        capabilities=frozenset({"prepare"}),
+        deliveries=frozenset({"portable"}),
+        config={
+            "prepare": {
+                "command": [sys.executable, "-c", f"print({raw!r})"],
+                "stdout_path": "REPO_MAP.md",
+                "output_marker": "marker\n",
+            }
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="complete map"):
+        asyncio.run(
+            AiderRepoMapContextProvider().prepare(
+                spec,
+                RepositorySnapshot("task", "fixture/repo", "HEAD", source),
+                ContextRuntime(
+                    tmp_path,
+                    tmp_path / "cache",
+                    {},
+                    output_dir=tmp_path / "output",
+                ),
+            )
+        )
 
 
 def test_cache_publication_restores_previous_generation_on_replace_failure(

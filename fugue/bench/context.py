@@ -730,6 +730,79 @@ class CommandContextProvider(BaseContextProvider):
         return _parse_hits(result.stdout, retrieve.get("format", "json"), query.top_k)
 
 
+class AiderRepoMapContextProvider(CommandContextProvider):
+    async def prepare(
+        self,
+        spec: ContextSystemSpec,
+        snapshot: RepositorySnapshot,
+        runtime: ContextRuntime,
+    ) -> PreparedContext:
+        prepare = _dict(spec.config.get("prepare"))
+        marker = str(prepare.get("output_marker") or "")
+        stdout_path = str(prepare.get("stdout_path") or "")
+        if not marker or not stdout_path:
+            raise ValueError("Aider RepoMap requires stdout_path and output_marker")
+
+        # Aider 0.86.2 writes its tag cache into the repository and mixes
+        # startup diagnostics into --show-repo-map stdout.
+        with tempfile.TemporaryDirectory(prefix="fugue-aider-") as temp:
+            isolated = Path(temp)
+            checkout = isolated / "repository"
+            home = isolated / "home"
+            home.mkdir()
+            clone_env = dict(runtime.env)
+            clone_env["GIT_LFS_SKIP_SMUDGE"] = "1"
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-hardlinks",
+                    "--no-recurse-submodules",
+                    snapshot.checkout.as_posix(),
+                    checkout.as_posix(),
+                ],
+                env=clone_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            uv_cache = (
+                runtime.env.get("UV_CACHE_DIR")
+                or os.environ.get("UV_CACHE_DIR")
+                or (Path.home() / ".cache" / "uv").as_posix()
+            )
+            isolated_env = {
+                **runtime.env,
+                "HOME": home.as_posix(),
+                "UV_CACHE_DIR": uv_cache,
+            }
+            prepared = await super().prepare(
+                spec,
+                replace(snapshot, checkout=checkout),
+                replace(runtime, env=isolated_env),
+            )
+
+        artifact = prepared.path / "artifact"
+        target = artifact / stdout_path
+        raw = target.read_text()
+        _, found, body = raw.partition(marker)
+        if not found or not body.strip():
+            raise RuntimeError("Aider RepoMap output did not contain a complete map")
+        clean = marker + body.lstrip("\n")
+        target.write_text(clean)
+        return replace(
+            prepared,
+            metrics={
+                **prepared.metrics,
+                **_tree_metrics(artifact),
+                "raw_output_bytes": len(raw.encode()),
+                "map_bytes": len(clean.encode()),
+            },
+        )
+
+
 class GitNexusContextProvider(CommandContextProvider):
     async def prepare(
         self,
