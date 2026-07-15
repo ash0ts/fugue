@@ -1,10 +1,12 @@
 dataset:
   ref: benchflow/skillsbench
   version: "sha256:145925c10bc09425dc0201772cfa50d9b800010081cf5ad77969554a644d7ae1"
+  source:
+    path: configs/fugue/evaluations/skillsbench-pdf-v1/cases.jsonl
 
 model: wandb/zai-org/GLM-5.2
-k: 2
-n_concurrent: 2
+k: 1
+n_concurrent: 4
 jobs_dir: jobs/skillsbench-pdf-ab
 
 harnesses:

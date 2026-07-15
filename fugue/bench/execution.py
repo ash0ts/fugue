@@ -130,7 +130,11 @@ def new_run_id() -> str:
 
 
 def plan_cells(
-    jobs: list[RenderedJob], *, run_id: str, run_name: str
+    jobs: list[RenderedJob],
+    *,
+    run_id: str,
+    run_name: str,
+    scheduling_seed: str | None = None,
 ) -> list[PlannedCell]:
     cells: list[PlannedCell] = []
     for job in jobs:
@@ -177,7 +181,30 @@ def plan_cells(
                 skip_reason=job.skip_reason,
             )
         )
-    return cells
+    return schedule_cells(cells, scheduling_seed)
+
+
+def schedule_cells(
+    cells: list[PlannedCell], scheduling_seed: str | None
+) -> list[PlannedCell]:
+    if not scheduling_seed:
+        return cells
+    return sorted(
+        cells,
+        key=lambda cell: hashlib.sha256(
+            ":".join(
+                (
+                    scheduling_seed,
+                    cell.workload_id,
+                    cell.task_id,
+                    cell.harness,
+                    cell.context_system_id,
+                    cell.variant_id,
+                    str(cell.trial_index),
+                )
+            ).encode()
+        ).hexdigest(),
+    )
 
 
 def execute_cells(
@@ -215,9 +242,7 @@ def execute_cells(
             runnable.append(cell)
         else:
             store.append_cell(
-                cell.record(
-                    "not_applicable", benchmark_outcome="not_applicable"
-                )
+                cell.record("not_applicable", benchmark_outcome="not_applicable")
             )
             store.append_event(
                 "cell_state",
@@ -258,9 +283,8 @@ def execute_cells(
         started = datetime.now(UTC)
         execution_env = dict(cell.env)
         cell_started_called = False
-        if (
-            cell_started is not None
-            and not (cancellation_event is not None and cancellation_event.is_set())
+        if cell_started is not None and not (
+            cancellation_event is not None and cancellation_event.is_set()
         ):
             try:
                 cell_started_called = True
@@ -324,9 +348,7 @@ def execute_cells(
                 returncode = int(result.returncode)
             harbor_result = (
                 _harbor_job_result(cell, repo_root)
-                if runner is None
-                and returncode == 0
-                and cell.execution_kind == "agent"
+                if runner is None and returncode == 0 and cell.execution_kind == "agent"
                 else _HarborJobResult(None, "unscored")
             )
             trial_error = harbor_result.error
@@ -493,18 +515,16 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
     if errored:
-        return _HarborJobResult(
-            f"{errored} Harbor trial(s) errored", "unscored"
-        )
+        return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
         return _HarborJobResult(
             f"{cancelled} Harbor trial(s) were cancelled", "unscored"
         )
     rewards: list[float] = []
     for evaluation in (stats.get("evals") or {}).values():
-        reward_buckets = (
-            ((evaluation or {}).get("reward_stats") or {}).get("reward") or {}
-        )
+        reward_buckets = ((evaluation or {}).get("reward_stats") or {}).get(
+            "reward"
+        ) or {}
         for raw_reward, trial_ids in reward_buckets.items():
             try:
                 reward = float(raw_reward)

@@ -1202,6 +1202,7 @@ class OperatorService:
                         ],
                         asset_overlay=asset_overlay,
                         source_provenance=source_provenance,
+                        scheduling_seed=preset.scheduling_seed,
                     )
                 )
             else:
@@ -1400,6 +1401,7 @@ class OperatorService:
                     "runner": workload.runner,
                     "n_attempts": attempts,
                     "trace_content": experiment.trace_content,
+                    "scheduling_seed": preset.scheduling_seed,
                     "fugue_source": source_provenance,
                 },
             )
@@ -1557,7 +1559,13 @@ class OperatorService:
                 if rendered
                 else request.run_name or resolved.run_name or resolved.id
             )
-            cells = plan_cells(rendered, run_id=run_id, run_name=run_name)
+            selected_preset = select_preset(resolved, request.preset)
+            cells = plan_cells(
+                rendered,
+                run_id=run_id,
+                run_name=run_name,
+                scheduling_seed=selected_preset.scheduling_seed,
+            )
             run_snapshot = build_run_snapshot(
                 repo_root=self.repo_root,
                 run_id=run_id,
@@ -1600,6 +1608,7 @@ class OperatorService:
                     "job_paths": job_paths,
                     "input_lock": "input-lock.json",
                     "snapshot_sha256": run_snapshot.snapshot_sha256,
+                    "scheduling_seed": selected_preset.scheduling_seed,
                 },
             )
             running = True

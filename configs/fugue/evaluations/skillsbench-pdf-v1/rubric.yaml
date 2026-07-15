@@ -1,0 +1,13 @@
+schema_version: 1
+id: skillsbench-pdf-v1
+dimensions:
+  - id: task_completion
+    kind: llm_judge
+    criterion: The requested PDF workflow is complete and the benchmark accepted its result.
+    threshold: 0.7
+    evidence: [harbor_status, harbor_pass, artifact_paths]
+  - id: artifact_quality
+    kind: llm_judge
+    criterion: Every required output exists, is non-empty, and uses the requested file format.
+    threshold: 0.7
+    evidence: [artifact_paths, deterministic_assertions]

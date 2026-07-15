@@ -261,6 +261,7 @@ class PresetSpec:
     n_tasks: int | None = None
     n_attempts: int | None = None
     n_concurrent: int | None = None
+    scheduling_seed: str | None = None
     workload_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -302,6 +303,7 @@ class ExperimentSpec:
             _paths_to_strings(variant.to_dict()) for variant in self.variants
         ]
         return value
+
 
 def library_root(repo_root: Path | None = None) -> Path:
     root = repo_root or Path.cwd()
@@ -393,9 +395,7 @@ def list_agent_presets(repo_root: Path | None = None) -> list[LibraryItem]:
     return _list_yaml_items(library_root(repo_root) / AGENT_PRESETS_DIR)
 
 
-def get_agent_preset(
-    item_id: str, repo_root: Path | None = None
-) -> AgentPreset:
+def get_agent_preset(item_id: str, repo_root: Path | None = None) -> AgentPreset:
     item_id = validate_id(item_id, kind="agent preset id")
     path = library_root(repo_root) / AGENT_PRESETS_DIR / f"{item_id}.yaml"
     if not path.is_file():
@@ -441,7 +441,10 @@ def get_agent_preset(
     if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
         raise ValueError("agent preset base_commit must be a full Git commit")
     metrics = _dict(evidence_raw.get("metrics"))
-    if any(value is not None and not isinstance(value, (int, float)) for value in metrics.values()):
+    if any(
+        value is not None and not isinstance(value, (int, float))
+        for value in metrics.values()
+    ):
         raise ValueError("agent preset metrics must be numeric or null")
     return AgentPreset(
         id=preset_id,
@@ -461,8 +464,7 @@ def get_agent_preset(
             ),
             agent_kwargs=_dict(candidate_raw.get("agent_kwargs")),
             agent_env={
-                str(k): str(v)
-                for k, v in _dict(candidate_raw.get("agent_env")).items()
+                str(k): str(v) for k, v in _dict(candidate_raw.get("agent_env")).items()
             },
             environment=_dict(candidate_raw.get("environment")),
             verifier=_dict(candidate_raw.get("verifier")),
@@ -525,9 +527,7 @@ def save_experiment_data(
     return save_experiment(item_id, experiment_to_yaml(experiment), repo_root)
 
 
-def experiment_from_yaml(
-    text: str, *, item_id: str | None = None
-) -> ExperimentSpec:
+def experiment_from_yaml(text: str, *, item_id: str | None = None) -> ExperimentSpec:
     raw = yaml.safe_load(text) or {}
     if not isinstance(raw, dict):
         raise ValueError("experiment YAML must be a mapping")
@@ -585,7 +585,9 @@ def experiment_from_data(
         retry=_dict(raw.get("retry")),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
-        integrations=_integration_selections(raw.get("integrations"), kind="experiment"),
+        integrations=_integration_selections(
+            raw.get("integrations"), kind="experiment"
+        ),
         workloads=workloads,
         evaluation_generation=_evaluation_generation(raw.get("evaluation_generation")),
         presets=presets,
@@ -621,7 +623,9 @@ def content_hashes_for_ids(
 
     resolved = resolve_skills(skill_ids, repo_root or Path.cwd())
     return {
-        "prompts": {item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids},
+        "prompts": {
+            item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids
+        },
         "skills": {item.id: item.digest.removeprefix("sha256:") for item in resolved},
     }
 
@@ -745,7 +749,9 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
             WorkloadSpec(
                 id=workload_id,
                 runner=runner,
-                manifest=Path(str(value["manifest"])) if value.get("manifest") else None,
+                manifest=Path(str(value["manifest"]))
+                if value.get("manifest")
+                else None,
                 dataset=_optional_str(value.get("dataset")),
                 systems=_string_list(value.get("systems")),
                 required_capabilities=required_capabilities,
@@ -769,9 +775,7 @@ def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:
     if not isinstance(raw, dict):
         raise ValueError("evaluation_generation must be a mapping")
     _reject_unknown(raw, EvaluationGenerationSpec, kind="evaluation generation")
-    size = _positive_int(
-        raw.get("size", 8), kind="evaluation generation size"
-    )
+    size = _positive_int(raw.get("size", 8), kind="evaluation generation size")
     assert size is not None
     sources: list[EvaluationSourceSpec] = []
     for index, value in enumerate(_list(raw.get("sources")), start=1):
@@ -895,6 +899,7 @@ def _presets(raw: Any) -> list[PresetSpec]:
                     value.get("n_concurrent"),
                     kind=f"preset {preset_id} n_concurrent",
                 ),
+                scheduling_seed=_optional_str(value.get("scheduling_seed")),
                 workload_overrides=_workload_overrides(
                     value.get("workload_overrides"), preset_id
                 ),

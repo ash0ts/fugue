@@ -158,6 +158,7 @@ def _build_jobs(
     scorer_refs: list[str] | None = None,
     asset_overlay: dict[str, str] | None = None,
     source_provenance: dict[str, Any] | None = None,
+    scheduling_seed: str | None = None,
 ) -> list[RenderedJob]:
     selected_source_provenance = source_provenance or resolve_fugue_source_provenance(
         repo_root
@@ -345,6 +346,7 @@ def _build_jobs(
                         },
                         "trace_content": experiment.trace_content,
                         "instrumentation": "weave",
+                        "scheduling_seed": scheduling_seed,
                         "fugue_source": selected_source_provenance,
                         **(
                             {"context_runtime": context_runtime}
