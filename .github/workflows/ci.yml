@@ -83,8 +83,6 @@ jobs:
     name: Python 3.13 serving and protocol compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      PYTHONWARNINGS: error
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -97,8 +95,13 @@ jobs:
           cache-dependency-path: tests/compat/package-lock.json
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen --extra dev --extra serve
-      - run: uv run pytest -q tests/test_serve.py
+      - name: Test serving with warnings as errors
+        env:
+          PYTHONWARNINGS: error
+        run: uv run pytest -q tests/test_serve.py
       - name: Open Responses and client compatibility
+        env:
+          PYTHONWARNINGS: error
         run: uv run bash tests/compat/run.sh
 
   curator:
