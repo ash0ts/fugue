@@ -1494,6 +1494,46 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
     assert summary["weave_tool_call_count"] == 1
 
 
+def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
+    trace_id = "a" * 32
+    root_span_id = "b" * 16
+    summary = _summarize_spans(
+        [
+            {
+                "id": root_span_id,
+                "trace_id": trace_id,
+                "attributes": {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": "native-conversation",
+                    "weave.eval.predict_and_score_call_id": "prediction-1",
+                },
+            },
+            {
+                "id": "chat",
+                "trace_id": trace_id,
+                "parent_id": root_span_id,
+                "attributes": {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.conversation.id": "native-conversation",
+                },
+            },
+            {
+                "id": "terminal-helper",
+                "trace_id": trace_id,
+                "parent_id": "chat",
+                "attributes": {
+                    "gen_ai.operation.name": "tool.terminal",
+                    "gen_ai.conversation.id": "planned-conversation",
+                },
+            },
+        ]
+    )
+
+    assert summary["weave_conversation_ids"] == ["native-conversation"]
+    row = {"trace_id": trace_id, "root_span_id": root_span_id, **summary}
+    assert export._verified_evaluation_root(row, "prediction-1") is not None
+
+
 def test_live_link_rejects_split_native_conversation_identity() -> None:
     row = {
         "trace_id": "a" * 32,

@@ -2060,11 +2060,17 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
     fugue_attributes, attribute_status, missing_attributes = _fugue_attribute_summary(
         values
     )
+    # Hermes emits helper spans such as tool.terminal with the provisional Fugue
+    # identity. Only the documented Agent operations own conversation identity.
+    agent_operations = {"invoke_agent", "chat", "execute_tool"}
     conversation_ids = sorted(
         {
             str(value)
-            for span, attrs in zip(values, attributes, strict=True)
-            if (
+            for span, attrs, operation in zip(
+                values, attributes, operations, strict=True
+            )
+            if operation in agent_operations
+            and (
                 value := span.get("conversation_id")
                 or attrs.get("gen_ai.conversation.id")
             )
