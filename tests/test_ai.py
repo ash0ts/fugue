@@ -9,12 +9,18 @@ from test_operator import make_operator_repo
 
 from fugue.assistant import AssistantAgent, AssistantModelClient
 from fugue.bench.ai import (
+    AnalysisResult,
+    AnalysisScope,
+    AnalysisSnapshot,
+    AnalysisSpec,
     ExperimentAnalyst,
     ExperimentComposer,
+    _write_analysis,
     get_analysis,
     save_analysis,
 )
 from fugue.bench.catalog import ExperimentCatalog
+from fugue.bench.scoring import SelectionPolicy, select_candidate_configuration
 
 
 def _client_factory(transport: httpx.MockTransport):
@@ -101,6 +107,16 @@ def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
     assert saved.id == "accepted-ai-demo"
 
 
+def test_composer_catalog_exposes_evidence_backed_agent_presets(tmp_path: Path):
+    service = make_operator_repo(tmp_path)
+    composer = ExperimentComposer(service)
+
+    catalog = composer._catalog_summary(service.experiment("demo"))
+
+    assert [item["id"] for item in catalog["agent_presets"]] == ["demo-maintainer"]
+    assert catalog["agent_presets"][0]["metrics"] == {"pass_rate": 1.0}
+
+
 def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> None:
     make_operator_repo(tmp_path)
     reports = tmp_path / "reports"
@@ -114,6 +130,8 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
         "task_name": "task-one",
         "harness": "codex",
         "variant_id": "baseline",
+        "candidate_id": "candidate-a",
+        "tags": ["self-eval", "campaign:test"],
         "context_system_id": "none",
         "model_provider": "openai",
         "model": "openai/gpt-5",
@@ -129,6 +147,10 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
     assert status.experiments == 1
     assert status.records == 1
     assert catalog.facets()["intervention_type"] == {"baseline": 1}
+    assert catalog.facets()["candidate_id"] == {"candidate-a": 1}
+    assert catalog.facets()["tag"] == {"campaign:test": 1, "self-eval": 1}
+    assert len(catalog.records(filters={"tag": "self-eval"})) == 1
+    assert len(catalog.records(filters={"candidate_id": "candidate-a"})) == 1
     (tmp_path / "reports/.env").write_text("OPENAI_API_KEY=secret\n")
     try:
         catalog.read_artifact("reports/.env")
@@ -136,6 +158,94 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
         assert "secret policy" in str(exc)
     else:
         raise AssertionError("secret-like artifact should be blocked")
+
+
+def test_confirmed_self_eval_analysis_writes_review_only_promotion_bundle(
+    tmp_path: Path,
+) -> None:
+    make_operator_repo(tmp_path)
+    experiment_path = tmp_path / "configs/fugue/experiments/demo.yaml"
+    experiment_path.write_text(
+        experiment_path.read_text()
+        + "\ntags: [self-eval, role:maintainer, suite:demo-v1]\n"
+    )
+    rows = []
+    for candidate, harness, cost in (
+        ("candidate-a", "codex", 0.5),
+        ("candidate-b", "openclaw", 0.25),
+    ):
+        for index in (1, 2):
+            rows.append(
+                {
+                    "row_id": f"{candidate}-{index}",
+                    "record_type": "trial",
+                    "run_id": "run-holdout",
+                    "experiment_id": "demo",
+                    "workload_id": "harbor",
+                    "task_name": f"task-{index}",
+                    "harness": harness,
+                    "variant_id": "baseline",
+                    "context_system_id": "none",
+                    "candidate_id": candidate,
+                    "comparison_example_id": f"example-{index}",
+                    "trial_index": 1,
+                    "model": "openai/gpt-5",
+                    "pass": True,
+                    "cost_usd": cost,
+                    "wall_time_sec": 2.0,
+                }
+            )
+    policy = SelectionPolicy(bootstrap_samples=200)
+    selection = select_candidate_configuration(rows, policy, seed="snapshot")
+    snapshot = AnalysisSnapshot(
+        id="snapshot-demo",
+        digest="a" * 64,
+        created_at="2026-07-14T00:00:00+00:00",
+        catalog_revision="revision",
+        row_ids=tuple(row["row_id"] for row in rows),
+        rows=tuple(rows),
+    )
+    spec = AnalysisSpec(
+        id="demo-selection",
+        title="Demo selection",
+        question="Which candidate?",
+        filters={"experiment_id": "demo", "tag": "phase:holdout"},
+        selection=policy,
+    )
+    result = AnalysisResult(
+        spec=spec,
+        scope=AnalysisScope(
+            experiments=("demo",),
+            runs=("run-holdout",),
+            rows=4,
+            tasks=("task-1", "task-2"),
+            models=("openai/gpt-5",),
+            variants=("baseline",),
+            sources=("local",),
+            missing_metrics=(),
+            warnings=(),
+        ),
+        snapshot=snapshot,
+        evidence=(),
+        aggregates=(),
+        selection=selection,
+        report="# Demo\n",
+        report_dir=tmp_path / "reports/analyses/demo-selection/run-1",
+        model="openai/gpt-5",
+        provider="openai",
+        session_id="session-1",
+        input_tokens=1,
+        output_tokens=1,
+    )
+
+    _write_analysis(result, tmp_path)
+
+    promotion = tmp_path / "reports/self-eval/snapshot-demo/promotion.json"
+    preset = tmp_path / "reports/self-eval/snapshot-demo/candidate-preset.yaml"
+    assert promotion.is_file()
+    assert json.loads(promotion.read_text())["selected_candidate_id"] == "candidate-b"
+    assert preset.is_file()
+    assert not (tmp_path / "configs/fugue/agent-presets/fugue-maintainer-recommended.yaml").exists()
 
 
 def test_analyst_snapshots_scope_and_requires_evidence(

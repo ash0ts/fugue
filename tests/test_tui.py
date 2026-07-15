@@ -187,6 +187,30 @@ def test_tui_initial_ai_draft_opens_compare_without_writing(
     asyncio.run(exercise())
 
 
+def test_tui_applies_recommended_agent_preset_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+            assert app.plan.agent_preset_id == "demo-maintainer"
+            assert app.plan.dirty
+            assert app.plan.request.harnesses == ("codex",)
+            assert app.plan.request.variants == ("maintainer-recommended",)
+            assert not (
+                tmp_path
+                / "configs/fugue/experiments/maintainer-recommended.yaml"
+            ).exists()
+
+    asyncio.run(exercise())
+
+
 def test_tui_ai_proposal_requires_explicit_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
