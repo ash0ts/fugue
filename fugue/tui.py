@@ -573,6 +573,7 @@ class FugueApp(App[None]):
         self._sync_generation = 0
         self._preview_generation = 0
         self._preview_timer: Any = None
+        self._poll_timer: Any = None
         self._review_blockers: tuple[str, ...] = ()
         self._log_target: tuple[str, str | None] | None = None
         self._log_offset = 0
@@ -786,8 +787,17 @@ class FugueApp(App[None]):
         self._refresh_runs()
         self._refresh_results()
         self._refresh_setup()
-        self.set_interval(1.0, self._poll_runs)
+        self._poll_timer = self.set_interval(1.0, self._poll_runs)
         self._queue_preview()
+
+    def on_unmount(self) -> None:
+        if self._preview_timer is not None:
+            self._preview_timer.stop()
+            self._preview_timer = None
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        self._preview_generation += 1
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
@@ -1469,15 +1479,18 @@ class FugueApp(App[None]):
         if self._preview_timer is not None:
             self._preview_timer.stop()
             self._preview_timer = None
+        preview_status = next(iter(self.query("#preview-status")), None)
+        if not self.is_mounted or not isinstance(preview_status, Static):
+            return
         request = self.plan.request
         if not request.harnesses or not request.variants:
-            self.query_one("#preview-status", Static).update(
+            preview_status.update(
                 "Select at least one harness and one variant."
             )
             return
         self._preview_generation += 1
         generation = self._preview_generation
-        self.query_one("#preview-status", Static).update("Updating exact matrix...")
+        preview_status.update("Updating exact matrix...")
         self._preview_worker(
             generation,
             request,
@@ -1837,8 +1850,10 @@ class FugueApp(App[None]):
                 self.notify(f"Copied conversation {conversation_id}")
         self.action_open_agents()
 
-    def _refresh_runs(self) -> None:
-        table = self.query_one("#runs-table", DataTable)
+    def _refresh_runs(self) -> bool:
+        table = next(iter(self.query("#runs-table")), None)
+        if not isinstance(table, DataTable):
+            return False
         table.clear(columns=True)
         table.add_columns("Run", "Experiment", "Status", "Pass", "Fail", "Waiting")
         runs = self.service.runs()
@@ -1856,9 +1871,11 @@ class FugueApp(App[None]):
             self.selected_run_id = runs[0].run_id
             self._show_run(runs[0].run_id)
         self._update_sequencer(runs)
+        return True
 
     def _poll_runs(self) -> None:
-        self._refresh_runs()
+        if not self.is_mounted or not self._refresh_runs():
+            return
         if self.selected_run_id:
             self._show_run(self.selected_run_id)
 

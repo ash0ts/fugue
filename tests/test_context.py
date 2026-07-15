@@ -421,6 +421,14 @@ def test_context_command_timeout_terminates_the_process_group(tmp_path: Path) ->
 def test_dense_artifact_is_shared_by_dense_and_hybrid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    versions = {
+        "fastembed": "0.8.0",
+        "onnxruntime": "1.23.2",
+        "lancedb": "0.34.0",
+    }
+    monkeypatch.setattr(
+        "fugue.bench.context.importlib.metadata.version", versions.__getitem__
+    )
     chunks = [
         {
             "id": "src/app.py:1",

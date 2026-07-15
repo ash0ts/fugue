@@ -279,6 +279,14 @@ def test_execute_run_persists_snapshot_before_first_cell(
         "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
     )
 
+    def validate(config_paths) -> None:
+        assert config_paths
+        observed.append("validate")
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", validate
+    )
+
     def runner(command, **kwargs):
         lock_path = tmp_path / ".fugue/runtime" / run_id / "input-lock.json"
         lock = json.loads(lock_path.read_text())
@@ -296,7 +304,7 @@ def test_execute_run_persists_snapshot_before_first_cell(
         cell_runner=runner,
     )
 
-    assert observed == ["harbor"]
+    assert observed == ["validate", "harbor"]
     assert result.status == "passed"
     assert result.evaluation_urls == ("https://wandb.ai/team/project/r/call/eval-1",)
     assert service.run_evaluation(run_id) == result.evaluations[0]
@@ -333,6 +341,9 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
 
     monkeypatch.setattr(
         "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
     )
 
     def runner(command, **kwargs):

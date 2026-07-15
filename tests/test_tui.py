@@ -190,6 +190,25 @@ def test_tui_initial_ai_draft_opens_compare_without_writing(
     asyncio.run(exercise())
 
 
+def test_debounced_preview_is_harmless_after_its_widget_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            app._queue_preview()
+            await app.query_one("#preview-status").remove()
+
+            app._begin_preview()
+
+            assert app._preview_timer is None
+
+    asyncio.run(exercise())
+
+
 def test_tui_applies_recommended_agent_preset_locally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

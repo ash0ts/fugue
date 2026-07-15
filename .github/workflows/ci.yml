@@ -19,6 +19,8 @@ jobs:
         suite: [core, context]
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -65,7 +67,7 @@ jobs:
       - name: Render README Mermaid diagrams
         run: >-
           npx --yes -p @mermaid-js/mermaid-cli@11.16.0
-          mmdc -i README.md -o /tmp/fugue-readme.md
+          mmdc -p .github/puppeteer-ci.json -a /tmp/fugue-mermaid-assets -i README.md -o /tmp/fugue-readme.md
       - name: Validate repository skill
         run: uv run pytest -q tests/test_skill.py
 
