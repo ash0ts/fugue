@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fugue.bench.export import export_rows
+from fugue.bench.export import export_rows, measurement_rows, normalize_prediction_rows
 from fugue.bench.library import (
     ExperimentSpec,
     get_experiment,
@@ -272,7 +272,7 @@ class ExperimentCatalog:
         else:
             connection.execute("DELETE FROM experiments")
 
-        rows = export_rows(
+        raw_rows = export_rows(
             [
                 path
                 for path in (
@@ -282,6 +282,10 @@ class ExperimentCatalog:
                 if path.exists()
             ]
         )
+        rows = [
+            *normalize_prediction_rows(raw_rows),
+            *measurement_rows(raw_rows),
+        ]
         reports = self.repo_root / "reports"
         if reports.is_dir():
             for path in reports.rglob("*.jsonl"):

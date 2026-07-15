@@ -55,6 +55,25 @@ class RunSnapshotV1:
         return value
 
 
+@dataclass(frozen=True)
+class RunSnapshotV2(RunSnapshotV1):
+    source_experiment: dict[str, Any] | None = None
+    resolved_experiment_sha256: str = ""
+    capability_plan: tuple[dict[str, Any], ...] = ()
+    planned_prediction_count: int = 0
+    runtime_locks: tuple[dict[str, Any], ...] = ()
+    publication_schema_version: int = 4
+
+    def to_dict(self) -> dict[str, Any]:
+        value = super().to_dict()
+        value["capability_plan"] = list(self.capability_plan)
+        value["runtime_locks"] = list(self.runtime_locks)
+        return value
+
+
+RunSnapshot = RunSnapshotV1 | RunSnapshotV2
+
+
 def build_run_snapshot(
     *,
     repo_root: Path,
@@ -64,7 +83,7 @@ def build_run_snapshot(
     jobs: list[RenderedJob],
     cells: list[PlannedCell],
     env: Mapping[str, str],
-) -> RunSnapshotV1:
+) -> RunSnapshotV2:
     secret_names = {
         value: name
         for name, value in env.items()
@@ -207,6 +226,10 @@ def build_run_snapshot(
             raise ValueError(f"candidate {job.candidate_id} runtime binding differs")
         runtimes[job.candidate_id] = runtime
 
+    jobs_by_execution = {
+        job.resolved_candidate.execution_fingerprint: job
+        for job in jobs
+    }
     planned_matrix = tuple(
         {
             "cell_id": cell.id,
@@ -227,6 +250,23 @@ def build_run_snapshot(
                     (),
                 )
             ),
+            "planned_prediction_count": _planned_prediction_count(
+                cell,
+                jobs_by_execution.get(cell.execution_fingerprint),
+            ),
+        }
+        for cell in cells
+    )
+    capability_plan = tuple(
+        {
+            "cell_id": cell.id,
+            "workload_id": cell.workload_id,
+            "execution_kind": cell.execution_kind,
+            "harness": cell.harness,
+            "context_system_id": cell.context_system_id,
+            "delivery": cell.context_delivery,
+            "applicable": cell.applicable,
+            "reason": cell.skip_reason,
         }
         for cell in cells
     )
@@ -250,11 +290,28 @@ def build_run_snapshot(
             "id": selected.id,
             "digest": stable_digest(selected.to_dict()),
         }
-    base = RunSnapshotV1(
-        schema_version=1,
+    resolved_experiment = _portable(
+        experiment.to_dict(), required_env, secret_names
+    )
+    source_experiment = _source_experiment(experiment, repo_root)
+    runtime_locks = tuple(
+        sorted(
+            (
+                {
+                    "candidate_id": candidate_id,
+                    "configuration_sha256": runtime["configuration_sha256"],
+                    "context_runtime": runtime.get("context_runtime"),
+                }
+                for candidate_id, runtime in runtimes.items()
+            ),
+            key=lambda item: item["candidate_id"],
+        )
+    )
+    base = RunSnapshotV2(
+        schema_version=2,
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
-        experiment=_portable(experiment.to_dict(), required_env, secret_names),
+        experiment=resolved_experiment,
         request=_portable(dict(request), required_env, secret_names),
         assets=assets,
         candidates=candidates,
@@ -270,18 +327,25 @@ def build_run_snapshot(
         },
         required_env=tuple(sorted(name for name in required_env if name)),
         preset=preset,
+        source_experiment=source_experiment,
+        resolved_experiment_sha256=stable_digest(resolved_experiment),
+        capability_plan=capability_plan,
+        planned_prediction_count=sum(
+            int(item["planned_prediction_count"]) for item in planned_matrix
+        ),
+        runtime_locks=runtime_locks,
     )
     serialized = json.dumps(base.to_dict(), sort_keys=True, default=str)
     for name, value in env.items():
         if _SENSITIVE_NAME.search(name) and len(value) >= 8 and value in serialized:
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
-    return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
+    return RunSnapshotV2(**{**asdict(base), "snapshot_sha256": digest})
 
 
 def write_run_input_lock(
     repo_root: Path,
-    snapshot: RunSnapshotV1,
+    snapshot: RunSnapshot,
 ) -> Path:
     path = repo_root / ".fugue" / "runtime" / snapshot.run_id / INPUT_LOCK_NAME
     payload = snapshot.to_dict()
@@ -308,6 +372,50 @@ def verify_snapshot(payload: Mapping[str, Any]) -> bool:
     unsigned["snapshot_sha256"] = ""
     unsigned["lock_sha256"] = ""
     return bool(expected) and expected == stable_digest(unsigned)
+
+
+def read_run_snapshot(payload: Mapping[str, Any]) -> RunSnapshot:
+    """Parse input locks without rewriting their historical schema."""
+    version = int(payload.get("schema_version") or 1)
+    values = dict(payload)
+    values.pop("lock_sha256", None)
+    if "snapshot_sha256" not in values:
+        values["snapshot_sha256"] = str(payload.get("lock_sha256") or "")
+    if version == 1:
+        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
+        values["required_env"] = tuple(values.get("required_env") or ())
+        return RunSnapshotV1(**values)
+    if version == 2:
+        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
+        values["required_env"] = tuple(values.get("required_env") or ())
+        values["capability_plan"] = tuple(values.get("capability_plan") or ())
+        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
+        return RunSnapshotV2(**values)
+    raise ValueError(f"unsupported run snapshot schema: {version}")
+
+
+def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int:
+    if not cell.applicable:
+        return 0
+    if cell.execution_kind == "agent":
+        return 1
+    fugue = dict((job.config if job is not None else {}).get("fugue") or {})
+    task_count = int(fugue.get("task_count") or 1)
+    attempts = int(fugue.get("n_attempts") or cell.n_attempts or 1)
+    return task_count * attempts
+
+
+def _source_experiment(
+    experiment: ExperimentSpec, repo_root: Path
+) -> dict[str, Any] | None:
+    manifest = experiment.manifest
+    path = manifest if manifest.is_absolute() else repo_root / manifest
+    if not path.is_file():
+        return None
+    return {
+        "path": _snapshot_path(path, repo_root),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
 
 
 def _portable(

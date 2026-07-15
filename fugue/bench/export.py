@@ -31,6 +31,36 @@ from fugue.model_plane import (
 from fugue.redaction import redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
+PREDICTION_SCHEMA_VERSION = 2
+PUBLICATION_SCHEMA_VERSION = 4
+
+
+@dataclass(frozen=True)
+class PredictionRowV2:
+    prediction_id: str
+    run_id: str
+    candidate_id: str
+    comparison_example_id: str
+    trial_index: int
+    execution_kind: str
+    source_record_type: str
+    payload: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.payload,
+            "schema_version": PREDICTION_SCHEMA_VERSION,
+            "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
+            "record_type": "trial",
+            "source_record_type": self.source_record_type,
+            "prediction_id": self.prediction_id,
+            "run_id": self.run_id,
+            "candidate_id": self.candidate_id,
+            "comparison_example_id": self.comparison_example_id,
+            "trial_index": self.trial_index,
+            "execution_kind": self.execution_kind,
+        }
+
 
 @dataclass(frozen=True)
 class PublishedEvaluation:
@@ -44,6 +74,10 @@ class PublishedEvaluation:
     linked_agent_predictions: int = 0
     direct_predictions: int = 0
     linking_failures: tuple[str, ...] = ()
+    publication_id: str | None = None
+    revision: int = 1
+    supersedes: str | None = None
+    active: bool = True
 
 
 @dataclass(frozen=True)
@@ -411,7 +445,7 @@ class LiveEvaluationCoordinator:
             / ".fugue"
             / "runtime"
             / "publications"
-            / "v3"
+            / f"v{PUBLICATION_SCHEMA_VERSION}"
             / _safe_slug(self.project)
         )
         ledger.mkdir(parents=True, exist_ok=True)
@@ -462,7 +496,7 @@ class LiveEvaluationCoordinator:
                     "finished without a verified Agent trace link: "
                     + "; ".join(linking_failures)
                 )
-            marker = ledger / f"{published['publication_id']}.json"
+            marker = ledger / f"{published['publication_id']}.r1.json"
             _write_publication_marker(
                 marker,
                 self.project,
@@ -479,6 +513,11 @@ class LiveEvaluationCoordinator:
                 direct_predictions=0,
                 linking_failures=linking_failures,
                 publication_mode="live",
+                publication_schema_version=PUBLICATION_SCHEMA_VERSION,
+                revision=1,
+                supersedes=None,
+                republish_reason=None,
+                active=True,
             )
             evaluations.append(
                 PublishedEvaluation(
@@ -492,6 +531,7 @@ class LiveEvaluationCoordinator:
                     linked_agent_predictions=linked,
                     direct_predictions=0,
                     linking_failures=linking_failures,
+                    publication_id=published["publication_id"],
                 )
             )
         return PublicationResult(
@@ -621,7 +661,8 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
     )
     expected_paths = _json_mapping(env.get("FUGUE_EXPECTED_EVIDENCE_PATHS"))
     row = {
-        "schema_version": 1,
+        "schema_version": PREDICTION_SCHEMA_VERSION,
+        "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
         "record_type": "trial",
         "cell_id": cell.id,
         "run_key": run_key,
@@ -674,6 +715,15 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "evaluation_rubrics": list(cell.evaluation_rubrics),
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
     }
+    row["prediction_id"] = _stable_digest(
+        {
+            "schema_version": PREDICTION_SCHEMA_VERSION,
+            "run_id": cell.run_id,
+            "candidate_id": cell.candidate_id,
+            "comparison_example_id": cell.comparison_example_id,
+            "trial_index": cell.trial_index,
+        }
+    )
     if cell.execution_kind == "agent":
         conversation_id = agent_conversation_id(cell.harness, run_key)
         row.update(
@@ -914,6 +964,84 @@ def export_rows(
             _merge_error_events(row)
     _apply_runtime_equivalence(rows)
     return rows
+
+
+def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve every executable result to one stable logical prediction row."""
+    normalized: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    canonical_inputs: dict[str, bool] = {}
+    for raw in _evaluation_rows(rows):
+        row = dict(raw)
+        run_id = str(row.get("run_id") or "")
+        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
+        comparison_id = str(_evaluation_inputs(row)["comparison_example_id"])
+        trial_index = _positive_int(row.get("trial_index") or row.get("attempt")) or 1
+        execution_kind = str(
+            row.get("execution_kind")
+            or ("agent" if _is_agent_row(row) else "provider_diagnostic")
+        )
+        current_schema = (
+            row.get("identity_schema_version") == CANDIDATE_IDENTITY_SCHEMA_VERSION
+            or row.get("prediction_schema_version") == PREDICTION_SCHEMA_VERSION
+        )
+        if not run_id and current_schema:
+            raise ValueError("current-schema evaluation prediction is missing run_id")
+        if not run_id:
+            run_id = "legacy-" + _stable_digest(
+                {
+                    "experiment_id": row.get("experiment_id"),
+                    "run_name": row.get("run_name"),
+                    "run_key": row.get("run_key"),
+                }
+            )[:16]
+        if not candidate_id:
+            raise ValueError("evaluation prediction is missing candidate_id")
+        prediction_id = _stable_digest(
+            {
+                "schema_version": PREDICTION_SCHEMA_VERSION,
+                "run_id": run_id,
+                "candidate_id": candidate_id,
+                "comparison_example_id": comparison_id,
+                "trial_index": trial_index,
+            }
+        )
+        source_record_type = str(
+            row.get("source_record_type") or row.get("record_type") or "trial"
+        )
+        value = PredictionRowV2(
+                prediction_id=prediction_id,
+                run_id=run_id,
+                candidate_id=candidate_id,
+                comparison_example_id=comparison_id,
+                trial_index=trial_index,
+                execution_kind=execution_kind,
+                source_record_type=source_record_type,
+                payload=row,
+            ).to_dict()
+        already_canonical = bool(row.get("prediction_schema_version"))
+        if prediction_id in positions:
+            prior_canonical = canonical_inputs[prediction_id]
+            if not prior_canonical and not already_canonical:
+                raise ValueError(
+                    f"duplicate evaluation trial (normalized prediction): {prediction_id}"
+                )
+            if already_canonical:
+                normalized[positions[prediction_id]] = value
+                canonical_inputs[prediction_id] = True
+            continue
+        positions[prediction_id] = len(normalized)
+        canonical_inputs[prediction_id] = already_canonical
+        normalized.append(value)
+    return normalized
+
+
+def measurement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in rows
+        if row.get("record_type") in {"preparation", "retrieval", "episode"}
+    ]
 
 
 _LOCAL_RESULT_FIELDS = {
@@ -1172,17 +1300,20 @@ def publish_to_weave(
     *,
     ledger_root: Path | None = None,
     republish: bool = False,
+    republish_reason: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> PublicationResult:
+    if republish and not str(republish_reason or "").strip():
+        raise ValueError("republish_reason is required for explicit republishing")
     project = project or _weave_project_from_env(env)
     weave = initialize_weave(project, env)
     logger_cls = getattr(weave, "EvaluationLogger", None)
     if logger_cls is None:
         raise RuntimeError("installed weave package has no EvaluationLogger")
-    candidates = _publication_candidates(_evaluation_rows(rows))
+    candidates = _publication_candidates(normalize_prediction_rows(rows))
     ledger = (
         (ledger_root or Path(".fugue/runtime/publications"))
-        / "v3"
+        / f"v{PUBLICATION_SCHEMA_VERSION}"
         / _safe_slug(project)
     )
     ledger.mkdir(parents=True, exist_ok=True)
@@ -1200,13 +1331,16 @@ def publish_to_weave(
             continue
         publication_id = candidate["publication_id"]
         scope_id = candidate["evaluation_scope_id"]
-        marker = ledger / f"{publication_id}.json"
-        with FileLock(marker.with_suffix(".lock"), timeout=120):
-            if marker.is_file() and not republish:
+        lock = ledger / f"{publication_id}.lock"
+        with FileLock(lock, timeout=120):
+            previous_marker, previous_revision = _latest_publication_marker(
+                ledger, publication_id
+            )
+            if previous_marker is not None and not republish:
                 try:
                     evaluations.append(
                         _published_evaluation_from_marker(
-                            marker,
+                            previous_marker,
                             project=project,
                             publication_id=publication_id,
                             candidate_id=candidate["candidate_id"],
@@ -1220,6 +1354,13 @@ def publish_to_weave(
                     )
                 skipped += 1
                 continue
+            revision = previous_revision + 1 if previous_marker is not None else 1
+            marker = ledger / f"{publication_id}.r{revision}.json"
+            supersedes = (
+                f"{publication_id}:r{previous_revision}"
+                if previous_marker is not None
+                else None
+            )
             if scope_id not in datasets:
                 dataset_name = _dataset_name(candidate)
                 dataset_cls = getattr(weave, "Dataset", None)
@@ -1295,7 +1436,16 @@ def publish_to_weave(
                 direct_predictions=len(direct_rows),
                 linking_failures=linking_failures,
                 publication_mode="post_hoc",
+                publication_schema_version=PUBLICATION_SCHEMA_VERSION,
+                revision=revision,
+                supersedes=supersedes,
+                republish_reason=(
+                    str(republish_reason).strip() if republish else None
+                ),
+                active=True,
             )
+            if previous_marker is not None:
+                _set_publication_marker_active(previous_marker, False)
             evaluations.append(
                 PublishedEvaluation(
                     candidate_id=candidate["candidate_id"],
@@ -1308,6 +1458,9 @@ def publish_to_weave(
                     linked_agent_predictions=linked_agent_predictions,
                     direct_predictions=len(direct_rows),
                     linking_failures=linking_failures,
+                    publication_id=publication_id,
+                    revision=revision,
+                    supersedes=supersedes,
                 )
             )
             published += 1
@@ -1436,6 +1589,31 @@ def _write_publication_marker(
     os.replace(temp, path)
 
 
+def _latest_publication_marker(
+    ledger: Path, publication_id: str
+) -> tuple[Path | None, int]:
+    revisions: list[tuple[int, Path]] = []
+    pattern = re.compile(rf"^{re.escape(publication_id)}\.r([1-9][0-9]*)\.json$")
+    for path in ledger.glob(f"{publication_id}.r*.json"):
+        match = pattern.fullmatch(path.name)
+        if match:
+            revisions.append((int(match.group(1)), path))
+    if not revisions:
+        return None, 0
+    revision, path = max(revisions, key=lambda item: item[0])
+    return path, revision
+
+
+def _set_publication_marker_active(path: Path, active: bool) -> None:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid publication marker: {path}")
+    value["active"] = active
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
+    os.replace(temp, path)
+
+
 def _published_evaluation_from_marker(
     path: Path,
     *,
@@ -1494,6 +1672,14 @@ def _published_evaluation_from_marker(
         linked_agent_predictions=linked_agent_predictions,
         direct_predictions=direct_predictions,
         linking_failures=tuple(item for item in linking_failures if item),
+        publication_id=publication_id,
+        revision=(
+            _publication_marker_count(value, "revision")
+            if "revision" in value
+            else 1
+        ),
+        supersedes=str(value["supersedes"]) if value.get("supersedes") else None,
+        active=value.get("active") is not False,
     )
 
 
@@ -1574,6 +1760,8 @@ def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _evaluation_row_id(row: dict[str, Any]) -> str:
+    if row.get("prediction_id"):
+        return str(row["prediction_id"])
     return _stable_digest(
         {
             "run_id": row.get("run_id"),

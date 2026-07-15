@@ -49,6 +49,8 @@ from fugue.bench.export import (
     LiveEvaluationCoordinator,
     PublishedEvaluation,
     export_rows,
+    measurement_rows,
+    normalize_prediction_rows,
     publish_to_weave,
     write_jsonl,
 )
@@ -247,6 +249,8 @@ class DeepLinks:
 class ExportSummary:
     path: Path
     rows: int
+    measurement_path: Path | None = None
+    measurements: int = 0
     published: int = 0
     skipped: int = 0
     evaluations: tuple[PublishedEvaluation, ...] = ()
@@ -1823,6 +1827,7 @@ class OperatorService:
         fetch_weave: bool = False,
         to_weave: bool = False,
         republish: bool = False,
+        republish_reason: str | None = None,
     ) -> ExportSummary:
         run = self.supervisor.get(run_id)
         project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
@@ -1833,18 +1838,28 @@ class OperatorService:
             weave_project=project,
             env=self.env,
         )
+        predictions = normalize_prediction_rows(rows)
+        measurements = measurement_rows(rows)
         output = out or self.repo_root / "reports" / f"{run_id}.jsonl"
-        write_jsonl(rows, output, env=self.env)
+        write_jsonl(predictions, output, env=self.env)
+        measurement_output = (
+            output.with_name(f"{output.stem}.measurements.jsonl")
+            if measurements
+            else None
+        )
+        if measurement_output is not None:
+            write_jsonl(measurements, measurement_output, env=self.env)
         published = 0
         skipped = 0
         evaluations: tuple[PublishedEvaluation, ...] = ()
         publication_failures: tuple[str, ...] = ()
         if to_weave:
             publication = publish_to_weave(
-                rows,
+                predictions,
                 project,
                 ledger_root=self.repo_root / ".fugue" / "runtime" / "publications",
                 republish=republish,
+                republish_reason=republish_reason,
                 env=self.env,
             )
             published = publication.published
@@ -1866,7 +1881,9 @@ class OperatorService:
                 )
         return ExportSummary(
             path=output,
-            rows=len(rows),
+            rows=len(predictions),
+            measurement_path=measurement_output,
+            measurements=len(measurements),
             published=published,
             skipped=skipped,
             evaluations=evaluations,
@@ -1881,7 +1898,7 @@ class OperatorService:
         rows = export_rows([path for path in sources if path.exists()])
         if paths is None:
             rows = _merge_report_rows(rows, self.repo_root / "reports")
-        trials = [row for row in rows if row.get("record_type") == "trial"]
+        trials = normalize_prediction_rows(rows)
         scored = [row for row in trials if row.get("pass") is not None]
         rewards = [_float(row.get("reward")) for row in trials]
         rewards = [value for value in rewards if value is not None]
@@ -2046,9 +2063,19 @@ class OperatorService:
                 linking_failures=tuple(
                     str(value) for value in item.get("linking_failures", []) if value
                 ),
+                publication_id=(
+                    str(item["publication_id"])
+                    if item.get("publication_id")
+                    else None
+                ),
+                revision=int(item.get("revision") or 1),
+                supersedes=(
+                    str(item["supersedes"]) if item.get("supersedes") else None
+                ),
+                active=item.get("active") is not False,
             )
             for item in run.metadata.get("evaluation_runs", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and item.get("active") is not False
         )
         return RunSummary(
             run_id=run.run_id,
@@ -2391,8 +2418,17 @@ def _merge_published_evaluations(
         if key not in replacements:
             merged.append(item)
             continue
+        replacement = replacements[key]
+        old_revision = int(item.get("revision") or 1)
+        new_revision = int(replacement.get("revision") or 1)
+        if old_revision < new_revision:
+            merged.append({**item, "active": False})
+            if key not in replaced:
+                merged.append(replacement)
+                replaced.add(key)
+            continue
         if key not in replaced:
-            merged.append(replacements[key])
+            merged.append(replacement)
             replaced.add(key)
     merged.extend(value for key, value in replacements.items() if key not in replaced)
     return merged
@@ -2435,7 +2471,8 @@ def _published_evaluation_key(value: dict[str, Any]) -> tuple[str, str, str]:
         kind = "agent"
     else:
         kind = "unknown"
-    return str(value.get("candidate_id") or ""), str(value.get("name") or ""), kind
+    identity = value.get("publication_id") or value.get("name") or ""
+    return str(value.get("candidate_id") or ""), str(identity), kind
 
 
 def _json_default(value: Any) -> Any:

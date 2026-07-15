@@ -157,6 +157,7 @@ def _parser() -> FugueArgumentParser:
     export_run.add_argument("--fetch-weave", action="store_true")
     export_run.add_argument("--to-weave", action="store_true")
     export_run.add_argument("--republish", action="store_true")
+    export_run.add_argument("--republish-reason")
     _add_common_args(export_run, json_output=True)
     package = run_actions.add_parser("package", help="Package one candidate")
     package.add_argument("candidate")
@@ -1021,6 +1022,7 @@ def _runs(args: argparse.Namespace) -> int:
             fetch_weave=args.fetch_weave,
             to_weave=args.to_weave,
             republish=args.republish,
+            republish_reason=args.republish_reason,
         )
         if args.json:
             print(as_json(summary))

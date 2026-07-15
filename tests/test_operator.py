@@ -20,7 +20,13 @@ from fugue.bench.library import (
     WorkloadSpec,
 )
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
-from fugue.bench.reproducibility import build_run_snapshot, verify_snapshot
+from fugue.bench.reproducibility import (
+    RunSnapshotV1,
+    RunSnapshotV2,
+    build_run_snapshot,
+    read_run_snapshot,
+    verify_snapshot,
+)
 from fugue.preflight import PreflightCheck
 
 
@@ -474,6 +480,54 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     assert {item["candidate_id"] for item in snapshot["planned_matrix"]} == set(
         snapshot["candidates"]
     )
+
+
+def test_snapshot_v2_records_resolved_plan_and_reads_v1(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="snapshot-v2",
+        experiment=experiment,
+    )
+    cells = plan_cells(jobs, run_id="snapshot-v2", run_name="snapshot v2")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="snapshot-v2",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    )
+
+    assert isinstance(snapshot, RunSnapshotV2)
+    assert snapshot.schema_version == 2
+    assert snapshot.source_experiment is not None
+    assert snapshot.resolved_experiment_sha256
+    assert snapshot.planned_prediction_count == len(cells)
+    assert len(snapshot.capability_plan) == len(cells)
+    assert read_run_snapshot(snapshot.to_dict()) == snapshot
+
+    legacy = {
+        key: value
+        for key, value in snapshot.to_dict().items()
+        if key
+        not in {
+            "source_experiment",
+            "resolved_experiment_sha256",
+            "capability_plan",
+            "planned_prediction_count",
+            "runtime_locks",
+            "publication_schema_version",
+        }
+    }
+    legacy["schema_version"] = 1
+    parsed = read_run_snapshot(legacy)
+    assert isinstance(parsed, RunSnapshotV1)
+    assert not isinstance(parsed, RunSnapshotV2)
 
 
 def test_operator_resolves_source_provenance_once_per_plan(

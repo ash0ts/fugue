@@ -361,7 +361,13 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     }
     first = publish_to_weave(rows, project, ledger_root=tmp_path, env=env)
     second = publish_to_weave(rows, project, ledger_root=tmp_path)
-    third = publish_to_weave(rows, project, ledger_root=tmp_path, republish=True)
+    third = publish_to_weave(
+        rows,
+        project,
+        ledger_root=tmp_path,
+        republish=True,
+        republish_reason="verify revised publication",
+    )
 
     assert (first.published, first.skipped, first.failures) == (1, 0, ())
     assert (second.published, second.skipped) == (0, 1)
@@ -396,7 +402,11 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert scores == {"reward": 1.0, "passed": True}
         assert logger.summary is True
         assert logger.failed is None
-    assert list((tmp_path / "v3").glob("**/*.json"))
+    markers = list((tmp_path / "v4").glob("**/*.json"))
+    assert len(markers) == 2
+    marker_values = [json.loads(path.read_text()) for path in markers]
+    assert sorted(value["revision"] for value in marker_values) == [1, 2]
+    assert sum(value["active"] is True for value in marker_values) == 1
     assert ("init", project, "https://api.wandb.ai") in calls
 
 
@@ -603,6 +613,33 @@ def test_direct_evaluation_projection_requires_a_completed_cell() -> None:
     assert projected[0]["dataset"] == "retrieval-dataset"
     assert projected[0]["workload_id"] == "retrieval"
 
+    normalized = export.normalize_prediction_rows(rows)
+    assert len(normalized) == 1
+    assert normalized[0]["record_type"] == "trial"
+    assert normalized[0]["source_record_type"] == "retrieval"
+    assert normalized[0]["prediction_schema_version"] == 2
+    assert normalized[0]["prediction_id"]
+    assert normalized[0]["execution_kind"] == "provider_diagnostic"
+
+
+def test_prediction_identity_ignores_scores_but_rejects_duplicate_execution() -> None:
+    row = {
+        "record_type": "trial",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "execution_kind": "agent",
+        "reward": 1.0,
+    }
+
+    first = export.normalize_prediction_rows([row])[0]
+    changed = export.normalize_prediction_rows([{**row, "reward": 0.0}])[0]
+
+    assert first["prediction_id"] == changed["prediction_id"]
+    with pytest.raises(ValueError, match="duplicate evaluation trial"):
+        export.normalize_prediction_rows([row, dict(row)])
+
 
 def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
     tmp_path: Path, monkeypatch
@@ -659,7 +696,13 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
 
     service.export_run("run-a", out=output, to_weave=True)
     service.export_run("run-a", out=output, to_weave=True)
-    service.export_run("run-a", out=output, to_weave=True, republish=True)
+    service.export_run(
+        "run-a",
+        out=output,
+        to_weave=True,
+        republish=True,
+        republish_reason="correct direct evaluation scope",
+    )
 
     evaluations = service.run_summary("run-a").evaluations
     assert len(evaluations) == 2
@@ -2123,7 +2166,7 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
     assert result.published == 0
     assert result.failures and "summary failed" in result.failures[0]
     assert isinstance(failed[0], RuntimeError)
-    assert not list((tmp_path / "v3").glob("**/*.json"))
+    assert not list((tmp_path / "v4").glob("**/*.json"))
 
 
 def test_weave_publication_rejects_duplicate_candidate_examples(
