@@ -227,6 +227,21 @@ def _parser() -> FugueArgumentParser:
         "--start-bridge", action="store_true", help="Start the local LiteLLM bridge"
     )
     operation.add_argument(
+        "--start-services",
+        action="store_true",
+        help="Start selected managed context services",
+    )
+    operation.add_argument(
+        "--service-status",
+        action="store_true",
+        help="Inspect selected managed context services without changing them",
+    )
+    operation.add_argument(
+        "--stop-services",
+        action="store_true",
+        help="Stop selected managed context services and preserve their data",
+    )
+    operation.add_argument(
         "--prepare-context",
         action="store_true",
         help="Build selected context artifacts",
@@ -556,6 +571,19 @@ def _print_checks(checks: Any) -> None:
     for check in checks:
         table.add_row(check.name, _state(check.ok), check.detail)
     CONSOLE.print(Panel(table, title="Preflight", border_style="fugue.gold"))
+
+
+def _print_service_statuses(statuses: Any) -> None:
+    table = Table("Service", "State", "Detail", box=box.SIMPLE_HEAD)
+    for status in statuses:
+        table.add_row(
+            status.service_id,
+            _state(status.ready),
+            f"{status.state}: {status.detail}",
+        )
+    if not statuses:
+        table.add_row("none", "—", "no selected context system needs a service")
+    CONSOLE.print(Panel(table, title="Managed services", border_style="fugue.gold"))
 
 
 def _print_context_preparation(records: Any) -> None:
@@ -894,6 +922,27 @@ def _setup(args: argparse.Namespace) -> int:
                 )
             )
         return 0
+    if args.start_services:
+        statuses = service.start_services(request)
+        if args.json:
+            print(as_json(statuses))
+        else:
+            _print_service_statuses(statuses)
+        return 0 if all(item.ready for item in statuses) else 1
+    if args.service_status:
+        statuses = service.service_status(request)
+        if args.json:
+            print(as_json(statuses))
+        else:
+            _print_service_statuses(statuses)
+        return 0 if all(item.ready for item in statuses) else 1
+    if args.stop_services:
+        statuses = service.stop_services(request)
+        if args.json:
+            print(as_json(statuses))
+        else:
+            _print_service_statuses(statuses)
+        return 0 if all(not item.ready for item in statuses) else 1
     if args.prepare_context:
         records = service.prepare_context(request, rebuild=args.rebuild)
         if args.json:

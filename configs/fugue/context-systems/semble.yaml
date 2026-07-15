@@ -6,13 +6,11 @@ version: semble@0.5.1
 support: experimental
 capabilities: [prepare, bind]
 deliveries: [native_mcp]
-required_commands: [uvx]
 license: Apache-2.0
 source_url: https://github.com/MinishLab/semble
 enabled_by_default: false
 config:
+  prepare:
+    copy_repository: true
   binding:
-    mcp_servers:
-      - name: semble
-        command: uvx
-        args: [--from, "semble[mcp]==0.5.1", semble]
+    managed_runtime: pinned_mcp

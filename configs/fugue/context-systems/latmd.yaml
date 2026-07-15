@@ -6,15 +6,12 @@ version: lat.md@0.11.0
 support: experimental
 capabilities: [prepare, retrieve, bind, ingest, sequence]
 deliveries: [native_mcp]
-required_commands: [npx]
 required_env: [LAT_LLM_KEY, FUGUE_ENABLE_EXPERIMENTAL_LATMD]
 license: MIT
 source_url: https://github.com/1st1/lat.md
 enabled_by_default: false
 config:
+  prepare:
+    copy_repository: true
   binding:
-    mcp_servers:
-      - name: latmd
-        command: npx
-        args: [-y, "lat.md@0.11.0", mcp]
-        cwd: .fugue-context/artifact
+    managed_runtime: pinned_mcp

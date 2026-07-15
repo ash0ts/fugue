@@ -9,6 +9,7 @@ import pytest
 from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.cli import main
 from fugue.bench.operator import OperatorService, PreviewSummary, load_env
+from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 
 
 def test_bare_fugue_is_noninteractive_when_not_attached_to_tty(capsys) -> None:
@@ -29,15 +30,71 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert set(subparsers.choices) == {"plan", "run", "runs", "analyze", "setup", "tui"}
 
 
+@pytest.mark.parametrize(
+    ("flag", "method", "ready", "state"),
+    (
+        ("--start-services", "start_services", True, "healthy"),
+        ("--service-status", "service_status", True, "healthy"),
+        ("--stop-services", "stop_services", False, "not_created"),
+    ),
+)
+def test_setup_exposes_explicit_managed_service_lifecycle(
+    flag: str,
+    method: str,
+    ready: bool,
+    state: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: list[object] = []
+    status = ManagedServiceStatus(
+        GRAPHITI_SERVICE.id,
+        state,  # type: ignore[arg-type]
+        ready,
+        "lifecycle result",
+        GRAPHITI_SERVICE.container_name,
+        GRAPHITI_SERVICE.image,
+        GRAPHITI_SERVICE.host_uri,
+    )
+
+    def lifecycle(self, request):
+        captured.append(request)
+        return (status,)
+
+    monkeypatch.setattr(OperatorService, method, lifecycle)
+
+    assert (
+        main(
+            [
+                "setup",
+                flag,
+                "--systems",
+                "graphiti",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert captured[0].systems == ("graphiti",)
+    assert GRAPHITI_SERVICE.id in capsys.readouterr().out
+
+
+def test_setup_service_actions_are_mutually_exclusive() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        main(["setup", "--start-services", "--stop-services"])
+
+
 def test_runs_packages_one_explicit_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     captured = {}
 
     def package(self, run_id, candidate_id, **kwargs):
-        captured.update(
-            {"run_id": run_id, "candidate_id": candidate_id, **kwargs}
-        )
+        captured.update({"run_id": run_id, "candidate_id": candidate_id, **kwargs})
         return SimpleNamespace(
             candidate_id=candidate_id,
             image=kwargs["image"],
@@ -114,9 +171,7 @@ def test_removed_public_commands_are_rejected(command: str) -> None:
         main([command])
 
 
-def test_run_preview_is_side_effect_free(
-    tmp_path: Path, capsys
-) -> None:
+def test_run_preview_is_side_effect_free(tmp_path: Path, capsys) -> None:
     manifest = tmp_path / "pilot.yaml"
     manifest.write_text(
         """
@@ -157,9 +212,7 @@ tasks:
     assert not (tmp_path / ".fugue").exists()
 
 
-def test_shell_environment_wins_over_blank_dotenv(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_shell_environment_wins_over_blank_dotenv(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=\nWANDB_API_KEY=dotenv-value\n")
     monkeypatch.setenv("OPENAI_API_KEY", "shell-value")
@@ -171,7 +224,9 @@ def test_shell_environment_wins_over_blank_dotenv(
     assert env["WANDB_API_KEY"] == "shell-trace"
 
 
-def test_repo_memory_smoke_preview_uses_per_workload_limits(tmp_path: Path, capsys) -> None:
+def test_repo_memory_smoke_preview_uses_per_workload_limits(
+    tmp_path: Path, capsys
+) -> None:
     repo_root = Path(__file__).resolve().parents[1]
 
     assert (

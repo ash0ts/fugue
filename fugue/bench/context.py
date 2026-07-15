@@ -34,6 +34,11 @@ from fugue.bench.context_contracts import (
     SupportLevel,
 )
 from fugue.bench.library import validate_id
+from fugue.bench.runtime_manager import (
+    prepare_runtime_repository,
+    runtime_ready,
+    runtime_spec,
+)
 
 CONTEXT_SYSTEMS_DIR = Path("configs") / "fugue" / "context-systems"
 DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v2"
@@ -104,6 +109,7 @@ class ContextBinding:
     mounts: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
     artifacts: tuple[Any, ...] = ()
+    runtime_descriptor: dict[str, Any] | None = None
 
 
 def context_behavior_definition(spec: ContextSystemSpec) -> dict[str, Any]:
@@ -233,6 +239,9 @@ class BaseContextProvider:
             )
             for name in spec.required_env
         )
+        if runtime_spec(spec.id) is not None:
+            ready, detail = runtime_ready(spec.id, runtime.repo_root)
+            checks.append(ContextCheck("managed runtime", ready, detail))
         approved = _license_approved(spec, runtime.env)
         if spec.requires_license_approval:
             checks.append(
@@ -266,21 +275,22 @@ class BaseContextProvider:
             for item in _dict_list(binding.get("mcp_servers"))
         )
         managed_runtime = str(binding.get("managed_runtime") or "") or None
-        if managed_runtime not in {None, "fugue_context"}:
+        if managed_runtime not in {None, "fugue_context", "pinned_mcp"}:
             raise ValueError(
                 f"context system {spec.id} declares unknown managed runtime "
                 f"{managed_runtime}"
             )
         if delivery == "portable" and declared_mcp_servers and not managed_runtime:
-            raise ValueError(
-                f"context system {spec.id} has no portable implementation"
-            )
+            raise ValueError(f"context system {spec.id} has no portable implementation")
         mcp_servers = declared_mcp_servers if delivery == "native_mcp" else ()
         env = {
-            str(key): str(
-                _expand_value(value, spec=spec, prepared=prepared, runtime=runtime)
-            )
-            for key, value in _dict(binding.get("env")).items()
+            **{name: f"${{{name}}}" for name in spec.required_env},
+            **{
+                str(key): str(
+                    _expand_value(value, spec=spec, prepared=prepared, runtime=runtime)
+                )
+                for key, value in _dict(binding.get("env")).items()
+            },
         }
         return ContextBinding(
             extra_instruction_paths=instruction_paths,
@@ -289,7 +299,9 @@ class BaseContextProvider:
             managed_runtime=managed_runtime,
             env=env,
             mounts=tuple(_dict_list(binding.get("mounts"))),
-            compose_files=tuple(Path(item) for item in _list(binding.get("compose_files"))),
+            compose_files=tuple(
+                Path(item) for item in _list(binding.get("compose_files"))
+            ),
             artifacts=tuple(_list(binding.get("artifacts"))),
         )
 
@@ -357,7 +369,9 @@ class AgentsMdContextProvider(BaseContextProvider):
         artifact.mkdir(parents=True, exist_ok=True)
         entries = [
             path.name + ("/" if path.is_dir() else "")
-            for path in sorted(snapshot.checkout.iterdir(), key=lambda item: item.name.lower())
+            for path in sorted(
+                snapshot.checkout.iterdir(), key=lambda item: item.name.lower()
+            )
             if path.name not in _IGNORED_DIRS
         ][:60]
         interesting = [
@@ -485,6 +499,13 @@ class LatMdContextProvider(MarkdownLogContextProvider):
         episodes = lattice / "episodes.md"
         if not episodes.exists():
             episodes.write_text("# Experiment Context\n\n")
+        shutil.copytree(
+            snapshot.checkout,
+            artifact / "repository",
+            dirs_exist_ok=True,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".git", ".fugue"),
+        )
         return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
 
     async def ingest(
@@ -526,13 +547,17 @@ class LatMdContextProvider(MarkdownLogContextProvider):
             check=True,
         )
         text = result.stdout.strip()
-        return [
-            RetrievalHit(
-                path="lat.md",
-                text=text,
-                metadata={"retriever": "lat search"},
-            )
-        ] if text else []
+        return (
+            [
+                RetrievalHit(
+                    path="lat.md",
+                    text=text,
+                    metadata={"retriever": "lat search"},
+                )
+            ]
+            if text
+            else []
+        )
 
 
 class Mem0ContextProvider(BaseContextProvider):
@@ -676,7 +701,8 @@ class CommandContextProvider(BaseContextProvider):
         command = _command(prepare.get("command"))
         if command:
             expanded = [
-                _format_token(token, spec, snapshot, artifact, runtime) for token in command
+                _format_token(token, spec, snapshot, artifact, runtime)
+                for token in command
             ]
             result = await _run_context_command(
                 expanded,
@@ -708,6 +734,22 @@ class CommandContextProvider(BaseContextProvider):
                 shutil.copytree(source, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(source, target)
+        if prepare.get("copy_repository"):
+            repository = artifact / "repository"
+            shutil.copytree(
+                snapshot.checkout,
+                repository,
+                dirs_exist_ok=True,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(".fugue"),
+            )
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+        )
         metrics = _tree_metrics(artifact)
         metrics["command"] = command
         return _prepared(spec, snapshot, runtime, metrics)
@@ -870,9 +912,7 @@ class IsolatedCommandContextProvider(CommandContextProvider):
         async with _isolated_repository(
             snapshot, runtime, prefix=f"fugue-{spec.id}-"
         ) as (isolated_snapshot, isolated_runtime):
-            return await super().prepare(
-                spec, isolated_snapshot, isolated_runtime
-            )
+            return await super().prepare(spec, isolated_snapshot, isolated_runtime)
 
 
 class AiderRepoMapContextProvider(IsolatedCommandContextProvider):
@@ -917,64 +957,32 @@ class GitNexusContextProvider(CommandContextProvider):
         snapshot: RepositorySnapshot,
         runtime: ContextRuntime,
     ) -> PreparedContext:
-        async with _isolated_repository(
-            snapshot, runtime, prefix="fugue-gitnexus-"
-        ) as (isolated_snapshot, isolated_runtime):
-            return await self._prepare_isolated(
-                spec, isolated_snapshot, isolated_runtime
-            )
-
-    async def _prepare_isolated(
-        self,
-        spec: ContextSystemSpec,
-        snapshot: RepositorySnapshot,
-        runtime: ContextRuntime,
-    ) -> PreparedContext:
         output = _require_output_dir(runtime)
         artifact = output / "artifact"
         repository = artifact / "repository"
         home = artifact / "home"
-        repository.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
-        env = dict(runtime.env)
-        env["HOME"] = home.as_posix()
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "npx",
-                "-y",
-                "gitnexus@1.6.3",
-                "analyze",
-                "--skip-agents-md",
-                "--force",
-                snapshot.checkout.as_posix(),
-            ],
-            cwd=snapshot.checkout,
-            env=env,
-            check=True,
-        )
-        index = snapshot.checkout / ".gitnexus"
-        if not index.is_dir():
-            raise FileNotFoundError("GitNexus did not create .gitnexus")
         await asyncio.to_thread(
             shutil.copytree,
             snapshot.checkout,
             repository,
             dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(".gitnexus", ".git"),
+            symlinks=True,
+            ignore=shutil.ignore_patterns(".fugue", ".gitnexus"),
         )
-        shutil.copytree(index, repository / ".gitnexus")
-        git_dir = snapshot.checkout / ".git"
-        if git_dir.is_dir():
-            shutil.copytree(git_dir, repository / ".git")
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+        )
+        index = repository / ".gitnexus"
+        if not index.is_dir():
+            raise FileNotFoundError("GitNexus did not create .gitnexus")
         registry = home / ".gitnexus" / "registry.json"
         if not registry.is_file():
             raise FileNotFoundError("GitNexus did not register the prepared repository")
-        text = registry.read_text().replace(
-            snapshot.checkout.resolve().as_posix(),
-            "/fugue-context/artifact/repository",
-        )
-        registry.write_text(text)
         return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
 
 
@@ -1053,7 +1061,9 @@ class RagContextProvider(BaseContextProvider):
                 _resolved_embedding_model(spec, runtime),
                 max(query.top_k, 20),
             )
-            ranked = dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
+            ranked = (
+                dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
+            )
             ranked = ranked[: query.top_k]
         return [
             RetrievalHit(
@@ -1118,7 +1128,9 @@ def list_context_systems(repo_root: Path | None = None) -> list[ContextSystemSpe
     return [load_context_system(path) for path in sorted(root.glob("*.yaml"))]
 
 
-def get_context_system(system_id: str, repo_root: Path | None = None) -> ContextSystemSpec:
+def get_context_system(
+    system_id: str, repo_root: Path | None = None
+) -> ContextSystemSpec:
     system_id = validate_id(system_id, kind="context system id")
     path = context_system_root(repo_root) / f"{system_id}.yaml"
     if not path.is_file():
@@ -1131,11 +1143,25 @@ def load_context_system(path: Path) -> ContextSystemSpec:
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: context system must be a mapping")
     known = {
-        "id", "title", "description", "provider", "version", "capabilities",
-        "deliveries", "serve_deliveries", "support", "required_env",
-        "required_commands", "required_packages", "runtime_image", "license",
-        "license_url", "source_url", "enabled_by_default",
-        "requires_license_approval", "config",
+        "id",
+        "title",
+        "description",
+        "provider",
+        "version",
+        "capabilities",
+        "deliveries",
+        "serve_deliveries",
+        "support",
+        "required_env",
+        "required_commands",
+        "required_packages",
+        "runtime_image",
+        "license",
+        "license_url",
+        "source_url",
+        "enabled_by_default",
+        "requires_license_approval",
+        "config",
     }
     unknown = sorted(set(raw) - known)
     if unknown:
@@ -1289,7 +1315,9 @@ async def prepare_context(
             )
             resource_metrics = await asyncio.to_thread(resources.stop)
             metrics = dict(prepared.metrics)
-            metrics.setdefault("build_latency_ms", (time.perf_counter() - started) * 1000)
+            metrics.setdefault(
+                "build_latency_ms", (time.perf_counter() - started) * 1000
+            )
             metrics.setdefault("cpu_time_sec", resource_metrics["cpu_time_sec"])
             metrics.setdefault("max_memory_mb", resource_metrics["max_memory_mb"])
             metrics.setdefault("index_size_bytes", _tree_metrics(temp_dir)["bytes"])
@@ -1444,9 +1472,7 @@ def checkout_repository(
         if checkout.is_dir() and marker.is_file() and not rebuild:
             data = json.loads(marker.read_text())
             if data.get("repo") == repo and data.get("commit") == commit:
-                return RepositorySnapshot(
-                    task_id, repo, commit, checkout, dataset_id
-                )
+                return RepositorySnapshot(task_id, repo, commit, checkout, dataset_id)
         temp = Path(tempfile.mkdtemp(prefix=f".{identity}.", dir=checkout_root))
         try:
             url = (
@@ -1455,10 +1481,19 @@ def checkout_repository(
                 else f"https://github.com/{repo}.git"
             )
             subprocess.run(
-                ["git", "clone", "--no-tags", "--filter=blob:none", url, temp.as_posix()],
+                [
+                    "git",
+                    "clone",
+                    "--no-tags",
+                    "--filter=blob:none",
+                    url,
+                    temp.as_posix(),
+                ],
                 check=True,
             )
-            subprocess.run(["git", "checkout", "--detach", commit], cwd=temp, check=True)
+            subprocess.run(
+                ["git", "checkout", "--detach", commit], cwd=temp, check=True
+            )
             subprocess.run(["git", "remote", "remove", "origin"], cwd=temp, check=False)
             (temp / ".fugue-snapshot.json").write_text(
                 json.dumps(
@@ -1672,9 +1707,9 @@ def _update_context_index(
                 "embedding_model"
             ),
         }
-        raw.setdefault("latest", {}).setdefault(system_id, {})[
-            snapshot.task_id
-        ] = prepared.cache_key
+        raw.setdefault("latest", {}).setdefault(system_id, {})[snapshot.task_id] = (
+            prepared.cache_key
+        )
         temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         temp.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
         os.replace(temp, path)
@@ -1820,12 +1855,8 @@ def _mem0_config(
         "embedder": {
             "provider": "huggingface",
             "config": {
-                "model": spec.config.get(
-                    "embedding_model", "BAAI/bge-small-en-v1.5"
-                ),
-                "embedding_dims": int(
-                    spec.config.get("embedding_dimensions", 384)
-                ),
+                "model": spec.config.get("embedding_model", "BAAI/bge-small-en-v1.5"),
+                "embedding_dims": int(spec.config.get("embedding_dimensions", 384)),
             },
         },
         "vector_store": {
@@ -1891,13 +1922,14 @@ def _graphiti(spec: ContextSystemSpec, runtime: ContextRuntime) -> Any:
 
             self.model = TextEmbedding(
                 model_name=str(
-                    spec.config.get("embedding_model")
-                    or "BAAI/bge-small-en-v1.5"
+                    spec.config.get("embedding_model") or "BAAI/bge-small-en-v1.5"
                 )
             )
 
         async def create(self, input_data: Any) -> list[float]:
-            values = [str(input_data)] if isinstance(input_data, str) else list(input_data)
+            values = (
+                [str(input_data)] if isinstance(input_data, str) else list(input_data)
+            )
             vectors = await asyncio.to_thread(lambda: list(self.model.embed(values)))
             return vectors[0].tolist()
 
@@ -2221,8 +2253,14 @@ def _bm25(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             frequency = frequencies[token]
             if not frequency:
                 continue
-            idf = math.log(1 + (len(documents) - document_frequency[token] + 0.5) / (document_frequency[token] + 0.5))
-            denominator = frequency + 1.5 * (1 - 0.75 + 0.75 * len(document) / max(avg_length, 1))
+            idf = math.log(
+                1
+                + (len(documents) - document_frequency[token] + 0.5)
+                / (document_frequency[token] + 0.5)
+            )
+            denominator = frequency + 1.5 * (
+                1 - 0.75 + 0.75 * len(document) / max(avg_length, 1)
+            )
             score += idf * (frequency * 2.5 / denominator)
         if score:
             scored.append({**chunk, "score": score})
@@ -2243,9 +2281,7 @@ def _canonical_chunks(chunks: list[dict[str, Any]]) -> bytes:
     )
 
 
-def _resolved_embedding_model(
-    spec: ContextSystemSpec, runtime: ContextRuntime
-) -> str:
+def _resolved_embedding_model(spec: ContextSystemSpec, runtime: ContextRuntime) -> str:
     return str(
         runtime.env.get("FUGUE_EMBEDDING_MODEL")
         or spec.config.get("embedding_model")
@@ -2407,10 +2443,15 @@ def _build_lance_index(
             batch_size=_DENSE_BATCH_SIZE,
         )
     )
-    if len(vectors) != len(chunks) or any(len(vector) != dimensions for vector in vectors):
+    if len(vectors) != len(chunks) or any(
+        len(vector) != dimensions for vector in vectors
+    ):
         raise RuntimeError("embedding output did not match the dense artifact contract")
     rows = [
-        {**chunk, "vector": vector.tolist() if hasattr(vector, "tolist") else list(vector)}
+        {
+            **chunk,
+            "vector": vector.tolist() if hasattr(vector, "tolist") else list(vector),
+        }
         for chunk, vector in zip(chunks, vectors, strict=True)
     ]
     database = lancedb.connect((artifact / "lancedb").as_posix())
@@ -2451,7 +2492,9 @@ def _reciprocal_rank_fusion(
             scores[item_id] += 1.0 / (k + rank)
     return [
         {**values[item_id], "score": score}
-        for item_id, score in sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))
+        for item_id, score in sorted(
+            scores.items(), key=lambda pair: (-pair[1], pair[0])
+        )
     ]
 
 

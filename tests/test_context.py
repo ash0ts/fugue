@@ -16,9 +16,11 @@ from fugue.bench.context import (
     AiderRepoMapContextProvider,
     ContextRuntime,
     ContextSystemSpec,
+    PreparedContext,
     RepositorySnapshot,
     RetrievalHit,
     RetrievalQuery,
+    TrialContext,
     _command_env,
     _dense_artifact_contract,
     _materialize_dense_artifact,
@@ -28,6 +30,7 @@ from fugue.bench.context import (
     _repository_chunks,
     _resolved_embedding_model,
     _run_context_command,
+    bind_context,
     context_cache_key,
     get_context_system,
     list_context_systems,
@@ -172,6 +175,35 @@ def test_mem0_declares_and_uses_the_shared_fastembed_runtime(
     ]
 
 
+def test_graphiti_binding_passes_required_env_by_reference(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = get_context_system("graphiti", repo_root)
+    assert spec.support == "experimental"
+    prepared = PreparedContext("graphiti", "cache", tmp_path, {}, {})
+    runtime = ContextRuntime(
+        repo_root,
+        tmp_path / "cache",
+        {
+            "FUGUE_GRAPHITI_URI": "bolt://127.0.0.1:7687",
+            "FUGUE_GRAPHITI_USER": "neo4j",
+            "FUGUE_GRAPHITI_PASSWORD": "private-password",
+        },
+    )
+
+    binding = asyncio.run(
+        bind_context(
+            spec,
+            prepared,
+            TrialContext("experiment", "workload", "task", "harness"),
+            runtime,
+            delivery="native_mcp",
+        )
+    )
+
+    assert binding.env == {name: f"${{{name}}}" for name in spec.required_env}
+    assert "private-password" not in json.dumps(binding.env)
+
+
 def test_context_cache_is_content_addressed_and_reused(tmp_path: Path) -> None:
     runtime = ContextRuntime(tmp_path, tmp_path / "cache", {})
     spec = get_context_system("agentsmd", tmp_path)
@@ -188,7 +220,9 @@ def test_context_cache_is_content_addressed_and_reused(tmp_path: Path) -> None:
     assert first.metrics["max_memory_mb"] is None or first.metrics["max_memory_mb"] > 0
     assert first.metrics["builder_cost_usd"] is None
     assert first.metrics["index_size_bytes"] > 0
-    assert json.loads((first.path / "context-manifest.json").read_text())["snapshot"] == {
+    assert json.loads((first.path / "context-manifest.json").read_text())[
+        "snapshot"
+    ] == {
         "commit": "abc123",
         "dataset_id": "",
         "repo": "fixture/repo",
@@ -206,9 +240,7 @@ def test_failed_context_build_is_not_published(tmp_path: Path) -> None:
         capabilities=frozenset({"prepare"}),
         deliveries=frozenset({"portable"}),
         config={
-            "prepare": {
-                "command": [sys.executable, "-c", "raise RuntimeError('boom')"]
-            }
+            "prepare": {"command": [sys.executable, "-c", "raise RuntimeError('boom')"]}
         },
     )
     runtime = ContextRuntime(tmp_path, tmp_path / "cache", {})
@@ -434,9 +466,7 @@ def test_isolated_command_does_not_mutate_the_source_checkout(tmp_path: Path) ->
         )
     )
 
-    assert (prepared.path / "artifact" / "openwiki" / "page.md").read_text() == (
-        "wiki"
-    )
+    assert (prepared.path / "artifact" / "openwiki" / "page.md").read_text() == ("wiki")
     assert (prepared.path / "artifact" / "AGENTS.md").read_text() == "agents"
     assert not (source / "openwiki").exists()
     assert not (source / "AGENTS.md").exists()
@@ -536,18 +566,16 @@ def test_dense_artifact_is_shared_by_dense_and_hybrid(
     assert (first / "lancedb" / "data").read_bytes() == (
         second / "lancedb" / "data"
     ).read_bytes()
-    dense_key, _ = _dense_artifact_contract(
-        chunks, "BAAI/bge-small-en-v1.5", 384
-    )
-    hybrid_key, _ = _dense_artifact_contract(
-        chunks, "BAAI/bge-small-en-v1.5", 384
-    )
+    dense_key, _ = _dense_artifact_contract(chunks, "BAAI/bge-small-en-v1.5", 384)
+    hybrid_key, _ = _dense_artifact_contract(chunks, "BAAI/bge-small-en-v1.5", 384)
     changed_key, _ = _dense_artifact_contract(chunks, "other/model", 384)
     assert dense_key == hybrid_key
     assert changed_key != dense_key
 
 
-def test_embedding_model_override_is_used_by_the_provider_contract(tmp_path: Path) -> None:
+def test_embedding_model_override_is_used_by_the_provider_contract(
+    tmp_path: Path,
+) -> None:
     spec = get_context_system("rag-dense", tmp_path)
     runtime = ContextRuntime(
         tmp_path,
@@ -716,23 +744,19 @@ def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
         output_dir=output,
     )
 
-    real_run = subprocess.run
-
-    def fake_run(command, **kwargs):
-        if command[0] == "git":
-            return real_run(command, **kwargs)
-        isolated_checkout = Path(kwargs["cwd"])
-        (isolated_checkout / ".gitnexus").mkdir()
-        (isolated_checkout / ".gitnexus" / "graph.json").write_text("{}")
-        env = kwargs["env"]
-        registry = Path(env["HOME"]) / ".gitnexus" / "registry.json"
+    def fake_prepare_runtime(system_id, *, repo_root, artifact, env):
+        assert system_id == "gitnexus"
+        repository = artifact / "repository"
+        (repository / ".gitnexus").mkdir()
+        (repository / ".gitnexus" / "graph.json").write_text("{}")
+        registry = artifact / "home" / ".gitnexus" / "registry.json"
         registry.parent.mkdir(parents=True)
-        registry.write_text(
-            json.dumps({isolated_checkout.resolve().as_posix(): {"ready": True}})
-        )
-        return subprocess.CompletedProcess(command, 0)
+        registry.write_text(json.dumps({"/workspace/repository": {"ready": True}}))
 
-    monkeypatch.setattr("fugue.bench.context.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "fugue.bench.context.prepare_runtime_repository",
+        fake_prepare_runtime,
+    )
     provider = load_provider(spec)
     prepared = asyncio.run(
         provider.prepare(
@@ -746,7 +770,7 @@ def test_gitnexus_artifact_contains_container_valid_repository_and_registry(
     assert (repository / "src" / "app.py").is_file()
     assert (repository / ".gitnexus" / "graph.json").is_file()
     registry = prepared.path / "artifact" / "home" / ".gitnexus" / "registry.json"
-    assert "/fugue-context/artifact/repository" in registry.read_text()
+    assert "/workspace/repository" in registry.read_text()
     assert checkout.as_posix() not in registry.read_text()
     assert not (checkout / ".gitnexus").exists()
 
@@ -810,8 +834,7 @@ cases:
 
 def test_direct_workload_rows_append_safely_across_workers(tmp_path: Path) -> None:
     batches = [
-        [{"worker": worker, "row": row} for row in range(100)]
-        for worker in range(8)
+        [{"worker": worker, "row": row} for row in range(100)] for worker in range(8)
     ]
     with ThreadPoolExecutor(max_workers=4) as pool:
         paths = list(pool.map(lambda rows: _write_rows(tmp_path, "run", rows), batches))
@@ -920,10 +943,7 @@ def test_portable_context_client_probes_and_records_bounded_queries(
     assert context_client.main(["probe"]) == 0
     assert json.loads(capsys.readouterr().out)["ok"] is True
     assert (
-        context_client.main(
-            ["query", "--text", "find the parser", "--top-k", "3"]
-        )
-        == 0
+        context_client.main(["query", "--text", "find the parser", "--top-k", "3"]) == 0
     )
     response = json.loads(capsys.readouterr().out)
     assert response["hits"][0]["path"] == "src/app.py"

@@ -6,9 +6,10 @@ version: graphiti-core@0.29.2
 required_packages: [graphiti_core, fastembed]
 capabilities: [prepare, retrieve, bind, ingest, sequence]
 deliveries: [portable, native_mcp]
+support: experimental
 license: Apache-2.0
 source_url: https://github.com/getzep/graphiti
-required_env: [FUGUE_GRAPHITI_URI]
+required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
 enabled_by_default: false
 config:
   backend: graphiti

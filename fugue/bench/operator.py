@@ -74,7 +74,18 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
 from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
+from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.services import (
+    GRAPHITI_SERVICE_ID,
+    ManagedServiceStatus,
+    managed_service_environment,
+    managed_service_statuses,
+    managed_services_for_systems,
+    start_managed_services,
+    stop_managed_services,
+    without_managed_service_environment,
+)
 from fugue.bench.sources import (
     SkillInspection,
     SkillLockEntry,
@@ -444,6 +455,7 @@ class OperatorService:
         from fugue.preflight import PreflightCheck, run_preflight
 
         env = self.env
+        external_graphiti_uri = bool(env.get("FUGUE_GRAPHITI_URI", "").strip())
         selected = experiment or self.experiment(request.experiment_id)
         selected = _experiment_with_request_overrides(selected, request)
         target_model = select_model(
@@ -522,6 +534,8 @@ class OperatorService:
                 if variant.enabled
             ]
         )
+        if "graphiti" in systems:
+            env = managed_service_environment(env, repo_root=self.repo_root)
         runtime = ContextRuntime(
             repo_root=self.repo_root,
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
@@ -537,6 +551,19 @@ class OperatorService:
                         item.detail,
                     )
                 )
+        service_specs = tuple(
+            service
+            for service in managed_services_for_systems(systems)
+            if not (external_graphiti_uri and service.id == GRAPHITI_SERVICE_ID)
+        )
+        for service in managed_service_statuses(service_specs):
+            checks.append(
+                PreflightCheck(
+                    f"managed service {service.service_id}",
+                    service.ready,
+                    f"{service.state}: {service.detail}",
+                )
+            )
         if preset.id == "full":
             for workload in select_workloads(selected, preset, None):
                 if not workload.dataset:
@@ -595,6 +622,53 @@ class OperatorService:
             ),
         )
 
+    def service_status(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> tuple[ManagedServiceStatus, ...]:
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        specs = managed_services_for_systems(
+            _selected_request_system_ids(selected, request)
+        )
+        return managed_service_statuses(specs)
+
+    def start_services(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> tuple[ManagedServiceStatus, ...]:
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        specs = managed_services_for_systems(
+            _selected_request_system_ids(selected, request)
+        )
+        return start_managed_services(
+            specs,
+            repo_root=self.repo_root,
+            env=self.env,
+        )
+
+    def stop_services(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+    ) -> tuple[ManagedServiceStatus, ...]:
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        specs = managed_services_for_systems(
+            _selected_request_system_ids(selected, request)
+        )
+        return stop_managed_services(
+            specs,
+            repo_root=self.repo_root,
+            env=self.env,
+        )
+
     def prepare_context(
         self,
         request: ExperimentRequest,
@@ -606,6 +680,8 @@ class OperatorService:
         selected = experiment or self.experiment(request.experiment_id)
         selected = _experiment_with_request_overrides(selected, request)
         env = self.env
+        if "graphiti" in _selected_request_system_ids(selected, request):
+            env = managed_service_environment(env, repo_root=self.repo_root)
         env["FUGUE_BUILDER_MODEL"] = (
             request.builder_model
             or selected.builder_model
@@ -637,7 +713,9 @@ class OperatorService:
             materialize_manifest_dataset(
                 load_manifest(manifest_path),
                 self.repo_root,
-                rebuild=rebuild,
+                # Dataset paths are content-addressed. --rebuild invalidates
+                # prepared context, never an already verified dataset snapshot.
+                rebuild=False,
             )
         targets = _preparation_targets(
             experiment=selected,
@@ -656,11 +734,14 @@ class OperatorService:
         )
         records: list[ContextPreparation] = []
         checkouts: dict[tuple[str, str, str], RepositorySnapshot] = {}
+        prepared_runtimes: set[str] = set()
         for system_id, snapshot in targets:
             spec = get_context_system(system_id, self.repo_root)
+            checks = asyncio.run(preflight_context(spec, runtime, phase="host"))
             failed = [
                 check
-                for check in asyncio.run(preflight_context(spec, runtime, phase="host"))
+                for check in checks
+                if check.name != "managed runtime"
                 if not check.ok and check.severity == "required"
             ]
             if failed:
@@ -673,6 +754,14 @@ class OperatorService:
                     )
                 )
                 continue
+            if (
+                runtime_spec(system_id) is not None
+                and system_id not in prepared_runtimes
+            ):
+                ready, _ = runtime_ready(system_id, self.repo_root)
+                if rebuild or not ready:
+                    prepare_runtime(system_id, repo_root=self.repo_root)
+                prepared_runtimes.add(system_id)
             checkout = snapshot
             if system_id != "none" and checkout.checkout == self.repo_root:
                 snapshot_key = (snapshot.task_id, snapshot.repo, snapshot.commit)
@@ -1000,6 +1089,8 @@ class OperatorService:
         selected = experiment or self.experiment(request.experiment_id)
         selected = _experiment_with_request_overrides(selected, request)
         env = self.env
+        if "graphiti" in _selected_request_system_ids(selected, request):
+            env = managed_service_environment(env, repo_root=self.repo_root)
         env |= trace_env_defaults(env)
         if request.model:
             env["FUGUE_MODEL"] = request.model
@@ -1170,8 +1261,6 @@ class OperatorService:
         )
         builder_model = env.get("FUGUE_BUILDER_MODEL") or selected_model
         route = resolve_model_route(builder_model, env)
-        direct_env = dict(env)
-        direct_env["FUGUE_MODEL"] = selected_model
         attempts = (
             request.n_attempts
             or preset_workload_int(preset, workload.id, "n_attempts")
@@ -1186,13 +1275,20 @@ class OperatorService:
             or workload.n_tasks
             or preset.n_tasks
         )
-        runtime = ContextRuntime(
-            repo_root=self.repo_root,
-            cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
-            env=env,
-        )
         jobs: list[RenderedJob] = []
         for system_id in systems:
+            system_env = (
+                managed_service_environment(env, repo_root=self.repo_root)
+                if system_id == "graphiti"
+                else without_managed_service_environment(env)
+            )
+            direct_env = dict(system_env)
+            direct_env["FUGUE_MODEL"] = selected_model
+            runtime = ContextRuntime(
+                repo_root=self.repo_root,
+                cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
+                env=system_env,
+            )
             spec = get_context_system(system_id, self.repo_root)
             delivery = next(
                 (
@@ -1203,7 +1299,7 @@ class OperatorService:
                 "portable",
             )
             license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
-            license_blocked = spec.requires_license_approval and env.get(
+            license_blocked = spec.requires_license_approval and system_env.get(
                 license_env, ""
             ).lower() not in {"1", "true", "yes"}
             resolution = resolve_context_capabilities(
@@ -2023,13 +2119,9 @@ class OperatorService:
                 ),
                 error=item.get("error"),
                 context_delivery=str(item.get("context_delivery") or "portable"),
-                benchmark_outcome=str(
-                    item.get("benchmark_outcome") or "unscored"
-                ),
+                benchmark_outcome=str(item.get("benchmark_outcome") or "unscored"),
                 reward=(
-                    float(item["reward"])
-                    if item.get("reward") is not None
-                    else None
+                    float(item["reward"]) if item.get("reward") is not None else None
                 ),
             )
             for item in records
@@ -2063,9 +2155,7 @@ class OperatorService:
                     str(value) for value in item.get("linking_failures", []) if value
                 ),
                 publication_id=(
-                    str(item["publication_id"])
-                    if item.get("publication_id")
-                    else None
+                    str(item["publication_id"]) if item.get("publication_id") else None
                 ),
                 revision=int(item.get("revision") or 1),
                 supersedes=(
@@ -2250,6 +2340,35 @@ def selected_system_ids(
         variant.context.system_id for variant in experiment.variants if variant.enabled
     ]
     return list(dict.fromkeys(values)) or None
+
+
+def _selected_request_system_ids(
+    experiment: ExperimentSpec,
+    request: ExperimentRequest,
+) -> tuple[str, ...]:
+    preset = select_preset(experiment, request.preset)
+    workloads = select_workloads(
+        experiment,
+        preset,
+        list(request.workloads) or None,
+    ) or [
+        WorkloadSpec(
+            id="harbor",
+            runner="harbor",
+            manifest=request.manifest or experiment.manifest,
+        )
+    ]
+    requested = list(request.systems) or (
+        [variant.context.system_id for variant in experiment.variants]
+        if request.variants
+        else None
+    )
+    values: list[str] = []
+    for workload in workloads:
+        values.extend(
+            selected_system_ids(experiment, workload, preset, requested) or []
+        )
+    return tuple(dict.fromkeys(values))
 
 
 def _request_for_experiment(experiment: ExperimentSpec) -> ExperimentRequest:
@@ -2646,9 +2765,7 @@ def _run_job_paths(root: Path, run: ManagedRun) -> list[Path]:
     if not configured:
         # Schema-v1 runs created before exact job paths were recorded can only
         # fall back to the shared parent. New runs must never use this branch.
-        configured = [
-            Path(str(path)) for path in run.metadata.get("jobs_dirs", [])
-        ]
+        configured = [Path(str(path)) for path in run.metadata.get("jobs_dirs", [])]
     return list(dict.fromkeys(_resolve(root, path) for path in configured))
 
 

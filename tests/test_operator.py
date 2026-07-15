@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import fugue.bench.operator as operator_module
 from fugue.bench.ai import AssetDraft
 from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
 from fugue.bench.export import PublicationResult, PublishedEvaluation
@@ -27,6 +28,7 @@ from fugue.bench.reproducibility import (
     read_run_snapshot,
     verify_snapshot,
 )
+from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 from fugue.preflight import PreflightCheck
 
 
@@ -114,6 +116,86 @@ evidence:
     return OperatorService(tmp_path, tmp_path / ".env")
 
 
+def test_managed_service_lifecycle_selects_only_requested_context_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo", systems=("none", "graphiti"))
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    status = ManagedServiceStatus(
+        GRAPHITI_SERVICE.id,
+        "healthy",
+        True,
+        "container is healthy",
+        GRAPHITI_SERVICE.container_name,
+        GRAPHITI_SERVICE.image,
+        GRAPHITI_SERVICE.host_uri,
+    )
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.managed_service_statuses",
+        lambda specs: calls.append(("status", tuple(specs))) or (status,),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.start_managed_services",
+        lambda specs, **kwargs: calls.append(("start", tuple(specs))) or (status,),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.stop_managed_services",
+        lambda specs, **kwargs: calls.append(("stop", tuple(specs))) or (status,),
+    )
+
+    assert service.service_status(request) == (status,)
+    assert service.start_services(request) == (status,)
+    assert service.stop_services(request) == (status,)
+    assert calls == [
+        ("status", (GRAPHITI_SERVICE,)),
+        ("start", (GRAPHITI_SERVICE,)),
+        ("stop", (GRAPHITI_SERVICE,)),
+    ]
+
+
+def test_external_graphiti_uri_does_not_require_managed_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/graphiti.yaml").write_text(
+        """
+id: graphiti
+title: Graphiti
+provider: fugue.bench.context:EmptyContextProvider
+version: test
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable]
+support: experimental
+required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
+"""
+    )
+    with (tmp_path / ".env").open("a") as handle:
+        handle.write(
+            "FUGUE_GRAPHITI_URI=bolt+s://graph.example.test\n"
+            "FUGUE_GRAPHITI_USER=neo4j\n"
+            "FUGUE_GRAPHITI_PASSWORD=external-password\n"
+        )
+    observed: list[tuple[object, ...]] = []
+    monkeypatch.setattr("fugue.preflight.run_preflight", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "fugue.bench.operator.managed_service_statuses",
+        lambda specs: observed.append(tuple(specs)) or (),
+    )
+
+    checks = service.preflight(
+        ExperimentRequest(experiment_id="demo", systems=("graphiti",)),
+        live=False,
+    )
+
+    assert observed == [()]
+    assert not any(check.name.startswith("managed service") for check in checks)
+    assert all(
+        check.ok for check in checks if check.name.startswith("context graphiti: env:")
+    )
+
+
 def test_operator_status_masks_secrets_and_links_to_agents(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     status = service.status(ExperimentRequest(experiment_id="demo"))
@@ -183,6 +265,36 @@ def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
         )
 
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_context_rebuild_keeps_content_addressed_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    rebuild_values: list[bool] = []
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda manifest, repo_root, *, rebuild=False: rebuild_values.append(rebuild),
+    )
+    experiment = replace(
+        service.experiment("demo"),
+        workloads=[
+            WorkloadSpec(
+                id="coding",
+                runner="harbor",
+                manifest=Path("datasets/demo.yaml"),
+            )
+        ],
+    )
+
+    service.prepare_context(
+        service.request_for_experiment(experiment),
+        rebuild=True,
+        experiment=experiment,
+    )
+
+    assert rebuild_values == [False]
 
 
 def test_generated_evaluation_preflight_requires_explicit_judge(
@@ -289,9 +401,7 @@ def test_execute_run_persists_snapshot_before_first_cell(
         assert config_paths
         observed.append("validate")
 
-    monkeypatch.setattr(
-        "fugue.bench.operator.validate_harbor_job_configs", validate
-    )
+    monkeypatch.setattr("fugue.bench.operator.validate_harbor_job_configs", validate)
 
     def runner(command, **kwargs):
         lock_path = tmp_path / ".fugue/runtime" / run_id / "input-lock.json"

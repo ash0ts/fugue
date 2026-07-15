@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
+from fugue.bench import services
 from fugue.bench.job_config import render_jobs
 from fugue.bench.library import (
     ContextSelection,
@@ -15,6 +17,94 @@ from fugue.bench.library import (
     save_skill,
 )
 from fugue.bench.manifest import load_manifest
+from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+
+
+def test_graphiti_job_uses_container_uri_without_serializing_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    context_path = tmp_path / "configs/fugue/context-systems/graphiti.yaml"
+    context_path.parent.mkdir(parents=True)
+    context_path.write_text(
+        """
+id: graphiti
+title: Graphiti
+provider: fugue.bench.context:EmptyContextProvider
+version: test
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable, native_mcp]
+required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
+config:
+  binding:
+    managed_runtime: fugue_context
+    mcp_servers:
+      - {name: fugue-memory, command: python, args: [-m, fugue.context_server]}
+"""
+    )
+    credentials_dir = tmp_path / ".fugue/runtime/services" / GRAPHITI_SERVICE.id
+    credentials_dir.mkdir(parents=True)
+    credentials_path = credentials_dir / "credentials.json"
+    credentials_path.write_text(
+        json.dumps(
+            {
+                "FUGUE_GRAPHITI_USER": "neo4j",
+                "FUGUE_GRAPHITI_PASSWORD": "private-password",
+            }
+        )
+    )
+    credentials_path.chmod(0o600)
+    monkeypatch.setattr(
+        services,
+        "managed_service_status",
+        lambda spec: ManagedServiceStatus(
+            spec.id,
+            "healthy",
+            True,
+            "container is healthy",
+            spec.container_name,
+            spec.image,
+            spec.host_uri,
+        ),
+    )
+    env = services.managed_service_environment({}, repo_root=tmp_path)
+    experiment = ExperimentSpec(
+        id="graphiti-a",
+        title="Graphiti A",
+        variants=[
+            FeatureVariant(
+                id="graphiti",
+                label="Graphiti",
+                context=ContextSelection(system_id="graphiti"),
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env=env,
+        model="openai/gpt-5",
+        run_id="unit",
+    )
+
+    agent_env = job.config["agents"][0]["env"]
+    assert agent_env["FUGUE_GRAPHITI_URI"] == "${FUGUE_GRAPHITI_URI}"
+    assert agent_env["FUGUE_GRAPHITI_PASSWORD"] == "${FUGUE_GRAPHITI_PASSWORD}"
+    assert job.env["FUGUE_GRAPHITI_URI"] == GRAPHITI_SERVICE.container_uri
+    assert job.env["FUGUE_GRAPHITI_PASSWORD"] == "private-password"
+    assert "private-password" not in job.config_path.read_text()
 
 
 def test_render_jobs_writes_harbor_config_without_secrets(tmp_path: Path):
@@ -94,15 +184,16 @@ tasks:
     assert config["agents"][0]["kwargs"] == {"temperature": 0}
     assert config["agents"][0]["env"] == {"FUGUE_AGENT_MODE": "strict"}
     instruction_paths = config["extra_instruction_paths"]
-    assert instruction_paths[0] == ".fugue/runtime/unit/context-instructions/agentsmd.md"
+    assert (
+        instruction_paths[0] == ".fugue/runtime/unit/context-instructions/agentsmd.md"
+    )
     assert instruction_paths[-1] == "configs/fugue/prompts/prompt-a.md"
     assert any(path.endswith("/artifact/AGENTS.md") for path in instruction_paths)
     assert config["environment"]["override_memory_mb"] == 4096
     assert config["environment"]["type"] == "docker"
     assert config["artifacts"] == ["/logs/artifacts"]
     assert any(
-        mount["target"] == "/fugue-context"
-        for mount in config["environment"]["mounts"]
+        mount["target"] == "/fugue-context" for mount in config["environment"]["mounts"]
     )
     assert config["verifier"] == {"type": "pytest"}
     assert config["fugue"]["experiment_id"] == "experiment-a"
@@ -208,9 +299,7 @@ tasks:
   - {id: task-a}
 """
     )
-    integration = (
-        tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
-    )
+    integration = tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
     integration.parent.mkdir(parents=True)
     integration.write_text(
         """
@@ -277,9 +366,7 @@ tasks:
   - {id: task-a}
 """
     )
-    integration = (
-        tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
-    )
+    integration = tmp_path / "configs" / "fugue" / "integrations" / "retrieval.yaml"
     integration.parent.mkdir(parents=True)
     integration.write_text(
         """
@@ -485,9 +572,7 @@ tasks:
   - {id: task-a}
 """
     )
-    integration = (
-        tmp_path / "configs" / "fugue" / "integrations" / "stdio.yaml"
-    )
+    integration = tmp_path / "configs" / "fugue" / "integrations" / "stdio.yaml"
     integration.parent.mkdir(parents=True)
     integration.write_text(
         """
@@ -537,8 +622,7 @@ interfaces:
     assert server["args"][-4:] == ["--", "python", "-m", "example_server"]
     assert agent["env"]["PYTHONPATH"] == "/fugue-src"
     assert any(
-        mount["target"] == "/fugue-src/fugue"
-        and mount["read_only"] is True
+        mount["target"] == "/fugue-src/fugue" and mount["read_only"] is True
         for mount in job.config["environment"]["mounts"]
     )
 
@@ -615,7 +699,9 @@ tasks:
 
     assert len(jobs) == 2
     assert jobs[0].candidate_id == jobs[1].candidate_id
-    assert jobs[0].resolved_candidate.definition == jobs[1].resolved_candidate.definition
+    assert (
+        jobs[0].resolved_candidate.definition == jobs[1].resolved_candidate.definition
+    )
     assert (
         jobs[0].resolved_candidate.execution_fingerprint
         != jobs[1].resolved_candidate.execution_fingerprint
@@ -697,9 +783,7 @@ tasks:
     agent = job.config["agents"][0]
     assert "mcp_servers" not in agent
     assert agent["env"]["FUGUE_CONTEXT_COMMAND"] == "fugue-context"
-    assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == (
-        "http://fugue-context:8001"
-    )
+    assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == ("http://fugue-context:8001")
     assert job.context_delivery == "portable"
     assert job.config["fugue"]["context_delivery"] == "portable"
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
@@ -732,7 +816,9 @@ tasks:
     assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
     assert "fugue.context_server" in service["command"]
     assert "8001" in service["healthcheck"]["test"][-1]
-    assert next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
+    assert (
+        next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
+    )
     assert "network_mode" not in service
     assert "main" not in compose["services"]
     client_mount = next(
@@ -800,9 +886,7 @@ interfaces:
 
     assert job.applicable is True
     assert "mcp_servers" not in job.config["agents"][0]
-    assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == (
-        "fugue-context"
-    )
+    assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == ("fugue-context")
     context_path, integration_path = [
         tmp_path / path for path in job.config["environment"]["extra_docker_compose"]
     ]
@@ -835,9 +919,7 @@ tasks:
             FeatureVariant(
                 id="rag",
                 label="RAG",
-                    context=ContextSelection(
-                        system_id="rag-bm25", delivery="native_mcp"
-                    ),
+                context=ContextSelection(system_id="rag-bm25", delivery="native_mcp"),
             )
         ],
     )
@@ -908,9 +990,7 @@ tasks:
 
     assert job.applicable is True
     assert "mcp_servers" not in job.config["agents"][0]
-    assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == (
-        "fugue-context"
-    )
+    assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == ("fugue-context")
 
 
 def test_unreviewed_harness_native_mcp_fails_closed(tmp_path: Path) -> None:
@@ -931,9 +1011,7 @@ tasks:
             FeatureVariant(
                 id="rag",
                 label="RAG",
-                context=ContextSelection(
-                    system_id="rag-bm25", delivery="native_mcp"
-                ),
+                context=ContextSelection(system_id="rag-bm25", delivery="native_mcp"),
             )
         ],
     )
@@ -973,9 +1051,7 @@ tasks:
             FeatureVariant(
                 id="rag",
                 label="RAG",
-                    context=ContextSelection(
-                        system_id="rag-bm25", delivery="native_mcp"
-                    ),
+                context=ContextSelection(system_id="rag-bm25", delivery="native_mcp"),
             )
         ],
     )
@@ -1044,9 +1120,7 @@ tasks:
     for job in jobs:
         agent = job.config["agents"][0]
         assert agent["env"]["FUGUE_CONTEXT_COMMAND"] == "fugue-context"
-        assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == (
-            "http://fugue-context:8001"
-        )
+        assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == ("http://fugue-context:8001")
         assert "mcp_servers" not in agent
         assert "must-not-serialize" not in json.dumps(job.config)
 
@@ -1085,7 +1159,9 @@ tasks:
     )
 
     assert job.applicable is False
-    assert job.skip_reason == "context system codegraph does not support portable delivery"
+    assert (
+        job.skip_reason == "context system codegraph does not support portable delivery"
+    )
 
 
 def test_metadata_trace_policy_rejects_unsupported_harness(tmp_path: Path):

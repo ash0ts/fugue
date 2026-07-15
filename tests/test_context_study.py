@@ -70,7 +70,6 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
             and "retrieve" in spec.capabilities
         ):
             assert (spec.config.get("retrieve") or {}).get("command"), spec.id
-
     targets = _preparation_targets(
         experiment=experiment,
         workloads=experiment.workloads,
@@ -81,6 +80,44 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     )
     assert targets
     assert {system_id for system_id, _ in targets} <= set(smoke.systems)
+
+
+def test_pdf_skill_presets_are_controlled_and_study_plans_72_cells(
+    tmp_path: Path,
+) -> None:
+    experiment = get_experiment("skillsbench-pdf-ab", REPO_ROOT)
+    smoke = select_preset(experiment, "smoke")
+    study = select_preset(experiment, "study")
+
+    assert (smoke.n_attempts, smoke.n_tasks, smoke.n_concurrent) == (1, 1, 4)
+    assert (study.n_attempts, study.n_tasks, study.n_concurrent) == (3, 3, 4)
+    assert study.scheduling_seed == "skillsbench-pdf-study-v1"
+    baseline, treatment = experiment.variants
+    baseline_contract = baseline.to_dict()
+    treatment_contract = treatment.to_dict()
+    for value in (baseline_contract, treatment_contract):
+        value.pop("id")
+        value.pop("label")
+        value.pop("skills")
+    assert baseline_contract == treatment_contract
+    assert baseline.skills == []
+    assert treatment.skills == ["pdf-artifact-workflow"]
+
+    env_file = tmp_path / "env"
+    env_file.write_text("WANDB_API_KEY=test\n")
+    jobs = OperatorService(REPO_ROOT, env_file=env_file).rendered_jobs(
+        ExperimentRequest(
+            experiment_id=experiment.id,
+            preset="study",
+        ),
+        run_id="pdf-study-plan",
+        write_configs=False,
+    )
+
+    assert len(jobs) == 72
+    assert {job.trial_index for job in jobs} == {1, 2, 3}
+    assert all(job.evaluation_rubrics for job in jobs)
+    assert all(experiment.judge_model == "wandb/zai-org/GLM-5.1" for _ in jobs)
 
 
 def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) -> None:
@@ -134,18 +171,16 @@ def test_repo_memory_direct_cells_use_direct_result_contract(monkeypatch) -> Non
         preset="smoke",
         model="openai/gpt-5",
     )
-    jobs = service.rendered_jobs(request, run_id="direct-cell-plan", write_configs=False)
+    jobs = service.rendered_jobs(
+        request, run_id="direct-cell-plan", write_configs=False
+    )
     cells = plan_cells(jobs, run_id="direct-cell-plan", run_name="direct cell plan")
     direct = [cell for cell in cells if cell.execution_kind == "provider_diagnostic"]
 
     assert len(direct) == 8
     assert {cell.n_attempts for cell in direct} == {1}
     assert {cell.result_path for cell in direct} == {
-        REPO_ROOT
-        / ".fugue"
-        / "runtime"
-        / "direct-cell-plan"
-        / "context-results.jsonl"
+        REPO_ROOT / ".fugue" / "runtime" / "direct-cell-plan" / "context-results.jsonl"
     }
 
 

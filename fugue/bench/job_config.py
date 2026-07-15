@@ -51,7 +51,12 @@ from fugue.bench.library import (
     get_prompt,
 )
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
+from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.services import (
+    managed_service_environment,
+    without_managed_service_environment,
+)
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
 from fugue.model_plane import (
     ModelRoute,
@@ -283,8 +288,7 @@ def _build_jobs(
                 selected_mcp = bool(
                     integration_binding.mcp_servers
                     or (
-                        binding.mcp_servers
-                        and variant.context.delivery == "native_mcp"
+                        binding.mcp_servers and variant.context.delivery == "native_mcp"
                     )
                 )
                 capabilities = harness_capabilities(harness.agent)
@@ -799,7 +803,15 @@ def _job_env(
             *tags,
         ]
     )
-    env = dict(base_env)
+    env = (
+        managed_service_environment(
+            base_env,
+            repo_root=repo_root,
+            target="container",
+        )
+        if context_spec.id == "graphiti"
+        else without_managed_service_environment(base_env)
+    )
     env.update(
         {
             "FUGUE_EXPERIMENT_ID": experiment.id,
@@ -864,7 +876,13 @@ def _job_env(
             "PYTHONPATH": _prepend_path(repo_root, base_env.get("PYTHONPATH")),
         }
     )
-    env.update({str(key): str(value) for key, value in context_binding.env.items()})
+    env.update(
+        {
+            str(key): str(value)
+            for key, value in context_binding.env.items()
+            if str(value) != f"${{{key}}}"
+        }
+    )
     return env
 
 
@@ -940,6 +958,27 @@ def _context_binding(
                 delivery=variant.context.delivery,
                 write=write,
             )
+            env = dict(binding.env)
+        elif (
+            binding.managed_runtime == "pinned_mcp"
+            and variant.context.delivery == "native_mcp"
+        ):
+            if read_runtime_lock(spec.id, runtime.repo_root) is not None:
+                compose_path, server, descriptor = render_runtime_compose(
+                    spec.id,
+                    repo_root=runtime.repo_root,
+                    artifact=prepared.path / "artifact",
+                    runtime_root=runtime_root,
+                    job_name=job_name,
+                    env_names=spec.required_env,
+                    write=write,
+                )
+                binding = replace(
+                    binding,
+                    mcp_servers=(server,),
+                    compose_files=(*binding.compose_files, compose_path),
+                    runtime_descriptor=descriptor,
+                )
             env = dict(binding.env)
         elif binding.mcp_servers:
             mounts.extend(
@@ -1087,6 +1126,8 @@ def _portable_context_runtime_descriptor(
     binding: ContextBinding,
     delivery: str,
 ) -> dict[str, Any] | None:
+    if binding.managed_runtime == "pinned_mcp" and delivery == "native_mcp":
+        return binding.runtime_descriptor
     if binding.managed_runtime != "fugue_context" or delivery != "portable":
         return None
     return {
