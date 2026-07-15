@@ -101,6 +101,23 @@ class WorkloadSpec:
     n_tasks: int | None = None
     n_attempts: int | None = None
     artifacts: list[Any] = field(default_factory=list)
+    scorers: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvaluationSourceSpec:
+    kind: str
+    path: str | None = None
+    text: str | None = None
+    server: str | None = None
+    tools: list[str] = field(default_factory=list)
+    resources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EvaluationGenerationSpec:
+    size: int = 8
+    sources: list[EvaluationSourceSpec] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -141,6 +158,7 @@ class ExperimentSpec:
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     integrations: list[IntegrationSelection] = field(default_factory=list)
     workloads: list[WorkloadSpec] = field(default_factory=list)
+    evaluation_generation: EvaluationGenerationSpec | None = None
     presets: list[PresetSpec] = field(default_factory=list)
     default_preset: str | None = None
     trace_content: str = "full"
@@ -349,6 +367,7 @@ def experiment_from_data(
         mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
         integrations=_integration_selections(raw.get("integrations"), kind="experiment"),
         workloads=workloads,
+        evaluation_generation=_evaluation_generation(raw.get("evaluation_generation")),
         presets=presets,
         default_preset=default_preset,
         trace_content=_trace_content(raw.get("trace_content")),
@@ -510,9 +529,84 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
                     kind=f"workload {workload_id} n_attempts",
                 ),
                 artifacts=_list(value.get("artifacts")),
+                scorers=_scorer_refs(value.get("scorers"), workload_id),
             )
         )
     return workloads
+
+
+def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation_generation must be a mapping")
+    _reject_unknown(raw, EvaluationGenerationSpec, kind="evaluation generation")
+    size = _positive_int(
+        raw.get("size", 8), kind="evaluation generation size"
+    )
+    assert size is not None
+    sources: list[EvaluationSourceSpec] = []
+    for index, value in enumerate(_list(raw.get("sources")), start=1):
+        if not isinstance(value, dict):
+            raise ValueError("evaluation source must be a mapping")
+        _reject_unknown(value, EvaluationSourceSpec, kind="evaluation source")
+        kind = str(value.get("kind") or "").strip()
+        if kind not in {"seed", "file", "mcp"}:
+            raise ValueError(
+                f"evaluation source {index} kind must be seed, file, or mcp"
+            )
+        path = _optional_str(value.get("path"))
+        text = _optional_str(value.get("text"))
+        server = _optional_str(value.get("server"))
+        tools = _string_list(value.get("tools"))
+        resources = _string_list(value.get("resources"))
+        if kind == "seed" and not text:
+            raise ValueError(f"evaluation source {index} seed text is required")
+        if kind == "file":
+            if not path:
+                raise ValueError(f"evaluation source {index} file path is required")
+            _safe_repo_path(path, kind=f"evaluation source {index} path")
+        if kind == "mcp" and not server:
+            raise ValueError(f"evaluation source {index} MCP server is required")
+        if server:
+            validate_id(server, kind=f"evaluation source {index} MCP server")
+        sources.append(
+            EvaluationSourceSpec(
+                kind=kind,
+                path=path,
+                text=text,
+                server=server,
+                tools=tools,
+                resources=resources,
+            )
+        )
+    return EvaluationGenerationSpec(size=size, sources=sources)
+
+
+def _scorer_refs(value: Any, workload_id: str) -> list[str]:
+    refs = _string_list(value)
+    _require_unique(refs, kind=f"workload {workload_id} scorer")
+    for ref in refs:
+        if ref == "builtin:harbor-outcome":
+            continue
+        path = _safe_repo_path(ref, kind=f"workload {workload_id} scorer")
+        if path.suffix not in {".yaml", ".yml"}:
+            raise ValueError(
+                f"workload {workload_id} scorer must be a YAML file: {ref}"
+            )
+        prefix = Path("configs/fugue/evaluations")
+        if path != prefix and prefix not in path.parents:
+            raise ValueError(
+                f"workload {workload_id} scorer must live under {prefix}: {ref}"
+            )
+    return refs
+
+
+def _safe_repo_path(value: str, *, kind: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{kind} must be a repository-relative path")
+    return path
 
 
 def _presets(raw: Any) -> list[PresetSpec]:

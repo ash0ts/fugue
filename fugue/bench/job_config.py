@@ -30,6 +30,7 @@ from fugue.bench.integrations import (
     bind_integrations,
     effective_selections,
 )
+from fugue.bench.evaluations import load_cases, scorer_bundle
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
@@ -72,6 +73,10 @@ class RenderedJob:
     trial_index: int
     comparison_example_id: str
     candidate_id: str
+    evaluation_case: dict[str, Any] | None = None
+    evaluation_rubrics: tuple[dict[str, Any], ...] = ()
+    scorer_hashes: dict[str, str] | None = None
+    scorer_refs: tuple[str, ...] = ()
     applicable: bool = True
     skip_reason: str | None = None
     skill_provenance: tuple[dict[str, Any], ...] = ()
@@ -119,6 +124,8 @@ def _build_jobs(
     preset_id: str | None = None,
     required_capabilities: list[str] | None = None,
     workload_artifacts: list[Any] | None = None,
+    scorer_refs: list[str] | None = None,
+    asset_overlay: dict[str, str] | None = None,
 ) -> list[RenderedJob]:
     runtime_root = repo_root / ".fugue" / "runtime" / run_id
     config_dir = runtime_root / "job-configs"
@@ -149,6 +156,16 @@ def _build_jobs(
         repo_root=repo_root,
         cache_root=repo_root / DEFAULT_CACHE_ROOT,
         env=env,
+    )
+    evaluation_cases = _evaluation_cases(
+        manifest,
+        repo_root,
+        asset_overlay or {},
+    )
+    _, evaluation_rubrics, scorer_hashes = scorer_bundle(
+        scorer_refs or [],
+        repo_root,
+        overlay=asset_overlay,
     )
 
     rendered: list[RenderedJob] = []
@@ -301,6 +318,7 @@ def _build_jobs(
                     skip_reason=skip_reason,
                     collect_evidence=bool(required_capabilities),
                     workload_artifacts=workload_artifacts or [],
+                    scorer_hashes=scorer_hashes,
                 )
                 config_path = config_dir / f"{job_name}.json"
                 if write_configs:
@@ -363,6 +381,10 @@ def _build_jobs(
                         trial_index=trial_index,
                         comparison_example_id=comparison_example_id,
                         candidate_id=candidate_id,
+                        evaluation_case=evaluation_cases.get(tasks[0].id),
+                        evaluation_rubrics=evaluation_rubrics,
+                        scorer_hashes=dict(scorer_hashes),
+                        scorer_refs=tuple(scorer_refs or []),
                         applicable=applicable,
                         skip_reason=skip_reason,
                         skill_provenance=tuple(
@@ -407,6 +429,7 @@ def _job_config(
     skip_reason: str | None,
     collect_evidence: bool,
     workload_artifacts: list[Any],
+    scorer_hashes: dict[str, str],
 ) -> dict[str, Any]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     environment = _merge_dicts(experiment.environment, variant.environment)
@@ -524,10 +547,32 @@ def _job_config(
         "model_provider": route.provider,
         "model": route.display_model,
         "trace_content": experiment.trace_content,
+        "scorer_hashes": scorer_hashes,
     }
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
     return rendered
+
+
+def _evaluation_cases(
+    manifest: BenchmarkManifest,
+    repo_root: Path,
+    overlay: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    source_path = str(manifest.dataset.source.get("path") or "")
+    if not source_path:
+        return {}
+    relative = Path(source_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("evaluation case source must be repository-relative")
+    text = overlay.get(relative.as_posix())
+    resolved = repo_root / relative
+    if text is None and not resolved.is_file():
+        return {}
+    return {
+        str(case["id"]): case
+        for case in load_cases(resolved, text=text)
+    }
 
 
 def _dataset_config(

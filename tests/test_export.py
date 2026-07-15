@@ -1,5 +1,6 @@
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -805,6 +806,89 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
         export._publication_candidates([row])[0]["evaluation_scope_id"]
         == export._publication_candidates([planned])[0]["evaluation_scope_id"]
     )
+
+
+def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
+    case = {
+        "id": "case-a",
+        "instruction": "Answer from the supplied capability source.",
+        "source_refs": [{"id": "seed:1", "sha256": "a" * 64}],
+        "expected": {"facts": ["grounded fact"]},
+        "scorer_dimensions": ["task_completion", "correctness"],
+    }
+    rubric = {
+        "id": "suite-a",
+        "dimensions": [
+            {
+                "id": "task_completion",
+                "criterion": "Complete the task.",
+                "threshold": 0.7,
+            },
+            {
+                "id": "correctness",
+                "criterion": "Include the grounded fact.",
+                "threshold": 0.7,
+            },
+        ],
+    }
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="capabilities",
+        task_id="case-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="openai",
+        model="openai/gpt-5",
+        trial_index=1,
+        comparison_example_id="shared-example",
+        candidate_id="candidate-a",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/missing/result.json"),
+        command=("harbor", "run"),
+        env={"FUGUE_DATASET": "generated/suite"},
+        n_attempts=1,
+        evaluation_case=case,
+        evaluation_rubrics=(rubric,),
+        scorer_hashes={"rubric.yaml": "b" * 64},
+        scorer_refs=("rubric.yaml",),
+    )
+    baseline = export._planned_evaluation_row(cell)
+    treatment = export._planned_evaluation_row(
+        replace(
+            cell,
+            id="cell-b",
+            candidate_id="candidate-b",
+            variant_id="with-skill",
+            trial_index=2,
+        )
+    )
+
+    candidates = export._publication_candidates([baseline, treatment])
+
+    assert len(candidates) == 2
+    assert {value["evaluation_scope_id"] for value in candidates} == {
+        candidates[0]["evaluation_scope_id"]
+    }
+    inputs = export._evaluation_inputs(baseline)
+    assert inputs["evaluation_case"] == case
+    assert inputs["evaluation_rubrics"] == [rubric]
+    assert "candidate_id" not in inputs
+    assert "variant_id" not in inputs
+    assert "trial_index" not in inputs
+    assert "evaluation_correctness" in candidates[0]["scorers"]
+    assert "evaluation_overall" not in candidates[0]["scorers"]
+
+    changed = json.loads(json.dumps(treatment))
+    changed["evaluation_rubrics"][0]["dimensions"][1]["criterion"] = (
+        "Use a changed correctness definition."
+    )
+    changed_scope = export._publication_candidates([changed])[0][
+        "evaluation_scope_id"
+    ]
+    assert changed_scope != candidates[0]["evaluation_scope_id"]
 
 
 def test_completed_evaluation_recovers_setup_failure_and_fingerprint(

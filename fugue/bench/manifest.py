@@ -128,9 +128,9 @@ def _as_path(value: str | Path | None, default: str) -> Path:
     return Path(value) if value is not None else Path(default)
 
 
-def load_manifest(path: Path | str) -> BenchmarkManifest:
+def load_manifest(path: Path | str, *, text: str | None = None) -> BenchmarkManifest:
     manifest_path = Path(path)
-    raw = yaml.safe_load(manifest_path.read_text()) or {}
+    raw = yaml.safe_load(text if text is not None else manifest_path.read_text()) or {}
     dataset_raw = raw.get("dataset") or {}
     if isinstance(dataset_raw, str):
         dataset_raw = {"ref": dataset_raw}

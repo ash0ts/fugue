@@ -19,6 +19,7 @@ from filelock import FileLock
 
 from fugue.agent_tracing import conversation_id as fugue_conversation_id
 from fugue.agent_tracing import stable_agent_name
+from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
 from fugue.bench.scoring import latency_summary, score_evidence_paths
 from fugue.model_plane import (
@@ -203,6 +204,15 @@ class LiveEvaluationCoordinator:
             _apply_trace_summary(row, self._wait_for_trace(row))
             _merge_error_events(row)
             _apply_observed_identity(row)
+            if cell.evaluation_case is not None:
+                apply_generated_evaluation(
+                    row,
+                    case=cell.evaluation_case,
+                    rubrics=cell.evaluation_rubrics,
+                    judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
+                    env=self.env,
+                    trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
+                )
             root = _verified_evaluation_root(row, call_id)
             if root is not None:
                 _attach_genai_span_ref(
@@ -392,6 +402,52 @@ class LiveEvaluationCoordinator:
                 )
 
 
+class GeneratedEvaluationCoordinator:
+    """Run generated scorers locally when live Weave publication is unavailable."""
+
+    def __init__(
+        self,
+        cells: list[PlannedCell],
+        *,
+        repo_root: Path,
+        env: Mapping[str, str],
+    ) -> None:
+        self.repo_root = repo_root
+        self.env = dict(env)
+        self.path = (
+            repo_root
+            / ".fugue"
+            / "runtime"
+            / (cells[0].run_id if cells else "unknown")
+            / "evaluation-results.jsonl"
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
+        if cell.evaluation_case is None:
+            return
+        row = _completed_evaluation_row(
+            cell,
+            outcome,
+            _planned_evaluation_row(cell),
+        )
+        row["evaluation_publication_mode"] = "local"
+        apply_generated_evaluation(
+            row,
+            case=cell.evaluation_case,
+            rubrics=cell.evaluation_rubrics,
+            judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
+            env=self.env,
+            trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
+        )
+        with self._lock:
+            with self.path.open("a") as handle:
+                handle.write(
+                    json.dumps(redact_value(row), sort_keys=True, default=str) + "\n"
+                )
+
+
 def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
     env = cell.env
     run_key = ":".join(
@@ -460,6 +516,10 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "weave_conversation_id": fugue_conversation_id(run_key),
         "trace_content": env.get("FUGUE_TRACE_CONTENT", "full"),
         "context_assigned": cell.context_system_id != "none",
+        "evaluation_case": cell.evaluation_case,
+        "evaluation_scorers": list(cell.scorer_refs),
+        "evaluation_rubrics": list(cell.evaluation_rubrics),
+        "evaluation_scorer_hashes": cell.scorer_hashes or {},
     }
 
 
@@ -1106,6 +1166,10 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
         "repository": row.get("repository"),
         "base_commit": row.get("base_commit"),
         "expected_evidence_paths": row.get("expected_evidence_paths") or None,
+        "evaluation_case": row.get("evaluation_case") or None,
+        "evaluation_scorers": row.get("evaluation_scorers") or None,
+        "evaluation_rubrics": row.get("evaluation_rubrics") or None,
+        "evaluation_scorer_hashes": row.get("evaluation_scorer_hashes") or None,
     }
     comparison_id = row.get("comparison_example_id") or _stable_digest(values)
     return {"comparison_example_id": comparison_id, **_drop_none(values)}
@@ -1231,6 +1295,8 @@ def _evaluation_output(
             "response": _bounded_agent_response(row),
             "response_sha256": row.get("agent_response_sha256"),
             "response_bytes": row.get("agent_response_bytes"),
+            "evaluation_na_dimensions": row.get("evaluation_na_dimensions"),
+            "evaluation_error": row.get("evaluation_error"),
         }
     )
 
@@ -1334,6 +1400,16 @@ def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
         scores["output_tokens"] = row.get("n_output_tokens")
         if row.get("cost_usd") is not None:
             scores["total_cost_usd"] = row["cost_usd"]
+    for dimension in (
+        "task_completion",
+        "correctness",
+        "groundedness",
+        "tool_use",
+        "artifact_quality",
+    ):
+        key = f"evaluation_{dimension}"
+        if row.get(key) is not None:
+            scores[key] = row[key]
     return {key: value for key, value in scores.items() if value is not None}
 
 
@@ -1363,6 +1439,10 @@ def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
                 "judge_overall",
             }
         )
+    for row in rows:
+        case = row.get("evaluation_case") or {}
+        for dimension in case.get("scorer_dimensions") or []:
+            values.add(f"evaluation_{dimension}")
     return sorted(values)
 
 
@@ -1477,6 +1557,7 @@ def _weave_safe_row(row: dict[str, Any]) -> dict[str, Any]:
         safe["hits"] = hits
     safe.pop("trial_dir", None)
     safe.pop("judge_reasoning", None)
+    safe.pop("evaluation_judge_reasons", None)
     return redact_value(safe)
 
 

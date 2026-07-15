@@ -63,6 +63,10 @@ class PlannedCell:
     env: dict[str, str]
     n_attempts: int
     context_transport: str = "portable"
+    evaluation_case: dict[str, Any] | None = None
+    evaluation_rubrics: tuple[dict[str, Any], ...] = ()
+    scorer_hashes: dict[str, str] | None = None
+    scorer_refs: tuple[str, ...] = ()
     applicable: bool = True
     skip_reason: str | None = None
 
@@ -147,6 +151,10 @@ def plan_cells(
                 env=job.env,
                 n_attempts=int(job.config.get("n_attempts") or 1),
                 context_transport=job.context_transport,
+                evaluation_case=job.evaluation_case,
+                evaluation_rubrics=job.evaluation_rubrics,
+                scorer_hashes=job.scorer_hashes,
+                scorer_refs=job.scorer_refs,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
             )

@@ -41,6 +41,7 @@ def test_tui_uses_three_step_plan_and_automatic_preview(
 
             app.action_next_step()
             assert app.plan_step == "compare-step"
+            assert app.query_one("#generate-evaluation", Button)
             app.action_next_step()
             assert app.plan_step == "review-step"
             assert app.query_one("#review-matrix").row_count == 1

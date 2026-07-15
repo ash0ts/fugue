@@ -103,6 +103,126 @@ def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
     assert saved.id == "accepted-ai-demo"
 
 
+def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("FUGUE_DISABLE_WEAVE", "1")
+    service = make_operator_repo(tmp_path)
+    base = service.experiment("demo").to_dict()
+    base.update(
+        {
+            "id": "generated-demo",
+            "title": "Generated demo",
+            "judge_model": "openai/gpt-5-mini",
+            "evaluation_generation": {
+                "size": 8,
+                "sources": [
+                    {"kind": "seed", "text": "The demo skill requires focused search."}
+                ],
+            },
+            "workloads": [{"id": "capabilities", "runner": "harbor"}],
+            "variants": [
+                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "with-skill",
+                    "label": "With skill",
+                    "skill_ids": ["demo-skill"],
+                },
+            ],
+        }
+    )
+    attempts = 0
+
+    def cases(count: int) -> list[dict]:
+        strata = ["easy", "boundary", "failure", "integration"]
+        return [
+            {
+                "id": f"generated-{index + 1:02d}",
+                "instruction": f"Use focused search for scenario {index + 1}.",
+                "family": "skill",
+                "source_refs": ["seed:1"],
+                "expected": {"facts": ["focused search"]},
+                "tags": [strata[index % 4]],
+            }
+            for index in range(count)
+        ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            json=_tool_response(
+                "submit_experiment",
+                {
+                    "experiment": base,
+                    "assets": [],
+                    "evaluation": {
+                        "suite_id": "generated-suite",
+                        "cases": cases(7 if attempts == 1 else 8),
+                        "rubric": {
+                            "dimensions": [
+                                {
+                                    "id": "task_completion",
+                                    "criterion": "The task is complete.",
+                                },
+                                {
+                                    "id": "correctness",
+                                    "criterion": "Expected facts are correct.",
+                                },
+                                {
+                                    "id": "groundedness",
+                                    "criterion": "Claims use the supplied source.",
+                                },
+                            ]
+                        },
+                    },
+                    "rationale": "Compare the skill against a true baseline.",
+                    "assumptions": [],
+                    "warnings": [],
+                },
+                f"call-{attempts}",
+            ),
+        )
+
+    composer = ExperimentComposer(
+        service,
+        client_factory=_client_factory(httpx.MockTransport(handler)),
+    )
+    draft = asyncio.run(
+        composer.compose("Generate the missing evaluation", base_experiment="demo")
+    )
+
+    assert attempts == 2
+    assert draft.evaluation is not None
+    assert len(draft.evaluation.cases) == 8
+    assert len(draft.assets) == 3
+    assert draft.preview.cells == 16
+    rendered = service.rendered_jobs(
+        service.request_for_experiment(draft.experiment),
+        run_id="preview",
+        write_configs=False,
+        experiment=draft.experiment,
+        asset_overlay=draft.evaluation.overlay,
+    )
+    for task_id in {job.task_id for job in rendered}:
+        task_jobs = [job for job in rendered if job.task_id == task_id]
+        assert {job.variant_id for job in task_jobs} == {"baseline", "with-skill"}
+        assert len({job.comparison_example_id for job in task_jobs}) == 1
+    assert not (tmp_path / "configs/fugue/evaluations/generated-suite").exists()
+    assert not (tmp_path / ".fugue").exists()
+
+    composer.save(draft, experiment_id="accepted-generated-demo")
+
+    suite = tmp_path / "configs/fugue/evaluations/generated-suite"
+    assert {path.name for path in suite.iterdir()} == {
+        "cases.jsonl",
+        "manifest.yaml",
+        "rubric.yaml",
+    }
+
+
 def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> None:
     make_operator_repo(tmp_path)
     reports = tmp_path / "reports"

@@ -26,6 +26,7 @@ from fugue.bench.context import (
     prepare_context as build_context,
 )
 from fugue.bench.datasets import materialize_manifest_dataset
+from fugue.bench.evaluations import evaluation_asset_path
 from fugue.bench.execution import latest_cell_records, new_run_id
 from fugue.bench.export import (
     PublishedEvaluation,
@@ -435,6 +436,26 @@ class OperatorService:
                 )
             )
         preset = select_preset(selected, request.preset)
+        selected_workloads = select_workloads(
+            selected,
+            preset,
+            list(request.workloads) or None,
+        )
+        generated_scoring = any(
+            any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+            for workload in selected_workloads
+        )
+        if generated_scoring and not (
+            request.judge_model or selected.judge_model
+        ):
+            checks.append(
+                PreflightCheck(
+                    "generated evaluation judge model",
+                    False,
+                    "set judge_model in the experiment or pass --judge-model; "
+                    "environment fallback is not accepted for generated rubrics",
+                )
+            )
         systems = list(request.systems) or (
             [variant.context.system_id for variant in selected.variants]
             if request.variants
@@ -544,6 +565,12 @@ class OperatorService:
         )
         preset = select_preset(selected, request.preset)
         workloads = select_workloads(selected, preset, list(request.workloads) or None)
+        _require_saved_evaluation_assets(
+            self.repo_root,
+            selected,
+            request,
+            workloads,
+        )
         for workload in workloads:
             if workload.runner != "harbor":
                 continue
@@ -714,26 +741,36 @@ class OperatorService:
     ) -> ExperimentSpec:
         """Persist one explicitly accepted TUI or assistant plan."""
         experiment_id = validate_id(experiment_id, kind="experiment id")
+        asset_paths: list[Path] = []
         for asset in assets:
             if asset.kind == "prompt":
                 path = self.repo_root / "configs/fugue/prompts" / f"{asset.id}.md"
-                if path.exists() and not replace_assets:
-                    raise FileExistsError(
-                        f"prompt {asset.id} exists; confirm replacement explicitly"
-                    )
-                save_prompt(asset.id, asset.body, self.repo_root)
-            else:
+            elif asset.kind == "skill":
                 path = (
                     self.repo_root
                     / "configs/fugue/skills"
                     / asset.id
                     / "SKILL.md"
                 )
-                if path.exists() and not replace_assets:
-                    raise FileExistsError(
-                        f"skill {asset.id} exists; confirm replacement explicitly"
-                    )
+            else:
+                path = self.repo_root / evaluation_asset_path(asset.kind, asset.id)
+            if path.exists() and not replace_assets:
+                raise FileExistsError(
+                    f"asset {path.relative_to(self.repo_root)} exists; "
+                    "confirm replacement explicitly"
+                )
+            asset_paths.append(path)
+
+        for asset, path in zip(assets, asset_paths, strict=True):
+            if asset.kind == "prompt":
+                save_prompt(asset.id, asset.body, self.repo_root)
+            elif asset.kind == "skill":
                 save_skill(asset.id, asset.body, self.repo_root)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                staging = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                staging.write_text(asset.body)
+                os.replace(staging, path)
 
         selected_variants = set(request.variants)
         data = experiment.to_dict()
@@ -777,10 +814,12 @@ class OperatorService:
         experiment: ExperimentSpec,
         *,
         request: ExperimentRequest | None = None,
+        asset_overlay: dict[str, str] | None = None,
     ) -> PreviewSummary:
         return self._preview(
             request or _request_for_experiment(experiment),
             experiment=experiment,
+            asset_overlay=asset_overlay,
         )
 
     def _preview(
@@ -788,12 +827,14 @@ class OperatorService:
         request: ExperimentRequest,
         *,
         experiment: ExperimentSpec | None = None,
+        asset_overlay: dict[str, str] | None = None,
     ) -> PreviewSummary:
         jobs = self.rendered_jobs(
             request,
             run_id="preview",
             write_configs=False,
             experiment=experiment,
+            asset_overlay=asset_overlay,
         )
         estimated_trials = 0
         for job in jobs:
@@ -857,6 +898,7 @@ class OperatorService:
         run_id: str,
         write_configs: bool = True,
         experiment: ExperimentSpec | None = None,
+        asset_overlay: dict[str, str] | None = None,
     ) -> list[RenderedJob]:
         selected = experiment or self.experiment(request.experiment_id)
         selected = _experiment_with_request_overrides(selected, request)
@@ -891,6 +933,13 @@ class OperatorService:
                     manifest=request.manifest or selected.manifest,
                 )
             ]
+        if write_configs:
+            _require_saved_evaluation_assets(
+                self.repo_root,
+                selected,
+                request,
+                workloads,
+            )
         rendered: list[RenderedJob] = []
         requested_systems = list(request.systems) or (
             [variant.context.system_id for variant in selected.variants]
@@ -903,7 +952,12 @@ class OperatorService:
                     self.repo_root,
                     request.manifest or workload.manifest or selected.manifest,
                 )
-                manifest = load_manifest(manifest_path)
+                manifest_text = (asset_overlay or {}).get(
+                    manifest_path.relative_to(self.repo_root).as_posix()
+                    if manifest_path.is_relative_to(self.repo_root)
+                    else manifest_path.as_posix()
+                )
+                manifest = load_manifest(manifest_path, text=manifest_text)
                 env["FUGUE_TAGS"] = ",".join(
                     _run_tags(
                         env=env,
@@ -954,6 +1008,8 @@ class OperatorService:
                         preset_id=preset.id if preset.id != "default" else None,
                         required_capabilities=workload.required_capabilities,
                         workload_artifacts=workload.artifacts,
+                        scorer_refs=workload.scorers,
+                        asset_overlay=asset_overlay,
                     )
                 )
             else:
@@ -1172,7 +1228,7 @@ class OperatorService:
         self,
         request: str,
         *,
-        base_experiment: str = "pilot",
+        base_experiment: str | ExperimentSpec = "pilot",
         model: str | None = None,
         trace_content: str | None = None,
     ) -> Any:
@@ -1740,6 +1796,65 @@ def _json_default(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
         return asdict(value)
     return str(value)
+
+
+def _require_saved_evaluation_assets(
+    repo_root: Path,
+    experiment: ExperimentSpec,
+    request: ExperimentRequest,
+    workloads: list[WorkloadSpec],
+) -> None:
+    generated = any(
+        any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+        for workload in workloads
+    ) or experiment.evaluation_generation is not None
+    if not generated:
+        return
+    if not (request.judge_model or experiment.judge_model):
+        raise ValueError(
+            "generated evaluation requires an explicit judge_model; run "
+            f"`fugue plan {experiment.id}` to review and save the evaluation"
+        )
+    required: list[Path] = []
+    for workload in workloads:
+        if workload.runner != "harbor":
+            continue
+        manifest_path = _resolve(
+            repo_root,
+            request.manifest or workload.manifest or experiment.manifest,
+        )
+        required.append(manifest_path)
+        required.extend(
+            _resolve(repo_root, Path(scorer))
+            for scorer in workload.scorers
+            if not scorer.startswith("builtin:")
+        )
+        if manifest_path.is_file():
+            manifest = load_manifest(manifest_path)
+            if manifest.dataset.materializer == (
+                "fugue.bench.evaluations:GeneratedCapabilityMaterializer"
+            ):
+                for key in ("path", "rubric"):
+                    if manifest.dataset.source.get(key):
+                        required.append(
+                            _resolve(
+                                repo_root,
+                                Path(str(manifest.dataset.source[key])),
+                            )
+                        )
+    missing = list(dict.fromkeys(path for path in required if not path.is_file()))
+    if not missing:
+        return
+    values = ", ".join(
+        path.relative_to(repo_root).as_posix()
+        if path.is_relative_to(repo_root)
+        else path.as_posix()
+        for path in missing
+    )
+    raise ValueError(
+        f"evaluation draft is incomplete or unsaved ({values}); run "
+        f"`fugue plan {experiment.id}` to generate, review, and save it"
+    )
 
 
 def _joined(values: tuple[str, ...]) -> str | None:

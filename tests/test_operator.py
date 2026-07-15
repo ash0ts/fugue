@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from fugue.bench.execution import write_run_manifest
+from fugue.bench.library import EvaluationGenerationSpec, WorkloadSpec
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.preflight import PreflightCheck
 
@@ -102,6 +106,67 @@ def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
     assert preview.matrix_cells[0].task_id == "task-one"
     assert preview.matrix_cells[0].trial_count == 1
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = replace(
+        service.experiment("demo"),
+        judge_model="openai/gpt-5-mini",
+        evaluation_generation=EvaluationGenerationSpec(),
+        workloads=[
+            WorkloadSpec(
+                id="capabilities",
+                runner="harbor",
+                manifest=Path(
+                    "configs/fugue/evaluations/missing-suite/manifest.yaml"
+                ),
+                scorers=[
+                    "configs/fugue/evaluations/missing-suite/rubric.yaml"
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match=r"fugue plan demo"):
+        service.prepare_context(
+            service.request_for_experiment(experiment),
+            experiment=experiment,
+        )
+
+    assert not (tmp_path / ".fugue").exists()
+
+
+def test_generated_evaluation_preflight_requires_explicit_judge(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = replace(
+        service.experiment("demo"),
+        workloads=[
+            WorkloadSpec(
+                id="capabilities",
+                runner="harbor",
+                manifest=Path("datasets/demo.yaml"),
+                scorers=[
+                    "configs/fugue/evaluations/generated/rubric.yaml"
+                ],
+            )
+        ],
+    )
+
+    checks = service.preflight(
+        service.request_for_experiment(experiment),
+        live=False,
+        experiment=experiment,
+    )
+
+    assert any(
+        check.name == "generated evaluation judge model" and not check.ok
+        for check in checks
+    )
 
 
 def test_request_for_experiment_keeps_inherited_scale_out_of_overrides(
