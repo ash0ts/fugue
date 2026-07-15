@@ -1452,7 +1452,11 @@ class OperatorService:
             self.prepare_context(request, experiment=resolved, run_id=run_id)
             rendered = self.rendered_jobs(request, run_id=run_id, experiment=resolved)
             validate_harbor_job_configs(
-                [job.config_path for job in rendered if job.applicable]
+                [
+                    job.config_path
+                    for job in rendered
+                    if job.applicable and job.execution_kind == "agent"
+                ]
             )
             run_name = (
                 rendered[0].run_name

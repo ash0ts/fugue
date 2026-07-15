@@ -314,6 +314,45 @@ def test_execute_run_persists_snapshot_before_first_cell(
     assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
 
 
+def test_execute_run_only_validates_agent_job_configs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo")
+    [agent_job] = service.rendered_jobs(request, run_id="validation-fixture")
+    dataset = tmp_path / "direct-diagnostic.yaml"
+    dataset.write_text("id: direct-diagnostic\n")
+    direct_job = replace(
+        agent_job,
+        config_path=dataset,
+        execution_kind="provider_diagnostic",
+    )
+    observed: list[Path] = []
+
+    class StopAfterValidation(RuntimeError):
+        pass
+
+    def validate(paths: list[Path]) -> None:
+        observed.extend(paths)
+        raise StopAfterValidation
+
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        service,
+        "rendered_jobs",
+        lambda *args, **kwargs: [agent_job, direct_job],
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs",
+        validate,
+    )
+
+    with pytest.raises(StopAfterValidation):
+        service.execute_run(request, run_id="agent-config-validation")
+
+    assert observed == [agent_job.config_path]
+
+
 def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
