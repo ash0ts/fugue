@@ -34,6 +34,25 @@ context = [
     "mem0ai==0.1.118",
     "qdrant-client==1.18.0",
 ]
+serve = [
+    "ag-ui-protocol==0.1.19",
+    "fastapi>=0.115,<1",
+    "fastembed==0.8.0",
+    "harbor==0.18.0; python_version >= '3.12'",
+    "lancedb==0.34.0",
+    "mcp==1.28.1",
+    "uvicorn>=0.34,<1",
+]
+
+[tool.uv]
+# The full context lab contains mem0's older OpenAI client constraint. Candidate
+# serving deliberately supports the production-safe context subset above instead.
+conflicts = [
+    [
+        { extra = "context" },
+        { extra = "serve" },
+    ],
+]
 
 [tool.setuptools.packages.find]
 include = ["fugue*"]

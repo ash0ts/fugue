@@ -29,6 +29,7 @@ from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
     ContextRuntime,
 )
+from fugue.bench.deployment import write_run_input_lock
 from fugue.bench.execution import (
     execute_cells,
     mark_unfinished_cells,
@@ -142,6 +143,7 @@ def _parser() -> FugueArgumentParser:
     action.add_argument("--cancel", action="store_true", help="Cancel the managed process group")
     action.add_argument("--export", action="store_true", dest="export_run", help="Write normalized JSONL")
     action.add_argument("--open", choices=("agents", "trace", "project"), help="Open the stable W&B destination")
+    action.add_argument("--package", metavar="CANDIDATE_ID", help="Package one explicit candidate for serving")
     runs.add_argument("--follow", action="store_true", help="Follow logs until the run finishes")
     runs.add_argument("--cell", help="Select one cell for logs or trace lookup")
     runs.add_argument("--out", type=Path, help="Export destination")
@@ -149,6 +151,10 @@ def _parser() -> FugueArgumentParser:
     runs.add_argument("--to-weave", action="store_true", help="Publish normalized evaluations once")
     runs.add_argument("--republish", action="store_true", help="Intentionally bypass the publication ledger")
     runs.add_argument("--print", action="store_true", dest="print_only", help="Print a link instead of opening it")
+    runs.add_argument("--workspace", type=Path, help="Clean production Git checkout to package")
+    runs.add_argument("--image", help="Local OCI image name and tag")
+    runs.add_argument("--platform", default="linux/amd64", help="OCI target platform")
+    runs.add_argument("--yes", action="store_true", help="Confirm packaging without prompting")
     _add_common_args(runs, json_output=True)
     runs.set_defaults(handler=_runs)
 
@@ -502,6 +508,13 @@ def _run_worker(args: argparse.Namespace) -> int:
         )
         _print_context_preparation(preparation)
         rendered = service.rendered_jobs(request, run_id=run_id, experiment=experiment)
+        write_run_input_lock(
+            args.repo_root,
+            run_id,
+            experiment,
+            rendered,
+            env=service.env,
+        )
         for job in rendered:
             if not job.applicable:
                 CONSOLE.print(f"[yellow]skip[/] {job.job_name}: {job.skip_reason}")
@@ -938,7 +951,7 @@ def _runs(args: argparse.Namespace) -> int:
 
     service = OperatorService(args.repo_root, args.env_file)
     if not args.run_id:
-        if any((args.logs, args.cancel, args.export_run, args.open)):
+        if any((args.logs, args.cancel, args.export_run, args.open, args.package)):
             raise ValueError("a run id is required for this action")
         runs = service.runs()[: args.limit]
         if args.json:
@@ -977,6 +990,33 @@ def _runs(args: argparse.Namespace) -> int:
             print(as_json(service.run_summary(args.run_id)))
         else:
             CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
+        return 0
+    if args.package:
+        if args.workspace is None or not args.image:
+            raise ValueError("--package requires --workspace and --image")
+        if not args.yes:
+            if not CONSOLE.is_terminal:
+                raise ValueError("use --yes to confirm packaging non-interactively")
+            if not Confirm.ask(
+                f"Package candidate {args.package} from run {args.run_id} "
+                f"as {args.image}?"
+            ):
+                return 1
+        result = service.package_candidate(
+            args.run_id,
+            args.package,
+            workspace=args.workspace,
+            image=args.image,
+            platform=args.platform,
+        )
+        if args.json:
+            print(as_json(result))
+        else:
+            CONSOLE.print(
+                f"Packaged [bold]{result.candidate_id}[/] as "
+                f"[cyan]{result.image}[/] ({result.deployment_id})"
+            )
+            CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
         return 0
     if args.export_run:
         summary = service.export_run(
@@ -1062,13 +1102,22 @@ def _run_panel(run: Any) -> Panel:
 
 
 def _cells_table(run: Any) -> Table:
-    table = Table("Harness", "Variant", "Context", "Task", "Status", box=box.SIMPLE_HEAD)
+    table = Table(
+        "Harness",
+        "Variant",
+        "Context",
+        "Task",
+        "Candidate",
+        "Status",
+        box=box.SIMPLE_HEAD,
+    )
     for cell in run.cells:
         table.add_row(
             cell.harness,
             cell.variant_id,
             cell.context_system_id,
             cell.task_id,
+            cell.candidate_id,
             _status_markup(cell.status),
         )
     if not run.cells:

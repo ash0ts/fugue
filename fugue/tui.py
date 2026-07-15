@@ -1626,13 +1626,16 @@ class FugueApp(App[None]):
         run = self.service.run_summary(run_id)
         cells = self.query_one("#cells-table", DataTable)
         cells.clear(columns=True)
-        cells.add_columns("Harness", "Variant", "Context", "Task", "Status", "Time")
+        cells.add_columns(
+            "Harness", "Variant", "Context", "Task", "Candidate", "Status", "Time"
+        )
         for cell in run.cells:
             cells.add_row(
                 cell.harness,
                 cell.variant_id,
                 cell.context_system_id,
                 cell.task_id,
+                cell.candidate_id,
                 cell.status.replace("_", " "),
                 f"{cell.wall_time_sec:.1f}s" if cell.wall_time_sec is not None else "-",
                 key=cell.cell_id,

@@ -418,6 +418,63 @@ tools only, so Codex plus an MCP-backed context system is reported as
 `not_applicable` before execution instead of silently mounting static context
 or recording a model failure.
 
+## Candidate Serving
+
+Every new run writes an immutable `input-lock.json` beside its durable state.
+After reviewing results, select a candidate explicitly and package it with a
+clean production checkout:
+
+```bash
+fugue runs RUN_ID --package CANDIDATE_ID \
+  --workspace /path/to/clean/production-checkout \
+  --image example/fugue-service:candidate \
+  --platform linux/amd64 \
+  --yes
+```
+
+Packaging never chooses a winner. It accepts passed or failed terminal runs,
+validates every selected cell against the immutable lock, rejects changed
+prompt/skill/context assets, prepares the selected context against the
+production corpus, and copies only Git-tracked files. Generated deployment
+state lives at `.fugue/runtime/deployments/DEPLOYMENT_ID` and contains no
+runtime credentials.
+
+The resulting Python 3.13 image is both the HTTP gateway and the prebuilt
+Harbor worker image. Its serving dependencies are installed from the packaged,
+frozen `uv.lock`. For local Docker, share the Docker socket and a host path used
+for ephemeral request state:
+
+```bash
+mkdir -p /tmp/fugue-serve
+docker run --rm -p 8000:8000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/fugue-serve:/tmp/fugue-serve \
+  -e FUGUE_SERVE_RUNTIME_DIR=/tmp/fugue-serve/requests \
+  -e FUGUE_SERVE_API_KEY \
+  -e FUGUE_SERVE_CORS_ORIGINS=https://app.example.com \
+  -e OPENAI_API_KEY \
+  -e WANDB_API_KEY \
+  example/fugue-service:candidate
+```
+
+The gateway provides `/v1/responses`, `/v1/chat/completions`, `/ag-ui`,
+`/v1/models`, `/healthz`, and `/readyz`. Requests are stateless and must send
+the complete text history. Client-provided tools, media, stored responses,
+response compaction, and WebSockets are rejected; packaged candidate tools and
+context remain available inside the isolated worker. Set
+`FUGUE_SERVE_HARBOR_ENVIRONMENT` to a configured remote Harbor environment and
+use a registry image for production execution.
+
+The opt-in compatibility suite exercises the official OpenAI client, pinned
+`@ai-sdk/open-responses@2.0.10`, and the Open Responses `2026-04-24` basic and
+streaming compliance tests at commit
+`92c12d96d7b61d6d15e2214daa5e9c6000ab6e1c`:
+
+```bash
+uv sync --extra serve --extra dev --python 3.13
+tests/compat/run.sh
+```
+
 ## Weave Agent Model
 
 Harness identities are stable across experiments:

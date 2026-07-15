@@ -29,7 +29,9 @@ DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v2"
 CONTEXT_MANIFEST = "context-manifest.json"
 CONTEXT_INDEX = "index.json"
 
-ContextCapability = Literal["prepare", "retrieve", "bind", "ingest", "sequence"]
+ContextCapability = Literal[
+    "prepare", "retrieve", "bind", "ingest", "sequence", "serve"
+]
 PreflightPhase = Literal["all", "host", "runtime"]
 
 
@@ -882,7 +884,7 @@ def load_context_system(path: Path) -> ContextSystemSpec:
         raise ValueError(f"{path}: context system must be a mapping")
     system_id = validate_id(raw.get("id") or path.stem, kind="context system id")
     capabilities = frozenset(str(item) for item in _list(raw.get("capabilities")))
-    allowed = {"prepare", "retrieve", "bind", "ingest", "sequence"}
+    allowed = {"prepare", "retrieve", "bind", "ingest", "sequence", "serve"}
     invalid = sorted(capabilities - allowed)
     if invalid:
         raise ValueError(f"{path}: unknown capabilities: {', '.join(invalid)}")
