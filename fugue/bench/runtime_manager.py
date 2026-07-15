@@ -36,6 +36,7 @@ class ManagedMCPRuntimeSpec:
     network_policy: str = "share_cell_network"
     repository_mount: str = "/workspace/repository"
     state_mount: str = "/workspace/state"
+    repository_state_paths: tuple[str, ...] = ()
     runtime_env: tuple[tuple[str, str], ...] = ()
     probe_command: tuple[str, ...] = ()
 
@@ -177,6 +178,7 @@ RUNTIMES = {
             "--force",
             "/workspace/repository",
         ),
+        repository_state_paths=(".gitnexus",),
         runtime_env=(("GITNEXUS_HOME", "/workspace/state/home/.gitnexus"),),
     ),
     "codegraph": ManagedMCPRuntimeSpec(
@@ -199,6 +201,7 @@ RUNTIMES = {
             ),
         ),
         prepare_command=("/opt/codegraph/bin/codegraph", "init", "-i"),
+        repository_state_paths=(".codegraph",),
     ),
     "semble": ManagedMCPRuntimeSpec(
         "semble",
@@ -258,6 +261,7 @@ RUNTIMES = {
             "ZGGuydzuL4Xhu82z5bRz/8+ZOCowQ5dPQ=="
         ),
         prepare_command=("lat", "init"),
+        repository_state_paths=("lat.md",),
     ),
     "project-rag": ManagedMCPRuntimeSpec(
         "project-rag",
@@ -267,7 +271,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang cmake lib
 RUN git clone --filter=blob:none https://github.com/Brainwires/project-rag /src && cd /src && git checkout --detach d5abf98a48b60d35b73745e47e1aacca3963a6f0 && test "$(git rev-parse HEAD)" = d5abf98a48b60d35b73745e47e1aacca3963a6f0 && test "$(git rev-parse HEAD^{{tree}})" = 16344729e08752575c278549cafbbd1cbd4e030d && cargo build --release
 FROM {_PROJECT_RAG_PYTHON_IMAGE}
 RUN python -m venv /opt/gateway && /opt/gateway/bin/pip install --no-cache-dir mcp==1.28.1 uvicorn==0.41.0 starlette==0.52.1
+RUN /opt/gateway/bin/pip install --no-cache-dir huggingface_hub==1.23.0
 COPY --from=builder /src/target/release/project-rag /usr/local/bin/project-rag
+RUN HF_HOME=/opt/project-rag-model /opt/gateway/bin/python -c "from pathlib import Path; from huggingface_hub import snapshot_download; revision='5f1b8cd78bc4fb444dd171e59b18f3a3af89a079'; snapshot_download(repo_id='Qdrant/all-MiniLM-L6-v2-onnx', revision=revision); ref=Path('/opt/project-rag-model/hub/models--Qdrant--all-MiniLM-L6-v2-onnx/refs/main'); ref.parent.mkdir(parents=True, exist_ok=True); ref.write_text(revision)"
+RUN set -eu; mkdir -p /opt/project-rag-prewarm/data /opt/project-rag-prewarm/cache /opt/project-rag-prewarm/config; HOME=/opt/project-rag-prewarm XDG_DATA_HOME=/opt/project-rag-prewarm/data XDG_CACHE_HOME=/opt/project-rag-prewarm/cache XDG_CONFIG_HOME=/opt/project-rag-prewarm/config PROJECT_RAG_LANCEDB_PATH=/opt/project-rag-prewarm/lancedb HF_HOME=/opt/project-rag-model HF_HUB_OFFLINE=1 project-rag </dev/null >/tmp/project-rag-prewarm.log 2>&1 || true; grep -q "Using LanceDB vector database backend" /tmp/project-rag-prewarm.log; test -e "$(find /opt/project-rag-model -name model.onnx -print -quit)"; rm -rf /opt/project-rag-prewarm /tmp/project-rag-prewarm.log
 COPY mcp_gateway.py /opt/fugue/mcp_gateway.py
 COPY start-gateway /opt/fugue/start-gateway
 RUN chmod 0555 /opt/fugue/start-gateway /usr/local/bin/project-rag
@@ -276,6 +283,21 @@ CMD [\"project-rag\"]
 """,
         ("project-rag",),
         package_integrity=("git-tree:16344729e08752575c278549cafbbd1cbd4e030d"),
+        asset_integrities=(
+            (
+                "Qdrant/all-MiniLM-L6-v2-onnx",
+                "git:5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+            ),
+        ),
+        runtime_env=(
+            ("HF_HOME", "/opt/project-rag-model"),
+            ("HF_HUB_OFFLINE", "1"),
+            ("XDG_DATA_HOME", "/workspace/state/data"),
+            ("XDG_CACHE_HOME", "/workspace/state/cache"),
+            ("XDG_CONFIG_HOME", "/workspace/state/config"),
+            ("PROJECT_RAG_LANCEDB_PATH", "/workspace/state/lancedb"),
+            ("RUST_LOG", "off"),
+        ),
     ),
 }
 
@@ -332,6 +354,7 @@ def prepare_runtime(
         "network_policy": spec.network_policy,
         "repository_mount": spec.repository_mount,
         "state_mount": spec.state_mount,
+        "repository_state_paths": list(spec.repository_state_paths),
         "runtime_env": dict(spec.runtime_env),
     }
     _atomic_json(root / "runtime-lock.json", lock)
@@ -548,14 +571,26 @@ def render_runtime_compose(
                 "read_only": True,
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
-                "volumes": [f"{artifact.resolve().as_posix()}:/fugue-context:ro"],
+                "volumes": [
+                    f"{artifact.resolve().as_posix()}:/fugue-context:ro",
+                    (
+                        f"{(artifact / 'repository').resolve().as_posix()}:"
+                        f"{spec.repository_mount}:ro"
+                    ),
+                ],
                 "tmpfs": [
                     f"{spec.state_mount}:rw,noexec,nosuid,size=2g",
-                    f"{spec.repository_mount}:rw,noexec,nosuid,size=2g",
+                    *[
+                        f"{spec.repository_mount}/{path}:rw,noexec,nosuid,size=2g"
+                        for path in spec.repository_state_paths
+                    ],
                 ],
                 "environment": {
                     "HOME": "/workspace/state/home",
                     **dict(spec.runtime_env),
+                    "FUGUE_REPOSITORY_STATE_PATHS": " ".join(
+                        spec.repository_state_paths
+                    ),
                     "FUGUE_CONTEXT_SYSTEM_ID": system_id,
                     **{
                         name: f"${{{name}}}"
@@ -605,9 +640,13 @@ def render_runtime_compose(
 def _gateway_entrypoint() -> str:
     return """#!/bin/sh
 set -eu
-mkdir -p /workspace/repository /workspace/state/home
-cp -a /fugue-context/repository/. /workspace/repository/
+mkdir -p /workspace/state/home
 if [ -d /fugue-context/home ]; then cp -a /fugue-context/home/. /workspace/state/home/; fi
+for relative in ${FUGUE_REPOSITORY_STATE_PATHS:-}; do
+  source="/fugue-context/repository/$relative"
+  target="/workspace/repository/$relative"
+  if [ -d "$source" ]; then cp -a "$source"/. "$target"/; fi
+done
 cd /workspace/repository
 exec /opt/gateway/bin/python /opt/fugue/mcp_gateway.py --host 0.0.0.0 --port 8765 -- "$@"
 """

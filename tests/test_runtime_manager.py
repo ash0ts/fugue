@@ -45,6 +45,23 @@ def test_managed_runtime_catalog_is_pinned_and_install_free_at_trial_time() -> N
         "d5abf98a48b60d35b73745e47e1aacca3963a6f0"
     )
     assert runtime_manager.RUNTIMES["latmd"].prepare_command == ("lat", "init")
+    assert runtime_manager.RUNTIMES["gitnexus"].repository_state_paths == (
+        ".gitnexus",
+    )
+    assert runtime_manager.RUNTIMES["codegraph"].repository_state_paths == (
+        ".codegraph",
+    )
+    assert runtime_manager.RUNTIMES["latmd"].repository_state_paths == ("lat.md",)
+    project_rag = runtime_manager.RUNTIMES["project-rag"]
+    assert dict(project_rag.asset_integrities) == {
+        "Qdrant/all-MiniLM-L6-v2-onnx": (
+            "git:5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+        )
+    }
+    assert dict(project_rag.runtime_env)["PROJECT_RAG_LANCEDB_PATH"] == (
+        "/workspace/state/lancedb"
+    )
+    assert dict(project_rag.runtime_env)["RUST_LOG"] == "off"
     for spec in runtime_manager.RUNTIMES.values():
         assert len(spec.recipe_sha256) == 64
         assert "latest" not in spec.dockerfile
@@ -141,8 +158,14 @@ def test_runtime_compose_uses_isolated_sidecar_and_read_only_repository(
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert service["volumes"] == [
-        f"{repository.resolve().as_posix()}:/fugue-context:ro"
+        f"{repository.resolve().as_posix()}:/fugue-context:ro",
+        (
+            f"{(repository / 'repository').resolve().as_posix()}:"
+            "/workspace/repository:ro"
+        ),
     ]
+    assert service["tmpfs"] == ["/workspace/state:rw,noexec,nosuid,size=2g"]
+    assert service["environment"]["FUGUE_REPOSITORY_STATE_PATHS"] == ""
     assert server == {
         "name": "semble",
         "transport": "streamable-http",
@@ -189,6 +212,44 @@ def test_repository_preparation_uses_the_active_runtime_paths(
     assert any(value.endswith(",dst=/workspace/state/home") for value in command)
     assert command[-1] == "/workspace/repository"
     assert "GITNEXUS_HOME=/workspace/state/home/.gitnexus" in command
+
+
+def test_mutable_adapter_index_is_isolated_from_the_read_only_repository(
+    tmp_path: Path,
+) -> None:
+    spec = runtime_manager.RUNTIMES["gitnexus"]
+    root = tmp_path / runtime_manager.RUNTIME_ROOT / "gitnexus"
+    root.mkdir(parents=True)
+    (root / "runtime-lock.json").write_text(
+        json.dumps(
+            {
+                "recipe_sha256": spec.recipe_sha256,
+                "image": spec.image,
+                "image_id": "sha256:" + "a" * 64,
+            }
+        )
+    )
+    artifact = tmp_path / "artifact"
+    (artifact / "repository/.gitnexus").mkdir(parents=True)
+
+    _, _, _ = runtime_manager.render_runtime_compose(
+        "gitnexus",
+        repo_root=tmp_path,
+        artifact=artifact,
+        runtime_root=tmp_path / "runtime",
+        job_name="job",
+        env_names=(),
+        write=True,
+    )
+    compose = runtime_manager.yaml.safe_load(
+        (tmp_path / "runtime/context-runtimes/job.yaml").read_text()
+    )
+    service = compose["services"]["fugue-gitnexus"]
+    assert service["volumes"][1].endswith(":/workspace/repository:ro")
+    assert service["tmpfs"][-1] == (
+        "/workspace/repository/.gitnexus:rw,noexec,nosuid,size=2g"
+    )
+    assert service["environment"]["FUGUE_REPOSITORY_STATE_PATHS"] == ".gitnexus"
 
 
 def test_install_probe_is_offline_and_does_not_start_the_gateway(
