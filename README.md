@@ -491,6 +491,101 @@ fugue run repo-memory-impact \
 
 Remove `--preview` to launch the eight-cell comparison.
 
+## Improve Fugue With Fugue
+
+Fugue includes two self-evaluation suites pinned to source commit
+`96512017842d68add2546a057f0601de3eaf610e`:
+
+- `fugue-maintainer-v1` measures agents repairing Fugue contracts.
+- `fugue-operator-v1` measures agents planning, inspecting, exporting, and
+  interpreting experiments through the public operator interface.
+
+Each suite has six development tasks and six holdout tasks. Maintainer tasks
+apply one reviewed mutation to the pinned source. Operator tasks use deterministic
+experiments, run state, logs, and result fixtures without nested model calls.
+Benchmark definitions, reference solutions, and verifiers are never mounted in
+the agent workspace.
+
+```mermaid
+flowchart LR
+    BASE["Pinned Fugue source"] --> TASKS["Maintainer mutations or operator scenarios"]
+    TASKS --> CELLS["Harness x treatment x task x trial"]
+    CELLS --> HARBOR["Harbor verifier outcomes"]
+    HARBOR --> ROWS["Normalized trial rows"]
+    ROWS --> GATE["Complete-grid quality gate"]
+    GATE --> CI["Paired task bootstrap"]
+    CI --> TIES["Cost, latency, recoverable-error tie-breakers"]
+    TIES --> PROPOSAL["Review-only promotion bundle"]
+    PROPOSAL --> PR["Human-reviewed preset PR"]
+```
+
+The four cumulative treatments are baseline, role prompt, role prompt plus
+skill, and role prompt plus skill plus deterministic `AGENTS.md` context. This
+uses only context behavior available on the pinned main branch.
+
+Preview the 48-trial maintainer smoke:
+
+```bash
+fugue setup --experiment fugue-maintainer-self-eval --check
+fugue run fugue-maintainer-self-eval \
+  --preset smoke \
+  --tags campaign:maintainer-smoke-01,phase:smoke \
+  --preview
+```
+
+Replace the experiment id with `fugue-operator-self-eval` for the operator
+track. Remove `--preview` or add `--detach` to launch. Use the smoke results to
+shortlist exact candidates, then run each candidate separately during model and
+holdout sweeps so harness/model/variant Cartesian products do not introduce
+unrequested configurations.
+
+```bash
+CAMPAIGN=maintainer-holdout-01
+
+fugue run fugue-maintainer-self-eval \
+  --preset holdout \
+  --harnesses codex \
+  --variants role-prompt-skill \
+  --model openai/gpt-5 \
+  --tags campaign:$CAMPAIGN,phase:holdout \
+  --detach
+
+fugue analyze \
+  --saved fugue-maintainer-selection \
+  --filter tag=campaign:$CAMPAIGN \
+  --yes
+```
+
+The analyst computes the official selection in deterministic Python. A model
+may explain the result but cannot change eligibility, confidence intervals, or
+the winner. Confirmed self-evaluation analysis writes:
+
+```text
+reports/self-eval/<campaign>/promotion.json
+reports/self-eval/<campaign>/promotion.md
+reports/self-eval/<campaign>/candidate-preset.yaml
+```
+
+These are review artifacts. Fugue never writes a tracked preset or changes a
+default automatically. After review, place an approved preset under
+`configs/fugue/agent-presets/` in a separate PR. The planning agent and Textual
+Plan screen then expose it as an optional starting configuration.
+
+```mermaid
+sequenceDiagram
+    participant U as Researcher
+    participant F as Fugue
+    participant H as Harbor
+    participant W as Weave
+    U->>F: Preview and launch exact candidates
+    F->>H: Run pinned tasks
+    H-->>F: Verifier outcomes and artifacts
+    F->>W: Agent traces and evaluation predictions
+    U->>F: Confirm deterministic analysis scope
+    F-->>U: Selection evidence and candidate preset
+    U->>U: Review and open promotion PR
+```
+
 ## Development
 
 ```bash

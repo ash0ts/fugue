@@ -84,6 +84,34 @@ Trial metadata and exported rows should make comparison easy:
 - Tags should include `fugue`, experiment, preset, workload, variant, context system, prompt, skill, harness, provider, model, and run name where applicable.
 - Results should group by experiment, workload, context system, variant, prompt, skill, harness, and provider. Keep outcome, retrieval, evidence, efficiency, and utilization metrics separate; do not invent a composite score.
 
+## Self-Improvement Contract
+
+- Treat `fugue-maintainer-v1` and `fugue-operator-v1` as separate benchmarks.
+  Do not combine their candidates or promote one universal agent configuration.
+- Self-evaluation v1 is pinned to Fugue commit
+  `96512017842d68add2546a057f0601de3eaf610e`. Changing the source commit,
+  mutations, task instructions, fixtures, or verifiers creates a new suite
+  version and requires benchmark review separate from a preset promotion.
+- Maintainer tasks contain one deterministic source mutation. The mutated task
+  must fail and its reference reversal must pass before the task enters a suite.
+- Operator tasks exercise public Fugue behavior over deterministic fixtures.
+  Do not invoke Fugue's composer or analyst model inside those Harbor tasks;
+  nested model calls confound the outer harness/model candidate.
+- Candidate identity is the exact harness, model, prompt and skill hashes,
+  context configuration, and agent configuration already recorded by Fugue.
+- Official selection requires a complete unique candidate/example/trial grid.
+  Use the deterministic paired task bootstrap and quality-first policy in
+  `fugue.bench.scoring`; never ask the analyst model to choose the winner.
+- Missing cost remains unavailable. Among quality-competitive candidates, prefer
+  measured cost per success, then median wall time, recoverable-error rate, and
+  deterministic candidate id.
+- A confirmed self-evaluation analysis writes review artifacts under
+  `reports/self-eval/`. It must never write `configs/fugue/agent-presets`, alter
+  defaults, or open a PR implicitly.
+- Tracked agent presets must include suite digest, pinned source commit, run ids,
+  analysis snapshot, and measured metrics. Presets contain no credentials and
+  are applied only when a user or composer explicitly selects them.
+
 ## Change Workflow
 
 1. Read the relevant tests and local module before editing. Use `rg` first.
