@@ -4,7 +4,8 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -346,11 +347,15 @@ class ExperimentCatalog:
         source = "\n".join(str(row[0]) for row in [*experiments, *values])
         return hashlib.sha256(source.encode()).hexdigest()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:

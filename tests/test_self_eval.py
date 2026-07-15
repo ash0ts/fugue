@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,32 @@ def test_self_eval_manifests_are_pinned_and_have_six_tasks(role: str, split: str
 
 
 @pytest.mark.parametrize("role", ROLES)
+def test_self_eval_splits_match_task_metadata_without_leakage(role: str):
+    development = load_manifest(
+        Path(f"datasets/fugue-self-eval/{role}-dev.yaml")
+    )
+    holdout = load_manifest(
+        Path(f"datasets/fugue-self-eval/{role}-holdout.yaml")
+    )
+    manifest_splits = {
+        "development": {task.id for task in development.tasks},
+        "holdout": {task.id for task in holdout.tasks},
+    }
+
+    assert manifest_splits["development"].isdisjoint(manifest_splits["holdout"])
+    declared_splits = {"development": set(), "holdout": set()}
+    for root in sorted(Path(f"datasets/fugue-self-eval/v1/{role}").glob("fugue-*")):
+        config = tomllib.loads((root / "task.toml").read_text())
+        metadata = config["metadata"]
+        assert config["task"]["name"] == root.name
+        assert metadata["suite"] == f"fugue-{role}-v1"
+        assert metadata["source_commit"] == BASE_COMMIT
+        declared_splits[metadata["split"]].add(root.name)
+
+    assert declared_splits == manifest_splits
+
+
+@pytest.mark.parametrize("role", ROLES)
 def test_self_eval_smoke_preview_is_48_side_effect_free(role: str):
     service = OperatorService(Path.cwd())
     experiment = service.experiment(f"fugue-{role}-self-eval")
@@ -82,6 +109,19 @@ def test_maintainer_mutations_apply_to_the_current_base_contract():
         assert result.returncode == 0, f"{path}: {result.stderr}"
 
 
+def test_publication_finalization_task_uses_the_owning_regression():
+    test_script = Path(
+        "datasets/fugue-self-eval/v1/maintainer/"
+        "fugue-maintainer-publication-ledger-finalization/tests/test.sh"
+    ).read_text()
+
+    assert (
+        "tests/test_export.py::"
+        "test_live_evaluation_links_native_root_and_finalizes_cleanly"
+    ) in test_script
+    assert "pytest -q tests/test_export.py\n" not in test_script
+
+
 @pytest.mark.parametrize("role", ROLES)
 def test_self_eval_harbor_tasks_are_complete_and_executable(role: str):
     roots = sorted(Path(f"datasets/fugue-self-eval/v1/{role}").glob("fugue-*"))
@@ -103,3 +143,15 @@ def test_self_eval_harbor_tasks_are_complete_and_executable(role: str):
         setup = root / "environment/setup.sh"
         if setup.exists():
             subprocess.run(["sh", "-n", setup.as_posix()], check=True)
+
+
+def test_operator_embedded_python_verifiers_compile():
+    marker = "python - <<'PY'\n"
+    for path in sorted(
+        Path("datasets/fugue-self-eval/v1/operator").glob("*/tests/test.sh")
+    ):
+        script = path.read_text()
+        if marker not in script:
+            continue
+        body = script.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        compile(body, path.as_posix(), "exec")

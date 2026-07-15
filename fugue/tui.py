@@ -732,9 +732,15 @@ class FugueApp(App[None]):
             if event.value not in {Select.NULL, "__none__"}:
                 self._apply_agent_preset(str(event.value))
         elif event.select.id == "run-size-select":
-            self._set_run_size(str(event.value))
+            if str(event.value) != self._run_size():
+                self._set_run_size(str(event.value))
         elif event.select.id == "trace-content-select":
-            self._update_request(trace_content=str(event.value))
+            current = (
+                self.plan.request.trace_content
+                or self.plan.experiment.trace_content
+            )
+            if str(event.value) != current:
+                self._update_request(trace_content=str(event.value))
 
     def on_selection_list_selected_changed(
         self, event: SelectionList.SelectedChanged
@@ -742,38 +748,52 @@ class FugueApp(App[None]):
         if self._syncing:
             return
         if event.selection_list.id == "harness-list":
-            self._update_request(
-                harnesses=tuple(event.selection_list.selected),
-                dirty=True,
-            )
+            selected = tuple(event.selection_list.selected)
+            if selected != self.plan.request.harnesses:
+                self._update_request(harnesses=selected, dirty=True)
         elif event.selection_list.id == "workload-list":
-            self._update_request(
-                workloads=tuple(event.selection_list.selected),
-                dirty=True,
-            )
+            selected = tuple(event.selection_list.selected)
+            if selected != self.plan.request.workloads:
+                self._update_request(workloads=selected, dirty=True)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
         values: dict[str, Any] = {}
+        request = self.plan.request
+        experiment = self.plan.experiment
         if event.input.id == "model-input":
-            values["model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.model or experiment.model):
+                values["model"] = selected
         elif event.input.id == "builder-model-input":
-            values["builder_model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.builder_model or experiment.builder_model):
+                values["builder_model"] = selected
         elif event.input.id == "judge-model-input":
-            values["judge_model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.judge_model or experiment.judge_model):
+                values["judge_model"] = selected
         elif event.input.id == "run-name-input":
-            values["run_name"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.run_name or experiment.run_name):
+                values["run_name"] = selected
         elif event.input.id == "concurrency-input":
-            values["n_concurrent"] = _optional_positive(event.value, "Concurrency")
+            selected = _optional_positive(event.value, "Concurrency")
+            if selected != (request.n_concurrent or experiment.n_concurrent):
+                values["n_concurrent"] = selected
         elif event.input.id == "tags-input":
-            values["tags"] = tuple(_csv(event.value))
+            selected = tuple(_csv(event.value))
+            if selected != request.tags:
+                values["tags"] = selected
         elif event.input.id == "tasks-input":
-            values["n_tasks"] = _optional_positive(event.value, "Task limit")
+            selected = _optional_positive(event.value, "Task limit")
+            if selected != (request.n_tasks or experiment.n_tasks):
+                values["n_tasks"] = selected
         elif event.input.id == "attempts-input":
-            values["n_attempts"] = _optional_positive(
-                event.value, "Trials per cell"
-            )
+            selected = _optional_positive(event.value, "Trials per cell")
+            if selected != (request.n_attempts or experiment.n_attempts):
+                values["n_attempts"] = selected
         if values:
             self._update_request(**values, dirty=True)
 
