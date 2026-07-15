@@ -10,6 +10,9 @@ from fugue.bench.manifest import load_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "datasets" / "skillsbench-pdf.yaml"
+SKILLSBENCH_DIGEST = (
+    "sha256:145925c10bc09425dc0201772cfa50d9b800010081cf5ad77969554a644d7ae1"
+)
 
 
 def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
@@ -18,7 +21,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
     skill = get_skill("pdf-artifact-workflow", REPO_ROOT)
 
     assert manifest.dataset.ref == "benchflow/skillsbench"
-    assert manifest.dataset.version == "1.1"
+    assert manifest.dataset.version == SKILLSBENCH_DIGEST
     assert [task.id for task in manifest.tasks] == [
         "court-form-filling",
         "pdf-excel-diff",
@@ -91,7 +94,7 @@ def _assert_balanced_skill_pair(
     assert baseline["datasets"] == [
         {
             "name": "benchflow/skillsbench",
-            "ref": "1.1",
+            "ref": SKILLSBENCH_DIGEST,
             "task_names": [f"benchflow/{task_id}"],
             "n_tasks": 1,
         }

@@ -1,6 +1,6 @@
 dataset:
   ref: benchflow/skillsbench
-  version: "1.1"
+  version: "sha256:145925c10bc09425dc0201772cfa50d9b800010081cf5ad77969554a644d7ae1"
 
 model: wandb/zai-org/GLM-5.2
 k: 2
