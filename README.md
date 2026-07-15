@@ -418,12 +418,12 @@ fugue runs RUN_ID package CANDIDATE_PREFIX \
   --yes
 ```
 
-All applicable cells for the candidate must be terminal and deterministically
-scored, and at least one benchmark outcome must pass. Benchmark or execution
-failures require both `--allow-failed` and confirmation; unscored cells block
-packaging. Judge and rubric results never replace the deterministic outcome.
-Another candidate may fail the overall run without blocking a complete
-candidate.
+All applicable cells for the candidate must be terminal, and at least one
+deterministic benchmark outcome must pass. Terminal unscored cells may provide
+coverage but never satisfy that pass requirement. Benchmark or execution
+failures require both `--allow-failed` and confirmation. Judge and rubric
+results never replace the deterministic outcome. Another candidate may fail
+the overall run without blocking a complete candidate.
 
 Serving is an optional Python 3.13 feature, outside the operator path:
 
