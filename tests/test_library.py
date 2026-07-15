@@ -5,12 +5,65 @@ import pytest
 from fugue.bench.library import (
     experiment_to_yaml,
     experiment_from_data,
+    get_agent_preset,
     get_experiment,
     get_prompt,
     save_experiment,
     save_prompt,
+    save_skill,
     validate_id,
 )
+
+
+def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
+    save_prompt("fugue-maintainer", "# Maintainer\n", tmp_path)
+    save_skill("fugue-maintainer", "# Maintainer\n", tmp_path)
+    root = tmp_path / "configs/fugue/agent-presets"
+    root.mkdir(parents=True)
+    (root / "maintainer-best.yaml").write_text(
+        """
+id: maintainer-best
+title: Maintainer best
+role: maintainer
+base_experiment_id: fugue-maintainer-self-eval
+harness: codex
+model: openai/gpt-5
+prompt_id: fugue-maintainer
+skill_ids: [fugue-maintainer]
+context: {system_id: agentsmd}
+suite_id: fugue-maintainer-v1
+suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+base_commit: 96512017842d68add2546a057f0601de3eaf610e
+run_ids: [run-1]
+analysis_snapshot: snapshot-1
+metrics: {pass_rate: 0.9, cost_per_success: 0.12}
+"""
+    )
+
+    preset = get_agent_preset("maintainer-best", tmp_path)
+
+    assert preset.role == "maintainer"
+    assert preset.harness == "codex"
+    assert preset.context.system_id == "agentsmd"
+    assert preset.metrics["pass_rate"] == 0.9
+
+
+def test_agent_preset_rejects_unknown_fields(tmp_path):
+    root = tmp_path / "configs/fugue/agent-presets"
+    root.mkdir(parents=True)
+    (root / "broken.yaml").write_text(
+        """
+id: broken
+role: operator
+base_experiment_id: pilot
+harness: codex
+model: openai/gpt-5
+invented: true
+"""
+    )
+
+    with pytest.raises(ValueError, match="unknown agent preset field.*invented"):
+        get_agent_preset("broken", tmp_path)
 
 
 def test_prompt_save_reload_and_hash(tmp_path):

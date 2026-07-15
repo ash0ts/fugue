@@ -411,6 +411,12 @@ def _print_analysis_preview(preview: Any) -> None:
     table.add_row("Models", ", ".join(scope.models) or "none")
     table.add_row("Variants", ", ".join(scope.variants) or "none")
     table.add_row("Sources", ", ".join(scope.sources) or "local")
+    if preview.selection is not None:
+        table.add_row("Selection", preview.selection.decision.replace("_", " "))
+        table.add_row(
+            "Candidate", preview.selection.selected_candidate_id or "none"
+        )
+        table.add_row("Selection reason", preview.selection.reason)
     if scope.missing_metrics:
         table.add_row("Missing metrics", ", ".join(scope.missing_metrics))
     CONSOLE.print(Panel(table, title="Resolved analysis scope", border_style="fugue.cyan"))

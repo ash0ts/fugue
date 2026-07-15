@@ -12,6 +12,7 @@ CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
 SKILLS_DIR = "skills"
 EXPERIMENTS_DIR = "experiments"
+AGENT_PRESETS_DIR = "agent-presets"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
@@ -53,6 +54,35 @@ class ContextSelection:
 class IntegrationSelection:
     id: str
     config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AgentPreset:
+    id: str
+    title: str
+    role: Literal["maintainer", "operator"]
+    base_experiment_id: str
+    harness: str
+    model: str
+    prompt_id: str | None = None
+    skill_ids: list[str] = field(default_factory=list)
+    context: ContextSelection = field(default_factory=ContextSelection)
+    agent_kwargs: dict[str, Any] = field(default_factory=dict)
+    agent_env: dict[str, str] = field(default_factory=dict)
+    mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    environment: dict[str, Any] = field(default_factory=dict)
+    verifier: dict[str, Any] = field(default_factory=dict)
+    retry: dict[str, Any] = field(default_factory=dict)
+    artifacts: list[Any] = field(default_factory=list)
+    suite_id: str = ""
+    suite_digest: str = ""
+    base_commit: str = ""
+    run_ids: list[str] = field(default_factory=list)
+    analysis_snapshot: str = ""
+    metrics: dict[str, float | int | None] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -257,6 +287,80 @@ def save_skill(item_id: str, body: str, repo_root: Path | None = None) -> Skill:
 
 def list_experiments(repo_root: Path | None = None) -> list[LibraryItem]:
     return _list_yaml_items(library_root(repo_root) / EXPERIMENTS_DIR)
+
+
+def list_agent_presets(repo_root: Path | None = None) -> list[LibraryItem]:
+    return _list_yaml_items(library_root(repo_root) / AGENT_PRESETS_DIR)
+
+
+def get_agent_preset(
+    item_id: str, repo_root: Path | None = None
+) -> AgentPreset:
+    item_id = validate_id(item_id, kind="agent preset id")
+    path = library_root(repo_root) / AGENT_PRESETS_DIR / f"{item_id}.yaml"
+    if not path.is_file():
+        raise FileNotFoundError(f"agent preset not found: {item_id}")
+    raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("agent preset YAML must be a mapping")
+    _reject_unknown(raw, AgentPreset, kind="agent preset")
+    preset_id = validate_id(raw.get("id") or item_id, kind="agent preset id")
+    if preset_id != item_id:
+        raise ValueError(
+            f"agent preset file {path.name!r} declares mismatched id {preset_id!r}"
+        )
+    role = str(raw.get("role") or "")
+    if role not in {"maintainer", "operator"}:
+        raise ValueError("agent preset role must be maintainer or operator")
+    harness = str(raw.get("harness") or "")
+    if harness not in {"hermes", "openclaw", "claude-code", "codex"}:
+        raise ValueError(f"unknown agent preset harness: {harness or '<empty>'}")
+    model = str(raw.get("model") or "").strip()
+    if not model:
+        raise ValueError("agent preset model is required")
+    prompt_id = _optional_str(raw.get("prompt_id"))
+    if prompt_id:
+        validate_id(prompt_id, kind="prompt id")
+        get_prompt(prompt_id, repo_root)
+    skill_ids = _string_list(raw.get("skill_ids"))
+    _require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
+    for skill_id in skill_ids:
+        get_skill(skill_id, repo_root)
+    suite_digest = str(raw.get("suite_digest") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", suite_digest):
+        raise ValueError("agent preset suite_digest must be a SHA-256 digest")
+    base_commit = str(raw.get("base_commit") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
+        raise ValueError("agent preset base_commit must be a full Git commit")
+    metrics = _dict(raw.get("metrics"))
+    if any(value is not None and not isinstance(value, (int, float)) for value in metrics.values()):
+        raise ValueError("agent preset metrics must be numeric or null")
+    return AgentPreset(
+        id=preset_id,
+        title=str(raw.get("title") or preset_id),
+        role=role,  # type: ignore[arg-type]
+        base_experiment_id=validate_id(
+            raw.get("base_experiment_id") or "pilot", kind="experiment id"
+        ),
+        harness=harness,
+        model=model,
+        prompt_id=prompt_id,
+        skill_ids=skill_ids,
+        context=_context_selection(raw.get("context")),
+        agent_kwargs=_dict(raw.get("agent_kwargs")),
+        agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
+        mcp_servers=[_dict(item) for item in _list(raw.get("mcp_servers"))],
+        environment=_dict(raw.get("environment")),
+        verifier=_dict(raw.get("verifier")),
+        retry=_dict(raw.get("retry")),
+        artifacts=_list(raw.get("artifacts")),
+        suite_id=str(raw.get("suite_id") or ""),
+        suite_digest=suite_digest,
+        base_commit=base_commit,
+        run_ids=_string_list(raw.get("run_ids")),
+        analysis_snapshot=str(raw.get("analysis_snapshot") or ""),
+        metrics={str(key): value for key, value in metrics.items()},
+    )
 
 
 def get_experiment(item_id: str, repo_root: Path | None = None) -> ExperimentSpec:

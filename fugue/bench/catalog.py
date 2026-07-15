@@ -39,6 +39,8 @@ FILTER_FIELDS = {
     "status",
     "intervention_type",
     "source",
+    "candidate_id",
+    "tag",
 }
 
 
@@ -126,13 +128,18 @@ class ExperimentCatalog:
         for key, value in (filters or {}).items():
             if key not in FILTER_FIELDS:
                 raise ValueError(f"unsupported catalog filter: {key}")
-            if key in {"preset_id", "prompt_id"}:
+            if key in {"preset_id", "prompt_id", "candidate_id"}:
                 clauses.append(f"json_extract(payload, '$.{key}') = ?")
             elif key in {"skill_id", "integration_id"}:
                 field = "skill_ids" if key == "skill_id" else "integration_ids"
                 clauses.append(
                     "EXISTS (SELECT 1 FROM json_each(json_extract(payload, "
                     f"'$.{field}')) WHERE json_each.value = ?)"
+                )
+            elif key == "tag":
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, '$.tags')) "
+                    "WHERE json_each.value = ?)"
                 )
             else:
                 clauses.append(f"{key} = ?")
@@ -162,6 +169,7 @@ class ExperimentCatalog:
             "status",
             "intervention_type",
             "source",
+            "candidate_id",
         )
         result = {
             field: dict(
@@ -191,6 +199,13 @@ class ExperimentCatalog:
             else:
                 integrations["none"] += 1
         result["integration_id"] = dict(sorted(integrations.items()))
+        tags: Counter[str] = Counter()
+        for row in values:
+            selected_tags = row.get("tags") or []
+            if isinstance(selected_tags, str):
+                selected_tags = [selected_tags]
+            tags.update(str(item) for item in selected_tags if item)
+        result["tag"] = dict(sorted(tags.items()))
         return result
 
     def read_artifact(self, value: str | Path, *, max_bytes: int = 32_768) -> ArtifactExcerpt:

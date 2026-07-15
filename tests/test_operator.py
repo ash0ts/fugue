@@ -17,6 +17,7 @@ def make_operator_repo(tmp_path: Path) -> OperatorService:
     (tmp_path / "configs/fugue/context-systems").mkdir(parents=True)
     (tmp_path / "configs/fugue/prompts").mkdir(parents=True)
     (tmp_path / "configs/fugue/skills/demo-skill").mkdir(parents=True)
+    (tmp_path / "configs/fugue/agent-presets").mkdir(parents=True)
     (tmp_path / "datasets").mkdir()
     (tmp_path / "configs/fugue/context-systems/none.yaml").write_text(
         """
@@ -62,6 +63,25 @@ trace_content: full
     )
     (tmp_path / "configs/fugue/skills/demo-skill/SKILL.md").write_text(
         "# Demo skill\n\nUse focused repository search.\n"
+    )
+    (tmp_path / "configs/fugue/agent-presets/demo-maintainer.yaml").write_text(
+        """
+id: demo-maintainer
+title: Demo maintainer
+role: maintainer
+base_experiment_id: demo
+harness: codex
+model: openai/gpt-5
+prompt_id: demo-prompt
+skill_ids: [demo-skill]
+context: {system_id: none}
+suite_id: demo-v1
+suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+run_ids: [run-1]
+analysis_snapshot: snapshot-1
+metrics: {pass_rate: 1.0}
+"""
     )
     (tmp_path / ".env").write_text(
         "OPENAI_API_KEY=model-secret\n"
@@ -182,6 +202,21 @@ def test_request_for_experiment_keeps_inherited_scale_out_of_overrides(
     assert request.n_attempts is None
     assert request.n_tasks is None
     assert request.n_concurrent is None
+
+
+def test_operator_applies_agent_preset_without_saving(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+
+    experiment = service.apply_agent_preset(
+        service.experiment("demo"), "demo-maintainer"
+    )
+
+    assert experiment.model == "openai/gpt-5"
+    assert experiment.harnesses == ["codex"]
+    assert [item.id for item in experiment.variants] == ["maintainer-recommended"]
+    assert experiment.variants[0].prompt_id == "demo-prompt"
+    assert experiment.variants[0].skill_ids == ["demo-skill"]
+    assert service.experiment("demo").variants[0].id == "baseline"
 
 
 def test_start_bridge_loads_the_requested_experiment(

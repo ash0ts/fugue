@@ -71,6 +71,7 @@ class PlanState:
     proposal: Any = None
     preview: PreviewSummary | None = None
     dirty: bool = False
+    agent_preset_id: str | None = None
 
 
 class PixelSequencer(Static):
@@ -564,6 +565,13 @@ class FugueApp(App[None]):
                     allow_blank=False,
                     id="experiment-select",
                 )
+                yield Label("RECOMMENDED AGENT CONFIGURATION", classes="section-title")
+                yield Select(
+                    [("None", "__none__"), *self.service.agent_preset_items()],
+                    value="__none__",
+                    allow_blank=False,
+                    id="agent-preset-select",
+                )
                 yield Static(id="define-summary")
                 with Vertical(id="proposal-panel", classes="hidden"):
                     yield Static(id="proposal-summary")
@@ -737,6 +745,9 @@ class FugueApp(App[None]):
         if event.select.id == "experiment-select" and event.value != Select.NULL:
             if str(event.value) != self.plan.base_experiment_id:
                 self._load_experiment(str(event.value))
+        elif event.select.id == "agent-preset-select":
+            if event.value not in {Select.NULL, "__none__"}:
+                self._apply_agent_preset(str(event.value))
         elif event.select.id == "run-size-select":
             self._set_run_size(str(event.value))
         elif event.select.id == "trace-content-select":
@@ -852,6 +863,23 @@ class FugueApp(App[None]):
         self._queue_preview()
         self._refresh_setup()
 
+    def _apply_agent_preset(self, preset_id: str) -> None:
+        experiment = self.service.apply_agent_preset(
+            self.plan.experiment, preset_id
+        )
+        self.experiment_id = experiment.id
+        self.selected_variant_id = experiment.variants[0].id
+        self.plan = PlanState(
+            base_experiment_id=self.plan.base_experiment_id,
+            experiment=experiment,
+            request=self.service.request_for_experiment(experiment),
+            dirty=True,
+            agent_preset_id=preset_id,
+        )
+        self._render_plan()
+        self._queue_preview()
+        self.notify("Recommended configuration applied locally")
+
     def _render_plan(self) -> None:
         self._syncing = True
         self._sync_generation += 1
@@ -863,6 +891,9 @@ class FugueApp(App[None]):
                 value for _, value in self.service.experiment_items()
             }:
                 selector.value = self.plan.base_experiment_id
+            self.query_one("#agent-preset-select", Select).value = (
+                self.plan.agent_preset_id or "__none__"
+            )
             self._render_define_summary()
             self._render_proposal()
             self._render_variants()
@@ -1929,11 +1960,19 @@ class FugueApp(App[None]):
         self.analysis_result = None
         scope = preview.scope
         warnings = "; ".join(scope.warnings) if scope.warnings else "None"
+        selection = getattr(preview, "selection", None)
+        selection_text = (
+            f"\nSelection: {selection.decision.replace('_', ' ')} / "
+            f"{selection.selected_candidate_id or 'none'}"
+            if selection is not None
+            else ""
+        )
         self.query_one("#analysis-scope", Static).update(
             f"{len(scope.experiments)} experiments / "
             f"{len(scope.runs)} runs / {scope.rows} records / "
             f"{len(scope.tasks)} tasks\n"
             f"Models: {', '.join(scope.models)}\nWarnings: {warnings}"
+            f"{selection_text}"
         )
         report = self.query_one("#analysis-report", RichLog)
         report.clear()

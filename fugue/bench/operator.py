@@ -37,11 +37,14 @@ from fugue.bench.export import (
 from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
 from fugue.bench.library import (
     ExperimentSpec,
+    FeatureVariant,
     PresetSpec,
     WorkloadSpec,
     experiment_to_yaml,
     experiment_with_overrides,
+    get_agent_preset,
     get_experiment,
+    list_agent_presets,
     list_experiments,
     save_experiment_data,
     save_prompt,
@@ -711,6 +714,35 @@ class OperatorService:
 
     def experiment_items(self) -> list[tuple[str, str]]:
         return [(item.title, item.id) for item in list_experiments(self.repo_root)]
+
+    def agent_preset_items(self) -> list[tuple[str, str]]:
+        return [(item.title, item.id) for item in list_agent_presets(self.repo_root)]
+
+    def apply_agent_preset(
+        self, experiment: ExperimentSpec, preset_id: str
+    ) -> ExperimentSpec:
+        preset = get_agent_preset(preset_id, self.repo_root)
+        variant = FeatureVariant(
+            id=f"{preset.role}-recommended",
+            label=f"Recommended {preset.role}",
+            prompt_id=preset.prompt_id,
+            skill_ids=list(preset.skill_ids),
+            context=preset.context,
+            agent_kwargs=dict(preset.agent_kwargs),
+            agent_env=dict(preset.agent_env),
+            mcp_servers=[dict(item) for item in preset.mcp_servers],
+            environment=dict(preset.environment),
+            verifier=dict(preset.verifier),
+            retry=dict(preset.retry),
+            artifacts=list(preset.artifacts),
+        )
+        return experiment_with_overrides(
+            experiment,
+            model=preset.model,
+            harnesses=[preset.harness],
+            variants=[variant.to_dict()],
+            tags=[*experiment.tags, "agent-preset", f"role:{preset.role}"],
+        )
 
     def request_for_experiment(self, experiment: ExperimentSpec) -> ExperimentRequest:
         """Build UI selections without turning inherited settings into overrides."""

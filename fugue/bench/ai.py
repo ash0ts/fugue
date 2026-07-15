@@ -7,7 +7,7 @@ import re
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -37,9 +37,11 @@ from fugue.bench.library import (
     ExperimentSpec,
     experiment_from_data,
     experiment_to_yaml,
+    get_agent_preset,
     get_experiment,
     get_prompt,
     get_skill,
+    list_agent_presets,
     list_experiments,
     list_prompts,
     list_skills,
@@ -47,7 +49,13 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import load_manifest
 from fugue.bench.sources import list_skill_source_ids, load_skill_source
+from fugue.bench.scoring import (
+    CandidateSelection,
+    SelectionPolicy,
+    select_candidate_configuration,
+)
 from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
+from fugue.redaction import redact_value
 
 if TYPE_CHECKING:
     from fugue.bench.operator import OperatorService, PreviewSummary
@@ -120,6 +128,7 @@ class AnalysisSpec:
     include_artifacts: bool = True
     model: str | None = None
     trace_content: str = "full"
+    selection: SelectionPolicy | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -168,6 +177,7 @@ class AnalysisResult:
     snapshot: AnalysisSnapshot
     evidence: tuple[EvidenceRef, ...]
     aggregates: tuple[dict[str, Any], ...]
+    selection: CandidateSelection | None
     report: str
     report_dir: Path
     model: str
@@ -184,6 +194,7 @@ class AnalysisPreview:
     snapshot: AnalysisSnapshot
     evidence: tuple[EvidenceRef, ...]
     aggregates: tuple[dict[str, Any], ...]
+    selection: CandidateSelection | None
 
 
 class ExperimentComposer:
@@ -307,6 +318,19 @@ class ExperimentComposer:
                 lambda value: get_experiment(str(value["id"]), self.repo_root).to_dict(),
             ),
             AssistantTool(
+                "show_agent_preset",
+                "Load one evidence-backed maintainer or operator agent preset.",
+                {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
+                lambda value: get_agent_preset(
+                    str(value["id"]), self.repo_root
+                ).to_dict(),
+            ),
+            AssistantTool(
                 "submit_experiment",
                 "Submit a complete Fugue experiment draft for deterministic validation.",
                 _experiment_submission_schema(),
@@ -394,6 +418,10 @@ class ExperimentComposer:
             }
         return {
             "experiments": experiments,
+            "agent_presets": [
+                get_agent_preset(item.id, self.repo_root).to_dict()
+                for item in list_agent_presets(self.repo_root)
+            ],
             "prompts": [item.id for item in list_prompts(self.repo_root)],
             "skills": sorted(
                 {
@@ -535,7 +563,7 @@ class ExperimentAnalyst:
                 source=source,
             )
         elif filters:
-            spec = AnalysisSpec(**{**spec.to_dict(), "filters": {**spec.filters, **filters}})
+            spec = replace(spec, filters={**spec.filters, **filters})
         preview = self.prepare(spec)
         return await self.execute(preview, model=model)
 
@@ -656,12 +684,16 @@ class ExperimentAnalyst:
         snapshot = _snapshot(rows, status.revision)
         scope = _scope(rows, spec.metrics, [])
         aggregates, evidence = _aggregate(rows, spec)
+        selection = _selection(rows, spec, snapshot.digest)
+        if selection is not None:
+            evidence.append(_selection_evidence(selection, len(evidence) + 1, rows))
         return AnalysisPreview(
             spec=spec,
             scope=scope,
             snapshot=snapshot,
             evidence=tuple(evidence),
             aggregates=tuple(aggregates),
+            selection=selection,
         )
 
     async def execute(
@@ -704,6 +736,9 @@ class ExperimentAnalyst:
         snapshot = _snapshot(rows, preview.snapshot.catalog_revision)
         scope = _scope(rows, spec.metrics, warnings)
         aggregates, evidence = _aggregate(rows, spec)
+        selection = _selection(rows, spec, snapshot.digest)
+        if selection is not None:
+            evidence.append(_selection_evidence(selection, len(evidence) + 1, rows))
         selected_model = select_assistant_model(
             "analyst",
             cli_model=model,
@@ -802,6 +837,7 @@ class ExperimentAnalyst:
                     lambda _: {
                         "scope": asdict(scope),
                         "aggregates": aggregates,
+                        "selection": selection.to_dict() if selection else None,
                         "evidence": [asdict(item) for item in evidence_values],
                     },
                 ),
@@ -871,6 +907,7 @@ class ExperimentAnalyst:
                             "question": spec.question,
                             "scope": asdict(scope),
                             "aggregates": aggregates,
+                            "selection": selection.to_dict() if selection else None,
                             "evidence": [asdict(item) for item in evidence_values],
                         },
                         sort_keys=True,
@@ -903,6 +940,7 @@ class ExperimentAnalyst:
             snapshot=snapshot,
             evidence=tuple(evidence_values),
             aggregates=tuple(aggregates),
+            selection=selection,
             report=report,
             report_dir=report_dir,
             model=run.model,
@@ -911,7 +949,7 @@ class ExperimentAnalyst:
             input_tokens=run.usage.input_tokens or 0,
             output_tokens=run.usage.output_tokens or 0,
         )
-        _write_analysis(result)
+        _write_analysis(result, self.repo_root)
         return result
 
 
@@ -983,6 +1021,90 @@ def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
         include_artifacts=bool(raw.get("include_artifacts", True)),
         model=str(raw["model"]) if raw.get("model") else None,
         trace_content=trace_content,
+        selection=_selection_policy(raw.get("selection")),
+    )
+
+
+def _selection_policy(raw: Any) -> SelectionPolicy | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("analysis selection must be a mapping")
+    allowed = set(SelectionPolicy.__dataclass_fields__)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"unknown analysis selection field(s): {', '.join(unknown)}")
+    metric = str(raw.get("metric") or "pass_rate")
+    if metric != "pass_rate":
+        raise ValueError("analysis selection currently supports pass_rate only")
+    confidence = float(raw.get("confidence", 0.95))
+    margin = float(raw.get("noninferiority_margin", 0.05))
+    samples = int(raw.get("bootstrap_samples", 2_000))
+    if not 0.5 < confidence < 1.0:
+        raise ValueError("analysis selection confidence must be between 0.5 and 1")
+    if not 0 <= margin < 1.0:
+        raise ValueError("analysis selection noninferiority_margin must be in [0, 1)")
+    if samples < 100:
+        raise ValueError("analysis selection bootstrap_samples must be at least 100")
+    tie_breakers = tuple(
+        str(item)
+        for item in raw.get("tie_breakers")
+        or SelectionPolicy.__dataclass_fields__["tie_breakers"].default
+    )
+    expected_ties = SelectionPolicy.__dataclass_fields__["tie_breakers"].default
+    if tie_breakers != expected_ties:
+        raise ValueError(
+            "analysis selection tie_breakers must be cost_per_success, "
+            "median_wall_time_sec, recoverable_error_rate"
+        )
+    improvement_values = {
+        "minimum_pass_rate_improvement": float(
+            raw.get("minimum_pass_rate_improvement", 0.05)
+        ),
+        "minimum_cost_improvement": float(
+            raw.get("minimum_cost_improvement", 0.15)
+        ),
+        "minimum_latency_improvement": float(
+            raw.get("minimum_latency_improvement", 0.15)
+        ),
+    }
+    if any(not 0 <= value < 1.0 for value in improvement_values.values()):
+        raise ValueError("analysis selection improvement thresholds must be in [0, 1)")
+    return SelectionPolicy(
+        metric=metric,
+        confidence=confidence,
+        noninferiority_margin=margin,
+        require_complete_grid=bool(raw.get("require_complete_grid", True)),
+        bootstrap_samples=samples,
+        tie_breakers=tie_breakers,
+        incumbent_candidate_id=(
+            str(raw["incumbent_candidate_id"])
+            if raw.get("incumbent_candidate_id")
+            else None
+        ),
+        **improvement_values,
+    )
+
+
+def _selection(
+    rows: Sequence[dict[str, Any]], spec: AnalysisSpec, snapshot_digest: str
+) -> CandidateSelection | None:
+    if spec.selection is None:
+        return None
+    return select_candidate_configuration(rows, spec.selection, seed=snapshot_digest)
+
+
+def _selection_evidence(
+    selection: CandidateSelection,
+    index: int,
+    rows: Sequence[dict[str, Any]],
+) -> EvidenceRef:
+    return EvidenceRef(
+        id=f"E{index:03d}",
+        kind="candidate_selection",
+        label="Deterministic quality-first candidate selection",
+        row_ids=tuple(str(row.get("row_id")) for row in rows),
+        data=selection.to_dict(),
     )
 
 
@@ -1141,7 +1263,7 @@ def _render_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _write_analysis(result: AnalysisResult) -> None:
+def _write_analysis(result: AnalysisResult, repo_root: Path) -> None:
     result.report_dir.mkdir(parents=True, exist_ok=True)
     (result.report_dir / "report.md").write_text(result.report)
     (result.report_dir / "analysis.json").write_text(
@@ -1151,6 +1273,7 @@ def _write_analysis(result: AnalysisResult) -> None:
                 "scope": asdict(result.scope),
                 "snapshot": {key: value for key, value in asdict(result.snapshot).items() if key != "rows"},
                 "aggregates": result.aggregates,
+                "selection": result.selection.to_dict() if result.selection else None,
                 "model": result.model,
                 "provider": result.provider,
                 "session_id": result.session_id,
@@ -1171,6 +1294,175 @@ def _write_analysis(result: AnalysisResult) -> None:
     with (result.report_dir / "evidence.jsonl").open("w") as handle:
         for item in result.evidence:
             handle.write(json.dumps(asdict(item), sort_keys=True, default=str) + "\n")
+    _write_promotion_bundle(result, repo_root)
+
+
+def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
+    selection = result.selection
+    if selection is None or selection.selected_candidate_id is None:
+        return
+    rows = [dict(row) for row in result.snapshot.rows]
+    selected_rows = [
+        row
+        for row in rows
+        if str(row.get("candidate_id")) == selection.selected_candidate_id
+    ]
+    if not selected_rows:
+        return
+    experiment_ids = _unique(selected_rows, "experiment_id")
+    if len(experiment_ids) != 1:
+        return
+    experiment = get_experiment(experiment_ids[0], repo_root)
+    role = next(
+        (
+            tag.split(":", 1)[1]
+            for tag in experiment.tags
+            if tag in {"role:maintainer", "role:operator"}
+        ),
+        None,
+    )
+    if role is None:
+        return
+    variant_id = str(selected_rows[0].get("variant_id") or "")
+    variant = next((item for item in experiment.variants if item.id == variant_id), None)
+    if variant is None:
+        return
+    score = next(
+        item
+        for item in selection.candidates
+        if item.candidate_id == selection.selected_candidate_id
+    )
+    suite_id = next(
+        (tag.split(":", 1)[1] for tag in experiment.tags if tag.startswith("suite:")),
+        experiment.id,
+    )
+    suite_digest, base_commit = _suite_provenance(
+        experiment, selected_rows, repo_root
+    )
+    campaign_tags = {
+        str(tag)
+        for row in selected_rows
+        for tag in row.get("tags") or []
+        if str(tag).startswith("campaign:")
+    }
+    campaign_tag = (
+        next(iter(campaign_tags))
+        if len(campaign_tags) == 1
+        else str(result.spec.filters.get("tag") or "")
+    )
+    campaign_id = (
+        campaign_tag.split(":", 1)[1]
+        if campaign_tag.startswith("campaign:")
+        else result.snapshot.id
+    )
+    output = repo_root / "reports" / "self-eval" / validate_id(
+        _slug(campaign_id), kind="campaign id"
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "pass_rate": score.pass_rate,
+        "cost_per_success": score.cost_per_success,
+        "median_wall_time_sec": score.median_wall_time_sec,
+        "recoverable_error_rate": score.recoverable_error_rate,
+        "confidence_low": score.confidence_low,
+        "confidence_high": score.confidence_high,
+    }
+    proposal = {
+        "decision": selection.decision,
+        "reason": selection.reason,
+        "role": role,
+        "suite_id": suite_id,
+        "suite_digest": suite_digest,
+        "base_commit": base_commit,
+        "analysis_id": result.spec.id,
+        "analysis_snapshot": result.snapshot.digest,
+        "run_ids": list(result.scope.runs),
+        "best_candidate_id": selection.best_candidate_id,
+        "selected_candidate_id": selection.selected_candidate_id,
+        "policy": asdict(selection.policy),
+        "metrics": metrics,
+        "candidates": [asdict(item) for item in selection.candidates],
+    }
+    (output / "promotion.json").write_text(
+        json.dumps(proposal, indent=2, sort_keys=True, default=str) + "\n"
+    )
+    (output / "promotion.md").write_text(
+        "\n".join(
+            [
+                f"# Fugue {role.title()} Agent Promotion",
+                "",
+                f"- Decision: `{selection.decision}`",
+                f"- Candidate: `{selection.selected_candidate_id}`",
+                f"- Reason: {selection.reason}",
+                f"- Suite: `{suite_id}` (`{suite_digest[:12]}`)",
+                f"- Source: `{base_commit}`",
+                f"- Analysis snapshot: `{result.snapshot.digest}`",
+                "",
+                "This is a review artifact. It does not change tracked defaults or open a PR.",
+                "",
+            ]
+        )
+    )
+    candidate = {
+        "id": f"fugue-{role}-recommended",
+        "title": f"Recommended Fugue {role}",
+        "role": role,
+        "base_experiment_id": experiment.id,
+        "harness": selected_rows[0].get("harness"),
+        "model": selected_rows[0].get("model"),
+        "prompt_id": variant.prompt_id,
+        "skill_ids": variant.skill_ids,
+        "context": asdict(variant.context),
+        "agent_kwargs": variant.agent_kwargs,
+        "agent_env": variant.agent_env,
+        "mcp_servers": variant.mcp_servers,
+        "environment": variant.environment,
+        "verifier": variant.verifier,
+        "retry": variant.retry,
+        "artifacts": variant.artifacts,
+        "suite_id": suite_id,
+        "suite_digest": suite_digest,
+        "base_commit": base_commit,
+        "run_ids": list(result.scope.runs),
+        "analysis_snapshot": result.snapshot.digest,
+        "metrics": metrics,
+    }
+    (output / "candidate-preset.yaml").write_text(
+        yaml.safe_dump(redact_value(candidate), sort_keys=False)
+    )
+
+
+def _suite_provenance(
+    experiment: ExperimentSpec,
+    rows: Sequence[dict[str, Any]],
+    repo_root: Path,
+) -> tuple[str, str]:
+    workload_ids = {str(row.get("workload_id") or "") for row in rows}
+    manifest_paths = {
+        item.manifest
+        for item in experiment.workloads
+        if item.id in workload_ids and item.manifest is not None
+    } or {experiment.manifest}
+    digest = hashlib.sha256()
+    commits: set[str] = set()
+    dataset_roots: set[Path] = set()
+    for value in sorted(manifest_paths, key=lambda item: item.as_posix()):
+        path = value if value.is_absolute() else repo_root / value
+        digest.update(path.relative_to(repo_root).as_posix().encode())
+        digest.update(path.read_bytes())
+        manifest = load_manifest(path)
+        commits.update(task.base_commit for task in manifest.tasks if task.base_commit)
+        if manifest.dataset.path:
+            dataset_roots.add(
+                manifest.dataset.path
+                if manifest.dataset.path.is_absolute()
+                else repo_root / manifest.dataset.path
+            )
+    for root in sorted(dataset_roots, key=lambda item: item.as_posix()):
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            digest.update(path.relative_to(repo_root).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest(), next(iter(commits)) if len(commits) == 1 else "mixed"
 
 
 def _asset_draft(raw: Any) -> AssetDraft:
@@ -1248,7 +1540,7 @@ def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:
 
 
 def _composer_instructions() -> str:
-    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Preserve unspecified settings from the base experiment. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested skill or MCP server. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, MCP, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, context, integration, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
 
 
 def _analyst_planner_instructions() -> str:
@@ -1331,6 +1623,25 @@ def _analysis_plan_schema() -> dict[str, Any]:
             "metrics": {"type": "array", "items": {"type": "string"}},
             "source": {"type": "string", "enum": ["local", "hybrid"]},
             "include_artifacts": {"type": "boolean"},
+            "selection": {
+                "type": "object",
+                "properties": {
+                    "metric": {"type": "string", "enum": ["pass_rate"]},
+                    "confidence": {"type": "number"},
+                    "noninferiority_margin": {"type": "number"},
+                    "require_complete_grid": {"type": "boolean"},
+                    "bootstrap_samples": {"type": "integer"},
+                    "tie_breakers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "incumbent_candidate_id": {"type": "string"},
+                    "minimum_pass_rate_improvement": {"type": "number"},
+                    "minimum_cost_improvement": {"type": "number"},
+                    "minimum_latency_improvement": {"type": "number"},
+                },
+                "additionalProperties": False,
+            },
         },
         "required": ["id", "title", "filters", "group_by", "metrics"],
         "additionalProperties": False,
