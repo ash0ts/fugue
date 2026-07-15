@@ -1148,6 +1148,37 @@ class FugueHermes(_TrialMetaMixin, Hermes):
     def _provider_name(self) -> str:
         return self.model_route.provider if self.model_route.chat_base_url else "fugue"
 
+    @override
+    def _build_register_mcp_servers_command(self) -> str | None:
+        if not self.mcp_servers:
+            return None
+        import yaml
+
+        servers: dict[str, dict[str, Any]] = {}
+        for server in self.mcp_servers:
+            if server.transport == "stdio":
+                servers[server.name] = {
+                    "command": server.command,
+                    "args": list(server.args),
+                }
+            else:
+                servers[server.name] = {"url": server.url}
+        rendered = yaml.dump({"mcp_servers": servers}, default_flow_style=False)
+        return (
+            'cat >> "$HOME/.hermes/config.yaml" << \'MCPEOF\'\n'
+            f"{rendered}MCPEOF"
+        )
+
+    @override
+    def _build_register_skills_command(self) -> str | None:
+        if not self.skills_dir:
+            return None
+        source = shlex.quote(str(self.skills_dir))
+        return (
+            'mkdir -p "$HOME/.hermes/skills" && '
+            f'cp -R {source}/. "$HOME/.hermes/skills/"'
+        )
+
     def _build_model_config_yaml(self) -> str:
         import yaml
 
@@ -1282,7 +1313,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                     "status": "registered",
                     "delivery": "native_mcp",
                     "servers": sorted(server.name for server in self.mcp_servers),
-                    "probe": "/tmp/hermes/config.yaml",
+                    "probe": "$HOME/.hermes/config.yaml",
                 }
             )
         skills_command = self._build_register_skills_command()
@@ -1297,7 +1328,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 raise RuntimeError(detail[-2_000:])
         await self._verify_skill_registration(
             environment,
-            "/tmp/hermes/skills",
+            "$HOME/.hermes/skills",
         )
         await self._lock_trial_mutators(environment)
 

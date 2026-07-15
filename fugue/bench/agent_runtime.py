@@ -197,7 +197,7 @@ RUN mkdir -p bin && ln -s ../home/.local/bin/hermes bin/hermes && \
 RUNTIMES = {
     "hermes": AgentRuntimeSpec(
         harness="hermes",
-        version="hermes-agent@v2026.6.5+hermes-otel@670e98f+fugue-span-attrs.1",
+        version="hermes-agent@v2026.6.5+hermes-otel@670e98f+fugue-span-attrs.2",
         dockerfile=_hermes_dockerfile(),
         probe=("/bin/sh", "-c", f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH hermes version"),
     ),

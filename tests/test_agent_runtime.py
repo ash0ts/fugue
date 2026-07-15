@@ -58,6 +58,12 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         for forbidden in ("apt-get", "npm install", "pip install", "curl -fs"):
             assert forbidden not in adapter, (harness, forbidden)
 
+    hermes_adapter = ranges["hermes"]
+    assert 'cat >> "$HOME/.hermes/config.yaml"' in hermes_adapter
+    assert 'mkdir -p "$HOME/.hermes/skills"' in hermes_adapter
+    assert "/tmp/hermes/config.yaml" not in hermes_adapter
+    assert "/tmp/hermes/skills" not in hermes_adapter
+
     assert "npm ci --ignore-scripts" in agent_runtime.RUNTIMES["openclaw"].dockerfile
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
     assert "npm ci --ignore-scripts" in claude_runtime.dockerfile
