@@ -83,6 +83,7 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.evaluation_scope_id",
         "fugue.model_provider",
         "fugue.model",
+        "fugue.tool_result_modalities",
         "weave.eval.predict_and_score_call_id",
         "weave.eval.project_id",
         "weave.eval.evaluation_name",

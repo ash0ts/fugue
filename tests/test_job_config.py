@@ -122,6 +122,10 @@ tasks:
         "astropy__astropy-12907": ["astropy/modeling/separable.py"]
     }
     assert config["fugue"]["candidate_id"] == job.candidate_id
+    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "2"
+    assert job.resolved_candidate.definition["model_route"][
+        "tool_result_modalities"
+    ] == ["text", "image"]
     assert config["fugue"]["trace_content"] == "full"
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 Provider = Literal["wandb", "openai", "anthropic"]
+ToolResultModality = Literal["text", "image"]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
@@ -21,6 +22,10 @@ WANDB_INFERENCE_PROJECT_HEADER = "OpenAI-Project"
 OPENAI_PROJECT_ENV = "OPENAI_PROJECT"
 OPENAI_PROJECT_ID_ENV = "OPENAI_PROJECT_ID"
 
+# GLM-5.2 rejected image-bearing tool results through both bridge protocols in
+# the release canary. Keep this model-specific: other W&B routes may be visual.
+_TEXT_ONLY_MODEL_ROUTES = {("wandb", "zai-org/GLM-5.2")}
+
 
 @dataclass(frozen=True)
 class ModelRoute:
@@ -32,6 +37,7 @@ class ModelRoute:
     responses_base_url: str | None
     messages_base_url: str | None
     litellm_model: str
+    tool_result_modalities: tuple[ToolResultModality, ...]
 
 
 def select_model(
@@ -83,6 +89,7 @@ def resolve_model_route(
             responses_base_url=None,
             messages_base_url=None,
             litellm_model="nebius/*",
+            tool_result_modalities=_tool_result_modalities("wandb", model_id),
         )
     if provider == "openai":
         base_url = values.get("OPENAI_BASE_URL", OPENAI_BASE_URL)
@@ -95,6 +102,7 @@ def resolve_model_route(
             responses_base_url=base_url.rstrip("/"),
             messages_base_url=None,
             litellm_model="openai/*",
+            tool_result_modalities=_tool_result_modalities("openai", model_id),
         )
     if provider == "anthropic":
         base_url = values.get("ANTHROPIC_BASE_URL", ANTHROPIC_BASE_URL)
@@ -107,12 +115,34 @@ def resolve_model_route(
             responses_base_url=None,
             messages_base_url=base_url.rstrip("/"),
             litellm_model="anthropic/*",
+            tool_result_modalities=_tool_result_modalities("anthropic", model_id),
         )
 
     raise ValueError(
         f"unknown model provider {provider_raw!r}; expected wandb, openai, "
         "or anthropic"
     )
+
+
+def model_route_identity(route: ModelRoute) -> dict[str, object]:
+    return {
+        "provider": route.provider,
+        "model_id": route.model_id,
+        "display_model": route.display_model,
+        "chat_base_url": route.chat_base_url,
+        "responses_base_url": route.responses_base_url,
+        "messages_base_url": route.messages_base_url,
+        "litellm_model": route.litellm_model,
+        "tool_result_modalities": list(route.tool_result_modalities),
+    }
+
+
+def _tool_result_modalities(
+    provider: Provider, model_id: str
+) -> tuple[ToolResultModality, ...]:
+    if (provider, model_id) in _TEXT_ONLY_MODEL_ROUTES:
+        return ("text",)
+    return ("text", "image")
 
 
 def bridge_master_key(env: Mapping[str, str] | None = None) -> str:

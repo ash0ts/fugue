@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import yaml
 
 from fugue.bench.candidates import (
+    CANDIDATE_IDENTITY_SCHEMA_VERSION,
     ResolvedCandidate,
     comparison_example_id,
     resolve_candidate,
@@ -45,7 +46,12 @@ from fugue.bench.library import (
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
-from fugue.model_plane import ModelRoute, resolve_model_route, select_model
+from fugue.model_plane import (
+    ModelRoute,
+    model_route_identity,
+    resolve_model_route,
+    select_model,
+)
 from fugue.preflight import HARBOR_VERSION
 
 CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
@@ -832,7 +838,7 @@ def _job_env(
             "FUGUE_CANDIDATE_ID": candidate_id,
             "FUGUE_EXECUTION_FINGERPRINT": execution_fingerprint,
             "FUGUE_EXECUTION_KIND": "agent",
-            "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
+            "FUGUE_IDENTITY_SCHEMA_VERSION": str(CANDIDATE_IDENTITY_SCHEMA_VERSION),
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
             "FUGUE_TRACE_CONTENT": experiment.trace_content,
@@ -1235,15 +1241,7 @@ def _identity_configuration(value: Any) -> Any:
 
 
 def _candidate_model_route(route: ModelRoute) -> dict[str, Any]:
-    return {
-        "provider": route.provider,
-        "model_id": route.model_id,
-        "display_model": route.display_model,
-        "chat_base_url": route.chat_base_url,
-        "responses_base_url": route.responses_base_url,
-        "messages_base_url": route.messages_base_url,
-        "litellm_model": route.litellm_model,
-    }
+    return model_route_identity(route)
 
 
 def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -> str:

@@ -8,6 +8,7 @@ from fugue.model_plane import (
     DEFAULT_WANDB_PROJECT,
     missing_model_env,
     missing_trace_env,
+    model_route_identity,
     provider_client_env,
     provider_request_headers,
     resolve_model_route,
@@ -27,12 +28,15 @@ def test_resolve_model_route_for_supported_providers() -> None:
     assert wandb.chat_base_url == "https://api.inference.wandb.ai/v1"
     assert wandb.responses_base_url is None
     assert wandb.messages_base_url is None
+    assert wandb.tool_result_modalities == ("text",)
+    assert model_route_identity(wandb)["tool_result_modalities"] == ["text"]
 
     openai = resolve_model_route("openai/gpt-5", {})
     assert openai.provider == "openai"
     assert openai.model_id == "gpt-5"
     assert openai.api_key_env == "OPENAI_API_KEY"
     assert openai.responses_base_url == "https://api.openai.com/v1"
+    assert openai.tool_result_modalities == ("text", "image")
 
     anthropic = resolve_model_route("anthropic/claude-sonnet-4-5", {})
     assert anthropic.provider == "anthropic"

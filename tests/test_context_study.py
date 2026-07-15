@@ -149,7 +149,7 @@ def test_direct_measurements_receive_canonical_identity(tmp_path: Path) -> None:
         env={
             "FUGUE_CANDIDATE_ID": "candidate-a",
             "FUGUE_EXECUTION_FINGERPRINT": "execution-a",
-            "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
+            "FUGUE_IDENTITY_SCHEMA_VERSION": "2",
             "FUGUE_DATASET": "dataset-a",
         },
     )

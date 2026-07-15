@@ -34,7 +34,7 @@ import shlex
 import shutil
 import tempfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 try:
@@ -69,6 +69,7 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_entity_project,
 )
+from fugue.tool_policy import HarnessToolPolicy, tool_result_guard_install_command
 from fugue.weave_support import (
     WEAVE_AGENTS_OTEL_ENDPOINT,
     weave_agents_otel_headers,
@@ -333,6 +334,26 @@ class _TrialMetaMixin:
     def _meta_path(self) -> Path:
         return self.logs_dir / "fugue-meta.json"
 
+    async def _install_tool_result_guard(
+        self,
+        environment: BaseEnvironment,
+        harness: HarnessToolPolicy,
+        config_path: PurePosixPath,
+    ) -> None:
+        command = tool_result_guard_install_command(
+            self.model_route, harness, config_path
+        )
+        if command is None:
+            return
+        result = await self.exec_as_agent(
+            environment,
+            command=command,
+            timeout_sec=30,
+        )
+        if result.return_code != 0:
+            detail = (result.stderr or result.stdout or "tool-result guard failed").strip()
+            raise RuntimeError(detail[-2_000:])
+
     async def _begin_trial(
         self, harness: str, route: ModelRoute, environment: BaseEnvironment
     ) -> None:
@@ -481,6 +502,7 @@ class _TrialMetaMixin:
             "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
+            "tool_result_modalities": list(route.tool_result_modalities),
             "builder_model": os.environ.get("FUGUE_BUILDER_MODEL"),
             "judge_model": os.environ.get("FUGUE_JUDGE_MODEL"),
             "experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID"),
@@ -624,6 +646,9 @@ class _TrialMetaMixin:
             ),
             "fugue.model_provider": route.provider,
             "fugue.model": route.display_model,
+            "fugue.tool_result_modalities": "|".join(
+                route.tool_result_modalities
+            ),
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
             "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", "").replace(",", "|"),
             "fugue.integration_ids": os.environ.get(
@@ -1629,6 +1654,11 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         )
         try:
             await self._install_weave_plugin(environment)
+            await self._install_tool_result_guard(
+                environment,
+                "claude-code",
+                PurePosixPath(self._CLAUDE_CONFIG_DIR) / "settings.json",
+            )
             await super().run(instruction, environment, context)
             # Let the plugin daemon flush the final turn before teardown.
             await self.exec_as_agent(
@@ -1861,6 +1891,11 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 setup_result.stderr or setup_result.stdout or "Codex setup failed"
             ).strip()
             raise RuntimeError(detail[-2_000:])
+        await self._install_tool_result_guard(
+            environment,
+            "codex",
+            self._REMOTE_CODEX_HOME / "hooks.json",
+        )
         if mcp_command:
             self._set_context_registration(
                 {

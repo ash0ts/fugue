@@ -15,7 +15,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fugue.bench.candidates import comparison_example_id, resolve_candidate
+from fugue.bench.candidates import (
+    CANDIDATE_IDENTITY_SCHEMA_VERSION,
+    comparison_example_id,
+    resolve_candidate,
+)
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
@@ -79,6 +83,7 @@ from fugue.bench.supervisor import ManagedRun, RunSupervisor
 from fugue.bench.workloads import load_workload_dataset
 from fugue.bridge import BridgeFiles, bridge_status, bridge_up
 from fugue.model_plane import (
+    model_route_identity,
     resolve_model_route,
     select_model,
     trace_env_defaults,
@@ -1165,7 +1170,8 @@ class OperatorService:
             env=env,
             experiment_model=experiment.model,
         )
-        route = resolve_model_route(selected_model, env)
+        builder_model = env.get("FUGUE_BUILDER_MODEL") or selected_model
+        route = resolve_model_route(builder_model, env)
         direct_env = dict(env)
         direct_env["FUGUE_MODEL"] = selected_model
         attempts = (
@@ -1287,11 +1293,7 @@ class OperatorService:
             direct_harness = "direct" if workload.runner == "retrieval" else "sequence"
             resolved_candidate = resolve_candidate(
                 harness=direct_harness,
-                model_route={
-                    "provider": route.provider,
-                    "model_id": route.model_id,
-                    "display_model": route.display_model,
-                },
+                model_route=model_route_identity(route),
                 prompt_digest=None,
                 skills=(),
                 context={
@@ -1320,7 +1322,9 @@ class OperatorService:
                         "FUGUE_CANDIDATE_ID": candidate_id,
                         "FUGUE_EXECUTION_FINGERPRINT": resolved_candidate.execution_fingerprint,
                         "FUGUE_EXECUTION_KIND": "provider_diagnostic",
-                        "FUGUE_IDENTITY_SCHEMA_VERSION": "1",
+                        "FUGUE_IDENTITY_SCHEMA_VERSION": str(
+                            CANDIDATE_IDENTITY_SCHEMA_VERSION
+                        ),
                         "FUGUE_DATASET": dataset.id,
                         "FUGUE_WORKLOAD_ID": workload.id,
                         "FUGUE_CONTEXT_SYSTEM_ID": system_id,

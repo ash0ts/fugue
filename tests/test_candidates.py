@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from fugue.bench.candidates import resolve_candidate
+from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, resolve_candidate
 from fugue.bench.job_config import _comparison_example_id
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 
@@ -62,6 +62,20 @@ def test_every_behavioral_input_changes_candidate_identity(
     assert resolve_candidate(**original).candidate_id != resolve_candidate(
         **changed
     ).candidate_id
+
+
+def test_tool_result_modalities_are_candidate_behavior() -> None:
+    original = _candidate_inputs()
+    original["model_route"]["tool_result_modalities"] = ["text", "image"]
+    changed = deepcopy(original)
+    changed["model_route"]["tool_result_modalities"] = ["text"]
+
+    first = resolve_candidate(**original)
+    second = resolve_candidate(**changed)
+
+    assert CANDIDATE_IDENTITY_SCHEMA_VERSION == 2
+    assert first.candidate_id != second.candidate_id
+    assert first.definition["identity_schema_version"] == 2
 
 
 def test_execution_policy_changes_fingerprint_not_candidate_identity() -> None:

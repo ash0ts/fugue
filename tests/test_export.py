@@ -9,6 +9,7 @@ import pytest
 
 from fugue.agent_tracing import agent_conversation_id
 from fugue.bench import export, operator
+from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
 from fugue.bench.execution import CellOutcome, PlannedCell, write_run_manifest
 from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
@@ -1495,7 +1496,7 @@ def test_current_identity_schema_requires_canonical_candidate_id() -> None:
         export._publication_candidates(
             [
                 {
-                    "identity_schema_version": 1,
+                    "identity_schema_version": CANDIDATE_IDENTITY_SCHEMA_VERSION,
                     "record_type": "retrieval",
                     "comparison_example_id": "example-a",
                     "trial_index": 1,
