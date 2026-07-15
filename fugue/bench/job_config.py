@@ -685,6 +685,10 @@ def _job_config(
         "context_support": context_spec.support,
         "context_config_hash": _context_config_hash(context_spec),
         "context_cache_keys": context_cache_keys,
+        "context_runtime_required": (
+            context_binding.managed_runtime == "fugue_context"
+            and variant.context.delivery == "portable"
+        ),
         "context_runtime": context_binding.runtime_descriptor,
         "agent_runtime": read_agent_runtime_lock(
             harness.name,

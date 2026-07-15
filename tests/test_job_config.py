@@ -264,6 +264,7 @@ tasks:
     assert config["fugue"]["variant_id"] == "prompt-skill"
     assert config["fugue"]["prompt_id"] == "prompt-a"
     assert config["fugue"]["context_system_id"] == "agentsmd"
+    assert config["fugue"]["context_runtime_required"] is False
     assert config["fugue"]["context_version"] == "1"
     assert len(config["fugue"]["context_config_hash"]) == 64
     assert config["fugue"]["agent_config_hash"] == job.agent_config_hash
@@ -874,6 +875,7 @@ tasks:
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == "http://127.0.0.1:8001"
     assert job.context_delivery == "portable"
     assert job.config["fugue"]["context_delivery"] == "portable"
+    assert job.config["fugue"]["context_runtime_required"] is True
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
     compose_paths = job.config["environment"]["extra_docker_compose"]
     compose_path = next(path for path in compose_paths if "context-runtime" in path)

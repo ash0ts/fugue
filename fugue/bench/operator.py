@@ -2685,8 +2685,7 @@ def _verify_rendered_setup(jobs: list[RenderedJob]) -> None:
             )
         context_runtime = fugue.get("context_runtime") or {}
         if (
-            job.context_delivery == "portable"
-            and job.context_system_id != "none"
+            fugue.get("context_runtime_required") is True
             and not context_runtime.get("image_id")
         ):
             missing.append(
