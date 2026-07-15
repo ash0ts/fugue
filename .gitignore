@@ -16,6 +16,18 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.nox/
+junit*.xml
 
 # JavaScript compatibility tests
 node_modules/
