@@ -29,6 +29,54 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert set(subparsers.choices) == {"plan", "run", "runs", "analyze", "setup", "tui"}
 
 
+def test_runs_packages_one_explicit_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    captured = {}
+
+    def package(self, run_id, candidate_id, **kwargs):
+        captured.update(
+            {"run_id": run_id, "candidate_id": candidate_id, **kwargs}
+        )
+        return SimpleNamespace(
+            candidate_id=candidate_id,
+            image=kwargs["image"],
+            deployment_id="deployment-1",
+            path=tmp_path / ".fugue/runtime/deployments/deployment-1",
+        )
+
+    monkeypatch.setattr(OperatorService, "package_candidate", package)
+
+    assert (
+        main(
+            [
+                "runs",
+                "run-1",
+                "--package",
+                "candidate-1",
+                "--workspace",
+                tmp_path.as_posix(),
+                "--image",
+                "example/fugue:test",
+                "--yes",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert captured == {
+        "run_id": "run-1",
+        "candidate_id": "candidate-1",
+        "workspace": tmp_path,
+        "image": "example/fugue:test",
+        "platform": "linux/amd64",
+    }
+    assert "deployment-1" in capsys.readouterr().out
+
+
 def test_rich_command_center_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
     from fugue.bench import cli
 

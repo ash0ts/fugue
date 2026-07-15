@@ -3,7 +3,7 @@ title: Repository map (AGENTS.md)
 description: Deterministic repository structure and entry-point notes.
 provider: fugue.bench.context:AgentsMdContextProvider
 version: "1"
-capabilities: [prepare, bind]
+capabilities: [prepare, bind, serve]
 license: Fugue
 config:
   binding:

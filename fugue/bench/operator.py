@@ -127,6 +127,7 @@ class PreviewSummary:
 @dataclass(frozen=True)
 class CellSummary:
     cell_id: str
+    candidate_id: str
     status: str
     harness: str
     variant_id: str
@@ -1313,14 +1314,13 @@ class OperatorService:
     ) -> RunSummary:
         run_id = new_run_id()
         selected = experiment or self.experiment(request.experiment_id)
-        snapshot = None
-        if experiment is not None:
-            run_dir = self.repo_root / ".fugue" / "runtime" / run_id
-            run_dir.mkdir(parents=True, exist_ok=True)
-            snapshot = run_dir / "experiment.yaml"
-            temp = snapshot.with_suffix(".tmp")
-            temp.write_text(experiment_to_yaml(experiment))
-            os.replace(temp, snapshot)
+        resolved = _experiment_with_request_overrides(selected, request)
+        run_dir = self.repo_root / ".fugue" / "runtime" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = run_dir / "experiment.yaml"
+        temp = snapshot.with_name(f".{snapshot.name}.{os.getpid()}.tmp")
+        temp.write_text(experiment_to_yaml(resolved))
+        os.replace(temp, snapshot)
         run_name = request.run_name or selected.run_name or selected.id
         command = [
             sys.executable,
@@ -1390,6 +1390,27 @@ class OperatorService:
 
     def run_summary(self, run_id: str) -> RunSummary:
         return self._summarize_run(self.supervisor.get(run_id))
+
+    def package_candidate(
+        self,
+        run_id: str,
+        candidate_id: str,
+        *,
+        workspace: Path,
+        image: str,
+        platform: str = "linux/amd64",
+    ) -> Any:
+        from fugue.bench.deployment import package_candidate
+
+        return package_candidate(
+            repo_root=self.repo_root,
+            run_id=run_id,
+            candidate_id=candidate_id,
+            workspace=workspace,
+            image=image,
+            platform=platform,
+            env=self.env,
+        )
 
     def wait_for_run(self, run_id: str, *, poll_sec: float = 0.25) -> RunSummary:
         terminal = {"passed", "failed", "cancelled", "interrupted"}
@@ -1575,6 +1596,7 @@ class OperatorService:
         cells = tuple(
             CellSummary(
                 cell_id=str(item.get("cell_id") or ""),
+                candidate_id=str(item.get("candidate_id") or ""),
                 status=str(item.get("status") or "unknown"),
                 harness=str(item.get("harness") or "direct"),
                 variant_id=str(item.get("variant_id") or "baseline"),

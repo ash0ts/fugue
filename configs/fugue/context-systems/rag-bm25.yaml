@@ -3,7 +3,7 @@ title: Fugue RAG (BM25)
 description: Controlled lexical retrieval baseline using the shared Fugue chunker.
 provider: fugue.bench.context:RagContextProvider
 version: "2"
-capabilities: [prepare, retrieve, bind]
+capabilities: [prepare, retrieve, bind, serve]
 license: Fugue
 config:
   mode: bm25

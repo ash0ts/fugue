@@ -3,7 +3,7 @@ title: OpenWiki
 description: Generated repository wiki injected as files.
 provider: fugue.bench.context:CommandContextProvider
 version: openwiki@0.1.1
-capabilities: [prepare, bind]
+capabilities: [prepare, bind, serve]
 required_commands: [npx]
 license: MIT
 source_url: https://github.com/langchain-ai/openwiki

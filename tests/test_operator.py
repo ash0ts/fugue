@@ -26,7 +26,7 @@ title: No added context
 description: Control
 provider: fugue.bench.context:EmptyContextProvider
 version: "1"
-capabilities: [prepare, retrieve, bind, ingest, sequence]
+capabilities: [prepare, retrieve, bind, ingest, sequence, serve]
 license: Fugue
 """
     )

@@ -1769,7 +1769,14 @@ class FugueApp(App[None]):
         cells = self.query_one("#cells-table", DataTable)
         cells.clear(columns=True)
         cells.add_columns(
-            "Harness", "Variant", "Context", "Transport", "Task", "Status", "Time"
+            "Harness",
+            "Variant",
+            "Context",
+            "Transport",
+            "Task",
+            "Candidate",
+            "Status",
+            "Time",
         )
         for cell in run.cells:
             cells.add_row(
@@ -1778,6 +1785,7 @@ class FugueApp(App[None]):
                 cell.context_system_id,
                 cell.context_transport,
                 cell.task_id,
+                cell.candidate_id,
                 cell.status.replace("_", " "),
                 f"{cell.wall_time_sec:.1f}s" if cell.wall_time_sec is not None else "-",
                 key=cell.cell_id,
