@@ -33,6 +33,8 @@ Preserve these invariants across schema, implementation, UI, and tests.
 - Evaluation generation is explicit, exact about suite/workload/size, and
   side-effect free during preview. Keep deterministic outcomes, judge scores,
   and judge errors separate.
+- Only Agent-backed predictions may name or link Agent conversations. Direct
+  provider diagnostics keep ordinary traces and mark Agent linking not applicable.
 
 ## Run lifecycle
 
