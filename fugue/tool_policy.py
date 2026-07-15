@@ -75,6 +75,16 @@ def tool_result_guard_config(
     }
 
 
+def tool_result_guard_cli_flags(
+    route: ModelRoute, harness: HarnessToolPolicy
+) -> tuple[str, ...]:
+    if harness != "codex" or tool_result_guard_config(route, harness) is None:
+        return ()
+    # Codex 0.143 skips untrusted hooks in headless runs. This trusts only the
+    # guard Fugue just wrote into the trial's isolated CODEX_HOME.
+    return ("--dangerously-bypass-hook-trust",)
+
+
 def tool_result_guard_script() -> str:
     return _GUARD_SCRIPT
 

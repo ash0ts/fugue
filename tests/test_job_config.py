@@ -126,6 +126,7 @@ tasks:
     assert job.resolved_candidate.definition["model_route"][
         "tool_result_modalities"
     ] == ["text", "image"]
+    assert job.resolved_candidate.definition["harness"] == "codex"
     assert config["fugue"]["trace_content"] == "full"
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
 

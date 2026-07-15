@@ -50,6 +50,9 @@ def resolve_candidate(
 ) -> ResolvedCandidate:
     """Resolve identity once; callers must reuse the returned representation."""
 
+    if not isinstance(harness, str) or not harness.strip():
+        raise ValueError("harness must be a non-empty string")
+
     definition = _canonical(
         {
             "identity_schema_version": CANDIDATE_IDENTITY_SCHEMA_VERSION,

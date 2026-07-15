@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from fugue.model_plane import resolve_model_route
 from fugue.tool_policy import (
     TOOL_RESULT_GUARD_PATH,
+    tool_result_guard_cli_flags,
     tool_result_guard_config,
     tool_result_guard_install_command,
     tool_result_guard_script,
@@ -60,6 +61,7 @@ def test_visual_routes_do_not_install_a_guard() -> None:
         )
         is None
     )
+    assert tool_result_guard_cli_flags(route, "codex") == ()
 
 
 def test_each_harness_uses_the_shared_guard_with_its_native_matcher() -> None:
@@ -73,6 +75,10 @@ def test_each_harness_uses_the_shared_guard_with_its_native_matcher() -> None:
     for config in (claude, codex):
         command = config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         assert command == f"python3 {TOOL_RESULT_GUARD_PATH}"
+    assert tool_result_guard_cli_flags(route, "codex") == (
+        "--dangerously-bypass-hook-trust",
+    )
+    assert tool_result_guard_cli_flags(route, "claude-code") == ()
 
 
 def test_guard_installer_preserves_existing_harness_settings(tmp_path: Path) -> None:

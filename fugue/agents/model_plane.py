@@ -69,7 +69,11 @@ from fugue.model_plane import (
     resolve_model_route,
     trace_entity_project,
 )
-from fugue.tool_policy import HarnessToolPolicy, tool_result_guard_install_command
+from fugue.tool_policy import (
+    HarnessToolPolicy,
+    tool_result_guard_cli_flags,
+    tool_result_guard_install_command,
+)
 from fugue.weave_support import (
     WEAVE_AGENTS_OTEL_ENDPOINT,
     weave_agents_otel_headers,
@@ -1811,6 +1815,10 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 f"--disable {feature} " for feature in self._BRIDGED_DISABLED_FEATURES
             )
         )
+        hook_flags = "".join(
+            f"{flag} "
+            for flag in tool_result_guard_cli_flags(self.model_route, "codex")
+        )
 
         remote_codex_home = self._REMOTE_CODEX_HOME.as_posix()
         weave_project = _weave_project_slug()
@@ -1921,6 +1929,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
                     "--skip-git-repo-check "
                     "--json "
                     f"{feature_flags}"
+                    f"{hook_flags}"
                     f"{cli_flags_arg}"
                     "-- "
                     f"{escaped_instruction} "

@@ -311,7 +311,7 @@ def _build_jobs(
                     repo_root=repo_root,
                 )
                 resolved_candidate = resolve_candidate(
-                    harness=harness,
+                    harness=harness.name,
                     model_route=_candidate_model_route(route),
                     prompt_digest=next(iter(content_hashes["prompts"].values()), None),
                     skills=[item.provenance() for item in resolved_skills],

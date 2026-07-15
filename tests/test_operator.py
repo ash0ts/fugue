@@ -418,6 +418,7 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     ).to_dict()
 
     assert len(snapshot["candidates"]) == 1
+    assert next(iter(snapshot["candidates"].values()))["harness"] == "codex"
     assert len(snapshot["candidate_runtime"]) == 1
     assert len(snapshot["runtime"]["executions"]) == 2
     assert {item["candidate_id"] for item in snapshot["planned_matrix"]} == set(

@@ -117,7 +117,7 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert "weave-codex@" in source
     assert "weave-codex run -- codex exec" in source
     assert "weave-codex install" not in source
-    assert "--dangerously-bypass-hook-trust" not in source
+    assert "tool_result_guard_cli_flags(self.model_route, \"codex\")" in source
     assert "set -o pipefail" in source
     assert "emitter pattern missing" in source
     assert "baggage pattern missing" in source

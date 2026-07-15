@@ -78,6 +78,15 @@ def test_tool_result_modalities_are_candidate_behavior() -> None:
     assert first.definition["identity_schema_version"] == 2
 
 
+@pytest.mark.parametrize("harness", [None, "", object()])
+def test_candidate_harness_must_be_a_non_empty_string(harness: object) -> None:
+    inputs = _candidate_inputs()
+    inputs["harness"] = harness
+
+    with pytest.raises(ValueError, match="harness must be a non-empty string"):
+        resolve_candidate(**inputs)
+
+
 def test_execution_policy_changes_fingerprint_not_candidate_identity() -> None:
     original = _candidate_inputs()
     changed = deepcopy(original)
