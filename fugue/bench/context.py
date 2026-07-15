@@ -1771,15 +1771,36 @@ def _runtime_checks(spec: ContextSystemSpec) -> list[ContextCheck]:
     ]
 
 
-def _mem0_memory(
-    spec: ContextSystemSpec, namespace: Path, runtime: ContextRuntime
-) -> Any:
-    from mem0 import Memory
+class _Mem0FastEmbedder:
+    def __init__(self, config: Any) -> None:
+        from fastembed import TextEmbedding
 
+        self.config = config
+        self.model = TextEmbedding(
+            model_name=str(config.model or "BAAI/bge-small-en-v1.5"),
+            providers=["CPUExecutionProvider"],
+        )
+
+    def embed(self, text: str, memory_action: str | None = None) -> list[float]:
+        del memory_action
+        vector = next(iter(self.model.embed([text], batch_size=1)))
+        values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
+        dimensions = int(self.config.embedding_dims or 0)
+        if dimensions and len(values) != dimensions:
+            raise RuntimeError("Mem0 embedding output has the wrong dimensions")
+        return values
+
+
+def _mem0_config(
+    spec: ContextSystemSpec, namespace: Path, runtime: ContextRuntime
+) -> dict[str, Any]:
     from fugue.model_plane import (
         bridge_master_key,
     )
 
+    embedding_provider = str(spec.config.get("embedding_provider") or "fastembed")
+    if embedding_provider != "fastembed":
+        raise ValueError(f"unsupported Mem0 embedding provider: {embedding_provider}")
     namespace.mkdir(parents=True, exist_ok=True)
     bridge_base = runtime.env.get("FUGUE_BRIDGE_BASE_URL", "").rstrip("/")
     if not bridge_base:
@@ -1800,7 +1821,10 @@ def _mem0_memory(
             "config": {
                 "model": spec.config.get(
                     "embedding_model", "BAAI/bge-small-en-v1.5"
-                )
+                ),
+                "embedding_dims": int(
+                    spec.config.get("embedding_dimensions", 384)
+                ),
             },
         },
         "vector_store": {
@@ -1812,7 +1836,21 @@ def _mem0_memory(
             },
         },
     }
-    return Memory.from_config(config)
+    return config
+
+
+def _mem0_memory(
+    spec: ContextSystemSpec, namespace: Path, runtime: ContextRuntime
+) -> Any:
+    from mem0 import Memory
+    from mem0.utils.factory import EmbedderFactory
+
+    # Mem0 validates provider names before factory dispatch. Keep its accepted
+    # Hugging Face key, but bind the pinned adapter to Fugue's FastEmbed runtime.
+    EmbedderFactory.provider_to_class["huggingface"] = (
+        "fugue.bench.context._Mem0FastEmbedder"
+    )
+    return Memory.from_config(_mem0_config(spec, namespace, runtime))
 
 
 def _graphiti(spec: ContextSystemSpec, runtime: ContextRuntime) -> Any:

@@ -7,6 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,8 @@ from fugue.bench.context import (
     _command_env,
     _dense_artifact_contract,
     _materialize_dense_artifact,
+    _mem0_config,
+    _Mem0FastEmbedder,
     _publish_cache_generation,
     _repository_chunks,
     _resolved_embedding_model,
@@ -111,6 +114,62 @@ def test_context_library_and_license_gate(tmp_path: Path) -> None:
     )
     checks = asyncio.run(preflight_context(systems["gitnexus"], approved))
     assert next(item for item in checks if item.name == "license").ok is True
+
+
+def test_mem0_declares_and_uses_the_shared_fastembed_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = get_context_system("mem0", repo_root)
+    assert {"mem0", "qdrant_client", "fastembed"} <= set(spec.required_packages)
+    assert spec.config["embedding_provider"] == "fastembed"
+    config = _mem0_config(
+        spec,
+        tmp_path / "memory",
+        ContextRuntime(
+            repo_root,
+            tmp_path / "cache",
+            {
+                "FUGUE_BRIDGE_BASE_URL": "http://127.0.0.1:4000",
+                "FUGUE_BRIDGE_MASTER_KEY": "test-key",
+            },
+        ),
+    )
+    assert config["embedder"] == {
+        "provider": "huggingface",
+        "config": {
+            "model": "BAAI/bge-small-en-v1.5",
+            "embedding_dims": 384,
+        },
+    }
+
+    calls: list[tuple[str, tuple[str, ...], int]] = []
+
+    class FakeVector(list[float]):
+        def tolist(self) -> list[float]:
+            return list(self)
+
+    class FakeTextEmbedding:
+        def __init__(self, *, model_name: str, providers: list[str]) -> None:
+            calls.append((model_name, tuple(providers), 0))
+
+        def embed(self, values: list[str], *, batch_size: int):
+            calls.append((values[0], (), batch_size))
+            return iter([FakeVector([0.25, 0.75])])
+
+    monkeypatch.setitem(
+        sys.modules,
+        "fastembed",
+        SimpleNamespace(TextEmbedding=FakeTextEmbedding),
+    )
+    embedder = _Mem0FastEmbedder(
+        SimpleNamespace(model="BAAI/bge-small-en-v1.5", embedding_dims=2)
+    )
+    assert embedder.embed("remember this", "add") == [0.25, 0.75]
+    assert calls == [
+        ("BAAI/bge-small-en-v1.5", ("CPUExecutionProvider",), 0),
+        ("remember this", (), 1),
+    ]
 
 
 def test_context_cache_is_content_addressed_and_reused(tmp_path: Path) -> None:
