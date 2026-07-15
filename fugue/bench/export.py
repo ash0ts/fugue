@@ -1860,6 +1860,8 @@ def _outcome_status(row: dict[str, Any]) -> str:
 
 
 def _measured_local_usage(row: dict[str, Any]) -> bool:
+    if row.get("local_usage_status") == "unavailable":
+        return False
     return any(
         key in row and row[key] is not None
         for key in ("n_input_tokens", "n_output_tokens", "cost_usd")
@@ -2676,12 +2678,31 @@ def _trial_result_paths(job: Path) -> list[Path]:
     )
 
 
+def _local_usage(agent_result: Mapping[str, Any]) -> dict[str, Any]:
+    values = {
+        "n_input_tokens": agent_result.get("n_input_tokens"),
+        "n_cache_tokens": agent_result.get("n_cache_tokens"),
+        "n_output_tokens": agent_result.get("n_output_tokens"),
+        "cost_usd": agent_result.get("cost_usd"),
+    }
+    measured = any(_number(value) not in (None, 0.0) for value in values.values())
+    if measured:
+        return {"local_usage_status": "available", **values}
+    # Harbor adapters that cannot report usage serialize the same zero tuple as
+    # a measured result. Without source attribution, that tuple is unavailable.
+    return {
+        "local_usage_status": "unavailable",
+        **dict.fromkeys(values),
+    }
+
+
 def _row_from_trial(result_path: Path) -> dict[str, Any]:
     trial = json.loads(result_path.read_text())
     trial_dir = result_path.parent
     meta_path = trial_dir / "agent" / "fugue-meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     agent_result = trial.get("agent_result") or {}
+    local_usage = _local_usage(agent_result)
     verifier_result = trial.get("verifier_result") or {}
     exception = trial.get("exception_info") or {}
     reward = (verifier_result.get("rewards") or {}).get("reward")
@@ -2775,10 +2796,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
         "wall_time_sec": wall_time,
-        "n_input_tokens": agent_result.get("n_input_tokens"),
-        "n_cache_tokens": agent_result.get("n_cache_tokens"),
-        "n_output_tokens": agent_result.get("n_output_tokens"),
-        "cost_usd": agent_result.get("cost_usd"),
+        **local_usage,
         "exception_class": exception.get("exception_type"),
         "runtime_fingerprints": _runtime_fingerprints(trial_dir, meta),
         "context_registration": context_registration,

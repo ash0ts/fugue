@@ -134,10 +134,42 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["reward"] == 1.0
     assert row["pass"] is True
     assert row["wall_time_sec"] == 5.0
+    assert row["local_usage_status"] == "available"
+    assert row["n_input_tokens"] == 10
+    assert row["n_cache_tokens"] == 0
+    assert row["n_output_tokens"] == 5
+    assert row["cost_usd"] == 0.01
 
     out = tmp_path / "pilot.jsonl"
     write_jsonl(rows, out)
     assert "bridge-check__abc123" in out.read_text()
+
+
+def test_export_marks_unattributed_harbor_zero_usage_unavailable(
+    tmp_path: Path,
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    result_path = next(jobs.rglob("result.json"))
+    result = json.loads(result_path.read_text())
+    result["agent_result"] = {
+        "n_input_tokens": 0,
+        "n_cache_tokens": 0,
+        "n_output_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    result_path.write_text(json.dumps(result))
+
+    [row] = export_rows([jobs])
+
+    assert row["local_usage_status"] == "unavailable"
+    assert row["n_input_tokens"] is None
+    assert row["n_cache_tokens"] is None
+    assert row["n_output_tokens"] is None
+    assert row["cost_usd"] is None
+    scores = export._evaluation_scores(row)
+    assert "input_tokens" not in scores
+    assert "output_tokens" not in scores
+    assert "total_cost_usd" not in scores
 
 
 def test_weave_payload_redacts_secrets_and_keeps_full_hits_local() -> None:
