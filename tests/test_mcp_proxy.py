@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 
-from fugue.mcp_proxy import _Recorder, _sanitize
+from fugue.mcp_proxy import _Recorder, _relay_requests, _sanitize
 
 
 def test_mcp_telemetry_redacts_and_correlates_requests(tmp_path) -> None:
@@ -48,3 +49,21 @@ def test_mcp_payload_sanitizer_caps_text_and_nested_lists() -> None:
     assert value["authorization"] == "[redacted]"
     assert value["max_tokens"] == 2_000
     assert len(value["text"]) == 1_000
+
+
+def test_mcp_proxy_denies_tools_outside_the_allowlist(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    recorder = _Recorder(name="search", path=path, allowed_tools={"search"})
+    request = BytesIO(
+        b'{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"delete"}}\n'
+    )
+    upstream = BytesIO()
+    client = BytesIO()
+
+    _relay_requests(request, upstream, client, recorder)
+
+    assert upstream.getvalue() == b""
+    assert b"Tool denied by Fugue policy" in client.getvalue()
+    [event] = [json.loads(line) for line in path.read_text().splitlines()]
+    assert event["event"] == "mcp_tool_denied"
+    assert event["tool"] == "delete"

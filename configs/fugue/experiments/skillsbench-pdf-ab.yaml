@@ -21,7 +21,7 @@ variants:
       system_id: none
   - id: with-pdf-skill
     label: PDF artifact workflow
-    skill_ids:
+    skills:
       - pdf-artifact-workflow
     context:
       system_id: none

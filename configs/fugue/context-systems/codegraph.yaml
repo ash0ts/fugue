@@ -3,6 +3,7 @@ title: CodeGraph
 description: Local SQLite code graph exposed through native MCP tools.
 provider: fugue.bench.context:CommandContextProvider
 version: "@colbymchenry/codegraph@0.7.9"
+support: experimental
 capabilities: [prepare, bind]
 required_commands: [npx]
 license: MIT

@@ -226,6 +226,11 @@ def _validate_source_row(task: TaskSpec, row: dict[str, Any]) -> None:
 
 
 def _download_source(source: dict[str, Any], destination: Path) -> None:
+    if source.get("type") not in (None, "http"):
+        raise ValueError(
+            "this dataset materializer requires an HTTP source; Git dataset sources "
+            "must use a Git-aware materializer"
+        )
     url = str(source.get("url") or "")
     expected = str(source.get("sha256") or "")
     if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", expected):

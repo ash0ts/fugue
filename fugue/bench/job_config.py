@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +24,20 @@ from fugue.bench.context import (
     preflight_context,
     run_async,
 )
+from fugue.bench.integrations import (
+    IntegrationBinding,
+    bind_integrations,
+    effective_selections,
+)
 from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
-    content_hashes_for_ids,
     get_prompt,
-    get_skill,
 )
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
+from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
 from fugue.model_plane import ModelRoute, resolve_model_route, select_model
+from fugue.preflight import HARBOR_VERSION
 
 CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
 CONTEXT_RUNTIME_SERVICE = "fugue-context"
@@ -65,6 +71,9 @@ class RenderedJob:
     candidate_id: str
     applicable: bool = True
     skip_reason: str | None = None
+    skill_provenance: tuple[dict[str, Any], ...] = ()
+    integration_ids: tuple[str, ...] = ()
+    integration_provenance: tuple[dict[str, Any], ...] = ()
 
 
 def preview_jobs(**kwargs: Any) -> list[RenderedJob]:
@@ -151,18 +160,27 @@ def _build_jobs(
         route = resolve_model_route(selected_model, env)
         for variant in variants:
             spec = _context_spec(variant, repo_root)
-            applicable, skip_reason = _applicability(
+            base_applicable, base_skip_reason = _applicability(
                 spec,
                 required_capabilities or [],
                 runtime,
             )
             if experiment.trace_content == "metadata" and harness.name == "claude-code":
-                applicable = False
-                skip_reason = (
+                base_applicable = False
+                base_skip_reason = (
                     "Claude Code tracing cannot guarantee metadata-only capture; "
                     "use trace_content: full or exclude claude-code"
                 )
+            skill_ids = variant.selected_skill_ids
+            try:
+                resolved_skills = resolve_skills(skill_ids, repo_root)
+                skill_setup_reason = None
+            except SkillSetupRequired as exc:
+                resolved_skills = []
+                skill_setup_reason = str(exc)
             for tasks, trial_index in task_groups:
+                applicable = base_applicable
+                skip_reason = base_skip_reason
                 job_name = _job_name(
                     run_name=selected_run_name,
                     workload_id=workload_id,
@@ -184,10 +202,26 @@ def _build_jobs(
                     job_name=job_name,
                     write=write_configs,
                 )
+                integration_binding = bind_integrations(
+                    effective_selections(experiment.integrations, variant.integrations),
+                    repo_root=repo_root,
+                    runtime_root=runtime_root,
+                    job_name=job_name,
+                    env=env,
+                    write=write_configs,
+                )
+                if skill_setup_reason:
+                    applicable = False
+                    skip_reason = _join_skip_reasons(skip_reason, skill_setup_reason)
+                if not integration_binding.applicable:
+                    applicable = False
+                    skip_reason = _join_skip_reasons(
+                        skip_reason, integration_binding.skip_reason
+                    )
                 if (
                     applicable
                     and harness.name == "codex"
-                    and binding.mcp_servers
+                    and (binding.mcp_servers or integration_binding.mcp_servers)
                     and route.provider != "openai"
                 ):
                     applicable = False
@@ -195,8 +229,14 @@ def _build_jobs(
                         "Codex MCP tools require Responses namespace support; "
                         f"the {route.provider} bridge accepts function tools only"
                     )
-                skill_ids = list(variant.skill_ids)
-                agent_config_hash = _agent_config_hash(experiment, variant, spec, binding)
+                agent_config_hash = _agent_config_hash(
+                    experiment,
+                    variant,
+                    spec,
+                    binding,
+                    resolved_skills,
+                    integration_binding,
+                )
                 comparison_example_id = _comparison_example_id(
                     dataset_id=manifest.dataset.harbor_ref,
                     workload_id=workload_id,
@@ -208,7 +248,8 @@ def _build_jobs(
                     harness=harness,
                     route=route,
                     context_spec=spec,
-                    skill_ids=skill_ids,
+                    resolved_skills=resolved_skills,
+                    integration_binding=integration_binding,
                     agent_config_hash=agent_config_hash,
                     repo_root=repo_root,
                 )
@@ -229,6 +270,8 @@ def _build_jobs(
                     context_instruction=context_instruction,
                     context_cache_keys=cache_keys,
                     skill_ids=skill_ids,
+                    resolved_skills=resolved_skills,
+                    integration_binding=integration_binding,
                     agent_config_hash=agent_config_hash,
                     job_name=job_name,
                     jobs_dir=selected_jobs_dir,
@@ -265,6 +308,8 @@ def _build_jobs(
                     context_binding=binding,
                     context_cache_keys=cache_keys,
                     skill_ids=skill_ids,
+                    resolved_skills=resolved_skills,
+                    integration_binding=integration_binding,
                     agent_config_hash=agent_config_hash,
                     job_name=job_name,
                     run_name=selected_run_name,
@@ -308,6 +353,11 @@ def _build_jobs(
                         candidate_id=candidate_id,
                         applicable=applicable,
                         skip_reason=skip_reason,
+                        skill_provenance=tuple(
+                            item.provenance() for item in resolved_skills
+                        ),
+                        integration_ids=integration_binding.ids,
+                        integration_provenance=integration_binding.provenance,
                     )
                 )
     return rendered
@@ -325,6 +375,8 @@ def _job_config(
     context_instruction: Path | None,
     context_cache_keys: dict[str, str],
     skill_ids: list[str],
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
     agent_config_hash: str,
     job_name: str,
     jobs_dir: Path,
@@ -356,11 +408,17 @@ def _job_config(
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in context_binding.compose_files],
         ]
+    if integration_binding.compose_files:
+        environment["extra_docker_compose"] = [
+            *environment.get("extra_docker_compose", []),
+            *[path.as_posix() for path in integration_binding.compose_files],
+        ]
     artifacts = _dedupe_values(
         [
             *(variant.artifacts or experiment.artifacts),
             *workload_artifacts,
             *context_binding.artifacts,
+            *integration_binding.artifacts,
         ]
     )
     config: dict[str, Any] = {
@@ -377,7 +435,8 @@ def _job_config(
                 experiment=experiment,
                 variant=variant,
                 binding=context_binding,
-                skill_ids=skill_ids,
+                resolved_skills=resolved_skills,
+                integration_binding=integration_binding,
                 repo_root=repo_root,
             )
         ],
@@ -388,6 +447,7 @@ def _job_config(
             repo_root=repo_root,
             context_instruction=context_instruction,
             binding=context_binding,
+            integration_binding=integration_binding,
             prompt_ids=prompt_ids,
         ),
     }
@@ -409,15 +469,19 @@ def _job_config(
         "prompt_id": variant.prompt_id,
         "context_system_id": context_spec.id,
         "context_version": context_spec.version,
+        "context_support": context_spec.support,
         "context_config_hash": _context_config_hash(context_spec),
         "context_cache_keys": context_cache_keys,
         "skill_ids": skill_ids,
+        "skills": [item.provenance() for item in resolved_skills],
+        "integration_ids": list(integration_binding.ids),
+        "integrations": list(integration_binding.provenance),
         "agent_config_hash": agent_config_hash,
         "applicable": applicable,
         "skip_reason": skip_reason,
-        "content_hashes": content_hashes_for_ids(
+        "content_hashes": _content_hashes(
             prompt_ids=prompt_ids,
-            skill_ids=skill_ids,
+            resolved_skills=resolved_skills,
             repo_root=repo_root,
         ),
         "expected_evidence_paths": {
@@ -426,11 +490,16 @@ def _job_config(
         "task_id": tasks[0].id,
         "repository": tasks[0].repo,
         "base_commit": tasks[0].base_commit,
+        "repository_source": (
+            tasks[0].repository.to_dict() if tasks[0].repository else None
+        ),
         "model_provider": route.provider,
         "model": route.display_model,
         "trace_content": experiment.trace_content,
     }
-    return _drop_empty(config)
+    rendered = _drop_empty(config)
+    _validate_harbor_job_config(rendered)
+    return rendered
 
 
 def _dataset_config(
@@ -469,26 +538,31 @@ def _agent_config(
     experiment: ExperimentSpec,
     variant: FeatureVariant,
     binding: ContextBinding,
-    skill_ids: list[str],
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
     repo_root: Path,
 ) -> dict[str, Any]:
     config: dict[str, Any] = {
         "model_name": route.display_model,
         "include_logs": ["**/*"],
         "skills": [
-            _relative_or_absolute(Path(get_skill(item_id, repo_root).path).parent, repo_root)
-            for item_id in skill_ids
+            _relative_or_absolute(item.path, repo_root) for item in resolved_skills
         ],
         "kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
         "env": _merge_dicts(
-            _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
+            _merge_dicts(
+                _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
+            ),
+            integration_binding.env,
         ),
         "mcp_servers": _instrument_mcp_servers(
             [
                 *(variant.mcp_servers or experiment.mcp_servers),
                 *binding.mcp_servers,
+                *integration_binding.mcp_servers,
             ]
         ),
+        "extra_allowed_hosts": list(integration_binding.allowed_hosts),
     }
     if _looks_like_import_path(harness.agent):
         config["import_path"] = harness.agent
@@ -502,9 +576,10 @@ def _extra_instruction_paths(
     repo_root: Path,
     context_instruction: Path | None,
     binding: ContextBinding,
+    integration_binding: IntegrationBinding,
     prompt_ids: list[str],
 ) -> list[str]:
-    paths = [*binding.extra_instruction_paths]
+    paths = [*binding.extra_instruction_paths, *integration_binding.instruction_paths]
     if context_instruction is not None:
         paths.insert(0, context_instruction)
     paths.extend(Path(get_prompt(item_id, repo_root).path) for item_id in prompt_ids)
@@ -524,6 +599,8 @@ def _job_env(
     context_binding: ContextBinding,
     context_cache_keys: dict[str, str],
     skill_ids: list[str],
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
     agent_config_hash: str,
     job_name: str,
     run_name: str,
@@ -540,9 +617,9 @@ def _job_env(
     candidate_id: str,
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
-    hashes = content_hashes_for_ids(
+    hashes = _content_hashes(
         prompt_ids=prompt_ids,
-        skill_ids=skill_ids,
+        resolved_skills=resolved_skills,
         repo_root=repo_root,
     )
     run_tags = _dedupe(
@@ -556,6 +633,7 @@ def _job_env(
             f"context-system:{context_spec.id}",
             *[f"prompt:{item_id}" for item_id in prompt_ids],
             *[f"skill:{item_id}" for item_id in skill_ids],
+            *[f"integration:{item_id}" for item_id in integration_binding.ids],
             f"run:{run_name}",
             f"harness:{harness.name}",
             f"provider:{route.provider}",
@@ -573,6 +651,7 @@ def _job_env(
             "FUGUE_VARIANT_ID": variant.id,
             "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
             "FUGUE_CONTEXT_VERSION": context_spec.version,
+            "FUGUE_CONTEXT_SUPPORT": context_spec.support,
             "FUGUE_CONTEXT_CONFIG_HASH": _context_config_hash(context_spec),
             "FUGUE_CONTEXT_CACHE_KEYS": json.dumps(context_cache_keys, sort_keys=True),
             "FUGUE_CONTEXT_CACHE_ROOT": (repo_root / DEFAULT_CACHE_ROOT).as_posix(),
@@ -588,6 +667,13 @@ def _job_env(
             "FUGUE_PROMPT_HASHES": json.dumps(hashes["prompts"], sort_keys=True),
             "FUGUE_SKILL_IDS": ",".join(skill_ids),
             "FUGUE_SKILL_HASHES": json.dumps(hashes["skills"], sort_keys=True),
+            "FUGUE_SKILL_PROVENANCE": json.dumps(
+                [item.provenance() for item in resolved_skills], sort_keys=True
+            ),
+            "FUGUE_INTEGRATION_IDS": ",".join(integration_binding.ids),
+            "FUGUE_INTEGRATION_PROVENANCE": json.dumps(
+                integration_binding.provenance, sort_keys=True
+            ),
             "FUGUE_HARBOR_CONFIG": config_path.as_posix(),
             "FUGUE_AGENT_CONFIG_HASH": agent_config_hash,
             "FUGUE_HARBOR_ENVIRONMENT": str(experiment.environment.get("type") or ""),
@@ -849,6 +935,8 @@ def _applicability(
     required_capabilities: list[str],
     runtime: ContextRuntime,
 ) -> tuple[bool, str | None]:
+    if spec.support in {"not_applicable", "disabled"}:
+        return False, f"context system {spec.id} is {spec.support}"
     missing = sorted(set(required_capabilities) - set(spec.capabilities))
     if missing:
         return False, f"missing context capabilities: {', '.join(missing)}"
@@ -903,6 +991,8 @@ def _agent_config_hash(
     variant: FeatureVariant,
     spec: ContextSystemSpec,
     binding: ContextBinding,
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
 ) -> str:
     payload = {
         "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
@@ -910,12 +1000,16 @@ def _agent_config_hash(
         "mcp_servers": [
             *(variant.mcp_servers or experiment.mcp_servers),
             *binding.mcp_servers,
+            *integration_binding.mcp_servers,
         ],
         "environment": _merge_dicts(experiment.environment, variant.environment),
         "verifier": _merge_dicts(experiment.verifier, variant.verifier),
         "retry": _merge_dicts(experiment.retry, variant.retry),
         "artifacts": variant.artifacts or experiment.artifacts,
         "context": {"id": spec.id, "version": spec.version, "config": spec.config},
+        "skills": [item.provenance() for item in resolved_skills],
+        "integrations": list(integration_binding.provenance),
+        "allowed_hosts": list(integration_binding.allowed_hosts),
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
@@ -940,7 +1034,8 @@ def _candidate_id(
     harness: HarnessSpec,
     route: ModelRoute,
     context_spec: ContextSystemSpec,
-    skill_ids: list[str],
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
     agent_config_hash: str,
     repo_root: Path,
 ) -> str:
@@ -955,11 +1050,12 @@ def _candidate_id(
                 "version": context_spec.version,
                 "config_hash": _context_config_hash(context_spec),
             },
-            "content_hashes": content_hashes_for_ids(
+            "content_hashes": _content_hashes(
                 prompt_ids=prompt_ids,
-                skill_ids=skill_ids,
+                resolved_skills=resolved_skills,
                 repo_root=repo_root,
             ),
+            "integrations": list(integration_binding.provenance),
             "agent_config_hash": agent_config_hash,
             "trace_content": experiment.trace_content,
         }
@@ -973,9 +1069,16 @@ def _stable_id(value: Any) -> str:
 
 def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     servers: list[dict[str, Any]] = []
+    names: set[str] = set()
     for value in values:
         server = dict(value)
+        allowed_tools = [str(item) for item in server.pop("fugue_allowed_tools", [])]
         command = server.get("command")
+        name = str(server.get("name") or command or "")
+        if name in names:
+            raise ValueError(f"duplicate MCP server name: {name}")
+        if name:
+            names.add(name)
         transport = str(server.get("transport") or ("stdio" if command else "sse"))
         server["transport"] = transport
         if transport != "stdio" or not command:
@@ -983,6 +1086,8 @@ def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         upstream = [str(command), *[str(item) for item in server.get("args", [])]]
         proxy_args = ["--name", str(server.get("name") or command)]
+        for tool_name in allowed_tools:
+            proxy_args.extend(["--allow-tool", tool_name])
         cwd = server.pop("cwd", None)
         if cwd:
             proxy_args.extend(["--cwd", str(cwd)])
@@ -993,8 +1098,53 @@ def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]
     return servers
 
 
+def _content_hashes(
+    *,
+    prompt_ids: list[str],
+    resolved_skills: list[ResolvedSkill],
+    repo_root: Path,
+) -> dict[str, dict[str, str]]:
+    return {
+        "prompts": {
+            item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids
+        },
+        "skills": {item.id: item.digest for item in resolved_skills},
+    }
+
+
+def _join_skip_reasons(*values: str | None) -> str | None:
+    reasons = [value for value in values if value]
+    return "; ".join(dict.fromkeys(reasons)) or None
+
+
+def _validate_harbor_job_config(config: dict[str, Any]) -> None:
+    """Validate against the pinned Harbor schema when installed in this runtime."""
+    try:
+        actual = version("harbor")
+    except PackageNotFoundError:
+        return
+    if actual != HARBOR_VERSION:
+        raise RuntimeError(
+            f"Fugue requires harbor=={HARBOR_VERSION}; found harbor=={actual}"
+        )
+    from harbor.models.job.config import JobConfig
+
+    harbor_config = {key: value for key, value in config.items() if key != "fugue"}
+    unknown = sorted(set(harbor_config) - set(JobConfig.model_fields))
+    if unknown:
+        raise ValueError(
+            "generated config contains unknown Harbor field(s): " + ", ".join(unknown)
+        )
+    JobConfig.model_validate(harbor_config)
+
+
 def _context_config_hash(spec: ContextSystemSpec) -> str:
-    payload = {"provider": spec.provider, "version": spec.version, "config": spec.config}
+    payload = {
+        "provider": spec.provider,
+        "version": spec.version,
+        "support": spec.support,
+        "config": spec.config,
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

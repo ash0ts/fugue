@@ -54,6 +54,8 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.harness",
         "fugue.variant_id",
         "fugue.context_system_id",
+        "fugue.context_support",
+        "fugue.integration_ids",
         "fugue.task_id",
         "fugue.trial_index",
         "fugue.comparison_example_id",

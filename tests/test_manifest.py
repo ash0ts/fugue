@@ -56,6 +56,65 @@ tasks:
     assert manifest.tasks[0].metadata == {"source_index": 7}
 
 
+def test_manifest_normalizes_typed_repository_and_http_source(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "typed.yaml"
+    commit = "a" * 40
+    digest = "b" * 64
+    manifest_path.write_text(
+        f"""
+dataset:
+  path: .fugue/cache/datasets/typed
+  source:
+    type: http
+    url: https://example.test/tasks.jsonl
+    sha256: {digest}
+    license: MIT
+harnesses:
+  - {{name: codex, agent: fugue.agents:FugueCodex}}
+tasks:
+  - id: typed-task
+    repository:
+      type: git
+      url: https://github.com/example/project.git
+      commit: {commit}
+      path: packages/core
+"""
+    )
+
+    manifest = load_manifest(manifest_path)
+
+    assert manifest.dataset.source_spec is not None
+    assert manifest.dataset.source["type"] == "http"
+    task = manifest.tasks[0]
+    assert task.repo == "example/project"
+    assert task.base_commit == commit
+    assert task.repository is not None
+    assert task.repository.to_dict() == {
+        "type": "git",
+        "url": "https://github.com/example/project",
+        "commit": commit,
+        "path": "packages/core",
+    }
+
+
+def test_typed_repository_rejects_moving_refs(tmp_path: Path) -> None:
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        """
+dataset: {ref: test/tasks}
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks:
+  - id: task
+    repository:
+      type: git
+      url: https://github.com/example/project
+      commit: main
+"""
+    )
+    with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        load_manifest(path)
+
+
 def test_pilot_canary_declares_gold_evidence_paths() -> None:
     manifest = load_manifest(Path(__file__).parents[1] / "datasets" / "pilot.yaml")
     task = next(

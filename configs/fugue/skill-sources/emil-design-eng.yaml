@@ -1,0 +1,6 @@
+id: emil-design-eng
+source:
+  type: git
+  url: https://github.com/emilkowalski/skills
+  ref: 7bb7061b5cf7de15ea1aeaf00fbd9e6592a20fce
+  path: skills/emil-design-eng

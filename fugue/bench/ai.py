@@ -25,6 +25,7 @@ from fugue.assistant import (
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
 from fugue.bench.export import fetch_weave_summaries
+from fugue.bench.integrations import list_integrations, load_integration
 from fugue.bench.library import (
     ExperimentSpec,
     experiment_from_data,
@@ -38,6 +39,7 @@ from fugue.bench.library import (
     validate_id,
 )
 from fugue.bench.manifest import load_manifest
+from fugue.bench.sources import list_skill_source_ids, load_skill_source
 from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
 
 if TYPE_CHECKING:
@@ -47,7 +49,12 @@ ANALYSES_DIR = Path("configs/fugue/analyses")
 ANALYSIS_REPORTS_DIR = Path("reports/analyses")
 AnalysisSource = Literal["local", "hybrid"]
 ClientFactory = Callable[[str, Mapping[str, str]], AssistantModelClient]
-ANALYSIS_GROUP_FIELDS = FILTER_FIELDS | {"skill_ids", "manifest", "run_name"}
+ANALYSIS_GROUP_FIELDS = FILTER_FIELDS | {
+    "skill_ids",
+    "integration_ids",
+    "manifest",
+    "run_name",
+}
 
 
 @dataclass(frozen=True)
@@ -365,7 +372,15 @@ class ExperimentComposer:
         return {
             "experiments": experiments,
             "prompts": [item.id for item in list_prompts(self.repo_root)],
-            "skills": [item.id for item in list_skills(self.repo_root)],
+            "skills": sorted(
+                {
+                    *[item.id for item in list_skills(self.repo_root)],
+                    *list_skill_source_ids(self.repo_root),
+                }
+            ),
+            "integrations": [
+                item.id for item in list_integrations(self.repo_root)
+            ],
             "context_systems": [item.id for item in list_context_systems(self.repo_root)],
             "manifests": manifests,
             "harnesses": ["hermes", "openclaw", "claude-code", "codex"],
@@ -1116,9 +1131,14 @@ def _validate_experiment_references(
     for variant in experiment.variants:
         if variant.prompt_id and ("prompt", variant.prompt_id) not in asset_ids:
             get_prompt(variant.prompt_id, repo_root)
-        for skill_id in variant.skill_ids:
+        for skill_id in variant.selected_skill_ids:
             if ("skill", skill_id) not in asset_ids:
-                get_skill(skill_id, repo_root)
+                try:
+                    get_skill(skill_id, repo_root)
+                except FileNotFoundError:
+                    load_skill_source(skill_id, repo_root)
+        for integration in variant.integrations or experiment.integrations:
+            load_integration(integration.id, repo_root)
         get_context_system(variant.context.system_id, repo_root)
     paths = [experiment.manifest]
     paths.extend(item.manifest for item in experiment.workloads if item.manifest)

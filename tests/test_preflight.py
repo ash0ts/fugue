@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from fugue.preflight import PreflightCheck, harbor_import_check, run_preflight
+from fugue.preflight import (
+    HARBOR_VERSION,
+    PreflightCheck,
+    harbor_import_check,
+    run_preflight,
+    validate_harbor_job_configs,
+)
 
 
 def test_harbor_import_check_uses_resolved_tool_python(
@@ -60,6 +66,34 @@ def test_preflight_reports_harbor_runtime_adapter_check(
     adapters = next(check for check in checks if check.name == "adapters")
     assert adapters.ok is True
     assert adapters.detail == "harbor runtime"
+
+
+def test_job_configs_are_validated_by_harbor_tool_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tool_bin = tmp_path / "harbor" / "bin"
+    tool_bin.mkdir(parents=True)
+    harbor = tool_bin / "harbor"
+    harbor.touch()
+    harbor_python = tool_bin / "python"
+    harbor_python.touch()
+    config = tmp_path / "job.json"
+    config.write_text("{}")
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: str(harbor))
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("fugue.preflight.subprocess.run", fake_run)
+
+    validate_harbor_job_configs([config])
+
+    [command] = commands
+    assert command[0] == harbor_python.as_posix()
+    assert command[1] == "-c"
+    assert command[-2:] == [HARBOR_VERSION, config.as_posix()]
 
 
 def test_live_preflight_is_read_only(

@@ -19,14 +19,14 @@ variants:
   - id: prompt-skill
     label: Prompt + skill
     prompt_id: repository-memory
-    skill_ids:
+    skills:
       - repository-orientation
     context:
       system_id: none
   - id: context-skill
     label: Repository context + skill
     prompt_id: repository-memory
-    skill_ids:
+    skills:
       - repository-orientation
     context:
       system_id: agentsmd

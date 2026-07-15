@@ -424,11 +424,21 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "prompt_id": env.get("FUGUE_PROMPT_ID"),
         "context_system_id": cell.context_system_id,
         "context_version": env.get("FUGUE_CONTEXT_VERSION"),
+        "context_support": env.get("FUGUE_CONTEXT_SUPPORT"),
         "context_config_hash": env.get("FUGUE_CONTEXT_CONFIG_HASH"),
         "agent_config_hash": env.get("FUGUE_AGENT_CONFIG_HASH"),
         "skill_ids": [
             value for value in env.get("FUGUE_SKILL_IDS", "").split(",") if value
         ],
+        "skill_provenance": _json_list(env.get("FUGUE_SKILL_PROVENANCE")),
+        "integration_ids": [
+            value
+            for value in env.get("FUGUE_INTEGRATION_IDS", "").split(",")
+            if value
+        ],
+        "integration_provenance": _json_list(
+            env.get("FUGUE_INTEGRATION_PROVENANCE")
+        ),
         "tags": [value for value in env.get("FUGUE_TAGS", "").split(",") if value],
         "dataset": env.get("FUGUE_DATASET"),
         "repository": env.get("FUGUE_REPOSITORY"),
@@ -545,6 +555,16 @@ def _json_mapping(value: str | None) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: str | None) -> list[Any]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 def export_rows(
@@ -1031,6 +1051,8 @@ def _candidate_id_from_row(row: dict[str, Any]) -> str:
             "prompt_hashes": row.get("prompt_hashes") or {},
             "skill_ids": row.get("skill_ids") or [],
             "skill_hashes": row.get("skill_hashes") or {},
+            "integration_ids": row.get("integration_ids") or [],
+            "integration_provenance": row.get("integration_provenance") or [],
             "agent_config_hash": row.get("agent_config_hash"),
         }
     )
@@ -1078,6 +1100,9 @@ def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "fugue.context_system_id": row.get("context_system_id"),
             "fugue.prompt_id": row.get("prompt_id"),
             "fugue.skill_ids": "|".join(str(x) for x in row.get("skill_ids") or []),
+            "fugue.integration_ids": "|".join(
+                str(x) for x in row.get("integration_ids") or []
+            ),
             "fugue.model_provider": row.get("model_provider"),
             "fugue.model": row.get("model"),
             "fugue.run_ids": "|".join(run_ids),
@@ -1949,11 +1974,15 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "prompt_id": meta.get("prompt_id"),
         "context_system_id": context_system_id,
         "context_version": meta.get("context_version"),
+        "context_support": meta.get("context_support"),
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
         "prompt_hashes": meta.get("prompt_hashes", {}),
         "skill_ids": meta.get("skill_ids", []),
         "skill_hashes": meta.get("skill_hashes", {}),
+        "skill_provenance": meta.get("skill_provenance", []),
+        "integration_ids": meta.get("integration_ids", []),
+        "integration_provenance": meta.get("integration_provenance", []),
         "harbor_config": meta.get("harbor_config"),
         "harbor_environment": meta.get("harbor_environment"),
         "harbor_resources": meta.get("harbor_resources", {}),
