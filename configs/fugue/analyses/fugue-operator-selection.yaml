@@ -1,0 +1,20 @@
+id: fugue-operator-selection
+title: Fugue operator candidate selection
+question: Which operator agent configuration passes the complete holdout grid and is quality-competitive before cost and latency tie-breakers?
+filters:
+  experiment_id: fugue-operator-self-eval
+  tag: phase:holdout
+group_by: [candidate_id, harness, variant_id, context_system_id, model]
+metrics: [pass_rate, reward, wall_time_sec, cost_usd, failures, tool_calls]
+source: hybrid
+include_artifacts: true
+selection:
+  metric: pass_rate
+  confidence: 0.95
+  noninferiority_margin: 0.05
+  require_complete_grid: true
+  bootstrap_samples: 2000
+  tie_breakers: [cost_per_success, median_wall_time_sec, recoverable_error_rate]
+  minimum_pass_rate_improvement: 0.05
+  minimum_cost_improvement: 0.15
+  minimum_latency_improvement: 0.15

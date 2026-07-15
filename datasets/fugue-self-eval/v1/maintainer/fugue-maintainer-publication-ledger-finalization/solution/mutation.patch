@@ -1,0 +1,11 @@
+diff --git a/fugue/bench/export.py b/fugue/bench/export.py
+--- a/fugue/bench/export.py
++++ b/fugue/bench/export.py
+@@ -269,6 +269,6 @@ class LiveEvaluationCoordinator:
+             candidate_id = session.candidate["candidate_id"]
+             try:
+                 with session.lock:
+-                    session.logger.log_summary()
++                    session.logger.log_summary({})
+             except Exception as exc:
+                 try:

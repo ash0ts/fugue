@@ -1,0 +1,11 @@
+diff --git a/fugue/bench/export.py b/fugue/bench/export.py
+--- a/fugue/bench/export.py
++++ b/fugue/bench/export.py
+@@ -1497,6 +1497,6 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
+             "weave_root_spans": [],
+             "weave_usage_status": "unavailable",
+             "weave_usage_source": "unavailable",
+-            "weave_input_tokens": None,
++            "weave_input_tokens": 0,
+             "weave_output_tokens": None,
+             "weave_total_cost_usd": None,

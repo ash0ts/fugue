@@ -1,0 +1,11 @@
+diff --git a/fugue/bench/job_config.py b/fugue/bench/job_config.py
+--- a/fugue/bench/job_config.py
++++ b/fugue/bench/job_config.py
+@@ -948,6 +948,6 @@ def _candidate_id(
+         {
+             "harness": harness.name,
+             "model": route.display_model,
+-            "variant": variant.id,
++            "variant": "shared",
+             "context": {
+                 "id": context_spec.id,
