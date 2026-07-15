@@ -1,7 +1,7 @@
 id: openwiki
 title: OpenWiki
 description: Generated repository wiki injected as files.
-provider: fugue.bench.context:CommandContextProvider
+provider: fugue.bench.context:IsolatedCommandContextProvider
 version: openwiki@0.1.1
 capabilities: [prepare, bind, serve]
 deliveries: [portable]
@@ -11,7 +11,9 @@ license: MIT
 source_url: https://github.com/langchain-ai/openwiki
 config:
   prepare:
-    command: [npx, -y, "openwiki@0.1.1", code, --update, --print]
+    command: [npx, -y, "openwiki@0.1.1", code, --init, --print]
+    timeout_seconds: 600
+    required_paths: [openwiki/quickstart.md, AGENTS.md, CLAUDE.md]
     copy_paths: [openwiki, AGENTS.md, CLAUDE.md]
     env:
       OPENWIKI_PROVIDER: openai-compatible

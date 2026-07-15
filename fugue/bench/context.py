@@ -4,19 +4,23 @@ import asyncio
 import concurrent.futures
 import hashlib
 import importlib
+import importlib.metadata
 import importlib.util
 import json
 import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
 import time
 from collections import Counter
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
 import yaml
@@ -672,19 +676,27 @@ class CommandContextProvider(BaseContextProvider):
             expanded = [
                 _format_token(token, spec, snapshot, artifact, runtime) for token in command
             ]
-            result = await asyncio.to_thread(
-                subprocess.run,
+            result = await _run_context_command(
                 expanded,
                 cwd=snapshot.checkout,
                 env=_command_env(runtime.env, prepare.get("env")),
-                check=True,
                 capture_output=bool(prepare.get("stdout_path")),
-                text=bool(prepare.get("stdout_path")),
+                timeout_seconds=(
+                    float(prepare["timeout_seconds"])
+                    if prepare.get("timeout_seconds") is not None
+                    else None
+                ),
             )
             if prepare.get("stdout_path"):
                 target = artifact / str(prepare["stdout_path"])
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(result.stdout or "")
+        for value in _list(prepare.get("required_paths")):
+            required = snapshot.checkout / str(value)
+            if not required.exists():
+                raise FileNotFoundError(
+                    f"{spec.id} did not produce required path {value}"
+                )
         for value in _list(prepare.get("copy_paths")):
             source = snapshot.checkout / str(value)
             if not source.exists():
@@ -730,7 +742,138 @@ class CommandContextProvider(BaseContextProvider):
         return _parse_hits(result.stdout, retrieve.get("format", "json"), query.top_k)
 
 
-class AiderRepoMapContextProvider(CommandContextProvider):
+async def _run_context_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    capture_output: bool,
+    timeout_seconds: float | None,
+) -> subprocess.CompletedProcess[str]:
+    stream = asyncio.subprocess.PIPE if capture_output else None
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=cwd,
+        env=env,
+        stdout=stream,
+        stderr=stream,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=timeout_seconds
+        )
+    except (TimeoutError, asyncio.CancelledError):
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            command,
+            output=stdout.decode(errors="replace") if stdout is not None else None,
+            stderr=stderr.decode(errors="replace") if stderr is not None else None,
+        )
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout.decode(errors="replace") if stdout is not None else None,
+        stderr.decode(errors="replace") if stderr is not None else None,
+    )
+
+
+@asynccontextmanager
+async def _isolated_repository(
+    snapshot: RepositorySnapshot,
+    runtime: ContextRuntime,
+    *,
+    prefix: str,
+) -> AsyncIterator[tuple[RepositorySnapshot, ContextRuntime]]:
+    with tempfile.TemporaryDirectory(prefix=prefix) as temp:
+        isolated = Path(temp)
+        checkout = isolated / "repository"
+        home = isolated / "home"
+        home.mkdir()
+        clone_env = {**runtime.env, "GIT_LFS_SKIP_SMUDGE": "1"}
+        await asyncio.to_thread(
+            subprocess.run,
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--no-recurse-submodules",
+                snapshot.checkout.as_posix(),
+                checkout.as_posix(),
+            ],
+            env=clone_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        await asyncio.to_thread(
+            subprocess.run,
+            [
+                "git",
+                "-C",
+                checkout.as_posix(),
+                "checkout",
+                "--quiet",
+                "--detach",
+                snapshot.commit,
+            ],
+            env=clone_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        original_home = Path.home()
+        isolated_env = {
+            **runtime.env,
+            "GIT_LFS_SKIP_SMUDGE": "1",
+            "HOME": home.as_posix(),
+            "XDG_CACHE_HOME": (home / ".cache").as_posix(),
+            "UV_CACHE_DIR": runtime.env.get("UV_CACHE_DIR")
+            or os.environ.get("UV_CACHE_DIR")
+            or (original_home / ".cache" / "uv").as_posix(),
+            "npm_config_cache": runtime.env.get("npm_config_cache")
+            or runtime.env.get("NPM_CONFIG_CACHE")
+            or os.environ.get("npm_config_cache")
+            or os.environ.get("NPM_CONFIG_CACHE")
+            or (original_home / ".npm").as_posix(),
+        }
+        yield (
+            replace(snapshot, checkout=checkout),
+            replace(runtime, env=isolated_env),
+        )
+
+
+class IsolatedCommandContextProvider(CommandContextProvider):
+    async def prepare(
+        self,
+        spec: ContextSystemSpec,
+        snapshot: RepositorySnapshot,
+        runtime: ContextRuntime,
+    ) -> PreparedContext:
+        async with _isolated_repository(
+            snapshot, runtime, prefix=f"fugue-{spec.id}-"
+        ) as (isolated_snapshot, isolated_runtime):
+            return await super().prepare(
+                spec, isolated_snapshot, isolated_runtime
+            )
+
+
+class AiderRepoMapContextProvider(IsolatedCommandContextProvider):
     async def prepare(
         self,
         spec: ContextSystemSpec,
@@ -743,46 +886,8 @@ class AiderRepoMapContextProvider(CommandContextProvider):
         if not marker or not stdout_path:
             raise ValueError("Aider RepoMap requires stdout_path and output_marker")
 
-        # Aider 0.86.2 writes its tag cache into the repository and mixes
-        # startup diagnostics into --show-repo-map stdout.
-        with tempfile.TemporaryDirectory(prefix="fugue-aider-") as temp:
-            isolated = Path(temp)
-            checkout = isolated / "repository"
-            home = isolated / "home"
-            home.mkdir()
-            clone_env = dict(runtime.env)
-            clone_env["GIT_LFS_SKIP_SMUDGE"] = "1"
-            await asyncio.to_thread(
-                subprocess.run,
-                [
-                    "git",
-                    "clone",
-                    "--quiet",
-                    "--no-hardlinks",
-                    "--no-recurse-submodules",
-                    snapshot.checkout.as_posix(),
-                    checkout.as_posix(),
-                ],
-                env=clone_env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            uv_cache = (
-                runtime.env.get("UV_CACHE_DIR")
-                or os.environ.get("UV_CACHE_DIR")
-                or (Path.home() / ".cache" / "uv").as_posix()
-            )
-            isolated_env = {
-                **runtime.env,
-                "HOME": home.as_posix(),
-                "UV_CACHE_DIR": uv_cache,
-            }
-            prepared = await super().prepare(
-                spec,
-                replace(snapshot, checkout=checkout),
-                replace(runtime, env=isolated_env),
-            )
+        # Aider 0.86.2 mixes startup diagnostics into --show-repo-map stdout.
+        prepared = await super().prepare(spec, snapshot, runtime)
 
         artifact = prepared.path / "artifact"
         target = artifact / stdout_path
@@ -805,6 +910,19 @@ class AiderRepoMapContextProvider(CommandContextProvider):
 
 class GitNexusContextProvider(CommandContextProvider):
     async def prepare(
+        self,
+        spec: ContextSystemSpec,
+        snapshot: RepositorySnapshot,
+        runtime: ContextRuntime,
+    ) -> PreparedContext:
+        async with _isolated_repository(
+            snapshot, runtime, prefix="fugue-gitnexus-"
+        ) as (isolated_snapshot, isolated_runtime):
+            return await self._prepare_isolated(
+                spec, isolated_snapshot, isolated_runtime
+            )
+
+    async def _prepare_isolated(
         self,
         spec: ContextSystemSpec,
         snapshot: RepositorySnapshot,
@@ -869,7 +987,7 @@ class RagContextProvider(BaseContextProvider):
         artifact = output / "artifact"
         artifact.mkdir(parents=True, exist_ok=True)
         chunks = _repository_chunks(
-            snapshot.checkout,
+            snapshot,
             lines_per_chunk=int(spec.config.get("lines_per_chunk") or 80),
             overlap=int(spec.config.get("line_overlap") or 20),
         )
@@ -879,27 +997,31 @@ class RagContextProvider(BaseContextProvider):
                 f"{snapshot.checkout}"
             )
         chunks_path = artifact / "chunks.jsonl"
-        with chunks_path.open("w") as handle:
-            for chunk in chunks:
-                handle.write(json.dumps(chunk, sort_keys=True) + "\n")
+        chunks_path.write_bytes(_canonical_chunks(chunks))
 
         mode = str(spec.config.get("mode") or "bm25")
+        embedding_model = _resolved_embedding_model(spec, runtime)
+        dense_artifact = None
         if mode in {"dense", "hybrid"}:
-            await asyncio.to_thread(
-                _build_lance_index,
+            dense_artifact = await asyncio.to_thread(
+                _materialize_dense_artifact,
                 artifact,
                 chunks,
-                str(spec.config.get("embedding_model") or "BAAI/bge-small-en-v1.5"),
+                embedding_model,
+                int(spec.config.get("embedding_dimensions") or 384),
+                runtime.cache_root,
             )
         metrics = _tree_metrics(artifact)
         metrics.update(
             {
                 "chunks": len(chunks),
                 "files": len({str(chunk["path"]) for chunk in chunks}),
-                "embedding_model": spec.config.get("embedding_model"),
+                "embedding_model": embedding_model,
                 "mode": mode,
             }
         )
+        if dense_artifact is not None:
+            metrics["dense_artifact"] = dense_artifact
         return _prepared(spec, snapshot, runtime, metrics)
 
     async def retrieve(
@@ -926,7 +1048,7 @@ class RagContextProvider(BaseContextProvider):
                 _dense_search,
                 artifact,
                 query.text,
-                str(spec.config.get("embedding_model") or "BAAI/bge-small-en-v1.5"),
+                _resolved_embedding_model(spec, runtime),
                 max(query.top_k, 20),
             )
             ranked = dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
@@ -969,7 +1091,8 @@ class RagContextProvider(BaseContextProvider):
                 _build_lance_index,
                 namespace,
                 chunks,
-                str(spec.config.get("embedding_model") or "BAAI/bge-small-en-v1.5"),
+                _resolved_embedding_model(spec, runtime),
+                int(spec.config.get("embedding_dimensions") or 384),
             )
         return {
             "write_latency_ms": (time.perf_counter() - started) * 1000,
@@ -1140,7 +1263,10 @@ async def prepare_context(
         return replace(prepared, cache_hit=True)
 
     runtime.cache_root.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(runtime.cache_root / f".{key}.lock", timeout=120)
+    lock = FileLock(
+        runtime.cache_root / f".{key}.lock",
+        timeout=_CONTEXT_BUILD_LOCK_TIMEOUT_SECONDS,
+    )
     await asyncio.to_thread(lock.acquire)
     try:
         backup_dir = runtime.cache_root / f".{key}.previous"
@@ -1917,26 +2043,19 @@ _TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+_RAG_CHUNK_SCHEMA = "fugue.git-lines.v1"
+_DENSE_ARTIFACT_SCHEMA = "fugue.rag-dense-artifact.v1"
+_DENSE_BATCH_SIZE = 256
+_CONTEXT_BUILD_LOCK_TIMEOUT_SECONDS = 3600
 
 
 def _repository_chunks(
-    root: Path, *, lines_per_chunk: int, overlap: int
+    snapshot: RepositorySnapshot, *, lines_per_chunk: int, overlap: int
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     step = max(1, lines_per_chunk - overlap)
-    for path in sorted(root.rglob("*")):
-        relative_path = path.relative_to(root)
-        if not path.is_file() or any(
-            part in _IGNORED_DIRS for part in relative_path.parts
-        ):
-            continue
-        if path.suffix.lower() not in _TEXT_SUFFIXES or path.stat().st_size > 1_000_000:
-            continue
-        try:
-            lines = path.read_text(errors="strict").splitlines()
-        except (OSError, UnicodeError):
-            continue
-        relative = relative_path.as_posix()
+    for relative, text in _tracked_repository_text(snapshot):
+        lines = text.splitlines()
         for start in range(0, len(lines) or 1, step):
             selected = lines[start : start + lines_per_chunk]
             if not selected:
@@ -1953,6 +2072,97 @@ def _repository_chunks(
             if start + lines_per_chunk >= len(lines):
                 break
     return chunks
+
+
+def _tracked_repository_text(
+    snapshot: RepositorySnapshot,
+) -> list[tuple[str, str]]:
+    listing = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--long",
+            "--full-tree",
+            snapshot.commit,
+        ],
+        cwd=snapshot.checkout,
+        check=True,
+        capture_output=True,
+    ).stdout
+    entries: list[tuple[bytes, str, int]] = []
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, raw_path = record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 4:
+            raise RuntimeError("git ls-tree returned an invalid record")
+        mode, kind, object_id, raw_size = fields
+        if mode not in {b"100644", b"100755"} or kind != b"blob":
+            continue
+        try:
+            relative = raw_path.decode("utf-8", errors="strict")
+            size = int(raw_size)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        path = PurePosixPath(relative)
+        if (
+            not path.parts
+            or any(part in _IGNORED_DIRS for part in path.parts)
+            or path.suffix.lower() not in _TEXT_SUFFIXES
+            or size > 1_000_000
+        ):
+            continue
+        entries.append((object_id, relative, size))
+
+    process = subprocess.Popen(
+        ["git", "cat-file", "--batch"],
+        cwd=snapshot.checkout,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        process.kill()
+        raise RuntimeError("git cat-file did not expose its pipes")
+    values: list[tuple[str, str]] = []
+    try:
+        for object_id, relative, expected_size in entries:
+            process.stdin.write(object_id + b"\n")
+            process.stdin.flush()
+            header = process.stdout.readline().rstrip(b"\n").split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise RuntimeError("git cat-file returned an invalid blob header")
+            size = int(header[2])
+            body = process.stdout.read(size)
+            terminator = process.stdout.read(1)
+            if size != expected_size or len(body) != size or terminator != b"\n":
+                raise RuntimeError("git cat-file returned an incomplete blob")
+            try:
+                text = body.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                continue
+            values.append((relative, text))
+        process.stdin.close()
+        stderr = process.stderr.read()
+        return_code = process.wait()
+        if return_code:
+            raise subprocess.CalledProcessError(
+                return_code,
+                process.args,
+                stderr=stderr,
+            )
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if not stream.closed:
+                stream.close()
+    return values
 
 
 def _bm25(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1980,14 +2190,186 @@ def _bm25(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(scored, key=lambda item: (-float(item["score"]), item["id"]))
 
 
+def _canonical_chunks(chunks: list[dict[str, Any]]) -> bytes:
+    return b"".join(
+        (
+            json.dumps(
+                chunk,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode()
+        for chunk in chunks
+    )
+
+
+def _resolved_embedding_model(
+    spec: ContextSystemSpec, runtime: ContextRuntime
+) -> str:
+    return str(
+        runtime.env.get("FUGUE_EMBEDDING_MODEL")
+        or spec.config.get("embedding_model")
+        or "BAAI/bge-small-en-v1.5"
+    )
+
+
+def _dense_artifact_contract(
+    chunks: list[dict[str, Any]], embedding_model: str, dimensions: int
+) -> tuple[str, dict[str, Any]]:
+    chunks_digest = hashlib.sha256(_canonical_chunks(chunks)).hexdigest()
+    contract = {
+        "schema": _DENSE_ARTIFACT_SCHEMA,
+        "chunk_schema": _RAG_CHUNK_SCHEMA,
+        "chunks_digest": chunks_digest,
+        "embedding": {
+            "model_id": embedding_model,
+            "dimensions": dimensions,
+            "fastembed_version": importlib.metadata.version("fastembed"),
+            "onnxruntime_version": importlib.metadata.version("onnxruntime"),
+            "provider": "CPUExecutionProvider",
+            "document_batch_size": _DENSE_BATCH_SIZE,
+        },
+        "index": {
+            "format": "lancedb",
+            "lancedb_version": importlib.metadata.version("lancedb"),
+            "table": "chunks",
+            "distance": "l2",
+            "schema_version": 1,
+        },
+    }
+    key = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return key, contract
+
+
+def _tree_content_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _valid_dense_artifact(
+    root: Path, key: str, contract: dict[str, Any], rows: int
+) -> dict[str, Any] | None:
+    manifest_path = root / "artifact-manifest.json"
+    chunks_path = root / "chunks.jsonl"
+    index = root / "lancedb"
+    if not manifest_path.is_file() or not chunks_path.is_file() or not index.is_dir():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        manifest.get("key") != key
+        or manifest.get("contract") != contract
+        or manifest.get("rows") != rows
+        or hashlib.sha256(chunks_path.read_bytes()).hexdigest()
+        != contract["chunks_digest"]
+        or _tree_content_digest(index) != manifest.get("index_tree_digest")
+    ):
+        return None
+    return manifest
+
+
+def _materialize_dense_artifact(
+    artifact: Path,
+    chunks: list[dict[str, Any]],
+    embedding_model: str,
+    dimensions: int,
+    cache_root: Path,
+) -> dict[str, Any]:
+    key, contract = _dense_artifact_contract(chunks, embedding_model, dimensions)
+    shared_root = cache_root / "artifacts" / "rag-dense" / "v1"
+    final = shared_root / key
+    shared_root.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(
+        shared_root / f".{key}.lock",
+        timeout=_CONTEXT_BUILD_LOCK_TIMEOUT_SECONDS,
+    )
+    lock.acquire()
+    try:
+        manifest = _valid_dense_artifact(final, key, contract, len(chunks))
+        cache_hit = manifest is not None
+        if manifest is None:
+            if final.exists():
+                shutil.rmtree(final)
+            temp = Path(tempfile.mkdtemp(prefix=f".{key}.", dir=shared_root))
+            backup = shared_root / f".{key}.previous"
+            try:
+                (temp / "chunks.jsonl").write_bytes(_canonical_chunks(chunks))
+                _build_lance_index(
+                    temp,
+                    chunks,
+                    embedding_model,
+                    dimensions,
+                )
+                manifest = {
+                    "schema": _DENSE_ARTIFACT_SCHEMA,
+                    "key": key,
+                    "contract": contract,
+                    "contract_digest": hashlib.sha256(
+                        json.dumps(
+                            contract,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
+                    "rows": len(chunks),
+                    "vector_dimensions": dimensions,
+                    "index_tree_digest": _tree_content_digest(temp / "lancedb"),
+                    "bytes": _tree_metrics(temp)["bytes"],
+                }
+                (temp / "artifact-manifest.json").write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+                )
+                _publish_cache_generation(temp, final, backup)
+            except Exception:
+                shutil.rmtree(temp, ignore_errors=True)
+                raise
+            manifest = _valid_dense_artifact(final, key, contract, len(chunks))
+            if manifest is None:
+                raise RuntimeError("published dense artifact failed validation")
+    finally:
+        lock.release()
+
+    target = artifact / "lancedb"
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(final / "lancedb", target)
+    (artifact / "dense-artifact.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+    return {**manifest, "cache_hit": cache_hit}
+
+
 def _build_lance_index(
-    artifact: Path, chunks: list[dict[str, Any]], embedding_model: str
+    artifact: Path,
+    chunks: list[dict[str, Any]],
+    embedding_model: str,
+    dimensions: int,
 ) -> None:
     import lancedb
     from fastembed import TextEmbedding
 
-    embedder = TextEmbedding(model_name=embedding_model)
-    vectors = list(embedder.embed([str(chunk["text"]) for chunk in chunks]))
+    embedder = TextEmbedding(
+        model_name=embedding_model,
+        providers=["CPUExecutionProvider"],
+    )
+    vectors = list(
+        embedder.embed(
+            [str(chunk["text"]) for chunk in chunks],
+            batch_size=_DENSE_BATCH_SIZE,
+        )
+    )
+    if len(vectors) != len(chunks) or any(len(vector) != dimensions for vector in vectors):
+        raise RuntimeError("embedding output did not match the dense artifact contract")
     rows = [
         {**chunk, "vector": vector.tolist() if hasattr(vector, "tolist") else list(vector)}
         for chunk, vector in zip(chunks, vectors, strict=True)
@@ -2002,8 +2384,11 @@ def _dense_search(
     import lancedb
     from fastembed import TextEmbedding
 
-    embedder = TextEmbedding(model_name=embedding_model)
-    vector = next(iter(embedder.embed([query])))
+    embedder = TextEmbedding(
+        model_name=embedding_model,
+        providers=["CPUExecutionProvider"],
+    )
+    vector = next(iter(embedder.embed([query], batch_size=1)))
     database = lancedb.connect((artifact / "lancedb").as_posix())
     rows = database.open_table("chunks").search(vector).limit(limit).to_list()
     return [
