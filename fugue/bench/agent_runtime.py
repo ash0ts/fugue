@@ -132,12 +132,24 @@ def _node_agent_dockerfile(harness: str, command: str, version: str) -> str:
         if harness == "openclaw"
         else " && ln -s ../node_modules/.bin/weave-claude-code bin/weave-claude-code"
     )
+    weave_global_view = (
+        ""
+        if harness == "openclaw"
+        else (
+            "RUN mkdir -p lib/node_modules && "
+            "ln -s ../../node_modules/weave-claude-code "
+            "lib/node_modules/weave-claude-code && "
+            f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
+            "test -s \"$(npm root -g)/weave-claude-code/"
+            ".claude-plugin/marketplace.json\"\n"
+        )
+    )
     return f"""FROM {_NODE_IMAGE}
 WORKDIR {AGENT_RUNTIME_MOUNT}
 COPY package.json package-lock.json ./
 {("COPY weave-node-sdk.tgz ./" if harness == "openclaw" else "")}
 RUN npm ci --ignore-scripts --no-audit --no-fund
-{postinstall}COPY patch-runtime.mjs ./
+{postinstall}{weave_global_view}COPY patch-runtime.mjs ./
 RUN node patch-runtime.mjs {AGENT_RUNTIME_MOUNT} && test -s {patch_lock}
 RUN mkdir -p bin && cp /usr/local/bin/node bin/node && \
     ln -s ../node_modules/.bin/{command} bin/{command}{weave_cli}
@@ -196,12 +208,15 @@ RUNTIMES = {
     ),
     "claude-code": AgentRuntimeSpec(
         harness="claude-code",
-        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.1",
+        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.2",
         dockerfile=_node_agent_dockerfile("claude-code", "claude", "2.1.210"),
         probe=(
             "/bin/sh",
             "-c",
-            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH claude --version",
+            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH claude --version && "
+            f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
+            "test -s \"$(npm root -g)/weave-claude-code/"
+            ".claude-plugin/marketplace.json\"",
         ),
     ),
     "codex": AgentRuntimeSpec(

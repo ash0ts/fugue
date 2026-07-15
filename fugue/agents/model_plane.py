@@ -1752,7 +1752,9 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 f"PATH={runtime}/bin:$PATH claude --version | "
                 f"grep -F {shlex.quote(self._CLAUDE_CODE_VERSION)} && "
                 f"PATH={runtime}/bin:$PATH weave-claude-code --version && "
-                f"test -s {runtime}/claude-code-patch-lock.json"
+                f"test -s {runtime}/claude-code-patch-lock.json && "
+                f"test -s {runtime}/lib/node_modules/weave-claude-code/"
+                ".claude-plugin/marketplace.json"
             ),
             timeout_sec=30,
         )
@@ -1771,6 +1773,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             "WANDB_API_KEY": _require_trace_key(),
             "IS_SANDBOX": "1",
             "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+            "NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime",
         }
         # Three container gotchas, all verified empirically:
         # 1. `--source=local` registers the npm tree as a *directory

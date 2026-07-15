@@ -59,7 +59,14 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             assert forbidden not in adapter, (harness, forbidden)
 
     assert "npm ci --ignore-scripts" in agent_runtime.RUNTIMES["openclaw"].dockerfile
-    assert "npm ci --ignore-scripts" in agent_runtime.RUNTIMES["claude-code"].dockerfile
+    claude_runtime = agent_runtime.RUNTIMES["claude-code"]
+    assert "npm ci --ignore-scripts" in claude_runtime.dockerfile
+    assert "lib/node_modules/weave-claude-code" in claude_runtime.dockerfile
+    assert "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime" in (
+        claude_runtime.dockerfile
+    )
+    assert "marketplace.json" in " ".join(claude_runtime.probe)
+    assert '"NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime"' in ranges["claude-code"]
     assert "hermes-install.sh" in agent_runtime.RUNTIMES["hermes"].dockerfile
 
 
