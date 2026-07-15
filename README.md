@@ -40,11 +40,11 @@ flowchart LR
 uv venv --python 3.12
 source .venv/bin/activate
 uv sync --extra dev
-cp .env.example .env
 ```
 
-Configure W&B for tracing and the credentials required by the selected model
-route:
+Keep credentials outside the checkout and pass their existing path directly to
+`--env-file`. Fugue reads the file but never copies it into runtime artifacts,
+snapshots, jobs, or Git. `.env.example` lists the supported names:
 
 ```dotenv
 WANDB_API_KEY=
@@ -85,8 +85,27 @@ Check dependencies and prepare only what the selected experiment requires:
 ```bash
 fugue setup --experiment pilot --check
 fugue setup --experiment pilot --skills
-fugue setup --experiment repo-memory-impact --prepare-context
+fugue setup --experiment repo-memory-impact --prepare-context \
+  --env-file /path/to/existing/.env
 ```
+
+`--check` is observational. `--prepare-context` is the explicit state-changing
+boundary that downloads or builds pinned context assets; preview and run never
+install an adapter or start a service. Graphiti has a separate local Neo4j
+lifecycle:
+
+```bash
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --start-services --env-file /path/to/existing/.env
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --service-status --env-file /path/to/existing/.env
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --stop-services --env-file /path/to/existing/.env
+```
+
+When Graphiti credentials are absent, Fugue generates an ignored mode-0600
+credential file and resolves host and Harbor endpoints internally. Stopping the
+service preserves its named data volume; 0.1.1 has no destructive purge action.
 
 Remote skills are fetched for review but not executed. Approve one exact
 reviewed digest before it can enter a run:
@@ -202,6 +221,13 @@ names, variant IDs and labels, preset names, run names, judge/scorer state, and
 trial ordinals do not affect it. Runtime, Harbor, concurrency, and tracing
 policy instead affect a separate execution fingerprint.
 
+Model routing and tool delivery are independent for Codex. Model traffic still
+uses the selected W&B bridge route, while each native-MCP cell receives a new,
+isolated `CODEX_HOME` containing only that route and its resolved allowlisted
+servers. Fugue never reads or mutates the user's global Codex credentials,
+skills, configuration, or MCP definitions, and it never downgrades native MCP
+to portable instructions.
+
 ## Experiment contract
 
 Saved experiments live in `configs/fugue/experiments/`. The public YAML schema
@@ -243,6 +269,24 @@ injects native MCP, while `native_mcp` preserves the provider interface.
 Selecting an unsupported delivery makes the cell `not_applicable` before
 binding. Research adapters remain outside default presets until their pinned
 Harbor runtimes pass live integration tests.
+
+The experimental managed adapters are opt-in:
+
+| System | Delivery | Explicit requirement |
+| --- | --- | --- |
+| GitNexus 1.6.3 | native MCP | `FUGUE_LICENSE_APPROVED_GITNEXUS=true`; noncommercial research only |
+| CodeGraph 0.9.0 | native MCP | Prepared pinned platform bundle |
+| Semble 0.5.1 | native MCP | Prepared local model and parser assets |
+| Project RAG `d5abf98…` | native MCP | Prepared Rust runtime and isolated LanceDB state |
+| Graphiti 0.29.2 | portable or native MCP | Managed Neo4j 5.26 service or explicit compatible endpoint |
+| OpenWiki 0.1.1 | portable | Isolated builder workspace and Fugue model bridge |
+| lat.md 0.11.0 | native MCP | `LAT_LLM_KEY` and `FUGUE_ENABLE_EXPERIMENTAL_LATMD=true` |
+
+GitNexus, CodeGraph, Semble, Project RAG, and lat.md receive the same read-only
+task snapshot at `/workspace/repository` and a separate writable state area.
+The Fugue gateway preserves upstream MCP schemas and cancellation while adding
+cell correlation to tool results. Without a lat.md key, semantic lat.md cells
+are deterministically `not_applicable` and are not a release failure.
 
 ```mermaid
 flowchart LR
@@ -329,6 +373,19 @@ dataset, workload, and task; trial index is a separate cell coordinate.
 Deterministic outcomes, rubric scores, and judge errors remain separate—Fugue
 does not invent a composite score or convert a judge outage into a Harbor
 failure. Unmeasured token usage remains unavailable rather than becoming zero.
+
+`RunSnapshotV2` records source and resolved experiment digests, capability
+decisions, logical predictions, runtime locks, planned cells, asset identities,
+and publication schema before execution. A normalized prediction is distinct
+from its raw retrieval or episode measurements. Summaries therefore report
+planned and executed cells, logical predictions, measurements, Agent and direct
+predictions, conversations, links, canaries, and remediation cohorts separately.
+
+W&B publication is idempotent by project, prediction ID, scorer version, and
+revision. An explicit republish creates a new active revision with a reason and
+`supersedes` link; it never merges evidence by a display label. Dashboard views
+should filter to the active revision and facet by source commit, snapshot
+digest, cohort, execution kind, harness, context system, and skill treatment.
 
 Analysis first resolves and displays an immutable local scope. `--yes` is the
 explicit boundary for model interpretation and report writing:
@@ -477,7 +534,7 @@ uv build
 
 Core and context suites support Python 3.12 and 3.13. Serving and protocol
 compatibility run on Python 3.13. See `docs/extension-guide.md` for context and
-integration definitions, and `docs/releases/0.1.md` for release scope and
-manual gates.
+integration definitions, `docs/releases/0.1.md` for the base release, and
+`docs/releases/0.1.1.md` for the stacked hardening scope and evidence rules.
 
 Fugue is licensed under the Apache License 2.0. See `LICENSE`.

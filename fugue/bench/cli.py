@@ -294,7 +294,10 @@ def _add_common_args(
     parser: argparse.ArgumentParser, *, json_output: bool = False
 ) -> None:
     parser.add_argument(
-        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Read credentials from this file without copying it into the repository",
     )
     parser.add_argument(
         "--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS
@@ -325,7 +328,10 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-n", "--n-concurrent", type=_positive_cli_int)
     parser.add_argument("-l", "--n-tasks", type=_positive_cli_int)
     parser.add_argument(
-        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Read credentials from this file without copying it into the repository",
     )
     parser.add_argument("--jobs-dir", type=Path)
     parser.add_argument(

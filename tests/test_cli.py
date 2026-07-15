@@ -28,6 +28,8 @@ def test_public_command_surface_is_intentionally_small() -> None:
         if isinstance(action, cli.argparse._SubParsersAction)
     )
     assert set(subparsers.choices) == {"plan", "run", "runs", "analyze", "setup", "tui"}
+    assert "--env-file" in subparsers.choices["run"].format_help()
+    assert "--env-file" in subparsers.choices["setup"].format_help()
 
 
 @pytest.mark.parametrize(
