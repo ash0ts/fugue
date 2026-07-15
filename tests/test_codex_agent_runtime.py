@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("harbor")
+pytest.importorskip("harbor.agents.installed.codex")
 
 from fugue.agents.model_plane import FugueCodex
 

@@ -18,9 +18,8 @@ from fugue.agent_tracing import (
 )
 from fugue.registration import skill_registration_probe_command
 
-AGENT_MODEL_PLANE = (
-    Path(__file__).resolve().parents[1] / "fugue" / "agents" / "model_plane.py"
-)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENT_MODEL_PLANE = REPO_ROOT / "fugue" / "agents" / "model_plane.py"
 
 
 def test_harness_agents_are_stable_and_trials_are_deterministic() -> None:
@@ -168,6 +167,16 @@ def test_hermes_staging_promotes_resource_attributes_to_spans() -> None:
 
 def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     source = AGENT_MODEL_PLANE.read_text()
+    codex_runtime = (
+        REPO_ROOT / "configs/fugue/runtime/codex/patch-runtime.mjs"
+    ).read_text()
+    runtime_patches = "\n".join(
+        path.read_text()
+        for path in (
+            REPO_ROOT / "configs/fugue/runtime/openclaw/patch-runtime.mjs",
+            REPO_ROOT / "configs/fugue/runtime/claude-code/patch-runtime.mjs",
+        )
+    )
 
     assert source.count('_WEAVE_PLUGIN_VERSION = "0.1.1"') == 2
     assert '_WEAVE_PLUGIN_VERSION = "0.2.12"' in source
@@ -176,22 +185,24 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert '_CLAUDE_CODE_VERSION = "2.1.210"' in source
     assert '_CODEX_VERSION = "0.143.0"' in source
     assert "@latest" not in source
-    assert "openclaw plugins install weave-openclaw@" in source
-    assert "{self._HERMES_VERSION}/scripts/install.sh" in source
-    assert "--skip-browser --no-skills --non-interactive" in source
-    assert "npm install -g weave-claude-code@" in source
-    assert "weave-codex@" in source
+    assert "openclaw plugins install weave-openclaw@" not in source
+    assert "hermes-install.sh" not in source
+    assert "npm install -g weave-claude-code@" not in source
+    assert "OpenClaw prepared runtime is missing" in source
+    assert "Hermes prepared runtime is missing" in source
+    assert "Claude Code prepared runtime is missing" in source
+    assert "Codex prepared runtime is missing" in source
     assert "weave-codex run -- codex exec" in source
     assert "weave-codex install" not in source
     assert 'tool_result_guard_cli_flags(self.model_route, "codex")' in source
     assert "set -o pipefail" in source
-    assert "emitter pattern missing" in source
-    assert "baggage pattern missing" in source
-    assert "processor pattern missing" in source
-    assert "key.startsWith('fugue.')" in source
+    assert "pinned patch target mismatch" in runtime_patches
+    assert "key.startsWith('fugue.')" in runtime_patches
     assert "self._resolved_env_vars.update(" in source
-    assert "expected 3 span objects" in source
+    assert "!== 3" in codex_runtime
     assert "codex mcp list --json" in source
+    assert '"HOME": f"{remote_codex_home}/home"' in source
+    assert 'f"{remote_codex_home}/home/.agents/skills"' in source
     assert "pending_native_registration" in source
     assert '"status": "failed"' in source
     for tool in (
@@ -204,3 +215,6 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     ):
         assert f'"{tool}"' in source
     assert "context registration probe failed before agent execution" in source
+    assert "trial policy rejected a mounted Docker socket" in source
+    assert "_lock_trial_mutators(environment)" in source
+    assert '"post_execution"' in source

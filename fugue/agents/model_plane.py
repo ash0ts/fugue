@@ -5,17 +5,8 @@ Inference, OpenAI, or Anthropic. The shared ``ModelRoute`` determines whether
 each harness can talk to the provider natively or should use the local LiteLLM
 bridge.
 
-Tracing plane — every harness ships its Weave plugin inside the container:
-
-- Hermes     -> local hermes-otel checkout (HERMES_OTEL_CHECKOUT, default
-                ~/Documents/GitHub/hermes-otel) uploaded + pip-installed into
-                the hermes venv; W&B Agents OTLP backend with Fugue span
-                attributes.
-- OpenClaw   -> ``openclaw plugins install weave-openclaw``; config entry
-                with entity/project + ``hooks.allowConversationAccess``.
-- Claude Code-> ``npm i -g weave-claude-code`` + non-interactive
-                ``--source=local`` install against the run's CLAUDE_CONFIG_DIR.
-- Codex      -> ``npm i -g weave-codex`` + its synchronous headless collector.
+Setup builds each harness and tracing integration into a locked runtime image.
+Trials mount that image read-only and only write cell-specific configuration.
 
 Every trial also writes ``/logs/agent/fugue-meta.json`` (host side)
 with the run key, harness, model, experiment, variant, context system,
@@ -342,6 +333,12 @@ class _TrialMetaMixin:
     def _meta_path(self) -> Path:
         return self.logs_dir / "fugue-meta.json"
 
+    async def _detect_home(self, environment: BaseEnvironment) -> str:
+        result = await self.exec_as_agent(
+            environment, command='printf %s "$HOME"', timeout_sec=10
+        )
+        return (result.stdout or "").strip() or "/root"
+
     async def _install_tool_result_guard(
         self,
         environment: BaseEnvironment,
@@ -412,6 +409,34 @@ class _TrialMetaMixin:
         fingerprints = getattr(self, "_runtime_fingerprints", {})
         fingerprints[stage] = fingerprint
         self._runtime_fingerprints = fingerprints
+
+    async def _lock_trial_mutators(self, environment: BaseEnvironment) -> None:
+        command = """
+set -eu
+if [ -S /var/run/docker.sock ]; then
+  echo 'trial policy rejected a mounted Docker socket' >&2
+  exit 86
+fi
+for name in apt apt-get apk dnf yum microdnf pip pip3 uv uvx npm npx pnpm yarn \
+            cargo rustup curl wget docker podman buildah; do
+  for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+    candidate="$directory/$name"
+    if [ -e "$candidate" ]; then
+      resolved="$(readlink -f "$candidate" 2>/dev/null || printf %s "$candidate")"
+      case "$resolved" in
+        /opt/fugue-agent-runtime/*) ;;
+        *) chmod 000 "$resolved" 2>/dev/null || true ;;
+      esac
+    fi
+  done
+done
+""".strip()
+        result = await self.exec_as_root(environment, command=command, timeout_sec=30)
+        if result.return_code != 0:
+            detail = (
+                result.stderr or result.stdout or "trial mutation policy failed"
+            ).strip()
+            raise RuntimeError(detail[-2_000:])
 
     async def _install_context_runtime(
         self, environment: BaseEnvironment
@@ -585,6 +610,10 @@ class _TrialMetaMixin:
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
         try:
+            await self._capture_runtime_fingerprint(environment, "post_execution")
+        except Exception:
+            pass
+        try:
             artifact_normalization = await self._normalize_artifact_paths(environment)
         except Exception as exc:
             artifact_normalization = [
@@ -670,6 +699,13 @@ class _TrialMetaMixin:
         meta["ended_at"] = datetime.now(UTC).isoformat()
         meta["changed_paths"] = changed_paths or []
         meta["artifact_normalization"] = artifact_normalization or []
+        fingerprints = getattr(self, "_runtime_fingerprints", {})
+        meta["runtime_fingerprints"] = fingerprints
+        before = (fingerprints.get("pre_execution") or {}).get("comparable_digest")
+        after = (fingerprints.get("post_execution") or {}).get("comparable_digest")
+        meta["runtime_drift"] = (
+            before != after if before is not None and after is not None else None
+        )
         try:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids
@@ -1027,30 +1063,29 @@ class FugueHermes(_TrialMetaMixin, Hermes):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await self._capture_runtime_fingerprint(environment, "pre_install")
+        runtime = "/opt/fugue-agent-runtime"
         await self.exec_as_root(
             environment,
-            command="apt-get update && apt-get install -y curl git ripgrep xz-utils",
-            env={"DEBIAN_FRONTEND": "noninteractive"},
+            command=(
+                f"test -x {runtime}/bin/hermes && "
+                f"ln -sf {runtime}/bin/hermes /usr/local/bin/hermes"
+            ),
+            timeout_sec=30,
         )
-        installer = (
-            "https://raw.githubusercontent.com/NousResearch/hermes-agent/"
-            f"{self._HERMES_VERSION}/scripts/install.sh"
-        )
-        await self.exec_as_agent(
+        result = await self.exec_as_agent(
             environment,
             command=(
-                "set -euo pipefail; "
-                f"curl -fsSL {shlex.quote(installer)} | bash -s -- "
-                "--skip-setup --skip-browser --no-skills --non-interactive "
-                f"--branch {shlex.quote(self._HERMES_VERSION)} && "
-                'export PATH="$HOME/.local/bin:$PATH" && '
-                'export HERMES_HOME="${HERMES_HOME:-/tmp/hermes}" && '
-                'mkdir -p "$HERMES_HOME" "$HERMES_HOME/sessions" '
-                '"$HERMES_HOME/skills" "$HERMES_HOME/memories" && '
-                "hermes version"
+                f"PATH={runtime}/bin:$PATH hermes version && "
+                f"test -s {runtime}/hermes-otel/fugue-patch-lock.json"
             ),
+            timeout_sec=30,
         )
+        if result.return_code != 0:
+            raise RuntimeError(
+                "Hermes prepared runtime is missing or does not match its lock; "
+                "run fugue setup --prepare"
+            )
+        await self._capture_runtime_fingerprint(environment, "verified")
 
     def _provider_name(self) -> str:
         return self.model_route.provider if self.model_route.chat_base_url else "fugue"
@@ -1108,58 +1143,18 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         }
         return yaml.dump(config, default_flow_style=False)
 
-    async def _detect_home(self, environment: BaseEnvironment) -> str:
-        result = await self.exec_as_agent(
-            environment, command='printf %s "$HOME"', timeout_sec=10
-        )
-        return (result.stdout or "").strip() or "/root"
-
-    async def _install_hermes_otel(
+    async def _configure_hermes_otel(
         self, environment: BaseEnvironment, home: str
     ) -> None:
-        staged = stage_hermes_otel_checkout()
         plugin_dir = f"{home}/.hermes/plugins/hermes_otel"
-
-        await self.exec_as_agent(
-            environment, command=f"mkdir -p {shlex.quote(plugin_dir)}", timeout_sec=10
-        )
-        await environment.upload_dir(source_dir=staged, target_dir=plugin_dir)
-
-        # The OTel deps must land in the hermes-agent venv (README install
-        # contract). The venv is uv-managed and ships no pip, so prefer the
-        # hermes-bundled uv ($HOME/.hermes/bin/uv, verified) and fall back to
-        # ensurepip. The venv path comes from the hermes launcher shim.
-        install_cmd = (
-            "set -e; "
-            'export PATH="$HOME/.local/bin:$PATH"; '
-            'HB="$(command -v hermes)"; '
-            'VENV_PY="$(sed -n \'s|^exec "\\(.*\\)/bin/hermes".*|\\1/bin/python|p\' "$HB")"; '
-            '[ -x "$VENV_PY" ] || VENV_PY=/usr/local/lib/hermes-agent/venv/bin/python; '
-            '[ -x "$VENV_PY" ] || { echo "hermes venv python not found" >&2; exit 1; }; '
-            'if [ -x "$HOME/.hermes/bin/uv" ]; then '
-            f'  "$HOME/.hermes/bin/uv" pip install --quiet --python "$VENV_PY" -e "{plugin_dir}[yaml]"; '
-            "else "
-            '  "$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true; '
-            f'  "$VENV_PY" -m pip install --quiet -e "{plugin_dir}[yaml]"; '
-            "fi"
-        )
-        await self.exec_as_agent(environment, command=install_cmd, timeout_sec=600)
-
-        # Discovery alone leaves the plugin "not enabled" (verified via
-        # `hermes plugins list`). Enablement is persisted as a `plugins:`
-        # block inside ~/.hermes/config.yaml, so this MUST run after the
-        # main config write — a later `cat > config.yaml` wipes it and the
-        # plugin silently never loads (root cause of the traceless smoke
-        # runs). Capture list output as a trial artifact for verification.
         await self.exec_as_agent(
             environment,
             command=(
-                'export PATH="$HOME/.local/bin:$PATH" && '
-                "{ hermes plugins enable hermes_otel && "
-                "hermes plugins list | grep -A2 hermes_otel; } "
-                "2>&1 | tee /logs/agent/hermes-otel-install.txt"
+                f"mkdir -p {shlex.quote(plugin_dir)} && "
+                "cp -R /opt/fugue-agent-runtime/hermes-otel/. "
+                f"{shlex.quote(plugin_dir)}/"
             ),
-            timeout_sec=60,
+            timeout_sec=30,
         )
 
         otel_config = self._build_otel_plugin_config_yaml()
@@ -1202,7 +1197,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         }
 
         home = await self._detect_home(environment)
-        await self._install_hermes_otel(environment, home)
+        await self._configure_hermes_otel(environment, home)
 
         config_yaml = self._build_model_config_yaml()
         await self.exec_as_agent(
@@ -1246,6 +1241,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
             environment,
             "/tmp/hermes/skills",
         )
+        await self._lock_trial_mutators(environment)
 
         run_cmd = (
             'export PATH="$HOME/.local/bin:$PATH" && '
@@ -1367,8 +1363,31 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await self._capture_runtime_fingerprint(environment, "pre_install")
-        await super().install(environment)
+        runtime = "/opt/fugue-agent-runtime"
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"test -x {runtime}/bin/node && test -x {runtime}/bin/openclaw && "
+                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+                f"ln -sf {runtime}/bin/openclaw /usr/local/bin/openclaw"
+            ),
+            timeout_sec=30,
+        )
+        result = await self.exec_as_agent(
+            environment,
+            command=(
+                f"PATH={runtime}/bin:$PATH openclaw --version | "
+                f"grep -F {shlex.quote(self._OPENCLAW_VERSION)} && "
+                f"test -s {runtime}/openclaw-patch-lock.json"
+            ),
+            timeout_sec=30,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                "OpenClaw prepared runtime is missing or does not match its lock; "
+                "run fugue setup --prepare"
+            )
+        await self._capture_runtime_fingerprint(environment, "verified")
 
     @override
     def _normalize_provider_models_schema(self, cfg: dict[str, Any]) -> None:
@@ -1413,55 +1432,16 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         }
         return cfg
 
-    _WEAVE_TGZ_UPLOAD = "/logs/agent/weave-node-sdk.tgz"
-
     def _install_plugin_command(self) -> str:
-        """Install weave-openclaw, then swap in the OTel-2.x weave SDK build.
-
-        The published weave SDK (<=0.16.2) uses the OTel 1.x trace stack,
-        which crashes at plugin load against OpenClaw's managed override
-        ``@opentelemetry/core@2.8.0``. Overriding ``weave`` to our tgz (built
-        from the wandb/weave OTel-2.x branch) and reinstalling resolves a
-        consistent 2.x tree. Node_modules and the lockfile are removed first
-        so npm actually honors the new override.
-        """
-        override_js = (
-            "const fs = require('node:fs');"
-            "const p = process.argv[1] + '/package.json';"
-            "const j = JSON.parse(fs.readFileSync(p, 'utf8'));"
-            "j.overrides = j.overrides || {};"
-            f"j.overrides['weave'] = 'file:{self._WEAVE_TGZ_UPLOAD}';"
-            "fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\\n');"
-            "console.log('override weave ->', j.overrides['weave']);"
-        )
-        trace_patch_js = (
-            "const fs = require('node:fs');"
-            "const weaveRoot = process.argv[1] + '/node_modules/weave/dist/genai/';"
-            "const needle = 'this.span = span;';"
-            "const repl = \"this.span = span; try { this.span.setAttributes(JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}')); } catch {}\";"
-            "for (const name of ['spanBase.js', 'spanBase.mjs']) {"
-            " const p = weaveRoot + name; let src = fs.readFileSync(p, 'utf8');"
-            " const matches = src.split(needle).length - 1;"
-            " if (matches !== 1 && !src.includes('FUGUE_TRACE_ATTRIBUTES_JSON'))"
-            "  { console.error('trace attrs patch: emitter pattern missing in ' + name); process.exit(1); }"
-            " src = src.replace(needle, repl); fs.writeFileSync(p, src);"
-            "}"
-            "console.log('patched OpenClaw Fugue trace attributes');"
-        )
+        """Activate the setup-built plugin tree in this cell's OpenClaw home."""
         return (
-            f"{{ openclaw plugins install weave-openclaw@{self._WEAVE_PLUGIN_VERSION} && "
-            f"PLUGIN_DIR=$(cd {self._PLUGIN_PROJECT} && pwd) && "
-            f'node -e {shlex.quote(override_js)} "$PLUGIN_DIR" && '
-            'rm -rf "$PLUGIN_DIR/node_modules" "$PLUGIN_DIR/package-lock.json" && '
-            'npm install --prefix "$PLUGIN_DIR" --no-audit --no-fund && '
-            f'node -e {shlex.quote(trace_patch_js)} "$PLUGIN_DIR" && '
-            'node -e \'console.log("resolved weave:", '
-            "require(process.argv[1] + "
-            '"/node_modules/weave/package.json").version, '
-            '"core:", require(process.argv[1] + '
-            '"/node_modules/@opentelemetry/core/package.json").version)\' '
-            '"$PLUGIN_DIR"; } '
-            "2>&1 | tee /logs/agent/weave-openclaw-install.txt"
+            "set -e; RUNTIME=/opt/fugue-agent-runtime; "
+            "test -s $RUNTIME/openclaw-patch-lock.json; "
+            "mkdir -p ~/.openclaw/npm/projects; "
+            f"rm -rf {self._PLUGIN_PROJECT}; "
+            f"ln -s $RUNTIME/node_modules/weave-openclaw {self._PLUGIN_PROJECT}; "
+            "openclaw plugins list 2>&1 | tee /logs/agent/weave-openclaw-install.txt; "
+            "grep -qi weave /logs/agent/weave-openclaw-install.txt"
         )
 
     def _start_gateway_command(self) -> str:
@@ -1511,8 +1491,6 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         # agent env (the plugin reads it per config apiKey.source=env), the
         # plugin install + OTel pin after the config lands, and a loopback
         # gateway wrapped around the agent turn (plugins only trace there).
-        from harbor.agents.installed.openclaw import _nvm22
-
         await self._begin_trial("openclaw", self.model_route, environment)
         escaped_instruction = shlex.quote(instruction)
 
@@ -1543,18 +1521,6 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             encoding="utf-8",
         )
 
-        # Ship the OTel-2.x weave SDK build into the container via the logs
-        # mount; _install_plugin_command overrides the plugin's `weave` dep
-        # to this file.
-        if not WEAVE_NODE_SDK_TGZ.exists():
-            raise FileNotFoundError(
-                f"weave node SDK tarball not found at {WEAVE_NODE_SDK_TGZ} "
-                "(build it from the wandb/weave OTel-2.x branch: "
-                "`pnpm build && pnpm pack` in sdks/node, or set "
-                "WEAVE_NODE_SDK_TGZ)"
-            )
-        shutil.copy2(WEAVE_NODE_SDK_TGZ, self.logs_dir / "weave-node-sdk.tgz")
-
         try:
             (self.logs_dir / "instruction.txt").write_text(instruction)
         except OSError:
@@ -1564,7 +1530,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         try:
             await self.exec_as_agent(
                 environment,
-                command=_nvm22(
+                command=(
                     "openclaw onboard --non-interactive --accept-risk "
                     "--auth-choice skip --workspace . --skip-daemon "
                     "--skip-channels --skip-skills --skip-hooks --skip-search "
@@ -1582,14 +1548,14 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
 
             await self.exec_as_agent(
                 environment,
-                command=_nvm22(self._install_plugin_command()),
+                command=self._install_plugin_command(),
                 env=env,
                 timeout_sec=600,
             )
 
             await self.exec_as_agent(
                 environment,
-                command=_nvm22(self._register_trial_agent_command()),
+                command=self._register_trial_agent_command(),
                 env=env,
                 timeout_sec=120,
             )
@@ -1611,10 +1577,11 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 environment,
                 f"{home}/.openclaw/skills",
             )
+            await self._lock_trial_mutators(environment)
 
             await self.exec_as_agent(
                 environment,
-                command=_nvm22(self._start_gateway_command()),
+                command=self._start_gateway_command(),
                 env=env,
                 timeout_sec=180,
             )
@@ -1635,7 +1602,6 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             cli_flags = self.build_cli_flags()
             cli_flags_arg = (cli_flags + " ") if cli_flags else ""
             command = (
-                ". ~/.nvm/nvm.sh && nvm use 22 && "
                 f"openclaw agent --json {cli_flags_arg}"
                 f"--model {shlex.quote(self.model_name)} "
                 f"--message {escaped_instruction} "
@@ -1709,30 +1675,35 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await self._capture_runtime_fingerprint(environment, "pre_install")
-        await super().install(environment)
-        # The plugin CLI + its daemon need node >= 18.19. Debian may provide an
-        # older executable, so checking only for npm is insufficient.
+        runtime = "/opt/fugue-agent-runtime"
         await self.exec_as_root(
             environment,
             command=(
-                "node -e \"const [a,b]=process.versions.node.split('.').map(Number);"
-                'process.exit(a>18||(a===18&&b>=19)?0:1)" 2>/dev/null || { '
-                "apt-get update && apt-get install -y --no-install-recommends "
-                "ca-certificates curl && "
-                "curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && "
-                "apt-get install -y --no-install-recommends nodejs; }"
+                f"test -x {runtime}/bin/node && test -x {runtime}/bin/claude && "
+                f"test -x {runtime}/bin/weave-claude-code && "
+                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+                f"ln -sf {runtime}/bin/claude /usr/local/bin/claude && "
+                f"ln -sf {runtime}/bin/weave-claude-code "
+                "/usr/local/bin/weave-claude-code"
             ),
-            env={"DEBIAN_FRONTEND": "noninteractive"},
+            timeout_sec=30,
         )
-        await self.exec_as_agent(
+        result = await self.exec_as_agent(
             environment,
             command=(
-                f"npm install -g weave-claude-code@{self._WEAVE_PLUGIN_VERSION} && "
-                "weave-claude-code --version"
+                f"PATH={runtime}/bin:$PATH claude --version | "
+                f"grep -F {shlex.quote(self._CLAUDE_CODE_VERSION)} && "
+                f"PATH={runtime}/bin:$PATH weave-claude-code --version && "
+                f"test -s {runtime}/claude-code-patch-lock.json"
             ),
-            timeout_sec=600,
+            timeout_sec=30,
         )
+        if result.return_code != 0:
+            raise RuntimeError(
+                "Claude Code prepared runtime is missing or does not match its lock; "
+                "run fugue setup --prepare"
+            )
+        await self._capture_runtime_fingerprint(environment, "verified")
 
     async def _install_weave_plugin(self, environment: BaseEnvironment) -> None:
         env = {
@@ -1762,62 +1733,12 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         #    (ANTHROPIC_* point at the bridge). Persist them explicitly; the
         #    daemon resolves env > settings.json. The agent name is stable;
         #    conversation and Fugue resource attributes identify the trial.
-        marketplace_js = (
-            "const fs = require('node:fs');"
-            "const p = process.argv[1] + '/.claude-plugin/marketplace.json';"
-            "const j = JSON.parse(fs.readFileSync(p, 'utf8'));"
-            "j.plugins = (j.plugins || []).map(pl => ({...pl, source: './'}));"
-            "fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\\n');"
-            "console.log('patched marketplace plugin source -> ./');"
-        )
-        transcript_js = (
-            "const fs = require('node:fs');"
-            "const p = process.argv[1] + '/dist/transcriptFile.js';"
-            "let src = fs.readFileSync(p, 'utf8');"
-            "const needle = 'isPathWithinBase(resolved, os.homedir())';"
-            "const repl = '[os.homedir(), process.env.CLAUDE_CONFIG_DIR]"
-            ".filter(Boolean).some(b => isPathWithinBase(resolved, b))';"
-            "if (!src.includes(needle) && !src.includes('CLAUDE_CONFIG_DIR'))"
-            " { console.error('transcript patch: pattern missing'); process.exit(1); }"
-            "src = src.split(needle).join(repl);"
-            "fs.writeFileSync(p, src);"
-            "console.log('patched transcript_path base check');"
-        )
-        trace_attrs_js = (
-            "const fs = require('node:fs');"
-            "const root = process.argv[1] + '/dist/';"
-            "const spansPath = root + 'genaiSpans.js';"
-            "let spans = fs.readFileSync(spansPath, 'utf8');"
-            'const spansNeedle = "entries[`${WEAVE_INTEGRATION_META_PREFIX}${key}`] = { value };";'
-            "const spansRepl = \"entries[(key.startsWith('fugue.') || key.startsWith('weave.eval.')) ? key : `${WEAVE_INTEGRATION_META_PREFIX}${key}`] = { value: String(value) };\";"
-            "if (!spans.includes(spansNeedle) && !spans.includes(spansRepl))"
-            " { console.error('trace attrs patch: baggage pattern missing'); process.exit(1); }"
-            "spans = spans.split(spansNeedle).join(spansRepl);"
-            "const processorNeedle = 'if (key.startsWith(WEAVE_INTEGRATION_PREFIX)) {';"
-            "const processorRepl = \"if (key.startsWith(WEAVE_INTEGRATION_PREFIX) || key.startsWith('fugue.') || key.startsWith('weave.eval.')) {\";"
-            "if (!spans.includes(processorNeedle) && !spans.includes(processorRepl))"
-            " { console.error('trace attrs patch: processor pattern missing'); process.exit(1); }"
-            "spans = spans.split(processorNeedle).join(processorRepl);"
-            "fs.writeFileSync(spansPath, spans);"
-            "const daemonPath = root + 'daemon.js';"
-            "let daemon = fs.readFileSync(daemonPath, 'utf8');"
-            'const daemonNeedle = "meta: { claude_code_app_version: claudeCodeAppVersion },";'
-            "const daemonRepl = \"meta: { claude_code_app_version: claudeCodeAppVersion, ...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}') },\";"
-            "if (!daemon.includes(daemonNeedle) && !daemon.includes(daemonRepl))"
-            " { console.error('trace attrs patch: daemon pattern missing'); process.exit(1); }"
-            "daemon = daemon.split(daemonNeedle).join(daemonRepl);"
-            "fs.writeFileSync(daemonPath, daemon);"
-            "console.log('patched Fugue trace attribute baggage');"
-        )
         await self.exec_as_agent(
             environment,
             command=(
                 'export PATH="$HOME/.local/bin:$PATH"; '
                 'mkdir -p "$CLAUDE_CONFIG_DIR"; '
-                '{ NPM_ROOT="$(npm root -g)" && '
-                f'node -e {shlex.quote(marketplace_js)} "$NPM_ROOT/weave-claude-code" && '
-                f'node -e {shlex.quote(transcript_js)} "$NPM_ROOT/weave-claude-code" && '
-                f'node -e {shlex.quote(trace_attrs_js)} "$NPM_ROOT/weave-claude-code" && '
+                "{ test -s /opt/fugue-agent-runtime/claude-code-patch-lock.json && "
                 "weave-claude-code install --non-interactive --source=local && "
                 'weave-claude-code config set weave_project "$WEAVE_PROJECT" && '
                 'weave-claude-code config set wandb_api_key "$WANDB_API_KEY" && '
@@ -1880,6 +1801,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                         "probe": f"{self._CLAUDE_CONFIG_DIR}/.claude.json",
                     }
                 )
+            await self._lock_trial_mutators(environment)
             await super().run(instruction, environment, context)
             # Let the plugin daemon flush the final turn before teardown.
             await self.exec_as_agent(
@@ -1918,10 +1840,9 @@ class FugueCodex(_TrialMetaMixin, Codex):
     failed turn, so wrapper ownership is required to trace both outcomes and
     avoids racing a detached collector during cleanup.
 
-    weave-codex hardcodes ``agent_name=codex`` in its spans; install() patches
-    its emit.js to honor ``WEAVE_CODEX_AGENT_NAME`` so the stable harness
-    identity is explicit. Fugue stores both its deterministic conversation id
-    and the native Codex session id for export correlation.
+    The setup-built runtime patches weave-codex to honor the stable Fugue Agent
+    identity and correlation attributes. Trials only verify that locked runtime;
+    they never install or mutate Codex packages.
     """
 
     TRACE_HARNESS = "codex"
@@ -1963,45 +1884,34 @@ class FugueCodex(_TrialMetaMixin, Codex):
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
-        await self._capture_runtime_fingerprint(environment, "pre_install")
-        await super().install(environment)
-        # weave-codex has no --version flag; `command -v` is the install check.
-        # The emit.js patch makes the span agent_name configurable via
-        # WEAVE_CODEX_AGENT_NAME (upstream hardcodes 'codex'), which run()
-        # sets to Fugue's stable harness identity.
-        trace_patch_js = (
-            "const fs = require('node:fs');"
-            "const p = process.argv[1] + '/dist/spans/emit.js';"
-            "let src = fs.readFileSync(p, 'utf8');"
-            "const needle = \"const AGENT_NAME = 'codex';\";"
-            'const repl = "const AGENT_NAME = '
-            "process.env.WEAVE_CODEX_AGENT_NAME || 'codex';\\n"
-            "const FUGUE_TRACE_ATTRIBUTES = (() => { try { return JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}'); } catch { return {}; } })();\";"
-            "if (!src.includes(needle) && !src.includes('WEAVE_CODEX_AGENT_NAME'))"
-            " { console.error('agent-name patch: pattern missing'); process.exit(1); }"
-            "src = src.split(needle).join(repl);"
-            "const attrsNeedle = 'const spanAttributes = {';"
-            "const attrsRepl = 'const spanAttributes = { ...FUGUE_TRACE_ATTRIBUTES,';"
-            "const count = src.split(attrsNeedle).length - 1;"
-            "if (count && count !== 3)"
-            " { console.error('trace attrs patch: expected 3 span objects, got ' + count); process.exit(1); }"
-            "if (!count && !src.includes(attrsRepl))"
-            " { console.error('trace attrs patch: span pattern missing'); process.exit(1); }"
-            "src = src.split(attrsNeedle).join(attrsRepl);"
-            "fs.writeFileSync(p, src);"
-            "console.log('patched weave-codex identity and Fugue trace attributes');"
-        )
-        await self.exec_as_agent(
+        runtime = "/opt/fugue-agent-runtime"
+        await self.exec_as_root(
             environment,
             command=(
-                "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; "
-                f"npm install -g weave-codex@{self._WEAVE_PLUGIN_VERSION} && "
-                "codex --version && command -v weave-codex && "
-                'NPM_ROOT="$(npm root -g)" && '
-                f'node -e {shlex.quote(trace_patch_js)} "$NPM_ROOT/weave-codex"'
+                f"test -x {runtime}/bin/node && "
+                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+                f"ln -sf {runtime}/bin/codex /usr/local/bin/codex && "
+                f"ln -sf {runtime}/bin/weave-codex /usr/local/bin/weave-codex"
             ),
-            timeout_sec=600,
+            timeout_sec=30,
         )
+        result = await self.exec_as_agent(
+            environment,
+            command=(
+                f"test -x {runtime}/bin/codex && "
+                f"test -x {runtime}/bin/weave-codex && "
+                f"PATH={runtime}/bin:$PATH codex --version | "
+                f"grep -F {shlex.quote(self._CODEX_VERSION)} && "
+                f"PATH={runtime}/bin:$PATH weave-codex --help >/dev/null"
+            ),
+            timeout_sec=30,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                "Codex prepared runtime is missing or does not match its lock; "
+                "run fugue setup --prepare"
+            )
+        await self._capture_runtime_fingerprint(environment, "verified")
 
     def _build_model_config_toml(self) -> str:
         provider = _codex_provider_name(self.model_route)
@@ -2055,6 +1965,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
             **provider_client_env(self.model_route, os.environ),
             **self._trace_environment("codex", self.model_route),
             "CODEX_HOME": remote_codex_home,
+            "HOME": f"{remote_codex_home}/home",
             # Codex reads the configured provider's key from OPENAI_API_KEY
             # regardless of whether it is native OpenAI or the local bridge.
             "OPENAI_API_KEY": _responses_key(self.model_route),
@@ -2065,6 +1976,10 @@ class FugueCodex(_TrialMetaMixin, Codex):
             # grouped under the stable Codex agent.
             "WEAVE_CODEX_AGENT_NAME": stable_agent_name("codex"),
             "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+            "PATH": (
+                "/opt/fugue-agent-runtime/bin:/usr/local/sbin:/usr/local/bin:"
+                "/usr/sbin:/usr/bin:/sbin:/bin"
+            ),
         }
 
         config_toml = self._build_model_config_toml()
@@ -2075,11 +1990,10 @@ class FugueCodex(_TrialMetaMixin, Codex):
             }
         )
         setup_command = (
-            f'mkdir -p "$CODEX_HOME" {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}\n'
+            f'mkdir -p "$CODEX_HOME" "$HOME" {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}\n'
             f"cat >>\"$CODEX_HOME/config.toml\" <<'TOML'\n{config_toml}TOML\n"
             "mkdir -p ~/.weave-codex\n"
             f"cat > ~/.weave-codex/settings.json <<'JSON'\n{settings_json}\nJSON\n"
-            "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi\n"
             "weave-codex status --json "
             "2>&1 | tee /logs/agent/weave-codex-status.json\n"
         )
@@ -2090,26 +2004,28 @@ class FugueCodex(_TrialMetaMixin, Codex):
         mcp_command = self._build_register_mcp_servers_command()
         if mcp_command:
             setup_command += f"\n{mcp_command}"
-            expected_servers = json.dumps(
-                sorted(str(server.name) for server in self.mcp_servers)
-            )
-            probe_script = (
-                "import json,sys;"
-                "rows=json.load(open(sys.argv[1]));"
-                "expected=set(json.loads(sys.argv[2]));"
-                "actual={str(row.get('name')) for row in rows "
-                "if row.get('enabled') is not False};"
-                "missing=sorted(expected-actual);"
-                "print(json.dumps({'expected':sorted(expected),"
-                "'registered':sorted(actual),'missing':missing}));"
-                "sys.exit(bool(missing))"
-            )
-            setup_command += (
-                "\ncodex mcp list --json > /logs/agent/codex-mcp-list.json\n"
-                f"python3 -c {shlex.quote(probe_script)} "
-                "/logs/agent/codex-mcp-list.json "
-                f"{shlex.quote(expected_servers)}\n"
-            )
+        expected_servers = json.dumps(
+            sorted(str(server.name) for server in self.mcp_servers)
+        )
+        probe_script = (
+            "import json,sys;"
+            "rows=json.load(open(sys.argv[1]));"
+            "expected=set(json.loads(sys.argv[2]));"
+            "actual={str(row.get('name')) for row in rows "
+            "if row.get('enabled') is not False};"
+            "missing=sorted(expected-actual);"
+            "unexpected=sorted(actual-expected);"
+            "print(json.dumps({'expected':sorted(expected),"
+            "'registered':sorted(actual),'missing':missing,"
+            "'unexpected':unexpected}));"
+            "sys.exit(bool(missing or unexpected))"
+        )
+        setup_command += (
+            "\ncodex mcp list --json > /logs/agent/codex-mcp-list.json\n"
+            f"python3 -c {shlex.quote(probe_script)} "
+            "/logs/agent/codex-mcp-list.json "
+            f"{shlex.quote(expected_servers)}\n"
+        )
 
         setup_result = await self.exec_as_agent(
             environment, command=setup_command, env=env, timeout_sec=600
@@ -2128,10 +2044,9 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 setup_result.stderr or setup_result.stdout or "Codex setup failed"
             ).strip()
             raise RuntimeError(detail[-2_000:])
-        home = await self._detect_home(environment)
         await self._verify_skill_registration(
             environment,
-            f"{home}/.agents/skills",
+            f"{remote_codex_home}/home/.agents/skills",
         )
         await self._install_tool_result_guard(
             environment,
@@ -2148,6 +2063,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 }
             )
             env.update(self._trace_environment("codex", self.model_route))
+        await self._lock_trial_mutators(environment)
 
         codex_output = (EnvironmentPaths.agent_dir / self._OUTPUT_FILENAME).as_posix()
         codex_sessions = (EnvironmentPaths.agent_dir / "sessions").as_posix()
@@ -2157,7 +2073,6 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 environment,
                 command=(
                     "set -o pipefail; "
-                    "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; "
                     "weave-codex run -- codex exec "
                     "--dangerously-bypass-approvals-and-sandbox "
                     "--skip-git-repo-check "
