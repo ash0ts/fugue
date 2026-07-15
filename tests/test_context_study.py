@@ -5,7 +5,6 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fugue.bench.context import ContextRuntime, get_context_system, list_context_systems
-from fugue.bench.execution import plan_cells
 from fugue.bench.library import get_experiment
 from fugue.bench.operator import (
     ExperimentRequest,
@@ -79,7 +78,7 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
         repo_root=REPO_ROOT,
     )
     assert targets
-    assert {system_id for system_id, _ in targets} <= set(smoke.systems)
+    assert {target.spec.id for target in targets} <= set(smoke.systems)
 
 
 def test_pdf_skill_presets_are_controlled_and_study_plans_72_cells(
@@ -141,6 +140,8 @@ def test_repo_memory_smoke_preview_is_exact_and_side_effect_free(monkeypatch) ->
     }
     expected_cells = 0
     for workload in experiment.workloads:
+        if preset.workloads and workload.id not in preset.workloads:
+            continue
         systems = set(workload.systems) & set(preset.systems)
         if workload.runner == "harbor":
             task_count = preset.workload_overrides[workload.id]["n_tasks"]
@@ -174,13 +175,88 @@ def test_repo_memory_direct_cells_use_direct_result_contract(monkeypatch) -> Non
     jobs = service.rendered_jobs(
         request, run_id="direct-cell-plan", write_configs=False
     )
-    cells = plan_cells(jobs, run_id="direct-cell-plan", run_name="direct cell plan")
-    direct = [cell for cell in cells if cell.execution_kind == "provider_diagnostic"]
+    direct = [job for job in jobs if job.execution_kind == "provider_diagnostic"]
 
     assert len(direct) == 8
     assert {cell.n_attempts for cell in direct} == {1}
-    assert {cell.result_path for cell in direct} == {
+    assert {job.result_path for job in direct} == {
         REPO_ROOT / ".fugue" / "runtime" / "direct-cell-plan" / "context-results.jsonl"
+    }
+
+
+def test_hard_memory_presets_encode_exact_cohorts(monkeypatch) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+    expected = {
+        "context-contract": 48,
+        "hard-calibration": 56,
+        "hard-discovery": 80,
+        "gitnexus-ablation": 96,
+    }
+    for preset, count in expected.items():
+        jobs = service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="repo-memory-impact",
+                preset=preset,
+            ),
+            run_id=f"plan-{preset}",
+            write_configs=False,
+        )
+        assert sum(job.n_attempts for job in jobs) == count
+
+    treatments = ("none", "gitnexus-vector", "rag-dense", "rag-hybrid")
+    for preset, count in {
+        "hard-holdout": 192,
+        "hard-controls": 96,
+        "hard-repository-qa": 128,
+    }.items():
+        jobs = service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="repo-memory-impact",
+                preset=preset,
+                variants=treatments,
+            ),
+            run_id=f"plan-{preset}",
+            write_configs=False,
+        )
+        assert sum(job.n_attempts for job in jobs) == count
+        assert {job.variant_id for job in jobs} == set(treatments)
+
+
+def test_direct_study_presets_keep_modes_and_measurement_counts(monkeypatch) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    experiment = get_experiment("repo-memory-impact", REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+    expected = {
+        "retrieval-study": (4, 225, 1),
+        "gitnexus-retrieval-study": (2, 225, 1),
+        "continuity-study": (6, 6, 3),
+    }
+    for preset_id, (jobs_count, tasks, attempts) in expected.items():
+        preset = select_preset(experiment, preset_id)
+        jobs = service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id=experiment.id,
+                preset=preset_id,
+            ),
+            run_id=f"plan-{preset_id}",
+            write_configs=False,
+        )
+        assert len(jobs) == jobs_count
+        assert preset.n_tasks == tasks
+        assert preset.n_attempts == attempts
+
+    gitnexus = service.rendered_jobs(
+        ExperimentRequest(
+            experiment_id=experiment.id,
+            preset="gitnexus-retrieval-study",
+        ),
+        run_id="plan-gitnexus-retrieval",
+        write_configs=False,
+    )
+    assert {job.variant_id for job in gitnexus} == {
+        "gitnexus-bm25",
+        "gitnexus-vector",
     }
 
 

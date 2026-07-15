@@ -7,6 +7,8 @@ source:
   counts:
     smoke: 3
     full: 225
+    retrieval-study: 225
+    gitnexus-retrieval-study: 225
   materialize_command:
     - arb
     - download-benchmark
@@ -37,4 +39,3 @@ cases:
     query: A dataset alignment test fails in merge logic; find the likely implementation source.
     expected_paths:
       - xarray/core/merge.py
-
