@@ -6,6 +6,7 @@ import sys
 import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -31,6 +32,7 @@ from textual.widgets import (
 )
 
 from fugue.bench.context import list_context_systems
+from fugue.bench.evaluations import evaluation_asset_path
 from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
@@ -625,6 +627,7 @@ class FugueApp(App[None]):
                 yield Static("Preparing preview...", id="preview-status")
                 with Horizontal(classes="button-row"):
                     yield Button("Back", id="compare-back")
+                    yield Button("Generate evaluation", id="generate-evaluation")
                     yield Button("Review", id="compare-next", variant="primary")
             with VerticalScroll(id="review-step", classes="plan-step plan-pane"):
                 yield Label("REVIEW THE RUN", classes="section-title")
@@ -775,6 +778,7 @@ class FugueApp(App[None]):
             "define-next": lambda: self._show_plan_step("compare-step"),
             "compare-back": lambda: self._show_plan_step("define-step"),
             "compare-next": lambda: self._show_plan_step("review-step"),
+            "generate-evaluation": self._generate_evaluation,
             "review-back": lambda: self._show_plan_step("compare-step"),
             "add-variant": self._add_variant,
             "duplicate-variant": self._duplicate_variant,
@@ -969,6 +973,8 @@ class FugueApp(App[None]):
             f"Scale: {draft.preview.cells} cells / "
             f"{draft.preview.estimated_trials} trials\n"
             f"Assumptions: {assumptions}\nWarnings: {warnings}"
+            + _evaluation_proposal_summary(draft)
+            + f"\n\nProposed changes:\n{draft.diff or 'No file changes'}"
         )
 
     def _render_variants(self) -> None:
@@ -1063,6 +1069,40 @@ class FugueApp(App[None]):
             "Grounding your request in saved experiments, prompts, skills, and context systems..."
         )
         self._compose_ai_worker(request)
+
+    def _generate_evaluation(self) -> None:
+        self.query_one("#preview-status", Static).update(
+            "Generating a grounded evaluation draft for review..."
+        )
+        self._generate_evaluation_worker(self.plan.experiment)
+
+    @work(thread=True, exclusive=True, group="composer")
+    def _generate_evaluation_worker(self, experiment: ExperimentSpec) -> None:
+        request = (
+            "Generate or complete the evaluation assets for this experiment. "
+            "Preserve its comparison, variants, models, and run settings exactly. "
+            "Use the configured sources, fill only missing coverage, produce the "
+            "configured case count, and return the assets for explicit review."
+        )
+        try:
+            draft = asyncio.run(
+                self.service.compose_experiment(
+                    request,
+                    base_experiment=experiment,
+                    trace_content=(
+                        self.plan.request.trace_content or experiment.trace_content
+                    ),
+                )
+            )
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(self._queue_preview)
+            return
+        self.call_from_thread(self._show_evaluation_proposal, draft)
+
+    def _show_evaluation_proposal(self, draft: Any) -> None:
+        self._show_proposal(draft)
+        self._show_plan_step("define-step")
 
     @work(thread=True, exclusive=True, group="composer")
     def _compose_ai_worker(self, request: str) -> None:
@@ -1286,7 +1326,12 @@ class FugueApp(App[None]):
         self._preview_generation += 1
         generation = self._preview_generation
         self.query_one("#preview-status", Static).update("Updating exact matrix...")
-        self._preview_worker(generation, request, self.plan.experiment)
+        self._preview_worker(
+            generation,
+            request,
+            self.plan.experiment,
+            self.plan.assets,
+        )
 
     @work(thread=True, exclusive=True, group="preview")
     def _preview_worker(
@@ -1294,9 +1339,14 @@ class FugueApp(App[None]):
         generation: int,
         request: ExperimentRequest,
         experiment: ExperimentSpec,
+        assets: tuple[Any, ...],
     ) -> None:
         try:
-            preview = self.service.preview_experiment(experiment, request=request)
+            preview = self.service.preview_experiment(
+                experiment,
+                request=request,
+                asset_overlay=_asset_overlay(assets),
+            )
             status = self.service.status(request, experiment=experiment)
         except Exception as exc:
             self.call_from_thread(self._preview_failed, generation, str(exc))
@@ -1404,6 +1454,23 @@ class FugueApp(App[None]):
             blockers.append(f"Model credentials are missing: {status.model_key_env}")
         if not status.trace_key_present:
             blockers.append("Weave tracing requires WANDB_API_KEY")
+        generated_scoring = any(
+            any(not scorer.startswith("builtin:") for scorer in workload.scorers)
+            for workload in self.plan.experiment.workloads
+        )
+        explicit_judge = (
+            self.plan.request.judge_model or self.plan.experiment.judge_model
+        )
+        if generated_scoring and not explicit_judge:
+            blockers.append("Generated evaluation rubrics require an explicit judge model")
+        judge_route = next(
+            (route for route in status.routes if route.role == "judge"),
+            None,
+        )
+        if generated_scoring and judge_route is not None and not judge_route.key_present:
+            blockers.append(
+                f"Judge credentials are missing: {judge_route.key_env}"
+            )
         harnesses = tuple(
             dict.fromkeys(
                 item.harness
@@ -1437,7 +1504,7 @@ class FugueApp(App[None]):
         if preview.applicable_cells == 0:
             blockers.append("No matrix cells are applicable")
         if self.plan.assets:
-            blockers.append("Save the proposed prompt or skill assets before running")
+            blockers.append("Save all proposed assets before running")
         return tuple(blockers)
 
     def _show_preview_sequencer(self, preview: PreviewSummary) -> None:
@@ -2056,6 +2123,39 @@ def run_tui(
         experiment_id=experiment_id,
         initial_draft=initial_draft,
     ).run()
+
+
+def _asset_overlay(assets: tuple[Any, ...]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for asset in assets:
+        if asset.kind == "prompt":
+            path = Path("configs/fugue/prompts") / f"{asset.id}.md"
+        elif asset.kind == "skill":
+            path = Path("configs/fugue/skills") / asset.id / "SKILL.md"
+        else:
+            path = evaluation_asset_path(asset.kind, asset.id)
+        values[path.as_posix()] = asset.body
+    return values
+
+
+def _evaluation_proposal_summary(draft: Any) -> str:
+    evaluation = getattr(draft, "evaluation", None)
+    if evaluation is None:
+        return ""
+    dimensions = [
+        str(item.get("id")) for item in evaluation.rubric.get("dimensions") or []
+    ]
+    source_hashes = (
+        evaluation.rubric.get("generation", {}).get("source_hashes", {})
+    )
+    coverage = ", ".join(
+        f"{key}={value}" for key, value in sorted(evaluation.coverage.items())
+    )
+    return (
+        f"\nEvaluation: {len(evaluation.cases)} cases ({coverage})"
+        f"\nDimensions: {', '.join(dimensions)}"
+        f"\nProvenance: {len(source_hashes)} checksum-pinned sources"
+    )
 
 
 def _animation_enabled() -> bool:

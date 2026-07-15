@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from fugue.bench.library import (
+    experiment_from_data,
     get_experiment,
     get_prompt,
     save_experiment,
@@ -150,6 +151,109 @@ presets:
       coding: {typo: 1}
 """,
             tmp_path,
+        )
+
+
+def test_evaluation_generation_and_scorers_are_strictly_parsed():
+    experiment = experiment_from_data(
+        {
+            "id": "generated",
+            "judge_model": "openai/gpt-5-mini",
+            "evaluation_generation": {
+                "size": 8,
+                "sources": [
+                    {"kind": "seed", "text": "Test skill behavior."},
+                    {"kind": "file", "path": "README.md"},
+                    {
+                        "kind": "mcp",
+                        "server": "github",
+                        "tools": ["search_code"],
+                        "resources": ["repo://schema"],
+                    },
+                ],
+            },
+            "workloads": [
+                {
+                    "id": "capabilities",
+                    "runner": "harbor",
+                    "scorers": [
+                        "builtin:harbor-outcome",
+                        "configs/fugue/evaluations/generated/rubric.yaml",
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert experiment.evaluation_generation is not None
+    assert experiment.evaluation_generation.size == 8
+    assert [source.kind for source in experiment.evaluation_generation.sources] == [
+        "seed",
+        "file",
+        "mcp",
+    ]
+    assert experiment.workloads[0].scorers[-1].endswith("rubric.yaml")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sources", [{"kind": "file", "path": "../secret"}], "repository-relative"),
+        ("sources", [{"kind": "seed"}], "seed text is required"),
+        ("sources", [{"kind": "mcp"}], "MCP server is required"),
+    ],
+)
+def test_evaluation_generation_rejects_invalid_sources(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        experiment_from_data(
+            {
+                "id": "invalid-generated",
+                "evaluation_generation": {field: value},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "scorer",
+    [
+        "../rubric.yaml",
+        "/tmp/rubric.yaml",
+        "configs/fugue/rubrics/not-evaluation.yaml",
+        "configs/fugue/evaluations/suite/rubric.json",
+    ],
+)
+def test_workload_rejects_unsafe_or_unsupported_scorer_refs(scorer):
+    with pytest.raises(ValueError, match="scorer"):
+        experiment_from_data(
+            {
+                "id": "invalid-scorer",
+                "workloads": [
+                    {
+                        "id": "capabilities",
+                        "runner": "harbor",
+                        "scorers": [scorer],
+                    }
+                ],
+            }
+        )
+
+
+def test_workload_rejects_duplicate_scorers():
+    with pytest.raises(ValueError, match="duplicate workload capabilities scorer"):
+        experiment_from_data(
+            {
+                "id": "duplicate-scorer",
+                "workloads": [
+                    {
+                        "id": "capabilities",
+                        "runner": "harbor",
+                        "scorers": [
+                            "builtin:harbor-outcome",
+                            "builtin:harbor-outcome",
+                        ],
+                    }
+                ],
+            }
         )
 
 

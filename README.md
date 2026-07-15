@@ -181,7 +181,37 @@ fugue plan "Run the checked-in configuration unchanged" \
   --yes
 ```
 
-Generated prompt or skill assets must be saved before the draft can run.
+Generated prompt, skill, and evaluation assets must be saved before the draft
+can run. When an experiment has no suitable dataset or scorer, planning can
+generate a reviewable eight-case suite under
+`configs/fugue/evaluations/<suite-id>/`:
+
+```yaml
+judge_model: openai/gpt-5-mini
+evaluation_generation:
+  size: 8
+  sources:
+    - {kind: seed, text: "Evaluate the repository-search skill."}
+    - {kind: file, path: README.md}
+    - kind: mcp
+      server: docs
+      tools: [search]
+      resources: ["docs://schema"]
+workloads:
+  - id: capabilities
+    runner: harbor
+    scorers:
+      - builtin:harbor-outcome
+      - configs/fugue/evaluations/repository-search/rubric.yaml
+```
+
+Generation may list bounded MCP tool schemas and read only the resource URIs
+named in the experiment; it never invokes an MCP tool. The preview shows case
+coverage, source hashes, rubric dimensions, and the diffs for `cases.jsonl`,
+`rubric.yaml`, and `manifest.yaml` without writing files or preparing runtime
+state. A saved generated suite is materialized atomically into the
+content-addressed `.fugue/cache/datasets/generated/` cache when execution is
+prepared.
 
 ### Textual planning workflow
 
@@ -207,7 +237,8 @@ flowchart LR
   proposals remain local until `Use proposal` is selected.
 - **Compare** shows only the controlled variables: variants, harnesses,
   evaluation coverage, and run size. Variant edits remain in memory until an
-  explicit save or run.
+  explicit save or run. `Generate evaluation` creates a proposal that must be
+  reviewed and accepted before it is attached to the plan.
 - **Review** automatically renders the exact matrix and explains unavailable
   cells or setup blockers before enabling `Run experiment`.
 - **Advanced** contains model-role overrides, concurrency, tags, run name, and

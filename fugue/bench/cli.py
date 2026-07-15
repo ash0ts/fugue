@@ -36,7 +36,10 @@ from fugue.bench.execution import (
     plan_cells,
     write_run_manifest,
 )
-from fugue.bench.export import LiveEvaluationCoordinator
+from fugue.bench.export import (
+    GeneratedEvaluationCoordinator,
+    LiveEvaluationCoordinator,
+)
 from fugue.bench.job_config import RenderedJob
 from fugue.bench.library import (
     ExperimentSpec,
@@ -559,6 +562,16 @@ def _run_worker(args: argparse.Namespace) -> int:
                     "[yellow]Weave live evaluation unavailable:[/] "
                     f"{observability_error}"
                 )
+        local_evaluations = (
+            GeneratedEvaluationCoordinator(
+                cells,
+                repo_root=args.repo_root,
+                env=run_env,
+            )
+            if live_evaluations is None
+            and any(cell.evaluation_case is not None for cell in cells)
+            else None
+        )
         outcomes = execute_cells(
             cells,
             repo_root=args.repo_root,
@@ -567,7 +580,13 @@ def _run_worker(args: argparse.Namespace) -> int:
                 live_evaluations.begin_cell if live_evaluations is not None else None
             ),
             cell_finished=(
-                live_evaluations.finish_cell if live_evaluations is not None else None
+                live_evaluations.finish_cell
+                if live_evaluations is not None
+                else (
+                    local_evaluations.finish_cell
+                    if local_evaluations is not None
+                    else None
+                )
             ),
         )
         publication = live_evaluations.finalize() if live_evaluations else None
@@ -794,7 +813,8 @@ def _plan(args: argparse.Namespace) -> int:
         ) if save_id and saved is None else saved
         if draft.assets and not saved:
             raise ValueError(
-                "save the experiment and its proposed prompt or skill before running"
+                "save the experiment and all proposed assets before running; "
+                f"rerun `fugue plan {' '.join(args.request)}` with --save"
             )
         selected = saved or draft.experiment
         run = service.launch(

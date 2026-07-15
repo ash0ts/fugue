@@ -24,6 +24,13 @@ from fugue.assistant import (
 )
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
+from fugue.bench.evaluations import (
+    EvaluationDraft,
+    build_evaluation_draft,
+    evaluation_asset_path,
+    needs_evaluation_generation,
+    source_catalog,
+)
 from fugue.bench.export import fetch_weave_summaries
 from fugue.bench.library import (
     ExperimentSpec,
@@ -52,7 +59,13 @@ ANALYSIS_GROUP_FIELDS = FILTER_FIELDS | {"skill_ids", "manifest", "run_name"}
 
 @dataclass(frozen=True)
 class AssetDraft:
-    kind: Literal["prompt", "skill"]
+    kind: Literal[
+        "prompt",
+        "skill",
+        "evaluation_cases",
+        "evaluation_rubric",
+        "evaluation_manifest",
+    ]
     id: str
     title: str
     body: str
@@ -72,6 +85,7 @@ class ExperimentDraft:
     session_id: str
     input_tokens: int
     output_tokens: int
+    evaluation: EvaluationDraft | None = None
 
 
 @dataclass(frozen=True)
@@ -180,11 +194,15 @@ class ExperimentComposer:
         self,
         request: str,
         *,
-        base_experiment: str = "pilot",
+        base_experiment: str | ExperimentSpec = "pilot",
         model: str | None = None,
         trace_content: str | None = None,
     ) -> ExperimentDraft:
-        base = get_experiment(base_experiment, self.repo_root)
+        base = (
+            base_experiment
+            if isinstance(base_experiment, ExperimentSpec)
+            else get_experiment(base_experiment, self.repo_root)
+        )
         env = self.operator.env
         selected_model = select_assistant_model(
             "composer",
@@ -268,7 +286,7 @@ class ExperimentComposer:
                 "list_fugue_assets",
                 "List the repository-backed experiment assets currently available.",
                 {"type": "object", "properties": {}, "additionalProperties": False},
-                lambda _: self._catalog_summary(base),
+                lambda _: self._catalog_summary(base, allow_mcp_io=True),
             ),
             AssistantTool(
                 "show_experiment",
@@ -289,7 +307,12 @@ class ExperimentComposer:
             ),
         )
 
-    def _catalog_summary(self, base: ExperimentSpec) -> dict[str, Any]:
+    def _catalog_summary(
+        self,
+        base: ExperimentSpec,
+        *,
+        allow_mcp_io: bool = False,
+    ) -> dict[str, Any]:
         experiments: list[dict[str, Any]] = []
         for item in list_experiments(self.repo_root):
             experiment = get_experiment(item.id, self.repo_root)
@@ -372,6 +395,14 @@ class ExperimentComposer:
             "model_prefixes": ["wandb/", "openai/", "anthropic/"],
             "routes": routes,
             "trace_key_present": bool(env.get("WANDB_API_KEY", "").strip()),
+            "evaluation_sources": [
+                item.public()
+                for item in source_catalog(
+                    base,
+                    self.repo_root,
+                    allow_mcp_io=allow_mcp_io,
+                )
+            ],
         }
 
     def _validate_draft(
@@ -385,9 +416,53 @@ class ExperimentComposer:
             raise ValueError("submit_experiment requires an experiment object")
         assets = tuple(_asset_draft(item) for item in raw.get("assets") or [])
         experiment = experiment_from_data(experiment_raw)
-        _validate_experiment_references(experiment, assets, self.repo_root, self.operator.env)
-        preview = self.operator.preview_experiment(experiment)
-        diff = "\n".join(
+        asset_bodies = {(item.kind, item.id): item.body for item in assets}
+        sources = source_catalog(
+            experiment,
+            self.repo_root,
+            allow_mcp_io=True,
+            draft_assets=asset_bodies,
+        )
+        evaluation: EvaluationDraft | None = None
+        if raw.get("evaluation") is not None:
+            if not experiment.judge_model:
+                raise ValueError(
+                    "generated evaluation rubrics require an explicit judge_model"
+                )
+            experiment, evaluation = build_evaluation_draft(
+                raw["evaluation"],
+                experiment,
+                generator_model=result.model,
+                source_catalog=sources,
+                repo_root=self.repo_root,
+            )
+            assets = (
+                *assets,
+                *(
+                    AssetDraft(
+                        kind=item.kind,
+                        id=item.suite_id,
+                        title=item.path.name,
+                        body=item.body,
+                    )
+                    for item in evaluation.files
+                ),
+            )
+        elif needs_evaluation_generation(experiment):
+            raise ValueError(
+                "this experiment has no complete evaluation suite; submit an "
+                "evaluation draft with grounded cases and a rubric"
+            )
+        overlay = _asset_overlay(assets)
+        _validate_experiment_references(
+            experiment,
+            assets,
+            self.repo_root,
+            self.operator.env,
+            overlay=overlay,
+        )
+        preview = self.operator.preview_experiment(experiment, asset_overlay=overlay)
+        experiment_diff = "\n".join(
             difflib.unified_diff(
                 experiment_to_yaml(base).splitlines(),
                 experiment_to_yaml(experiment).splitlines(),
@@ -396,9 +471,11 @@ class ExperimentComposer:
                 lineterm="",
             )
         )
+        diff = _draft_diff(experiment_diff, assets, self.repo_root)
         return ExperimentDraft(
             experiment=experiment,
             assets=assets,
+            evaluation=evaluation,
             rationale=str(raw.get("rationale") or ""),
             assumptions=tuple(str(item) for item in raw.get("assumptions") or []),
             warnings=tuple(str(item) for item in raw.get("warnings") or []),
@@ -1107,6 +1184,8 @@ def _validate_experiment_references(
     assets: Sequence[AssetDraft],
     repo_root: Path,
     env: Mapping[str, str],
+    *,
+    overlay: Mapping[str, str] | None = None,
 ) -> None:
     asset_ids = {(item.kind, item.id) for item in assets}
     allowed_harnesses = {"hermes", "openclaw", "claude-code", "codex"}
@@ -1123,7 +1202,16 @@ def _validate_experiment_references(
     paths = [experiment.manifest]
     paths.extend(item.manifest for item in experiment.workloads if item.manifest)
     paths.extend(Path(item.dataset) for item in experiment.workloads if item.dataset)
+    paths.extend(
+        Path(scorer)
+        for item in experiment.workloads
+        for scorer in item.scorers
+        if not scorer.startswith("builtin:")
+    )
+    virtual_paths = set(overlay or {})
     for path in paths:
+        if path.as_posix() in virtual_paths:
+            continue
         resolved = path if path.is_absolute() else repo_root / path
         if not resolved.is_file():
             raise FileNotFoundError(f"experiment data source not found: {path}")
@@ -1140,7 +1228,7 @@ def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:
 
 
 def _composer_instructions() -> str:
-    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Preserve unspecified settings from the base experiment. Keep comparisons controlled: vary only what the user asks to vary. Use positive trials, task limits, and concurrency. Never include secrets. Call submit_experiment with the complete experiment, rationale, assumptions, warnings, and asset drafts. Do not claim that a draft has run."""
+    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Preserve unspecified settings from the base experiment. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested skill or MCP server. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, MCP, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
 
 
 def _analyst_planner_instructions() -> str:
@@ -1157,6 +1245,16 @@ def _experiment_submission_schema() -> dict[str, Any]:
         "properties": {
             "experiment": {"type": "object"},
             "assets": {"type": "array", "items": {"type": "object"}},
+            "evaluation": {
+                "type": "object",
+                "properties": {
+                    "suite_id": {"type": "string"},
+                    "cases": {"type": "array", "items": {"type": "object"}},
+                    "rubric": {"type": "object"},
+                },
+                "required": ["suite_id", "cases", "rubric"],
+                "additionalProperties": False,
+            },
             "rationale": {"type": "string"},
             "assumptions": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
@@ -1164,6 +1262,42 @@ def _experiment_submission_schema() -> dict[str, Any]:
         "required": ["experiment", "rationale", "assumptions", "warnings"],
         "additionalProperties": False,
     }
+
+
+def _asset_overlay(assets: Sequence[AssetDraft]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for asset in assets:
+        if asset.kind == "prompt":
+            path = Path("configs/fugue/prompts") / f"{asset.id}.md"
+        elif asset.kind == "skill":
+            path = Path("configs/fugue/skills") / asset.id / "SKILL.md"
+        else:
+            path = evaluation_asset_path(asset.kind, asset.id)
+        values[path.as_posix()] = asset.body
+    return values
+
+
+def _draft_diff(
+    experiment_diff: str,
+    assets: Sequence[AssetDraft],
+    repo_root: Path,
+) -> str:
+    sections = [experiment_diff] if experiment_diff else []
+    for path_text, body in _asset_overlay(assets).items():
+        path = repo_root / path_text
+        before = path.read_text() if path.is_file() else ""
+        section = "\n".join(
+            difflib.unified_diff(
+                before.splitlines(),
+                body.splitlines(),
+                fromfile=path_text if before else "/dev/null",
+                tofile=path_text,
+                lineterm="",
+            )
+        )
+        if section:
+            sections.append(section)
+    return "\n\n".join(sections)
 
 
 def _analysis_plan_schema() -> dict[str, Any]:
