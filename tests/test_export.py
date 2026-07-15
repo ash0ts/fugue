@@ -426,13 +426,33 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     )
     rows = [
         {"record_type": "trial", "task_name": "trial"},
-        {"record_type": "retrieval", "task_name": "query", "mrr": 1.0},
+        {
+            "record_type": "retrieval",
+            "task_name": "query",
+            "mrr": 1.0,
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "execution_fingerprint": "fingerprint-a",
+            "execution_kind": "provider_diagnostic",
+            "trial_index": 1,
+            "workload_id": "retrieval-dataset",
+        },
         {
             "record_type": "episode",
             "task_name": "episode",
             "sequence_id": "sequence-a",
         },
-        {"record_type": "cell", "task_name": "cell"},
+        {
+            "record_type": "cell",
+            "task_name": "cell",
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "execution_fingerprint": "fingerprint-a",
+            "execution_kind": "provider_diagnostic",
+            "trial_index": 1,
+            "workload_id": "retrieval",
+            "status": "passed",
+        },
         {"record_type": "preparation", "task_name": "build"},
     ]
 
@@ -451,14 +471,17 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
 def test_weave_publication_counts_one_prediction_per_sequence_cell(
     tmp_path: Path, monkeypatch
 ) -> None:
+    declared_scorers = []
+    logged_scores = []
+
     class FakeLogger:
         ui_url = "https://wandb.test/evaluations/direct"
 
         def __init__(self, **kwargs) -> None:
-            pass
+            declared_scorers.extend(kwargs["scorers"])
 
         def log_example(self, inputs, output, scores) -> None:
-            pass
+            logged_scores.append(scores)
 
         def log_summary(self) -> None:
             pass
@@ -482,6 +505,7 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
         "variant_id": "markdown-log",
         "context_system_id": "markdown-log",
         "execution_kind": "provider_diagnostic",
+        "execution_fingerprint": "fingerprint-a",
         "trial_index": 1,
     }
     rows = [
@@ -525,6 +549,59 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
     assert sum(item.examples for item in result.evaluations) == 1
     assert sum(item.direct_predictions for item in result.evaluations) == 1
     assert sum(item.agent_predictions for item in result.evaluations) == 0
+    assert logged_scores == [
+        {
+            "context_queries": 2,
+            "context_query_latency_ms": 6.0,
+            "context_storage_bytes": 101,
+            "context_write_latency_ms": 4.0,
+            "episodes": 2,
+            "mrr": 0.5,
+        }
+    ]
+    assert set(logged_scores[0]) <= set(declared_scorers)
+
+
+def test_direct_evaluation_projection_requires_a_completed_cell() -> None:
+    def cell(*, status: str, fingerprint: str) -> dict[str, object]:
+        return {
+            "record_type": "cell",
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "execution_fingerprint": fingerprint,
+            "execution_kind": "provider_diagnostic",
+            "trial_index": 1,
+            "status": status,
+            "workload_id": "retrieval",
+        }
+
+    def measurement(*, fingerprint: str, query: str) -> dict[str, object]:
+        return {
+            "record_type": "retrieval",
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "execution_fingerprint": fingerprint,
+            "execution_kind": "provider_diagnostic",
+            "trial_index": 1,
+            "workload_id": "retrieval-dataset",
+            "comparison_example_id": query,
+        }
+
+    rows = [
+        cell(status="failed", fingerprint="failed"),
+        measurement(fingerprint="failed", query="failed-query"),
+        cell(status="passed", fingerprint="passed"),
+        measurement(fingerprint="passed", query="published-query"),
+        cell(status="passed", fingerprint="empty"),
+    ]
+
+    projected = export._evaluation_rows(rows)
+
+    assert [row["comparison_example_id"] for row in projected] == [
+        "published-query"
+    ]
+    assert projected[0]["dataset"] == "retrieval-dataset"
+    assert projected[0]["workload_id"] == "retrieval"
 
 
 def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
@@ -661,8 +738,19 @@ def test_export_recovers_direct_evaluation_after_marker_only_crash(
             "variant_id": "rag-bm25",
             "context_system_id": "rag-bm25",
             "execution_kind": "provider_diagnostic",
+            "execution_fingerprint": "fingerprint-a",
             "trial_index": 1,
-        }
+        },
+        {
+            "record_type": "cell",
+            "run_id": "run-a",
+            "candidate_id": "candidate-direct",
+            "execution_kind": "provider_diagnostic",
+            "execution_fingerprint": "fingerprint-a",
+            "trial_index": 1,
+            "workload_id": "retrieval",
+            "status": "passed",
+        },
     ]
     ledger = tmp_path / ".fugue" / "runtime" / "publications"
     first = publish_to_weave(

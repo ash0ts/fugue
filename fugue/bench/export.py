@@ -1320,42 +1320,47 @@ def publish_to_weave(
 
 
 def _evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    evaluation_rows = [
-        row
+    evaluation_rows = [row for row in rows if row.get("record_type") == "trial"]
+    completed_cells = {
+        _direct_cell_key(row): row
         for row in rows
-        if row.get("record_type") == "trial"
-        or (
-            row.get("record_type") == "retrieval"
-            and not row.get("sequence_id")
-        )
-    ]
-    sequence_measurements: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+        if row.get("record_type") == "cell"
+        and row.get("execution_kind") == "provider_diagnostic"
+        and row.get("status") == "passed"
+    }
+    measurements: dict[tuple[str, str, str, int], list[dict[str, Any]]] = {}
     for row in rows:
-        if row.get("sequence_id") and row.get("record_type") in {
+        key = _direct_cell_key(row)
+        if key in completed_cells and row.get("record_type") in {
             "episode",
             "retrieval",
         }:
-            sequence_measurements.setdefault(_direct_cell_key(row), []).append(row)
-    for row in rows:
-        if not (
-            row.get("record_type") == "cell"
-            and row.get("execution_kind") == "provider_diagnostic"
-            and row.get("harness") == "sequence"
-            and row.get("status") == "passed"
-        ):
+            measurements.setdefault(key, []).append(row)
+    for key, cell in completed_cells.items():
+        cell_measurements = measurements.get(key, [])
+        if not cell_measurements:
             continue
-        summary = dict(row)
-        _add_sequence_measurement_summary(
-            summary, sequence_measurements.get(_direct_cell_key(row), [])
-        )
-        evaluation_rows.append(summary)
+        sequence_rows = [row for row in cell_measurements if row.get("sequence_id")]
+        if sequence_rows:
+            summary = dict(cell)
+            _add_sequence_measurement_summary(summary, sequence_rows)
+            evaluation_rows.append(summary)
+            continue
+        for measurement in cell_measurements:
+            if measurement.get("record_type") != "retrieval":
+                continue
+            projected = dict(measurement)
+            projected["dataset"] = measurement.get("workload_id")
+            projected["workload_id"] = cell.get("workload_id")
+            evaluation_rows.append(projected)
     return evaluation_rows
 
 
-def _direct_cell_key(row: dict[str, Any]) -> tuple[str, str, int]:
+def _direct_cell_key(row: dict[str, Any]) -> tuple[str, str, str, int]:
     return (
         str(row.get("run_id") or ""),
         str(row.get("candidate_id") or ""),
+        str(row.get("execution_fingerprint") or ""),
         _positive_int(row.get("trial_index") or row.get("attempt")) or 1,
     )
 
@@ -1363,6 +1368,21 @@ def _direct_cell_key(row: dict[str, Any]) -> tuple[str, str, int]:
 def _add_sequence_measurement_summary(
     row: dict[str, Any], measurements: list[dict[str, Any]]
 ) -> None:
+    first = measurements[0]
+    row["record_type"] = "sequence"
+    row["dataset"] = first.get("workload_id")
+    for key in (
+        "experiment_id",
+        "preset_id",
+        "trace_project",
+        "identity_schema_version",
+        "context_config_hash",
+        "context_version",
+        "builder_model",
+        "embedding_model",
+    ):
+        if first.get(key) is not None:
+            row[key] = first[key]
     retrievals = [
         item for item in measurements if item.get("record_type") == "retrieval"
     ]
@@ -1774,6 +1794,9 @@ _SCORE_ALIASES = {
     "context_query_latency_ms": "context_query_latency_ms",
     "context_registered": "context_registered",
     "runtime_equivalent": "runtime_equivalent",
+    "episode_count": "episodes",
+    "write_latency_ms": "context_write_latency_ms",
+    "storage_bytes": "context_storage_bytes",
 }
 
 _COMMON_SCORERS = (
@@ -1801,6 +1824,9 @@ _COMMON_SCORERS = (
     "context_query_latency_ms",
     "context_registered",
     "runtime_equivalent",
+    "episodes",
+    "context_write_latency_ms",
+    "context_storage_bytes",
 )
 
 
@@ -1836,32 +1862,9 @@ def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
-    record_types = {str(row.get("record_type") or "trial") for row in rows}
     values = set(_COMMON_SCORERS)
-    if "retrieval" in record_types:
-        values.update(
-            {
-                "mrr",
-                "ndcg_at_10",
-                "recall_at_1",
-                "recall_at_5",
-                "recall_at_10",
-                "recall_at_20",
-            }
-        )
-    if record_types & {"trial", "episode"}:
-        values.update(
-            {
-                "evidence_recall",
-                "citation_correctness",
-                "fact_recall",
-                "judge_correctness",
-                "judge_completeness",
-                "judge_groundedness",
-                "judge_overall",
-            }
-        )
     for row in rows:
+        values.update(_evaluation_scores(row))
         case = row.get("evaluation_case") or {}
         for dimension in case.get("scorer_dimensions") or []:
             values.add(f"evaluation_{dimension}")
