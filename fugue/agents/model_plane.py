@@ -51,6 +51,7 @@ from fugue.agent_tracing import (
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
+    skill_invocation_evidence,
     stable_agent_name,
 )
 from fugue.artifacts import artifact_recoveries
@@ -573,10 +574,15 @@ done
             "skills_assigned": assigned_skills,
             "skills_registered": skill_registration.get("skills_registered", []),
             "skill_registration": skill_registration,
-            "skill_invocation_evidence": {
-                "status": "unavailable",
-                "reason": "the harness does not emit skill-selection events",
-            },
+            "skill_invocation_evidence": (
+                {
+                    "status": "unavailable",
+                    "skills_invoked": [],
+                    "reason": "execution has not produced skill-use evidence yet",
+                }
+                if assigned_skills
+                else {"status": "not_applicable", "skills_invoked": []}
+            ),
             "integration_ids": _split_tags(os.environ.get("FUGUE_INTEGRATION_IDS")),
             "integration_provenance": _json_env("FUGUE_INTEGRATION_PROVENANCE"),
             "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
@@ -718,6 +724,13 @@ done
         except (OSError, json.JSONDecodeError):
             meta["native_session_ids"] = []
             meta["weave_conversation_ids"] = [self.trace_conversation_id]
+        registration = meta.get("skill_registration")
+        if isinstance(registration, dict):
+            meta["skill_invocation_evidence"] = skill_invocation_evidence(
+                self.logs_dir,
+                self.TRACE_HARNESS,
+                registration,
+            )
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     def _set_context_registration(self, value: dict[str, Any]) -> None:

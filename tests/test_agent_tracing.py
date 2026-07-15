@@ -14,6 +14,7 @@ from fugue.agent_tracing import (
     normalize_trace_content,
     openclaw_agent_id,
     openclaw_conversation_id,
+    skill_invocation_evidence,
     stable_agent_name,
 )
 from fugue.registration import (
@@ -128,6 +129,95 @@ def test_skill_registration_probe_requires_every_assigned_skill(
         text=True,
     )
     assert incomplete.returncode == 2
+
+
+def test_codex_skill_read_is_normalized_from_a_successful_structured_event(
+    tmp_path: Path,
+) -> None:
+    skill_root = "/tmp/isolated/home/.agents/skills"
+    (tmp_path / "codex.txt").write_text(
+        "not json\n"
+        + json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_6",
+                    "type": "command_execution",
+                    "command": (
+                        "/bin/bash -lc 'cat "
+                        f"{skill_root}/pdf-artifact-workflow/SKILL.md'"
+                    ),
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "codex",
+        {
+            "skills_assigned": ["pdf-artifact-workflow"],
+            "skills_registered": ["pdf-artifact-workflow"],
+            "directory": skill_root,
+        },
+    )
+
+    assert evidence == {
+        "status": "observed",
+        "skills_invoked": ["pdf-artifact-workflow"],
+        "missing_skills": [],
+        "events": [
+            {
+                "item_id": "item_6",
+                "operation": "read_skill_instructions",
+                "skill_id": "pdf-artifact-workflow",
+            }
+        ],
+    }
+
+
+def test_codex_skill_evidence_ignores_failed_or_unrelated_commands(
+    tmp_path: Path,
+) -> None:
+    root = "/tmp/isolated/skills"
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "failed",
+                "type": "command_execution",
+                "command": f"cat {root}/pdf/SKILL.md",
+                "exit_code": 1,
+                "status": "failed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "echo",
+                "type": "command_execution",
+                "command": f"echo {root}/pdf/SKILL.md",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+    ]
+    (tmp_path / "codex.txt").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "codex",
+        {"skills_assigned": ["pdf"], "directory": root},
+    )
+
+    assert evidence["status"] == "not_observed"
+    assert evidence["skills_invoked"] == []
+    assert evidence["missing_skills"] == ["pdf"]
 
 
 def test_context_registration_digest_is_order_independent_and_behavioral() -> None:
