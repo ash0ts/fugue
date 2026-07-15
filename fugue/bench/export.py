@@ -858,6 +858,7 @@ def export_rows(
     weave_project: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    jobs = list(dict.fromkeys(path.resolve(strict=False) for path in jobs))
     rows = [
         *[_row_from_trial(path) for job in jobs for path in _trial_result_paths(job)],
         *[row for job in jobs for row in _context_result_rows(job)],
@@ -1319,11 +1320,81 @@ def publish_to_weave(
 
 
 def _evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
+    evaluation_rows = [
         row
         for row in rows
-        if row.get("record_type") in {"trial", "retrieval", "episode"}
+        if row.get("record_type") == "trial"
+        or (
+            row.get("record_type") == "retrieval"
+            and not row.get("sequence_id")
+        )
     ]
+    sequence_measurements: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("sequence_id") and row.get("record_type") in {
+            "episode",
+            "retrieval",
+        }:
+            sequence_measurements.setdefault(_direct_cell_key(row), []).append(row)
+    for row in rows:
+        if not (
+            row.get("record_type") == "cell"
+            and row.get("execution_kind") == "provider_diagnostic"
+            and row.get("harness") == "sequence"
+            and row.get("status") == "passed"
+        ):
+            continue
+        summary = dict(row)
+        _add_sequence_measurement_summary(
+            summary, sequence_measurements.get(_direct_cell_key(row), [])
+        )
+        evaluation_rows.append(summary)
+    return evaluation_rows
+
+
+def _direct_cell_key(row: dict[str, Any]) -> tuple[str, str, int]:
+    return (
+        str(row.get("run_id") or ""),
+        str(row.get("candidate_id") or ""),
+        _positive_int(row.get("trial_index") or row.get("attempt")) or 1,
+    )
+
+
+def _add_sequence_measurement_summary(
+    row: dict[str, Any], measurements: list[dict[str, Any]]
+) -> None:
+    retrievals = [
+        item for item in measurements if item.get("record_type") == "retrieval"
+    ]
+    episodes = [item for item in measurements if item.get("record_type") == "episode"]
+    row["context_query_count"] = len(retrievals)
+    row["episode_count"] = len(episodes)
+    row["context_query_latency_ms"] = sum(
+        float(item.get("query_latency_ms") or 0) for item in retrievals
+    )
+    row["write_latency_ms"] = sum(
+        float(item.get("write_latency_ms") or 0) for item in episodes
+    )
+    if episodes:
+        row["storage_bytes"] = max(
+            int(item.get("storage_bytes") or 0) for item in episodes
+        )
+    for score_field in (
+        "mrr",
+        "ndcg_at_10",
+        "recall_at_1",
+        "recall_at_5",
+        "recall_at_10",
+        "recall_at_20",
+        "fact_recall",
+    ):
+        values = [
+            float(item[score_field])
+            for item in retrievals
+            if item.get(score_field) is not None
+        ]
+        if values:
+            row[score_field] = sum(values) / len(values)
 
 
 def _write_publication_marker(

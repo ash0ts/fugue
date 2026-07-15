@@ -95,6 +95,26 @@ def _write_export_fixture(tmp_path: Path) -> Path:
     return tmp_path / "jobs"
 
 
+def test_export_reads_each_source_path_once(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".fugue" / "runtime" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "context-results.jsonl").write_text(
+        json.dumps(
+            {
+                "record_type": "retrieval",
+                "run_key": "run-a:retrieval:probe-a",
+                "task_name": "probe-a",
+            }
+        )
+        + "\n"
+    )
+
+    rows = export_rows([run_dir, run_dir.resolve()])
+
+    assert len(rows) == 1
+    assert rows[0]["run_key"] == "run-a:retrieval:probe-a"
+
+
 def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     jobs = _write_export_fixture(tmp_path)
 
@@ -407,7 +427,11 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     rows = [
         {"record_type": "trial", "task_name": "trial"},
         {"record_type": "retrieval", "task_name": "query", "mrr": 1.0},
-        {"record_type": "episode", "task_name": "episode"},
+        {
+            "record_type": "episode",
+            "task_name": "episode",
+            "sequence_id": "sequence-a",
+        },
         {"record_type": "cell", "task_name": "cell"},
         {"record_type": "preparation", "task_name": "build"},
     ]
@@ -419,12 +443,12 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
         env={"WANDB_API_KEY": "test-only"},
     )
 
-    assert published.published == 3
-    assert set(logged) == {"trial", "query", "episode"}
-    assert summaries == [True, True, True]
+    assert published.published == 2
+    assert set(logged) == {"trial", "query"}
+    assert summaries == [True, True]
 
 
-def test_weave_publication_counts_direct_measurement_rows(
+def test_weave_publication_counts_one_prediction_per_sequence_cell(
     tmp_path: Path, monkeypatch
 ) -> None:
     class FakeLogger:
@@ -464,16 +488,30 @@ def test_weave_publication_counts_direct_measurement_rows(
         {
             **common,
             "record_type": "episode",
+            "sequence_id": "maintainer-preferences",
             "comparison_example_id": f"episode-{index}",
+            "write_latency_ms": 2.0,
+            "storage_bytes": 100 + index,
         }
         for index in range(2)
     ] + [
         {
             **common,
             "record_type": "retrieval",
+            "sequence_id": "maintainer-preferences",
             "comparison_example_id": f"probe-{index}",
+            "mrr": float(index),
+            "query_latency_ms": 3.0,
         }
         for index in range(2)
+    ] + [
+        {
+            **common,
+            "record_type": "cell",
+            "workload_id": "continuity",
+            "comparison_example_id": "sequence-cell",
+            "status": "passed",
+        }
     ]
 
     result = publish_to_weave(
@@ -483,9 +521,9 @@ def test_weave_publication_counts_direct_measurement_rows(
         env={"WANDB_API_KEY": "test-only"},
     )
 
-    assert result.published == 2
-    assert sum(item.examples for item in result.evaluations) == 4
-    assert sum(item.direct_predictions for item in result.evaluations) == 4
+    assert result.published == 1
+    assert sum(item.examples for item in result.evaluations) == 1
+    assert sum(item.direct_predictions for item in result.evaluations) == 1
     assert sum(item.agent_predictions for item in result.evaluations) == 0
 
 
