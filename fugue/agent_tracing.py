@@ -31,6 +31,14 @@ def openclaw_conversation_id(fugue_conversation_id: str) -> str:
     return f"agent:{openclaw_agent_id(fugue_conversation_id)}:main"
 
 
+def agent_conversation_id(harness: str, run_or_cohort_key: str) -> str:
+    """Resolve the conversation identity emitted by a typed harness adapter."""
+    resolved = conversation_id(run_or_cohort_key)
+    if harness == "openclaw":
+        return openclaw_conversation_id(resolved)
+    return resolved
+
+
 def normalize_trace_content(value: str | None) -> str:
     selected = str(value or "full").strip().lower()
     if selected not in {"full", "metadata"}:

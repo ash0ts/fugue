@@ -312,6 +312,99 @@ interfaces:
     assert len(job.integration_provenance[0]["config_hash"]) == 64
 
 
+def test_integration_instruction_content_not_presentation_or_output_capture_controls_identity(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    root = tmp_path / "configs" / "fugue" / "integrations"
+    instructions = root / "review"
+    instructions.mkdir(parents=True)
+    usage = instructions / "usage.md"
+    usage.write_text("Use the first review policy.\n")
+    declaration = root / "review.yaml"
+    declaration.write_text(
+        """
+id: review
+version: "1"
+support: experimental
+runtime: {type: builtin, command: [python, -m, example_server]}
+interfaces:
+  - {type: mcp, name: review, transport: stdio}
+instructions: [usage.md]
+artifacts:
+  - {source: /logs/first-review.jsonl}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="instruction-identity",
+        title="Instruction identity",
+        variants=[
+            FeatureVariant(
+                id="review",
+                label="Review",
+                integrations=[IntegrationSelection("review")],
+            )
+        ],
+    )
+
+    def rendered(run_id: str):
+        [job] = render_jobs(
+            experiment=experiment,
+            manifest=load_manifest(manifest_path),
+            manifest_path=manifest_path,
+            repo_root=tmp_path,
+            env={},
+            model="openai/gpt-5",
+            run_id=run_id,
+        )
+        return job
+
+    first = rendered("first")
+    usage.write_text("Use the second review policy.\n")
+    second = rendered("second")
+    (instructions / "renamed.md").write_text(usage.read_text())
+    declaration.write_text(
+        """
+id: review
+version: "1"
+support: supported
+runtime: {type: builtin, command: [python, -m, example_server]}
+interfaces:
+  - {type: mcp, name: review, transport: stdio}
+instructions: [renamed.md]
+artifacts:
+  - source: /logs/renamed-review.jsonl
+    destination: review.jsonl
+    exclude: ["*.tmp"]
+"""
+    )
+    presentation_only = rendered("presentation")
+
+    assert first.candidate_id != second.candidate_id
+    assert second.candidate_id == presentation_only.candidate_id
+    assert (
+        first.integration_provenance[0]["instruction_assets"][0]["sha256"]
+        != second.integration_provenance[0]["instruction_assets"][0]["sha256"]
+    )
+    assert (
+        second.integration_provenance[0]["config_hash"]
+        != presentation_only.integration_provenance[0]["config_hash"]
+    )
+    assert (
+        second.resolved_candidate.definition["integrations"]
+        == presentation_only.resolved_candidate.definition["integrations"]
+    )
+
+
 def test_stdio_integration_mounts_and_invokes_the_policy_proxy(tmp_path: Path) -> None:
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
@@ -542,18 +635,35 @@ tasks:
     assert job.config["fugue"]["context_delivery"] == "portable"
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
     [compose_path] = job.config["environment"]["extra_docker_compose"]
+    assert job.generated_runtime_files == (tmp_path / compose_path,)
+    descriptor = job.resolved_candidate.execution_definition["context_runtime"]
+    assert descriptor == {
+        "bridge_url": "http://host.docker.internal:4000",
+        "dockerfile": "Dockerfile.context",
+        "host_gateway": "host.docker.internal:host-gateway",
+        "image": "fugue-context-runtime:0.1.0",
+        "kind": "compose_service",
+        "mcp_port": 8000,
+        "network": "compose_project",
+        "portable_port": 8001,
+        "query_url": "http://fugue-context:8001",
+        "schema_version": 1,
+        "service": "fugue-context",
+    }
     compose_text = (tmp_path / compose_path).read_text()
     assert "secret" not in compose_text
     compose = yaml.safe_load(compose_text)
     service = compose["services"]["fugue-context"]
-    assert service["image"] == "fugue-context-runtime:0.1.0"
-    assert service["build"]["dockerfile"] == "Dockerfile.context"
+    assert service["image"] == descriptor["image"]
+    assert service["build"]["dockerfile"] == descriptor["dockerfile"]
+    assert service["extra_hosts"] == [descriptor["host_gateway"]]
+    assert f"FUGUE_BRIDGE_BASE_URL={descriptor['bridge_url']}" in service["environment"]
+    assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == descriptor["query_url"]
     dockerfile = Path(__file__).parents[1] / "Dockerfile.context"
     assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
     assert "fugue.context_server" in service["command"]
     assert "8001" in service["healthcheck"]["test"][-1]
     assert next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
-    assert service["extra_hosts"] == ["host.docker.internal:host-gateway"]
     assert "network_mode" not in service
     assert "main" not in compose["services"]
     client_mount = next(
@@ -624,6 +734,18 @@ interfaces:
     assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == (
         "fugue-context"
     )
+    context_path, integration_path = [
+        tmp_path / path for path in job.config["environment"]["extra_docker_compose"]
+    ]
+    assert job.generated_runtime_files == (context_path, integration_path)
+    context_service = yaml.safe_load(context_path.read_text())["services"][
+        "fugue-context"
+    ]
+    integration_service = yaml.safe_load(integration_path.read_text())["services"][
+        "api"
+    ]
+    assert "network_mode" not in context_service
+    assert integration_service["network_mode"] == "service:main"
 
 
 def test_bridged_codex_native_mcp_is_explicitly_not_applicable(tmp_path: Path):

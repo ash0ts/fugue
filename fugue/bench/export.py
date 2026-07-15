@@ -17,8 +17,7 @@ from typing import Any
 import httpx
 from filelock import FileLock
 
-from fugue.agent_tracing import conversation_id as fugue_conversation_id
-from fugue.agent_tracing import stable_agent_name
+from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
 from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
@@ -71,6 +70,10 @@ class _LivePrediction:
     opened_monotonic: float
 
 
+class _TracePollingCancelled(Exception):
+    pass
+
+
 class LiveEvaluationCoordinator:
     """Own live Weave prediction calls while Harbor cells execute."""
 
@@ -84,6 +87,7 @@ class LiveEvaluationCoordinator:
         weave_module: Any | None = None,
         summary_fetcher: Callable[..., dict[str, dict[str, Any]]] | None = None,
         trace_timeout_sec: float | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> None:
         if not env.get("WANDB_API_KEY", "").strip():
             raise RuntimeError("WANDB_API_KEY is required for live evaluations")
@@ -98,6 +102,8 @@ class LiveEvaluationCoordinator:
         self._event_lock = threading.Lock()
         self._predictions: dict[str, _LivePrediction] = {}
         self._prediction_lock = threading.Lock()
+        self._terminal_cells: set[str] = set()
+        self._cancellation_event = cancellation_event or threading.Event()
         self._summary_fetcher = summary_fetcher or fetch_weave_summaries
         configured_timeout = self.env.get("FUGUE_WEAVE_LINK_TIMEOUT_SEC")
         self.trace_timeout_sec = (
@@ -194,7 +200,7 @@ class LiveEvaluationCoordinator:
 
     def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
         with self._prediction_lock:
-            active = self._predictions.pop(cell.id, None)
+            active = self._predictions.get(cell.id)
         if active is None:
             return
         row = _completed_evaluation_row(cell, outcome, active.row)
@@ -204,8 +210,21 @@ class LiveEvaluationCoordinator:
             time.monotonic() - active.opened_monotonic, 0.0
         )
         call_id = str(active.prediction.predict_and_score_call.id)
+        if outcome.status in {"cancelled", "interrupted"}:
+            self._cancel_prediction(
+                cell.id,
+                active,
+                row,
+                reason=outcome.error or "Run cancelled by the operator.",
+            )
+            return
+        owns_prediction = False
         try:
-            _apply_trace_summary(row, self._wait_for_trace(row))
+            if row.get("agent_execution_status") == "not_started":
+                _mark_agent_execution_not_started(row)
+            else:
+                _apply_trace_summary(row, self._wait_for_trace(row))
+            self._raise_if_cancelled()
             _merge_error_events(row)
             _apply_observed_identity(row)
             if cell.evaluation_case is not None:
@@ -219,7 +238,12 @@ class LiveEvaluationCoordinator:
                         str(row.get("trial_dir") or cell.result_path.parent)
                     ),
                 )
-            root = _verified_evaluation_root(row, call_id)
+            self._raise_if_cancelled()
+            root = (
+                None
+                if row.get("trace_link_status") in {"not_applicable", "not_started"}
+                else _verified_evaluation_root(row, call_id)
+            )
             if root is not None:
                 _attach_genai_span_ref(
                     active.prediction.predict_and_score_call,
@@ -237,12 +261,16 @@ class LiveEvaluationCoordinator:
                     root_span_id=root.get("span_id"),
                     eval_predict_and_score_call_id=call_id,
                 )
+            if not self._pop_prediction(cell.id, active):
+                return
+            owns_prediction = True
             active.prediction.output = _evaluation_output(row)
             with active.session.lock:
                 for name, value in _evaluation_scores(row).items():
                     active.prediction.log_score(name, value)
                 active.prediction.__exit__(None, None, None)
                 active.session.rows.append(row)
+            self._terminal_cells.add(cell.id)
             self._append_result(row)
             self._append_event(
                 "finalized",
@@ -251,7 +279,16 @@ class LiveEvaluationCoordinator:
                 trace_link_status=row.get("trace_link_status"),
                 eval_predict_and_score_call_id=call_id,
             )
+        except _TracePollingCancelled:
+            self._cancel_prediction(
+                cell.id,
+                active,
+                row,
+                reason="Run cancelled by the operator.",
+            )
         except Exception as exc:
+            if not owns_prediction and not self._pop_prediction(cell.id, active):
+                return
             row["trace_link_status"] = "failed"
             row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
             try:
@@ -261,6 +298,7 @@ class LiveEvaluationCoordinator:
                         active.prediction.log_score(name, value)
                     active.prediction.__exit__(None, None, None)
                     active.session.rows.append(row)
+                self._terminal_cells.add(cell.id)
                 self._append_result(row)
             finally:
                 self._append_event(
@@ -271,7 +309,101 @@ class LiveEvaluationCoordinator:
                     eval_predict_and_score_call_id=call_id,
                 )
 
-    def finalize(self) -> PublicationResult:
+    def cancel_open_predictions(self, reason: str) -> None:
+        self._cancellation_event.set()
+        with self._prediction_lock:
+            active_predictions = list(self._predictions.values())
+            self._predictions.clear()
+        for active in active_predictions:
+            row = dict(active.row)
+            row["evaluation_publication_mode"] = "live"
+            row["evaluation_prediction_latency_sec"] = max(
+                time.monotonic() - active.opened_monotonic, 0.0
+            )
+            self._close_cancelled_prediction(active, row, reason=reason)
+
+    def _cancel_prediction(
+        self,
+        cell_id: str,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        if not self._pop_prediction(cell_id, active):
+            return
+        self._close_cancelled_prediction(active, row, reason=reason)
+
+    def _pop_prediction(self, cell_id: str, active: _LivePrediction) -> bool:
+        with self._prediction_lock:
+            if self._predictions.get(cell_id) is not active:
+                return False
+            self._predictions.pop(cell_id)
+            return True
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancellation_event.is_set():
+            raise _TracePollingCancelled
+
+    def _close_cancelled_prediction(
+        self,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        cell_id = str(row.get("cell_id") or "")
+        row.update(
+            {
+                "status": "cancelled",
+                "pass": None,
+                "trace_link_status": "cancelled",
+                "trace_link_error": None,
+                "trace_link_reason": reason,
+                "weave_observability_status": "cancelled",
+                "weave_usage_status": "unavailable",
+                "weave_usage_source": "unavailable",
+            }
+        )
+        active.prediction.output = _evaluation_output(row)
+        with active.session.lock:
+            active.prediction.__exit__(None, None, None)
+            active.session.rows.append(row)
+        if cell_id:
+            self._terminal_cells.add(cell_id)
+        self._append_result(row)
+        self._append_event(
+            "cancelled",
+            cell_id=cell_id or None,
+            candidate_id=row.get("candidate_id"),
+            error=reason,
+            eval_predict_and_score_call_id=str(
+                active.prediction.predict_and_score_call.id
+            ),
+        )
+
+    def finalize(self, *, cancelled: bool = False) -> PublicationResult:
+        if cancelled:
+            self.cancel_open_predictions("Run cancelled by the operator.")
+            error = RuntimeError("Run cancelled by the operator.")
+            for session in self._unique_sessions:
+                try:
+                    with session.lock:
+                        session.logger.fail(error)
+                except Exception:
+                    pass
+                for row in session.candidate["rows"]:
+                    cell_id = str(row.get("cell_id") or "")
+                    if not cell_id or cell_id in self._terminal_cells:
+                        continue
+                    self._terminal_cells.add(cell_id)
+                    self._append_event(
+                        "cancelled",
+                        cell_id=cell_id,
+                        candidate_id=row.get("candidate_id"),
+                        error=str(error),
+                    )
+            return PublicationResult(published=0, skipped=0)
         evaluations: list[PublishedEvaluation] = []
         failures: list[str] = []
         ledger = (
@@ -313,18 +445,21 @@ class LiveEvaluationCoordinator:
             url = getattr(session.logger, "ui_url", None)
             evaluation_ref = _logger_ref(session.logger, "_pseudo_evaluation")
             model_ref = _logger_ref(session.logger, "model")
-            linked = sum(
-                row.get("trace_link_status") == "linked" for row in session.rows
-            )
-            linking_failures = tuple(
-                f"{row.get('cell_id')}: {row.get('trace_link_error') or 'native Agent root was not linked'}"
+            agent_rows = [
+                row
                 for row in session.rows
+                if row.get("trace_link_status") != "not_applicable"
+            ]
+            linked = sum(row.get("trace_link_status") == "linked" for row in agent_rows)
+            linking_failures = tuple(
+                f"{row.get('cell_id')}: {row.get('trace_link_error') or 'Agent root was not linked'}"
+                for row in agent_rows
                 if row.get("trace_link_status") != "linked"
             )
-            if linked != len(session.rows):
+            if linked != len(agent_rows):
                 failures.append(
-                    f"{candidate_id}: {len(session.rows) - linked} prediction(s) "
-                    "finished without a verified native Agent trace link: "
+                    f"{candidate_id}: {len(agent_rows) - linked} prediction(s) "
+                    "finished without a verified Agent trace link: "
                     + "; ".join(linking_failures)
                 )
             marker = ledger / f"{published['publication_id']}.json"
@@ -339,7 +474,7 @@ class LiveEvaluationCoordinator:
                 url=url,
                 evaluation_ref=evaluation_ref,
                 model_ref=model_ref,
-                agent_predictions=len(session.rows),
+                agent_predictions=len(agent_rows),
                 linked_agent_predictions=linked,
                 direct_predictions=0,
                 linking_failures=linking_failures,
@@ -353,7 +488,7 @@ class LiveEvaluationCoordinator:
                     url=url,
                     evaluation_ref=evaluation_ref,
                     model_ref=model_ref,
-                    agent_predictions=len(session.rows),
+                    agent_predictions=len(agent_rows),
                     linked_agent_predictions=linked,
                     direct_predictions=0,
                     linking_failures=linking_failures,
@@ -382,6 +517,7 @@ class LiveEvaluationCoordinator:
         )
         latest: dict[str, Any] = {}
         while True:
+            self._raise_if_cancelled()
             values = self._summary_fetcher(
                 run_keys=[str(row["run_key"])],
                 conversation_ids_by_run={str(row["run_key"]): conversation_ids},
@@ -389,6 +525,7 @@ class LiveEvaluationCoordinator:
                 timeout_sec=min(max(self.trace_timeout_sec, 1), 10),
                 env=self.env,
             )
+            self._raise_if_cancelled()
             latest = values.get(str(row["run_key"]), {})
             probe = {**row, **latest}
             _apply_observed_identity(probe)
@@ -396,7 +533,9 @@ class LiveEvaluationCoordinator:
                 return latest
             if time.monotonic() >= deadline:
                 return latest
-            time.sleep(min(2, max(deadline - time.monotonic(), 0)))
+            wait_sec = min(2, max(deadline - time.monotonic(), 0))
+            if self._cancellation_event.wait(wait_sec):
+                raise _TracePollingCancelled
 
     def _append_event(self, status: str, **values: Any) -> None:
         record = redact_value(
@@ -536,7 +675,7 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
     }
     if cell.execution_kind == "agent":
-        conversation_id = fugue_conversation_id(run_key)
+        conversation_id = agent_conversation_id(cell.harness, run_key)
         row.update(
             {
                 "weave_agent_name": stable_agent_name(cell.harness),
@@ -574,6 +713,7 @@ def _completed_evaluation_row(
         row = dict(planned)
     for key, value in planned.items():
         row.setdefault(key, value)
+    row["status"] = outcome.status
     for key in (
         "comparison_example_id",
         "candidate_id",
@@ -631,9 +771,37 @@ def _verified_evaluation_root(
     ]
     if len(roots) != 1:
         row["trace_link_status"] = "missing"
-        row["trace_link_error"] = "matching native root disappeared during linking"
+        available_roots = row.get("weave_root_spans") or []
+        if not available_roots:
+            row["trace_link_error"] = (
+                "no matching invoke_agent root reached Weave before the link deadline"
+            )
+        elif not roots:
+            row["trace_link_error"] = (
+                "no invoke_agent root matched the selected trace"
+            )
+        else:
+            row["trace_link_error"] = (
+                "multiple invoke_agent roots matched the selected trace"
+            )
         return None
     root = roots[0]
+    root_conversation_id = str(root.get("conversation_id") or "")
+    conversation_ids = {
+        str(value) for value in row.get("weave_conversation_ids") or [] if value
+    }
+    if not root_conversation_id:
+        row["trace_link_status"] = "attribute_missing"
+        row["trace_link_error"] = (
+            "native root is missing gen_ai.conversation.id"
+        )
+        return None
+    if conversation_ids != {root_conversation_id}:
+        row["trace_link_status"] = "identity_mismatch"
+        row["trace_link_error"] = (
+            "native trace operations do not share the root conversation identity"
+        )
+        return None
     observed_call_id = str(root.get("eval_predict_and_score_call_id") or "")
     if not observed_call_id:
         row["trace_link_status"] = "attribute_missing"
@@ -782,6 +950,21 @@ def _is_agent_row(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _mark_agent_execution_not_started(row: dict[str, Any]) -> None:
+    row.update(
+        {
+            "trace_link_status": "not_started",
+            "trace_link_error": (
+                "Agent execution did not start; no invoke_agent root was emitted"
+            ),
+            "trace_link_reason": None,
+            "weave_observability_status": "failed",
+            "weave_usage_source": "unavailable",
+            "weave_usage_status": "unavailable",
+        }
+    )
+
+
 def _apply_observed_identity(row: dict[str, Any]) -> None:
     if row.get("status") == "not_applicable" or row.get("applicable") is False:
         row.update(
@@ -793,6 +976,9 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
                 "weave_usage_status": "not_applicable",
             }
         )
+        return
+    if row.get("agent_execution_status") == "not_started":
+        _mark_agent_execution_not_started(row)
         return
     if not _is_agent_row(row):
         row.update(
@@ -838,9 +1024,9 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
     if len(matches) != 1:
         row["trace_link_status"] = "missing" if not matches else "ambiguous"
         row["trace_link_error"] = (
-            "no matching native invoke_agent root"
+            "no matching invoke_agent root reached Weave before the link deadline"
             if not matches
-            else "multiple matching native invoke_agent roots"
+            else "multiple matching invoke_agent roots reached Weave"
         )
         return
     root = next(iter(matches.values()))
@@ -1002,6 +1188,7 @@ def publish_to_weave(
     datasets: dict[str, Any] = {}
     evaluations: list[PublishedEvaluation] = []
     failures: list[str] = []
+    published = 0
     skipped = 0
     for candidate in candidates:
         if all(
@@ -1011,12 +1198,27 @@ def publish_to_weave(
             skipped += 1
             continue
         publication_id = candidate["publication_id"]
+        scope_id = candidate["evaluation_scope_id"]
         marker = ledger / f"{publication_id}.json"
         with FileLock(marker.with_suffix(".lock"), timeout=120):
             if marker.is_file() and not republish:
+                try:
+                    evaluations.append(
+                        _published_evaluation_from_marker(
+                            marker,
+                            project=project,
+                            publication_id=publication_id,
+                            candidate_id=candidate["candidate_id"],
+                            evaluation_scope_id=scope_id,
+                            publication_mode="post_hoc",
+                        )
+                    )
+                except (OSError, ValueError) as exc:
+                    failures.append(
+                        f"{candidate['candidate_id']}: publication marker: {exc}"
+                    )
                 skipped += 1
                 continue
-            scope_id = candidate["evaluation_scope_id"]
             if scope_id not in datasets:
                 dataset_name = _dataset_name(candidate)
                 dataset_cls = getattr(weave, "Dataset", None)
@@ -1091,6 +1293,7 @@ def publish_to_weave(
                 linked_agent_predictions=linked_agent_predictions,
                 direct_predictions=len(direct_rows),
                 linking_failures=linking_failures,
+                publication_mode="post_hoc",
             )
             evaluations.append(
                 PublishedEvaluation(
@@ -1106,8 +1309,9 @@ def publish_to_weave(
                     linking_failures=linking_failures,
                 )
             )
+            published += 1
     return PublicationResult(
-        published=len(evaluations),
+        published=published,
         skipped=skipped,
         evaluations=tuple(evaluations),
         failures=tuple(failures),
@@ -1139,6 +1343,74 @@ def _write_publication_marker(
         + "\n"
     )
     os.replace(temp, path)
+
+
+def _published_evaluation_from_marker(
+    path: Path,
+    *,
+    project: str,
+    publication_id: str,
+    candidate_id: str,
+    evaluation_scope_id: str,
+    publication_mode: str,
+) -> PublishedEvaluation:
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("metadata must be an object")
+    if value.get("project") != project or value.get("publication_id") != publication_id:
+        raise ValueError("metadata does not match its ledger key")
+    expected = {
+        "candidate_id": candidate_id,
+        "evaluation_scope_id": evaluation_scope_id,
+        "publication_mode": publication_mode,
+    }
+    for metadata_field, expected_value in expected.items():
+        if not expected_value or value.get(metadata_field) != expected_value:
+            raise ValueError(
+                f"{metadata_field} does not match the current evaluation"
+            )
+    name = value.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name must be a non-empty string")
+    examples = _publication_marker_count(value, "examples")
+    agent_predictions = _publication_marker_count(value, "agent_predictions")
+    linked_agent_predictions = _publication_marker_count(
+        value, "linked_agent_predictions"
+    )
+    direct_predictions = _publication_marker_count(value, "direct_predictions")
+    if linked_agent_predictions > agent_predictions:
+        raise ValueError("linked_agent_predictions cannot exceed agent_predictions")
+    if agent_predictions + direct_predictions > examples:
+        raise ValueError("prediction counts cannot exceed examples")
+    linking_failures = value.get("linking_failures")
+    if not isinstance(linking_failures, list) or any(
+        not isinstance(item, str) for item in linking_failures
+    ):
+        raise ValueError("linking_failures must be a list of strings")
+    return PublishedEvaluation(
+        candidate_id=candidate_id,
+        name=name,
+        examples=examples,
+        url=str(value["url"]) if value.get("url") else None,
+        evaluation_ref=(
+            str(value["evaluation_ref"]) if value.get("evaluation_ref") else None
+        ),
+        model_ref=str(value["model_ref"]) if value.get("model_ref") else None,
+        agent_predictions=agent_predictions,
+        linked_agent_predictions=linked_agent_predictions,
+        direct_predictions=direct_predictions,
+        linking_failures=tuple(item for item in linking_failures if item),
+    )
+
+
+def _publication_marker_count(value: dict[str, Any], metadata_field: str) -> int:
+    count = value.get(metadata_field)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError(f"{metadata_field} must be a nonnegative integer")
+    return count
 
 
 def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1364,6 +1636,8 @@ def _evaluation_output(
                 if not _is_agent_row(row)
                 else row.get("trace_link_status")
             ),
+            "trace_link_reason": row.get("trace_link_reason"),
+            "trace_link_error": row.get("trace_link_error"),
             "agent_name": (
                 row.get("weave_agent_name") or row.get("harness")
                 if _is_agent_row(row)
@@ -1574,6 +1848,8 @@ def _logger_ref(logger: Any, attribute: str) -> str | None:
 
 
 def _outcome_status(row: dict[str, Any]) -> str:
+    if row.get("status") in {"cancelled", "interrupted", "not_applicable"}:
+        return str(row["status"])
     if row.get("exception_class"):
         return "error"
     if row.get("pass") is True:
@@ -2427,6 +2703,12 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     context_registration = meta.get("context_registration") or {}
     registration_status = context_registration.get("status")
     context_registered = registration_status in {"registered", "static"}
+    if "agent_execution" not in trial:
+        agent_execution_status = "unknown"
+    elif trial.get("agent_execution") is None:
+        agent_execution_status = "not_started"
+    else:
+        agent_execution_status = "started"
     if registration_status is None:
         context_registered = bool(
             context_events["context_telemetry_available"]
@@ -2442,6 +2724,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "candidate_id": meta.get("candidate_id"),
         "execution_fingerprint": meta.get("execution_fingerprint"),
         "execution_kind": meta.get("execution_kind", "agent"),
+        "agent_execution_status": agent_execution_status,
         "identity_schema_version": meta.get("identity_schema_version"),
         "evaluation_scope_id": meta.get("evaluation_scope_id"),
         "job_name": meta.get("job_name") or trial_dir.parent.name,

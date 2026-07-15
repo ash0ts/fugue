@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -40,6 +41,104 @@ def test_detached_run_can_be_read_and_cancelled(tmp_path: Path) -> None:
         current = supervisor.get(run.run_id, recover=False)
         if current.status in {"starting", "running"}:
             supervisor.cancel(run.run_id)
+
+
+def test_graceful_cancel_leaves_terminal_state_to_controller(tmp_path: Path) -> None:
+    supervisor = RunSupervisor(tmp_path, cancel_grace_sec=2)
+    run_path = tmp_path / ".fugue/runtime/run-graceful/run.json"
+    script = """
+import json
+import os
+import signal
+import sys
+import time
+
+path = sys.argv[1]
+def cancel(signum, frame):
+    del signum, frame
+    value = json.loads(open(path).read())
+    value.update(status="cancelled", ended_at="controller", terminal_writer="controller")
+    temp = path + ".controller.tmp"
+    open(temp, "w").write(json.dumps(value))
+    os.replace(temp, path)
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, cancel)
+print("ready", flush=True)
+time.sleep(30)
+"""
+    run = supervisor.start_detached(
+        run_id="run-graceful",
+        command=[sys.executable, "-c", script, run_path.as_posix()],
+        env=os.environ.copy(),
+        run_name="Graceful",
+        experiment_id="demo",
+    )
+    for _ in range(40):
+        if "ready" in supervisor.read_log(run.run_id):
+            break
+        time.sleep(0.05)
+
+    cancelled = supervisor.cancel(run.run_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata["terminal_writer"] == "controller"
+    assert cancelled.run_name == "Graceful"
+    assert cancelled.experiment_id == "demo"
+    assert cancelled.pid == run.pid
+    assert "cancellation_forced" not in cancelled.metadata
+
+
+def test_forced_cancel_records_open_prediction_as_truthfully_unclosed(
+    tmp_path: Path,
+) -> None:
+    supervisor = RunSupervisor(tmp_path, cancel_grace_sec=0.05)
+    run = supervisor.start_detached(
+        run_id="run-forced",
+        command=[
+            sys.executable,
+            "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(30)",
+        ],
+        env=os.environ.copy(),
+        run_name="Forced",
+        experiment_id="demo",
+    )
+    evaluations = run.run_dir / "evaluations.jsonl"
+    evaluations.write_text(
+        json.dumps(
+            {
+                "status": "prediction_open",
+                "cell_id": "cell-a",
+                "candidate_id": "candidate-a",
+                "eval_predict_and_score_call_id": "call-a",
+            }
+        )
+        + "\n"
+    )
+    write_run_manifest(
+        tmp_path,
+        run.run_id,
+        {"evaluation_failures": ["preexisting observability failure"]},
+    )
+    for _ in range(40):
+        if "ready" in supervisor.read_log(run.run_id):
+            break
+        time.sleep(0.05)
+
+    cancelled = supervisor.cancel(run.run_id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata["cancellation_forced"] is True
+    assert cancelled.metadata["observability_status"] == "failed"
+    assert cancelled.metadata["evaluation_failures"] == [
+        "preexisting observability failure",
+        "cell-a: cancelled prediction was not closed",
+    ]
+    records = [json.loads(line) for line in evaluations.read_text().splitlines()]
+    assert records[-1]["status"] == "cancelled_unclosed"
+    assert records[-1]["eval_predict_and_score_call_id"] == "call-a"
+    assert "cloud state is unknown" in records[-1]["error"]
 
 
 def test_orphaned_run_is_marked_interrupted(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from fugue.agent_tracing import (
+    agent_conversation_id,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
@@ -30,11 +31,28 @@ def test_harness_agents_are_stable_and_trials_are_deterministic() -> None:
 
 
 def test_openclaw_trial_identity_preserves_stable_agent_name() -> None:
+    run_key = "run:task:openclaw:trial-1"
     fugue_id = "872b3077-0f62-544d-8e09-aa437b84f029"
 
     assert openclaw_agent_id(fugue_id) == f"fugue-{fugue_id}"
     assert openclaw_conversation_id(fugue_id) == f"agent:fugue-{fugue_id}:main"
+    assert agent_conversation_id("openclaw", run_key) == openclaw_conversation_id(
+        conversation_id(run_key)
+    )
+    assert agent_conversation_id("hermes", run_key) == conversation_id(run_key)
     assert stable_agent_name("openclaw") == "openclaw"
+
+
+def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
+    source = AGENT_MODEL_PLANE.read_text()
+
+    for harness in ("hermes", "openclaw", "claude-code", "codex", "letta"):
+        assert f'TRACE_HARNESS = "{harness}"' in source
+    assert '"gen_ai.conversation.id": self.trace_conversation_id' in source
+    assert '"fugue.conversation_id": self.trace_conversation_id' in source
+    assert '"planned_conversation_id": self.trace_conversation_id' in source
+    assert '"FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id' not in source
+    assert "dict.fromkeys([self.trace_conversation_id, *native_ids])" in source
 
 
 def test_trace_content_is_explicit() -> None:

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -178,6 +180,8 @@ def execute_cells(
     event_callback: EventCallback | None = None,
     cell_started: CellStartedCallback | None = None,
     cell_finished: CellFinishedCallback | None = None,
+    cancellation_event: threading.Event | None = None,
+    cancellation_message: str = "Run cancelled by the operator.",
 ) -> list[CellOutcome]:
     if max_workers < 1:
         raise ValueError("cell concurrency must be positive")
@@ -212,12 +216,34 @@ def execute_cells(
 
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
+        if cancellation_event is not None and cancellation_event.is_set():
+            outcome = CellOutcome(cell.id, "cancelled", error=cancellation_message)
+            ended = datetime.now(UTC)
+            store.append_cell(
+                cell.record(
+                    "cancelled",
+                    error=cancellation_message,
+                    ended_at=ended.isoformat(),
+                )
+            )
+            store.append_event(
+                "cell_state",
+                cell=cell,
+                status="cancelled",
+                message=cancellation_message,
+            )
+            return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
         execution_env = dict(cell.env)
-        if cell_started is not None:
+        cell_started_called = False
+        if (
+            cell_started is not None
+            and not (cancellation_event is not None and cancellation_event.is_set())
+        ):
             try:
+                cell_started_called = True
                 execution_env.update(cell_started(cell) or {})
             except Exception as exc:
                 store.append_event(
@@ -225,9 +251,48 @@ def execute_cells(
                     cell=cell,
                     message=f"{type(exc).__name__}: {exc}",
                 )
+        if cancellation_event is not None and cancellation_event.is_set():
+            outcome = CellOutcome(cell.id, "cancelled", error=cancellation_message)
+            ended = datetime.now(UTC)
+            if cell_started_called and cell_finished is not None:
+                try:
+                    cell_finished(cell, outcome)
+                except Exception as exc:
+                    store.append_event(
+                        "observability_error",
+                        cell=cell,
+                        message=f"{type(exc).__name__}: {exc}",
+                    )
+            store.append_cell(
+                cell.record(
+                    "cancelled",
+                    error=cancellation_message,
+                    started_at=started.isoformat(),
+                    ended_at=ended.isoformat(),
+                    wall_time_sec=(ended - started).total_seconds(),
+                )
+            )
+            store.append_event(
+                "cell_state",
+                cell=cell,
+                status="cancelled",
+                message=cancellation_message,
+                wall_time_sec=(ended - started).total_seconds(),
+            )
+            return outcome
         try:
             if runner is None:
-                returncode = _run_cell_process(cell, repo_root, store, execution_env)
+                returncode = _run_cell_process(
+                    cell,
+                    repo_root,
+                    store,
+                    execution_env,
+                    **(
+                        {"cancellation_event": cancellation_event}
+                        if cancellation_event is not None
+                        else {}
+                    ),
+                )
             else:
                 result = runner(
                     list(cell.command),
@@ -241,9 +306,16 @@ def execute_cells(
                 if runner is None and returncode == 0
                 else None
             )
-            status: CellStatus = (
-                "passed" if returncode == 0 and trial_error is None else "failed"
+            cancellation_requested = bool(
+                cancellation_event is not None and cancellation_event.is_set()
             )
+            if cancellation_requested and (returncode != 0 or trial_error is not None):
+                status: CellStatus = "cancelled"
+                trial_error = cancellation_message
+            else:
+                status = (
+                    "passed" if returncode == 0 and trial_error is None else "failed"
+                )
             outcome = CellOutcome(
                 cell.id,
                 status,
@@ -298,6 +370,8 @@ def _run_cell_process(
     repo_root: Path,
     store: _RunStore,
     env: Mapping[str, str],
+    *,
+    cancellation_event: threading.Event | None = None,
 ) -> int:
     log_path = store.logs_dir / f"{cell.id}.log"
     process = subprocess.Popen(
@@ -308,17 +382,71 @@ def _run_cell_process(
         bufsize=1,
         env=dict(env),
         cwd=repo_root,
+        start_new_session=True,
+    )
+    store.append_cell(
+        cell.record(
+            "running",
+            harbor_pid=process.pid,
+            harbor_process_group=process.pid,
+        )
     )
     secrets = secrets_from_env(env)
+    reader_error: list[BaseException] = []
+
     with log_path.open("a") as log:
         assert process.stdout is not None
-        for line in process.stdout:
-            safe_line = redact_text(line, secrets)
-            log.write(safe_line)
-            log.flush()
-            print(safe_line, end="", flush=True)
-            store.append_event("log", cell=cell, chunk=safe_line)
-    return process.wait()
+        stdout = process.stdout
+
+        def drain_output() -> None:
+            try:
+                with stdout:
+                    for line in stdout:
+                        safe_line = redact_text(line, secrets)
+                        log.write(safe_line)
+                        log.flush()
+                        print(safe_line, end="", flush=True)
+                        store.append_event("log", cell=cell, chunk=safe_line)
+            except BaseException as exc:  # pragma: no cover - defensive I/O guard
+                reader_error.append(exc)
+
+        reader = threading.Thread(
+            target=drain_output,
+            name=f"fugue-cell-log-{cell.id}",
+            daemon=True,
+        )
+        reader.start()
+        while process.poll() is None:
+            if cancellation_event is not None and cancellation_event.wait(0.1):
+                _terminate_process_group(process)
+                break
+            time.sleep(0.05)
+        returncode = process.wait()
+        reader.join(timeout=2)
+        if reader.is_alive():  # pragma: no cover - dead children should close the pipe
+            stdout.close()
+            reader.join(timeout=2)
+    if reader_error:
+        raise RuntimeError(f"cell log reader failed: {reader_error[0]}")
+    return returncode
+
+
+def _terminate_process_group(
+    process: subprocess.Popen[str], *, grace_sec: float = 2.0
+) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=grace_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def _harbor_job_error(cell: PlannedCell, repo_root: Path) -> str | None:
@@ -339,11 +467,16 @@ def _harbor_job_error(cell: PlannedCell, repo_root: Path) -> str | None:
     return None
 
 
-def write_run_manifest(repo_root: Path, run_id: str, values: dict[str, Any]) -> Path:
+def update_run_manifest(
+    repo_root: Path,
+    run_id: str,
+    updater: Callable[[dict[str, Any]], dict[str, Any]],
+) -> Path:
     path = repo_root / ".fugue" / "runtime" / run_id / "run.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with FileLock(path.with_suffix(".lock").as_posix()):
         existing = read_run_manifest(path.parent) or {}
+        values = updater(dict(existing))
         created_at = existing.get("created_at") or datetime.now(UTC).isoformat()
         temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temp.write_text(
@@ -364,6 +497,10 @@ def write_run_manifest(repo_root: Path, run_id: str, values: dict[str, Any]) -> 
         )
         os.replace(temp, path)
     return path
+
+
+def write_run_manifest(repo_root: Path, run_id: str, values: dict[str, Any]) -> Path:
+    return update_run_manifest(repo_root, run_id, lambda _: values)
 
 
 def read_run_manifest(run_dir: Path) -> dict[str, Any] | None:

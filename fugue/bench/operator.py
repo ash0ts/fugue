@@ -5,8 +5,11 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import sys
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +37,7 @@ from fugue.bench.execution import (
     mark_unfinished_cells,
     new_run_id,
     plan_cells,
+    update_run_manifest,
     write_run_manifest,
 )
 from fugue.bench.export import (
@@ -63,6 +67,7 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import BenchmarkManifest, load_manifest
 from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
+from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.sources import (
     SkillInspection,
     SkillLockEntry,
@@ -1035,6 +1040,7 @@ class OperatorService:
             if request.variants
             else None
         )
+        source_provenance = resolve_fugue_source_provenance(self.repo_root)
         for workload in workloads:
             if workload.runner == "harbor":
                 manifest_path = _resolve(
@@ -1101,6 +1107,7 @@ class OperatorService:
                             scorer_reference(item) for item in workload.scorers
                         ],
                         asset_overlay=asset_overlay,
+                        source_provenance=source_provenance,
                     )
                 )
             else:
@@ -1113,6 +1120,7 @@ class OperatorService:
                         run_name=run_name,
                         request=request,
                         run_id=run_id,
+                        source_provenance=source_provenance,
                     )
                 )
         return rendered
@@ -1127,6 +1135,7 @@ class OperatorService:
         run_name: str,
         request: ExperimentRequest,
         run_id: str,
+        source_provenance: dict[str, Any],
     ) -> list[RenderedJob]:
         if not workload.dataset:
             raise ValueError(f"workload {workload.id} requires dataset")
@@ -1297,6 +1306,7 @@ class OperatorService:
                     "runner": workload.runner,
                     "n_attempts": attempts,
                     "trace_content": experiment.trace_content,
+                    "fugue_source": source_provenance,
                 },
             )
             candidate_id = resolved_candidate.candidate_id
@@ -1401,12 +1411,15 @@ class OperatorService:
         run_id: str,
         experiment: ExperimentSpec | None = None,
         cell_runner: Any = None,
+        cancellation_event: threading.Event | None = None,
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
         selected = experiment or self.experiment(request.experiment_id)
         resolved = _experiment_with_request_overrides(selected, request)
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        cancel_event = cancellation_event or threading.Event()
+        restore_sigterm = _install_worker_sigterm_handler(cancel_event)
         write_run_manifest(
             self.repo_root,
             run_id,
@@ -1418,7 +1431,10 @@ class OperatorService:
             },
         )
         running = False
+        live: LiveEvaluationCoordinator | None = None
         try:
+            if cancel_event.is_set():
+                raise _RunCancellation
             snapshot_path = run_dir / "experiment.yaml"
             temporary = snapshot_path.with_name(
                 f".{snapshot_path.name}.{os.getpid()}.tmp"
@@ -1446,6 +1462,8 @@ class OperatorService:
                 env=self.env,
             )
             write_run_input_lock(self.repo_root, run_snapshot)
+            if cancel_event.is_set():
+                raise _RunCancellation
             job_dirs = sorted(
                 {
                     str(job.config.get("jobs_dir"))
@@ -1472,7 +1490,6 @@ class OperatorService:
             )
             running = True
             run_env = rendered[0].env if rendered else self.env
-            live = None
             observability_error = None
             if (
                 cells
@@ -1486,6 +1503,7 @@ class OperatorService:
                         repo_root=self.repo_root,
                         project=trace_project_slug(run_env),
                         env=run_env,
+                        cancellation_event=cancel_event,
                     )
                 except Exception as exc:
                     observability_error = f"{type(exc).__name__}: {exc}"
@@ -1510,29 +1528,71 @@ class OperatorService:
                     if local is not None
                     else None
                 ),
+                cancellation_event=cancel_event,
             )
-            publication = live.finalize() if live is not None else None
+            cancelled = cancel_event.is_set() or any(
+                item.status == "cancelled" for item in outcomes
+            )
+            publication = (
+                live.finalize(cancelled=True)
+                if live is not None and cancelled
+                else live.finalize()
+                if live is not None
+                else None
+            )
             failures = list(publication.failures if publication else ())
             if observability_error:
                 failures.insert(0, observability_error)
             failed = sum(item.status == "failed" for item in outcomes)
             skipped = sum(item.status == "not_applicable" for item in outcomes)
+            cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
+            passed = sum(item.status == "passed" for item in outcomes)
             write_run_manifest(
                 self.repo_root,
                 run_id,
                 {
-                    "status": "failed" if failed else "passed",
+                    "status": "cancelled"
+                    if cancelled
+                    else "failed"
+                    if failed
+                    else "passed",
                     "ended_at": _now(),
-                    "passed_cells": len(outcomes) - failed - skipped,
+                    "error": "Run cancelled by the operator." if cancelled else None,
+                    "passed_cells": passed,
                     "failed_cells": failed,
+                    "cancelled_cells": cancelled_cells,
                     "not_applicable_cells": skipped,
-                    "observability_status": "failed" if failures else "passed",
+                    "observability_status": "failed"
+                    if failures
+                    else "cancelled"
+                    if cancelled
+                    else "passed",
                     "evaluation_runs": [
                         asdict(item) for item in publication.evaluations
                     ]
                     if publication
                     else [],
                     "evaluation_failures": failures,
+                },
+            )
+        except _RunCancellation:
+            if live is not None:
+                live.cancel_open_predictions("Run cancelled by the operator.")
+                live.finalize(cancelled=True)
+            if running:
+                mark_unfinished_cells(
+                    run_dir,
+                    "cancelled",
+                    message="Run cancelled by the operator.",
+                )
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "cancelled",
+                    "ended_at": _now(),
+                    "error": "Run cancelled by the operator.",
+                    "observability_status": "cancelled",
                 },
             )
         except KeyboardInterrupt:
@@ -1548,17 +1608,40 @@ class OperatorService:
                 },
             )
         except Exception as exc:
-            write_run_manifest(
-                self.repo_root,
-                run_id,
-                {
-                    "status": "failed",
-                    "ended_at": _now(),
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "phase": "running" if running else "starting",
-                },
-            )
-            raise
+            if cancel_event.is_set():
+                if live is not None:
+                    live.cancel_open_predictions("Run cancelled by the operator.")
+                    live.finalize(cancelled=True)
+                if running:
+                    mark_unfinished_cells(
+                        run_dir,
+                        "cancelled",
+                        message="Run cancelled by the operator.",
+                    )
+                write_run_manifest(
+                    self.repo_root,
+                    run_id,
+                    {
+                        "status": "cancelled",
+                        "ended_at": _now(),
+                        "error": "Run cancelled by the operator.",
+                        "observability_status": "cancelled",
+                    },
+                )
+            else:
+                write_run_manifest(
+                    self.repo_root,
+                    run_id,
+                    {
+                        "status": "failed",
+                        "ended_at": _now(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "phase": "running" if running else "starting",
+                    },
+                )
+                raise
+        finally:
+            restore_sigterm()
         return self.run_summary(run_id)
 
     def launch(
@@ -1759,6 +1842,19 @@ class OperatorService:
             skipped = publication.skipped
             evaluations = publication.evaluations
             publication_failures = publication.failures
+            direct_evaluations = tuple(
+                item for item in evaluations if item.direct_predictions > 0
+            )
+            if direct_evaluations or publication_failures:
+                update_run_manifest(
+                    self.repo_root,
+                    run_id,
+                    lambda manifest: _publication_manifest_update(
+                        manifest,
+                        direct_evaluations,
+                        publication_failures,
+                    ),
+                )
         return ExportSummary(
             path=output,
             rows=len(rows),
@@ -2252,10 +2348,96 @@ def as_json(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True, default=_json_default)
 
 
+def _merge_published_evaluations(
+    existing: Any,
+    published: tuple[PublishedEvaluation, ...],
+) -> list[dict[str, Any]]:
+    current = [dict(item) for item in (existing or []) if isinstance(item, dict)]
+    replacements: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in published:
+        value = asdict(item)
+        replacements[_published_evaluation_key(value)] = value
+    merged: list[dict[str, Any]] = []
+    replaced: set[tuple[str, str, str]] = set()
+    for item in current:
+        key = _published_evaluation_key(item)
+        if key not in replacements:
+            merged.append(item)
+            continue
+        if key not in replaced:
+            merged.append(replacements[key])
+            replaced.add(key)
+    merged.extend(value for key, value in replacements.items() if key not in replaced)
+    return merged
+
+
+def _publication_manifest_update(
+    manifest: dict[str, Any],
+    evaluations: tuple[PublishedEvaluation, ...],
+    failures: tuple[str, ...],
+) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if evaluations:
+        values["evaluation_runs"] = _merge_published_evaluations(
+            manifest.get("evaluation_runs"), evaluations
+        )
+    if failures:
+        values["evaluation_failures"] = list(
+            dict.fromkeys(
+                [
+                    *(
+                        str(item)
+                        for item in manifest.get("evaluation_failures", [])
+                        if item
+                    ),
+                    *(str(item) for item in failures if item),
+                ]
+            )
+        )
+    return values
+
+
+def _published_evaluation_key(value: dict[str, Any]) -> tuple[str, str, str]:
+    agent_predictions = int(value.get("agent_predictions") or 0)
+    direct_predictions = int(value.get("direct_predictions") or 0)
+    if agent_predictions and direct_predictions:
+        kind = "mixed"
+    elif direct_predictions:
+        kind = "direct"
+    elif agent_predictions:
+        kind = "agent"
+    else:
+        kind = "unknown"
+    return str(value.get("candidate_id") or ""), str(value.get("name") or ""), kind
+
+
 def _json_default(value: Any) -> Any:
     if hasattr(value, "__dataclass_fields__"):
         return asdict(value)
     return str(value)
+
+
+class _RunCancellation(Exception):
+    pass
+
+
+def _install_worker_sigterm_handler(
+    cancellation_event: threading.Event,
+) -> Callable[[], None]:
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def request_cancellation(signum: int, frame: Any) -> None:
+        del signum, frame
+        cancellation_event.set()
+
+    signal.signal(signal.SIGTERM, request_cancellation)
+
+    def restore() -> None:
+        signal.signal(signal.SIGTERM, previous)
+
+    return restore
 
 
 def _now() -> str:

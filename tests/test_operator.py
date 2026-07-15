@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +13,9 @@ from fugue.bench.ai import AssetDraft
 from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
 from fugue.bench.export import PublicationResult, PublishedEvaluation
 from fugue.bench.library import (
+    ContextSelection,
     EvaluationGenerationSpec,
+    IntegrationSelection,
     RubricScorerSelection,
     WorkloadSpec,
 )
@@ -302,6 +306,58 @@ def test_execute_run_persists_snapshot_before_first_cell(
     assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
 
 
+def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "operator-cancellation"
+    cancellation = threading.Event()
+    events: list[tuple[str, object]] = []
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell) -> None:
+            events.append(("begin", cell.id))
+
+        def finish_cell(self, cell, outcome) -> None:
+            events.append(("finish", outcome.status))
+
+        def cancel_open_predictions(self, reason: str) -> None:
+            events.append(("cancel_open", reason))
+
+        def finalize(self, *, cancelled: bool = False) -> PublicationResult:
+            events.append(("finalize", cancelled))
+            return PublicationResult(published=0, skipped=0)
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
+
+    def runner(command, **kwargs):
+        cancellation.set()
+        return subprocess.CompletedProcess(command, 1)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id=run_id,
+        cell_runner=runner,
+        cancellation_event=cancellation,
+    )
+
+    assert result.status == "cancelled"
+    assert events[0][0] == "begin"
+    assert ("finish", "cancelled") in events
+    assert ("finalize", True) in events
+    assert not any(name == "cancel_open" for name, _ in events)
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
+    assert manifest is not None
+    assert manifest["status"] == "cancelled"
+    assert manifest["cancelled_cells"] == 1
+    assert manifest["failed_cells"] == 0
+
+
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -367,6 +423,174 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     assert {item["candidate_id"] for item in snapshot["planned_matrix"]} == set(
         snapshot["candidates"]
     )
+
+
+def test_operator_resolves_source_provenance_once_per_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = replace(service.experiment("demo"), n_attempts=2)
+    provenance = {
+        "schema_version": 1,
+        "kind": "git",
+        "commit": "a" * 40,
+        "dirty": False,
+    }
+    calls: list[Path] = []
+
+    def resolve_once(repo_root: Path) -> dict:
+        calls.append(repo_root)
+        return provenance
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.resolve_fugue_source_provenance",
+        resolve_once,
+    )
+    jobs = service.rendered_jobs(
+        service.request_for_experiment(experiment),
+        run_id="source-once",
+        experiment=experiment,
+    )
+
+    assert len(jobs) == 2
+    assert calls == [tmp_path]
+    assert all(
+        job.resolved_candidate.execution_definition["fugue_source"] == provenance
+        for job in jobs
+    )
+
+
+def test_snapshot_locks_generated_context_runtime_per_cell(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/rag-bm25.yaml").write_text(
+        """
+id: rag-bm25
+title: Fugue RAG
+provider: fugue.bench.context:RagContextProvider
+version: "2"
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable]
+license: Fugue
+config:
+  mode: bm25
+  binding: {managed_runtime: fugue_context}
+"""
+    )
+    experiment = service.experiment("demo")
+    experiment = replace(
+        experiment,
+        variants=[
+            replace(
+                experiment.variants[0],
+                context=ContextSelection(system_id="rag-bm25"),
+            )
+        ],
+    )
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="context-lock",
+        experiment=experiment,
+    )
+    cells = plan_cells(jobs, run_id="context-lock", run_name="context lock")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="context-lock",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    [job] = jobs
+    [planned] = snapshot["planned_matrix"]
+    [asset_id] = planned["generated_runtime_asset_ids"]
+    asset = snapshot["assets"][asset_id]
+    [runtime_file] = job.generated_runtime_files
+    raw = runtime_file.read_bytes()
+    assert asset["kind"] == "generated_runtime"
+    assert asset["path"].startswith(".fugue/runtime/context-lock/context-runtime/")
+    assert asset["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert asset["body"].encode() == raw
+    assert (
+        snapshot["candidate_runtime"][job.candidate_id]["context_runtime"]
+        == (job.resolved_candidate.execution_definition["context_runtime"])
+    )
+    fugue_source = job.resolved_candidate.execution_definition["fugue_source"]
+    assert fugue_source["kind"] == "unversioned"
+    assert fugue_source["dirty"] is True
+    assert snapshot["runtime"]["fugue_source"] == fugue_source
+    assert snapshot["candidate_runtime"][job.candidate_id]["fugue_source"] == (
+        fugue_source
+    )
+    assert verify_snapshot(snapshot)
+    tampered = json.loads(json.dumps(snapshot))
+    tampered["assets"][asset_id]["body"] += "\n# changed after planning\n"
+    assert not verify_snapshot(tampered)
+    assert "model-secret" not in json.dumps(snapshot)
+
+
+def test_snapshot_locks_generated_integration_runtime_per_cell(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    root = tmp_path / "configs" / "fugue" / "integrations"
+    root.mkdir()
+    (root / "api.yaml").write_text(
+        """
+id: api
+version: "1"
+support: experimental
+runtime:
+  type: compose
+  image: ghcr.io/example/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  service: api
+  port: 8000
+interfaces:
+  - {type: http, name: endpoint, path: /}
+"""
+    )
+    experiment = service.experiment("demo")
+    experiment = replace(
+        experiment,
+        variants=[
+            replace(
+                experiment.variants[0],
+                integrations=[IntegrationSelection("api")],
+            )
+        ],
+    )
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="integration-lock",
+        experiment=experiment,
+    )
+    cells = plan_cells(jobs, run_id="integration-lock", run_name="integration lock")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="integration-lock",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    [job] = jobs
+    [runtime_file] = job.generated_runtime_files
+    [asset_id] = snapshot["planned_matrix"][0]["generated_runtime_asset_ids"]
+    asset = snapshot["assets"][asset_id]
+    assert asset["kind"] == "generated_runtime"
+    assert asset["path"].startswith(".fugue/runtime/integration-lock/integrations/")
+    assert asset["body"] == runtime_file.read_text()
+    assert asset["sha256"] == hashlib.sha256(runtime_file.read_bytes()).hexdigest()
+    assert "api:" in asset["body"]
+    assert job.resolved_candidate.definition["integrations"][0]["id"] == "api"
+    assert job.integration_provenance[0]["support"] == "experimental"
+    assert verify_snapshot(snapshot)
 
 
 def test_candidate_prefixes_are_display_only_and_must_resolve_uniquely(

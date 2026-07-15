@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -10,10 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock
+
 from fugue.bench.execution import (
+    latest_cell_records,
     list_run_manifests,
     mark_unfinished_cells,
     read_run_manifest,
+    update_run_manifest,
     write_run_manifest,
 )
 
@@ -33,10 +38,11 @@ class ManagedRun:
 
 
 class RunSupervisor:
-    def __init__(self, repo_root: Path):
+    def __init__(self, repo_root: Path, *, cancel_grace_sec: float = 20.0):
         self.repo_root = repo_root.resolve()
         self.runtime_root = self.repo_root / ".fugue" / "runtime"
         self._processes: dict[int, subprocess.Popen[str]] = {}
+        self.cancel_grace_sec = max(cancel_grace_sec, 0.0)
 
     def start_detached(
         self,
@@ -113,24 +119,74 @@ class RunSupervisor:
         run = self.get(run_id)
         if run.status not in {"starting", "running"}:
             return run
-        process_group = run.metadata.get("process_group") or run.pid
-        if isinstance(process_group, int):
-            try:
-                os.killpg(process_group, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        if run.pid is not None:
-            self._reap_local_process(run.pid, wait=True)
         message = "Run cancelled by the operator."
-        mark_unfinished_cells(run.run_dir, "cancelled", message=message)
-        write_run_manifest(
+        requested_at = _now()
+        update_run_manifest(
             self.repo_root,
             run_id,
-            {
+            lambda _: {
+                "cancellation_requested_at": requested_at,
+                "cancellation_reason": message,
+            },
+        )
+        if run.pid is not None:
+            try:
+                os.kill(run.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+        deadline = time.monotonic() + self.cancel_grace_sec
+        while time.monotonic() < deadline:
+            current = read_run_manifest(run.run_dir) or {}
+            if current.get("status") not in {"starting", "running"}:
+                return self.get(run_id, recover=False)
+            if run.pid is None or not _pid_alive(run.pid):
+                break
+            time.sleep(0.05)
+
+        current = read_run_manifest(run.run_dir) or {}
+        if current.get("status") not in {"starting", "running"}:
+            return self.get(run_id, recover=False)
+        if run.pid is not None and _pid_alive(run.pid):
+            _signal_recorded_cell_groups(run.run_dir, signal.SIGKILL)
+            process_group = run.metadata.get("process_group") or run.pid
+            if isinstance(process_group, int):
+                try:
+                    os.killpg(process_group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            for _ in range(20):
+                if not _pid_alive(run.pid):
+                    break
+                time.sleep(0.05)
+            if _pid_alive(run.pid):
+                raise RuntimeError(
+                    f"run {run_id} did not exit after cancellation escalation"
+                )
+
+        failures = _record_forced_evaluation_cancellation(run.run_dir, message)
+        mark_unfinished_cells(run.run_dir, "cancelled", message=message)
+
+        def forced_cancellation(manifest: dict[str, Any]) -> dict[str, Any]:
+            existing_failures = [
+                str(item) for item in manifest.get("evaluation_failures") or ()
+            ]
+            combined_failures = list(dict.fromkeys([*existing_failures, *failures]))
+            return {
                 "status": "cancelled",
                 "ended_at": _now(),
                 "error": message,
-            },
+                "cancellation_forced": True,
+                "observability_status": (
+                    "failed" if combined_failures else "cancelled"
+                ),
+                "evaluation_failures": combined_failures,
+            }
+
+        update_run_manifest(
+            self.repo_root,
+            run_id,
+            forced_cancellation,
         )
         return self.get(run_id, recover=False)
 
@@ -283,6 +339,70 @@ def _redact_command(command: list[str]) -> list[str]:
         redacted.append(value)
         hide_next = value.lower() in {"--api-key", "--password", "--secret", "--token"}
     return redacted
+
+
+def _signal_recorded_cell_groups(run_dir: Path, signum: signal.Signals) -> None:
+    for record in latest_cell_records(run_dir / "cells.jsonl"):
+        process_group = record.get("harbor_process_group")
+        if not isinstance(process_group, int) or process_group <= 0:
+            continue
+        try:
+            if os.getpgid(process_group) != process_group:
+                continue
+            os.killpg(process_group, signum)
+        except ProcessLookupError:
+            continue
+
+
+def _record_forced_evaluation_cancellation(
+    run_dir: Path, message: str
+) -> list[str]:
+    path = run_dir / "evaluations.jsonl"
+    if not path.is_file():
+        return []
+    latest: dict[str, dict[str, Any]] = {}
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        cell_id = str(record.get("cell_id") or "")
+        if cell_id:
+            latest[cell_id] = record
+    failures: list[str] = []
+    terminal = {"cancelled", "cancelled_unclosed", "failed", "finalized"}
+    records: list[dict[str, Any]] = []
+    for cell_id, record in latest.items():
+        if record.get("status") in terminal:
+            continue
+        opened = record.get("status") == "prediction_open"
+        status = "cancelled_unclosed" if opened else "cancelled"
+        value = {
+            "schema_version": 1,
+            "run_id": run_dir.name,
+            "status": status,
+            "recorded_at": _now(),
+            "cell_id": cell_id,
+            "candidate_id": record.get("candidate_id"),
+            "eval_predict_and_score_call_id": record.get(
+                "eval_predict_and_score_call_id"
+            ),
+            "error": (
+                "Controller exited before the open evaluation prediction could be "
+                "closed; cloud state is unknown."
+                if opened
+                else message
+            ),
+        }
+        records.append(value)
+        if opened:
+            failures.append(f"{cell_id}: cancelled prediction was not closed")
+    if records:
+        with FileLock(f"{path}.lock"), path.open("a") as handle:
+            for record in records:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+            handle.flush()
+    return failures
 
 
 def _now() -> str:

@@ -1,16 +1,20 @@
 import json
 import sys
-from dataclasses import replace
+import threading
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from fugue.bench import export
-from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.agent_tracing import agent_conversation_id
+from fugue.bench import export, operator
+from fugue.bench.execution import CellOutcome, PlannedCell, write_run_manifest
 from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
     LiveEvaluationCoordinator,
+    PublicationResult,
+    PublishedEvaluation,
     _fetch_agents_spans,
     _fetch_calls_spans,
     _summarize_spans,
@@ -20,6 +24,7 @@ from fugue.bench.export import (
     publish_to_weave,
     write_jsonl,
 )
+from fugue.bench.operator import OperatorService
 
 
 def _write_export_fixture(tmp_path: Path) -> Path:
@@ -374,6 +379,301 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     assert summaries == [True, True, True]
 
 
+def test_weave_publication_counts_direct_measurement_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeLogger:
+        ui_url = "https://wandb.test/evaluations/direct"
+
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def log_example(self, inputs, output, scores) -> None:
+            pass
+
+        def log_summary(self) -> None:
+            pass
+
+        def fail(self, exception) -> None:
+            raise AssertionError(exception)
+
+    monkeypatch.setattr(
+        export,
+        "initialize_weave",
+        lambda project, env: SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    common = {
+        "experiment_id": "memory-ab",
+        "run_id": "run-a",
+        "workload_id": "continuity",
+        "dataset": "repository-continuity",
+        "task_name": "maintainer-preferences",
+        "candidate_id": "candidate-direct",
+        "harness": "sequence",
+        "variant_id": "markdown-log",
+        "context_system_id": "markdown-log",
+        "execution_kind": "provider_diagnostic",
+        "trial_index": 1,
+    }
+    rows = [
+        {
+            **common,
+            "record_type": "episode",
+            "comparison_example_id": f"episode-{index}",
+        }
+        for index in range(2)
+    ] + [
+        {
+            **common,
+            "record_type": "retrieval",
+            "comparison_example_id": f"probe-{index}",
+        }
+        for index in range(2)
+    ]
+
+    result = publish_to_weave(
+        rows,
+        "entity/project",
+        ledger_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+
+    assert result.published == 2
+    assert sum(item.examples for item in result.evaluations) == 4
+    assert sum(item.direct_predictions for item in result.evaluations) == 4
+    assert sum(item.agent_predictions for item in result.evaluations) == 0
+
+
+def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = PublishedEvaluation(
+        candidate_id="candidate-agent",
+        name="memory | coding | agent-scope",
+        examples=1,
+        url="https://wandb.test/evaluations/live",
+        agent_predictions=1,
+        linked_agent_predictions=1,
+        linking_failures=("agent link reason remains visible",),
+    )
+    direct = PublishedEvaluation(
+        candidate_id="candidate-direct",
+        name="memory | continuity | direct-scope",
+        examples=4,
+        url="https://wandb.test/evaluations/direct-v1",
+        evaluation_ref="weave:///direct-v1",
+        direct_predictions=4,
+    )
+    updated_direct = replace(
+        direct,
+        url="https://wandb.test/evaluations/direct-v2",
+        evaluation_ref="weave:///direct-v2",
+    )
+    write_run_manifest(
+        tmp_path,
+        "run-a",
+        {
+            "status": "passed",
+            "run_name": "memory",
+            "experiment_id": "memory-ab",
+            "trace_project": "entity/project",
+            "jobs_dirs": [],
+            "evaluation_runs": [asdict(live)],
+        },
+    )
+    publications = iter(
+        (
+            PublicationResult(1, 0, (direct,)),
+            PublicationResult(0, 1, (direct,)),
+            PublicationResult(1, 0, (updated_direct,)),
+        )
+    )
+    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        operator,
+        "publish_to_weave",
+        lambda *args, **kwargs: next(publications),
+    )
+    service = OperatorService(tmp_path)
+    output = tmp_path / "reports" / "run-a.jsonl"
+
+    service.export_run("run-a", out=output, to_weave=True)
+    service.export_run("run-a", out=output, to_weave=True)
+    service.export_run("run-a", out=output, to_weave=True, republish=True)
+
+    evaluations = service.run_summary("run-a").evaluations
+    assert len(evaluations) == 2
+    assert evaluations[0] == live
+    assert evaluations[1] == updated_direct
+    assert evaluations[1].direct_predictions == evaluations[1].examples == 4
+
+
+def test_export_recovers_direct_evaluation_after_marker_only_crash(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class FakeLogger:
+        ui_url = "https://wandb.test/evaluations/recovered"
+
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def log_example(self, inputs, output, scores) -> None:
+            pass
+
+        def log_summary(self) -> None:
+            pass
+
+        def fail(self, exception) -> None:
+            raise AssertionError(exception)
+
+    monkeypatch.setattr(
+        export,
+        "initialize_weave",
+        lambda project, env: SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    rows = [
+        {
+            "record_type": "retrieval",
+            "experiment_id": "memory-ab",
+            "run_id": "run-a",
+            "workload_id": "retrieval",
+            "dataset": "repository-retrieval",
+            "task_name": "probe-a",
+            "comparison_example_id": "example-a",
+            "candidate_id": "candidate-direct",
+            "harness": "direct",
+            "variant_id": "rag-bm25",
+            "context_system_id": "rag-bm25",
+            "execution_kind": "provider_diagnostic",
+            "trial_index": 1,
+        }
+    ]
+    ledger = tmp_path / ".fugue" / "runtime" / "publications"
+    first = publish_to_weave(
+        rows,
+        "entity/project",
+        ledger_root=ledger,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+    assert first.published == 1
+    write_run_manifest(
+        tmp_path,
+        "run-a",
+        {
+            "status": "passed",
+            "run_name": "memory",
+            "experiment_id": "memory-ab",
+            "trace_project": "entity/project",
+            "jobs_dirs": [],
+            "evaluation_runs": [],
+        },
+    )
+    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: rows)
+
+    recovered = OperatorService(tmp_path).export_run(
+        "run-a",
+        out=tmp_path / "reports" / "run-a.jsonl",
+        to_weave=True,
+    )
+
+    assert (recovered.published, recovered.skipped) == (0, 1)
+    assert len(recovered.evaluations) == 1
+    assert recovered.evaluations[0].url == FakeLogger.ui_url
+    assert recovered.evaluations[0].direct_predictions == 1
+    run_evaluations = OperatorService(tmp_path).run_summary("run-a").evaluations
+    assert run_evaluations == recovered.evaluations
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered", "message"),
+    (
+        ("candidate_id", "candidate-other", "candidate_id does not match"),
+        ("evaluation_scope_id", "scope-other", "evaluation_scope_id does not match"),
+        ("publication_mode", "live", "publication_mode does not match"),
+        ("examples", -1, "examples must be a nonnegative integer"),
+        (
+            "linked_agent_predictions",
+            2,
+            "linked_agent_predictions cannot exceed agent_predictions",
+        ),
+        ("direct_predictions", 2, "prediction counts cannot exceed examples"),
+    ),
+)
+def test_publication_marker_rejects_tampered_identity_and_counts(
+    tmp_path: Path, field: str, tampered: object, message: str
+) -> None:
+    marker = tmp_path / "publication.json"
+    value = {
+        "project": "entity/project",
+        "publication_id": "publication-a",
+        "candidate_id": "candidate-a",
+        "evaluation_scope_id": "scope-a",
+        "publication_mode": "post_hoc",
+        "name": "memory | retrieval | scope-a",
+        "examples": 1,
+        "agent_predictions": 1,
+        "linked_agent_predictions": 1,
+        "direct_predictions": 0,
+        "linking_failures": [],
+    }
+    value[field] = tampered
+    marker.write_text(json.dumps(value))
+
+    with pytest.raises(ValueError, match=message):
+        export._published_evaluation_from_marker(
+            marker,
+            project="entity/project",
+            publication_id="publication-a",
+            candidate_id="candidate-a",
+            evaluation_scope_id="scope-a",
+            publication_mode="post_hoc",
+        )
+
+
+def test_export_persists_publication_failures_without_clobbering_agent_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = PublishedEvaluation(
+        candidate_id="candidate-agent",
+        name="memory | coding | agent-scope",
+        examples=1,
+        url="https://wandb.test/evaluations/live",
+        agent_predictions=1,
+        linked_agent_predictions=1,
+    )
+    write_run_manifest(
+        tmp_path,
+        "run-a",
+        {
+            "status": "passed",
+            "run_name": "memory",
+            "experiment_id": "memory-ab",
+            "trace_project": "entity/project",
+            "jobs_dirs": [],
+            "evaluation_runs": [asdict(live)],
+            "evaluation_failures": ["live Agent publication warning"],
+        },
+    )
+    failure = "candidate-direct: RuntimeError: direct publication failed"
+    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        operator,
+        "publish_to_weave",
+        lambda *args, **kwargs: PublicationResult(0, 0, failures=(failure,)),
+    )
+    service = OperatorService(tmp_path)
+
+    service.export_run("run-a", to_weave=True)
+    service.export_run("run-a", to_weave=True)
+
+    run = service.run_summary("run-a")
+    assert run.evaluations == (live,)
+    assert run.evaluation_failures == (
+        "live Agent publication warning",
+        failure,
+    )
+
+
 def test_weave_publication_shares_dataset_across_candidates(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -693,6 +993,309 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert statuses == ["pending", "prediction_open", "trace_linked", "finalized"]
 
 
+def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
+    tmp_path: Path,
+) -> None:
+    predictions = []
+    loggers = []
+
+    class FakeDataset:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class FakePrediction:
+        def __init__(self, call_id: str) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id=call_id,
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    class FakeLogger:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+            self.failed = None
+            loggers.append(self)
+
+        def log_prediction(self, inputs):
+            prediction = FakePrediction(f"call-{len(predictions) + 1}")
+            predictions.append(prediction)
+            return prediction
+
+        def fail(self, exception) -> None:
+            self.failed = exception
+
+    def cell(name: str) -> PlannedCell:
+        return PlannedCell(
+            id=f"cell-{name}",
+            run_id="run-cancel",
+            run_name="cancel",
+            workload_id="coding",
+            task_id=f"task-{name}",
+            harness="codex",
+            context_system_id="none",
+            variant_id="none",
+            model_provider="wandb",
+            model="wandb/test-model",
+            trial_index=1,
+            comparison_example_id=f"example-{name}",
+            candidate_id=f"candidate-{name}",
+            execution_fingerprint=f"execution-{name}",
+            config_path=Path(f"{name}.json"),
+            result_path=Path("jobs") / name / "result.json",
+            command=("harbor", "run"),
+            env={"WANDB_API_KEY": "test-only"},
+            n_attempts=1,
+        )
+
+    cells = [cell("active"), cell("queued")]
+    coordinator = LiveEvaluationCoordinator(
+        cells,
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cells[0].env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+        summary_fetcher=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("cancelled predictions must not poll Weave")
+        ),
+    )
+
+    coordinator.begin_cell(cells[0])
+    coordinator.finish_cell(
+        cells[0],
+        CellOutcome(cells[0].id, "cancelled", error="operator cancellation"),
+    )
+    publication = coordinator.finalize(cancelled=True)
+
+    assert publication.failures == ()
+    assert predictions[0].exit_count == 1
+    assert predictions[0].output["status"] == "cancelled"
+    assert predictions[0].output["trace_link_status"] == "cancelled"
+    assert predictions[0].output["trace_link_reason"] == "operator cancellation"
+    assert all(logger.failed is not None for logger in loggers)
+    statuses = [
+        json.loads(line)["status"]
+        for line in (tmp_path / ".fugue/runtime/run-cancel/evaluations.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert statuses.count("prediction_open") == 1
+    assert statuses.count("cancelled") == 2
+    assert "failed" not in statuses
+    assert "finalized" not in statuses
+
+
+def test_live_cancellation_during_trace_fetch_closes_prediction_once(
+    tmp_path: Path,
+) -> None:
+    cancellation = threading.Event()
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+
+    class FakePrediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="call-a", project_id="entity/project", summary=None
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = FakePrediction()
+
+    class FakeLogger:
+        def __init__(self, **kwargs) -> None:
+            self.failed = None
+
+        def log_prediction(self, inputs):
+            return prediction
+
+        def fail(self, exception) -> None:
+            self.failed = exception
+
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-poll-cancel",
+        run_name="cancel during polling",
+        workload_id="coding",
+        task_id="task-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="wandb",
+        model="wandb/test-model",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/missing/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
+
+    def summaries(**kwargs):
+        fetch_started.set()
+        assert release_fetch.wait(2)
+        return {}
+
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+        summary_fetcher=summaries,
+        trace_timeout_sec=45,
+        cancellation_event=cancellation,
+    )
+    coordinator.begin_cell(cell)
+    worker = threading.Thread(
+        target=coordinator.finish_cell,
+        args=(cell, CellOutcome(cell.id, "passed", returncode=0)),
+    )
+    worker.start()
+    assert fetch_started.wait(2)
+
+    cancellation.set()
+    release_fetch.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert prediction.exit_count == 1
+    assert prediction.output["status"] == "cancelled"
+    assert prediction.output["trace_link_status"] == "cancelled"
+    statuses = [
+        json.loads(line)["status"]
+        for line in (
+            tmp_path / ".fugue/runtime/run-poll-cancel/evaluations.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert statuses == ["pending", "prediction_open", "cancelled"]
+
+
+def test_pre_agent_setup_failure_skips_trace_poll_and_reports_observability_failure(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "jobs/job/trial"
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "swe-bench/task-a",
+                "trial_name": "trial-a",
+                "agent_execution": None,
+                "exception_info": {
+                    "exception_type": "RuntimeError",
+                    "exception_message": "environment setup failed",
+                },
+            }
+        )
+    )
+
+    class FakePrediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="call-a", project_id="entity/project", summary=None
+            )
+            self.output = None
+
+        def __enter__(self):
+            return self
+
+        def log_score(self, name, value) -> None:
+            pass
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            pass
+
+    prediction = FakePrediction()
+
+    class FakeLogger:
+        ui_url = None
+
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+        def log_prediction(self, inputs):
+            return prediction
+
+        def log_summary(self) -> None:
+            pass
+
+        def fail(self, exception) -> None:
+            raise AssertionError(exception)
+
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-pre-agent",
+        run_name="pre-agent",
+        workload_id="coding",
+        task_id="task-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="wandb",
+        model="wandb/test-model",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs/job/result.json",
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+        summary_fetcher=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-agent failures must not poll Weave")
+        ),
+    )
+
+    coordinator.begin_cell(cell)
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(cell.id, "failed", returncode=1, error="trial failed"),
+    )
+    publication = coordinator.finalize()
+
+    assert len(publication.failures) == 1
+    assert publication.evaluations[0].agent_predictions == 1
+    assert publication.evaluations[0].linked_agent_predictions == 0
+    assert publication.evaluations[0].linking_failures == (
+        "cell-a: Agent execution did not start; no invoke_agent root was emitted",
+    )
+    assert prediction.output["trace_link_status"] == "not_started"
+    assert prediction.output["trace_link_error"] == (
+        "Agent execution did not start; no invoke_agent root was emitted"
+    )
+
+
 def test_direct_diagnostic_does_not_open_or_synthesize_agent_prediction(
     tmp_path: Path,
 ) -> None:
@@ -741,6 +1344,117 @@ def test_direct_diagnostic_does_not_open_or_synthesize_agent_prediction(
     assert "weave_agent_name" not in planned
     assert "planned_conversation_id" not in planned
     assert "weave_conversation_id" not in planned
+
+
+@pytest.mark.parametrize("harness", ["hermes", "openclaw"])
+def test_planned_agent_uses_adapter_conversation_identity(harness: str) -> None:
+    cell = PlannedCell(
+        id=f"cell-{harness}",
+        run_id="run-a",
+        run_name="memory-smoke",
+        workload_id="coding",
+        task_id="task-a",
+        harness=harness,
+        context_system_id="none",
+        variant_id="none",
+        model_provider="wandb",
+        model="wandb/test-model",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id=f"candidate-{harness}",
+        execution_fingerprint=f"execution-{harness}",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={"FUGUE_DATASET": "dataset-a"},
+        n_attempts=1,
+    )
+
+    planned = export._planned_evaluation_row(cell)
+    expected = agent_conversation_id(harness, planned["run_key"])
+
+    assert planned["planned_conversation_id"] == expected
+    assert planned["weave_conversation_id"] == expected
+
+
+def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
+    resolved = agent_conversation_id("openclaw", "run-a:task-a:openclaw:t001")
+    summary = _summarize_spans(
+        [
+            {
+                "id": "root",
+                "trace_id": "trace-a",
+                "attributes": {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": resolved,
+                },
+            },
+            {
+                "id": "chat",
+                "trace_id": "trace-a",
+                "parent_id": "root",
+                "attributes": {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.conversation.id": resolved,
+                },
+            },
+            {
+                "id": "tool",
+                "trace_id": "trace-a",
+                "parent_id": "chat",
+                "attributes": {
+                    "gen_ai.operation.name": "execute_tool",
+                    "gen_ai.conversation.id": resolved,
+                },
+            },
+        ]
+    )
+
+    assert summary["weave_conversation_ids"] == [resolved]
+    assert summary["weave_turn_count"] == 1
+    assert summary["weave_llm_call_count"] == 1
+    assert summary["weave_tool_call_count"] == 1
+
+
+def test_live_link_rejects_split_native_conversation_identity() -> None:
+    row = {
+        "trace_id": "a" * 32,
+        "root_span_id": "b" * 16,
+        "weave_conversation_ids": ["native-root", "split-tool"],
+        "weave_root_spans": [
+            {
+                "conversation_id": "native-root",
+                "trace_id": "a" * 32,
+                "span_id": "b" * 16,
+                "eval_predict_and_score_call_id": "prediction-1",
+            }
+        ],
+    }
+
+    root = export._verified_evaluation_root(row, "prediction-1")
+
+    assert root is None
+    assert row["trace_link_status"] == "identity_mismatch"
+    assert row["trace_link_error"] == (
+        "native trace operations do not share the root conversation identity"
+    )
+
+
+def test_live_link_reports_pre_agent_failure_without_disappearing_root() -> None:
+    row = {
+        "trace_id": "",
+        "root_span_id": "",
+        "weave_conversation_ids": [],
+        "weave_root_spans": [],
+    }
+
+    root = export._verified_evaluation_root(row, "prediction-1")
+
+    assert root is None
+    assert row["trace_link_status"] == "missing"
+    assert row["trace_link_error"] == (
+        "no matching invoke_agent root reached Weave before the link deadline"
+    )
 
 
 def test_current_identity_schema_requires_canonical_candidate_id() -> None:
@@ -1426,7 +2140,9 @@ def test_not_applicable_cell_does_not_report_a_missing_trace() -> None:
         "applicable": False,
         "weave_root_spans": [],
         "trace_link_status": "missing",
-        "trace_link_error": "no matching native invoke_agent root",
+        "trace_link_error": (
+            "no matching invoke_agent root reached Weave before the link deadline"
+        ),
     }
 
     export._apply_observed_identity(row)

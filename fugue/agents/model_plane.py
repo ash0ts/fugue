@@ -36,7 +36,7 @@ import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 try:
     from typing import override
@@ -56,10 +56,10 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
 
 from fugue.agent_tracing import (
+    agent_conversation_id,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
-    openclaw_conversation_id,
     stable_agent_name,
 )
 from fugue.model_plane import (
@@ -287,6 +287,7 @@ class _TrialMetaMixin:
     """
 
     logs_dir: Path  # provided by BaseAgent
+    TRACE_HARNESS: ClassVar[str]
 
     @property
     def context_system_id(self) -> str:
@@ -315,6 +316,10 @@ class _TrialMetaMixin:
         return conversation_id(self.conversation_key)
 
     @property
+    def trace_conversation_id(self) -> str:
+        return agent_conversation_id(self.TRACE_HARNESS, self.conversation_key)
+
+    @property
     def trace_content(self) -> str:
         return normalize_trace_content(os.environ.get("FUGUE_TRACE_CONTENT"))
 
@@ -332,7 +337,7 @@ class _TrialMetaMixin:
     async def _begin_trial(
         self, harness: str, route: ModelRoute, environment: BaseEnvironment
     ) -> None:
-        os.environ["FUGUE_WEAVE_CONVERSATION_ID"] = self.conversation_id
+        os.environ["FUGUE_WEAVE_CONVERSATION_ID"] = self.trace_conversation_id
         os.environ["OTEL_RESOURCE_ATTRIBUTES"] = self._otel_resource_attributes(
             harness, route
         )
@@ -510,8 +515,8 @@ class _TrialMetaMixin:
             "trace_project": f"{entity}/{project}",
             "weave_agent_name": stable_agent_name(harness),
             "weave_conversation_key": self.conversation_key,
-            "weave_conversation_id": self.conversation_id,
-            "planned_conversation_id": self.conversation_id,
+            "weave_conversation_id": self.trace_conversation_id,
+            "planned_conversation_id": self.trace_conversation_id,
             "eval_predict_and_score_call_id": os.environ.get(
                 "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
             ),
@@ -563,11 +568,11 @@ class _TrialMetaMixin:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids
             meta["weave_conversation_ids"] = list(
-                dict.fromkeys([self.conversation_id, *native_ids])
+                dict.fromkeys([self.trace_conversation_id, *native_ids])
             )
         except (OSError, json.JSONDecodeError):
             meta["native_session_ids"] = []
-            meta["weave_conversation_ids"] = [self.conversation_id]
+            meta["weave_conversation_ids"] = [self.trace_conversation_id]
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     def _set_context_registration(self, value: dict[str, Any]) -> None:
@@ -585,7 +590,7 @@ class _TrialMetaMixin:
     def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
         attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
-            "gen_ai.conversation.id": self.conversation_id,
+            "gen_ai.conversation.id": self.trace_conversation_id,
             "fugue.run_key": self.run_key,
             "fugue.run_id": os.environ.get("FUGUE_RUN_ID", ""),
             "fugue.run_name": _experiment_name(),
@@ -626,7 +631,7 @@ class _TrialMetaMixin:
                 "FUGUE_INTEGRATION_IDS", ""
             ).replace(",", "|"),
             "fugue.tags": os.environ.get("FUGUE_TAGS", "").replace(",", "|"),
-            "fugue.conversation_id": self.conversation_id,
+            "fugue.conversation_id": self.trace_conversation_id,
         }
         attributes.update(
             {
@@ -835,6 +840,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
     run-key resource attributes.
     """
 
+    TRACE_HARNESS = "hermes"
     _HERMES_VERSION = "v2026.6.5"
 
     @staticmethod
@@ -1123,6 +1129,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     agent name groups all OpenClaw trials; Fugue attributes identify a trial.
     """
 
+    TRACE_HARNESS = "openclaw"
     CLI_FLAGS = [
         CliFlag("openclaw_agent_id", cli="--agent", type="str", default="main"),
         CliFlag("thinking", cli="--thinking", type="str", default="off"),
@@ -1334,7 +1341,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             "OPENCLAW_GATEWAY_PORT": str(self._GATEWAY_PORT),
             "OPENAI_API_KEY": _chat_key(self.model_route),
             "OPENAI_BASE_URL": _chat_base_url(self.model_route),
-            "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
+            "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
         }
         for key in self._provider_env_keys(provider):
             val = self._get_env(key)
@@ -1448,7 +1455,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         native_ids = self._regex_ids(
             self.logs_dir / "openclaw.txt", r'"sessionId"\s*:\s*"([^"]+)"'
         )
-        return [openclaw_conversation_id(self.conversation_id), *native_ids]
+        return list(dict.fromkeys([self.trace_conversation_id, *native_ids]))
 
 
 class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
@@ -1464,6 +1471,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     ``claude plugin ...`` registers the marketplace/plugin inside that dir.
     """
 
+    TRACE_HARNESS = "claude-code"
     _CLAUDE_CONFIG_DIR = (EnvironmentPaths.agent_dir / "sessions").as_posix()
     _CLAUDE_CODE_VERSION = "2.1.210"
     _WEAVE_PLUGIN_VERSION = "0.2.12"
@@ -1521,7 +1529,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             "WEAVE_PROJECT": _weave_project_slug(),
             "WANDB_API_KEY": _require_trace_key(),
             "IS_SANDBOX": "1",
-            "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
+            "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
         }
         # Three container gotchas, all verified empirically:
         # 1. `--source=local` registers the npm tree as a *directory
@@ -1617,7 +1625,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         self._resolved_env_vars.update(
             {
                 **self._trace_environment("claude-code", self.model_route),
-                "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
+                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
             }
         )
         try:
@@ -1671,6 +1679,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
     and the native Codex session id for export correlation.
     """
 
+    TRACE_HARNESS = "codex"
     # Bridged providers may reject OpenAI reasoning params; drop the stock
     # default of `-c model_reasoning_effort=high`.
     CLI_FLAGS = [flag for flag in Codex.CLI_FLAGS if flag.kwarg != "reasoning_effort"]
@@ -1798,7 +1807,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
             # Consumed by the emit.js patch from install(); keeps all trials
             # grouped under the stable Codex agent.
             "WEAVE_CODEX_AGENT_NAME": stable_agent_name("codex"),
-            "FUGUE_WEAVE_CONVERSATION_ID": self.conversation_id,
+            "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
         }
 
         config_toml = self._build_model_config_toml()
@@ -1958,6 +1967,7 @@ class FugueLetta(_TrialMetaMixin, BaseInstalledAgent):
     stateful results remain separate from the four-harness context matrix.
     """
 
+    TRACE_HARNESS = "letta"
     LETTA_VERSION = "0.26.2"
 
     @staticmethod

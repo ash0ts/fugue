@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -74,6 +75,8 @@ def build_run_snapshot(
     runtimes: dict[str, dict[str, Any]] = {}
     executions: dict[str, dict[str, Any]] = {}
     assets: dict[str, dict[str, Any]] = {}
+    generated_runtime_assets_by_config: dict[str, tuple[str, ...]] = {}
+    fugue_source: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
         existing = candidates.get(job.candidate_id)
@@ -89,6 +92,44 @@ def build_run_snapshot(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
             )
         executions[resolved.execution_fingerprint] = resolved.execution_definition
+        selected_fugue_source = resolved.execution_definition.get("fugue_source")
+        if selected_fugue_source is not None:
+            if not isinstance(selected_fugue_source, dict):
+                raise ValueError("Fugue source provenance must be an object")
+            if fugue_source is not None and fugue_source != selected_fugue_source:
+                raise ValueError("jobs resolved from different Fugue source states")
+            fugue_source = selected_fugue_source
+        generated_runtime_asset_ids: list[str] = []
+        for runtime_file in job.generated_runtime_files:
+            if not runtime_file.is_file():
+                raise ValueError(f"generated runtime asset is missing: {runtime_file}")
+            raw = runtime_file.read_bytes()
+            try:
+                body = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"generated runtime asset is not UTF-8: {runtime_file}"
+                ) from exc
+            asset_id = f"generated-runtime:{job.job_name}:{runtime_file.name}"
+            record = {
+                "kind": "generated_runtime",
+                "path": _snapshot_path(runtime_file, repo_root),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "body": body,
+                "generated": True,
+                "execution_fingerprint": resolved.execution_fingerprint,
+            }
+            prior_asset = assets.get(asset_id)
+            if prior_asset is not None and prior_asset != record:
+                raise ValueError(f"generated runtime asset {asset_id} differs")
+            assets[asset_id] = record
+            generated_runtime_asset_ids.append(asset_id)
+        config_key = job.config_path.resolve().as_posix()
+        prior_asset_ids = generated_runtime_assets_by_config.get(config_key)
+        selected_asset_ids = tuple(generated_runtime_asset_ids)
+        if prior_asset_ids is not None and prior_asset_ids != selected_asset_ids:
+            raise ValueError(f"job config {job.config_path} has inconsistent assets")
+        generated_runtime_assets_by_config[config_key] = selected_asset_ids
         context = get_context_system(job.context_system_id, repo_root)
         candidate_required_env: set[str] = {
             job.route.api_key_env,
@@ -154,6 +195,11 @@ def build_run_snapshot(
             "environment": _portable(environment, candidate_required_env, secret_names),
             "required_env": sorted(name for name in candidate_required_env if name),
         }
+        context_runtime = resolved.execution_definition.get("context_runtime")
+        if context_runtime is not None:
+            runtime["context_runtime"] = context_runtime
+        if selected_fugue_source is not None:
+            runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
         runtime["configuration_sha256"] = stable_digest(runtime)
         prior = runtimes.get(job.candidate_id)
@@ -174,6 +220,12 @@ def build_run_snapshot(
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,
             "config_path": cell.config_path.as_posix(),
+            "generated_runtime_asset_ids": list(
+                generated_runtime_assets_by_config.get(
+                    cell.config_path.resolve().as_posix(),
+                    (),
+                )
+            ),
         }
         for cell in cells
     )
@@ -213,6 +265,7 @@ def build_run_snapshot(
                 {job.resolved_candidate.execution_fingerprint for job in jobs}
             ),
             "executions": executions,
+            "fugue_source": fugue_source,
         },
         required_env=tuple(sorted(name for name in required_env if name)),
         preset=preset,
@@ -285,6 +338,13 @@ def _portable(
         required_env.add(name)
         return f"${{{name}}}"
     return value
+
+
+def _snapshot_path(path: Path, repo_root: Path) -> str:
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def _assert_no_secret_values(value: Any) -> None:

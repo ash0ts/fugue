@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +17,7 @@ from fugue.bench.execution import (
     latest_cell_records,
     new_run_id,
     read_run_manifest,
+    update_run_manifest,
     write_run_manifest,
 )
 from fugue.bench.export import export_rows
@@ -161,6 +165,58 @@ def test_cell_lifecycle_overlays_env_without_changing_outcome(tmp_path: Path) ->
     assert finished == [(cell.id, "passed")]
 
 
+def test_cancellation_terminates_active_process_and_never_opens_queued_cell(
+    tmp_path: Path,
+) -> None:
+    cancellation = threading.Event()
+    opened: list[str] = []
+    cells = [
+        replace(
+            _cell("run-cancel", name),
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+        )
+        for name in ("active", "queued")
+    ]
+    result: list = []
+
+    def execute() -> None:
+        result.extend(
+            execute_cells(
+                cells,
+                repo_root=tmp_path,
+                max_workers=1,
+                cell_started=lambda cell: opened.append(cell.id) or None,
+                cancellation_event=cancellation,
+            )
+        )
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    state_path = tmp_path / ".fugue/runtime/run-cancel/cells.jsonl"
+    process_group = None
+    for _ in range(100):
+        latest = {row["cell_id"]: row for row in latest_cell_records(state_path)}
+        process_group = latest.get("cell-active", {}).get("harbor_process_group")
+        if process_group:
+            break
+        time.sleep(0.02)
+    assert isinstance(process_group, int)
+
+    cancellation.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert {outcome.cell_id: outcome.status for outcome in result} == {
+        "cell-active": "cancelled",
+        "cell-queued": "cancelled",
+    }
+    assert opened == ["cell-active"]
+    latest = {row["cell_id"]: row for row in latest_cell_records(state_path)}
+    assert {row["status"] for row in latest.values()} == {"cancelled"}
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process_group, 0)
+
+
 def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -> None:
     barrier = threading.Barrier(3)
 
@@ -180,3 +236,32 @@ def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -
     assert manifest is not None
     assert manifest["pid"] == 123
     assert manifest["trace_project"] == "team/project"
+
+
+def test_update_run_manifest_merges_partial_updater_result(tmp_path: Path) -> None:
+    write_run_manifest(
+        tmp_path,
+        "run-update",
+        {
+            "status": "running",
+            "pid": 123,
+            "evaluation_failures": ["existing failure"],
+        },
+    )
+
+    update_run_manifest(
+        tmp_path,
+        "run-update",
+        lambda manifest: {
+            "evaluation_runs": [
+                {"candidate_id": "candidate-a", "name": "evaluation-a"}
+            ]
+        },
+    )
+
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime/run-update")
+    assert manifest is not None
+    assert manifest["status"] == "running"
+    assert manifest["pid"] == 123
+    assert manifest["evaluation_failures"] == ["existing failure"]
+    assert manifest["evaluation_runs"][0]["candidate_id"] == "candidate-a"

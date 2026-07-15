@@ -65,6 +65,7 @@ class IntegrationSpec:
 @dataclass(frozen=True)
 class IntegrationBinding:
     ids: tuple[str, ...] = ()
+    identity: tuple[dict[str, Any], ...] = ()
     mcp_servers: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
     instruction_paths: tuple[Path, ...] = ()
@@ -209,12 +210,31 @@ def bind_integrations(
     binding_env: dict[str, str] = {}
     allowed_hosts: list[str] = []
     provenance: list[dict[str, Any]] = []
+    identities: list[dict[str, Any]] = []
     names: set[str] = set()
     compose_ports: dict[int, str] = dict(reserved_ports or {})
     for selection in selections:
         spec = load_integration(selection.id, repo_root)
         _validate_selection_config(spec, selection.config)
+        selected_instruction_paths = tuple(
+            _instruction_path(repo_root, spec.id, value)
+            for value in spec.instructions
+        )
+        instruction_assets = tuple(
+            {
+                "path": value,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for value, path in zip(
+                spec.instructions,
+                selected_instruction_paths,
+                strict=True,
+            )
+        )
         ids.append(spec.id)
+        identities.append(
+            _integration_identity(spec, selection.config, instruction_assets)
+        )
         provenance.append(
             {
                 "id": spec.id,
@@ -224,6 +244,7 @@ def bind_integrations(
                 "selection_config_hash": _stable_hash(selection.config),
                 "runtime_type": spec.runtime.type,
                 "image": spec.runtime.image,
+                "instruction_assets": list(instruction_assets),
                 "allowed_tools": {
                     interface.name: list(interface.allowed_tools)
                     for interface in spec.interfaces
@@ -234,6 +255,7 @@ def bind_integrations(
         if spec.support in {"not_applicable", "disabled"}:
             return IntegrationBinding(
                 ids=tuple(ids),
+                identity=tuple(identities),
                 provenance=tuple(provenance),
                 applicable=False,
                 skip_reason=f"integration {spec.id} is {spec.support}",
@@ -242,6 +264,7 @@ def bind_integrations(
         if missing:
             return IntegrationBinding(
                 ids=tuple(ids),
+                identity=tuple(identities),
                 provenance=tuple(provenance),
                 applicable=False,
                 skip_reason=(
@@ -252,9 +275,7 @@ def bind_integrations(
         # credential values into a generated JobConfig.
         binding_env.update({name: f"${{{name}}}" for name in spec.required_env})
         allowed_hosts.extend(spec.allowed_hosts)
-        instruction_paths.extend(
-            _instruction_path(repo_root, spec.id, value) for value in spec.instructions
-        )
+        instruction_paths.extend(selected_instruction_paths)
         artifacts.extend(spec.artifacts)
         for interface in spec.interfaces:
             if interface.name in names:
@@ -290,6 +311,7 @@ def bind_integrations(
             compose_files.append(compose_path)
     return IntegrationBinding(
         ids=tuple(ids),
+        identity=tuple(identities),
         mcp_servers=tuple(servers),
         compose_files=tuple(compose_files),
         instruction_paths=tuple(instruction_paths),
@@ -298,6 +320,39 @@ def bind_integrations(
         allowed_hosts=tuple(dict.fromkeys(allowed_hosts)),
         provenance=tuple(provenance),
     )
+
+
+def _integration_identity(
+    spec: IntegrationSpec,
+    selection_config: dict[str, Any],
+    instruction_assets: tuple[dict[str, str], ...],
+) -> dict[str, Any]:
+    selection_config_hash = _stable_hash(selection_config)
+    behavior = {
+        "id": spec.id,
+        "version": spec.version,
+        "runtime": asdict(spec.runtime),
+        "interfaces": [asdict(interface) for interface in spec.interfaces],
+        "capabilities": list(spec.capabilities),
+        "required_env": list(spec.required_env),
+        "allowed_hosts": list(spec.allowed_hosts),
+        "instruction_digests": [item["sha256"] for item in instruction_assets],
+        "selection_config_hash": selection_config_hash,
+    }
+    return {
+        "id": spec.id,
+        "version": spec.version,
+        "behavior_hash": _stable_hash(behavior),
+        "selection_config_hash": selection_config_hash,
+        "runtime_type": spec.runtime.type,
+        "image": spec.runtime.image,
+        "instruction_digests": behavior["instruction_digests"],
+        "allowed_tools": {
+            interface.name: list(interface.allowed_tools)
+            for interface in spec.interfaces
+            if interface.allowed_tools
+        },
+    }
 
 
 def effective_selections(

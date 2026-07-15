@@ -43,6 +43,7 @@ from fugue.bench.library import (
     get_prompt,
 )
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
+from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
 from fugue.model_plane import ModelRoute, resolve_model_route, select_model
 from fugue.preflight import HARBOR_VERSION
@@ -50,6 +51,7 @@ from fugue.preflight import HARBOR_VERSION
 CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
 CONTEXT_RUNTIME_SERVICE = "fugue-context"
 CONTEXT_CLIENT_PATH = Path(__file__).resolve().parents[1] / "context_client.py"
+PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,7 @@ class RenderedJob:
     skill_provenance: tuple[dict[str, Any], ...] = ()
     integration_ids: tuple[str, ...] = ()
     integration_provenance: tuple[dict[str, Any], ...] = ()
+    generated_runtime_files: tuple[Path, ...] = ()
 
 
 def preview_jobs(**kwargs: Any) -> list[RenderedJob]:
@@ -134,7 +137,11 @@ def _build_jobs(
     workload_artifacts: list[Any] | None = None,
     scorer_refs: list[str] | None = None,
     asset_overlay: dict[str, str] | None = None,
+    source_provenance: dict[str, Any] | None = None,
 ) -> list[RenderedJob]:
+    selected_source_provenance = source_provenance or resolve_fugue_source_provenance(
+        repo_root
+    )
     runtime_root = repo_root / ".fugue" / "runtime" / run_id
     config_dir = runtime_root / "job-configs"
     if write_configs:
@@ -283,6 +290,10 @@ def _build_jobs(
                     resolved_skills,
                     integration_binding,
                 )
+                context_runtime = _portable_context_runtime_descriptor(
+                    binding,
+                    variant.context.delivery,
+                )
                 comparison_example_id = _comparison_example_id(
                     dataset_id=manifest.dataset.harbor_ref,
                     workload_id=workload_id,
@@ -304,7 +315,7 @@ def _build_jobs(
                         "config_hash": _context_config_hash(spec),
                         "delivery": variant.context.delivery,
                     },
-                    integrations=integration_binding.provenance,
+                    integrations=integration_binding.identity,
                     agent=_candidate_agent_configuration(experiment, variant),
                     execution={
                         "harbor_version": HARBOR_VERSION,
@@ -318,6 +329,12 @@ def _build_jobs(
                         },
                         "trace_content": experiment.trace_content,
                         "instrumentation": "weave",
+                        "fugue_source": selected_source_provenance,
+                        **(
+                            {"context_runtime": context_runtime}
+                            if context_runtime is not None
+                            else {}
+                        ),
                     },
                 )
                 candidate_id = resolved_candidate.candidate_id
@@ -437,6 +454,10 @@ def _build_jobs(
                         ),
                         integration_ids=integration_binding.ids,
                         integration_provenance=integration_binding.provenance,
+                        generated_runtime_files=(
+                            *binding.compose_files,
+                            *integration_binding.compose_files,
+                        ),
                     )
                 )
     return rendered
@@ -940,14 +961,20 @@ def _bind_fugue_context_runtime(
     delivery: str,
     write: bool,
 ) -> ContextBinding:
+    descriptor = _portable_context_runtime_descriptor(binding, delivery)
+    if descriptor is None:
+        raise ValueError("managed Fugue context runtime is portable-only here")
+    service_name = str(descriptor["service"])
+    mcp_port = int(descriptor["mcp_port"])
+    portable_port = int(descriptor["portable_port"])
     compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
     compose = {
         "services": {
-            CONTEXT_RUNTIME_SERVICE: {
-                "image": CONTEXT_RUNTIME_IMAGE,
+            service_name: {
+                "image": descriptor["image"],
                 "build": {
                     "context": runtime.repo_root.resolve().as_posix(),
-                    "dockerfile": "Dockerfile.context",
+                    "dockerfile": descriptor["dockerfile"],
                 },
                 "command": [
                     "python",
@@ -964,7 +991,7 @@ def _bind_fugue_context_runtime(
                     "--host",
                     "0.0.0.0",
                     "--port",
-                    "8000",
+                    str(mcp_port),
                 ],
                 "environment": [
                     "ANTHROPIC_API_KEY",
@@ -977,12 +1004,12 @@ def _bind_fugue_context_runtime(
                     "LITELLM_MASTER_KEY",
                     "OPENAI_API_KEY",
                     "WANDB_API_KEY",
-                    "FUGUE_BRIDGE_BASE_URL=http://host.docker.internal:4000",
+                    f"FUGUE_BRIDGE_BASE_URL={descriptor['bridge_url']}",
                     "FUGUE_CONTEXT_EVENTS_PATH=/tmp/fugue-context-events.jsonl",
                 ],
                 # Portable context is addressed by service name. Keeping it on
                 # the project network also leaves the bridge host alias valid.
-                "extra_hosts": ["host.docker.internal:host-gateway"],
+                "extra_hosts": [descriptor["host_gateway"]],
                 "volumes": [
                     {
                         "type": "bind",
@@ -998,7 +1025,7 @@ def _bind_fugue_context_runtime(
                         "python",
                         "-c",
                         "import socket; socket.create_connection(("
-                        f"'127.0.0.1', {8001 if delivery == 'portable' else 8000}"
+                        f"'127.0.0.1', {portable_port}"
                         "), 2).close()",
                     ],
                     "interval": "2s",
@@ -1011,15 +1038,13 @@ def _bind_fugue_context_runtime(
     if write:
         compose_path.parent.mkdir(parents=True, exist_ok=True)
         compose_path.write_text(yaml.safe_dump(compose, sort_keys=False))
-    if delivery != "portable":
-        raise ValueError("managed Fugue context runtime is portable-only here")
     return replace(
         binding,
         mcp_servers=(),
         env={
             **binding.env,
             "FUGUE_CONTEXT_COMMAND": "fugue-context",
-            "FUGUE_CONTEXT_QUERY_URL": f"http://{CONTEXT_RUNTIME_SERVICE}:8001",
+            "FUGUE_CONTEXT_QUERY_URL": str(descriptor["query_url"]),
             "FUGUE_CONTEXT_EVENTS_PATH": ("/logs/artifacts/fugue-context-events.jsonl"),
         },
         mounts=(
@@ -1031,6 +1056,27 @@ def _bind_fugue_context_runtime(
         ),
         compose_files=(*binding.compose_files, compose_path),
     )
+
+
+def _portable_context_runtime_descriptor(
+    binding: ContextBinding,
+    delivery: str,
+) -> dict[str, Any] | None:
+    if binding.managed_runtime != "fugue_context" or delivery != "portable":
+        return None
+    return {
+        "schema_version": PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION,
+        "kind": "compose_service",
+        "image": CONTEXT_RUNTIME_IMAGE,
+        "dockerfile": "Dockerfile.context",
+        "service": CONTEXT_RUNTIME_SERVICE,
+        "network": "compose_project",
+        "host_gateway": "host.docker.internal:host-gateway",
+        "bridge_url": "http://host.docker.internal:4000",
+        "mcp_port": 8000,
+        "portable_port": 8001,
+        "query_url": f"http://{CONTEXT_RUNTIME_SERVICE}:8001",
+    }
 
 
 def _reserved_context_ports(binding: ContextBinding) -> dict[int, str]:
@@ -1146,7 +1192,7 @@ def _agent_config_hash(
         "context": {"id": spec.id, "version": spec.version, "config": spec.config},
         "context_delivery": variant.context.delivery,
         "skills": [item.provenance() for item in resolved_skills],
-        "integrations": list(integration_binding.provenance),
+        "integrations": list(integration_binding.identity),
         "allowed_hosts": list(integration_binding.allowed_hosts),
     }
     text = json.dumps(payload, sort_keys=True, default=str)

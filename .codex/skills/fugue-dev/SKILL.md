@@ -16,8 +16,8 @@ Preserve these invariants across schema, implementation, UI, and tests.
   and advanced agent settings.
 - Keep experiment and variant names, labels, run names, preset names, scoring or
   judge configuration, UI state, and trial index out of candidate identity.
-- Put runtime, Harbor, concurrency, and instrumentation policy in a separate
-  execution fingerprint.
+- Put Fugue source/runtime topology, Harbor, concurrency, and instrumentation
+  policy in a separate execution fingerprint and lock generated runtime assets.
 - Identify comparison examples by dataset, workload, and task. Trial index is a
   separate cell coordinate.
 
@@ -35,6 +35,8 @@ Preserve these invariants across schema, implementation, UI, and tests.
   and judge errors separate.
 - Only Agent-backed predictions may name or link Agent conversations. Direct
   provider diagnostics keep ordinary traces and mark Agent linking not applicable.
+- One Agent cell is one adapter-resolved native conversation. Root, chat, and
+  tool spans share its identity; the evaluation link targets that exact root.
 
 ## Run lifecycle
 
@@ -44,6 +46,8 @@ Preserve these invariants across schema, implementation, UI, and tests.
 - A failure before the running transition records a failed starting run and
   executes no cell. CLI and TUI delegate to the operator rather than duplicating
   orchestration.
+- Cancellation stops child process groups, but the operator remains the single
+  writer for cell, prediction, and run terminal state during graceful shutdown.
 - Group results by candidate. Display a unique short prefix, retain full IDs in
   JSON and snapshots, and reject ambiguous input prefixes.
 - A candidate is packageable only when all planned applicable cells are
