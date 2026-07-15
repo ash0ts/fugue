@@ -63,6 +63,7 @@ from fugue.agent_tracing import (
     stable_agent_name,
 )
 from fugue.artifacts import artifact_recoveries
+from fugue.codex_mcp import render_codex_mcp_toml
 from fugue.model_plane import (
     BRIDGE_BASE_URL_CONTAINER,
     ModelRoute,
@@ -1867,6 +1868,17 @@ class FugueCodex(_TrialMetaMixin, Codex):
             'wire_api = "responses"\n'
         )
 
+    def _codex_home(self) -> PurePosixPath:
+        cell_digest = hashlib.sha256(self.run_key.encode()).hexdigest()[:16]
+        return PurePosixPath("/tmp/fugue-codex") / cell_digest
+
+    @override
+    def _build_register_mcp_servers_command(self) -> str | None:
+        config = render_codex_mcp_toml(self.mcp_servers)
+        if not config:
+            return None
+        return f"printf %s {shlex.quote(config)} >> \"$CODEX_HOME/config.toml\""
+
     @override
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -1889,7 +1901,8 @@ class FugueCodex(_TrialMetaMixin, Codex):
             for flag in tool_result_guard_cli_flags(self.model_route, "codex")
         )
 
-        remote_codex_home = self._REMOTE_CODEX_HOME.as_posix()
+        codex_home = self._codex_home()
+        remote_codex_home = codex_home.as_posix()
         weave_project = _weave_project_slug()
         env: dict[str, str] = {
             **provider_client_env(self.model_route, os.environ),
@@ -1971,7 +1984,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
         await self._install_tool_result_guard(
             environment,
             "codex",
-            self._REMOTE_CODEX_HOME / "hooks.json",
+            codex_home / "hooks.json",
         )
         if mcp_command:
             self._set_context_registration(

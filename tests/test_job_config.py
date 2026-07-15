@@ -817,7 +817,7 @@ interfaces:
     assert integration_service["network_mode"] == "service:main"
 
 
-def test_bridged_codex_native_mcp_is_explicitly_not_applicable(tmp_path: Path):
+def test_bridged_codex_native_mcp_is_registered_outside_model_route(tmp_path: Path):
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
         """
@@ -863,11 +863,14 @@ tasks:
         for mount in job.config["environment"]["mounts"]
     )
     assert "artifacts" not in job.config
-    assert job.applicable is False
-    assert job.skip_reason == (
-        "Codex MCP tools require Responses namespace support; "
-        "the wandb bridge accepts function tools only"
-    )
+    assert job.applicable is True
+    assert job.skip_reason is None
+    assert job.config["fugue"]["model_provider"] == "wandb"
+    assert job.config["fugue"]["harness_capabilities"] == {
+        "native_mcp": True,
+        "isolated_home": True,
+        "provider_independent_tools": True,
+    }
 
 
 def test_bridged_codex_portable_context_is_applicable(tmp_path: Path):
@@ -907,6 +910,48 @@ tasks:
     assert "mcp_servers" not in job.config["agents"][0]
     assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == (
         "fugue-context"
+    )
+
+
+def test_unreviewed_harness_native_mcp_fails_closed(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "pilot.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: custom, agent: example.agent:Custom}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="experiment-a",
+        title="Experiment A",
+        variants=[
+            FeatureVariant(
+                id="rag",
+                label="RAG",
+                context=ContextSelection(
+                    system_id="rag-bm25", delivery="native_mcp"
+                ),
+            )
+        ],
+    )
+
+    [job] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="wandb/zai-org/GLM-5.2",
+        run_id="unit",
+    )
+
+    assert job.applicable is False
+    assert job.skip_reason == (
+        "harness adapter example.agent:Custom has no reviewed native MCP "
+        "registration contract"
     )
 
 

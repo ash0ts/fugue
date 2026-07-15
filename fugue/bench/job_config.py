@@ -39,6 +39,7 @@ from fugue.bench.context_contracts import (
     resolve_context_capabilities,
 )
 from fugue.bench.evaluations import load_cases, scorer_bundle
+from fugue.bench.harness_contracts import harness_capabilities
 from fugue.bench.integrations import (
     IntegrationBinding,
     bind_integrations,
@@ -279,22 +280,19 @@ def _build_jobs(
                     skip_reason = _join_skip_reasons(
                         skip_reason, integration_binding.skip_reason
                     )
-                if (
-                    applicable
-                    and harness.name == "codex"
-                    and (
-                        integration_binding.mcp_servers
-                        or (
-                            binding.mcp_servers
-                            and variant.context.delivery == "native_mcp"
-                        )
+                selected_mcp = bool(
+                    integration_binding.mcp_servers
+                    or (
+                        binding.mcp_servers
+                        and variant.context.delivery == "native_mcp"
                     )
-                    and route.provider != "openai"
-                ):
+                )
+                capabilities = harness_capabilities(harness.agent)
+                if applicable and selected_mcp and not capabilities.native_mcp:
                     applicable = False
                     skip_reason = (
-                        "Codex MCP tools require Responses namespace support; "
-                        f"the {route.provider} bridge accepts function tools only"
+                        f"harness adapter {harness.agent} has no reviewed native MCP "
+                        "registration contract"
                     )
                 agent_config_hash = _agent_config_hash(
                     experiment,
@@ -631,6 +629,7 @@ def _job_config(
         "model_provider": route.provider,
         "model": route.display_model,
         "trace_content": experiment.trace_content,
+        "harness_capabilities": harness_capabilities(harness.agent).to_dict(),
         "scorer_hashes": scorer_hashes,
         "expected_artifact_paths": artifact_source_paths(expected_artifacts),
     }
