@@ -118,3 +118,11 @@ def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> Non
     (root / "runtime-lock-arm64.json").write_text(json.dumps(value))
 
     assert task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path) is None
+
+
+def test_local_task_source_does_not_import_harbor(tmp_path: Path) -> None:
+    manifest, source = _fixture(tmp_path)
+
+    assert task_runtime._resolve_task_source(
+        manifest, manifest.tasks[0], tmp_path
+    ) == source.resolve()

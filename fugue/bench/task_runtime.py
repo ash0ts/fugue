@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -178,38 +177,73 @@ def _resolve_task_source(
     task: TaskSpec,
     repo_root: Path,
 ) -> Path:
-    from harbor.models.job.config import DatasetConfig
-    from harbor.tasks.client import TaskClient
-
     if manifest.dataset.path:
         dataset = manifest.dataset.path
         dataset_path = dataset if dataset.is_absolute() else repo_root / dataset
-        config = DatasetConfig(path=dataset_path, task_names=[task.id])
-    else:
-        task_name = task.id
-        if (
-            manifest.dataset.ref
-            and "/" in manifest.dataset.ref
-            and "/" not in task_name
-        ):
-            task_name = f"{manifest.dataset.ref.split('/', 1)[0]}/{task_name}"
-        config = DatasetConfig(
-            name=manifest.dataset.ref,
-            ref=manifest.dataset.version,
-            task_names=[task_name],
+        source = (dataset_path / task.id).resolve()
+        if not source.is_dir():
+            raise RuntimeError(f"local task source is missing: {source}")
+        return source
+
+    task_name = task.id
+    if manifest.dataset.ref and "/" in manifest.dataset.ref and "/" not in task_name:
+        task_name = f"{manifest.dataset.ref.split('/', 1)[0]}/{task_name}"
+    harbor = shutil.which("harbor")
+    if harbor is None:
+        raise RuntimeError("harbor is required to prepare remote task images")
+    first_line = Path(harbor).read_text(encoding="utf-8").splitlines()[0]
+    if not first_line.startswith("#!"):
+        raise RuntimeError(f"cannot resolve Harbor interpreter from {harbor}")
+    interpreter = first_line.removeprefix("#!").strip()
+    if not Path(interpreter).is_file():
+        raise RuntimeError(f"Harbor interpreter is unavailable: {interpreter}")
+    payload = json.dumps(
+        {
+            "name": manifest.dataset.ref,
+            "ref": manifest.dataset.version,
+            "task_name": task_name,
+        }
+    )
+    script = """
+import asyncio, json, sys
+from harbor.models.job.config import DatasetConfig
+from harbor.tasks.client import TaskClient
+
+async def resolve():
+    value = json.loads(sys.argv[1])
+    config = DatasetConfig(
+        name=value["name"], ref=value["ref"], task_names=[value["task_name"]]
+    )
+    task_configs = await config.get_task_configs()
+    if len(task_configs) != 1:
+        raise RuntimeError(
+            f"task resolution returned {len(task_configs)} entries"
         )
+    result = await TaskClient().download_tasks([task_configs[0].get_task_id()])
+    if len(result.results) != 1:
+        raise RuntimeError("task download did not return exactly one result")
+    print(result.results[0].path.resolve())
 
-    async def resolve() -> Path:
-        task_configs = await config.get_task_configs()
-        if len(task_configs) != 1:
-            raise RuntimeError(f"task resolution returned {len(task_configs)} entries")
-        task_id = task_configs[0].get_task_id()
-        result = await TaskClient().download_tasks([task_id])
-        if len(result.results) != 1:
-            raise RuntimeError("task download did not return exactly one result")
-        return result.results[0].path.resolve()
-
-    return asyncio.run(resolve())
+asyncio.run(resolve())
+"""
+    result = subprocess.run(
+        [interpreter, "-c", script, payload],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "Harbor task resolution failed").strip()
+        raise RuntimeError(detail[-2_000:])
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("Harbor task resolution returned no source path")
+    source = Path(lines[-1]).resolve()
+    if not source.is_dir():
+        raise RuntimeError(f"Harbor task source is missing: {source}")
+    return source
 
 
 def _lock_root(manifest: BenchmarkManifest, task: TaskSpec, repo_root: Path) -> Path:
