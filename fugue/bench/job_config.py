@@ -12,6 +12,9 @@ from urllib.parse import urlparse
 import yaml
 
 from fugue.artifacts import artifact_source_paths, harbor_artifacts
+from fugue.bench.agent_runtime import read_runtime_lock as read_agent_runtime_lock
+from fugue.bench.agent_runtime import runtime_mount as agent_runtime_mount
+from fugue.bench.agent_runtime import runtime_spec as agent_runtime_spec
 from fugue.bench.candidates import (
     CANDIDATE_IDENTITY_SCHEMA_VERSION,
     ResolvedCandidate,
@@ -30,7 +33,6 @@ from fugue.bench.context import (
     context_cache_key,
     expected_prepared_context,
     get_context_system,
-    preflight_context,
     run_async,
 )
 from fugue.bench.context_contracts import (
@@ -51,6 +53,7 @@ from fugue.bench.library import (
     get_prompt,
 )
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
+from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.services import (
@@ -58,6 +61,7 @@ from fugue.bench.services import (
     without_managed_service_environment,
 )
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
+from fugue.bench.task_runtime import read_task_runtime_lock
 from fugue.model_plane import (
     ModelRoute,
     model_route_identity,
@@ -143,6 +147,8 @@ def _build_jobs(
     model: str | None = None,
     harness_names: list[str] | None = None,
     system_names: list[str] | None = None,
+    variant_names: list[str] | None = None,
+    harness_assignment: str = "cross",
     n_tasks: int | None = None,
     n_attempts: int | None = None,
     n_concurrent: int | None = None,
@@ -170,6 +176,16 @@ def _build_jobs(
 
     harnesses = manifest.select_harnesses(harness_names or experiment.harnesses or None)
     variants = [variant for variant in experiment.variants if variant.enabled]
+    if variant_names:
+        requested_variants = set(variant_names)
+        variants = [variant for variant in variants if variant.id in requested_variants]
+        missing_variants = sorted(
+            requested_variants - {variant.id for variant in variants}
+        )
+        if missing_variants:
+            raise ValueError(
+                "unknown or disabled variant(s): " + ", ".join(missing_variants)
+            )
     if system_names:
         requested = set(system_names)
         variants = [
@@ -191,6 +207,11 @@ def _build_jobs(
     selected_tasks = (
         manifest.tasks[:selected_n_tasks] if selected_n_tasks else manifest.tasks
     )
+    if harness_assignment not in {"cross", "latin_square"}:
+        raise ValueError("harness_assignment must be cross or latin_square")
+    harness_positions = {item.name: index for index, item in enumerate(harnesses)}
+    variant_positions = {item.id: index for index, item in enumerate(variants)}
+    task_positions = {item.id: index for index, item in enumerate(selected_tasks)}
     task_groups = [
         ([task], trial_index)
         for task in selected_tasks
@@ -246,6 +267,12 @@ def _build_jobs(
                 resolved_skills = []
                 skill_setup_reason = str(exc)
             for tasks, trial_index in task_groups:
+                if harness_assignment == "latin_square":
+                    assigned = (
+                        task_positions[tasks[0].id] + variant_positions[variant.id]
+                    ) % len(harnesses)
+                    if harness_positions[harness.name] != assigned:
+                        continue
                 applicable = base_applicable
                 skip_reason = base_skip_reason
                 job_name = _job_name(
@@ -268,6 +295,15 @@ def _build_jobs(
                     runtime_root=runtime_root,
                     job_name=job_name,
                     write=write_configs,
+                )
+                trial_policy = _render_trial_policy_compose(
+                    runtime_root,
+                    job_name,
+                    write=write_configs,
+                )
+                binding = replace(
+                    binding,
+                    compose_files=(*binding.compose_files, trial_policy),
                 )
                 integration_binding = bind_integrations(
                     effective_selections(experiment.integrations, variant.integrations),
@@ -310,6 +346,7 @@ def _build_jobs(
                 context_runtime = _portable_context_runtime_descriptor(
                     binding,
                     variant.context.delivery,
+                    repo_root,
                 )
                 comparison_example_id = _comparison_example_id(
                     dataset_id=manifest.dataset.harbor_ref,
@@ -321,8 +358,24 @@ def _build_jobs(
                     resolved_skills=resolved_skills,
                     repo_root=repo_root,
                 )
+                task_architecture = _task_architecture(tasks[0])
+                agent_runtime = read_agent_runtime_lock(
+                    harness.name,
+                    repo_root,
+                    task_architecture,
+                )
+                task_runtime = read_task_runtime_lock(
+                    manifest,
+                    tasks[0],
+                    repo_root,
+                )
                 resolved_candidate = resolve_candidate(
                     harness=harness.name,
+                    harness_version=(
+                        agent_runtime_spec(harness.name).version
+                        if agent_runtime_spec(harness.name) is not None
+                        else harness.agent
+                    ),
                     model_route=_candidate_model_route(route),
                     prompt_digest=next(iter(content_hashes["prompts"].values()), None),
                     skills=[item.provenance() for item in resolved_skills],
@@ -351,6 +404,16 @@ def _build_jobs(
                         **(
                             {"context_runtime": context_runtime}
                             if context_runtime is not None
+                            else {}
+                        ),
+                        **(
+                            {"agent_runtime": agent_runtime}
+                            if agent_runtime is not None
+                            else {}
+                        ),
+                        **(
+                            {"task_runtime": task_runtime}
+                            if task_runtime is not None
                             else {}
                         ),
                     },
@@ -522,7 +585,18 @@ def _job_config(
     scorer_hashes: dict[str, str],
 ) -> dict[str, Any]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
+    task_architecture = _task_architecture(tasks[0])
     environment = _merge_dicts(experiment.environment, variant.environment)
+    prepared_agent_mount = agent_runtime_mount(
+        harness.name,
+        repo_root,
+        task_architecture,
+    )
+    if prepared_agent_mount is not None:
+        environment["mounts"] = [
+            *environment.get("mounts", []),
+            prepared_agent_mount,
+        ]
     if context_binding.mounts:
         environment["mounts"] = [
             *environment.get("mounts", []),
@@ -611,6 +685,14 @@ def _job_config(
         "context_support": context_spec.support,
         "context_config_hash": _context_config_hash(context_spec),
         "context_cache_keys": context_cache_keys,
+        "context_runtime": context_binding.runtime_descriptor,
+        "agent_runtime": read_agent_runtime_lock(
+            harness.name,
+            repo_root,
+            task_architecture,
+        ),
+        "task_runtime": read_task_runtime_lock(manifest, tasks[0], repo_root),
+        "task_architecture": task_architecture,
         "skill_ids": skill_ids,
         "skills": [item.provenance() for item in resolved_skills],
         "integration_ids": list(integration_binding.ids),
@@ -667,6 +749,13 @@ def _dataset_config(
     repo_root: Path,
     tasks: list[TaskSpec],
 ) -> dict[str, Any]:
+    prepared = read_task_runtime_lock(manifest, tasks[0], repo_root)
+    if prepared is not None:
+        return {
+            "path": str(prepared["dataset_path"]),
+            "task_names": [tasks[0].id],
+            "n_tasks": len(tasks),
+        }
     config: dict[str, Any] = {
         "task_names": [_harbor_task_name(manifest, task.id) for task in tasks],
         "n_tasks": len(tasks),
@@ -724,13 +813,40 @@ def _agent_config(
         "kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
         "env": agent_env,
         "mcp_servers": _instrument_mcp_servers(selected_mcp_servers),
-        "extra_allowed_hosts": list(integration_binding.allowed_hosts),
+        "extra_allowed_hosts": _agent_allowed_hosts(
+            route,
+            selected_mcp_servers,
+            integration_binding.allowed_hosts,
+        ),
     }
     if _looks_like_import_path(harness.agent):
         config["import_path"] = harness.agent
     else:
         config["name"] = harness.agent
     return _drop_empty(config)
+
+
+def _agent_allowed_hosts(
+    route: ModelRoute,
+    mcp_servers: list[dict[str, Any]],
+    integration_hosts: tuple[str, ...],
+) -> list[str]:
+    values = [
+        "api.wandb.ai",
+        "trace.wandb.ai",
+        "host.docker.internal",
+        *integration_hosts,
+    ]
+    for url in (
+        route.chat_base_url,
+        route.responses_base_url,
+        route.messages_base_url,
+        *(str(server.get("url") or "") for server in mcp_servers),
+    ):
+        hostname = urlparse(url).hostname if url else None
+        if hostname and hostname not in {"127.0.0.1", "localhost", "::1"}:
+            values.append(hostname)
+    return list(dict.fromkeys(values))
 
 
 def _extra_instruction_paths(
@@ -974,6 +1090,7 @@ def _context_binding(
                     job_name=job_name,
                     env_names=spec.required_env,
                     write=write,
+                    context_config=spec.config,
                 )
                 binding = replace(
                     binding,
@@ -1027,7 +1144,9 @@ def _bind_fugue_context_runtime(
     delivery: str,
     write: bool,
 ) -> ContextBinding:
-    descriptor = _portable_context_runtime_descriptor(binding, delivery)
+    descriptor = _portable_context_runtime_descriptor(
+        binding, delivery, runtime.repo_root
+    )
     if descriptor is None:
         raise ValueError("managed Fugue context runtime is portable-only here")
     service_name = str(descriptor["service"])
@@ -1038,10 +1157,11 @@ def _bind_fugue_context_runtime(
         "services": {
             service_name: {
                 "image": descriptor["image"],
-                "build": {
-                    "context": runtime.repo_root.resolve().as_posix(),
-                    "dockerfile": descriptor["dockerfile"],
-                },
+                "pull_policy": "never",
+                "read_only": True,
+                "security_opt": ["no-new-privileges:true"],
+                "cap_drop": ["ALL"],
+                "tmpfs": ["/tmp:rw,noexec,nosuid,size=256m"],
                 "command": [
                     "python",
                     "-m",
@@ -1059,20 +1179,11 @@ def _bind_fugue_context_runtime(
                     "--port",
                     str(mcp_port),
                 ],
-                "environment": [
-                    "ANTHROPIC_API_KEY",
-                    "FUGUE_BUILDER_MODEL",
-                    "FUGUE_EMBEDDING_MODEL",
-                    "FUGUE_GRAPHITI_PASSWORD",
-                    "FUGUE_GRAPHITI_URI",
-                    "FUGUE_GRAPHITI_USER",
-                    "FUGUE_MODEL",
-                    "LITELLM_MASTER_KEY",
-                    "OPENAI_API_KEY",
-                    "WANDB_API_KEY",
-                    f"FUGUE_BRIDGE_BASE_URL={descriptor['bridge_url']}",
-                    "FUGUE_CONTEXT_EVENTS_PATH=/tmp/fugue-context-events.jsonl",
-                ],
+                "environment": {
+                    **{name: f"${{{name}}}" for name in spec.required_env},
+                    "FUGUE_BRIDGE_BASE_URL": descriptor["bridge_url"],
+                    "FUGUE_CONTEXT_EVENTS_PATH": ("/tmp/fugue-context-events.jsonl"),
+                },
                 # Portable context is addressed by service name. Keeping it on
                 # the project network also leaves the bridge host alias valid.
                 "extra_hosts": [descriptor["host_gateway"]],
@@ -1121,22 +1232,45 @@ def _bind_fugue_context_runtime(
             ),
         ),
         compose_files=(*binding.compose_files, compose_path),
+        runtime_descriptor=descriptor,
     )
+
+
+def _render_trial_policy_compose(
+    runtime_root: Path,
+    _job_name: str,
+    *,
+    write: bool,
+) -> Path:
+    path = runtime_root / "trial-policy" / "locked-images.yaml"
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            yaml.safe_dump(
+                {"services": {"main": {"pull_policy": "never"}}},
+                sort_keys=False,
+            )
+        )
+    return path
 
 
 def _portable_context_runtime_descriptor(
     binding: ContextBinding,
     delivery: str,
+    repo_root: Path | None = None,
 ) -> dict[str, Any] | None:
     if binding.managed_runtime == "pinned_mcp" and delivery == "native_mcp":
         return binding.runtime_descriptor
     if binding.managed_runtime != "fugue_context" or delivery != "portable":
         return None
+    lock = read_portable_runtime_lock(repo_root) if repo_root is not None else None
     return {
         "schema_version": PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION,
         "kind": "compose_service",
-        "image": CONTEXT_RUNTIME_IMAGE,
-        "dockerfile": "Dockerfile.context",
+        "image": lock.get("image_id") if lock else CONTEXT_RUNTIME_IMAGE,
+        "image_id": lock.get("image_id") if lock else None,
+        "recipe_sha256": lock.get("recipe_sha256") if lock else None,
+        "prepared": lock is not None,
         "service": CONTEXT_RUNTIME_SERVICE,
         "network": "compose_project",
         "host_gateway": "host.docker.internal:host-gateway",
@@ -1185,7 +1319,17 @@ def _snapshot_for_task(
         commit=task.base_commit or "dataset-managed",
         checkout=repo_root,
         dataset_id=dataset_id,
+        metadata=task.metadata,
     )
+
+
+def _task_architecture(task: TaskSpec) -> str:
+    architecture = str(task.metadata.get("architecture") or "amd64")
+    if architecture not in {"amd64", "arm64"}:
+        raise ValueError(
+            f"task {task.id} has unsupported architecture {architecture!r}"
+        )
+    return architecture
 
 
 def _applicability(
@@ -1202,16 +1346,15 @@ def _applicability(
     )
     if not resolution.applicable:
         return False, resolution.reason
-    checks = run_async(preflight_context(spec, runtime))
-    failed = [
-        check
-        for check in checks
-        if not check.ok
-        and check.severity == "required"
-        and (check.phase == "runtime" or check.name == "license")
+    missing_env = [
+        name for name in spec.required_env if not runtime.env.get(name, "").strip()
     ]
-    if failed:
-        return False, "; ".join(f"{item.name}: {item.detail}" for item in failed)
+    if missing_env:
+        return False, f"missing required environment: {', '.join(missing_env)}"
+    if spec.requires_license_approval:
+        gate = "FUGUE_LICENSE_APPROVED_" + spec.id.upper().replace("-", "_")
+        if runtime.env.get(gate, "").strip().lower() not in {"1", "true", "yes"}:
+            return False, f"{spec.license or 'restricted'} license requires {gate}=true"
     return True, None
 
 

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from fugue.bench.manifest import load_manifest
+from fugue.bench.manifest import fixture_repository_digest, load_manifest
 
 
 def test_manifest_loads_benchmark_surface_without_experiment_axes(tmp_path: Path) -> None:
@@ -113,6 +113,39 @@ tasks:
     )
     with pytest.raises(ValueError, match="full lowercase Git SHA"):
         load_manifest(path)
+
+
+def test_manifest_supports_content_addressed_fixture_repository(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "module.py").write_text("VALUE = 1\n")
+    digest = fixture_repository_digest(fixture)
+    path = tmp_path / "fixture.yaml"
+    path.write_text(
+        f"""
+dataset: {{path: local-tasks}}
+harnesses: [{{name: codex, agent: fugue.agents:FugueCodex}}]
+tasks:
+  - id: vector-contract
+    repository:
+      type: fixture
+      path: fixture
+      sha256: {digest}
+"""
+    )
+
+    task = load_manifest(path).tasks[0]
+
+    assert task.repo == "fixture/fixture"
+    assert task.base_commit == digest
+    assert task.repository is not None
+    assert task.repository.to_dict() == {
+        "type": "fixture",
+        "path": "fixture",
+        "sha256": digest,
+    }
 
 
 def test_pilot_canary_declares_gold_evidence_paths() -> None:

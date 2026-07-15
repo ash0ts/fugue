@@ -129,10 +129,14 @@ def build_run_snapshot(
                 raise ValueError(
                     f"generated runtime asset is not UTF-8: {runtime_file}"
                 ) from exc
-            asset_id = f"generated-runtime:{job.job_name}:{runtime_file.name}"
+            runtime_path = _snapshot_path(runtime_file, repo_root)
+            path_id = hashlib.sha256(runtime_path.encode()).hexdigest()[:12]
+            asset_id = (
+                f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
+            )
             record = {
                 "kind": "generated_runtime",
-                "path": _snapshot_path(runtime_file, repo_root),
+                "path": runtime_path,
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "body": body,
                 "generated": True,
@@ -217,6 +221,12 @@ def build_run_snapshot(
         context_runtime = resolved.execution_definition.get("context_runtime")
         if context_runtime is not None:
             runtime["context_runtime"] = context_runtime
+        agent_runtime = resolved.execution_definition.get("agent_runtime")
+        if agent_runtime is not None:
+            runtime["agent_runtime"] = agent_runtime
+        task_runtime = resolved.execution_definition.get("task_runtime")
+        if task_runtime is not None:
+            runtime["task_runtime"] = task_runtime
         if selected_fugue_source is not None:
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
@@ -227,8 +237,7 @@ def build_run_snapshot(
         runtimes[job.candidate_id] = runtime
 
     jobs_by_execution = {
-        job.resolved_candidate.execution_fingerprint: job
-        for job in jobs
+        job.resolved_candidate.execution_fingerprint: job for job in jobs
     }
     planned_matrix = tuple(
         {
@@ -243,7 +252,9 @@ def build_run_snapshot(
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,
             "config_path": cell.config_path.as_posix(),
+            "config_sha256": cell.config_sha256,
             "result_path": cell.result_path.as_posix(),
+            "runtime_assets": [list(item) for item in cell.runtime_assets],
             "generated_runtime_asset_ids": list(
                 generated_runtime_assets_by_config.get(
                     cell.config_path.resolve().as_posix(),
@@ -290,9 +301,7 @@ def build_run_snapshot(
             "id": selected.id,
             "digest": stable_digest(selected.to_dict()),
         }
-    resolved_experiment = _portable(
-        experiment.to_dict(), required_env, secret_names
-    )
+    resolved_experiment = _portable(experiment.to_dict(), required_env, secret_names)
     source_experiment = _source_experiment(experiment, repo_root)
     runtime_locks = tuple(
         sorted(
@@ -301,6 +310,8 @@ def build_run_snapshot(
                     "candidate_id": candidate_id,
                     "configuration_sha256": runtime["configuration_sha256"],
                     "context_runtime": runtime.get("context_runtime"),
+                    "agent_runtime": runtime.get("agent_runtime"),
+                    "task_runtime": runtime.get("task_runtime"),
                 }
                 for candidate_id, runtime in runtimes.items()
             ),
@@ -408,8 +419,7 @@ def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int
 def _source_experiment(
     experiment: ExperimentSpec, repo_root: Path
 ) -> dict[str, Any] | None:
-    manifest = experiment.manifest
-    path = manifest if manifest.is_absolute() else repo_root / manifest
+    path = repo_root / "configs" / "fugue" / "experiments" / f"{experiment.id}.yaml"
     if not path.is_file():
         return None
     return {

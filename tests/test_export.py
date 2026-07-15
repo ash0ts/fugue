@@ -1660,6 +1660,14 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
                     "_meta": {
                         "fugue_gateway_call_id": "gateway-a",
                         "fugue_context_system_id": "gitnexus",
+                        "fugue_gitnexus_vector": {
+                            "vector_search_attempted": True,
+                            "vector_search_succeeded": True,
+                            "semantic_result_count": 4,
+                            "bm25_result_count": 2,
+                            "model_digest": "sha256:model",
+                            "query_latency_ms": 12.5,
+                        },
                     }
                 },
             },
@@ -1672,6 +1680,12 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
     assert summary["weave_tool_call_count"] == 1
     assert summary["weave_gateway_tool_call_count"] == 1
     assert summary["weave_gateway_call_ids"] == ["gateway-a"]
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 4
+    assert summary["gitnexus_bm25_result_count"] == 2
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 12.5
 
     row = {"context_assigned": True}
     export._apply_trace_summary(row, dict(summary))
@@ -1679,6 +1693,52 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
     assert row["context_invocation_evidence"]["source"] == (
         "mcp_gateway_result_metadata"
     )
+
+
+def test_agent_hierarchy_decodes_gateway_metadata_from_remote_tool_result() -> None:
+    result = json.dumps(
+        {
+            "Ok": {
+                "content": [{"type": "text", "text": "result"}],
+                "_meta": {
+                    "fugue_gateway_call_id": "gateway-remote",
+                    "fugue_gitnexus_vector": {
+                        "vector_search_attempted": True,
+                        "vector_search_succeeded": True,
+                        "semantic_result_count": 3,
+                        "bm25_result_count": 0,
+                        "model_digest": "sha256:remote-model",
+                        "query_latency_ms": 22.5,
+                    },
+                },
+            }
+        }
+    )
+    raw_span = {
+        "attributes": {
+            "gen_ai": {
+                "operation": {"name": "execute_tool"},
+                "tool": {"call": {"result": result}},
+            }
+        }
+    }
+    summary = _summarize_spans(
+        [
+            {
+                "span_id": "tool",
+                "operation_name": "execute_tool",
+                "raw_span_dump": json.dumps(raw_span),
+            }
+        ]
+    )
+
+    assert summary["weave_gateway_call_ids"] == ["gateway-remote"]
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 3
+    assert summary["gitnexus_bm25_result_count"] == 0
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:remote-model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 22.5
 
 
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
@@ -1885,6 +1945,8 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
     row = export._completed_evaluation_row(
         cell, CellOutcome(cell.id, "passed", returncode=0), planned
     )
+    row["citation_correctness"] = 0.0
+    row["evidence_recall"] = 0.0
 
     assert row["task_name"] == "task-a"
     assert row["dataset"] == "fixture/tasks@1"
@@ -2767,6 +2829,29 @@ def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:
     rows[1]["runtime_fingerprints"]["pre_install"]["comparable_digest"] = "other"
     export._apply_runtime_equivalence(rows)
     assert all(row["runtime_equivalence_status"] == "mismatch" for row in rows)
+
+
+def test_prepared_runtime_equivalence_and_in_trial_drift_are_separate() -> None:
+    rows = [
+        {
+            "record_type": "trial",
+            "run_id": "run",
+            "comparison_example_id": "example",
+            "trial_index": 1,
+            "model": "wandb/model",
+            "runtime_fingerprints": {
+                "pre_execution": {"comparable_digest": "prepared"},
+                "post_execution": {"comparable_digest": post},
+            },
+        }
+        for post in ("prepared", "drifted")
+    ]
+
+    export._apply_runtime_equivalence(rows)
+
+    assert all(row["runtime_equivalent"] is True for row in rows)
+    assert rows[0]["runtime_drift"] is False
+    assert rows[1]["runtime_drift"] is True
 
 
 def test_agent_span_summary_preserves_measured_zero_usage() -> None:

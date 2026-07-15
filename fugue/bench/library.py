@@ -227,6 +227,8 @@ class WorkloadSpec:
     manifest: Path | None = None
     dataset: str | None = None
     systems: list[str] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
+    harness_assignment: Literal["cross", "latin_square"] = "cross"
     required_capabilities: list[ContextCapability] = field(default_factory=list)
     n_tasks: int | None = None
     n_attempts: int | None = None
@@ -558,6 +560,14 @@ def experiment_from_data(
             raise ValueError(
                 f"preset {preset.id} overrides unknown workload(s): {', '.join(unknown)}"
             )
+    variant_ids = {variant.id for variant in variants}
+    for workload in workloads:
+        unknown_variants = sorted(set(workload.variants) - variant_ids)
+        if unknown_variants:
+            raise ValueError(
+                f"workload {workload.id} selects unknown variant(s): "
+                + ", ".join(unknown_variants)
+            )
     default_preset = _optional_str(raw.get("default_preset"))
     if default_preset and default_preset not in {preset.id for preset in presets}:
         raise ValueError(f"unknown default preset: {default_preset}")
@@ -755,6 +765,10 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
                 else None,
                 dataset=_optional_str(value.get("dataset")),
                 systems=_string_list(value.get("systems")),
+                variants=_string_list(value.get("variants")),
+                harness_assignment=_harness_assignment(
+                    value.get("harness_assignment"), workload_id
+                ),
                 required_capabilities=required_capabilities,
                 n_tasks=_positive_int(
                     value.get("n_tasks"), kind=f"workload {workload_id} n_tasks"
@@ -768,6 +782,15 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
             )
         )
     return workloads
+
+
+def _harness_assignment(value: Any, workload_id: str) -> str:
+    assignment = str(value or "cross")
+    if assignment not in {"cross", "latin_square"}:
+        raise ValueError(
+            f"workload {workload_id} harness_assignment must be cross or latin_square"
+        )
+    return assignment
 
 
 def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:

@@ -83,6 +83,7 @@ def _internal_context_evaluate(argv: list[str]) -> int:
     parser.add_argument("--experiment", required=True)
     parser.add_argument("--workload", required=True)
     parser.add_argument("--system", required=True)
+    parser.add_argument("--variant", required=True)
     parser.add_argument("--preset", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--attempts", type=_positive_cli_int, default=1)
@@ -218,6 +219,7 @@ def _parser() -> FugueArgumentParser:
     setup.add_argument("--manifest", type=Path)
     setup.add_argument("--workloads")
     setup.add_argument("--systems")
+    setup.add_argument("--harnesses")
     setup.add_argument("--trace-content", choices=("full", "metadata"))
     operation = setup.add_mutually_exclusive_group()
     operation.add_argument(
@@ -240,6 +242,11 @@ def _parser() -> FugueArgumentParser:
         "--stop-services",
         action="store_true",
         help="Stop selected managed context services and preserve their data",
+    )
+    operation.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Build all locked context and harness artifacts selected by the plan",
     )
     operation.add_argument(
         "--prepare-context",
@@ -593,10 +600,18 @@ def _print_service_statuses(statuses: Any) -> None:
 
 
 def _print_context_preparation(records: Any) -> None:
-    table = Table("System", "Task", "State", "Detail", box=box.SIMPLE_HEAD)
+    table = Table(
+        "System", "Variant / mode", "Task", "State", "Detail", box=box.SIMPLE_HEAD
+    )
     for record in records:
         table.add_row(
             record.system_id,
+            " / ".join(
+                value
+                for value in (record.variant_id, record.retrieval_mode)
+                if value
+            )
+            or "—",
             record.task_id,
             record.status,
             record.detail,
@@ -903,6 +918,7 @@ def _setup(args: argparse.Namespace) -> int:
         preset=args.preset,
         workloads=tuple(_csv(args.workloads) or []),
         systems=tuple(_csv(args.systems) or []),
+        harnesses=tuple(_csv(args.harnesses) or []),
         model=args.model,
         builder_model=args.builder_model,
         judge_model=args.judge_model,
@@ -949,13 +965,45 @@ def _setup(args: argparse.Namespace) -> int:
         else:
             _print_service_statuses(statuses)
         return 0 if all(not item.ready for item in statuses) else 1
+    if args.prepare:
+        prepared = service.prepare(request, rebuild=args.rebuild)
+        if args.json:
+            print(as_json(prepared))
+        else:
+            _print_context_preparation(prepared.context)
+            for runtime in prepared.agent_runtimes:
+                CONSOLE.print(
+                    f"[fugue.success]{runtime.harness}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+            for runtime in prepared.task_runtimes:
+                CONSOLE.print(
+                    f"[fugue.success]task {runtime.task_id}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+            for dataset in prepared.workload_datasets:
+                CONSOLE.print(
+                    f"[fugue.success]dataset {dataset.dataset_id}[/] "
+                    f"{dataset.status}: {dataset.sample_count} samples "
+                    f"({dataset.sha256[:19]})"
+                )
+            if prepared.portable_context_runtime is not None:
+                runtime = prepared.portable_context_runtime
+                CONSOLE.print(
+                    f"[fugue.success]{runtime.harness}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+        return 0 if all(item.status != "skipped" for item in prepared.context) else 1
     if args.prepare_context:
         records = service.prepare_context(request, rebuild=args.rebuild)
         if args.json:
             print(as_json(records))
         else:
             _print_context_preparation(records)
-        return 0
+        return 0 if all(item.status != "skipped" for item in records) else 1
     if args.skills:
         inspections = service.prepare_skills(request, refresh=args.refresh_skills)
         if args.json:
@@ -1326,14 +1374,16 @@ def _context_evaluate(args: argparse.Namespace) -> int:
     if workload is None or not workload.dataset:
         raise ValueError(f"unknown direct workload: {args.workload}")
     dataset = load_workload_dataset(_resolve(args.repo_root, Path(workload.dataset)))
-    variant = next(
-        (item for item in experiment.variants if item.context.system_id == args.system),
-        None,
-    )
+    variant = next((item for item in experiment.variants if item.id == args.variant), None)
+    if variant is None or variant.context.system_id != args.system:
+        raise ValueError(
+            f"variant {args.variant!r} does not select context system {args.system!r}"
+        )
     runtime_env = load_env(args.env_file)
     runtime_env["FUGUE_CONTEXT_DELIVERY"] = (
-        variant.context.delivery if variant is not None else "portable"
+        variant.context.delivery
     )
+    runtime_env["FUGUE_VARIANT_ID"] = variant.id
     runtime = ContextRuntime(
         repo_root=args.repo_root,
         cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
@@ -1354,6 +1404,7 @@ def _context_evaluate(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             attempts=args.attempts,
             limit=args.limit,
+            context_config=variant.context.config,
             **(
                 {"concurrency": args.concurrency}
                 if workload.runner == "sequence"

@@ -14,6 +14,7 @@ from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 def _candidate_inputs() -> dict:
     return {
         "harness": "codex",
+        "harness_version": "codex@0.143.0+fugue-flat-mcp.1",
         "model_route": {"provider": "openai", "model_id": "gpt-5"},
         "prompt_digest": "prompt-a",
         "skills": [{"id": "reviewed", "sha256": "skill-a"}],
@@ -73,9 +74,19 @@ def test_tool_result_modalities_are_candidate_behavior() -> None:
     first = resolve_candidate(**original)
     second = resolve_candidate(**changed)
 
-    assert CANDIDATE_IDENTITY_SCHEMA_VERSION == 2
+    assert CANDIDATE_IDENTITY_SCHEMA_VERSION == 3
     assert first.candidate_id != second.candidate_id
-    assert first.definition["identity_schema_version"] == 2
+    assert first.definition["identity_schema_version"] == 3
+
+
+def test_harness_behavior_version_changes_candidate_identity() -> None:
+    original = _candidate_inputs()
+    changed = deepcopy(original)
+    changed["harness_version"] = "codex@0.143.0+fugue-flat-mcp.2"
+
+    assert resolve_candidate(**original).candidate_id != resolve_candidate(
+        **changed
+    ).candidate_id
 
 
 @pytest.mark.parametrize("harness", [None, "", object()])
@@ -84,6 +95,15 @@ def test_candidate_harness_must_be_a_non_empty_string(harness: object) -> None:
     inputs["harness"] = harness
 
     with pytest.raises(ValueError, match="harness must be a non-empty string"):
+        resolve_candidate(**inputs)
+
+
+@pytest.mark.parametrize("version", [None, "", object()])
+def test_candidate_harness_version_must_be_non_empty(version: object) -> None:
+    inputs = _candidate_inputs()
+    inputs["harness_version"] = version
+
+    with pytest.raises(ValueError, match="harness_version must be a non-empty string"):
         resolve_candidate(**inputs)
 
 

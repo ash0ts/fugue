@@ -364,6 +364,8 @@ def test_execute_run_persists_snapshot_before_first_cell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     run_id = "transaction-order"
     observed: list[str] = []
 
@@ -434,6 +436,8 @@ def test_execute_run_only_validates_agent_job_configs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     request = ExperimentRequest(experiment_id="demo")
     [agent_job] = service.rendered_jobs(request, run_id="validation-fixture")
     dataset = tmp_path / "direct-diagnostic.yaml"
@@ -473,6 +477,8 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     run_id = "operator-cancellation"
     cancellation = threading.Event()
     events: list[tuple[str, object]] = []
@@ -722,9 +728,17 @@ config:
 
     [job] = jobs
     [planned] = snapshot["planned_matrix"]
-    [asset_id] = planned["generated_runtime_asset_ids"]
+    asset_id = next(
+        item
+        for item in planned["generated_runtime_asset_ids"]
+        if "/context-runtime/" in snapshot["assets"][item]["path"]
+    )
     asset = snapshot["assets"][asset_id]
-    [runtime_file] = job.generated_runtime_files
+    runtime_file = next(
+        item
+        for item in job.generated_runtime_files
+        if "context-runtime" in item.as_posix()
+    )
     raw = runtime_file.read_bytes()
     assert asset["kind"] == "generated_runtime"
     assert asset["path"].startswith(".fugue/runtime/context-lock/context-runtime/")
@@ -795,8 +809,16 @@ interfaces:
     ).to_dict()
 
     [job] = jobs
-    [runtime_file] = job.generated_runtime_files
-    [asset_id] = snapshot["planned_matrix"][0]["generated_runtime_asset_ids"]
+    runtime_file = next(
+        item
+        for item in job.generated_runtime_files
+        if "integrations" in item.as_posix()
+    )
+    asset_id = next(
+        item
+        for item in snapshot["planned_matrix"][0]["generated_runtime_asset_ids"]
+        if "/integrations/" in snapshot["assets"][item]["path"]
+    )
     asset = snapshot["assets"][asset_id]
     assert asset["kind"] == "generated_runtime"
     assert asset["path"].startswith(".fugue/runtime/integration-lock/integrations/")
@@ -919,9 +941,7 @@ def test_run_summary_preserves_not_applicable_reason(tmp_path: Path) -> None:
         json.dumps(
             {
                 "candidates": {candidate_id: {"harness": "sequence"}},
-                "planned_matrix": [
-                    {"cell_id": "latmd", "candidate_id": candidate_id}
-                ],
+                "planned_matrix": [{"cell_id": "latmd", "candidate_id": candidate_id}],
             }
         )
     )

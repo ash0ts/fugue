@@ -10,11 +10,16 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fugue.bench.agent_runtime import (
+    prepare_runtime as prepare_agent_runtime,
+)
+from fugue.bench.agent_runtime import runtime_ready as agent_runtime_ready
+from fugue.bench.agent_runtime import runtime_spec as agent_runtime_spec
 from fugue.bench.candidates import (
     CANDIDATE_IDENTITY_SCHEMA_VERSION,
     comparison_example_id,
@@ -24,6 +29,7 @@ from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
     ContextRuntime,
+    ContextSystemSpec,
     RepositorySnapshot,
     checkout_repository,
     get_context_system,
@@ -72,7 +78,14 @@ from fugue.bench.library import (
     scorer_reference,
     validate_id,
 )
-from fugue.bench.manifest import BenchmarkManifest, load_manifest
+from fugue.bench.manifest import (
+    BenchmarkManifest,
+    FixtureRepositorySpec,
+    fixture_repository_digest,
+    load_manifest,
+)
+from fugue.bench.portable_runtime import prepare_runtime as prepare_portable_runtime
+from fugue.bench.portable_runtime import runtime_ready as portable_runtime_ready
 from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
@@ -94,7 +107,16 @@ from fugue.bench.sources import (
     prepare_skill_source,
 )
 from fugue.bench.supervisor import ManagedRun, RunSupervisor
-from fugue.bench.workloads import load_workload_dataset
+from fugue.bench.task_runtime import (
+    prepare_task_runtime,
+    task_architecture,
+    task_runtime_ready,
+)
+from fugue.bench.workloads import (
+    PreparedWorkloadDataset,
+    load_workload_dataset,
+    prepare_workload_dataset,
+)
 from fugue.bridge import BridgeFiles, bridge_status, bridge_up
 from fugue.model_plane import (
     model_route_identity,
@@ -278,6 +300,47 @@ class ContextPreparation:
     detail: str
     cache_key: str | None = None
     path: Path | None = None
+    variant_id: str | None = None
+    config_digest: str | None = None
+    retrieval_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class ContextPreparationTarget:
+    variant_id: str
+    spec: ContextSystemSpec
+    delivery: str
+    config_digest: str
+    snapshot: RepositorySnapshot
+
+
+@dataclass(frozen=True)
+class AgentRuntimePreparation:
+    harness: str
+    architecture: str
+    status: str
+    image: str
+    image_id: str
+    recipe_sha256: str
+
+
+@dataclass(frozen=True)
+class TaskRuntimePreparation:
+    task_id: str
+    architecture: str
+    status: str
+    image: str
+    image_id: str
+    recipe_sha256: str
+
+
+@dataclass(frozen=True)
+class SetupPreparation:
+    context: tuple[ContextPreparation, ...]
+    agent_runtimes: tuple[AgentRuntimePreparation, ...]
+    task_runtimes: tuple[TaskRuntimePreparation, ...] = ()
+    workload_datasets: tuple[PreparedWorkloadDataset, ...] = ()
+    portable_context_runtime: AgentRuntimePreparation | None = None
 
 
 @dataclass(frozen=True)
@@ -526,7 +589,7 @@ class OperatorService:
                 )
             )
         systems = list(request.systems) or (
-            [variant.context.system_id for variant in selected.variants]
+            _request_variant_system_ids(selected, request)
             if request.variants
             else preset.systems
             or [
@@ -725,19 +788,22 @@ class OperatorService:
             requested_systems=(
                 list(request.systems)
                 or (
-                    [variant.context.system_id for variant in selected.variants]
+                    _request_variant_system_ids(selected, request)
                     if request.variants
                     else None
                 )
             ),
             manifest_override=request.manifest,
             repo_root=self.repo_root,
+            requested_variants=list(request.variants) or None,
         )
         records: list[ContextPreparation] = []
         checkouts: dict[tuple[str, str, str], RepositorySnapshot] = {}
         prepared_runtimes: set[str] = set()
-        for system_id, snapshot in targets:
-            spec = get_context_system(system_id, self.repo_root)
+        for target in targets:
+            snapshot = target.snapshot
+            spec = target.spec
+            system_id = spec.id
             checks = asyncio.run(preflight_context(spec, runtime, phase="host"))
             failed = [
                 check
@@ -752,6 +818,10 @@ class OperatorService:
                         snapshot.task_id,
                         "skipped",
                         "; ".join(f"{item.name}: {item.detail}" for item in failed),
+                        variant_id=target.variant_id,
+                        config_digest=target.config_digest,
+                        retrieval_mode=str(spec.config.get("retrieval_mode") or "")
+                        or None,
                     )
                 )
                 continue
@@ -783,6 +853,9 @@ class OperatorService:
                         "preset_id": preset.id,
                         "run_id": run_id,
                         "context_system_id": system_id,
+                        "variant_id": target.variant_id,
+                        "context_config_digest": target.config_digest,
+                        "context_retrieval_mode": spec.config.get("retrieval_mode"),
                         "task_id": snapshot.task_id,
                         "dataset_id": snapshot.dataset_id,
                         "repository": snapshot.repo,
@@ -810,9 +883,158 @@ class OperatorService:
                     prepared.path.as_posix(),
                     cache_key=prepared.cache_key,
                     path=prepared.path,
+                    variant_id=target.variant_id,
+                    config_digest=target.config_digest,
+                    retrieval_mode=str(spec.config.get("retrieval_mode") or "")
+                    or None,
                 )
             )
         return tuple(records)
+
+    def prepare(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: ExperimentSpec | None = None,
+        rebuild: bool = False,
+    ) -> SetupPreparation:
+        """Prepare every locked artifact selected by the resolved plan."""
+        selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        preset = select_preset(selected, request.preset)
+        harnesses = list(request.harnesses) or preset.harnesses or selected.harnesses
+        workloads = select_workloads(selected, preset, list(request.workloads) or None)
+        if not workloads:
+            workloads = [
+                WorkloadSpec(
+                    id="harbor",
+                    runner="harbor",
+                    manifest=request.manifest or selected.manifest,
+                )
+            ]
+        selected_tasks: list[tuple[BenchmarkManifest, Any]] = []
+        workload_datasets: list[PreparedWorkloadDataset] = []
+        dataset_runtime = ContextRuntime(
+            repo_root=self.repo_root,
+            cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
+            env=self.env,
+        )
+        for workload in workloads:
+            if workload.runner != "harbor":
+                if workload.dataset:
+                    dataset = load_workload_dataset(
+                        _resolve(self.repo_root, Path(workload.dataset))
+                    )
+                    prepared_dataset = prepare_workload_dataset(
+                        dataset,
+                        dataset_runtime,
+                        preset_id=preset.id,
+                        rebuild=rebuild,
+                    )
+                    if prepared_dataset is not None:
+                        workload_datasets.append(prepared_dataset)
+                continue
+            manifest = load_manifest(
+                _resolve(
+                    self.repo_root,
+                    request.manifest or workload.manifest or selected.manifest,
+                )
+            )
+            limit = (
+                request.n_tasks
+                or preset_workload_int(preset, workload.id, "n_tasks")
+                or workload.n_tasks
+                or preset.n_tasks
+            )
+            tasks = manifest.tasks[:limit] if limit else manifest.tasks
+            selected_tasks.extend((manifest, task) for task in tasks)
+
+        prepared_tasks: list[TaskRuntimePreparation] = []
+        seen_tasks: set[tuple[str, str, str]] = set()
+        for manifest, task in selected_tasks:
+            architecture = task_architecture(task)
+            key = (manifest.dataset.harbor_ref, task.id, architecture)
+            if key in seen_tasks:
+                continue
+            seen_tasks.add(key)
+            was_ready, _ = task_runtime_ready(manifest, task, self.repo_root)
+            lock = prepare_task_runtime(
+                manifest,
+                task,
+                repo_root=self.repo_root,
+                rebuild=rebuild,
+            )
+            prepared_tasks.append(
+                TaskRuntimePreparation(
+                    task_id=task.id,
+                    architecture=architecture,
+                    status="cached" if was_ready and not rebuild else "built",
+                    image=str(lock["image"]),
+                    image_id=str(lock["image_id"]),
+                    recipe_sha256=str(lock["recipe_sha256"]),
+                )
+            )
+
+        architectures = {
+            task_architecture(task) for _manifest, task in selected_tasks
+        }
+        prepared_agents: list[AgentRuntimePreparation] = []
+        for harness in dict.fromkeys(harnesses):
+            runtime = agent_runtime_spec(harness)
+            if runtime is None:
+                continue
+            for architecture in sorted(architectures & set(runtime.architectures)):
+                was_ready, _ = agent_runtime_ready(
+                    harness, self.repo_root, architecture
+                )
+                lock = prepare_agent_runtime(
+                    harness,
+                    repo_root=self.repo_root,
+                    architecture=architecture,
+                    rebuild=rebuild,
+                )
+                prepared_agents.append(
+                    AgentRuntimePreparation(
+                        harness=harness,
+                        architecture=architecture,
+                        status="cached" if was_ready and not rebuild else "built",
+                        image=str(lock["image"]),
+                        image_id=str(lock["image_id"]),
+                        recipe_sha256=str(lock["recipe_sha256"]),
+                    )
+                )
+        portable = None
+        selected_systems = set(_selected_request_system_ids(selected, request))
+        if any(
+            variant.enabled
+            and variant.context.system_id in selected_systems
+            and variant.context.system_id != "none"
+            and variant.context.delivery == "portable"
+            for variant in selected.variants
+        ):
+            portable_was_ready, _ = portable_runtime_ready(self.repo_root)
+            lock = prepare_portable_runtime(self.repo_root, rebuild=rebuild)
+            portable = AgentRuntimePreparation(
+                harness="portable-context",
+                architecture=str(lock.get("architecture") or "unknown"),
+                status=(
+                    "cached" if portable_was_ready and not rebuild else "built"
+                ),
+                image=str(lock["image"]),
+                image_id=str(lock["image_id"]),
+                recipe_sha256=str(lock["recipe_sha256"]),
+            )
+        return SetupPreparation(
+            context=self.prepare_context(
+                request,
+                experiment=selected,
+                rebuild=rebuild,
+            ),
+            agent_runtimes=tuple(prepared_agents),
+            task_runtimes=tuple(prepared_tasks),
+            workload_datasets=tuple(workload_datasets),
+            portable_context_runtime=portable,
+        )
 
     def prepare_skills(
         self,
@@ -1131,7 +1353,7 @@ class OperatorService:
             )
         rendered: list[RenderedJob] = []
         requested_systems = list(request.systems) or (
-            [variant.context.system_id for variant in selected.variants]
+            _request_variant_system_ids(selected, request)
             if request.variants
             else None
         )
@@ -1173,6 +1395,8 @@ class OperatorService:
                             preset,
                             requested_systems,
                         ),
+                        variant_names=(list(request.variants) or workload.variants or None),
+                        harness_assignment=workload.harness_assignment,
                         n_tasks=(
                             request.n_tasks
                             or preset_workload_int(preset, workload.id, "n_tasks")
@@ -1249,7 +1473,7 @@ class OperatorService:
                 preset,
                 list(request.systems)
                 or (
-                    [variant.context.system_id for variant in experiment.variants]
+                    _request_variant_system_ids(experiment, request)
                     if request.variants
                     else None
                 ),
@@ -1277,8 +1501,20 @@ class OperatorService:
             or workload.n_tasks
             or preset.n_tasks
         )
+        selected_variants = [
+            variant
+            for variant in experiment.variants
+            if variant.enabled
+            and variant.context.system_id in systems
+            and (
+                variant.id in request.variants
+                if request.variants
+                else not workload.variants or variant.id in workload.variants
+            )
+        ]
         jobs: list[RenderedJob] = []
-        for system_id in systems:
+        for variant in selected_variants:
+            system_id = variant.context.system_id
             system_env = (
                 managed_service_environment(env, repo_root=self.repo_root)
                 if system_id == "graphiti"
@@ -1291,15 +1527,12 @@ class OperatorService:
                 cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
                 env=system_env,
             )
-            spec = get_context_system(system_id, self.repo_root)
-            delivery = next(
-                (
-                    variant.context.delivery
-                    for variant in experiment.variants
-                    if variant.context.system_id == system_id
-                ),
-                "portable",
+            base_spec = get_context_system(system_id, self.repo_root)
+            spec = replace(
+                base_spec,
+                config={**base_spec.config, **variant.context.config},
             )
+            delivery = variant.context.delivery
             license_env = f"FUGUE_LICENSE_APPROVED_{_env_id(system_id)}"
             license_blocked = spec.requires_license_approval and system_env.get(
                 license_env, ""
@@ -1336,6 +1569,8 @@ class OperatorService:
                 workload.id,
                 "--system",
                 system_id,
+                "--variant",
+                variant.id,
                 "--preset",
                 preset.id,
                 "--run-id",
@@ -1370,6 +1605,7 @@ class OperatorService:
                     "workload_id": workload.id,
                     "runner": workload.runner,
                     "context_system_id": system_id,
+                    "variant_id": variant.id,
                     "context_delivery": delivery,
                     "context_version": spec.version,
                     "dataset": dataset_path.as_posix(),
@@ -1387,6 +1623,7 @@ class OperatorService:
             direct_harness = "direct" if workload.runner == "retrieval" else "sequence"
             resolved_candidate = resolve_candidate(
                 harness=direct_harness,
+                harness_version=f"fugue-{workload.runner}@1",
                 model_route=model_route_identity(route),
                 prompt_digest=None,
                 skills=(),
@@ -1429,8 +1666,9 @@ class OperatorService:
                         "FUGUE_WORKLOAD_ID": workload.id,
                         "FUGUE_CONTEXT_SYSTEM_ID": system_id,
                         "FUGUE_CONTEXT_DELIVERY": delivery,
+                        "FUGUE_VARIANT_ID": variant.id,
                     },
-                    job_name=f"{_slug(run_name)}-{workload.id}-{system_id}",
+                    job_name=f"{_slug(run_name)}-{workload.id}-{variant.id}",
                     harness=direct_harness,
                     context_system_id=system_id,
                     context_delivery=delivery,
@@ -1439,8 +1677,8 @@ class OperatorService:
                     context_cache_ready=False,
                     prompt_id=None,
                     skill_ids=[],
-                    variant_id=system_id,
-                    variant_label=spec.title,
+                    variant_id=variant.id,
+                    variant_label=variant.label,
                     agent_config_hash="",
                     route=route,
                     workload_id=workload.id,
@@ -1546,8 +1784,8 @@ class OperatorService:
             )
             temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
             os.replace(temporary, snapshot_path)
-            self.prepare_context(request, experiment=resolved, run_id=run_id)
             rendered = self.rendered_jobs(request, run_id=run_id, experiment=resolved)
+            _verify_rendered_setup(rendered)
             validate_harbor_job_configs(
                 [
                     job.config_path
@@ -2030,7 +2268,9 @@ class OperatorService:
                 row.get("context_registered") is True for row in trials
             ),
             runtime_mismatched=sum(
-                row.get("runtime_equivalence_status") == "mismatch" for row in trials
+                row.get("runtime_equivalence_status") == "mismatch"
+                or row.get("runtime_drift") is True
+                for row in trials
             ),
             attributed_errors=sum(
                 int(row.get(f"{origin}_error_count") or 0)
@@ -2370,7 +2610,7 @@ def _selected_request_system_ids(
         )
     ]
     requested = list(request.systems) or (
-        [variant.context.system_id for variant in experiment.variants]
+        _request_variant_system_ids(experiment, request)
         if request.variants
         else None
     )
@@ -2380,6 +2620,19 @@ def _selected_request_system_ids(
             selected_system_ids(experiment, workload, preset, requested) or []
         )
     return tuple(dict.fromkeys(values))
+
+
+def _request_variant_system_ids(
+    experiment: ExperimentSpec, request: ExperimentRequest
+) -> list[str]:
+    requested = set(request.variants)
+    return list(
+        dict.fromkeys(
+            variant.context.system_id
+            for variant in experiment.variants
+            if variant.id in requested
+        )
+    )
 
 
 def _request_for_experiment(experiment: ExperimentSpec) -> ExperimentRequest:
@@ -2403,6 +2656,51 @@ def _request_for_experiment(experiment: ExperimentSpec) -> ExperimentRequest:
     )
 
 
+def _verify_rendered_setup(jobs: list[RenderedJob]) -> None:
+    missing: list[str] = []
+    for job in jobs:
+        if not job.applicable or job.execution_kind != "agent":
+            continue
+        fugue = job.config.get("fugue") or {}
+        if job.context_system_id != "none" and not job.context_cache_ready:
+            missing.append(
+                f"{job.job_name}: context artifact {job.context_system_id} is missing"
+            )
+        if (
+            job.context_delivery == "native_mcp"
+            and runtime_spec(job.context_system_id) is not None
+            and not fugue.get("context_runtime")
+        ):
+            missing.append(
+                f"{job.job_name}: managed runtime {job.context_system_id} is missing"
+            )
+        context_runtime = fugue.get("context_runtime") or {}
+        if (
+            job.context_delivery == "portable"
+            and job.context_system_id != "none"
+            and not context_runtime.get("image_id")
+        ):
+            missing.append(
+                f"{job.job_name}: portable context runtime image is missing"
+            )
+        if agent_runtime_spec(job.harness) is not None and not fugue.get(
+            "agent_runtime"
+        ):
+            missing.append(
+                f"{job.job_name}: prepared agent runtime {job.harness} is missing"
+            )
+        if not fugue.get("task_runtime"):
+            missing.append(
+                f"{job.job_name}: prepared task image {job.task_id} is missing"
+            )
+    if missing:
+        detail = "\n".join(f"- {item}" for item in missing[:20])
+        raise RuntimeError(
+            "run setup is incomplete; execute `fugue setup --prepare` before "
+            f"starting an immutable run:\n{detail}"
+        )
+
+
 def _preparation_targets(
     *,
     experiment: ExperimentSpec,
@@ -2411,8 +2709,11 @@ def _preparation_targets(
     requested_systems: list[str] | None,
     manifest_override: Path | None,
     repo_root: Path,
-) -> list[tuple[str, RepositorySnapshot]]:
-    targets: dict[tuple[str, str, str, str], tuple[str, RepositorySnapshot]] = {}
+    requested_variants: list[str] | None = None,
+) -> list[ContextPreparationTarget]:
+    targets: dict[
+        tuple[str, str, str, str, str], ContextPreparationTarget
+    ] = {}
     selected = workloads or [
         WorkloadSpec(
             id="harbor",
@@ -2430,23 +2731,25 @@ def _preparation_targets(
             )
             or []
         )
-        system_ids = [
-            system_id
-            for system_id in system_ids
+        variants = [
+            variant
+            for variant in experiment.variants
+            if variant.enabled and variant.context.system_id in system_ids
+        ]
+        effective: list[tuple[FeatureVariant, ContextSystemSpec]] = []
+        for variant in variants:
+            base = get_context_system(variant.context.system_id, repo_root)
+            spec = replace(
+                base,
+                config={**base.config, **variant.context.config},
+            )
             if resolve_context_capabilities(
-                get_context_system(system_id, repo_root),
-                delivery=next(
-                    (
-                        variant.context.delivery
-                        for variant in experiment.variants
-                        if variant.context.system_id == system_id
-                    ),
-                    "portable",
-                ),
+                spec,
+                delivery=variant.context.delivery,
                 runner=workload.runner,
                 additional=workload.required_capabilities,
-            ).applicable
-        ]
+            ).applicable:
+                effective.append((variant, spec))
         limit = (
             preset_workload_int(preset, workload.id, "n_tasks")
             or workload.n_tasks
@@ -2465,8 +2768,9 @@ def _preparation_targets(
                     task.id,
                     task.repo,
                     task.base_commit,
-                    repo_root,
+                    _fixture_repository_path(task.repository, repo_root),
                     manifest.dataset.harbor_ref,
+                    task.metadata,
                 )
                 for task in tasks
                 if task.repo and task.base_commit
@@ -2486,11 +2790,54 @@ def _preparation_targets(
                 )
                 for case in cases
             )
-        for system_id in system_ids:
+        for variant, spec in effective:
+            if requested_variants:
+                if variant.id not in requested_variants:
+                    continue
+            elif workload.variants and variant.id not in workload.variants:
+                continue
             for snapshot in snapshots:
-                key = (system_id, snapshot.task_id, snapshot.repo, snapshot.commit)
-                targets[key] = (system_id, snapshot)
+                config_digest = hashlib.sha256(
+                    json.dumps(
+                        variant.context.config,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                key = (
+                    variant.context.system_id,
+                    f"{variant.context.delivery}:{config_digest}",
+                    snapshot.task_id,
+                    snapshot.repo,
+                    snapshot.commit,
+                )
+                targets[key] = ContextPreparationTarget(
+                    variant_id=variant.id,
+                    spec=spec,
+                    delivery=variant.context.delivery,
+                    config_digest=config_digest,
+                    snapshot=snapshot,
+                )
     return list(targets.values())
+
+
+def _fixture_repository_path(
+    repository: Any,
+    repo_root: Path,
+) -> Path:
+    if not isinstance(repository, FixtureRepositorySpec):
+        return repo_root
+    path = (repo_root / repository.path).resolve()
+    try:
+        path.relative_to(repo_root.resolve())
+    except ValueError as exc:
+        raise ValueError("fixture repository escapes the repository root") from exc
+    actual = fixture_repository_digest(path)
+    if actual != repository.sha256:
+        raise ValueError(
+            f"fixture repository digest changed: expected {repository.sha256}, got {actual}"
+        )
+    return path
 
 
 def _experiment_with_request_overrides(
@@ -2498,14 +2845,11 @@ def _experiment_with_request_overrides(
     request: ExperimentRequest,
 ) -> ExperimentSpec:
     variant_ids = set(request.variants)
-    variants = (
-        [variant for variant in experiment.variants if variant.id in variant_ids]
-        if variant_ids
-        else None
-    )
-    missing = sorted(variant_ids - {variant.id for variant in variants or []})
+    missing = sorted(variant_ids - {variant.id for variant in experiment.variants})
     if missing:
         raise ValueError(f"unknown variant(s): {', '.join(missing)}")
+    # A request narrows the plan, not the authored experiment. Removing variants here
+    # invalidates unrelated workload contracts before workload selection runs.
     return experiment_with_overrides(
         experiment,
         model=request.model,
@@ -2513,7 +2857,6 @@ def _experiment_with_request_overrides(
         judge_model=request.judge_model,
         tags=list(request.tags),
         harnesses=list(request.harnesses),
-        variants=[variant.to_dict() for variant in variants] if variants else None,
         n_tasks=request.n_tasks,
         n_attempts=request.n_attempts,
         n_concurrent=request.n_concurrent,

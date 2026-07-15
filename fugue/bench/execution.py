@@ -76,6 +76,8 @@ class PlannedCell:
     scorer_refs: tuple[str, ...] = ()
     applicable: bool = True
     skip_reason: str | None = None
+    config_sha256: str = ""
+    runtime_assets: tuple[tuple[str, str], ...] = ()
 
     def record(self, status: CellStatus, **values: Any) -> dict[str, Any]:
         return {
@@ -102,6 +104,8 @@ class PlannedCell:
             "n_attempts": self.n_attempts,
             "status": status,
             "skip_reason": self.skip_reason,
+            "config_sha256": self.config_sha256,
+            "runtime_assets": [list(item) for item in self.runtime_assets],
             "recorded_at": datetime.now(UTC).isoformat(),
             **values,
         }
@@ -179,6 +183,11 @@ def plan_cells(
                 scorer_refs=job.scorer_refs,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
+                config_sha256=_path_digest(job.config_path),
+                runtime_assets=tuple(
+                    (path.as_posix(), _path_digest(path))
+                    for path in job.generated_runtime_files
+                ),
             )
         )
     return schedule_cells(cells, scheduling_seed)
@@ -277,6 +286,21 @@ def execute_cells(
                 status="cancelled",
                 message=cancellation_message,
             )
+            return outcome
+        try:
+            _verify_cell_inputs(cell, repo_root)
+        except Exception as exc:
+            error = f"immutable run input verification failed: {exc}"
+            outcome = CellOutcome(cell.id, "failed", error=error)
+            store.append_cell(
+                cell.record(
+                    "failed",
+                    error=error,
+                    benchmark_outcome="unscored",
+                    ended_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            store.append_event("cell_state", cell=cell, status="failed", message=error)
             return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
@@ -481,6 +505,27 @@ def _run_cell_process(
     if reader_error:
         raise RuntimeError(f"cell log reader failed: {reader_error[0]}")
     return returncode
+
+
+def _verify_cell_inputs(cell: PlannedCell, repo_root: Path) -> None:
+    config_path = cell.config_path
+    if not config_path.is_absolute():
+        config_path = repo_root / config_path
+    if cell.config_sha256 and _path_digest(config_path) != cell.config_sha256:
+        raise RuntimeError(f"config drift: {config_path}")
+    for raw_path, expected in cell.runtime_assets:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = repo_root / path
+        if _path_digest(path) != expected:
+            raise RuntimeError(f"runtime asset drift: {path}")
+
+
+def _path_digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read immutable input {path}: {exc}") from exc
 
 
 def _terminate_process_group(

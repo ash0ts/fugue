@@ -20,6 +20,70 @@ from fugue.bench.manifest import load_manifest
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 
 
+def test_latin_square_renders_one_harness_per_variant_task_coordinate(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "matrix.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: hermes, agent: fugue.agents:FugueHermes}
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+  - {id: task-b}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="matrix",
+        title="Matrix",
+        variants=[
+            FeatureVariant(
+                id="none",
+                label="None",
+                context=ContextSelection(system_id="none"),
+            ),
+            FeatureVariant(
+                id="agents",
+                label="Agents",
+                context=ContextSelection(system_id="agentsmd"),
+            ),
+        ],
+    )
+
+    jobs = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="latin",
+        harness_assignment="latin_square",
+    )
+
+    assert {(job.variant_id, job.task_id, job.harness) for job in jobs} == {
+        ("none", "task-a", "hermes"),
+        ("none", "task-b", "codex"),
+        ("agents", "task-a", "codex"),
+        ("agents", "task-b", "hermes"),
+    }
+    selected = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="selected",
+        variant_names=["agents"],
+        harness_assignment="latin_square",
+    )
+    assert len(selected) == 2
+    assert {job.variant_id for job in selected} == {"agents"}
+
+
 def test_graphiti_job_uses_container_uri_without_serializing_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -213,7 +277,10 @@ tasks:
         "astropy__astropy-12907": ["astropy/modeling/separable.py"]
     }
     assert config["fugue"]["candidate_id"] == job.candidate_id
-    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "2"
+    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "3"
+    assert job.resolved_candidate.definition["harness_version"] == (
+        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1"
+    )
     assert job.resolved_candidate.definition["model_route"][
         "tool_result_modalities"
     ] == ["text", "image"]
@@ -406,7 +473,12 @@ required_env: [RETRIEVAL_TOKEN]
         "integration retrieval requires environment: RETRIEVAL_TOKEN"
     )
     assert "env" not in job.config["agents"][0]
-    assert "extra_allowed_hosts" not in job.config["agents"][0]
+    assert job.config["agents"][0]["extra_allowed_hosts"] == [
+        "api.wandb.ai",
+        "trace.wandb.ai",
+        "host.docker.internal",
+        "api.openai.com",
+    ]
     assert job.config["fugue"]["integration_ids"] == ["retrieval"]
 
 
@@ -460,7 +532,13 @@ interfaces:
 
     agent = job.config["agents"][0]
     assert job.applicable
-    assert agent["extra_allowed_hosts"] == ["api.example.test"]
+    assert agent["extra_allowed_hosts"] == [
+        "api.wandb.ai",
+        "trace.wandb.ai",
+        "host.docker.internal",
+        "api.example.test",
+        "api.openai.com",
+    ]
     assert agent["env"] == {
         "FUGUE_INTEGRATION_API_SEARCH_URL": "https://api.example.test/v1/search"
     }
@@ -747,7 +825,17 @@ tasks:
     assert job.config["fugue"]["applicable"] is False
 
 
-def test_portable_context_binding_uses_pinned_sidecar_and_command(tmp_path: Path):
+def test_portable_context_binding_uses_pinned_sidecar_and_command(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(
+        "fugue.bench.job_config.read_portable_runtime_lock",
+        lambda root: {
+            "image": "fugue-context-runtime:locked",
+            "image_id": "sha256:" + "1" * 64,
+            "recipe_sha256": "2" * 64,
+        },
+    )
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
         """
@@ -787,19 +875,27 @@ tasks:
     assert job.context_delivery == "portable"
     assert job.config["fugue"]["context_delivery"] == "portable"
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
-    [compose_path] = job.config["environment"]["extra_docker_compose"]
-    assert job.generated_runtime_files == (tmp_path / compose_path,)
+    compose_paths = job.config["environment"]["extra_docker_compose"]
+    compose_path = next(path for path in compose_paths if "context-runtime" in path)
+    assert job.generated_runtime_files == tuple(
+        tmp_path / path for path in compose_paths
+    )
+    policy_path = next(path for path in compose_paths if "trial-policy" in path)
+    policy = yaml.safe_load((tmp_path / policy_path).read_text())
+    assert policy["services"]["main"]["pull_policy"] == "never"
     descriptor = job.resolved_candidate.execution_definition["context_runtime"]
     assert descriptor == {
         "bridge_url": "http://host.docker.internal:4000",
-        "dockerfile": "Dockerfile.context",
         "host_gateway": "host.docker.internal:host-gateway",
-        "image": "fugue-context-runtime:0.1.0",
+        "image": "sha256:" + "1" * 64,
+        "image_id": "sha256:" + "1" * 64,
         "kind": "compose_service",
         "mcp_port": 8000,
         "network": "compose_project",
         "portable_port": 8001,
+        "prepared": True,
         "query_url": "http://fugue-context:8001",
+        "recipe_sha256": "2" * 64,
         "schema_version": 1,
         "service": "fugue-context",
     }
@@ -808,9 +904,13 @@ tasks:
     compose = yaml.safe_load(compose_text)
     service = compose["services"]["fugue-context"]
     assert service["image"] == descriptor["image"]
-    assert service["build"]["dockerfile"] == descriptor["dockerfile"]
+    assert "build" not in service
+    assert service["pull_policy"] == "never"
+    assert service["read_only"] is True
+    assert service["cap_drop"] == ["ALL"]
     assert service["extra_hosts"] == [descriptor["host_gateway"]]
-    assert f"FUGUE_BRIDGE_BASE_URL={descriptor['bridge_url']}" in service["environment"]
+    assert service["environment"]["FUGUE_BRIDGE_BASE_URL"] == descriptor["bridge_url"]
+    assert "WANDB_API_KEY" not in service["environment"]
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == descriptor["query_url"]
     dockerfile = Path(__file__).parents[1] / "Dockerfile.context"
     assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
@@ -887,10 +987,16 @@ interfaces:
     assert job.applicable is True
     assert "mcp_servers" not in job.config["agents"][0]
     assert job.config["agents"][0]["env"]["FUGUE_CONTEXT_COMMAND"] == ("fugue-context")
-    context_path, integration_path = [
+    compose_paths = [
         tmp_path / path for path in job.config["environment"]["extra_docker_compose"]
     ]
-    assert job.generated_runtime_files == (context_path, integration_path)
+    context_path = next(
+        path for path in compose_paths if "context-runtime" in path.as_posix()
+    )
+    integration_path = next(
+        path for path in compose_paths if "integrations" in path.as_posix()
+    )
+    assert job.generated_runtime_files == tuple(compose_paths)
     context_service = yaml.safe_load(context_path.read_text())["services"][
         "fugue-context"
     ]
@@ -939,7 +1045,9 @@ tasks:
     assert server["name"] == "fugue-context"
     assert server["transport"] == "stdio"
     assert "fugue.context_server" in server["args"]
-    assert "extra_docker_compose" not in job.config["environment"]
+    [policy_path] = job.config["environment"]["extra_docker_compose"]
+    policy = yaml.safe_load((tmp_path / policy_path).read_text())
+    assert policy["services"]["main"]["pull_policy"] == "never"
     assert any(
         mount["target"] == "/fugue-context"
         for mount in job.config["environment"]["mounts"]
@@ -1249,7 +1357,11 @@ tasks:
             item for item in mounts if item["target"] == "/usr/local/bin/fugue-context"
         )
         assert client_mount["read_only"] is True
-        [compose_path] = job.config["environment"]["extra_docker_compose"]
+        compose_path = next(
+            path
+            for path in job.config["environment"]["extra_docker_compose"]
+            if "context-runtime" in path
+        )
         compose = yaml.safe_load((tmp_path / compose_path).read_text())
         sidecar_mount = compose["services"]["fugue-context"]["volumes"][0]
         assert next(iter(job.context_cache_keys.values())) in sidecar_mount["source"]

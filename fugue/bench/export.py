@@ -2140,34 +2140,38 @@ _SCORE_ALIASES = {
     "storage_bytes": "context_storage_bytes",
 }
 
-_COMMON_SCORERS = (
-    "passed",
-    "reward",
-    "wall_time_seconds",
-    "prediction_latency_seconds",
-    "agent_latency_seconds",
-    "model_latency_seconds",
-    "input_tokens",
-    "output_tokens",
-    "total_cost_usd",
-    "tool_calls",
-    "terminal_errors",
-    "model_errors",
-    "recoverable_tool_errors",
-    "agent_errors",
-    "benchmark_runtime_errors",
-    "harness_adapter_errors",
-    "context_system_errors",
-    "provider_errors",
-    "fugue_errors",
-    "context_errors",
-    "context_queries",
-    "context_query_latency_ms",
-    "context_registered",
-    "runtime_equivalent",
-    "episodes",
-    "context_write_latency_ms",
-    "context_storage_bytes",
+_COMMON_SCORERS = tuple(
+    dict.fromkeys(
+        (
+            *_DIRECT_SCORE_FIELDS,
+            "passed",
+            "wall_time_seconds",
+            "prediction_latency_seconds",
+            "agent_latency_seconds",
+            "model_latency_seconds",
+            "input_tokens",
+            "output_tokens",
+            "total_cost_usd",
+            "tool_calls",
+            "terminal_errors",
+            "model_errors",
+            "recoverable_tool_errors",
+            "agent_errors",
+            "benchmark_runtime_errors",
+            "harness_adapter_errors",
+            "context_system_errors",
+            "provider_errors",
+            "fugue_errors",
+            "context_errors",
+            "context_queries",
+            "context_query_latency_ms",
+            "context_registered",
+            "runtime_equivalent",
+            "episodes",
+            "context_write_latency_ms",
+            "context_storage_bytes",
+        )
+    )
 )
 
 
@@ -2548,6 +2552,11 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
             if (call_id := _gateway_call_id(span)) is not None
         }
     )
+    vector_events = [
+        value
+        for span in tool_spans
+        if (value := _gateway_vector(span)) is not None
+    ]
     return {
         "weave_span_count": len(values),
         "weave_observability_status": "available",
@@ -2556,6 +2565,28 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         "weave_tool_call_count": operations.count("execute_tool"),
         "weave_gateway_tool_call_count": len(gateway_call_ids),
         "weave_gateway_call_ids": gateway_call_ids,
+        "gitnexus_vector_search_attempted": any(
+            value.get("vector_search_attempted") is True for value in vector_events
+        ),
+        "gitnexus_vector_search_succeeded": any(
+            value.get("vector_search_succeeded") is True for value in vector_events
+        ),
+        "gitnexus_semantic_result_count": sum(
+            int(value.get("semantic_result_count") or 0) for value in vector_events
+        ),
+        "gitnexus_bm25_result_count": sum(
+            int(value.get("bm25_result_count") or 0) for value in vector_events
+        ),
+        "gitnexus_vector_model_digests": sorted(
+            {
+                str(digest)
+                for value in vector_events
+                if (digest := value.get("model_digest"))
+            }
+        ),
+        "gitnexus_vector_query_latency_ms": sum(
+            float(value.get("query_latency_ms") or 0.0) for value in vector_events
+        ),
         "weave_error_count": sum(_span_has_error(span) for span in values),
         "weave_terminal_error_count": sum(_span_has_error(span) for span in roots),
         "weave_model_error_count": sum(_span_has_error(span) for span in chat_spans),
@@ -2606,19 +2637,37 @@ def _gateway_call_id(span: dict[str, Any]) -> str | None:
     return None
 
 
-def _nested_value(value: Any, key: str) -> Any:
+def _gateway_vector(span: dict[str, Any]) -> dict[str, Any] | None:
+    for source in (span, _raw_span(span)):
+        value = _nested_value(source, "fugue_gitnexus_vector")
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _nested_value(value: Any, key: str, *, _depth: int = 0) -> Any:
+    if _depth > 12:
+        return None
     if isinstance(value, dict):
         if key in value:
             return value[key]
         for item in value.values():
-            found = _nested_value(item, key)
+            found = _nested_value(item, key, _depth=_depth + 1)
             if found not in (None, ""):
                 return found
     elif isinstance(value, list):
         for item in value:
-            found = _nested_value(item, key)
+            found = _nested_value(item, key, _depth=_depth + 1)
             if found not in (None, ""):
                 return found
+    elif isinstance(value, str) and len(value) <= 256 * 1024:
+        stripped = value.strip()
+        if stripped[:1] in {"{", "["}:
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None
+            return _nested_value(decoded, key, _depth=_depth + 1)
     return None
 
 
@@ -3150,15 +3199,7 @@ def _apply_runtime_equivalence(rows: list[dict[str, Any]]) -> None:
         )
         cohorts.setdefault(key, []).append(row)
     for cohort in cohorts.values():
-        digests = [
-            str(
-                ((row.get("runtime_fingerprints") or {}).get("pre_install") or {}).get(
-                    "comparable_digest"
-                )
-                or ""
-            )
-            for row in cohort
-        ]
+        digests = [_runtime_comparison_digest(row) for row in cohort]
         available = [value for value in digests if value]
         if len(available) != len(cohort):
             status, equivalent = "unavailable", None
@@ -3175,6 +3216,23 @@ def _apply_runtime_equivalence(rows: list[dict[str, Any]]) -> None:
             row["runtime_pre_execution_digest"] = (
                 (row.get("runtime_fingerprints") or {}).get("pre_execution") or {}
             ).get("comparable_digest")
+            row["runtime_post_execution_digest"] = (
+                (row.get("runtime_fingerprints") or {}).get("post_execution") or {}
+            ).get("comparable_digest")
+            before = row["runtime_pre_execution_digest"]
+            after = row["runtime_post_execution_digest"]
+            row["runtime_drift"] = (
+                before != after if before is not None and after is not None else None
+            )
+
+
+def _runtime_comparison_digest(row: dict[str, Any]) -> str:
+    values = row.get("runtime_fingerprints") or {}
+    for stage in ("pre_execution", "verified", "pre_install"):
+        digest = (values.get(stage) or {}).get("comparable_digest")
+        if digest:
+            return str(digest)
+    return ""
 
 
 def _trial_result_paths(job: Path) -> list[Path]:
@@ -3331,7 +3389,9 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_invoked": context_events["context_query_count"] > 0,
         "context_invocation_evidence": {
             "status": (
-                "observed" if context_events["context_query_count"] > 0 else "not_observed"
+                "observed"
+                if context_events["context_query_count"] > 0
+                else "not_observed"
             ),
             "source": "local_context_events",
             "tool_calls": context_events["context_query_count"],
@@ -3392,7 +3452,7 @@ def _agent_response(trial_dir: Path) -> str | None:
 
 def _runtime_fingerprints(trial_dir: Path, meta: dict[str, Any]) -> dict[str, Any]:
     values = dict(meta.get("runtime_fingerprints") or {})
-    for stage in ("pre_install", "pre_execution"):
+    for stage in ("pre_install", "verified", "pre_execution", "post_execution"):
         if stage in values:
             continue
         path = trial_dir / "agent" / f"runtime-fingerprint-{stage}.json"

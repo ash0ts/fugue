@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,29 @@ class RepositorySpec:
 
 
 @dataclass(frozen=True)
+class FixtureRepositorySpec:
+    type: str
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.type != "fixture":
+            raise ValueError("fixture repository type must be 'fixture'")
+        validate_relative_source_path(self.path)
+        if len(self.sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in self.sha256
+        ):
+            raise ValueError("fixture repository requires a lowercase SHA-256")
+
+    @property
+    def slug(self) -> str:
+        return f"fixture/{Path(self.path).name}"
+
+    def to_dict(self) -> dict[str, str]:
+        return {"type": self.type, "path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
 class DatasetSpec:
     ref: str | None = None
     version: str | None = None
@@ -91,7 +115,7 @@ class TaskSpec:
     expected_paths: tuple[str, ...] = ()
     artifacts: tuple[Any, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
-    repository: RepositorySpec | None = None
+    repository: RepositorySpec | FixtureRepositorySpec | None = None
 
     @property
     def repo_slug(self) -> str:
@@ -197,21 +221,48 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
     if repository_raw is not None:
         if not isinstance(repository_raw, dict):
             raise ValueError(f"{manifest_path}: task repository must be a mapping")
-        unknown = sorted(set(repository_raw) - {"type", "url", "commit", "path"})
-        if unknown:
-            raise ValueError(
-                f"{manifest_path}: unknown repository field(s): {', '.join(unknown)}"
+        repository_type = str(repository_raw.get("type") or "")
+        if repository_type == "fixture":
+            unknown = sorted(set(repository_raw) - {"type", "path", "sha256"})
+            if unknown:
+                raise ValueError(
+                    f"{manifest_path}: unknown fixture repository field(s): "
+                    + ", ".join(unknown)
+                )
+            repository = FixtureRepositorySpec(
+                type=repository_type,
+                path=str(repository_raw.get("path") or ""),
+                sha256=str(repository_raw.get("sha256") or ""),
             )
-        repository = RepositorySpec(
-            type=str(repository_raw.get("type") or ""),
-            url=str(repository_raw.get("url") or ""),
-            commit=str(repository_raw.get("commit") or ""),
-            path=str(repository_raw["path"]) if repository_raw.get("path") else None,
-        )
+        else:
+            unknown = sorted(
+                set(repository_raw) - {"type", "url", "commit", "path"}
+            )
+            if unknown:
+                raise ValueError(
+                    f"{manifest_path}: unknown repository field(s): "
+                    + ", ".join(unknown)
+                )
+            repository = RepositorySpec(
+                type=repository_type,
+                url=str(repository_raw.get("url") or ""),
+                commit=str(repository_raw.get("commit") or ""),
+                path=(
+                    str(repository_raw["path"])
+                    if repository_raw.get("path")
+                    else None
+                ),
+            )
     return TaskSpec(
         id=str(item["id"]),
         repo=repository.slug if repository else item.get("repo"),
-        base_commit=repository.commit if repository else item.get("base_commit"),
+        base_commit=(
+            repository.commit
+            if isinstance(repository, RepositorySpec)
+            else repository.sha256
+            if isinstance(repository, FixtureRepositorySpec)
+            else item.get("base_commit")
+        ),
         notes=item.get("notes"),
         expected_paths=tuple(str(path) for path in item.get("expected_paths", [])),
         artifacts=tuple(artifacts),
@@ -276,6 +327,25 @@ def _positive_int(value: Any, name: str, path: Path) -> int:
     if parsed < 1:
         raise ValueError(f"{path}: {name} must be positive")
     return parsed
+
+
+def fixture_repository_digest(root: Path) -> str:
+    if not root.is_dir():
+        raise ValueError(f"fixture repository does not exist: {root}")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"fixture repository may not contain symlinks: {relative}")
+        if not path.is_file():
+            continue
+        name = relative.encode()
+        body = path.read_bytes()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(len(body).to_bytes(8, "big"))
+        digest.update(body)
+    return digest.hexdigest()
 
 
 def _require_unique(values: list[str], kind: str, path: Path) -> None:

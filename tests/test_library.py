@@ -143,6 +143,66 @@ presets:
     assert experiment.presets[0].workload_overrides == {"coding": {"n_tasks": 1}}
 
 
+def test_workload_selects_exact_variants_and_latin_square_assignment() -> None:
+    experiment = experiment_from_data(
+        {
+            "id": "memory-study",
+            "title": "Memory study",
+            "variants": [
+                {
+                    "id": "none",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
+                {
+                    "id": "vector",
+                    "context": {
+                        "system_id": "gitnexus",
+                        "delivery": "native_mcp",
+                    },
+                },
+            ],
+            "workloads": [
+                {
+                    "id": "discovery",
+                    "runner": "harbor",
+                    "variants": ["none", "vector"],
+                    "harness_assignment": "latin_square",
+                }
+            ],
+        }
+    )
+
+    workload = experiment.workloads[0]
+    assert workload.variants == ["none", "vector"]
+    assert workload.harness_assignment == "latin_square"
+
+
+def test_workload_rejects_unknown_variant_and_assignment() -> None:
+    common = {
+        "id": "memory-study",
+        "variants": [
+            {
+                "id": "none",
+                "context": {"system_id": "none", "delivery": "portable"},
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="unknown variant"):
+        experiment_from_data(
+            {
+                **common,
+                "workloads": [{"id": "study", "variants": ["missing"]}],
+            }
+        )
+    with pytest.raises(ValueError, match="harness_assignment"):
+        experiment_from_data(
+            {
+                **common,
+                "workloads": [
+                    {"id": "study", "harness_assignment": "random"}
+                ],
+            }
+        )
 def test_experiment_defaults_to_baseline_variant(tmp_path):
     save_experiment(
         "experiment-b",

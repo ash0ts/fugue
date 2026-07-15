@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-CANDIDATE_IDENTITY_SCHEMA_VERSION = 2
+CANDIDATE_IDENTITY_SCHEMA_VERSION = 3
 EXECUTION_IDENTITY_SCHEMA_VERSION = 1
 COMPARISON_IDENTITY_SCHEMA_VERSION = 1
 
@@ -40,6 +40,7 @@ class ResolvedCandidate:
 def resolve_candidate(
     *,
     harness: str,
+    harness_version: str,
     model_route: Mapping[str, Any],
     prompt_digest: str | None,
     skills: Sequence[Mapping[str, Any]],
@@ -52,11 +53,14 @@ def resolve_candidate(
 
     if not isinstance(harness, str) or not harness.strip():
         raise ValueError("harness must be a non-empty string")
+    if not isinstance(harness_version, str) or not harness_version.strip():
+        raise ValueError("harness_version must be a non-empty string")
 
     definition = _canonical(
         {
             "identity_schema_version": CANDIDATE_IDENTITY_SCHEMA_VERSION,
             "harness": harness,
+            "harness_version": harness_version,
             "model_route": model_route,
             "prompt_digest": prompt_digest,
             "skills": list(skills),
