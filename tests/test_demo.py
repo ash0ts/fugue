@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from fugue.bench.job_config import preview_jobs
 from fugue.bench.library import get_experiment, get_skill
 from fugue.bench.manifest import load_manifest
@@ -15,7 +17,14 @@ SKILLSBENCH_DIGEST = (
 )
 
 
-def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
+def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This assertion covers the authored remote dataset, not machine-local setup state.
+    monkeypatch.setattr(
+        "fugue.bench.job_config.read_task_runtime_lock",
+        lambda *_args, **_kwargs: None,
+    )
     manifest = load_manifest(MANIFEST_PATH)
     experiment = get_experiment("skillsbench-pdf-ab", REPO_ROOT)
     skill = get_skill("pdf-artifact-workflow", REPO_ROOT)
