@@ -20,8 +20,67 @@ from fugue.bench.export import (
 )
 
 
+def _write_export_fixture(tmp_path: Path) -> Path:
+    trial = tmp_path / "jobs" / "pilot" / "bridge-check__abc123"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "fugue/smoke-bridge-check",
+                "trial_name": "bridge-check__abc123",
+                "config": {"agent": {"model_name": "wandb/zai-org/GLM-5.2"}},
+                "agent_info": {"name": "wandb-hermes"},
+                "agent_result": {
+                    "n_input_tokens": 10,
+                    "n_cache_tokens": 0,
+                    "n_output_tokens": 5,
+                    "cost_usd": 0.01,
+                },
+                "verifier_result": {"rewards": {"reward": 1.0}},
+                "exception_info": None,
+                "started_at": "2026-07-08T22:19:56.798954Z",
+                "finished_at": "2026-07-08T22:20:01.798954Z",
+            }
+        )
+    )
+    (trial / "agent" / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "run_key": "bridge-check__abc123",
+                "job_name": "pilot",
+                "harness": "hermes",
+                "experiment_id": "fixture-exp-id",
+                "run_name": "fixture-exp",
+                "run_group": "fixture-exp",
+                "variant_id": "baseline",
+                "prompt_id": "smoke-prompt",
+                "prompt_hashes": {"smoke-prompt": "prompt123"},
+                "skill_ids": ["repo-skill"],
+                "workload_id": "coding",
+                "preset_id": "smoke",
+                "context_system_id": "rag-bm25",
+                "context_version": "1",
+                "context_config_hash": "context123",
+                "context_cache_keys": {"bridge-check": "cache123"},
+                "context_artifact": {"context_system_id": "rag-bm25"},
+                "agent_config_hash": "abc123",
+                "evaluation_scope_id": "scope-123",
+                "tags": ["fugue", "run:fixture-exp", "harness:hermes"],
+                "model_provider": "wandb",
+                "model": "wandb/zai-org/GLM-5.2",
+                "trace_project": "test/fugue",
+                "weave_agent_name": "hermes-agent",
+                "weave_conversation_ids": ["session-1"],
+                "native_session_ids": ["session-1"],
+                "trace_content": "full",
+            }
+        )
+    )
+    return tmp_path / "jobs"
+
+
 def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
-    jobs = Path(__file__).parent / "fixtures" / "export" / "jobs"
+    jobs = _write_export_fixture(tmp_path)
 
     rows = export_rows([jobs])
 
@@ -44,6 +103,7 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["context_invoked"] is False
     assert row["context_query_count"] == 0
     assert row["agent_config_hash"] == "abc123"
+    assert row["evaluation_scope_id"] == "scope-123"
     assert row["run_name"] == "fixture-exp"
     assert row["tags"] == ["fugue", "run:fixture-exp", "harness:hermes"]
     assert row["model_provider"] == "wandb"
@@ -83,6 +143,25 @@ def test_weave_payload_redacts_secrets_and_keeps_full_hits_local() -> None:
     assert safe["hits"] == [{"path": "src/app.py", "score": 0.9}]
     assert "trial_dir" not in safe
     assert row["hits"][0]["text"].startswith("repository")
+
+
+def test_jsonl_export_redacts_secret_keys_and_values(tmp_path: Path) -> None:
+    output = tmp_path / "results.jsonl"
+
+    write_jsonl(
+        [
+            {
+                "api_key": "named-secret",
+                "error": "provider rejected opaque-live-secret-value",
+            }
+        ],
+        output,
+        env={"WANDB_API_KEY": "opaque-live-secret-value"},
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["api_key"] == "[redacted]"
+    assert payload["error"] == "provider rejected [redacted]"
 
 
 def test_qa_judge_uses_local_reference_and_records_separate_metrics(
@@ -641,6 +720,33 @@ def test_live_evaluation_rows_recover_prediction_latency(tmp_path: Path) -> None
     assert rows[0]["evaluation_publication_mode"] == "live"
 
 
+def test_live_evaluation_merge_preserves_fresh_local_measurements() -> None:
+    row = {
+        "run_key": "run-key",
+        "evaluation_scope_id": "scope",
+        "context_query_count": 1,
+        "evidence_paths": ["src/current.py"],
+        "local_error_events": [{"id": "current"}],
+    }
+    live = {
+        "run_key": "run-key",
+        "context_query_count": 0,
+        "evidence_paths": ["dev/null"],
+        "local_error_events": [],
+        "trace_id": "trace",
+        "evaluation_prediction_latency_sec": 12.0,
+    }
+
+    export._merge_live_evaluation_row(row, live)
+
+    assert row["evaluation_scope_id"] == "scope"
+    assert row["context_query_count"] == 1
+    assert row["evidence_paths"] == ["src/current.py"]
+    assert row["local_error_events"] == [{"id": "current"}]
+    assert row["trace_id"] == "trace"
+    assert row["evaluation_prediction_latency_sec"] == 12.0
+
+
 def test_completed_evaluation_preserves_planned_dataset_identity(
     tmp_path: Path,
 ) -> None:
@@ -699,6 +805,66 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
         export._publication_candidates([row])[0]["evaluation_scope_id"]
         == export._publication_candidates([planned])[0]["evaluation_scope_id"]
     )
+
+
+def test_completed_evaluation_recovers_setup_failure_and_fingerprint(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "agent" / "runtime-fingerprint-pre_install.json").write_text(
+        json.dumps({"stage": "pre_install", "comparable_digest": "runtime-a"})
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "swe-bench/task-a",
+                "trial_name": "trial",
+                "exception_info": {
+                    "exception_type": "NonZeroAgentExitCodeError",
+                    "exception_message": "installer exited with code 1",
+                    "exception_traceback": "trial.py in _setup_agent\nhermes.py in install",
+                },
+            }
+        )
+    )
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="coding",
+        task_id="task-a",
+        harness="hermes",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="wandb",
+        model="wandb/test-model",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "job" / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_EXPERIMENT_ID": "experiment-a"},
+        n_attempts=1,
+    )
+    planned = export._planned_evaluation_row(cell)
+
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(cell.id, "failed", returncode=1, error="trial failed"),
+        planned,
+    )
+    export._merge_error_events(row)
+
+    assert row["run_id"] == "run-a"
+    assert row["candidate_id"] == "candidate-a"
+    assert row["harness"] == "hermes"
+    assert row["runtime_fingerprints"]["pre_install"]["comparable_digest"] == (
+        "runtime-a"
+    )
+    assert row["harness_adapter_error_count"] == 1
+    assert row["error_events"][0]["terminal"] is True
 
 
 def test_weave_publication_never_republishes_finalized_live_predictions(
@@ -1111,6 +1277,170 @@ def test_agent_span_summary_separates_error_categories() -> None:
     assert summary["weave_tool_error_count"] == 1
 
 
+def test_error_provenance_distinguishes_agent_runtime_and_adapter_failures() -> None:
+    cases = [
+        ("'content' must be a string, got dict", "write_file", "agent"),
+        ("tool_result_error", "exec", "agent"),
+        ("ModuleNotFoundError: No module named 'erfa'", "Bash", "benchmark_runtime"),
+        ("web_search is disabled: no provider configured", "web_search", "harness_adapter"),
+        (
+            "unknown variant `namespace`, expected `function`",
+            "",
+            "provider",
+        ),
+    ]
+
+    for message, tool_name, origin in cases:
+        event = export._classify_error(
+            message,
+            tool_name=tool_name,
+            operation="execute_tool",
+            source="test",
+        )
+        assert event["origin"] == origin
+        assert event["recoverable"] is True
+
+
+def test_terminal_harness_install_failure_is_owned_by_adapter() -> None:
+    event = export._terminal_exception_event(
+        {
+            "exception_type": "NonZeroAgentExitCodeError",
+            "exception_message": "installer exited with code 1",
+            "exception_traceback": (
+                "harbor/trial/trial.py in _setup_agent\n"
+                "harbor/agents/installed/hermes.py in install"
+            ),
+        }
+    )
+
+    assert event is not None
+    assert event["origin"] == "harness_adapter"
+    assert event["kind"] == "integration_failure"
+    assert event["terminal"] is True
+    assert event["recoverable"] is False
+
+
+def test_error_events_merge_native_and_weave_occurrences_without_double_counting() -> None:
+    row: dict[str, object] = {
+        "weave_error_events": [
+            export._classify_error(
+                "command failed with exit code 1",
+                tool_name="bash",
+                operation="execute_tool",
+                source="weave_span",
+                event_key=f"span-{index}",
+            )
+            for index in range(2)
+        ],
+        "local_error_events": [
+            export._classify_error(
+                "tool reported failure",
+                tool_name="bash",
+                operation="execute_tool",
+                source="local_trajectory",
+                event_key=f"call-{index}",
+            )
+            for index in range(2)
+        ],
+    }
+
+    export._merge_error_events(row)
+
+    assert len(row["error_events"]) == 2
+    assert row["agent_error_count"] == 2
+    assert row["recoverable_error_count"] == 2
+
+
+def test_failed_context_registration_is_not_reported_as_available(tmp_path: Path) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    meta_path = next(jobs.rglob("fugue-meta.json"))
+    meta = json.loads(meta_path.read_text())
+    meta["context_registration"] = {
+        "status": "failed",
+        "transport": "portable",
+        "error": "probe unavailable",
+    }
+    meta_path.write_text(json.dumps(meta))
+
+    [row] = export_rows([jobs])
+
+    assert row["context_assigned"] is True
+    assert row["context_registered"] is False
+    assert row["context_available"] is False
+
+
+def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "tool_calls": [
+                            {
+                                "tool_call_id": "read",
+                                "function_name": "read_file",
+                                "arguments": {
+                                    "path": "/testbed/src/app.py",
+                                    "command": (
+                                        "cat /dev/null /tmp/ignore.txt "
+                                        "/testbed/src/other.py"
+                                    ),
+                                },
+                            },
+                            {
+                                "tool_call_id": "write",
+                                "function_name": "write_file",
+                                "arguments": {"path": "src/app.py"},
+                            },
+                        ],
+                        "observation": {
+                            "results": [
+                                {
+                                    "source_call_id": "write",
+                                    "content": "'content' must be a string, got dict",
+                                    "extra": {"tool_result_is_error": True},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    activity = export._trajectory_activity(trial)
+
+    assert activity["inspected_paths"] == ["src/app.py", "src/other.py"]
+    assert activity["changed_paths"] == ["src/app.py"]
+    assert activity["error_events"][0]["kind"] == "invalid_tool_arguments"
+
+
+def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:
+    rows = [
+        {
+            "record_type": "trial",
+            "run_id": "run",
+            "comparison_example_id": "example",
+            "trial_index": 1,
+            "model": "wandb/model",
+            "runtime_fingerprints": {
+                "pre_install": {"comparable_digest": digest}
+            },
+        }
+        for digest in ("same", "same")
+    ]
+    export._apply_runtime_equivalence(rows)
+    assert all(row["runtime_equivalent"] is True for row in rows)
+
+    rows[1]["runtime_fingerprints"]["pre_install"]["comparable_digest"] = "other"
+    export._apply_runtime_equivalence(rows)
+    assert all(row["runtime_equivalence_status"] == "mismatch" for row in rows)
+
+
 def test_agent_span_summary_preserves_measured_zero_usage() -> None:
     summary = _summarize_spans(
         [
@@ -1164,6 +1494,8 @@ def test_agent_span_summary_verifies_flat_fugue_attributes() -> None:
         "fugue.harness": "codex",
         "fugue.variant_id": "rag-bm25",
         "fugue.context_system_id": "rag-bm25",
+        "fugue.context_transport": "portable",
+        "fugue.context_registration_status": "registered",
         "fugue.task_id": "task-a",
         "fugue.trial_index": "1",
         "fugue.comparison_example_id": "example-a",
@@ -1233,8 +1565,10 @@ def test_agent_span_summary_supports_agents_api_rows() -> None:
     assert summary["weave_output_tokens"] == 3
 
 
-def test_weave_enrichment_marks_expected_agent_identity(monkeypatch) -> None:
-    jobs = Path(__file__).parent / "fixtures" / "export" / "jobs"
+def test_weave_enrichment_marks_expected_agent_identity(
+    monkeypatch, tmp_path: Path
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
 
     monkeypatch.setattr(
         export,

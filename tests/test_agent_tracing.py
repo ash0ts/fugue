@@ -54,6 +54,8 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.harness",
         "fugue.variant_id",
         "fugue.context_system_id",
+        "fugue.context_transport",
+        "fugue.context_registration_status",
         "fugue.task_id",
         "fugue.trial_index",
         "fugue.comparison_example_id",
@@ -82,7 +84,14 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
 
     assert source.count('_WEAVE_PLUGIN_VERSION = "0.1.1"') == 2
     assert '_WEAVE_PLUGIN_VERSION = "0.2.12"' in source
+    assert '_HERMES_VERSION = "v2026.6.5"' in source
+    assert '_OPENCLAW_VERSION = "2026.7.1"' in source
+    assert '_CLAUDE_CODE_VERSION = "2.1.210"' in source
+    assert '_CODEX_VERSION = "0.143.0"' in source
+    assert "@latest" not in source
     assert "openclaw plugins install weave-openclaw@" in source
+    assert "{self._HERMES_VERSION}/scripts/install.sh" in source
+    assert "--skip-browser --no-skills --non-interactive" in source
     assert "npm install -g weave-claude-code@" in source
     assert "weave-codex@" in source
     assert "emitter pattern missing" in source
@@ -91,3 +100,16 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert "key.startsWith('fugue.')" in source
     assert "self._resolved_env_vars.update(" in source
     assert "expected 3 span objects" in source
+    assert "codex mcp list --json" in source
+    assert "pending_native_registration" in source
+    assert '"status": "failed"' in source
+    for tool in (
+        "web_search",
+        "web_fetch",
+        "browser",
+        "image",
+        "memory_search",
+        "memory_get",
+    ):
+        assert f'"{tool}"' in source
+    assert "context registration probe failed before agent execution" in source
