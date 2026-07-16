@@ -963,27 +963,9 @@ def _setup(args: argparse.Namespace) -> int:
                 )
             )
         return 0
-    if args.start_services:
-        statuses = service.start_services(request)
-        if args.json:
-            print(as_json(statuses))
-        else:
-            _print_service_statuses(statuses)
-        return 0 if all(item.ready for item in statuses) else 1
-    if args.service_status:
-        statuses = service.service_status(request)
-        if args.json:
-            print(as_json(statuses))
-        else:
-            _print_service_statuses(statuses)
-        return 0 if all(item.ready for item in statuses) else 1
-    if args.stop_services:
-        statuses = service.stop_services(request)
-        if args.json:
-            print(as_json(statuses))
-        else:
-            _print_service_statuses(statuses)
-        return 0 if all(not item.ready for item in statuses) else 1
+    service_result = _setup_service_action(args, service, request, as_json)
+    if service_result is not None:
+        return service_result
     if args.prepare:
         prepared = service.prepare(request, rebuild=args.rebuild)
         if args.json:
@@ -1059,6 +1041,24 @@ def _setup(args: argparse.Namespace) -> int:
         and status.trace_key_present
         else 1
     )
+
+
+def _setup_service_action(args, service, request, as_json) -> int | None:
+    actions = (
+        (args.start_services, service.start_services, True),
+        (args.service_status, service.service_status, True),
+        (args.stop_services, service.stop_services, False),
+    )
+    selected = next((item for item in actions if item[0]), None)
+    if selected is None:
+        return None
+    _, action, expected_ready = selected
+    statuses = action(request)
+    if args.json:
+        print(as_json(statuses))
+    else:
+        _print_service_statuses(statuses)
+    return 0 if all(item.ready is expected_ready for item in statuses) else 1
 
 
 def _runs(args: argparse.Namespace) -> int:

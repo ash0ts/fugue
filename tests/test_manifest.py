@@ -19,8 +19,7 @@ harnesses:
     agent: fugue.agents:FugueHermes
 tasks:
   - id: astropy__astropy-12907
-    repo: astropy/astropy
-    base_commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
+    repository: {type: git, url: https://github.com/astropy/astropy, commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607}
 """
     )
 
@@ -44,8 +43,7 @@ harnesses:
     agent: fugue.agents:FugueCodex
 tasks:
   - id: qa-001
-    repo: org/repo
-    base_commit: abc123
+    repository: {type: git, url: https://github.com/org/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     metadata: {source_index: 7}
 """
     )
@@ -213,6 +211,23 @@ tasks:
 """
     )
     with pytest.raises(ValueError, match="full lowercase Git SHA"):
+        load_manifest(path)
+
+
+def test_manifest_rejects_legacy_task_repository_fields(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.yaml"
+    path.write_text(
+        """
+dataset: {ref: test/tasks}
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks:
+  - id: task
+    repo: example/project
+    base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+    )
+
+    with pytest.raises(ValueError, match="must use repository"):
         load_manifest(path)
 
 

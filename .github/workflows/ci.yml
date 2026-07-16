@@ -81,6 +81,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -91,6 +93,17 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv lock --check
       - run: uv run ruff check .
+      - name: Reject high-confidence dead production code
+        run: uv run vulture fugue --min-confidence 80
+      - name: Report advisory dead-code candidates
+        continue-on-error: true
+        run: uv run vulture fugue --min-confidence 60
+      - name: Validate dependency declarations
+        run: uv run deptry fugue
+      - name: Production Python remains net-negative
+        run: |
+          changed=$(git diff --numstat 75eb7c7 -- 'fugue/**/*.py' 'fugue/*.py' | awk '{added += $1; removed += $2} END {print added - removed}')
+          test "$changed" -lt 0
       - name: Compile with warnings as errors
         env:
           PYTHONWARNINGS: error
@@ -166,8 +179,8 @@ jobs:
           ADAPTER: ${{ matrix.adapter }}
         run: >-
           uv run python -c
-          'import os; from pathlib import Path; from fugue.bench.runtime_manager import probe_runtime_install;
-          probe_runtime_install(os.environ["ADAPTER"], Path.cwd())'
+          'import os; from pathlib import Path; from fugue.bench.runtime_manager import runtime_ready;
+          ready, reason = runtime_ready(os.environ["ADAPTER"], Path.cwd()); assert ready, reason'
       - name: Build and query the offline GitNexus vector fixture
         if: matrix.adapter == 'gitnexus'
         run: |

@@ -13,8 +13,6 @@ from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
     IntegrationSelection,
-    save_prompt,
-    save_skill,
 )
 from fugue.bench.manifest import load_manifest
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
@@ -84,6 +82,52 @@ tasks:
     assert {job.variant_id for job in selected} == {"agents"}
 
 
+def test_reused_run_name_keeps_harbor_state_isolated_by_run_id(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "matrix.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+jobs_dir: jobs/matrix
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="matrix",
+        title="Matrix",
+        run_name="reusable-display-name",
+        variants=[FeatureVariant(id="none", label="None")],
+    )
+
+    [first] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="run-a",
+    )
+    [second] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="run-b",
+    )
+
+    assert first.job_name == second.job_name
+    assert first.config["jobs_dir"] == "jobs/matrix/run-a"
+    assert second.config["jobs_dir"] == "jobs/matrix/run-b"
+    assert first.result_path != second.result_path
+
+
 def test_graphiti_job_uses_container_uri_without_serializing_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -130,7 +174,7 @@ config:
     monkeypatch.setattr(
         services,
         "managed_service_status",
-        lambda spec: ManagedServiceStatus(
+        lambda spec, **_kwargs: ManagedServiceStatus(
             spec.id,
             "healthy",
             True,
@@ -185,8 +229,12 @@ tasks:
     expected_paths: [astropy/modeling/separable.py]
 """
     )
-    save_prompt("prompt-a", "# Prompt A\n", tmp_path)
-    save_skill("skill-a", "# Skill A\n", tmp_path)
+    prompt = tmp_path / "configs/fugue/prompts/prompt-a.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("# Prompt A\n")
+    skill = tmp_path / "configs/fugue/skills/skill-a/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Skill A\n")
     experiment = ExperimentSpec(
         id="experiment-a",
         title="Experiment A",
@@ -275,7 +323,7 @@ tasks:
     assert "FUGUE_EXPECTED_EVIDENCE_PATHS" not in job.env
     assert job.expected_evidence_paths == ("astropy/modeling/separable.py",)
     assert config["fugue"]["candidate_id"] == job.candidate_id
-    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "3"
+    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "1"
     assert job.resolved_candidate.definition["harness_version"] == (
         "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
     )
@@ -1316,8 +1364,8 @@ dataset: {ref: fixture/tasks}
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-a, repo: fixture/a, base_commit: abc}
-  - {id: task-b, repo: fixture/b, base_commit: def}
+  - {id: task-a, repository: {type: git, url: https://github.com/fixture/a, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
+  - {id: task-b, repository: {type: git, url: https://github.com/fixture/b, commit: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}}
 """
     )
     experiment = ExperimentSpec(

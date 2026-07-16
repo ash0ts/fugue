@@ -406,11 +406,12 @@ Deterministic outcomes, rubric scores, and judge errors remain separate—Fugue
 does not invent a composite score or convert a judge outage into a Harbor
 failure. Unmeasured token usage remains unavailable rather than becoming zero.
 
-`RunSnapshotV3` records source and resolved experiment digests, capability
+`RunSnapshotV1` records source and resolved experiment digests, capability
 decisions, logical predictions, runtime locks, planned cells, asset identities,
 cohort identity, treatment-selection digest, evaluation-lock digest, and
-publication schema before execution. V1 and V2 snapshots remain readable. A
-normalized prediction is distinct from its raw retrieval or episode
+publication schema before execution. This is the first public contract, so
+earlier development snapshots are intentionally unreadable. A normalized
+prediction is distinct from its raw retrieval or episode
 measurements. Summaries therefore report planned and executed cells, logical
 predictions, measurements, Agent and direct predictions, conversations, links,
 canaries, and remediation cohorts separately.

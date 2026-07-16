@@ -114,8 +114,11 @@ def test_hard_memory_v2_lock_is_deterministic_disjoint_and_gold_free() -> None:
         ).hexdigest()
         for row in rows
     )
-    repositories = {row["repo"] for row in rows}
-    assert all(sum(row["repo"] == repo for row in rows) <= 2 for repo in repositories)
+    repositories = {row["repository"]["url"] for row in rows}
+    assert all(
+        sum(row["repository"]["url"] == repo for row in rows) <= 2
+        for repo in repositories
+    )
 
     manifests = {
         "discovery": "swe-bench-hard-discovery-v2.yaml",

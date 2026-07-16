@@ -11,8 +11,6 @@ from fugue.bench.library import (
     get_experiment,
     get_prompt,
     save_experiment,
-    save_prompt,
-    save_skill,
     validate_id,
 )
 
@@ -26,8 +24,12 @@ def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
 
 
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
-    save_prompt("fugue-maintainer", "# Maintainer\n", tmp_path)
-    save_skill("fugue-maintainer", "# Maintainer\n", tmp_path)
+    prompt = tmp_path / "configs/fugue/prompts/fugue-maintainer.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("# Maintainer\n")
+    skill = tmp_path / "configs/fugue/skills/fugue-maintainer/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Maintainer\n")
     root = tmp_path / "configs/fugue/agent-presets"
     root.mkdir(parents=True)
     (root / "maintainer-best.yaml").write_text(
@@ -79,13 +81,14 @@ invented: true
 
 
 def test_prompt_save_reload_and_hash(tmp_path):
-    item = save_prompt("prompt-a", "# Prompt A\n\nUse tests.\n", tmp_path)
+    path = tmp_path / "configs/fugue/prompts/prompt-a.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# Prompt A\n\nUse tests.\n")
 
     loaded = get_prompt("prompt-a", tmp_path)
 
     assert loaded.body == "# Prompt A\n\nUse tests.\n"
     assert loaded.title == "Prompt A"
-    assert loaded.sha256 == item.sha256
     assert len(loaded.sha256) == 64
 
 

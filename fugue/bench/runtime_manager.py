@@ -5,12 +5,14 @@ import json
 import os
 import shutil
 import subprocess
-import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 
 RUNTIME_ROOT = Path(".fugue/runtime/context-runtimes")
 GATEWAY_PORT = 8765
@@ -40,7 +42,6 @@ class ManagedMCPRuntimeSpec:
     state_mount: str = "/workspace/state"
     repository_state_paths: tuple[str, ...] = ()
     runtime_env: tuple[tuple[str, str], ...] = ()
-    probe_command: tuple[str, ...] = ()
 
     @property
     def recipe_sha256(self) -> str:
@@ -63,11 +64,6 @@ class ManagedMCPRuntimeSpec:
     @property
     def image(self) -> str:
         return f"fugue-context-{self.system_id}:{self.recipe_sha256[:12]}"
-
-    @property
-    def install_probe_command(self) -> tuple[str, ...]:
-        return self.probe_command or (*self.upstream_command, "--help")
-
 
 _GATEWAY_INSTALL = (
     "python3 -m venv /opt/gateway && "
@@ -252,14 +248,6 @@ RUNTIMES = {
                 "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
             ),
         ),
-        probe_command=(
-            "node",
-            "-e",
-            "import('/opt/gitnexus-runtime/node_modules/gitnexus/dist/mcp/core/"
-            "embedder.js').then(async m => { const v=await m.embedQuery('offline "
-            "semantic readiness'); if(v.length!==384) process.exit(2); "
-            "console.log(v.length) })",
-        ),
     ),
     "codegraph": ManagedMCPRuntimeSpec(
         "codegraph",
@@ -324,11 +312,6 @@ RUNTIMES = {
             ("SEMBLE_MODEL_NAME", "/opt/semble-model"),
             ("SEMBLE_TREE_SITTER_CACHE", "/opt/tree-sitter-languages"),
             ("HF_HUB_OFFLINE", "1"),
-        ),
-        probe_command=(
-            "/opt/gateway/bin/python",
-            "-c",
-            "import semble.mcp",
         ),
     ),
     "latmd": ManagedMCPRuntimeSpec(
@@ -470,7 +453,7 @@ def prepare_runtime(
         "repository_state_paths": list(spec.repository_state_paths),
         "runtime_env": dict(spec.runtime_env),
     }
-    _atomic_json(root / "runtime-lock.json", lock)
+    atomic_write_json(root / "runtime-lock.json", lock)
     return lock
 
 
@@ -501,39 +484,6 @@ def runtime_ready(system_id: str, repo_root: Path) -> tuple[bool, str]:
     if inspected.get("Architecture") not in spec.architectures:
         return False, "managed runtime image architecture is not supported"
     return True, f"{lock['image']} matches {str(lock['image_id'])[:19]}"
-
-
-def probe_runtime_install(system_id: str, repo_root: Path) -> None:
-    spec = RUNTIMES.get(system_id)
-    lock = read_runtime_lock(system_id, repo_root)
-    if spec is None or lock is None:
-        raise RuntimeError(f"managed runtime for {system_id} is not prepared")
-    command = spec.install_probe_command
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
-            "--entrypoint",
-            command[0],
-            str(lock["image_id"]),
-            *command[1:],
-        ],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
 
 
 def prepare_runtime_repository(
@@ -872,7 +822,10 @@ def query_gitnexus(
         telemetry["vector_model_digest"] = telemetry.pop("model_digest")
     if "query_latency_ms" in telemetry:
         telemetry["vector_query_latency_ms"] = telemetry.pop("query_latency_ms")
-    if mode == GITNEXUS_VECTOR_MODE and telemetry.get("vector_search_succeeded") is not True:
+    if (
+        mode == GITNEXUS_VECTOR_MODE
+        and telemetry.get("vector_search_succeeded") is not True
+    ):
         raise RuntimeError("GitNexus hybrid query did not execute vector retrieval")
     return payload, telemetry
 
@@ -1060,33 +1013,6 @@ done
 cd /workspace/repository
 exec /opt/gateway/bin/python /opt/fugue/mcp_gateway.py --host 0.0.0.0 --port 8765 -- "$@"
 """
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if (
-        not isinstance(values, list)
-        or len(values) != 1
-        or not isinstance(values[0], dict)
-    ):
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
 
 
 def _digest(value: Any) -> str:

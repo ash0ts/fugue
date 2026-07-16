@@ -15,6 +15,8 @@ from typing import Any
 import toml
 from filelock import FileLock
 
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 from fugue.bench.manifest import (
     BenchmarkManifest,
     DatasetVerifierRuntimeSpec,
@@ -137,7 +139,7 @@ def prepare_task_runtime(
             ),
             "verifier_script": verifier_script,
         }
-        _atomic_json(root / f"runtime-lock-{architecture}.json", lock)
+        atomic_write_json(root / f"runtime-lock-{architecture}.json", lock)
         return lock
 
 
@@ -507,28 +509,6 @@ def _reject_escaping_symlinks(root: Path) -> None:
             raise RuntimeError(
                 f"task contains escaping symlink: {path.relative_to(root)}"
             )
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if not isinstance(values, list) or len(values) != 1:
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
 
 
 def _digest(value: Any) -> str:

@@ -1,19 +1,60 @@
 dataset:
   ref: swe-bench/swe-bench-verified
   version: sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341
-  source: {name: princeton-nlp/SWE-bench_Verified, revision: c104f840cc67f8b6eec6f759ebc8b2693d585d4a, parquet_sha256: a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd}
-  verifier_runtime: {profile: swebench-v4-offline, python_interpreter: /opt/fugue-verifier/bin/python, python_packages: [swebench==4.0.3, datasets==2.16.1, fastcore==1.10.5]}
+  source:
+    name: princeton-nlp/SWE-bench_Verified
+    revision: c104f840cc67f8b6eec6f759ebc8b2693d585d4a
+    parquet_sha256: a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd
+  verifier_runtime:
+    profile: swebench-v4-offline
+    python_interpreter: /opt/fugue-verifier/bin/python
+    python_packages:
+    - swebench==4.0.3
+    - datasets==2.16.1
+    - fastcore==1.10.5
 model: wandb/zai-org/GLM-5.2
 k: 1
 n_concurrent: 4
 jobs_dir: jobs/repo-memory-impact/hard-holdout-v2
 harnesses:
-  - {name: hermes, agent: fugue.agents:FugueHermes}
-  - {name: openclaw, agent: fugue.agents:FugueOpenClaw}
-  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
-  - {name: codex, agent: fugue.agents:FugueCodex}
+- name: hermes
+  agent: fugue.agents:FugueHermes
+- name: openclaw
+  agent: fugue.agents:FugueOpenClaw
+- name: claude-code
+  agent: fugue.agents:FugueClaudeCode
+- name: codex
+  agent: fugue.agents:FugueCodex
 tasks:
-  - {id: matplotlib__matplotlib-13989, repo: matplotlib/matplotlib, base_commit: a3e2897bfaf9eaac1d6649da535c4e721c89fa69, metadata: {partition: holdout, selection_rank: 9}}
-  - {id: mwaskom__seaborn-3187, repo: mwaskom/seaborn, base_commit: 22cdfb0c93f8ec78492d87edb810f10cb7f57a31, metadata: {partition: holdout, selection_rank: 10}}
-  - {id: pytest-dev__pytest-7490, repo: pytest-dev/pytest, base_commit: 7f7a36478abe7dd1fa993b115d22606aa0e35e88, metadata: {partition: holdout, selection_rank: 11}}
-  - {id: matplotlib__matplotlib-23314, repo: matplotlib/matplotlib, base_commit: 97fc1154992f64cfb2f86321155a7404efeb2d8a, metadata: {partition: holdout, selection_rank: 12}}
+- id: matplotlib__matplotlib-13989
+  metadata:
+    partition: holdout
+    selection_rank: 9
+  repository:
+    type: git
+    url: https://github.com/matplotlib/matplotlib
+    commit: a3e2897bfaf9eaac1d6649da535c4e721c89fa69
+- id: mwaskom__seaborn-3187
+  metadata:
+    partition: holdout
+    selection_rank: 10
+  repository:
+    type: git
+    url: https://github.com/mwaskom/seaborn
+    commit: 22cdfb0c93f8ec78492d87edb810f10cb7f57a31
+- id: pytest-dev__pytest-7490
+  metadata:
+    partition: holdout
+    selection_rank: 11
+  repository:
+    type: git
+    url: https://github.com/pytest-dev/pytest
+    commit: 7f7a36478abe7dd1fa993b115d22606aa0e35e88
+- id: matplotlib__matplotlib-23314
+  metadata:
+    partition: holdout
+    selection_rank: 12
+  repository:
+    type: git
+    url: https://github.com/matplotlib/matplotlib
+    commit: 97fc1154992f64cfb2f86321155a7404efeb2d8a

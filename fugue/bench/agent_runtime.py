@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import uuid
@@ -11,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from filelock import FileLock
+
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 
 AGENT_RUNTIME_ROOT = Path(".fugue/runtime/agent-runtimes")
 AGENT_RUNTIME_MOUNT = "/opt/fugue-agent-runtime"
@@ -141,12 +143,12 @@ def _node_agent_dockerfile(harness: str, command: str, version: str) -> str:
         if harness == "openclaw"
         else (
             "RUN mkdir -p lib/node_modules && "
-            "cp -a \"$(npm root -g)/npm\" lib/node_modules/npm && "
+            'cp -a "$(npm root -g)/npm" lib/node_modules/npm && '
             "ln -s ../../node_modules/weave-claude-code "
             "lib/node_modules/weave-claude-code && "
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
-            "test -s \"$(npm root -g)/weave-claude-code/"
-            ".claude-plugin/marketplace.json\"\n"
+            'test -s "$(npm root -g)/weave-claude-code/'
+            '.claude-plugin/marketplace.json"\n'
         )
     )
     return f"""FROM {_NODE_IMAGE}
@@ -164,19 +166,27 @@ RUN PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH {command} --version | grep -F {json.dum
 
 def _hermes_dockerfile() -> str:
     plugin_commit = "670e98ff503e574994e6e64fa0d1294f4d7eefdf"
-    return f"""FROM {_PYTHON_IMAGE}
+    return f"""FROM {_NODE_IMAGE} AS node-runtime
+
+FROM {_PYTHON_IMAGE}
+COPY --from=node-runtime /usr/local/bin/node {AGENT_RUNTIME_MOUNT}/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm \
+  {AGENT_RUNTIME_MOUNT}/lib/node_modules/npm
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git ripgrep xz-utils && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 fugue && \
-    mkdir -p {AGENT_RUNTIME_MOUNT} && chown -R fugue:fugue {AGENT_RUNTIME_MOUNT}
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js {AGENT_RUNTIME_MOUNT}/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js {AGENT_RUNTIME_MOUNT}/bin/npx && \
+    chown -R fugue:fugue {AGENT_RUNTIME_MOUNT}
 ENV HOME={AGENT_RUNTIME_MOUNT}/home
 WORKDIR {AGENT_RUNTIME_MOUNT}
 USER fugue
 RUN curl -fsSLo /tmp/hermes-install.sh \
       https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.6.5/scripts/install.sh && \
     echo "5562d544934751313f16c57ed3dd17b052600cd8fae9f6e6977bfc9ef1e72f38  /tmp/hermes-install.sh" | sha256sum -c - && \
-    bash /tmp/hermes-install.sh --skip-setup --skip-browser --no-skills \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH bash /tmp/hermes-install.sh \
+      --skip-setup --skip-browser --no-skills \
       --non-interactive --branch v2026.6.5 && rm /tmp/hermes-install.sh
 RUN curl -fsSLo /tmp/hermes-otel.tar.gz \
       https://github.com/briancaffey/hermes-otel/archive/{plugin_commit}.tar.gz && \
@@ -189,7 +199,9 @@ RUN python patch-plugin.py && \
     test -x "$VENV_PY" && \
     "$HOME/.hermes/bin/uv" pip install --quiet --python "$VENV_PY" -e \
       "{AGENT_RUNTIME_MOUNT}/hermes-otel[yaml]"
-RUN mkdir -p bin && ln -s ../home/.local/bin/hermes bin/hermes && \
+RUN ln -s ../home/.local/bin/hermes bin/hermes && \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH node --version | grep -F "v22.23.0" && \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH npm --version | grep -F "10.9.8" && \
     PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH hermes version
 """
 
@@ -199,16 +211,20 @@ RUNTIMES = {
         harness="hermes",
         version=(
             "hermes-agent@v2026.6.5+hermes-otel@670e98f+"
-            "fugue-span-attrs.2+single-agent.1"
+            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-agent.1"
         ),
         dockerfile=_hermes_dockerfile(),
-        probe=("/bin/sh", "-c", f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH hermes version"),
+        probe=(
+            "/bin/sh",
+            "-c",
+            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH node --version | "
+            "grep -F v22.23.0 && npm --version | grep -F 10.9.8 && hermes version",
+        ),
     ),
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
         version=(
-            "openclaw@2026.7.1+weave-openclaw@0.1.1+"
-            "weave-otel2.1+fugue-load-path.1"
+            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+fugue-load-path.1"
         ),
         dockerfile=_node_agent_dockerfile("openclaw", "openclaw", "2026.7.1"),
         probe=(
@@ -231,8 +247,8 @@ RUNTIMES = {
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
             "npm root -g | "
             f"grep -F {AGENT_RUNTIME_MOUNT}/lib/node_modules && "
-            "test -s \"$(npm root -g)/weave-claude-code/"
-            ".claude-plugin/marketplace.json\"",
+            'test -s "$(npm root -g)/weave-claude-code/'
+            '.claude-plugin/marketplace.json"',
         ),
     ),
     "codex": AgentRuntimeSpec(
@@ -320,7 +336,7 @@ def prepare_runtime(
                 "os": inspected.get("Os"),
                 "probe": list(spec.probe),
             }
-            _atomic_json(root / f"runtime-lock-{architecture}.json", lock)
+            atomic_write_json(root / f"runtime-lock-{architecture}.json", lock)
             return lock
         finally:
             shutil.rmtree(build, ignore_errors=True)
@@ -335,9 +351,6 @@ def read_runtime_lock(
     path = (
         repo_root / AGENT_RUNTIME_ROOT / harness / f"runtime-lock-{architecture}.json"
     )
-    legacy = repo_root / AGENT_RUNTIME_ROOT / harness / "runtime-lock.json"
-    if architecture == "amd64" and not path.is_file() and legacy.is_file():
-        path = legacy
     if spec is None or not path.is_file():
         return None
     value = json.loads(path.read_text())
@@ -396,29 +409,6 @@ def _build_assets(harness: str) -> tuple[Path, ...]:
     if harness == "openclaw":
         assets.append(Path(__file__).resolve().parents[2] / "vendor/weave-node-sdk.tgz")
     return tuple(assets)
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if not isinstance(values, list) or len(values) != 1:
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
 
 
 def _digest(value: Any) -> str:

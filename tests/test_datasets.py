@@ -26,8 +26,7 @@ harnesses:
     agent: fugue.agents:FugueCodex
 tasks:
   - id: swe-qa-pro-000-fixture
-    repo: fixture/repo
-    base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    repository: {type: git, url: https://github.com/fixture/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     metadata: {source_index: 0}
 """
     )

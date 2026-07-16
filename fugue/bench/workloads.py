@@ -26,7 +26,9 @@ from fugue.bench.context import (
     prepare_context,
     query_context,
 )
+from fugue.bench.files import require_unique
 from fugue.bench.library import validate_id
+from fugue.bench.manifest import RepositorySpec
 from fugue.bench.scoring import score_fact_recall, score_retrieval
 from fugue.model_plane import resolve_model_route, trace_project_slug
 from fugue.weave_support import trace_async_operation
@@ -87,8 +89,8 @@ def load_workload_dataset(path: Path) -> WorkloadDataset:
         raise ValueError(f"{path}: unsupported workload runner {runner}")
     retrieval_cases = tuple(_retrieval_case(item) for item in raw.get("cases", []))
     sequence_cases = tuple(_sequence_case(item) for item in raw.get("sequences", []))
-    _require_unique_ids([item.id for item in retrieval_cases], "retrieval case", path)
-    _require_unique_ids([item.id for item in sequence_cases], "sequence", path)
+    require_unique([item.id for item in retrieval_cases], "retrieval case", path)
+    require_unique([item.id for item in sequence_cases], "sequence", path)
     if runner == "retrieval" and not retrieval_cases:
         raise ValueError(f"{path}: retrieval workload needs cases")
     if runner == "sequence" and not sequence_cases:
@@ -576,10 +578,11 @@ async def _run_sequence_cohort(
 def _retrieval_case(raw: Any) -> RetrievalCase:
     if not isinstance(raw, dict):
         raise ValueError("retrieval case must be a mapping")
+    repository = _workload_repository(raw)
     return RetrievalCase(
         id=validate_id(raw["id"], kind="retrieval case id"),
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         query=str(raw["query"]),
         expected_paths=tuple(str(item) for item in raw.get("expected_paths", [])),
         family=str(raw["family"]) if raw.get("family") else None,
@@ -614,11 +617,11 @@ def _sequence_case(raw: Any) -> SequenceCase:
         )
         for item in raw.get("probes", [])
     )
-    _require_unique_ids(
+    require_unique(
         [str(event.episode) for event in events],
         f"sequence {sequence_id} episode",
     )
-    _require_unique_ids([probe.id for probe in probes], f"sequence {sequence_id} probe")
+    require_unique([probe.id for probe in probes], f"sequence {sequence_id} probe")
     if any(event.episode < 1 for event in events):
         raise ValueError(f"sequence {sequence_id} episodes must be positive")
     episode_ids = {event.episode for event in events}
@@ -626,12 +629,30 @@ def _sequence_case(raw: Any) -> SequenceCase:
         raise ValueError(
             f"sequence {sequence_id} probes must reference an existing episode"
         )
+    repository = _workload_repository(raw)
     return SequenceCase(
         id=sequence_id,
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         events=events,
         probes=probes,
+    )
+
+
+def _workload_repository(raw: dict[str, Any]) -> RepositorySpec:
+    if "repo" in raw or "commit" in raw or "base_commit" in raw:
+        raise ValueError("workload cases must use a typed repository mapping")
+    value = raw.get("repository")
+    if not isinstance(value, dict):
+        raise ValueError("workload case repository must be a mapping")
+    unknown = sorted(set(value) - {"type", "url", "commit", "path"})
+    if unknown:
+        raise ValueError("unknown workload repository field(s): " + ", ".join(unknown))
+    return RepositorySpec(
+        type=str(value.get("type") or ""),
+        url=str(value.get("url") or ""),
+        commit=str(value.get("commit") or ""),
+        path=str(value["path"]) if value.get("path") else None,
     )
 
 
@@ -640,16 +661,6 @@ def _validate_workload_counts(*, attempts: int, limit: int | None) -> None:
         raise ValueError("workload attempts must be positive")
     if limit is not None and limit < 1:
         raise ValueError("workload limit must be positive")
-
-
-def _require_unique_ids(values: list[str], kind: str, path: Path | None = None) -> None:
-    counts: dict[str, int] = {}
-    for value in values:
-        counts[value] = counts.get(value, 0) + 1
-    duplicates = sorted(value for value, count in counts.items() if count > 1)
-    if duplicates:
-        prefix = f"{path}: " if path else ""
-        raise ValueError(f"{prefix}duplicate {kind} id(s): {', '.join(duplicates)}")
 
 
 def _base_row(
@@ -784,9 +795,8 @@ def _materialized_retrieval_cases(
     dataset: WorkloadDataset, runtime: ContextRuntime, preset_id: str
 ) -> tuple[RetrievalCase, ...]:
     expected_count = int((dataset.source.get("counts") or {}).get(preset_id) or 0)
-    if (
-        not dataset.source.get("materialize_command")
-        or expected_count <= len(dataset.retrieval_cases)
+    if not dataset.source.get("materialize_command") or expected_count <= len(
+        dataset.retrieval_cases
     ):
         return dataset.retrieval_cases
     version = str(dataset.source.get("version") or "v1")

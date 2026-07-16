@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from fugue.redaction import redact_text, secrets_from_env
+from fugue.redaction import redact_text, secrets_from_env, sensitive_key
 
 _MAX_TEXT = 1_000
 _MAX_EVENT_BYTES = 16_384
@@ -111,7 +111,9 @@ class _Recorder:
                     "tool": tool,
                     "request_id": request_id,
                     "request_bytes": size,
-                    "arguments": _sanitize((payload.get("params") or {}).get("arguments")),
+                    "arguments": _sanitize(
+                        (payload.get("params") or {}).get("arguments")
+                    ),
                 }
             )
         return True
@@ -209,10 +211,12 @@ def _request_id(payload: dict[str, Any]) -> str | None:
 
 
 def _sanitize(value: Any, *, key: str = "") -> Any:
-    if _sensitive_key(key):
+    if sensitive_key(key):
         return "[redacted]"
     if isinstance(value, dict):
-        return {str(name): _sanitize(item, key=str(name)) for name, item in value.items()}
+        return {
+            str(name): _sanitize(item, key=str(name)) for name, item in value.items()
+        }
     if isinstance(value, list):
         return [_sanitize(item, key=key) for item in value[:50]]
     if isinstance(value, str):
@@ -220,17 +224,6 @@ def _sanitize(value: Any, *, key: str = "") -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)[:_MAX_TEXT]
-
-
-def _sensitive_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return (
-        normalized in {"authorization", "password", "secret", "token", "apikey"}
-        or "api_key" in normalized
-        or normalized.endswith(
-            ("_access_token", "_refresh_token", "_auth_token", "_password", "_secret")
-        )
-    )
 
 
 if __name__ == "__main__":

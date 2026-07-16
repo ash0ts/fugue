@@ -60,11 +60,36 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
 
     hermes_adapter = ranges["hermes"]
     assert agent_runtime.RUNTIMES["hermes"].version.endswith("+single-agent.1")
+    hermes_runtime = agent_runtime.RUNTIMES["hermes"]
+    assert "FROM " + agent_runtime._NODE_IMAGE + " AS node-runtime" in (
+        hermes_runtime.dockerfile
+    )
+    assert (
+        "COPY --from=node-runtime /usr/local/bin/node "
+        "/opt/fugue-agent-runtime/bin/node"
+    ) in hermes_runtime.dockerfile
+    assert "/opt/fugue-agent-runtime/lib/node_modules/npm" in (
+        hermes_runtime.dockerfile
+    )
+    assert "npm --version | grep -F \"10.9.8\"" in hermes_runtime.dockerfile
+    assert (
+        "PATH=/opt/fugue-agent-runtime/bin:$PATH bash /tmp/hermes-install.sh"
+        in hermes_runtime.dockerfile
+    )
+    probe = " ".join(hermes_runtime.probe)
+    assert "node --version | grep -F v22.23.0" in probe
+    assert "npm --version | grep -F 10.9.8" in probe
     assert '"disabled_toolsets": ["delegation"]' in hermes_adapter
     assert 'cat >> "$HOME/.hermes/config.yaml"' in hermes_adapter
     assert 'mkdir -p "$HOME/.hermes/skills"' in hermes_adapter
     assert "/tmp/hermes/config.yaml" not in hermes_adapter
     assert "/tmp/hermes/skills" not in hermes_adapter
+    assert "ln -sf {runtime}/bin/node /usr/local/bin/node" in hermes_adapter
+    assert "ln -sf {runtime}/bin/npm /usr/local/bin/npm" in hermes_adapter
+    assert (
+        'export PATH="/opt/fugue-agent-runtime/bin:$HOME/.local/bin:$PATH"'
+        in hermes_adapter
+    )
 
     openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
     assert openclaw_runtime.version == (
@@ -136,6 +161,27 @@ def test_agent_runtime_lock_rejects_contract_drift(tmp_path: Path) -> None:
     assert agent_runtime.read_runtime_lock("codex", tmp_path) == lock
     lock["version"] = "drifted"
     path.write_text(json.dumps(lock))
+    assert agent_runtime.read_runtime_lock("codex", tmp_path) is None
+
+
+def test_agent_runtime_lock_requires_architecture_qualified_name(tmp_path: Path) -> None:
+    spec = agent_runtime.RUNTIMES["codex"]
+    root = tmp_path / agent_runtime.AGENT_RUNTIME_ROOT / "codex"
+    root.mkdir(parents=True)
+    (root / "runtime-lock.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "harness": "codex",
+                "version": spec.version,
+                "recipe_sha256": spec.recipe_sha256,
+                "image": spec.image,
+                "image_id": "sha256:" + "a" * 64,
+                "architecture": "amd64",
+            }
+        )
+    )
+
     assert agent_runtime.read_runtime_lock("codex", tmp_path) is None
 
 

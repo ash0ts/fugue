@@ -6,7 +6,6 @@ import os
 import re
 import threading
 import time
-import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -22,26 +21,22 @@ from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
 from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.files import atomic_write_json
 from fugue.bench.reproducibility import (
     EVALUATION_ASSET_LOCK_NAME,
     read_evaluation_asset_lock,
 )
 from fugue.bench.scoring import latency_summary, score_evidence_paths
-from fugue.model_plane import (
-    ModelRoute,
-    provider_request_headers,
-    resolve_model_route,
-    trace_project_slug,
-)
+from fugue.model_plane import trace_project_slug
 from fugue.redaction import redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
-PREDICTION_SCHEMA_VERSION = 2
-PUBLICATION_SCHEMA_VERSION = 4
+PREDICTION_SCHEMA_VERSION = 1
+PUBLICATION_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
-class PredictionRowV2:
+class PredictionRowV1:
     prediction_id: str
     run_id: str
     candidate_id: str
@@ -91,6 +86,13 @@ class PublicationResult:
     skipped: int
     evaluations: tuple[PublishedEvaluation, ...] = ()
     failures: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NormalizedExport:
+    predictions: tuple[dict[str, Any], ...]
+    measurements: tuple[dict[str, Any], ...]
+    publication: PublicationResult
 
 
 @dataclass
@@ -895,16 +897,6 @@ def _attach_genai_span_ref(call: Any, *, trace_id: str, span_id: str) -> None:
     ]
 
 
-def _json_mapping(value: str | None) -> dict[str, Any]:
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _json_list(value: str | None) -> list[Any]:
     if not value:
         return []
@@ -1055,37 +1047,32 @@ def _apply_host_evidence_scores(
 def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Resolve every executable result to one stable logical prediction row."""
     normalized: list[dict[str, Any]] = []
-    positions: dict[str, int] = {}
-    canonical_inputs: dict[str, bool] = {}
+    prediction_ids: set[str] = set()
     for raw in _evaluation_rows(rows):
         row = dict(raw)
         run_id = str(row.get("run_id") or "")
-        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
-        comparison_id = str(_evaluation_inputs(row)["comparison_example_id"])
-        trial_index = _positive_int(row.get("trial_index") or row.get("attempt")) or 1
+        candidate_id = str(row.get("candidate_id") or "")
+        comparison_id = str(row.get("comparison_example_id") or "")
+        trial_index = _positive_int(row.get("trial_index"))
+        missing = [
+            name
+            for name, value in (
+                ("run_id", run_id),
+                ("candidate_id", candidate_id),
+                ("comparison_example_id", comparison_id),
+                ("trial_index", trial_index),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "evaluation prediction is missing canonical identity: "
+                + ", ".join(missing)
+            )
         execution_kind = str(
             row.get("execution_kind")
             or ("agent" if _is_agent_row(row) else "provider_diagnostic")
         )
-        current_schema = (
-            row.get("identity_schema_version") == CANDIDATE_IDENTITY_SCHEMA_VERSION
-            or row.get("prediction_schema_version") == PREDICTION_SCHEMA_VERSION
-        )
-        if not run_id and current_schema:
-            raise ValueError("current-schema evaluation prediction is missing run_id")
-        if not run_id:
-            run_id = (
-                "legacy-"
-                + _stable_digest(
-                    {
-                        "experiment_id": row.get("experiment_id"),
-                        "run_name": row.get("run_name"),
-                        "run_key": row.get("run_key"),
-                    }
-                )[:16]
-            )
-        if not candidate_id:
-            raise ValueError("evaluation prediction is missing candidate_id")
         prediction_id = _stable_digest(
             {
                 "schema_version": PREDICTION_SCHEMA_VERSION,
@@ -1098,7 +1085,7 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         source_record_type = str(
             row.get("source_record_type") or row.get("record_type") or "trial"
         )
-        value = PredictionRowV2(
+        value = PredictionRowV1(
             prediction_id=prediction_id,
             run_id=run_id,
             candidate_id=candidate_id,
@@ -1108,29 +1095,53 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             source_record_type=source_record_type,
             payload=row,
         ).to_dict()
-        already_canonical = bool(row.get("prediction_schema_version"))
-        if prediction_id in positions:
-            prior_canonical = canonical_inputs[prediction_id]
-            if not prior_canonical and not already_canonical:
-                raise ValueError(
-                    f"duplicate evaluation trial (normalized prediction): {prediction_id}"
-                )
-            if already_canonical:
-                normalized[positions[prediction_id]] = value
-                canonical_inputs[prediction_id] = True
-            continue
-        positions[prediction_id] = len(normalized)
-        canonical_inputs[prediction_id] = already_canonical
+        if prediction_id in prediction_ids:
+            raise ValueError(
+                f"duplicate evaluation trial (normalized prediction): {prediction_id}"
+            )
+        prediction_ids.add(prediction_id)
         normalized.append(value)
     return normalized
 
 
-def measurement_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
+def compile_export(
+    jobs: list[Path],
+    *,
+    fetch_weave: bool = False,
+    project: str | None = None,
+    publish: bool = False,
+    ledger_root: Path | None = None,
+    republish: bool = False,
+    republish_reason: str | None = None,
+    env: Mapping[str, str] | None = None,
+    repo_root: Path | None = None,
+) -> NormalizedExport:
+    raw = export_rows(
+        jobs,
+        fetch_weave=fetch_weave,
+        weave_project=project,
+        env=env,
+        repo_root=repo_root,
+    )
+    predictions = tuple(normalize_prediction_rows(raw))
+    measurements = tuple(
         dict(row)
-        for row in rows
+        for row in raw
         if row.get("record_type") in {"preparation", "retrieval", "episode"}
-    ]
+    )
+    publication = (
+        publish_to_weave(
+            list(predictions),
+            project,
+            ledger_root=ledger_root,
+            republish=republish,
+            republish_reason=republish_reason,
+            env=env,
+        )
+        if publish
+        else PublicationResult(published=0, skipped=0)
+    )
+    return NormalizedExport(predictions, measurements, publication)
 
 
 _LOCAL_RESULT_FIELDS = {
@@ -1316,88 +1327,6 @@ def _task_ids_match(expected: str, observed: str) -> bool:
         or expected.endswith(f"/{observed}")
         or observed.endswith(f"/{expected}")
     )
-
-
-def filter_rows(
-    rows: list[dict[str, Any]],
-    *,
-    presets: list[str] | None = None,
-    workloads: list[str] | None = None,
-    systems: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    filters = {
-        "preset_id": set(presets or []),
-        "workload_id": set(workloads or []),
-        "context_system_id": set(systems or []),
-    }
-    return [
-        row
-        for row in rows
-        if all(
-            not values or str(row.get(key)) in values for key, values in filters.items()
-        )
-    ]
-
-
-def judge_qa_rows(
-    rows: list[dict[str, Any]],
-    *,
-    model: str,
-    env: dict[str, str],
-    repo_root: Path,
-) -> None:
-    route = resolve_model_route(model, env)
-    api_key = env.get(route.api_key_env, "").strip()
-    if not api_key:
-        raise RuntimeError(f"{route.api_key_env} is required for QA judging")
-    references = _qa_references(repo_root)
-    with httpx.Client(timeout=120) as client:
-        for row in rows:
-            if row.get("record_type") != "trial" or row.get("workload_id") != "qa":
-                continue
-            task_id = str(row.get("task_name") or "").rsplit("/", 1)[-1]
-            reference = references.get(task_id)
-            answer = _trial_answer(row)
-            if not reference or not answer:
-                row["judge_error"] = "missing local reference or agent answer"
-                _set_adapter_outcome(row)
-                continue
-            started = time.perf_counter()
-            try:
-                payload, usage = _judge_request(
-                    client,
-                    route,
-                    api_key,
-                    env=env,
-                    reference=reference,
-                    answer=answer,
-                    evidence_paths=[
-                        str(item) for item in row.get("evidence_paths") or []
-                    ],
-                )
-                row.update(
-                    {
-                        "judge_model": route.display_model,
-                        "judge_correctness": _score(payload, "correctness"),
-                        "judge_completeness": _score(payload, "completeness"),
-                        "judge_groundedness": _score(payload, "groundedness"),
-                        "judge_overall": _score(payload, "overall"),
-                        "judge_reasoning": str(payload.get("reasoning") or "")[:4_000],
-                        "judge_input_tokens": usage.get("input_tokens"),
-                        "judge_output_tokens": usage.get("output_tokens"),
-                        "judge_latency_ms": (time.perf_counter() - started) * 1000,
-                        "judge_cost_usd": None,
-                    }
-                )
-            except Exception as exc:
-                row.update(
-                    {
-                        "judge_model": route.display_model,
-                        "judge_latency_ms": (time.perf_counter() - started) * 1000,
-                        "judge_error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-            _set_adapter_outcome(row)
 
 
 def write_jsonl(
@@ -1735,20 +1664,15 @@ def _add_sequence_measurement_summary(
 def _write_publication_marker(
     path: Path, project: str, publication_id: str, **metadata: Any
 ) -> None:
-    temp = path.with_suffix(".tmp")
-    temp.write_text(
-        json.dumps(
-            {
-                "project": project,
-                "publication_id": publication_id,
-                "published_at": datetime.now(UTC).isoformat(),
-                **metadata,
-            },
-            sort_keys=True,
-        )
-        + "\n"
+    atomic_write_json(
+        path,
+        {
+            "project": project,
+            "publication_id": publication_id,
+            "published_at": datetime.now(UTC).isoformat(),
+            **metadata,
+        },
     )
-    os.replace(temp, path)
 
 
 def _prediction_ledger_paths(
@@ -1797,7 +1721,7 @@ def _reserve_prediction_publication(
             )
         previous.append((path, current))
     for path, identity in _prediction_ledger_paths(ledger, project, candidate):
-        _write_json_atomic(
+        atomic_write_json(
             path,
             {
                 **identity,
@@ -1817,7 +1741,7 @@ def _finalize_prediction_publication(
     revision: int,
 ) -> None:
     for path, identity in _prediction_ledger_paths(ledger, project, candidate):
-        _write_json_atomic(
+        atomic_write_json(
             path,
             {
                 **identity,
@@ -1835,13 +1759,7 @@ def _restore_prediction_publications(
         if value is None:
             path.unlink(missing_ok=True)
         else:
-            _write_json_atomic(path, value)
-
-
-def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    os.replace(temp, path)
+            atomic_write_json(path, value)
 
 
 def _latest_publication_marker(
@@ -1864,9 +1782,7 @@ def _set_publication_marker_active(path: Path, active: bool) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"invalid publication marker: {path}")
     value["active"] = active
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    os.replace(temp, path)
+    atomic_write_json(path, value)
 
 
 def _published_evaluation_from_marker(
@@ -1947,7 +1863,9 @@ def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         list[tuple[dict[str, Any], dict[str, Any]]],
     ] = {}
     for row in rows:
-        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id:
+            raise ValueError("evaluation prediction is missing candidate_id")
         inputs = _evaluation_inputs(row)
         partition = (
             candidate_id,
@@ -2030,7 +1948,7 @@ def _evaluation_row_id(row: dict[str, Any]) -> str:
     return _stable_digest(
         {
             "run_id": row.get("run_id"),
-            "candidate_id": row.get("candidate_id") or _candidate_id_from_row(row),
+            "candidate_id": row.get("candidate_id"),
             "comparison_example_id": _evaluation_inputs(row)["comparison_example_id"],
             "trial_index": _positive_int(row.get("trial_index")) or 1,
             "status": _outcome_status(row),
@@ -2049,8 +1967,7 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
         "episode_id": row.get("episode_id") or row.get("episode"),
         "repository": row.get("repository"),
         "base_commit": row.get("base_commit"),
-        "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256")
-        or None,
+        "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256") or None,
         "evaluation_case": row.get("evaluation_case") or None,
         "evaluation_scorers": row.get("evaluation_scorers") or None,
         "evaluation_rubrics": row.get("evaluation_rubrics") or None,
@@ -2058,29 +1975,6 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
     }
     comparison_id = row.get("comparison_example_id") or _stable_digest(values)
     return {"comparison_example_id": comparison_id, **_drop_none(values)}
-
-
-def _candidate_id_from_row(row: dict[str, Any]) -> str:
-    if row.get("identity_schema_version") == CANDIDATE_IDENTITY_SCHEMA_VERSION:
-        raise ValueError("current-schema evaluation row is missing candidate_id")
-    return _stable_digest(
-        {
-            "harness": row.get("harness"),
-            "model_provider": row.get("model_provider"),
-            "model": row.get("model"),
-            "context_system_id": row.get("context_system_id"),
-            "context_delivery": row.get("context_delivery"),
-            "context_version": row.get("context_version"),
-            "context_config_hash": row.get("context_config_hash"),
-            "prompt_id": row.get("prompt_id"),
-            "prompt_hashes": row.get("prompt_hashes") or {},
-            "skill_ids": row.get("skill_ids") or [],
-            "skill_hashes": row.get("skill_hashes") or {},
-            "integration_ids": row.get("integration_ids") or [],
-            "integration_provenance": row.get("integration_provenance") or [],
-            "agent_config_hash": row.get("agent_config_hash"),
-        }
-    )
 
 
 def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -2421,31 +2315,6 @@ def _safe_slug(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in value)
 
 
-def _weave_safe_row(row: dict[str, Any]) -> dict[str, Any]:
-    safe = dict(row)
-    if safe.get("query"):
-        safe["query"] = str(safe["query"])[:1_000]
-    if safe.get("exception_message"):
-        safe["exception_message"] = str(safe["exception_message"])[:1_000]
-    hits = []
-    for value in (safe.get("hits") or [])[:20]:
-        if not isinstance(value, dict):
-            continue
-        hits.append(
-            {
-                key: value.get(key)
-                for key in ("path", "start_line", "end_line", "score")
-                if value.get(key) is not None
-            }
-        )
-    if "hits" in safe:
-        safe["hits"] = hits
-    safe.pop("trial_dir", None)
-    safe.pop("judge_reasoning", None)
-    safe.pop("evaluation_judge_reasons", None)
-    return redact_value(safe)
-
-
 def fetch_weave_summaries(
     *,
     run_keys: list[str],
@@ -2666,9 +2535,7 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         }
     )
     vector_events = [
-        value
-        for span in tool_spans
-        if (value := _gateway_vector(span)) is not None
+        value for span in tool_spans if (value := _gateway_vector(span)) is not None
     ]
     return {
         "weave_span_count": len(values),
@@ -3258,9 +3125,10 @@ def _set_adapter_outcome(
         deterministic = "failed"
     if row.get("judge_error") or row.get("evaluation_error"):
         judge = "failed"
-    elif row.get("judge_overall") is not None or row.get(
-        "evaluation_judge_status"
-    ) == "scored":
+    elif (
+        row.get("judge_overall") is not None
+        or row.get("evaluation_judge_status") == "scored"
+    ):
         judge = "scored"
     elif row.get("evaluation_rubrics"):
         judge = "pending"
@@ -3499,9 +3367,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "runtime_fingerprints": _runtime_fingerprints(trial_dir, meta),
         "context_registration": context_registration,
         "context_registration_status": registration_status or "unavailable",
-        "context_registration_digest": context_registration.get(
-            "registration_digest"
-        ),
+        "context_registration_digest": context_registration.get("registration_digest"),
         "context_registered": context_registered if context_assigned else None,
         "context_artifact": meta.get("context_artifact"),
         "context_assigned": context_assigned,
@@ -4057,131 +3923,6 @@ def _local_tool_result_failed(result: dict[str, Any]) -> bool:
         or raw.get("is_error")
         or "[error] tool reported failure" in str(result.get("content") or "").lower()
     )
-
-
-def _qa_references(repo_root: Path) -> dict[str, str]:
-    references: dict[str, str] = {}
-    datasets_root = repo_root / ".fugue" / "cache" / "datasets"
-    if not datasets_root.exists():
-        return references
-    for selection_path in datasets_root.rglob("selection.json"):
-        source_path = selection_path.parent / "_source.jsonl"
-        if not source_path.is_file():
-            continue
-        rows = [
-            json.loads(line)
-            for line in source_path.read_text().splitlines()
-            if line.strip()
-        ]
-        for selected in json.loads(selection_path.read_text()):
-            index = selected.get("source_index")
-            if isinstance(index, int) and 0 <= index < len(rows):
-                references[str(selected["task_id"])] = str(
-                    rows[index].get("answer") or ""
-                )
-    return references
-
-
-def _trial_answer(row: dict[str, Any]) -> str | None:
-    trial_dir = Path(str(row.get("trial_dir") or ""))
-    if not trial_dir.is_dir():
-        return None
-    candidates = list(trial_dir.rglob("fugue-answer.md"))
-    if not candidates:
-        return None
-    value = candidates[0].read_text(errors="replace").strip()
-    return value or None
-
-
-def _judge_request(
-    client: httpx.Client,
-    route: ModelRoute,
-    api_key: str,
-    *,
-    env: Mapping[str, str],
-    reference: str,
-    answer: str,
-    evidence_paths: list[str],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    prompt = f"""Evaluate a repository-grounded answer against the reference. Return only JSON with numeric fields correctness, completeness, groundedness, and overall from 0 to 1, plus a concise reasoning string. Groundedness should consider whether the cited repository paths plausibly support the answer. Do not require wording to match the reference.
-
-REFERENCE:
-{reference[:16_000]}
-
-CANDIDATE:
-{answer[:16_000]}
-
-CITED PATHS:
-{json.dumps(evidence_paths[:100])}
-"""
-    if route.messages_base_url:
-        response = client.post(
-            f"{route.messages_base_url}/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": route.model_id,
-                "max_tokens": 800,
-                "temperature": 0,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
-        text = "".join(
-            str(item.get("text") or "")
-            for item in body.get("content", [])
-            if isinstance(item, dict)
-        )
-        raw_usage = body.get("usage") or {}
-        usage = {
-            "input_tokens": raw_usage.get("input_tokens"),
-            "output_tokens": raw_usage.get("output_tokens"),
-        }
-    else:
-        response = client.post(
-            f"{route.chat_base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                **provider_request_headers(route, env),
-            },
-            json={
-                "model": route.model_id,
-                "temperature": 0,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
-        text = str(
-            ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        )
-        raw_usage = body.get("usage") or {}
-        usage = {
-            "input_tokens": raw_usage.get("prompt_tokens"),
-            "output_tokens": raw_usage.get("completion_tokens"),
-        }
-    return _json_object(text), usage
-
-
-def _json_object(text: str) -> dict[str, Any]:
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if not match:
-        raise ValueError("judge returned no JSON object")
-    value = json.loads(match.group(0))
-    if not isinstance(value, dict):
-        raise ValueError("judge response must be a JSON object")
-    return value
-
-
-def _score(payload: dict[str, Any], key: str) -> float:
-    value = float(payload[key])
-    if not 0 <= value <= 1:
-        raise ValueError(f"judge {key} must be between 0 and 1")
-    return value
 
 
 def _parse_time(value: str | None) -> datetime | None:

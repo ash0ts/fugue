@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +14,7 @@ from fugue.bench.context import (
     context_behavior_digest,
     get_context_system,
 )
+from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
 
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 
 INPUT_LOCK_NAME = "input-lock.json"
 EVALUATION_ASSET_LOCK_NAME = "evaluation-assets.json"
-PREDICTION_ID_SCHEMA_VERSION = 2
+PREDICTION_ID_SCHEMA_VERSION = 1
 _SENSITIVE_NAME = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
@@ -47,37 +46,25 @@ class RunSnapshotV1:
     runtime: dict[str, Any]
     required_env: tuple[str, ...]
     preset: dict[str, Any] | None = None
+    source_experiment: dict[str, Any] | None = None
+    resolved_experiment_sha256: str = ""
+    capability_plan: tuple[dict[str, Any], ...] = ()
+    planned_prediction_count: int = 0
+    runtime_locks: tuple[dict[str, Any], ...] = ()
+    publication_schema_version: int = 1
+    evaluation_asset_lock_sha256: str = ""
+    cohort_id: str = ""
+    treatment_selection_sha256: str = ""
     snapshot_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["planned_matrix"] = list(self.planned_matrix)
         value["required_env"] = list(self.required_env)
-        value["lock_sha256"] = self.snapshot_sha256
-        return value
-
-
-@dataclass(frozen=True)
-class RunSnapshotV2(RunSnapshotV1):
-    source_experiment: dict[str, Any] | None = None
-    resolved_experiment_sha256: str = ""
-    capability_plan: tuple[dict[str, Any], ...] = ()
-    planned_prediction_count: int = 0
-    runtime_locks: tuple[dict[str, Any], ...] = ()
-    publication_schema_version: int = 4
-
-    def to_dict(self) -> dict[str, Any]:
-        value = super().to_dict()
         value["capability_plan"] = list(self.capability_plan)
         value["runtime_locks"] = list(self.runtime_locks)
+        value["lock_sha256"] = self.snapshot_sha256
         return value
-
-
-@dataclass(frozen=True)
-class RunSnapshotV3(RunSnapshotV2):
-    evaluation_asset_lock_sha256: str = ""
-    cohort_id: str = ""
-    treatment_selection_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,9 +78,6 @@ class EvaluationAssetLockV1:
         return asdict(self)
 
 
-RunSnapshot = RunSnapshotV1 | RunSnapshotV2 | RunSnapshotV3
-
-
 def build_run_snapshot(
     *,
     repo_root: Path,
@@ -105,7 +89,7 @@ def build_run_snapshot(
     env: Mapping[str, str],
     evaluation_asset_lock_sha256: str = "",
     treatment_selection_sha256: str = "",
-) -> RunSnapshotV3:
+) -> RunSnapshotV1:
     secret_names = {
         value: name
         for name, value in env.items()
@@ -120,19 +104,20 @@ def build_run_snapshot(
     fugue_source: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
-        existing = candidates.get(job.candidate_id)
-        if existing is not None and existing != resolved.definition:
-            raise ValueError(f"candidate {job.candidate_id} resolved inconsistently")
-        candidates[job.candidate_id] = resolved.definition
-        prior_execution = executions.get(resolved.execution_fingerprint)
-        if (
-            prior_execution is not None
-            and prior_execution != resolved.execution_definition
-        ):
-            raise ValueError(
+        store_consistent(
+            candidates,
+            job.candidate_id,
+            resolved.definition,
+            error=f"candidate {job.candidate_id} resolved inconsistently",
+        )
+        store_consistent(
+            executions,
+            resolved.execution_fingerprint,
+            resolved.execution_definition,
+            error=(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
-            )
-        executions[resolved.execution_fingerprint] = resolved.execution_definition
+            ),
+        )
         selected_fugue_source = resolved.execution_definition.get("fugue_source")
         if selected_fugue_source is not None:
             if not isinstance(selected_fugue_source, dict):
@@ -153,9 +138,7 @@ def build_run_snapshot(
                 ) from exc
             runtime_path = _snapshot_path(runtime_file, repo_root)
             path_id = hashlib.sha256(runtime_path.encode()).hexdigest()[:12]
-            asset_id = (
-                f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
-            )
+            asset_id = f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
             record = {
                 "kind": "generated_runtime",
                 "path": runtime_path,
@@ -164,17 +147,21 @@ def build_run_snapshot(
                 "generated": True,
                 "execution_fingerprint": resolved.execution_fingerprint,
             }
-            prior_asset = assets.get(asset_id)
-            if prior_asset is not None and prior_asset != record:
-                raise ValueError(f"generated runtime asset {asset_id} differs")
-            assets[asset_id] = record
+            store_consistent(
+                assets,
+                asset_id,
+                record,
+                error=f"generated runtime asset {asset_id} differs",
+            )
             generated_runtime_asset_ids.append(asset_id)
         config_key = job.config_path.resolve().as_posix()
-        prior_asset_ids = generated_runtime_assets_by_config.get(config_key)
         selected_asset_ids = tuple(generated_runtime_asset_ids)
-        if prior_asset_ids is not None and prior_asset_ids != selected_asset_ids:
-            raise ValueError(f"job config {job.config_path} has inconsistent assets")
-        generated_runtime_assets_by_config[config_key] = selected_asset_ids
+        store_consistent(
+            generated_runtime_assets_by_config,
+            config_key,
+            selected_asset_ids,
+            error=f"job config {job.config_path} has inconsistent assets",
+        )
         context = get_context_system(job.context_system_id, repo_root)
         candidate_required_env: set[str] = {
             job.route.api_key_env,
@@ -253,10 +240,12 @@ def build_run_snapshot(
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
         runtime["configuration_sha256"] = stable_digest(runtime)
-        prior = runtimes.get(job.candidate_id)
-        if prior is not None and prior != runtime:
-            raise ValueError(f"candidate {job.candidate_id} runtime binding differs")
-        runtimes[job.candidate_id] = runtime
+        store_consistent(
+            runtimes,
+            job.candidate_id,
+            runtime,
+            error=f"candidate {job.candidate_id} runtime binding differs",
+        )
 
     jobs_by_execution = {
         job.resolved_candidate.execution_fingerprint: job for job in jobs
@@ -340,8 +329,8 @@ def build_run_snapshot(
             key=lambda item: item["candidate_id"],
         )
     )
-    base = RunSnapshotV3(
-        schema_version=3,
+    base = RunSnapshotV1(
+        schema_version=1,
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
         experiment=resolved_experiment,
@@ -376,7 +365,7 @@ def build_run_snapshot(
         if _SENSITIVE_NAME.search(name) and len(value) >= 8 and value in serialized:
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
-    return RunSnapshotV3(**{**asdict(base), "snapshot_sha256": digest})
+    return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
 
 
 def build_evaluation_asset_lock(
@@ -396,14 +385,10 @@ def build_evaluation_asset_lock(
         predictions=predictions,
     )
     digest = stable_digest(base.to_dict())
-    return EvaluationAssetLockV1(
-        **{**asdict(base), "lock_sha256": digest}
-    )
+    return EvaluationAssetLockV1(**{**asdict(base), "lock_sha256": digest})
 
 
-def write_evaluation_asset_lock(
-    repo_root: Path, lock: EvaluationAssetLockV1
-) -> Path:
+def write_evaluation_asset_lock(repo_root: Path, lock: EvaluationAssetLockV1) -> Path:
     path = repo_root / ".fugue" / "runtime" / lock.run_id / EVALUATION_ASSET_LOCK_NAME
     payload = lock.to_dict()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -413,22 +398,9 @@ def write_evaluation_asset_lock(
             raise ValueError(
                 f"evaluation asset lock already exists with different content: {path}"
             )
-        os.chmod(path, 0o600)
+        path.chmod(0o600)
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    os.chmod(path, 0o600)
-    return path
+    return atomic_write_json(path, payload)
 
 
 def read_evaluation_asset_lock(path: Path) -> EvaluationAssetLockV1:
@@ -461,7 +433,7 @@ def _prediction_id(cell: PlannedCell) -> str:
 
 def write_run_input_lock(
     repo_root: Path,
-    snapshot: RunSnapshot,
+    snapshot: RunSnapshotV1,
 ) -> Path:
     path = repo_root / ".fugue" / "runtime" / snapshot.run_id / INPUT_LOCK_NAME
     payload = snapshot.to_dict()
@@ -474,46 +446,17 @@ def write_run_input_lock(
                 f"run input lock already exists with different content: {path}"
             )
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary, path)
-    return path
+    return atomic_write_json(path, payload)
 
 
 def verify_snapshot(payload: Mapping[str, Any]) -> bool:
+    if payload.get("schema_version") != 1:
+        return False
     expected = str(payload.get("snapshot_sha256") or payload.get("lock_sha256") or "")
     unsigned = dict(payload)
     unsigned["snapshot_sha256"] = ""
     unsigned["lock_sha256"] = ""
     return bool(expected) and expected == stable_digest(unsigned)
-
-
-def read_run_snapshot(payload: Mapping[str, Any]) -> RunSnapshot:
-    """Parse input locks without rewriting their historical schema."""
-    version = int(payload.get("schema_version") or 1)
-    values = dict(payload)
-    values.pop("lock_sha256", None)
-    if "snapshot_sha256" not in values:
-        values["snapshot_sha256"] = str(payload.get("lock_sha256") or "")
-    if version == 1:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        return RunSnapshotV1(**values)
-    if version == 2:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        values["capability_plan"] = tuple(values.get("capability_plan") or ())
-        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
-        return RunSnapshotV2(**values)
-    if version == 3:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        values["capability_plan"] = tuple(values.get("capability_plan") or ())
-        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
-        return RunSnapshotV3(**values)
-    raise ValueError(f"unsupported run snapshot schema: {version}")
 
 
 def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int:

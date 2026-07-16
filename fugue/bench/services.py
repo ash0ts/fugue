@@ -9,11 +9,15 @@ import stat
 import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 from filelock import FileLock
+
+from fugue.bench.files import atomic_write_json
 
 SERVICES_RUNTIME_ROOT = Path(".fugue") / "runtime" / "services"
 SERVICE_INSTANCE_FILE = ".instance-id"
@@ -129,6 +133,7 @@ def managed_service_compose(
         f"fugue-managed-services-{namespace}" if namespace else "fugue-managed-services"
     )
     data_volume = f"{spec.data_volume}-{namespace}" if namespace else spec.data_volume
+    container_name = _service_container_name(spec, repo_root)
     labels = {"io.fugue.managed-service": spec.id}
     if namespace:
         labels["io.fugue.managed-service-namespace"] = namespace
@@ -145,11 +150,15 @@ def managed_service_compose(
         "services": {
             spec.id: {
                 "image": spec.image,
-                "container_name": spec.container_name,
+                "container_name": container_name,
                 "restart": "unless-stopped",
                 "labels": labels,
                 "ports": [
-                    f"{port.host}:{port.host_port}:{port.container_port}"
+                    (
+                        f"{port.host}::{port.container_port}"
+                        if namespace
+                        else f"{port.host}:{port.host_port}:{port.container_port}"
+                    )
                     for port in spec.ports
                 ],
                 "environment": environment,
@@ -172,16 +181,18 @@ def managed_service_status(
     *,
     repo_root: Path | None = None,
 ) -> ManagedServiceStatus:
+    status = partial(_status, spec, repo_root=repo_root)
     if shutil.which("docker") is None:
-        return _status(spec, "unavailable", False, "docker is not installed")
+        return status("unavailable", False, "docker is not installed")
+    container_name = _service_container_name(spec, repo_root)
     try:
         result = subprocess.run(
             [
                 "docker",
                 "inspect",
                 "--format",
-                "{{json .State}}\n{{json .Config.Image}}\n{{json .Config.Labels}}",
-                spec.container_name,
+                "{{json .State}}\n{{json .Config.Image}}\n{{json .Config.Labels}}\n{{json .NetworkSettings.Ports}}",
+                container_name,
             ],
             capture_output=True,
             text=True,
@@ -189,17 +200,19 @@ def managed_service_status(
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return _status(spec, "unavailable", False, str(exc))
+        return status("unavailable", False, str(exc))
     if result.returncode:
         detail = (result.stderr or result.stdout or "container is not created").strip()
-        return _status(spec, "not_created", False, detail)
+        return status("not_created", False, detail)
     lines = result.stdout.splitlines()
     try:
         state = json.loads(lines[0])
         image = json.loads(lines[1])
         labels = json.loads(lines[2])
+        ports = json.loads(lines[3])
     except (IndexError, TypeError, json.JSONDecodeError):
-        return _status(spec, "unavailable", False, "docker returned invalid state")
+        return status("unavailable", False, "docker returned invalid state")
+    host_uri = _host_uri(spec, ports)
     namespace = _service_namespace(repo_root) if repo_root is not None else ""
     if (
         not isinstance(state, dict)
@@ -208,22 +221,32 @@ def managed_service_status(
         or labels.get("io.fugue.managed-service") != spec.id
         or (namespace and labels.get("io.fugue.managed-service-namespace") != namespace)
     ):
-        return _status(
-            spec,
+        return status(
             "unhealthy",
             False,
             "container does not match the pinned managed-service contract",
+            host_uri=host_uri,
         )
     if not state.get("Running"):
         detail = str(state.get("Error") or state.get("Status") or "container stopped")
-        return _status(spec, "stopped", False, detail)
+        return status("stopped", False, detail, host_uri=host_uri)
     health = state.get("Health")
     health_state = str(health.get("Status") or "") if isinstance(health, dict) else ""
     if health_state == "healthy":
-        return _status(spec, "healthy", True, "container is healthy")
+        return status("healthy", True, "container is healthy", host_uri=host_uri)
     if health_state == "unhealthy":
-        return _status(spec, "unhealthy", False, "container health check failed")
-    return _status(spec, "starting", False, health_state or "health check pending")
+        return status(
+            "unhealthy",
+            False,
+            "container health check failed",
+            host_uri=host_uri,
+        )
+    return status(
+        "starting",
+        False,
+        health_state or "health check pending",
+        host_uri=host_uri,
+    )
 
 
 def managed_service_statuses(
@@ -325,10 +348,13 @@ def managed_service_environment(
     if not all(effective_credentials.values()):
         return values
     values.update(effective_credentials)
-    values["FUGUE_GRAPHITI_URI"] = (
+    host_uri = (
         GRAPHITI_SERVICE.host_uri
-        if target == "host"
-        else GRAPHITI_SERVICE.container_uri
+        if planning
+        else managed_service_status(GRAPHITI_SERVICE, repo_root=repo_root).host_uri
+    )
+    values["FUGUE_GRAPHITI_URI"] = (
+        host_uri if target == "host" else _container_uri(host_uri)
     )
     values[GRAPHITI_MANAGED_MARKER] = GRAPHITI_SERVICE.id
     return values
@@ -420,23 +446,7 @@ def _write_credentials(
     values: Mapping[str, str],
 ) -> None:
     path = _credentials_path(spec, repo_root)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "w") as handle:
-            json.dump(dict(values), handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    atomic_write_json(path, dict(values))
 
 
 def _write_compose(spec: ManagedServiceSpec, repo_root: Path) -> Path:
@@ -490,7 +500,9 @@ def _read_service_instance(repo_root: Path) -> str:
     if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise RuntimeError(f"managed service instance must use mode 0600: {path}")
     value = path.read_text().strip()
-    if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
+    if len(value) != 32 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise RuntimeError(f"managed service instance is invalid: {path}")
     return value
 
@@ -534,18 +546,46 @@ def _service_namespace(repo_root: Path | None) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:12]
 
 
+def _service_container_name(spec: ManagedServiceSpec, repo_root: Path | None) -> str:
+    namespace = _service_namespace(repo_root)
+    return f"{spec.container_name}-{namespace}" if namespace else spec.container_name
+
+
+def _host_uri(spec: ManagedServiceSpec, ports: Any) -> str:
+    if not isinstance(ports, dict):
+        return spec.host_uri
+    parsed = urlsplit(spec.host_uri)
+    bindings = ports.get(f"{parsed.port}/tcp")
+    if not isinstance(bindings, list) or not bindings or not isinstance(bindings[0], dict):
+        return spec.host_uri
+    port = str(bindings[0].get("HostPort") or "").strip()
+    if not port.isdigit():
+        return spec.host_uri
+    return urlunsplit((parsed.scheme, f"127.0.0.1:{port}", parsed.path, "", ""))
+
+
+def _container_uri(host_uri: str) -> str:
+    parsed = urlsplit(host_uri)
+    return urlunsplit(
+        (parsed.scheme, f"host.docker.internal:{parsed.port}", parsed.path, "", "")
+    )
+
+
 def _status(
     spec: ManagedServiceSpec,
     state: ManagedServiceState,
     ready: bool,
     detail: str,
+    *,
+    repo_root: Path | None = None,
+    host_uri: str | None = None,
 ) -> ManagedServiceStatus:
     return ManagedServiceStatus(
         service_id=spec.id,
         state=state,
         ready=ready,
         detail=detail,
-        container_name=spec.container_name,
+        container_name=_service_container_name(spec, repo_root),
         image=spec.image,
-        host_uri=spec.host_uri,
+        host_uri=host_uri or spec.host_uri,
     )

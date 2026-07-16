@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from fugue.bench.candidates import stable_digest
+from fugue.bench.files import atomic_write_json
 from fugue.bench.manifest import BenchmarkManifest
 
 SWE_BENCH_VERIFIED_REVISION = "c104f840cc67f8b6eec6f759ebc8b2693d585d4a"
@@ -63,7 +64,7 @@ def prepare_evaluation_assets(
         "lock_sha256": "",
     }
     payload = {**base, "lock_sha256": stable_digest(base)}
-    _write_private_json(destination, payload)
+    atomic_write_json(destination, payload)
     return destination
 
 
@@ -171,23 +172,6 @@ def _read_lock(path: Path) -> dict[str, Any]:
     if source.get("parquet_sha256") != SWE_BENCH_VERIFIED_PARQUET_SHA256:
         raise ValueError("host evaluation assets use a different source")
     return payload
-
-
-def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    os.chmod(path, 0o600)
 
 
 def _changed_paths(patch: str, test_patch: str) -> list[str]:

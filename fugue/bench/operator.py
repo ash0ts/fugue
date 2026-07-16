@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fugue.bench.agent_runtime import (
     prepare_runtime as prepare_agent_runtime,
@@ -47,6 +47,7 @@ from fugue.bench.evaluation_assets import (
 )
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
 from fugue.bench.execution import (
+    PlannedCell,
     execute_cells,
     latest_cell_records,
     mark_unfinished_cells,
@@ -59,10 +60,9 @@ from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
     LiveEvaluationCoordinator,
     PublishedEvaluation,
+    compile_export,
     export_rows,
-    measurement_rows,
     normalize_prediction_rows,
-    publish_to_weave,
     write_jsonl,
 )
 from fugue.bench.job_config import RenderedJob, preview_jobs, render_jobs
@@ -361,6 +361,18 @@ class SetupPreparation:
     workload_datasets: tuple[PreparedWorkloadDataset, ...] = ()
     evaluation_asset_locks: tuple[str, ...] = ()
     portable_context_runtime: AgentRuntimePreparation | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedRunPlan:
+    request: ExperimentRequest
+    experiment: ExperimentSpec
+    preset: PresetSpec
+    workloads: tuple[WorkloadSpec, ...]
+    jobs: tuple[RenderedJob, ...]
+    cells: tuple[PlannedCell, ...]
+    run_name: str
+    max_workers: int
 
 
 @dataclass(frozen=True)
@@ -756,6 +768,93 @@ class OperatorService:
             env=self.env,
         )
 
+    def resolve_run_plan(
+        self,
+        request: ExperimentRequest,
+        *,
+        run_id: str,
+        experiment: ExperimentSpec | None = None,
+        asset_overlay: dict[str, str] | None = None,
+    ) -> ResolvedRunPlan:
+        selected = experiment or self.experiment(request.experiment_id)
+        request = _request_with_selection_lock(selected, request, self.repo_root)
+        resolved = _experiment_with_request_overrides(selected, request)
+        preset = select_preset(resolved, request.preset)
+        workloads = select_workloads(
+            resolved, preset, list(request.workloads) or None
+        ) or [
+            WorkloadSpec(
+                id="harbor",
+                runner="harbor",
+                manifest=request.manifest or resolved.manifest,
+            )
+        ]
+        if asset_overlay is None:
+            _require_saved_evaluation_assets(
+                self.repo_root, resolved, request, workloads
+            )
+        jobs = tuple(
+            self.rendered_jobs(
+                request,
+                run_id=run_id,
+                write_configs=False,
+                experiment=selected,
+                asset_overlay=asset_overlay,
+            )
+        )
+        run_name = (
+            jobs[0].run_name
+            if jobs
+            else request.run_name or resolved.run_name or resolved.id
+        )
+        cells = tuple(
+            plan_cells(
+                list(jobs),
+                run_id=run_id,
+                run_name=run_name,
+                scheduling_seed=preset.scheduling_seed,
+                verify_inputs=False,
+            )
+        )
+        return ResolvedRunPlan(
+            request=request,
+            experiment=resolved,
+            preset=preset,
+            workloads=tuple(workloads),
+            jobs=jobs,
+            cells=cells,
+            run_name=run_name,
+            max_workers=(
+                request.n_concurrent
+                or preset.n_concurrent
+                or resolved.n_concurrent
+                or 2
+            ),
+        )
+
+    def _materialize_run_plan(
+        self, plan: ResolvedRunPlan, *, run_id: str
+    ) -> ResolvedRunPlan:
+        jobs = tuple(
+            self.rendered_jobs(
+                plan.request,
+                run_id=run_id,
+                write_configs=True,
+                experiment=plan.experiment,
+            )
+        )
+        cells = tuple(
+            plan_cells(
+                list(jobs),
+                run_id=run_id,
+                run_name=plan.run_name,
+                scheduling_seed=plan.preset.scheduling_seed,
+            )
+        )
+        if _plan_coordinates(cells) != _plan_coordinates(plan.cells):
+            raise RuntimeError("materialized run coordinates differ from the resolved plan")
+        return replace(plan, jobs=jobs, cells=cells)
+
     def prepare_context(
         self,
         request: ExperimentRequest,
@@ -763,9 +862,15 @@ class OperatorService:
         experiment: ExperimentSpec | None = None,
         rebuild: bool = False,
         run_id: str | None = None,
+        _plan: ResolvedRunPlan | None = None,
     ) -> tuple[ContextPreparation, ...]:
-        selected = experiment or self.experiment(request.experiment_id)
-        selected = _experiment_with_request_overrides(selected, request)
+        plan = _plan or self.resolve_run_plan(
+            request,
+            run_id=run_id or "setup-context",
+            experiment=experiment,
+        )
+        request = plan.request
+        selected = plan.experiment
         env = self.env
         if "graphiti" in _selected_request_system_ids(selected, request):
             env = managed_service_environment(env, repo_root=self.repo_root)
@@ -782,14 +887,8 @@ class OperatorService:
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
             env=env,
         )
-        preset = select_preset(selected, request.preset)
-        workloads = select_workloads(selected, preset, list(request.workloads) or None)
-        _require_saved_evaluation_assets(
-            self.repo_root,
-            selected,
-            request,
-            workloads,
-        )
+        preset = plan.preset
+        workloads = list(plan.workloads)
         for workload in workloads:
             if workload.runner != "harbor":
                 continue
@@ -923,19 +1022,20 @@ class OperatorService:
         rebuild: bool = False,
     ) -> SetupPreparation:
         """Prepare every locked artifact selected by the resolved plan."""
-        selected = experiment or self.experiment(request.experiment_id)
-        selected = _experiment_with_request_overrides(selected, request)
-        preset = select_preset(selected, request.preset)
-        harnesses = list(request.harnesses) or preset.harnesses or selected.harnesses
-        workloads = select_workloads(selected, preset, list(request.workloads) or None)
-        if not workloads:
-            workloads = [
-                WorkloadSpec(
-                    id="harbor",
-                    runner="harbor",
-                    manifest=request.manifest or selected.manifest,
-                )
-            ]
+        plan = self.resolve_run_plan(
+            request,
+            run_id="setup",
+            experiment=experiment,
+        )
+        request = plan.request
+        selected = plan.experiment
+        preset = plan.preset
+        workloads = list(plan.workloads)
+        harnesses = list(
+            dict.fromkeys(
+                job.harness for job in plan.jobs if agent_runtime_spec(job.harness)
+            )
+        )
         selected_tasks: list[tuple[BenchmarkManifest, Any]] = []
         workload_datasets: list[PreparedWorkloadDataset] = []
         evaluation_asset_locks: set[str] = set()
@@ -965,6 +1065,7 @@ class OperatorService:
                     request.manifest or workload.manifest or selected.manifest,
                 )
             )
+            materialize_manifest_dataset(manifest, self.repo_root, rebuild=False)
             evaluation_assets = prepare_evaluation_assets(manifest, self.repo_root)
             if evaluation_assets is not None:
                 evaluation_asset_locks.add(evaluation_assets.as_posix())
@@ -1066,6 +1167,7 @@ class OperatorService:
                 request,
                 experiment=selected,
                 rebuild=rebuild,
+                _plan=plan,
             ),
             agent_runtimes=tuple(prepared_agents),
             task_runtimes=tuple(prepared_tasks),
@@ -1289,13 +1391,13 @@ class OperatorService:
         experiment: ExperimentSpec | None = None,
         asset_overlay: dict[str, str] | None = None,
     ) -> PreviewSummary:
-        jobs = self.rendered_jobs(
+        plan = self.resolve_run_plan(
             request,
             run_id="preview",
-            write_configs=False,
             experiment=experiment,
             asset_overlay=asset_overlay,
         )
+        jobs = plan.jobs
         estimated_trials = 0
         for job in jobs:
             if not job.applicable:
@@ -1804,9 +1906,6 @@ class OperatorService:
         cancellation_event: threading.Event | None = None,
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
-        selected = experiment or self.experiment(request.experiment_id)
-        request = _request_with_selection_lock(selected, request, self.repo_root)
-        resolved = _experiment_with_request_overrides(selected, request)
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         cancel_event = cancellation_event or threading.Event()
@@ -1816,9 +1915,9 @@ class OperatorService:
             run_id,
             {
                 "status": "starting",
-                "run_name": request.run_name or resolved.run_name or resolved.id,
-                "experiment_id": resolved.id,
-                "trace_content": request.trace_content or resolved.trace_content,
+                "run_name": request.run_name or request.experiment_id,
+                "experiment_id": request.experiment_id,
+                "trace_content": request.trace_content,
             },
         )
         running = False
@@ -1826,13 +1925,21 @@ class OperatorService:
         try:
             if cancel_event.is_set():
                 raise _RunCancellation
+            plan = self.resolve_run_plan(
+                request,
+                run_id=run_id,
+                experiment=experiment,
+            )
+            request = plan.request
+            resolved = plan.experiment
             snapshot_path = run_dir / "experiment.yaml"
             temporary = snapshot_path.with_name(
                 f".{snapshot_path.name}.{os.getpid()}.tmp"
             )
             temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
             os.replace(temporary, snapshot_path)
-            rendered = self.rendered_jobs(request, run_id=run_id, experiment=resolved)
+            plan = self._materialize_run_plan(plan, run_id=run_id)
+            rendered = list(plan.jobs)
             _verify_rendered_setup(rendered)
             validate_harbor_job_configs(
                 [
@@ -1841,24 +1948,10 @@ class OperatorService:
                     if job.applicable and job.execution_kind == "agent"
                 ]
             )
-            run_name = (
-                rendered[0].run_name
-                if rendered
-                else request.run_name or resolved.run_name or resolved.id
-            )
-            selected_preset = select_preset(resolved, request.preset)
-            max_workers = (
-                request.n_concurrent
-                or selected_preset.n_concurrent
-                or resolved.n_concurrent
-                or 2
-            )
-            cells = plan_cells(
-                rendered,
-                run_id=run_id,
-                run_name=run_name,
-                scheduling_seed=selected_preset.scheduling_seed,
-            )
+            run_name = plan.run_name
+            selected_preset = plan.preset
+            max_workers = plan.max_workers
+            cells = list(plan.cells)
             evaluation_assets = build_evaluation_asset_lock(run_id, cells)
             write_evaluation_asset_lock(self.repo_root, evaluation_assets)
             cells = [
@@ -1989,17 +2082,16 @@ class OperatorService:
             skipped = sum(item.status == "not_applicable" for item in outcomes)
             cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
             passed = sum(item.status == "passed" for item in outcomes)
-            write_run_manifest(
+            _finalize_run(
                 self.repo_root,
                 run_id,
-                {
-                    "status": "cancelled"
-                    if cancelled
-                    else "failed"
-                    if failed
-                    else "passed",
-                    "ended_at": _now(),
-                    "error": "Run cancelled by the operator." if cancelled else None,
+                run_dir=run_dir,
+                status=(
+                    "cancelled" if cancelled else "failed" if failed else "passed"
+                ),
+                error="Run cancelled by the operator." if cancelled else None,
+                running=running,
+                values={
                     "passed_cells": passed,
                     "failed_cells": failed,
                     "cancelled_cells": cancelled_cells,
@@ -2018,66 +2110,51 @@ class OperatorService:
                 },
             )
         except _RunCancellation:
-            if live is not None:
-                live.cancel_open_predictions("Run cancelled by the operator.")
-                live.finalize(cancelled=True)
-            if running:
-                mark_unfinished_cells(
-                    run_dir,
-                    "cancelled",
-                    message="Run cancelled by the operator.",
-                )
-            write_run_manifest(
+            _cancel_live_evaluation(live, "Run cancelled by the operator.")
+            _finalize_run(
                 self.repo_root,
                 run_id,
-                {
-                    "status": "cancelled",
-                    "ended_at": _now(),
-                    "error": "Run cancelled by the operator.",
+                run_dir=run_dir,
+                status="cancelled",
+                error="Run cancelled by the operator.",
+                running=running,
+                values={
                     "observability_status": "cancelled",
                 },
             )
         except KeyboardInterrupt:
-            if running:
-                mark_unfinished_cells(run_dir, "interrupted", message="Run interrupted")
-            write_run_manifest(
+            _finalize_run(
                 self.repo_root,
                 run_id,
-                {
-                    "status": "interrupted",
-                    "ended_at": _now(),
-                    "error": "Run interrupted",
-                },
+                run_dir=run_dir,
+                status="interrupted",
+                error="Run interrupted",
+                running=running,
             )
         except Exception as exc:
             if cancel_event.is_set():
-                if live is not None:
-                    live.cancel_open_predictions("Run cancelled by the operator.")
-                    live.finalize(cancelled=True)
-                if running:
-                    mark_unfinished_cells(
-                        run_dir,
-                        "cancelled",
-                        message="Run cancelled by the operator.",
-                    )
-                write_run_manifest(
+                _cancel_live_evaluation(live, "Run cancelled by the operator.")
+                _finalize_run(
                     self.repo_root,
                     run_id,
-                    {
-                        "status": "cancelled",
-                        "ended_at": _now(),
-                        "error": "Run cancelled by the operator.",
+                    run_dir=run_dir,
+                    status="cancelled",
+                    error="Run cancelled by the operator.",
+                    running=running,
+                    values={
                         "observability_status": "cancelled",
                     },
                 )
             else:
-                write_run_manifest(
+                error = f"{type(exc).__name__}: {exc}"
+                _finalize_run(
                     self.repo_root,
                     run_id,
-                    {
-                        "status": "failed",
-                        "ended_at": _now(),
-                        "error": f"{type(exc).__name__}: {exc}",
+                    run_dir=run_dir,
+                    status="failed",
+                    error=error,
+                    running=running,
+                    values={
                         "phase": "running" if running else "starting",
                     },
                 )
@@ -2255,14 +2332,19 @@ class OperatorService:
         run = self.supervisor.get(run_id)
         project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
         job_paths = _run_job_paths(self.repo_root, run)
-        rows = export_rows(
+        bundle = compile_export(
             [*job_paths, run.run_dir],
             fetch_weave=fetch_weave,
-            weave_project=project,
+            project=project,
+            publish=to_weave,
+            ledger_root=self.repo_root / ".fugue" / "runtime" / "publications",
+            republish=republish,
+            republish_reason=republish_reason,
             env=self.env,
+            repo_root=self.repo_root,
         )
-        predictions = normalize_prediction_rows(rows)
-        measurements = measurement_rows(rows)
+        predictions = list(bundle.predictions)
+        measurements = list(bundle.measurements)
         output = out or self.repo_root / "reports" / f"{run_id}.jsonl"
         write_jsonl(predictions, output, env=self.env)
         measurement_output = (
@@ -2277,14 +2359,7 @@ class OperatorService:
         evaluations: tuple[PublishedEvaluation, ...] = ()
         publication_failures: tuple[str, ...] = ()
         if to_weave:
-            publication = publish_to_weave(
-                predictions,
-                project,
-                ledger_root=self.repo_root / ".fugue" / "runtime" / "publications",
-                republish=republish,
-                republish_reason=republish_reason,
-                env=self.env,
-            )
+            publication = bundle.publication
             published = publication.published
             skipped = publication.skipped
             evaluations = publication.evaluations
@@ -3063,6 +3138,62 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def _plan_coordinates(cells: tuple[PlannedCell, ...]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (
+            cell.workload_id,
+            cell.task_id,
+            cell.harness,
+            cell.context_system_id,
+            cell.context_delivery,
+            cell.variant_id,
+            cell.model_provider,
+            cell.model,
+            cell.trial_index,
+            cell.comparison_example_id,
+            cell.candidate_id,
+            cell.execution_fingerprint,
+            cell.execution_kind,
+            cell.applicable,
+            cell.skip_reason,
+        )
+        for cell in cells
+    )
+
+
+def _cancel_live_evaluation(
+    live: LiveEvaluationCoordinator | None, message: str
+) -> None:
+    if live is None:
+        return
+    live.cancel_open_predictions(message)
+    live.finalize(cancelled=True)
+
+
+def _finalize_run(
+    repo_root: Path,
+    run_id: str,
+    *,
+    run_dir: Path,
+    status: Literal["passed", "failed", "cancelled", "interrupted"],
+    error: str | None,
+    running: bool,
+    values: dict[str, Any] | None = None,
+) -> None:
+    if running and status in {"failed", "cancelled", "interrupted"}:
+        mark_unfinished_cells(run_dir, status, message=error or f"Run {status}")
+    write_run_manifest(
+        repo_root,
+        run_id,
+        {
+            "status": status,
+            "ended_at": _now(),
+            "error": error,
+            **(values or {}),
+        },
+    )
+
+
 class _RunCancellation(Exception):
     pass
 
@@ -3318,11 +3449,6 @@ def _result_identity(row: dict[str, Any]) -> tuple[str, str]:
         or json.dumps(row, sort_keys=True, default=str)
     )
     return record_type, str(identity)
-
-
-def _stable_identity(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _float(value: Any) -> float | None:

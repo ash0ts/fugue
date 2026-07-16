@@ -199,7 +199,10 @@ def _build_jobs(
             raise ValueError(
                 f"context systems are not variants in this experiment: {', '.join(missing)}"
             )
-    selected_jobs_dir = jobs_dir or experiment.jobs_dir or manifest.jobs_dir
+    jobs_root = jobs_dir or experiment.jobs_dir or manifest.jobs_dir
+    # A run name is a display/grouping field and may be reused. Harbor persists
+    # state below jobs_dir, so the immutable run id must own that namespace.
+    selected_jobs_dir = jobs_root / run_id
     selected_attempts = n_attempts or experiment.n_attempts or manifest.k
     selected_concurrent = (
         n_concurrent or experiment.n_concurrent or manifest.n_concurrent
@@ -1456,11 +1459,6 @@ def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -
         workload_id=workload_id,
         logical_task_id=task_id,
     )
-
-
-def _stable_id(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:

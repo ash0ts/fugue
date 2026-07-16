@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from fugue.bench.files import require_unique
 from fugue.bench.sources import (
     GitSourceSpec,
     canonical_git_url,
@@ -194,8 +195,6 @@ def _validate_exact_python_packages(packages: tuple[str, ...], label: str) -> No
 @dataclass(frozen=True)
 class TaskSpec:
     id: str
-    repo: str | None = None
-    base_commit: str | None = None
     notes: str | None = None
     expected_paths: tuple[str, ...] = ()
     artifacts: tuple[Any, ...] = ()
@@ -207,9 +206,19 @@ class TaskSpec:
     def repo_slug(self) -> str:
         if self.repository:
             return self.repository.slug
-        if self.repo:
-            return self.repo
         return self.id.split("__", 1)[0]
+
+    @property
+    def repo(self) -> str | None:
+        return self.repository.slug if self.repository else None
+
+    @property
+    def base_commit(self) -> str | None:
+        if isinstance(self.repository, RepositorySpec):
+            return self.repository.commit
+        if isinstance(self.repository, FixtureRepositorySpec):
+            return self.repository.sha256
+        return None
 
 
 @dataclass(frozen=True)
@@ -263,8 +272,8 @@ def load_manifest(path: Path | str, *, text: str | None = None) -> BenchmarkMani
         raise ValueError(f"{manifest_path}: at least one harness is required")
     if not tasks:
         raise ValueError(f"{manifest_path}: at least one task is required")
-    _require_unique([harness.name for harness in harnesses], "harness", manifest_path)
-    _require_unique([task.id for task in tasks], "task", manifest_path)
+    require_unique([harness.name for harness in harnesses], "harness", manifest_path)
+    require_unique([task.id for task in tasks], "task", manifest_path)
     k = _positive_int(raw.get("k", 1), "k", manifest_path)
     n_concurrent = _positive_int(
         raw.get("n_concurrent", 2), "n_concurrent", manifest_path
@@ -334,11 +343,12 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
     artifacts = item.get("artifacts") or []
     if not isinstance(artifacts, list):
         raise ValueError(f"{manifest_path}: task artifacts must be a list")
-    repository_raw = item.get("repository")
-    if repository_raw is not None and (item.get("repo") or item.get("base_commit")):
+    if "repo" in item or "base_commit" in item:
         raise ValueError(
-            f"{manifest_path}: task {item.get('id')} may not mix repository with repo/base_commit"
+            f"{manifest_path}: task {item.get('id')} must use repository instead of "
+            "repo/base_commit"
         )
+    repository_raw = item.get("repository")
     repository = None
     if repository_raw is not None:
         if not isinstance(repository_raw, dict):
@@ -399,14 +409,6 @@ def _task_spec(item: Any, manifest_path: Path) -> TaskSpec:
         )
     return TaskSpec(
         id=str(item["id"]),
-        repo=repository.slug if repository else item.get("repo"),
-        base_commit=(
-            repository.commit
-            if isinstance(repository, RepositorySpec)
-            else repository.sha256
-            if isinstance(repository, FixtureRepositorySpec)
-            else item.get("base_commit")
-        ),
         notes=item.get("notes"),
         expected_paths=tuple(str(path) for path in item.get("expected_paths", [])),
         artifacts=tuple(artifacts),
@@ -499,12 +501,3 @@ def fixture_repository_digest(root: Path) -> str:
         digest.update(len(body).to_bytes(8, "big"))
         digest.update(body)
     return digest.hexdigest()
-
-
-def _require_unique(values: list[str], kind: str, path: Path) -> None:
-    counts: dict[str, int] = {}
-    for value in values:
-        counts[value] = counts.get(value, 0) + 1
-    duplicates = sorted(value for value, count in counts.items() if count > 1)
-    if duplicates:
-        raise ValueError(f"{path}: duplicate {kind} id(s): {', '.join(duplicates)}")

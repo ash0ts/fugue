@@ -14,6 +14,9 @@ from fugue.bench.context_contracts import (
     WorkloadRunner,
     context_capabilities,
 )
+from fugue.bench.files import as_list as _list
+from fugue.bench.files import as_mapping as _dict
+from fugue.bench.files import require_unique
 
 CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
@@ -341,14 +344,6 @@ def get_prompt(item_id: str, repo_root: Path | None = None) -> Prompt:
     )
 
 
-def save_prompt(item_id: str, body: str, repo_root: Path | None = None) -> Prompt:
-    item_id = validate_id(item_id, kind="prompt id")
-    path = library_root(repo_root) / PROMPTS_DIR / f"{item_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_prompt(item_id, repo_root)
-
-
 def list_skills(repo_root: Path | None = None) -> list[LibraryItem]:
     root = library_root(repo_root) / SKILLS_DIR
     if not root.exists():
@@ -380,14 +375,6 @@ def get_skill(item_id: str, repo_root: Path | None = None) -> Skill:
         path=path.as_posix(),
         sha256=_file_sha256(path),
     )
-
-
-def save_skill(item_id: str, body: str, repo_root: Path | None = None) -> Skill:
-    item_id = validate_id(item_id, kind="skill id")
-    path = library_root(repo_root) / SKILLS_DIR / item_id / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_skill(item_id, repo_root)
 
 
 def list_experiments(repo_root: Path | None = None) -> list[LibraryItem]:
@@ -434,7 +421,7 @@ def get_agent_preset(item_id: str, repo_root: Path | None = None) -> AgentPreset
         validate_id(prompt_id, kind="prompt id")
         get_prompt(prompt_id, repo_root)
     skill_ids = _string_list(candidate_raw.get("skills"))
-    _require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
+    require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
     for skill_id in skill_ids:
         get_skill(skill_id, repo_root)
     suite_digest = str(evidence_raw.get("suite_digest") or "")
@@ -498,14 +485,6 @@ def get_experiment(item_id: str, repo_root: Path | None = None) -> ExperimentSpe
     return experiment
 
 
-def get_experiment_text(item_id: str, repo_root: Path | None = None) -> str:
-    item_id = validate_id(item_id, kind="experiment id")
-    path = library_root(repo_root) / EXPERIMENTS_DIR / f"{item_id}.yaml"
-    if not path.is_file():
-        raise FileNotFoundError(f"experiment not found: {item_id}")
-    return path.read_text()
-
-
 def save_experiment(
     item_id: str, body: str, repo_root: Path | None = None
 ) -> ExperimentSpec:
@@ -549,9 +528,9 @@ def experiment_from_data(
         variants = [FeatureVariant(id="baseline", label="Baseline")]
     workloads = _workloads(raw.get("workloads"))
     presets = _presets(raw.get("presets"))
-    _require_unique([variant.id for variant in variants], kind="variant")
-    _require_unique([workload.id for workload in workloads], kind="workload")
-    _require_unique([preset.id for preset in presets], kind="preset")
+    require_unique([variant.id for variant in variants], kind="variant")
+    require_unique([workload.id for workload in workloads], kind="workload")
+    require_unique([preset.id for preset in presets], kind="preset")
     workload_ids = {workload.id for workload in workloads}
     for preset in presets:
         unknown = sorted(
@@ -624,23 +603,6 @@ def experiment_with_overrides(
     return experiment_from_yaml(yaml.safe_dump(data), item_id=experiment.id)
 
 
-def content_hashes_for_ids(
-    *,
-    prompt_ids: list[str],
-    skill_ids: list[str],
-    repo_root: Path | None = None,
-) -> dict[str, dict[str, str]]:
-    from fugue.bench.sources import resolve_skills
-
-    resolved = resolve_skills(skill_ids, repo_root or Path.cwd())
-    return {
-        "prompts": {
-            item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids
-        },
-        "skills": {item.id: item.digest.removeprefix("sha256:") for item in resolved},
-    }
-
-
 def _variants(raw: dict[str, Any]) -> list[FeatureVariant]:
     values = raw.get("variants")
     if values is None:
@@ -663,7 +625,7 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     skills = _string_list(raw.get("skills"))
     for skill_id in skills:
         validate_id(skill_id, kind="skill id")
-    _require_unique(skills, kind=f"variant {variant_id} skill")
+    require_unique(skills, kind=f"variant {variant_id} skill")
     return FeatureVariant(
         id=variant_id,
         label=str(raw.get("label") or variant_id),
@@ -734,7 +696,7 @@ def _integration_selections(raw: Any, *, kind: str) -> list[IntegrationSelection
         result.append(
             IntegrationSelection(id=integration_id, config=_dict(value.get("config")))
         )
-    _require_unique([item.id for item in result], kind=f"{kind} integration")
+    require_unique([item.id for item in result], kind=f"{kind} integration")
     return result
 
 
@@ -882,7 +844,7 @@ def _scorer_refs(value: Any, workload_id: str) -> list[ScorerSelection]:
             )
         result.append(RubricScorerSelection(type="rubric", path=ref))
     refs = [scorer_reference(item) for item in result]
-    _require_unique(refs, kind=f"workload {workload_id} scorer")
+    require_unique(refs, kind=f"workload {workload_id} scorer")
     return result
 
 
@@ -1036,25 +998,6 @@ def _positive_int(value: Any, *, kind: str) -> int | None:
     return parsed
 
 
-def _require_unique(values: list[str], *, kind: str) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen:
-            duplicates.add(value)
-        seen.add(value)
-    if duplicates:
-        raise ValueError(f"duplicate {kind} id(s): {', '.join(sorted(duplicates))}")
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"expected mapping, got {type(value).__name__}")
-    return dict(value)
-
-
 def _workload_overrides(value: Any, preset_id: str) -> dict[str, dict[str, Any]]:
     values = _dict(value)
     allowed = {"n_tasks", "n_attempts", "n_concurrent"}
@@ -1075,14 +1018,6 @@ def _workload_overrides(value: Any, preset_id: str) -> dict[str, dict[str, Any]]
             for name, selected in settings.items()
         }
     return result
-
-
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"expected list, got {type(value).__name__}")
-    return list(value)
 
 
 def _paths_to_strings(value: Any) -> Any:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,20 @@ def test_checked_in_dynamic_imports_are_declared_and_agent_allowlist_is_exact() 
             for alias in node.names
         )
         assert object_name in declared, import_path
+
+
+def test_declared_cli_and_tui_actions_resolve() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    for import_path in project["project"]["scripts"].values():
+        module_name, object_name = import_path.split(":", 1)
+        assert callable(getattr(importlib.import_module(module_name), object_name))
+
+    from fugue.tui import FugueApp
+
+    framework_actions = {"command_palette", "quit"}
+    for binding in FugueApp.BINDINGS:
+        if binding.action not in framework_actions:
+            assert callable(getattr(FugueApp, f"action_{binding.action}"))
 
 
 def _harbor_execution_available() -> bool:

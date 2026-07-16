@@ -28,12 +28,9 @@ from fugue.bench.library import (
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.bench.reproducibility import (
     RunSnapshotV1,
-    RunSnapshotV2,
-    RunSnapshotV3,
     build_evaluation_asset_lock,
     build_run_snapshot,
     read_evaluation_asset_lock,
-    read_run_snapshot,
     verify_snapshot,
     write_evaluation_asset_lock,
 )
@@ -71,7 +68,7 @@ jobs_dir: jobs/demo
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-one, repo: test/repo, base_commit: abc123}
+  - {id: task-one, repository: {type: git, url: https://github.com/test/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
 """
     )
     (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
@@ -241,6 +238,40 @@ def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_preview_setup_and_execution_resolve_the_same_coordinates(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo")
+
+    preview = service.resolve_run_plan(request, run_id="preview")
+    setup = service.resolve_run_plan(request, run_id="setup")
+    materialized = service._materialize_run_plan(
+        service.resolve_run_plan(request, run_id="execution"),
+        run_id="execution",
+    )
+
+    def coordinates(plan):
+        return [
+            (
+                cell.workload_id,
+                cell.task_id,
+                cell.harness,
+                cell.context_system_id,
+                cell.trial_index,
+                cell.comparison_example_id,
+                cell.candidate_id,
+                cell.execution_fingerprint,
+                cell.applicable,
+            )
+            for cell in plan.cells
+        ]
+
+    assert coordinates(preview) == coordinates(setup) == coordinates(materialized)
+    assert preview.cells[0].config_sha256 == ""
+    assert materialized.cells[0].config_sha256
+
+
 def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
     tmp_path: Path,
 ) -> None:
@@ -304,6 +335,35 @@ def test_context_rebuild_keeps_content_addressed_dataset(
     )
 
     assert rebuild_values == [False]
+
+
+def test_setup_materializes_a_dataset_before_preparing_its_task_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: events.append("dataset"),
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+
+    def prepare_task(manifest, task, **kwargs):
+        assert events == ["dataset"]
+        events.append("task")
+        return {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        }
+
+    monkeypatch.setattr(operator_module, "prepare_task_runtime", prepare_task)
+
+    service.prepare(ExperimentRequest(experiment_id="demo"))
+
+    assert events == ["dataset", "task"]
 
 
 def test_generated_evaluation_preflight_requires_explicit_judge(
@@ -643,7 +703,7 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     )
 
 
-def test_snapshot_v3_records_resolved_plan_and_reads_v1_v2(tmp_path: Path) -> None:
+def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     experiment = service.experiment("demo")
     request = service.request_for_experiment(experiment)
@@ -664,46 +724,16 @@ def test_snapshot_v3_records_resolved_plan_and_reads_v1_v2(tmp_path: Path) -> No
         env=service.env,
     )
 
-    assert isinstance(snapshot, RunSnapshotV3)
-    assert snapshot.schema_version == 3
+    assert isinstance(snapshot, RunSnapshotV1)
+    assert snapshot.schema_version == 1
     assert snapshot.source_experiment is not None
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
-    assert read_run_snapshot(snapshot.to_dict()) == snapshot
-
-    v2 = {
-        key: value
-        for key, value in snapshot.to_dict().items()
-        if key
-        not in {
-            "evaluation_asset_lock_sha256",
-            "cohort_id",
-            "treatment_selection_sha256",
-        }
-    }
-    v2["schema_version"] = 2
-    parsed_v2 = read_run_snapshot(v2)
-    assert isinstance(parsed_v2, RunSnapshotV2)
-    assert not isinstance(parsed_v2, RunSnapshotV3)
-
-    legacy = {
-        key: value
-        for key, value in v2.items()
-        if key
-        not in {
-            "source_experiment",
-            "resolved_experiment_sha256",
-            "capability_plan",
-            "planned_prediction_count",
-            "runtime_locks",
-            "publication_schema_version",
-        }
-    }
-    legacy["schema_version"] = 1
-    parsed = read_run_snapshot(legacy)
-    assert isinstance(parsed, RunSnapshotV1)
-    assert not isinstance(parsed, RunSnapshotV2)
+    assert verify_snapshot(snapshot.to_dict())
+    for unsupported in (2, 3):
+        payload = {**snapshot.to_dict(), "schema_version": unsupported}
+        assert not verify_snapshot(payload)
 
 
 def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
@@ -1305,6 +1335,9 @@ def test_operator_results_prefers_enriched_normalized_exports(tmp_path: Path) ->
             {
                 "record_type": "trial",
                 "run_id": "run-1",
+                "candidate_id": "candidate-1",
+                "comparison_example_id": "example-1",
+                "trial_index": 1,
                 "run_key": "run-1:task:codex:trial-1",
                 "harness": "codex",
                 "experiment_id": "demo",
