@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 answer=/logs/artifacts/fugue-answer.txt
-test -f "$answer"
-test "$(tr -d '\r\n' < "$answer")" = 'src/relay/amber_lantern.py'
 mkdir -p /logs/verifier
-printf '%s\n' '{"reward": 1.0, "path_resolution": 1.0}' > /logs/verifier/reward.json
+reward=0.0
+if [ -f "$answer" ] && [ "$(tr -d '\r\n' < "$answer")" = 'src/relay/amber_lantern.py' ]; then
+  reward=1.0
+fi
+printf '{"reward": %s, "path_resolution": %s}\n' "$reward" "$reward" > /logs/verifier/reward.json
