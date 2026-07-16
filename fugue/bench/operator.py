@@ -1065,6 +1065,7 @@ class OperatorService:
                     request.manifest or workload.manifest or selected.manifest,
                 )
             )
+            materialize_manifest_dataset(manifest, self.repo_root, rebuild=False)
             evaluation_assets = prepare_evaluation_assets(manifest, self.repo_root)
             if evaluation_assets is not None:
                 evaluation_asset_locks.add(evaluation_assets.as_posix())

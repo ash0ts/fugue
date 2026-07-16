@@ -337,6 +337,35 @@ def test_context_rebuild_keeps_content_addressed_dataset(
     assert rebuild_values == [False]
 
 
+def test_setup_materializes_a_dataset_before_preparing_its_task_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: events.append("dataset"),
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+
+    def prepare_task(manifest, task, **kwargs):
+        assert events == ["dataset"]
+        events.append("task")
+        return {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        }
+
+    monkeypatch.setattr(operator_module, "prepare_task_runtime", prepare_task)
+
+    service.prepare(ExperimentRequest(experiment_id="demo"))
+
+    assert events == ["dataset", "task"]
+
+
 def test_generated_evaluation_preflight_requires_explicit_judge(
     tmp_path: Path,
 ) -> None:
