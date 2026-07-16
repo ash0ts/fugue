@@ -8,9 +8,13 @@ import httpx
 from fugue.assistant import (
     AssistantMessage,
     AssistantModelClient,
+    AssistantResponse,
     AssistantTool,
+    AssistantUsage,
+    _AssistantTrace,
     select_assistant_model,
 )
+from fugue.model_plane import resolve_model_route
 
 
 def test_assistant_model_role_precedence() -> None:
@@ -130,3 +134,42 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
     asyncio.run(exercise())
     assert len(requests) == 3
     assert all(b"secret" not in request.content for request in requests)
+
+
+def test_assistant_trace_preserves_weave_usage_object() -> None:
+    class Usage:
+        input_tokens = 0
+        output_tokens = 0
+
+    class Span:
+        def __init__(self) -> None:
+            self.usage = Usage()
+            self.output_messages: list[dict[str, str]] = []
+            self.closed = False
+
+        def __exit__(self, *_: object) -> None:
+            assert not isinstance(self.usage, dict)
+            assert self.usage.input_tokens == 13
+            assert self.usage.output_tokens == 5
+            self.closed = True
+
+    trace = _AssistantTrace(
+        role="composer",
+        route=resolve_model_route("wandb/test-model", {}),
+        env={},
+        trace_content="full",
+        session_id="session",
+        attributes={},
+    )
+    span = Span()
+
+    trace.finish_llm(
+        span,
+        response=AssistantResponse(
+            text="done",
+            usage=AssistantUsage(input_tokens=13, output_tokens=5),
+        ),
+    )
+
+    assert span.closed is True
+    assert span.output_messages == [{"role": "assistant", "content": "done"}]

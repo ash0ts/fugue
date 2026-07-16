@@ -688,10 +688,7 @@ class _AssistantTrace:
             if response is not None:
                 if self.include_content:
                     span.output_messages = [{"role": "assistant", "content": response.text}]
-                span.usage = {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                }
+                _record_llm_usage(span, response.usage)
             if error is not None:
                 span.error = f"{type(error).__name__}: {error}"
         finally:
@@ -752,6 +749,18 @@ def _enter(value: Any) -> None:
     enter = getattr(value, "__enter__", None)
     if enter is not None:
         enter()
+
+
+def _record_llm_usage(span: Any, usage: AssistantUsage) -> None:
+    # Weave owns this concrete Usage type. Replacing it with a dict makes the
+    # span fail during publication after the model call has already completed.
+    target = getattr(span, "usage", None)
+    if target is None:
+        return
+    for name in ("input_tokens", "output_tokens"):
+        value = getattr(usage, name)
+        if value is not None:
+            setattr(target, name, int(value))
 
 
 def _exit(value: Any, error: BaseException | None) -> None:
