@@ -27,6 +27,7 @@ def _inspect_output(
     state: dict[str, object],
     *,
     repo_root: Path | None = None,
+    bolt_port: int = 37687,
 ) -> str:
     labels = managed_service_compose(
         GRAPHITI_SERVICE,
@@ -37,6 +38,16 @@ def _inspect_output(
             json.dumps(state),
             json.dumps(GRAPHITI_SERVICE.image),
             json.dumps(labels),
+            json.dumps(
+                {
+                    "7474/tcp": [
+                        {"HostIp": "127.0.0.1", "HostPort": str(bolt_port - 313)}
+                    ],
+                    "7687/tcp": [
+                        {"HostIp": "127.0.0.1", "HostPort": str(bolt_port)}
+                    ],
+                }
+            ),
         )
     )
 
@@ -136,7 +147,10 @@ def test_managed_service_resources_are_isolated_per_checkout(tmp_path: Path) -> 
     first_service = first["services"][GRAPHITI_SERVICE.id]
     second_service = second["services"][GRAPHITI_SERVICE.id]
     assert first["name"] != second["name"]
+    assert first_service["container_name"] != second_service["container_name"]
     assert first_service["volumes"] != second_service["volumes"]
+    assert first_service["ports"] == ["127.0.0.1::7474", "127.0.0.1::7687"]
+    assert second_service["ports"] == ["127.0.0.1::7474", "127.0.0.1::7687"]
     assert (
         first_service["labels"]["io.fugue.managed-service-namespace"]
         != second_service["labels"]["io.fugue.managed-service-namespace"]
@@ -171,6 +185,7 @@ def test_status_rejects_a_container_outside_the_pinned_contract(
                     json.dumps({"Running": True, "Health": {"Status": "healthy"}}),
                     json.dumps("neo4j:latest"),
                     json.dumps({}),
+                    json.dumps({}),
                 )
             ),
             "",
@@ -199,7 +214,7 @@ def test_managed_environment_uses_host_and_container_uris_only_when_healthy(
     monkeypatch.setattr(
         services,
         "managed_service_status",
-        lambda spec: services.ManagedServiceStatus(
+        lambda spec, **kwargs: services.ManagedServiceStatus(
             spec.id,
             "healthy",
             True,
@@ -238,7 +253,7 @@ def test_managed_environment_accepts_user_credentials_without_storing_them(
     monkeypatch.setattr(
         services,
         "managed_service_status",
-        lambda spec: services.ManagedServiceStatus(
+        lambda spec, **kwargs: services.ManagedServiceStatus(
             spec.id,
             "stopped",
             False,
@@ -261,6 +276,48 @@ def test_managed_environment_accepts_user_credentials_without_storing_them(
     assert resolved["FUGUE_GRAPHITI_PASSWORD"] == "user-supplied-password"
     assert resolved[GRAPHITI_MANAGED_MARKER] == GRAPHITI_SERVICE.id
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_managed_environment_uses_the_worktree_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".fugue/runtime/services" / GRAPHITI_SERVICE.id
+    runtime.mkdir(parents=True)
+    path = runtime / "credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "FUGUE_GRAPHITI_USER": "neo4j",
+                "FUGUE_GRAPHITI_PASSWORD": "private-password",
+            }
+        )
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(
+        services,
+        "managed_service_status",
+        lambda spec, **kwargs: services.ManagedServiceStatus(
+            spec.id,
+            "healthy",
+            True,
+            "container is healthy",
+            "scoped-container",
+            spec.image,
+            "bolt://127.0.0.1:37687",
+        ),
+    )
+
+    host = managed_service_environment({}, repo_root=tmp_path)
+    container = managed_service_environment(
+        {},
+        repo_root=tmp_path,
+        target="container",
+    )
+
+    assert host["FUGUE_GRAPHITI_URI"] == "bolt://127.0.0.1:37687"
+    assert container["FUGUE_GRAPHITI_URI"] == (
+        "bolt://host.docker.internal:37687"
+    )
 
 
 def test_managed_environment_plans_without_creating_credentials(tmp_path: Path) -> None:
