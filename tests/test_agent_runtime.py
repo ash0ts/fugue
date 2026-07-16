@@ -76,6 +76,11 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     openclaw_adapter = ranges["openclaw"]
     assert 'plugins.setdefault("load", {})' in openclaw_adapter
     assert "plugins list --json" in openclaw_adapter
+    assert "openclaw config validate --json" in openclaw_adapter
+    assert "openclaw config get mcp.servers --json" in openclaw_adapter
+    assert openclaw_adapter.index("_verify_mcp_config_command()") < (
+        openclaw_adapter.index("_start_gateway_command()")
+    )
     assert r'plugin.status!==\"loaded\"' in openclaw_adapter
     assert r'plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"' in openclaw_adapter
     assert "~/.openclaw/npm/projects" not in openclaw_adapter

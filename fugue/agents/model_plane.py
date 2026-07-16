@@ -1538,6 +1538,44 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             "process.exit(1); }'"
         )
 
+    def _verify_mcp_config_command(self) -> str:
+        expected = {
+            str(server.name): {
+                key: value
+                for key, value in {
+                    "transport": getattr(server, "transport", None),
+                    "url": getattr(server, "url", None),
+                    "command": getattr(server, "command", None),
+                    "args": list(getattr(server, "args", None) or []),
+                }.items()
+                if value not in (None, "", [])
+            }
+            for server in self.mcp_servers
+        }
+        probe = (
+            "const fs=require('fs');"
+            "const actual=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));"
+            "const expected=JSON.parse(process.argv[2]);"
+            "const names=(value)=>Object.keys(value).sort();"
+            "if(JSON.stringify(names(actual))!==JSON.stringify(names(expected)))"
+            "{console.error(JSON.stringify({expected:names(expected),"
+            "registered:names(actual)}));process.exit(1);}"
+            "for(const [name,want] of Object.entries(expected)){"
+            "for(const [key,value] of Object.entries(want)){"
+            "if(JSON.stringify(actual[name]?.[key])!==JSON.stringify(value))"
+            "{console.error(JSON.stringify({name,key,expected:value,"
+            "registered:actual[name]?.[key]}));process.exit(1);}}}"
+        )
+        return (
+            "openclaw config validate --json "
+            "> /logs/agent/openclaw-config-validation.json && "
+            "openclaw config get mcp.servers --json "
+            "> /logs/agent/openclaw-mcp-list.json && "
+            f"node -e {shlex.quote(probe)} "
+            "/logs/agent/openclaw-mcp-list.json "
+            f"{shlex.quote(json.dumps(expected, sort_keys=True))}"
+        )
+
     def _start_gateway_command(self) -> str:
         """Start a loopback gateway in the background and wait until ready.
 
@@ -1644,6 +1682,32 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 timeout_sec=60,
             )
 
+            if self.mcp_servers:
+                registration = await self.exec_as_agent(
+                    environment,
+                    command=self._verify_mcp_config_command(),
+                    env=env,
+                    timeout_sec=60,
+                )
+                if registration.return_code != 0:
+                    detail = (
+                        registration.stderr
+                        or registration.stdout
+                        or "OpenClaw MCP registration failed"
+                    ).strip()
+                    raise RuntimeError(detail[-2_000:])
+                self._set_context_registration(
+                    {
+                        "status": "registered",
+                        "delivery": "native_mcp",
+                        "servers": sorted(
+                            server.name for server in self.mcp_servers
+                        ),
+                        "probe": "openclaw config validate + mcp.servers",
+                    }
+                )
+                env.update(self._trace_environment("openclaw", self.model_route))
+
             await self.exec_as_agent(
                 environment,
                 command=self._register_trial_agent_command(),
@@ -1677,16 +1741,6 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 timeout_sec=180,
             )
             gateway_started = True
-            if self.mcp_servers:
-                self._set_context_registration(
-                    {
-                        "status": "registered",
-                        "delivery": "native_mcp",
-                        "servers": sorted(server.name for server in self.mcp_servers),
-                        "probe": "openclaw gateway ready",
-                    }
-                )
-                env.update(self._trace_environment("openclaw", self.model_route))
 
             self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
                 self.conversation_id
