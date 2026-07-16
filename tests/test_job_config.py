@@ -82,6 +82,52 @@ tasks:
     assert {job.variant_id for job in selected} == {"agents"}
 
 
+def test_reused_run_name_keeps_harbor_state_isolated_by_run_id(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "matrix.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+jobs_dir: jobs/matrix
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    experiment = ExperimentSpec(
+        id="matrix",
+        title="Matrix",
+        run_name="reusable-display-name",
+        variants=[FeatureVariant(id="none", label="None")],
+    )
+
+    [first] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="run-a",
+    )
+    [second] = render_jobs(
+        experiment=experiment,
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="run-b",
+    )
+
+    assert first.job_name == second.job_name
+    assert first.config["jobs_dir"] == "jobs/matrix/run-a"
+    assert second.config["jobs_dir"] == "jobs/matrix/run-b"
+    assert first.result_path != second.result_path
+
+
 def test_graphiti_job_uses_container_uri_without_serializing_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -128,7 +174,7 @@ config:
     monkeypatch.setattr(
         services,
         "managed_service_status",
-        lambda spec: ManagedServiceStatus(
+        lambda spec, **_kwargs: ManagedServiceStatus(
             spec.id,
             "healthy",
             True,
