@@ -11,6 +11,7 @@ import pytest
 from fugue.agent_tracing import (
     agent_conversation_id,
     agent_conversation_name,
+    codex_skill_instruction,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
@@ -215,6 +216,29 @@ def test_codex_skill_read_is_normalized_from_a_successful_structured_event(
             }
         ],
     }
+
+
+def test_codex_assigned_skills_are_read_before_task_work() -> None:
+    instruction = codex_skill_instruction(
+        "Fill the PDF.",
+        skills=["pdf-artifact-workflow"],
+        directory="/tmp/cell/home/.agents/skills",
+    )
+
+    assert instruction.index(
+        "cat /tmp/cell/home/.agents/skills/pdf-artifact-workflow/SKILL.md"
+    ) < instruction.index("Fill the PDF.")
+    assert "then follow the instructions you read" in instruction
+    assert (
+        codex_skill_instruction(
+            "Inspect the repository.", skills=[], directory="/tmp/cell/skills"
+        )
+        == "Inspect the repository."
+    )
+    with pytest.raises(ValueError, match="invalid skill id"):
+        codex_skill_instruction(
+            "Unsafe.", skills=["../outside"], directory="/tmp/cell/skills"
+        )
 
 
 def test_codex_skill_evidence_ignores_failed_or_unrelated_commands(

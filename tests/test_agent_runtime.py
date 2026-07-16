@@ -12,7 +12,7 @@ from fugue.bench import agent_runtime
 def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> None:
     spec = agent_runtime.RUNTIMES["codex"]
     assert spec.version == (
-        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1"
+        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
     )
     assert "npm ci --ignore-scripts" in spec.dockerfile
     assert "cargo build --locked --release -p codex-cli" in spec.dockerfile

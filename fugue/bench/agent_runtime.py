@@ -234,7 +234,10 @@ RUNTIMES = {
     ),
     "codex": AgentRuntimeSpec(
         harness="codex",
-        version=("codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1"),
+        version=(
+            "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+"
+            "fugue-mcp-meta.1+skill-use.1"
+        ),
         dockerfile=_codex_dockerfile(),
         probe=(
             "/bin/sh",

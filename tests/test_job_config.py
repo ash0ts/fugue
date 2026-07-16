@@ -280,7 +280,7 @@ tasks:
     assert config["fugue"]["candidate_id"] == job.candidate_id
     assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "3"
     assert job.resolved_candidate.definition["harness_version"] == (
-        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1"
+        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
     )
     assert job.resolved_candidate.definition["model_route"][
         "tool_result_modalities"

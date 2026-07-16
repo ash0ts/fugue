@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 AGENT_NAMES = {
@@ -60,6 +60,31 @@ def normalize_trace_content(value: str | None) -> str:
     if selected not in {"full", "metadata"}:
         raise ValueError("trace content must be 'full' or 'metadata'")
     return selected
+
+
+def codex_skill_instruction(
+    instruction: str,
+    *,
+    skills: list[str],
+    directory: str,
+) -> str:
+    """Make assigned skill use explicit enough to prove from Codex events."""
+    if not skills:
+        return instruction
+    commands: list[str] = []
+    root = PurePosixPath(directory)
+    for skill_id in skills:
+        if not skill_id or PurePosixPath(skill_id).name != skill_id:
+            raise ValueError(f"invalid skill id for Codex delivery: {skill_id!r}")
+        path = root / skill_id / "SKILL.md"
+        commands.append(f"cat {shlex.quote(path.as_posix())}")
+    return (
+        "Assigned reviewed skills are behavior-affecting inputs. Before any task "
+        "work, run each command below, then follow the instructions you read:\n"
+        + "\n".join(commands)
+        + "\n\n"
+        + instruction
+    )
 
 
 def skill_invocation_evidence(

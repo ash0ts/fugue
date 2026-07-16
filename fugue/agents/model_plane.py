@@ -48,6 +48,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 from fugue.agent_tracing import (
     agent_conversation_id,
     agent_conversation_name,
+    codex_skill_instruction,
     conversation_id,
     normalize_trace_content,
     openclaw_agent_id,
@@ -2094,7 +2095,6 @@ class FugueCodex(_TrialMetaMixin, Codex):
     ) -> None:
         await self._begin_trial("codex", self.model_route, environment)
         instruction = self.render_instruction(instruction)
-        escaped_instruction = shlex.quote(instruction)
 
         cli_flags = self.build_cli_flags()
         cli_flags_arg = (cli_flags + " ") if cli_flags else ""
@@ -2112,6 +2112,12 @@ class FugueCodex(_TrialMetaMixin, Codex):
 
         codex_home = self._codex_home()
         remote_codex_home = codex_home.as_posix()
+        instruction = codex_skill_instruction(
+            instruction,
+            skills=_split_tags(os.environ.get("FUGUE_SKILL_IDS")),
+            directory=f"{remote_codex_home}/home/.agents/skills",
+        )
+        escaped_instruction = shlex.quote(instruction)
         weave_project = _weave_project_slug()
         env: dict[str, str] = {
             **provider_client_env(self.model_route, os.environ),
