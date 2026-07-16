@@ -143,7 +143,7 @@ def test_managed_service_lifecycle_selects_only_requested_context_services(
 
     monkeypatch.setattr(
         "fugue.bench.operator.managed_service_statuses",
-        lambda specs: calls.append(("status", tuple(specs))) or (status,),
+        lambda specs, **kwargs: calls.append(("status", tuple(specs))) or (status,),
     )
     monkeypatch.setattr(
         "fugue.bench.operator.start_managed_services",
@@ -190,7 +190,7 @@ required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
     monkeypatch.setattr("fugue.preflight.run_preflight", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         "fugue.bench.operator.managed_service_statuses",
-        lambda specs: observed.append(tuple(specs)) or (),
+        lambda specs, **kwargs: observed.append(tuple(specs)) or (),
     )
 
     checks = service.preflight(

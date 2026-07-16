@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -117,7 +118,19 @@ def managed_services_for_systems(
     return tuple(selected)
 
 
-def managed_service_compose(spec: ManagedServiceSpec) -> dict[str, Any]:
+def managed_service_compose(
+    spec: ManagedServiceSpec,
+    *,
+    repo_root: Path | None = None,
+) -> dict[str, Any]:
+    namespace = _service_namespace(repo_root) if repo_root is not None else ""
+    project_name = (
+        f"fugue-managed-services-{namespace}" if namespace else "fugue-managed-services"
+    )
+    data_volume = f"{spec.data_volume}-{namespace}" if namespace else spec.data_volume
+    labels = {"io.fugue.managed-service": spec.id}
+    if namespace:
+        labels["io.fugue.managed-service-namespace"] = namespace
     environment = {
         "FUGUE_GRAPHITI_USER": "${FUGUE_GRAPHITI_USER}",
         "FUGUE_GRAPHITI_PASSWORD": "${FUGUE_GRAPHITI_PASSWORD}",
@@ -127,19 +140,19 @@ def managed_service_compose(spec: ManagedServiceSpec) -> dict[str, Any]:
         "NEO4J_server_memory_pagecache_size": "512m",
     }
     return {
-        "name": "fugue-managed-services",
+        "name": project_name,
         "services": {
             spec.id: {
                 "image": spec.image,
                 "container_name": spec.container_name,
                 "restart": "unless-stopped",
-                "labels": {"io.fugue.managed-service": spec.id},
+                "labels": labels,
                 "ports": [
                     f"{port.host}:{port.host_port}:{port.container_port}"
                     for port in spec.ports
                 ],
                 "environment": environment,
-                "volumes": [f"{spec.data_volume}:/data"],
+                "volumes": [f"{data_volume}:/data"],
                 "healthcheck": {
                     "test": list(spec.health_check.command),
                     "interval": spec.health_check.interval,
@@ -149,11 +162,15 @@ def managed_service_compose(spec: ManagedServiceSpec) -> dict[str, Any]:
                 },
             }
         },
-        "volumes": {spec.data_volume: {"name": spec.data_volume}},
+        "volumes": {data_volume: {"name": data_volume}},
     }
 
 
-def managed_service_status(spec: ManagedServiceSpec) -> ManagedServiceStatus:
+def managed_service_status(
+    spec: ManagedServiceSpec,
+    *,
+    repo_root: Path | None = None,
+) -> ManagedServiceStatus:
     if shutil.which("docker") is None:
         return _status(spec, "unavailable", False, "docker is not installed")
     try:
@@ -182,11 +199,13 @@ def managed_service_status(spec: ManagedServiceSpec) -> ManagedServiceStatus:
         labels = json.loads(lines[2])
     except (IndexError, TypeError, json.JSONDecodeError):
         return _status(spec, "unavailable", False, "docker returned invalid state")
+    namespace = _service_namespace(repo_root) if repo_root is not None else ""
     if (
         not isinstance(state, dict)
         or image != spec.image
         or not isinstance(labels, dict)
         or labels.get("io.fugue.managed-service") != spec.id
+        or (namespace and labels.get("io.fugue.managed-service-namespace") != namespace)
     ):
         return _status(
             spec,
@@ -208,8 +227,10 @@ def managed_service_status(spec: ManagedServiceSpec) -> ManagedServiceStatus:
 
 def managed_service_statuses(
     specs: Iterable[ManagedServiceSpec],
+    *,
+    repo_root: Path | None = None,
 ) -> tuple[ManagedServiceStatus, ...]:
-    return tuple(managed_service_status(spec) for spec in specs)
+    return tuple(managed_service_status(spec, repo_root=repo_root) for spec in specs)
 
 
 def start_managed_services(
@@ -241,7 +262,7 @@ def start_managed_services(
             check=True,
             timeout=180,
         )
-    return managed_service_statuses(selected)
+    return managed_service_statuses(selected, repo_root=repo_root)
 
 
 def stop_managed_services(
@@ -273,13 +294,7 @@ def stop_managed_services(
                 check=True,
                 timeout=60,
             )
-        elif managed_service_status(spec).state != "not_created":
-            subprocess.run(
-                ["docker", "rm", "-f", spec.container_name],
-                check=True,
-                timeout=30,
-            )
-    return managed_service_statuses(selected)
+    return managed_service_statuses(selected, repo_root=repo_root)
 
 
 def managed_service_environment(
@@ -425,7 +440,12 @@ def _write_compose(spec: ManagedServiceSpec, repo_root: Path) -> Path:
     runtime_dir = _runtime_dir(spec, repo_root)
     runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = _compose_path(spec, repo_root)
-    path.write_text(yaml.safe_dump(managed_service_compose(spec), sort_keys=False))
+    path.write_text(
+        yaml.safe_dump(
+            managed_service_compose(spec, repo_root=repo_root),
+            sort_keys=False,
+        )
+    )
     return path
 
 
@@ -445,6 +465,12 @@ def _credentials_path(spec: ManagedServiceSpec, repo_root: Path) -> Path:
 
 def _compose_path(spec: ManagedServiceSpec, repo_root: Path) -> Path:
     return _runtime_dir(spec, repo_root) / "docker-compose.yaml"
+
+
+def _service_namespace(repo_root: Path | None) -> str:
+    if repo_root is None:
+        return ""
+    return hashlib.sha256(repo_root.resolve().as_posix().encode()).hexdigest()[:12]
 
 
 def _status(

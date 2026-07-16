@@ -640,7 +640,10 @@ class OperatorService:
             for service in managed_services_for_systems(systems)
             if not (external_graphiti_uri and service.id == GRAPHITI_SERVICE_ID)
         )
-        for service in managed_service_statuses(service_specs):
+        for service in managed_service_statuses(
+            service_specs,
+            repo_root=self.repo_root,
+        ):
             checks.append(
                 PreflightCheck(
                     f"managed service {service.service_id}",
@@ -717,7 +720,7 @@ class OperatorService:
         specs = managed_services_for_systems(
             _selected_request_system_ids(selected, request)
         )
-        return managed_service_statuses(specs)
+        return managed_service_statuses(specs, repo_root=self.repo_root)
 
     def start_services(
         self,

@@ -22,12 +22,20 @@ from fugue.bench.services import (
 )
 
 
-def _inspect_output(state: dict[str, object]) -> str:
+def _inspect_output(
+    state: dict[str, object],
+    *,
+    repo_root: Path | None = None,
+) -> str:
+    labels = managed_service_compose(
+        GRAPHITI_SERVICE,
+        repo_root=repo_root,
+    )["services"][GRAPHITI_SERVICE.id]["labels"]
     return "\n".join(
         (
             json.dumps(state),
             json.dumps(GRAPHITI_SERVICE.image),
-            json.dumps({"io.fugue.managed-service": GRAPHITI_SERVICE.id}),
+            json.dumps(labels),
         )
     )
 
@@ -75,7 +83,8 @@ def test_start_generates_private_credentials_and_waits_for_health(
                         "Running": True,
                         "Status": "running",
                         "Health": {"Status": "healthy"},
-                    }
+                    },
+                    repo_root=tmp_path,
                 ),
                 "",
             )
@@ -99,7 +108,10 @@ def test_start_generates_private_credentials_and_waits_for_health(
     assert stat.S_IMODE(credentials_path.stat().st_mode) == 0o600
     compose_text = (runtime / "docker-compose.yaml").read_text()
     assert credentials["FUGUE_GRAPHITI_PASSWORD"] not in compose_text
-    assert yaml.safe_load(compose_text) == managed_service_compose(GRAPHITI_SERVICE)
+    assert yaml.safe_load(compose_text) == managed_service_compose(
+        GRAPHITI_SERVICE,
+        repo_root=tmp_path,
+    )
     up = next(command for command in commands if command[1:3] == ["compose", "-f"])
     assert up[-5:] == ["up", "-d", "--wait", "--wait-timeout", "120"]
 
@@ -114,6 +126,20 @@ def test_status_is_read_only_and_reports_docker_state(
     assert status.state == "unavailable"
     assert status.ready is False
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_managed_service_resources_are_isolated_per_checkout(tmp_path: Path) -> None:
+    first = managed_service_compose(GRAPHITI_SERVICE, repo_root=tmp_path / "first")
+    second = managed_service_compose(GRAPHITI_SERVICE, repo_root=tmp_path / "second")
+
+    first_service = first["services"][GRAPHITI_SERVICE.id]
+    second_service = second["services"][GRAPHITI_SERVICE.id]
+    assert first["name"] != second["name"]
+    assert first_service["volumes"] != second_service["volumes"]
+    assert (
+        first_service["labels"]["io.fugue.managed-service-namespace"]
+        != second_service["labels"]["io.fugue.managed-service-namespace"]
+    )
 
 
 def test_status_rejects_a_container_outside_the_pinned_contract(
@@ -254,7 +280,7 @@ def test_stop_preserves_credentials_and_named_volume(
     )
     credentials_path.chmod(0o600)
     (runtime / "docker-compose.yaml").write_text(
-        yaml.safe_dump(managed_service_compose(GRAPHITI_SERVICE))
+        yaml.safe_dump(managed_service_compose(GRAPHITI_SERVICE, repo_root=tmp_path))
     )
     commands: list[list[str]] = []
 
