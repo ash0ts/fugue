@@ -31,6 +31,8 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
         "Require authored context delivery",
         "Nothing executes before the lock is durable",
         "Setup is the only stateful preparation boundary",
+        "Dataset verifiers use a pinned offline profile",
+        "Validate base failure and gold success",
         "Vector treatments fail closed",
         "BM25 and vector modes are different candidates",
         "confirmed skill/context registration",

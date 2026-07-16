@@ -5,7 +5,9 @@ import pytest
 from fugue.bench.manifest import fixture_repository_digest, load_manifest
 
 
-def test_manifest_loads_benchmark_surface_without_experiment_axes(tmp_path: Path) -> None:
+def test_manifest_loads_benchmark_surface_without_experiment_axes(
+    tmp_path: Path,
+) -> None:
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
         """
@@ -54,6 +56,103 @@ tasks:
     assert manifest.dataset.path == Path(".fugue/cache/datasets/qa/v1")
     assert manifest.dataset.materializer == "package.module:Adapter"
     assert manifest.tasks[0].metadata == {"source_index": 7}
+
+
+def test_manifest_loads_pinned_dataset_verifier_runtime(tmp_path: Path) -> None:
+    path = tmp_path / "offline.yaml"
+    path.write_text(
+        """
+dataset:
+  ref: swe-bench/swe-bench-verified
+  version: sha256:abc
+  verifier_runtime:
+    profile: swebench-v4-offline
+    python_interpreter: /opt/fugue-verifier/bin/python
+    python_packages: [swebench==4.0.3, datasets==2.16.1, fastcore==1.10.5]
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks: [{id: pydata__xarray-6992}]
+"""
+    )
+
+    runtime = load_manifest(path).dataset.verifier_runtime
+
+    assert runtime is not None
+    assert runtime.to_dict() == {
+        "profile": "swebench-v4-offline",
+        "python_interpreter": "/opt/fugue-verifier/bin/python",
+        "python_packages": [
+            "swebench==4.0.3",
+            "datasets==2.16.1",
+            "fastcore==1.10.5",
+        ],
+    }
+
+
+def test_manifest_rejects_unpinned_dataset_verifier_package(tmp_path: Path) -> None:
+    path = tmp_path / "offline.yaml"
+    path.write_text(
+        """
+dataset:
+  ref: swe-bench/swe-bench-verified
+  verifier_runtime:
+    profile: swebench-v4-offline
+    python_interpreter: /opt/fugue-verifier/bin/python
+    python_packages: [swebench>=4]
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks: [{id: task}]
+"""
+    )
+
+    with pytest.raises(ValueError, match="exact name==version pins"):
+        load_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "swe-bench-hard-memory-v1.yaml",
+        "swe-bench-gitnexus-holdout-v1.yaml",
+        "swe-bench-controls-v1.yaml",
+    ],
+)
+def test_hard_swe_manifests_lock_the_offline_verifier(name: str) -> None:
+    path = Path(__file__).parents[1] / "datasets" / "repo-memory" / name
+
+    runtime = load_manifest(path).dataset.verifier_runtime
+
+    assert runtime is not None
+    assert runtime.profile == "swebench-v4-offline"
+    assert runtime.python_interpreter == "/opt/fugue-verifier/bin/python"
+    assert runtime.python_packages == (
+        "swebench==4.0.3",
+        "datasets==2.16.1",
+        "fastcore==1.10.5",
+    )
+
+
+def test_manifest_rejects_mixed_dataset_and_task_verifier_runtimes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "mixed.yaml"
+    path.write_text(
+        f"""
+dataset:
+  ref: swe-bench/swe-bench-verified
+  verifier_runtime:
+    profile: swebench-v4-offline
+    python_interpreter: /opt/fugue-verifier/bin/python
+    python_packages: [swebench==4.0.3, datasets==2.16.1, fastcore==1.10.5]
+harnesses: [{{name: codex, agent: fugue.agents:FugueCodex}}]
+tasks:
+  - id: task
+    verifier_runtime:
+      python_packages: [pytest==8.4.1]
+      test_script_sha256: {"a" * 64}
+"""
+    )
+
+    with pytest.raises(ValueError, match="may not be mixed"):
+        load_manifest(path)
 
 
 def test_manifest_normalizes_typed_repository_and_http_source(tmp_path: Path) -> None:
@@ -150,9 +249,7 @@ tasks:
 
 def test_pilot_canary_declares_gold_evidence_paths() -> None:
     manifest = load_manifest(Path(__file__).parents[1] / "datasets" / "pilot.yaml")
-    task = next(
-        item for item in manifest.tasks if item.id == "astropy__astropy-12907"
-    )
+    task = next(item for item in manifest.tasks if item.id == "astropy__astropy-12907")
 
     assert task.expected_paths == (
         "astropy/modeling/separable.py",

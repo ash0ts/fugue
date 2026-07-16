@@ -27,6 +27,9 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Setup is the only stateful preparation boundary. Preview and active trials do
   not install packages, download runtimes, start services, use the Docker
   socket, or mutate the production checkout.
+- Dataset verifiers use a pinned offline profile prepared into the task image.
+  Validate base failure and gold success before a paid cohort; a verifier may
+  not resolve packages or benchmark metadata during a trial.
 - Vector treatments fail closed when vector indexing or retrieval is absent.
   BM25 and vector modes are different candidates and cache entries; a vector
   label may never conceal lexical fallback.

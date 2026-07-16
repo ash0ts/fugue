@@ -443,6 +443,12 @@ retrieval measurements, 450 GitNexus BM25/vector measurements, and 108
 continuity sequence attempts. The 225-probe retrieval source is materialized
 and locked by `setup --prepare`; a trial refuses to download it.
 
+SWE-bench verifier dependencies and grading metadata are prepared into the
+locked task image. Qualification runs the official verifier offline twice: the
+base checkout must fail and the pinned gold patch must pass. A verifier that
+tries to resolve packages or metadata during a trial invalidates the task
+image instead of producing a benchmark result.
+
 Analysis first resolves and displays an immutable local scope. `--yes` is the
 explicit boundary for model interpretation and report writing:
 

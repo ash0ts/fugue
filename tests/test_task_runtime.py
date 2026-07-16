@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import toml
 
 from fugue.bench import task_runtime
@@ -49,6 +51,30 @@ def _verifier_fixture(tmp_path: Path):
         f"      test_script_sha256: {task_runtime.hashlib.sha256(script.encode()).hexdigest()}\n"
     )
     return load_manifest(manifest_path), dataset
+
+
+def _swebench_verifier_fixture(tmp_path: Path):
+    manifest, dataset = _fixture(tmp_path)
+    (dataset / "tests").mkdir()
+    script = (
+        "#!/bin/bash\n"
+        "python -m pip install -e .\n"
+        "from swebench.harness.test_spec.test_spec import make_test_spec\n"
+        "test_spec   = make_test_spec(datum)\n"
+        'uv run parser.py | tee -a "$LOG_FILE"\n'
+    )
+    (dataset / "tests" / "test.sh").write_text(script)
+    manifest_path = tmp_path / "swebench-manifest.yaml"
+    manifest_path.write_text(
+        "dataset:\n  path: dataset\n"
+        "  verifier_runtime:\n"
+        "    profile: swebench-v4-offline\n"
+        "    python_interpreter: /opt/fugue-verifier/bin/python\n"
+        "    python_packages: [swebench==4.0.3, datasets==2.16.1, fastcore==1.10.5]\n"
+        "harnesses:\n  - {name: codex, agent: fugue.agents:FugueCodex}\n"
+        "tasks:\n  - id: task-one\n    metadata: {architecture: arm64}\n"
+    )
+    return load_manifest(manifest_path), dataset, script
 
 
 def test_task_preparation_locks_image_and_disables_trial_network(
@@ -147,6 +173,79 @@ def test_task_preparation_locks_verifier_dependencies_before_the_trial(
     }
 
 
+def test_swebench_verifier_is_prepared_for_offline_trial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest, source, original_script = _swebench_verifier_fixture(tmp_path)
+    build_dockerfile = ""
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs):
+        nonlocal build_dockerfile
+        commands.append(command)
+        if command[1] == "build":
+            build_dockerfile = (Path(command[-1]) / "Dockerfile").read_text()
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Id": "sha256:" + "a" * 64,
+                            "Architecture": "arm64",
+                            "Os": "linux",
+                        }
+                    ]
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(task_runtime.shutil, "which", lambda name: "/docker")
+    monkeypatch.setattr(task_runtime, "_resolve_task_source", lambda *args: source)
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+
+    lock = task_runtime.prepare_task_runtime(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+
+    interpreter = "/opt/fugue-verifier/bin/python"
+    assert "/opt/miniconda3/bin/python -m venv /opt/fugue-verifier" in build_dockerfile
+    assert f"{interpreter} -m pip install --no-cache-dir" in build_dockerfile
+    assert "swebench==4.0.3 datasets==2.16.1 fastcore==1.10.5" in build_dockerfile
+    verify = next(
+        command for command in commands if command[1:4] == ["run", "--rm", "--network"]
+    )
+    assert interpreter in verify
+    prepared = Path(lock["dataset_path"]) / "task-one" / "tests" / "test.sh"
+    rewritten = prepared.read_text()
+    assert "python -m pip" not in rewritten
+    assert "uv run" not in rewritten
+    assert "make_test_spec" not in rewritten
+    assert "test_spec = SimpleNamespace(" in rewritten
+    assert f'{interpreter} parser.py | tee -a "$LOG_FILE"' in rewritten
+    assert lock["verifier_script"] == {
+        "original_sha256": hashlib.sha256(original_script.encode()).hexdigest(),
+        "prepared_sha256": hashlib.sha256(rewritten.encode()).hexdigest(),
+    }
+
+
+def test_swebench_verifier_rewrite_fails_closed_on_upstream_shape_change(
+    tmp_path: Path,
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    script = source / "tests" / "test.sh"
+    script.write_text(
+        script.read_text().replace("uv run parser.py", "uv run --offline parser.py")
+    )
+
+    with pytest.raises(RuntimeError, match="one exact uv parser invocation"):
+        task_runtime._lock_verifier_script(
+            source, manifest.tasks[0], manifest.dataset.verifier_runtime
+        )
+
+
 def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:
     manifest, _source = _fixture(tmp_path)
     root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)
@@ -189,12 +288,16 @@ def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> Non
     }
     (root / "runtime-lock-arm64.json").write_text(json.dumps(value))
 
-    assert task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path) is None
+    assert (
+        task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path)
+        is None
+    )
 
 
 def test_local_task_source_does_not_import_harbor(tmp_path: Path) -> None:
     manifest, source = _fixture(tmp_path)
 
-    assert task_runtime._resolve_task_source(
-        manifest, manifest.tasks[0], tmp_path
-    ) == source.resolve()
+    assert (
+        task_runtime._resolve_task_source(manifest, manifest.tasks[0], tmp_path)
+        == source.resolve()
+    )
