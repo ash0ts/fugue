@@ -51,6 +51,8 @@ MAX_SOURCE_CHARS = 64_000
 MAX_SOURCE_TOTAL_CHARS = 512_000
 MAX_MCP_ITEMS = 50
 MAX_MCP_DISCOVERY_SECONDS = 30
+MAX_GENERATED_CASE_BYTES = 12_000
+MAX_GENERATED_RUBRIC_BYTES = 12_000
 
 EvaluationAssetKind = Literal[
     "evaluation_cases",
@@ -863,6 +865,10 @@ def _evaluation_case(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("evaluation case must be an object")
+    if len(json.dumps(raw, separators=(",", ":"), default=str).encode()) > MAX_GENERATED_CASE_BYTES:
+        raise ValueError(
+            f"evaluation case exceeds {MAX_GENERATED_CASE_BYTES} serialized bytes"
+        )
     allowed = {
         "id",
         "instruction",
@@ -1041,6 +1047,10 @@ def _evaluation_rubric(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("evaluation rubric must be an object")
+    if len(json.dumps(raw, separators=(",", ":"), default=str).encode()) > MAX_GENERATED_RUBRIC_BYTES:
+        raise ValueError(
+            f"evaluation rubric exceeds {MAX_GENERATED_RUBRIC_BYTES} serialized bytes"
+        )
     unknown = sorted(set(raw) - {"dimensions"})
     if unknown:
         raise ValueError(f"unknown evaluation rubric field(s): {', '.join(unknown)}")

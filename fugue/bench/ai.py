@@ -25,6 +25,7 @@ from fugue.assistant import (
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
 from fugue.bench.evaluations import (
+    EVALUATION_DIMENSIONS,
     EvaluationDraft,
     build_evaluation_draft,
     evaluation_asset_path,
@@ -1646,7 +1647,7 @@ def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:
 
 
 def _composer_instructions() -> str:
-    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Every authored variant must declare context as a mapping with both system_id and delivery, including no-context variants. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, context, integration, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Never copy an existing catalog asset into assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Every authored variant must declare context as a mapping with both system_id and delivery, including no-context variants. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Keep generated cases concise; do not repeat source content or the base experiment inside instructions, assertions, or rationale. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, context, integration, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
 
 
 def _analyst_planner_instructions() -> str:
@@ -1662,13 +1663,31 @@ def _experiment_submission_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "experiment": {"type": "object"},
-            "assets": {"type": "array", "items": {"type": "object"}},
+            "assets": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["prompt", "skill"]},
+                        "id": {"type": "string", "maxLength": 128},
+                        "title": {"type": "string", "maxLength": 256},
+                        "body": {"type": "string", "maxLength": 64_000},
+                    },
+                    "required": ["kind", "id", "title", "body"],
+                    "additionalProperties": False,
+                },
+            },
             "evaluation": {
                 "type": "object",
                 "properties": {
                     "suite_id": {"type": "string"},
-                    "cases": {"type": "array", "items": {"type": "object"}},
-                    "rubric": {"type": "object"},
+                    "cases": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": _evaluation_case_submission_schema(),
+                    },
+                    "rubric": _evaluation_rubric_submission_schema(),
                 },
                 "required": ["suite_id", "cases", "rubric"],
                 "additionalProperties": False,
@@ -1678,6 +1697,145 @@ def _experiment_submission_schema() -> dict[str, Any]:
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["experiment", "rationale", "assumptions", "warnings"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_case_submission_schema() -> dict[str, Any]:
+    short_text = {"type": "string", "maxLength": 500}
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "maxLength": 128},
+            "instruction": {"type": "string", "maxLength": 2_000},
+            "family": {
+                "type": "string",
+                "enum": ["prompt", "skill", "mcp", "agent", "mixed"],
+            },
+            "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {"type": "string", "maxLength": 256},
+            },
+            "attachments": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "maxLength": 512},
+                        "target": {"type": "string", "maxLength": 512},
+                        "sha256": {"type": "string", "maxLength": 64},
+                    },
+                    "required": ["path", "target", "sha256"],
+                    "additionalProperties": False,
+                },
+            },
+            "expected": {
+                "type": "object",
+                "properties": {
+                    "facts": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": short_text,
+                    },
+                    "tool_calls": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "server": {"type": "string", "maxLength": 128},
+                                "tool": {"type": "string", "maxLength": 128},
+                                "arguments_subset": {
+                                    "type": "object",
+                                    "maxProperties": 16,
+                                },
+                            },
+                            "required": ["tool"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "maxLength": 512},
+                                "checks": {
+                                    "type": "array",
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["exists", "nonempty", "json"],
+                                    },
+                                },
+                            },
+                            "required": ["path", "checks"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "reference_answer": {"type": "string", "maxLength": 2_000},
+                },
+                "additionalProperties": False,
+            },
+            "scorer_dimensions": {
+                "type": "array",
+                "maxItems": len(EVALUATION_DIMENSIONS),
+                "items": {
+                    "type": "string",
+                    "enum": sorted(EVALUATION_DIMENSIONS),
+                },
+            },
+            "tags": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {"type": "string", "maxLength": 128},
+            },
+            "turns": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 1_000},
+            },
+        },
+        "required": ["id", "instruction", "family", "source_refs", "expected", "tags"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_rubric_submission_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "dimensions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": len(EVALUATION_DIMENSIONS),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "enum": sorted(EVALUATION_DIMENSIONS),
+                        },
+                        "kind": {"type": "string", "enum": ["llm_judge"]},
+                        "criterion": {"type": "string", "maxLength": 1_000},
+                        "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+                        "evidence": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {"type": "string", "maxLength": 256},
+                        },
+                    },
+                    "required": ["id", "kind", "criterion", "threshold", "evidence"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["dimensions"],
         "additionalProperties": False,
     }
 

@@ -165,7 +165,18 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        assert json.loads(request.content)["max_output_tokens"] == 32_768
+        request_body = json.loads(request.content)
+        assert request_body["max_output_tokens"] == 32_768
+        submit_tool = next(
+            tool
+            for tool in request_body["tools"]
+            if tool["name"] == "submit_experiment"
+        )
+        case_schema = submit_tool["parameters"]["properties"]["evaluation"][
+            "properties"
+        ]["cases"]["items"]
+        assert case_schema["properties"]["instruction"]["maxLength"] == 2_000
+        assert case_schema["additionalProperties"] is False
         return httpx.Response(
             200,
             json=_tool_response(

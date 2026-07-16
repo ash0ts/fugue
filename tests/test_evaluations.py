@@ -181,6 +181,13 @@ def test_evaluation_draft_is_stratified_grounded_and_reviewable(
             ],
             "missing case strata",
         ),
+        (
+            lambda cases: [
+                {**cases[0], "instruction": "x" * 13_000},
+                *cases[1:],
+            ],
+            "evaluation case exceeds 12000 serialized bytes",
+        ),
     ],
 )
 def test_evaluation_draft_rejects_invalid_case_sets(
