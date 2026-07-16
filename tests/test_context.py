@@ -599,6 +599,48 @@ def test_isolated_command_initializes_checked_in_fixture_as_repository(
     assert not (source / "FIXTURE_READY").exists()
 
 
+def test_context_prepare_does_not_leak_child_output(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "README.md").write_text("# Fixture\n")
+    spec = ContextSystemSpec(
+        id="quiet-command",
+        title="Quiet command",
+        provider="fugue.bench.context:IsolatedCommandContextProvider",
+        version="test",
+        capabilities=frozenset({"prepare"}),
+        deliveries=frozenset({"portable"}),
+        config={
+            "prepare": {
+                "command": [
+                    sys.executable,
+                    "-c",
+                    "import sys; print('model output'); print('diagnostic', file=sys.stderr)",
+                ]
+            }
+        },
+    )
+
+    asyncio.run(
+        load_provider(spec).prepare(
+            spec,
+            RepositorySnapshot("task", "fixture/repo", "fixture-base", source),
+            ContextRuntime(
+                tmp_path,
+                tmp_path / "cache",
+                {},
+                output_dir=tmp_path / "output",
+            ),
+        )
+    )
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
 def test_context_command_timeout_terminates_the_process_group(tmp_path: Path) -> None:
     pid_path = tmp_path / "pid"
     command = [

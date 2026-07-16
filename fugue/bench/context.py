@@ -747,7 +747,7 @@ class CommandContextProvider(BaseContextProvider):
                 expanded,
                 cwd=snapshot.checkout,
                 env=_command_env(runtime.env, prepare.get("env")),
-                capture_output=bool(prepare.get("stdout_path")),
+                capture_output=True,
                 timeout_seconds=(
                     float(prepare["timeout_seconds"])
                     if prepare.get("timeout_seconds") is not None
