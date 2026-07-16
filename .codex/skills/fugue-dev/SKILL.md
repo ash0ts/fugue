@@ -30,6 +30,9 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Dataset verifiers use a pinned offline profile prepared into the task image.
   Validate base failure and gold success before a paid cohort; a verifier may
   not resolve packages or benchmark metadata during a trial.
+- Keep answer-bearing evaluation data in a private host-only lock. Containers,
+  Agent inputs, job configuration, snapshots, and traces receive only its
+  digest; derived metrics may be published, but raw gold paths may not.
 - Vector treatments fail closed when vector indexing or retrieval is absent.
   BM25 and vector modes are different candidates and cache entries; a vector
   label may never conceal lexical fallback.
@@ -39,6 +42,8 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Normalize every logical outcome into one versioned prediction row. Keep raw
   retrieval and episode measurements separate. Reconcile every planned
   coordinate to terminal, not applicable, or explicitly cancelled.
+- Freeze discovery rankings in a versioned treatment-selection lock.
+  Confirmatory cohorts reject treatments that disagree with that lock.
 - Publish idempotently by project, prediction identity, scorer version, and
   revision. Explicit revisions name what they supersede and why.
 - Agent cells have one native conversation and one matching `invoke_agent`

@@ -62,7 +62,7 @@ jobs:
           tests/test_agent_tracing.py tests/test_artifacts.py tests/test_assistant.py
           tests/test_bridge.py tests/test_codex_mcp.py
           tests/test_context.py tests/test_context_contracts.py tests/test_context_study.py
-          tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
+          tests/test_evaluation_assets.py tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
           tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
       - name: Test development and release tooling
@@ -73,7 +73,7 @@ jobs:
         run: >-
           uv run pytest
           tests/test_curation.py tests/test_deployment.py tests/test_self_eval.py
-          tests/test_skill.py tests/test_tui.py
+          tests/test_reachability.py tests/test_skill.py tests/test_tui.py
 
   quality:
     name: Quality, build, and command smoke
@@ -131,7 +131,9 @@ jobs:
       - name: Test serving with warnings as errors
         env:
           PYTHONWARNINGS: error
-        run: uv run pytest -q tests/test_serve.py tests/test_codex_agent_runtime.py
+        run: >-
+          uv run pytest -q tests/test_serve.py tests/test_codex_agent_runtime.py
+          tests/test_reachability.py
       - name: Open Responses and client compatibility
         env:
           PYTHONWARNINGS: error

@@ -406,12 +406,20 @@ Deterministic outcomes, rubric scores, and judge errors remain separate—Fugue
 does not invent a composite score or convert a judge outage into a Harbor
 failure. Unmeasured token usage remains unavailable rather than becoming zero.
 
-`RunSnapshotV2` records source and resolved experiment digests, capability
+`RunSnapshotV3` records source and resolved experiment digests, capability
 decisions, logical predictions, runtime locks, planned cells, asset identities,
-and publication schema before execution. A normalized prediction is distinct
-from its raw retrieval or episode measurements. Summaries therefore report
-planned and executed cells, logical predictions, measurements, Agent and direct
-predictions, conversations, links, canaries, and remediation cohorts separately.
+cohort identity, treatment-selection digest, evaluation-lock digest, and
+publication schema before execution. V1 and V2 snapshots remain readable. A
+normalized prediction is distinct from its raw retrieval or episode
+measurements. Summaries therefore report planned and executed cells, logical
+predictions, measurements, Agent and direct predictions, conversations, links,
+canaries, and remediation cohorts separately.
+
+Answer-bearing localization data lives in a mode-0600 host-only
+`EvaluationAssetLockV1`. Fugue never mounts its raw paths in a task or Agent
+container and never puts them in rendered jobs, snapshots, Agent metadata, or
+trace inputs. Host-side scoring may publish derived recall and MRR together
+with the lock digest.
 
 W&B publication is idempotent by project, prediction ID, scorer version, and
 revision. An explicit republish creates a new active revision with a reason and
@@ -428,8 +436,9 @@ experiment:
 fugue run repo-memory-impact --preset context-contract --preview
 fugue run repo-memory-impact --preset hard-calibration --preview
 fugue run repo-memory-impact --preset hard-discovery --preview
+fugue analyze --saved repo-memory-discovery-selection --yes
 fugue run repo-memory-impact --preset hard-holdout \
-  --variants none,TOP_TREATMENT_1,TOP_TREATMENT_2,TOP_TREATMENT_3 --preview
+  --selection-lock REPORT_DIR/treatment-selection-lock.json --preview
 fugue run repo-memory-impact --preset gitnexus-ablation --preview
 fugue run repo-memory-impact --preset gitnexus-swe-contract --preview
 fugue run repo-memory-impact --preset retrieval-study --preview
@@ -437,12 +446,21 @@ fugue run repo-memory-impact --preset gitnexus-retrieval-study --preview
 fugue run repo-memory-impact --preset continuity-study --preview
 ```
 
-The planned prediction counts are 48 context-contract, 56 calibration, 80
-discovery, 192 holdout, 96 easy-control, 128 repository-QA, and 96 independent
-GitNexus ablation Agent predictions. Direct cohorts contain 900 general
+The planned prediction counts are 48 context-contract, 32 calibration, 80
+discovery, 192 holdout, 96 easy-control, 128 repository-QA, 96 independent
+GitNexus ablation, and 72 PDF-skill Agent predictions: 744 primary cells in
+total. Direct cohorts contain 900 general
 retrieval measurements, 450 GitNexus BM25/vector measurements, and 108
 continuity sequence attempts. The 225-probe retrieval source is materialized
 and locked by `setup --prepare`; a trial refuses to download it.
+
+Discovery ranks variants against the same task, harness, and trial baseline.
+Official SWE resolution is primary, followed by localization recall@10, MRR,
+recoverable-error rate, measured cost, and stable variant ID. The versioned
+`TreatmentSelectionLockV1` captures the complete ranking and chosen three;
+holdout, controls, and repository-QA reject manual treatments that disagree
+with it. A separate 16-cell uptake diagnostic uses qualification-only tasks and
+never contributes to efficacy denominators.
 
 `gitnexus-swe-contract` is a one-cell Codex qualification canary. It explicitly
 requires a semantic lookup before editing so it can prove native MCP, vector
