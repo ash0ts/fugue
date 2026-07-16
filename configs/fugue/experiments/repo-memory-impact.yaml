@@ -12,26 +12,98 @@ workloads:
     dataset: datasets/repo-memory/agent-retrieval-bench-v1.yaml
     required_capabilities: [retrieve]
     systems: [none, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, codegraph, rag-bm25, rag-dense, rag-hybrid]
+  - id: gitnexus-retrieval
+    runner: retrieval
+    dataset: datasets/repo-memory/agent-retrieval-bench-v1.yaml
+    required_capabilities: [retrieve]
+    systems: [gitnexus]
+    variants: [gitnexus-bm25, gitnexus-vector]
   - id: qa
     runner: harbor
     manifest: datasets/repo-memory/swe-qa.yaml
     required_capabilities: [bind]
     artifacts: [/logs/artifacts/fugue-answer.md]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
   - id: coding
     runner: harbor
     manifest: datasets/pilot.yaml
     required_capabilities: [bind]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
   - id: continuity
     runner: sequence
     dataset: datasets/repo-memory/continuity-smoke.yaml
     required_capabilities: [sequence]
     systems: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
+    variants: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
+  - id: context-contract
+    runner: harbor
+    manifest: datasets/repo-memory/gitnexus-contract-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+  - id: hard-calibration
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
+    required_capabilities: [bind]
+    systems: [none]
+    variants: [none]
+  - id: hard-discovery
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
+    required_capabilities: [bind]
+    systems: [agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [agentsmd, openwiki, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harness_assignment: latin_square
+  - id: hard-holdout
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-hard-holdout-v2.yaml
+    required_capabilities: [bind]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none]
+  - id: hard-controls
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-controls-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none]
+  - id: hard-repository-qa
+    runner: harbor
+    manifest: datasets/repo-memory/swe-qa.yaml
+    required_capabilities: [bind]
+    artifacts: [/logs/artifacts/fugue-answer.md]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none]
+  - id: gitnexus-ablation
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-gitnexus-ablation-v2.yaml
+    required_capabilities: [bind]
+    systems: [gitnexus]
+    variants: [gitnexus-bm25, gitnexus-vector]
+  - id: gitnexus-swe-contract
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-qualification-v1.yaml
+    required_capabilities: [bind]
+    systems: [gitnexus]
+    variants: [gitnexus-vector-contract]
+  - id: uptake-diagnostic
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-qualification-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, gitnexus]
+    variants: [uptake-none, uptake-vector, uptake-oriented-none, uptake-oriented-vector]
+  - id: gitnexus-contract
+    runner: harbor
+    manifest: datasets/repo-memory/gitnexus-contract-v1.yaml
+    required_capabilities: [bind]
+    systems: [gitnexus]
+    variants: [gitnexus-bm25, gitnexus-vector]
 presets:
   smoke:
     workloads: [retrieval, qa, coding, continuity]
-    systems: [none, agentsmd, openwiki, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
+    systems: [none, agentsmd, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
     harnesses: [hermes, openclaw, claude-code, codex]
     n_attempts: 1
     n_concurrent: 2
@@ -42,7 +114,7 @@ presets:
       continuity: {n_tasks: 1}
   full:
     workloads: [retrieval, qa, coding, continuity]
-    systems: [none, agentsmd, openwiki, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
+    systems: [none, agentsmd, aider-repomap, rag-bm25, rag-dense, rag-hybrid, markdown-log, mem0]
     harnesses: [hermes, openclaw, claude-code, codex]
     n_attempts: 2
     n_concurrent: 2
@@ -51,22 +123,164 @@ presets:
       qa: {n_tasks: 24}
       coding: {n_tasks: 12}
       continuity: {n_tasks: 2}
+  gitnexus-ablation:
+    workloads: [gitnexus-ablation]
+    systems: [gitnexus]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 3
+    n_tasks: 4
+    n_concurrent: 4
+    scheduling_seed: gitnexus-ablation-v1
+  context-contract:
+    workloads: [context-contract]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 4
+    scheduling_seed: context-contract-v1
+  hard-calibration:
+    workloads: [hard-calibration]
+    systems: [none]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 8
+    n_concurrent: 4
+    scheduling_seed: hard-calibration-v1
+  hard-discovery:
+    workloads: [hard-discovery]
+    systems: [agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 8
+    n_concurrent: 4
+    scheduling_seed: hard-discovery-latin-square-v1
+  hard-holdout:
+    workloads: [hard-holdout]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 3
+    n_tasks: 4
+    n_concurrent: 4
+    scheduling_seed: hard-holdout-v1
+    selection_lock_required: true
+  hard-controls:
+    workloads: [hard-controls]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 3
+    n_tasks: 2
+    n_concurrent: 4
+    scheduling_seed: hard-controls-v1
+    selection_lock_required: true
+  hard-repository-qa:
+    workloads: [hard-repository-qa]
+    systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 8
+    n_concurrent: 4
+    scheduling_seed: hard-repository-qa-v1
+    selection_lock_required: true
+  uptake-diagnostic:
+    workloads: [uptake-diagnostic]
+    systems: [none, gitnexus]
+    harnesses: [codex]
+    n_attempts: 1
+    n_tasks: 4
+    n_concurrent: 4
+    scheduling_seed: uptake-diagnostic-v1
+  retrieval-study:
+    workloads: [retrieval]
+    systems: [none, rag-bm25, rag-dense, rag-hybrid]
+    n_attempts: 1
+    n_tasks: 225
+    n_concurrent: 4
+    scheduling_seed: retrieval-study-v1
+  gitnexus-retrieval-study:
+    workloads: [gitnexus-retrieval]
+    systems: [gitnexus]
+    n_attempts: 1
+    n_tasks: 225
+    n_concurrent: 2
+    scheduling_seed: gitnexus-retrieval-study-v1
+  continuity-study:
+    workloads: [continuity]
+    systems: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
+    n_attempts: 3
+    n_tasks: 6
+    n_concurrent: 4
+    scheduling_seed: continuity-study-v1
+  gitnexus-contract:
+    workloads: [gitnexus-contract]
+    systems: [gitnexus]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 4
+    scheduling_seed: gitnexus-contract-v1
+  gitnexus-swe-contract:
+    workloads: [gitnexus-swe-contract]
+    systems: [gitnexus]
+    harnesses: [codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: gitnexus-swe-contract-v1
 variants:
-  - {id: none, label: No added context, context: {system_id: none}}
-  - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd}}
-  - {id: openwiki, label: OpenWiki, context: {system_id: openwiki}}
-  - {id: gitnexus, label: GitNexus, context: {system_id: gitnexus}}
-  - {id: codegraph, label: CodeGraph, context: {system_id: codegraph}}
-  - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap}}
-  - {id: semble, label: Semble, context: {system_id: semble}}
-  - {id: project-rag, label: Project RAG, context: {system_id: project-rag}}
-  - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25}}
-  - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense}}
-  - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid}}
-  - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log}}
-  - {id: latmd, label: lat.md, context: {system_id: latmd}}
-  - {id: mem0, label: Mem0, context: {system_id: mem0}}
-  - {id: graphiti, label: Graphiti, context: {system_id: graphiti}}
+  - {id: none, label: No added context, context: {system_id: none, delivery: portable}}
+  - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd, delivery: portable}}
+  - {id: openwiki, label: OpenWiki, context: {system_id: openwiki, delivery: portable}}
+  - {id: gitnexus-bm25, label: GitNexus BM25, context: {system_id: gitnexus, delivery: native_mcp, config: {retrieval_mode: bm25}}}
+  - id: gitnexus-vector
+    label: GitNexus hybrid vector
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config:
+        retrieval_mode: hybrid_vector
+        embedding_model: Snowflake/snowflake-arctic-embed-xs
+        embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
+        embedding_dimensions: 384
+        vector_required: true
+  - id: gitnexus-vector-contract
+    label: GitNexus hybrid vector contract canary
+    prompt_id: repository-memory-contract
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config:
+        retrieval_mode: hybrid_vector
+        embedding_model: Snowflake/snowflake-arctic-embed-xs
+        embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
+        embedding_dimensions: 384
+        vector_required: true
+  - {id: uptake-none, label: Availability control, context: {system_id: none, delivery: portable}}
+  - id: uptake-vector
+    label: Vector available
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config: {retrieval_mode: hybrid_vector, embedding_model: Snowflake/snowflake-arctic-embed-xs, embedding_revision: d8c86521100d3556476a063fc2342036d45c106f, embedding_dimensions: 384, vector_required: true}
+  - {id: uptake-oriented-none, label: Orientation prompt without context, prompt_id: repository-memory-orientation, context: {system_id: none, delivery: portable}}
+  - id: uptake-oriented-vector
+    label: Orientation prompt with vector
+    prompt_id: repository-memory-orientation
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config: {retrieval_mode: hybrid_vector, embedding_model: Snowflake/snowflake-arctic-embed-xs, embedding_revision: d8c86521100d3556476a063fc2342036d45c106f, embedding_dimensions: 384, vector_required: true}
+  - {id: codegraph, label: CodeGraph, context: {system_id: codegraph, delivery: native_mcp}}
+  - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap, delivery: portable}}
+  - {id: semble, label: Semble, context: {system_id: semble, delivery: native_mcp}}
+  - {id: project-rag, label: Project RAG, context: {system_id: project-rag, delivery: native_mcp}}
+  - {id: rag-bm25, label: Fugue BM25, context: {system_id: rag-bm25, delivery: portable}}
+  - {id: rag-dense, label: Fugue dense RAG, context: {system_id: rag-dense, delivery: portable}}
+  - {id: rag-hybrid, label: Fugue hybrid RAG, context: {system_id: rag-hybrid, delivery: portable}}
+  - {id: markdown-log, label: Markdown log, context: {system_id: markdown-log, delivery: portable}}
+  - {id: latmd, label: lat.md, context: {system_id: latmd, delivery: native_mcp}}
+  - {id: mem0, label: Mem0, context: {system_id: mem0, delivery: portable}}
+  - {id: graphiti, label: Graphiti, context: {system_id: graphiti, delivery: portable}}
 n_attempts: 1
 n_concurrent: 2
 jobs_dir: jobs/repo-memory-impact

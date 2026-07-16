@@ -1,0 +1,6 @@
+id: hallmark
+source:
+  type: git
+  url: https://github.com/Nutlope/hallmark
+  ref: aeb42fb354ff4efa36ab475773a082315a3af2ce
+  path: skills/hallmark

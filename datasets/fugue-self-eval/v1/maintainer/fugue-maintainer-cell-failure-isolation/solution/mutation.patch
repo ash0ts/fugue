@@ -1,0 +1,9 @@
+diff --git a/fugue/bench/execution.py b/fugue/bench/execution.py
+--- a/fugue/bench/execution.py
++++ b/fugue/bench/execution.py
+@@ -266,4 +266,5 @@ def execute_cells(
+         futures = [pool.submit(run_one, cell) for cell in runnable]
+         for future in as_completed(futures):
+             outcomes.append(future.result())
++            break
+     return outcomes

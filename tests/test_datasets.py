@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,8 +26,7 @@ harnesses:
     agent: fugue.agents:FugueCodex
 tasks:
   - id: swe-qa-pro-000-fixture
-    repo: fixture/repo
-    base_commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    repository: {type: git, url: https://github.com/fixture/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     metadata: {source_index: 0}
 """
     )
@@ -88,3 +88,36 @@ def test_materializer_rejects_source_drift_without_publishing(
 
     assert not destination.exists()
     assert not destination.with_name(destination.name + ".lock").exists()
+
+
+def test_gitnexus_contract_verifier_scores_every_terminal_answer(
+    tmp_path: Path,
+) -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "datasets/repo-memory/gitnexus-contract"
+        / "gitnexus-vector-lexical-mismatch/tests/test.sh"
+    )
+    log_root = tmp_path / "logs"
+    script = tmp_path / "test.sh"
+    script.write_text(source.read_text().replace("/logs", str(log_root)))
+
+    def verify(answer: str | None) -> dict[str, float]:
+        artifact = log_root / "artifacts/fugue-answer.txt"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        if answer is None:
+            artifact.unlink(missing_ok=True)
+        else:
+            artifact.write_text(answer)
+        subprocess.run(["sh", str(script)], check=True)
+        return json.loads((log_root / "verifier/reward.json").read_text())
+
+    assert verify(None) == {"reward": 0.0, "path_resolution": 0.0}
+    assert verify("src/relay/blue_quartz.py\n") == {
+        "reward": 0.0,
+        "path_resolution": 0.0,
+    }
+    assert verify("src/relay/amber_lantern.py\n") == {
+        "reward": 1.0,
+        "path_resolution": 1.0,
+    }

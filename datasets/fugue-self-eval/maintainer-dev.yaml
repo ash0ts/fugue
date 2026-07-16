@@ -1,0 +1,100 @@
+dataset:
+  path: datasets/fugue-self-eval/v1/maintainer
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 2
+jobs_dir: jobs/fugue-maintainer-self-eval
+harnesses:
+- name: hermes
+  agent: fugue.agents:FugueHermes
+- name: openclaw
+  agent: fugue.agents:FugueOpenClaw
+- name: claude-code
+  agent: fugue.agents:FugueClaudeCode
+- name: codex
+  agent: fugue.agents:FugueCodex
+tasks:
+- id: fugue-maintainer-provider-project-header
+  notes: provider-routing
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: provider-routing
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/model_plane.py
+  - tests/test_model_plane.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-strict-experiment-parsing
+  notes: experiment-schema
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: experiment-schema
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/library.py
+  - tests/test_library.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-preview-side-effects
+  notes: operator-preview
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: operator-preview
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/operator.py
+  - tests/test_operator.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-cell-failure-isolation
+  notes: execution
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: execution
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/execution.py
+  - tests/test_execution.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-evaluation-row-filtering
+  notes: weave-publication
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: weave-publication
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/export.py
+  - tests/test_export.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-secret-artifact-boundary
+  notes: catalog-security
+  metadata:
+    suite: fugue-maintainer-v1
+    split: development
+    category: catalog-security
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/catalog.py
+  - tests/test_ai.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e

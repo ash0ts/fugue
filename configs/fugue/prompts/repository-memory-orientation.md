@@ -1,0 +1,1 @@
+Before editing, identify the behavioral contract, map the likely implementation and tests, and inspect the available repository context. Use a repository-memory tool when one is registered. Treat retrieved paths as leads, verify them in the checkout, run the official task verifier, and do not stop after fixing only the first visible symptom.

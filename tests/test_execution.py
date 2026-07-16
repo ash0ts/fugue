@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +17,8 @@ from fugue.bench.execution import (
     latest_cell_records,
     new_run_id,
     read_run_manifest,
+    schedule_cells,
+    update_run_manifest,
     write_run_manifest,
 )
 from fugue.bench.export import export_rows
@@ -34,6 +39,7 @@ def _cell(run_id: str, name: str, *, applicable: bool = True) -> PlannedCell:
         trial_index=1,
         comparison_example_id=f"example-{name}",
         candidate_id="candidate-codex-baseline",
+        execution_fingerprint="execution-a",
         config_path=Path(f"{name}.json"),
         result_path=Path("jobs") / name / "result.json",
         command=(name,),
@@ -108,6 +114,17 @@ def test_run_ids_are_immutable_and_unique() -> None:
     assert new_run_id() != new_run_id()
 
 
+def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:
+    first = [_cell("run-a", name) for name in ("one", "two", "three", "four")]
+    second = [_cell("run-b", name) for name in ("four", "three", "two", "one")]
+
+    first_order = [cell.task_id for cell in schedule_cells(first, "study-v1")]
+    second_order = [cell.task_id for cell in schedule_cells(second, "study-v1")]
+
+    assert first_order == second_order
+    assert schedule_cells(first, None) is first
+
+
 def test_real_cell_fails_when_harbor_reports_trial_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -124,6 +141,69 @@ def test_real_cell_fails_when_harbor_reports_trial_errors(
 
     assert outcome.status == "failed"
     assert outcome.error == "1 Harbor trial(s) errored"
+    assert outcome.benchmark_outcome == "unscored"
+
+
+@pytest.mark.parametrize(
+    ("reward", "expected"),
+    ((1.0, "passed"), (0.0, "failed"), (0.8, "failed"), (None, "unscored")),
+)
+def test_harbor_benchmark_outcome_is_separate_from_execution_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reward: float | None,
+    expected: str,
+) -> None:
+    run_id = new_run_id()
+    cell = _cell(run_id, "reward")
+    result_path = tmp_path / cell.result_path
+    result_path.parent.mkdir(parents=True)
+    reward_stats = {} if reward is None else {str(reward): ["trial-one"]}
+    result_path.write_text(
+        json.dumps(
+            {
+                "stats": {
+                    "n_errored_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "evals": {
+                        "agent__model__dataset": {
+                            "reward_stats": {"reward": reward_stats}
+                        }
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "passed"
+    assert outcome.benchmark_outcome == expected
+    assert outcome.reward == reward
+    [record] = latest_cell_records(
+        tmp_path / ".fugue" / "runtime" / run_id / "cells.jsonl"
+    )
+    assert record["benchmark_outcome"] == expected
+    assert record["reward"] == reward
+
+
+def test_provider_diagnostic_does_not_require_a_harbor_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = new_run_id()
+    cell = replace(
+        _cell(run_id, "diagnostic"),
+        execution_kind="provider_diagnostic",
+        harness="direct",
+    )
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "passed"
+    assert outcome.benchmark_outcome == "unscored"
+    assert outcome.error is None
 
 
 def test_execution_rejects_mixed_runs_and_duplicate_cells(tmp_path: Path) -> None:
@@ -160,6 +240,58 @@ def test_cell_lifecycle_overlays_env_without_changing_outcome(tmp_path: Path) ->
     assert finished == [(cell.id, "passed")]
 
 
+def test_cancellation_terminates_active_process_and_never_opens_queued_cell(
+    tmp_path: Path,
+) -> None:
+    cancellation = threading.Event()
+    opened: list[str] = []
+    cells = [
+        replace(
+            _cell("run-cancel", name),
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+        )
+        for name in ("active", "queued")
+    ]
+    result: list = []
+
+    def execute() -> None:
+        result.extend(
+            execute_cells(
+                cells,
+                repo_root=tmp_path,
+                max_workers=1,
+                cell_started=lambda cell: opened.append(cell.id) or None,
+                cancellation_event=cancellation,
+            )
+        )
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    state_path = tmp_path / ".fugue/runtime/run-cancel/cells.jsonl"
+    process_group = None
+    for _ in range(100):
+        latest = {row["cell_id"]: row for row in latest_cell_records(state_path)}
+        process_group = latest.get("cell-active", {}).get("harbor_process_group")
+        if process_group:
+            break
+        time.sleep(0.02)
+    assert isinstance(process_group, int)
+
+    cancellation.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert {outcome.cell_id: outcome.status for outcome in result} == {
+        "cell-active": "cancelled",
+        "cell-queued": "cancelled",
+    }
+    assert opened == ["cell-active"]
+    latest = {row["cell_id"]: row for row in latest_cell_records(state_path)}
+    assert {row["status"] for row in latest.values()} == {"cancelled"}
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process_group, 0)
+
+
 def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -> None:
     barrier = threading.Barrier(3)
 
@@ -179,3 +311,30 @@ def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -
     assert manifest is not None
     assert manifest["pid"] == 123
     assert manifest["trace_project"] == "team/project"
+
+
+def test_update_run_manifest_merges_partial_updater_result(tmp_path: Path) -> None:
+    write_run_manifest(
+        tmp_path,
+        "run-update",
+        {
+            "status": "running",
+            "pid": 123,
+            "evaluation_failures": ["existing failure"],
+        },
+    )
+
+    update_run_manifest(
+        tmp_path,
+        "run-update",
+        lambda manifest: {
+            "evaluation_runs": [{"candidate_id": "candidate-a", "name": "evaluation-a"}]
+        },
+    )
+
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime/run-update")
+    assert manifest is not None
+    assert manifest["status"] == "running"
+    assert manifest["pid"] == 123
+    assert manifest["evaluation_failures"] == ["existing failure"]
+    assert manifest["evaluation_runs"][0]["candidate_id"] == "candidate-a"

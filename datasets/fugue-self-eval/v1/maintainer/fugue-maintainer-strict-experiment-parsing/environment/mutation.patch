@@ -1,0 +1,9 @@
+diff --git a/fugue/bench/library.py b/fugue/bench/library.py
+--- a/fugue/bench/library.py
++++ b/fugue/bench/library.py
+@@ -554,4 +554,4 @@
+ def _reject_unknown(raw: dict[str, Any], contract: type, *, kind: str) -> None:
+-    unknown = sorted(set(raw) - set(contract.__dataclass_fields__))
++    unknown: list[str] = []
+     if unknown:
+         raise ValueError(f"unknown {kind} field(s): {', '.join(unknown)}")

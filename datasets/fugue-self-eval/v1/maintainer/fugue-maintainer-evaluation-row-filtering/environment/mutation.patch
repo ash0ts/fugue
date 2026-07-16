@@ -1,0 +1,10 @@
+diff --git a/fugue/bench/export.py b/fugue/bench/export.py
+--- a/fugue/bench/export.py
++++ b/fugue/bench/export.py
+@@ -888,5 +888,5 @@ def _evaluation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+     return [
+         row
+         for row in rows
+-        if row.get("record_type") in {"trial", "retrieval", "episode"}
++        if row.get("record_type") in {"trial", "retrieval", "episode", "cell"}
+     ]

@@ -1,0 +1,46 @@
+id: fugue-maintainer-self-eval
+title: Fugue maintainer agent self-evaluation
+description: Select an evidence-backed harness, prompt, skill, context, and model configuration for maintaining Fugue.
+manifest: datasets/fugue-self-eval/maintainer-dev.yaml
+model: wandb/zai-org/GLM-5.2
+run_name: fugue-maintainer-self-eval
+default_preset: smoke
+tags: [self-eval, role:maintainer, suite:fugue-maintainer-v1]
+harnesses: [hermes, openclaw, claude-code, codex]
+workloads:
+  - id: development
+    runner: harbor
+    manifest: datasets/fugue-self-eval/maintainer-dev.yaml
+  - id: holdout
+    runner: harbor
+    manifest: datasets/fugue-self-eval/maintainer-holdout.yaml
+presets:
+  smoke:
+    workloads: [development]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_concurrent: 2
+    workload_overrides:
+      development: {n_tasks: 3}
+  development:
+    workloads: [development]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 2
+    n_concurrent: 2
+    workload_overrides:
+      development: {n_tasks: 6}
+  holdout:
+    workloads: [holdout]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 3
+    n_concurrent: 2
+    workload_overrides:
+      holdout: {n_tasks: 6}
+variants:
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
+  - {id: role-prompt, label: Role prompt, prompt_id: fugue-maintainer, context: {system_id: none, delivery: portable}}
+  - {id: role-prompt-skill, label: Role prompt and skill, prompt_id: fugue-maintainer, skills: [fugue-maintainer], context: {system_id: none, delivery: portable}}
+  - {id: role-prompt-skill-agentsmd, label: "Role prompt, skill, and repository map", prompt_id: fugue-maintainer, skills: [fugue-maintainer], context: {system_id: agentsmd, delivery: portable}}
+n_attempts: 1
+n_concurrent: 2
+jobs_dir: jobs/fugue-maintainer-self-eval

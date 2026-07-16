@@ -26,6 +26,8 @@ class DatasetMaterializer(Protocol):
         manifest: BenchmarkManifest,
         destination: Path,
         source_path: Path,
+        *,
+        repo_root: Path | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -63,9 +65,15 @@ def materialize_manifest_dataset(
         )
         try:
             source_path = staging / "_source.jsonl"
-            _download_source(dataset.source, source_path)
+            _stage_source(dataset.source, source_path, repo_root)
             materializer = _load_materializer(dataset.materializer)
-            metrics = materializer.materialize(manifest, staging, source_path)
+            metrics = materializer.materialize(
+                manifest,
+                staging,
+                source_path,
+                repo_root=repo_root,
+            )
+            source_path.unlink(missing_ok=True)
             marker_payload = {
                 "fingerprint": expected,
                 "materializer": dataset.materializer,
@@ -88,6 +96,8 @@ class SweQaProMaterializer:
         manifest: BenchmarkManifest,
         destination: Path,
         source_path: Path,
+        *,
+        repo_root: Path | None = None,
     ) -> dict[str, Any]:
         rows = [json.loads(line) for line in source_path.read_text().splitlines() if line]
         selected: list[dict[str, Any]] = []
@@ -162,10 +172,8 @@ def _write_swe_qa_task(
                 str(row["question"]).strip(),
                 "",
                 "Explore the checked-out repository before answering. Write a grounded "
-                "answer to `/logs/artifacts/fugue-answer.md`. Also write "
-                "`/logs/artifacts/fugue-evidence.json` as a JSON object with a `paths` "
-                "array. Each item may be a path string or an object with `path`, optional "
-                "`start_line` and `end_line`, and a short `notes` field.",
+                "answer to `/logs/artifacts/fugue-answer.md`. Fugue records inspected "
+                "and changed files automatically.",
                 "",
             ]
         )
@@ -187,24 +195,16 @@ def _write_swe_qa_task(
     (root / "solution" / "solve.sh").write_text(
         "#!/bin/sh\nmkdir -p /logs/artifacts\n"
         "cp /solution/reference.md /logs/artifacts/fugue-answer.md\n"
-        "printf '{\"paths\": []}\\n' > /logs/artifacts/fugue-evidence.json\n"
     )
     (root / "tests" / "test.sh").write_text(
         "#!/bin/sh\n"
         "mkdir -p /logs/verifier\n"
         "python - <<'PY'\n"
-        "import json\n"
         "from pathlib import Path\n"
         "answer = Path('/logs/artifacts/fugue-answer.md')\n"
-        "evidence = Path('/logs/artifacts/fugue-evidence.json')\n"
         "ok = answer.is_file() and bool(answer.read_text().strip())\n"
-        "try:\n"
-        "    value = json.loads(evidence.read_text())\n"
-        "    ok = ok and isinstance(value, dict) and isinstance(value.get('paths'), list)\n"
-        "except Exception:\n"
-        "    ok = False\n"
         "Path('/logs/verifier/reward.json').write_text(" 
-        "json.dumps({'format_completion': float(ok)}))\n"
+        "__import__('json').dumps({'format_completion': float(ok)}))\n"
         "raise SystemExit(0 if ok else 1)\n"
         "PY\n"
     )
@@ -225,7 +225,37 @@ def _validate_source_row(task: TaskSpec, row: dict[str, Any]) -> None:
         raise ValueError(f"{task.id}: source row lacks a question or reference answer")
 
 
+def _stage_source(
+    source: dict[str, Any], destination: Path, repo_root: Path
+) -> None:
+    local_path = str(source.get("path") or "")
+    if local_path:
+        relative = Path(local_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("dataset source path must be repository-relative")
+        source_path = repo_root / relative
+        if not source_path.resolve().is_relative_to(repo_root.resolve()):
+            raise ValueError("dataset source path escapes the repository")
+        expected = str(source.get("sha256") or "")
+        if not source_path.is_file() or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("local dataset source requires a file and SHA-256")
+        content = source_path.read_bytes()
+        actual = hashlib.sha256(content).hexdigest()
+        if actual != expected:
+            raise ValueError(
+                f"dataset source checksum mismatch: expected {expected}, got {actual}"
+            )
+        destination.write_bytes(content)
+        return
+    _download_source(source, destination)
+
+
 def _download_source(source: dict[str, Any], destination: Path) -> None:
+    if source.get("type") not in (None, "http"):
+        raise ValueError(
+            "this dataset materializer requires an HTTP source; Git dataset sources "
+            "must use a Git-aware materializer"
+        )
     url = str(source.get("url") or "")
     expected = str(source.get("sha256") or "")
     if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", expected):

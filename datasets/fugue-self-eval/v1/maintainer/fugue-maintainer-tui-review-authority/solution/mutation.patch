@@ -1,0 +1,9 @@
+diff --git a/fugue/tui.py b/fugue/tui.py
+--- a/fugue/tui.py
++++ b/fugue/tui.py
+@@ -1468,4 +1468,4 @@
+     def _request_launch(self) -> None:
+-        if self.plan_step != "review-step":
++        if False and self.plan_step != "review-step":
+             self._show_plan_step("review-step")
+             return

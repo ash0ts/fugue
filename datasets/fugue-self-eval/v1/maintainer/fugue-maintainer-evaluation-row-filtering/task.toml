@@ -1,0 +1,23 @@
+schema_version = "1.3"
+
+[task]
+name = "fugue-maintainer-evaluation-row-filtering"
+description = "Fugue maintainer Weave publication regression"
+
+[metadata]
+suite = "fugue-maintainer-v1"
+split = "development"
+category = "Weave publication"
+source_commit = "96512017842d68add2546a057f0601de3eaf610e"
+
+[agent]
+timeout_sec = 1200.0
+
+[verifier]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -10,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from filelock import FileLock
 
+from fugue.bench.candidates import comparison_example_id
 from fugue.bench.context import (
     ContextEvent,
     ContextRuntime,
@@ -23,7 +26,9 @@ from fugue.bench.context import (
     prepare_context,
     query_context,
 )
+from fugue.bench.files import require_unique
 from fugue.bench.library import validate_id
+from fugue.bench.manifest import RepositorySpec
 from fugue.bench.scoring import score_fact_recall, score_retrieval
 from fugue.model_plane import resolve_model_route, trace_project_slug
 from fugue.weave_support import trace_async_operation
@@ -66,6 +71,15 @@ class WorkloadDataset:
     source: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PreparedWorkloadDataset:
+    dataset_id: str
+    status: str
+    path: Path
+    sample_count: int
+    sha256: str
+
+
 def load_workload_dataset(path: Path) -> WorkloadDataset:
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
@@ -75,8 +89,8 @@ def load_workload_dataset(path: Path) -> WorkloadDataset:
         raise ValueError(f"{path}: unsupported workload runner {runner}")
     retrieval_cases = tuple(_retrieval_case(item) for item in raw.get("cases", []))
     sequence_cases = tuple(_sequence_case(item) for item in raw.get("sequences", []))
-    _require_unique_ids([item.id for item in retrieval_cases], "retrieval case", path)
-    _require_unique_ids([item.id for item in sequence_cases], "sequence", path)
+    require_unique([item.id for item in retrieval_cases], "retrieval case", path)
+    require_unique([item.id for item in sequence_cases], "sequence", path)
     if runner == "retrieval" and not retrieval_cases:
         raise ValueError(f"{path}: retrieval workload needs cases")
     if runner == "sequence" and not sequence_cases:
@@ -87,6 +101,63 @@ def load_workload_dataset(path: Path) -> WorkloadDataset:
         retrieval_cases=retrieval_cases,
         sequence_cases=sequence_cases,
         source=dict(raw.get("source") or {}),
+    )
+
+
+def prepare_workload_dataset(
+    dataset: WorkloadDataset,
+    runtime: ContextRuntime,
+    *,
+    preset_id: str,
+    rebuild: bool = False,
+) -> PreparedWorkloadDataset | None:
+    """Materialize a declared remote dataset before an immutable run begins."""
+    command_template = dataset.source.get("materialize_command")
+    expected_count = int((dataset.source.get("counts") or {}).get(preset_id) or 0)
+    if not command_template or expected_count <= len(dataset.retrieval_cases):
+        return None
+    version = str(dataset.source.get("version") or "v1")
+    root = runtime.cache_root / "datasets" / dataset.id / version
+    samples_path = _prepared_samples_path(root, version)
+    lock_path = root / "fugue-dataset-lock.json"
+    if samples_path is not None and lock_path.is_file() and not rebuild:
+        return _verify_prepared_dataset(dataset, samples_path, lock_path, "cached")
+
+    root.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(token).format(output=root.as_posix(), version=version)
+        for token in command_template
+    ]
+    subprocess.run(command, check=True, env=runtime.env)
+    samples_path = _prepared_samples_path(root, version)
+    if samples_path is None:
+        raise FileNotFoundError(
+            f"{dataset.id} materializer did not create "
+            f"benchmark/{version}/samples.jsonl"
+        )
+    payload = samples_path.read_bytes()
+    sample_count = sum(1 for line in payload.splitlines() if line.strip())
+    if expected_count and sample_count != expected_count:
+        raise ValueError(
+            f"{dataset.id} expected {expected_count} samples, found {sample_count}"
+        )
+    lock = {
+        "schema_version": 1,
+        "dataset_id": dataset.id,
+        "source_version": version,
+        "sample_count": sample_count,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "materialize_command": command,
+    }
+    temporary = lock_path.with_name(f".{lock_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, lock_path)
+    return PreparedWorkloadDataset(
+        dataset_id=dataset.id,
+        status="built",
+        path=samples_path,
+        sample_count=sample_count,
+        sha256=str(lock["sha256"]),
     )
 
 
@@ -101,9 +172,12 @@ async def run_retrieval_workload(
     attempts: int = 1,
     limit: int | None = None,
     rebuild: bool = False,
+    context_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     _validate_workload_counts(attempts=attempts, limit=limit)
     spec = get_context_system(system_id, runtime.repo_root)
+    if context_config:
+        spec = replace(spec, config={**spec.config, **context_config})
     available_cases = await asyncio.to_thread(
         _materialized_retrieval_cases, dataset, runtime, preset_id
     )
@@ -254,11 +328,14 @@ async def run_sequence_workload(
     limit: int | None = None,
     rebuild: bool = False,
     concurrency: int = 4,
+    context_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     _validate_workload_counts(attempts=attempts, limit=limit)
     if concurrency < 1:
         raise ValueError("sequence concurrency must be positive")
     spec = get_context_system(system_id, runtime.repo_root)
+    if context_config:
+        spec = replace(spec, config={**spec.config, **context_config})
     cases = dataset.sequence_cases[:limit] if limit else dataset.sequence_cases
     rows: list[dict[str, Any]] = []
     if "ingest" not in spec.capabilities:
@@ -402,8 +479,8 @@ async def _run_sequence_cohort(
                     "event_kind": event.kind,
                 },
                 runtime.env,
-                lambda provider=provider, event=event, namespace=namespace: provider.ingest(
-                    spec, event, namespace, runtime
+                lambda provider=provider, event=event, namespace=namespace: (
+                    provider.ingest(spec, event, namespace, runtime)
                 ),
                 lambda value: value,
             )
@@ -454,11 +531,13 @@ async def _run_sequence_cohort(
                         "query_id": query.id,
                     },
                     runtime.env,
-                    lambda provider=provider, query=query, prepared=prepared, namespace=namespace: provider.retrieve(
-                        spec,
-                        query,
-                        replace(prepared, path=namespace),
-                        runtime,
+                    lambda provider=provider, query=query, prepared=prepared, namespace=namespace: (
+                        provider.retrieve(
+                            spec,
+                            query,
+                            replace(prepared, path=namespace),
+                            runtime,
+                        )
                     ),
                     lambda value: {
                         "result_count": len(value),
@@ -499,10 +578,11 @@ async def _run_sequence_cohort(
 def _retrieval_case(raw: Any) -> RetrievalCase:
     if not isinstance(raw, dict):
         raise ValueError("retrieval case must be a mapping")
+    repository = _workload_repository(raw)
     return RetrievalCase(
         id=validate_id(raw["id"], kind="retrieval case id"),
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         query=str(raw["query"]),
         expected_paths=tuple(str(item) for item in raw.get("expected_paths", [])),
         family=str(raw["family"]) if raw.get("family") else None,
@@ -528,18 +608,20 @@ def _sequence_case(raw: Any) -> SequenceCase:
             id=validate_id(item["id"], kind="sequence probe id"),
             after_episode=int(item["after_episode"]),
             query=str(item["query"]),
-            expected_paths=tuple(str(value) for value in item.get("expected_paths", [])),
-            expected_facts=tuple(str(value) for value in item.get("expected_facts", [])),
+            expected_paths=tuple(
+                str(value) for value in item.get("expected_paths", [])
+            ),
+            expected_facts=tuple(
+                str(value) for value in item.get("expected_facts", [])
+            ),
         )
         for item in raw.get("probes", [])
     )
-    _require_unique_ids(
+    require_unique(
         [str(event.episode) for event in events],
         f"sequence {sequence_id} episode",
     )
-    _require_unique_ids(
-        [probe.id for probe in probes], f"sequence {sequence_id} probe"
-    )
+    require_unique([probe.id for probe in probes], f"sequence {sequence_id} probe")
     if any(event.episode < 1 for event in events):
         raise ValueError(f"sequence {sequence_id} episodes must be positive")
     episode_ids = {event.episode for event in events}
@@ -547,12 +629,30 @@ def _sequence_case(raw: Any) -> SequenceCase:
         raise ValueError(
             f"sequence {sequence_id} probes must reference an existing episode"
         )
+    repository = _workload_repository(raw)
     return SequenceCase(
         id=sequence_id,
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         events=events,
         probes=probes,
+    )
+
+
+def _workload_repository(raw: dict[str, Any]) -> RepositorySpec:
+    if "repo" in raw or "commit" in raw or "base_commit" in raw:
+        raise ValueError("workload cases must use a typed repository mapping")
+    value = raw.get("repository")
+    if not isinstance(value, dict):
+        raise ValueError("workload case repository must be a mapping")
+    unknown = sorted(set(value) - {"type", "url", "commit", "path"})
+    if unknown:
+        raise ValueError("unknown workload repository field(s): " + ", ".join(unknown))
+    return RepositorySpec(
+        type=str(value.get("type") or ""),
+        url=str(value.get("url") or ""),
+        commit=str(value.get("commit") or ""),
+        path=str(value["path"]) if value.get("path") else None,
     )
 
 
@@ -561,18 +661,6 @@ def _validate_workload_counts(*, attempts: int, limit: int | None) -> None:
         raise ValueError("workload attempts must be positive")
     if limit is not None and limit < 1:
         raise ValueError("workload limit must be positive")
-
-
-def _require_unique_ids(
-    values: list[str], kind: str, path: Path | None = None
-) -> None:
-    counts: dict[str, int] = {}
-    for value in values:
-        counts[value] = counts.get(value, 0) + 1
-    duplicates = sorted(value for value, count in counts.items() if count > 1)
-    if duplicates:
-        prefix = f"{path}: " if path else ""
-        raise ValueError(f"{prefix}duplicate {kind} id(s): {', '.join(duplicates)}")
 
 
 def _base_row(
@@ -604,9 +692,10 @@ def _base_row(
 def _write_rows(repo_root: Path, run_id: str, rows: list[dict[str, Any]]) -> Path:
     path = repo_root / ".fugue" / "runtime" / run_id / "context-results.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+    with FileLock(f"{path}.lock"):
+        with path.open("a") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True, default=str) + "\n")
     return path
 
 
@@ -622,26 +711,62 @@ def _add_runtime_correlation(
         json.dumps(spec.config, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     trace_project = trace_project_slug(runtime.env)
+    candidate_id = runtime.env.get("FUGUE_CANDIDATE_ID")
+    execution_fingerprint = runtime.env.get("FUGUE_EXECUTION_FINGERPRINT")
+    identity_schema_version = runtime.env.get("FUGUE_IDENTITY_SCHEMA_VERSION")
+    dataset_id = runtime.env.get("FUGUE_DATASET")
+    variant_id = runtime.env.get("FUGUE_VARIANT_ID") or spec.id
     for row in rows:
+        logical_task_id = _logical_measurement_id(row)
         row.update(
             {
                 "run_id": run_id,
                 "run_key": (
-                    f"{run_id}:{row.get('workload_id')}:{spec.id}:"
+                    f"{run_id}:{row.get('workload_id')}:{variant_id}:"
                     f"{row.get('task_name')}:{row.get('attempt')}:"
                     f"{row.get('record_type')}:"
                     f"{row.get('episode') or 0}:{row.get('query_id') or '-'}"
                 ),
-                "variant_id": spec.id,
+                "variant_id": variant_id,
+                "execution_kind": "provider_diagnostic",
                 "context_version": spec.version,
                 "context_config_hash": config_hash,
+                "context_delivery": runtime.env.get(
+                    "FUGUE_CONTEXT_DELIVERY", "portable"
+                ),
                 "trace_project": trace_project,
                 "model_role": "context_builder",
                 "builder_model": route.display_model if route else None,
                 "model_provider": route.provider if route else None,
                 "embedding_model": spec.config.get("embedding_model"),
+                "trial_index": row.get("attempt"),
             }
         )
+        if candidate_id:
+            row["candidate_id"] = candidate_id
+        if execution_fingerprint:
+            row["execution_fingerprint"] = execution_fingerprint
+        if identity_schema_version:
+            row["identity_schema_version"] = int(identity_schema_version)
+        if dataset_id and logical_task_id:
+            row["comparison_example_id"] = comparison_example_id(
+                dataset_id=dataset_id,
+                workload_id=str(row.get("workload_id") or ""),
+                logical_task_id=logical_task_id,
+            )
+
+
+def _logical_measurement_id(row: dict[str, Any]) -> str:
+    task = str(row.get("task_name") or "")
+    record_type = str(row.get("record_type") or "measurement")
+    query = str(row.get("query_id") or "")
+    episode = row.get("episode")
+    if query:
+        suffix = f":after:{episode}" if episode is not None else ""
+        return f"{task}:probe:{query}{suffix}"
+    if episode is not None:
+        return f"{task}:episode:{episode}"
+    return f"{task}:{record_type}"
 
 
 def _trace_fields(
@@ -669,38 +794,66 @@ async def _async_value(value: Any) -> Any:
 def _materialized_retrieval_cases(
     dataset: WorkloadDataset, runtime: ContextRuntime, preset_id: str
 ) -> tuple[RetrievalCase, ...]:
-    if preset_id != "full" or not dataset.source.get("materialize_command"):
+    expected_count = int((dataset.source.get("counts") or {}).get(preset_id) or 0)
+    if not dataset.source.get("materialize_command") or expected_count <= len(
+        dataset.retrieval_cases
+    ):
         return dataset.retrieval_cases
     version = str(dataset.source.get("version") or "v1")
     root = runtime.cache_root / "datasets" / dataset.id / version
-    candidates = [
-        root / "benchmark" / version / "samples.jsonl",
-        root / "data" / "benchmark" / version / "samples.jsonl",
-    ]
-    samples_path = next((path for path in candidates if path.is_file()), None)
+    samples_path = _prepared_samples_path(root, version)
+    lock_path = root / "fugue-dataset-lock.json"
     if samples_path is None:
-        root.mkdir(parents=True, exist_ok=True)
-        command = [
-            str(token).format(output=root.as_posix(), version=version)
-            for token in dataset.source["materialize_command"]
-        ]
-        subprocess.run(command, check=True, env=runtime.env)
-        samples_path = next((path for path in candidates if path.is_file()), None)
-    if samples_path is None:
-        raise FileNotFoundError(
-            f"{dataset.id} materializer did not create benchmark/{version}/samples.jsonl"
+        raise RuntimeError(
+            f"{dataset.id} is not prepared; run `fugue setup --prepare` before "
+            "starting the immutable run"
         )
+    prepared = _verify_prepared_dataset(dataset, samples_path, lock_path, "cached")
     cases = tuple(
         _arb_case(json.loads(line), index)
         for index, line in enumerate(samples_path.read_text().splitlines(), start=1)
         if line.strip()
     )
-    expected_count = int((dataset.source.get("counts") or {}).get("full") or 0)
-    if expected_count and len(cases) != expected_count:
+    if len(cases) != prepared.sample_count or len(cases) != expected_count:
         raise ValueError(
             f"{dataset.id} expected {expected_count} samples, found {len(cases)}"
         )
     return cases
+
+
+def _prepared_samples_path(root: Path, version: str) -> Path | None:
+    candidates = (
+        root / "benchmark" / version / "samples.jsonl",
+        root / "data" / "benchmark" / version / "samples.jsonl",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _verify_prepared_dataset(
+    dataset: WorkloadDataset,
+    samples_path: Path,
+    lock_path: Path,
+    status: str,
+) -> PreparedWorkloadDataset:
+    if not lock_path.is_file():
+        raise RuntimeError(f"prepared dataset lock is missing: {lock_path}")
+    lock = json.loads(lock_path.read_text())
+    if lock.get("schema_version") != 1 or lock.get("dataset_id") != dataset.id:
+        raise RuntimeError(f"prepared dataset lock is incompatible: {lock_path}")
+    payload = samples_path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != lock.get("sha256"):
+        raise RuntimeError(f"prepared dataset drift detected: {samples_path}")
+    sample_count = sum(1 for line in payload.splitlines() if line.strip())
+    if sample_count != lock.get("sample_count"):
+        raise RuntimeError(f"prepared dataset count drift detected: {samples_path}")
+    return PreparedWorkloadDataset(
+        dataset_id=dataset.id,
+        status=status,
+        path=samples_path,
+        sample_count=sample_count,
+        sha256=digest,
+    )
 
 
 def _arb_case(raw: dict[str, Any], index: int) -> RetrievalCase:

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import os
 import sys
 import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -31,12 +33,15 @@ from textual.widgets import (
 )
 
 from fugue.bench.context import list_context_systems
+from fugue.bench.evaluations import evaluation_asset_path
 from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
     FeatureVariant,
+    experiment_to_yaml,
     list_prompts,
     list_skills,
+    scorer_reference,
     validate_id,
 )
 from fugue.bench.operator import (
@@ -46,6 +51,7 @@ from fugue.bench.operator import (
     PreviewSummary,
     RunSummary,
 )
+from fugue.bench.sources import list_skill_source_ids
 
 HARNESS_LABELS = (
     ("Hermes", "hermes"),
@@ -68,6 +74,7 @@ class PlanState:
     proposal: Any = None
     preview: PreviewSummary | None = None
     dirty: bool = False
+    agent_preset_id: str | None = None
 
 
 class PixelSequencer(Static):
@@ -225,8 +232,20 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
             yield Label("Skills", classes="muted")
             yield SelectionList(
                 *[
-                    (item.title, item.id, item.id in self.variant.skill_ids)
+                    (
+                        item.title,
+                        item.id,
+                        item.id in self.variant.skills,
+                    )
                     for item in list_skills(self.service.repo_root)
+                ],
+                *[
+                    (
+                        f"{item_id} (remote)",
+                        item_id,
+                        item_id in self.variant.skills,
+                    )
+                    for item_id in list_skill_source_ids(self.service.repo_root)
                 ],
                 id="variant-skills",
             )
@@ -274,7 +293,7 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                 id=variant_id,
                 label=label,
                 prompt_id=str(prompt_value) or None,
-                skill_ids=list(
+                skills=list(
                     self.query_one("#variant-skills", SelectionList).selected
                 ),
                 context=context,
@@ -366,6 +385,48 @@ class ConfirmRunScreen(ModalScreen[bool]):
             with Horizontal(classes="button-row"):
                 yield Button("Run experiment", id="confirm-run", variant="primary")
                 yield Button("Cancel", id="cancel-run-confirm")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-run")
+
+
+class ConfirmPresetReplacementScreen(ModalScreen[bool]):
+    DEFAULT_CSS = """
+    ConfirmPresetReplacementScreen { align: center middle; background: #000000 60%; }
+    #confirm-preset-panel {
+        width: 92%;
+        max-width: 96;
+        height: 28;
+        padding: 1 2;
+        border: solid #F59E0B;
+        background: #1A1C1F;
+    }
+    #preset-replacement-scroll { height: 17; border: solid #363B44; padding: 0 1; }
+    """
+
+    def __init__(self, preset_id: str, replacement_diff: str) -> None:
+        super().__init__()
+        self.preset_id = preset_id
+        self.replacement_diff = replacement_diff
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-preset-panel"):
+            yield Label("REPLACE THE CURRENT PLAN?", classes="section-title")
+            yield Static(
+                f"Preset {self.preset_id} starts from its declared base experiment. "
+                "The current dirty plan, proposal, and unsaved assets will be replaced."
+            )
+            yield VerticalScroll(
+                Static(
+                    self.replacement_diff,
+                    markup=False,
+                    id="preset-replacement-diff",
+                ),
+                id="preset-replacement-scroll",
+            )
+            with Horizontal(classes="button-row"):
+                yield Button("Replace plan", id="confirm-run", variant="warning")
+                yield Button("Keep current plan", id="cancel-run-confirm")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "confirm-run")
@@ -512,6 +573,7 @@ class FugueApp(App[None]):
         self._sync_generation = 0
         self._preview_generation = 0
         self._preview_timer: Any = None
+        self._poll_timer: Any = None
         self._review_blockers: tuple[str, ...] = ()
         self._log_target: tuple[str, str | None] | None = None
         self._log_offset = 0
@@ -549,17 +611,17 @@ class FugueApp(App[None]):
                     id="experiment-select",
                 )
                 yield Static(id="define-summary")
+                with Horizontal(classes="button-row"):
+                    yield Button("Continue", id="define-next", variant="primary")
+            with VerticalScroll(id="compare-step", classes="plan-step plan-pane"):
+                yield Label("BUILD THE COMPARISON", classes="section-title")
+                yield Static(id="compare-sentence")
                 with Vertical(id="proposal-panel", classes="hidden"):
                     yield Static(id="proposal-summary")
                     with Horizontal(classes="button-row"):
                         yield Button("Use proposal", id="use-proposal", variant="primary")
                         yield Button("Refine", id="refine-proposal")
                         yield Button("Discard", id="discard-proposal")
-                with Horizontal(classes="button-row"):
-                    yield Button("Continue", id="define-next", variant="primary")
-            with VerticalScroll(id="compare-step", classes="plan-step plan-pane"):
-                yield Label("BUILD THE COMPARISON", classes="section-title")
-                yield Static(id="compare-sentence")
                 yield Label("Variants", classes="muted")
                 yield DataTable(
                     id="variant-table",
@@ -570,6 +632,16 @@ class FugueApp(App[None]):
                     yield Button("Add", id="add-variant")
                     yield Button("Duplicate", id="duplicate-variant")
                     yield Button("Edit", id="edit-variant")
+                preset_items = self.service.agent_preset_items()
+                if preset_items:
+                    with Collapsible(title="Advanced", collapsed=True):
+                        yield Label("Start a new plan from an agent preset")
+                        yield Select(
+                            [("None", "__none__"), *preset_items],
+                            value="__none__",
+                            allow_blank=False,
+                            id="agent-preset-select",
+                        )
                     yield Button("Remove", id="remove-variant")
                     yield Button("Enable / disable", id="toggle-variant")
                 yield Label("Harnesses", classes="muted")
@@ -625,6 +697,7 @@ class FugueApp(App[None]):
                 yield Static("Preparing preview...", id="preview-status")
                 with Horizontal(classes="button-row"):
                     yield Button("Back", id="compare-back")
+                    yield Button("Generate evaluation", id="generate-evaluation")
                     yield Button("Review", id="compare-next", variant="primary")
             with VerticalScroll(id="review-step", classes="plan-step plan-pane"):
                 yield Label("REVIEW THE RUN", classes="section-title")
@@ -654,8 +727,11 @@ class FugueApp(App[None]):
                 yield Button("Combined log", id="all-run-logs")
                 yield Button("Cancel", id="cancel-run", variant="warning")
                 yield Button("Export", id="export-run")
+                yield Button("Open Eval / Trace", id="open-trace")
                 yield Button("Open Agents", id="open-agents", variant="primary")
             yield DataTable(id="runs-table", cursor_type="row", zebra_stripes=True)
+            yield Label("CANDIDATES", classes="section-title")
+            yield DataTable(id="candidates-table", cursor_type="row", zebra_stripes=True)
             yield Label("CELLS", classes="section-title")
             yield DataTable(id="cells-table", cursor_type="row", zebra_stripes=True)
             yield Label("LOG", classes="section-title")
@@ -711,8 +787,17 @@ class FugueApp(App[None]):
         self._refresh_runs()
         self._refresh_results()
         self._refresh_setup()
-        self.set_interval(1.0, self._poll_runs)
+        self._poll_timer = self.set_interval(1.0, self._poll_runs)
         self._queue_preview()
+
+    def on_unmount(self) -> None:
+        if self._preview_timer is not None:
+            self._preview_timer.stop()
+            self._preview_timer = None
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
+        self._preview_generation += 1
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
@@ -720,10 +805,19 @@ class FugueApp(App[None]):
         if event.select.id == "experiment-select" and event.value != Select.NULL:
             if str(event.value) != self.plan.base_experiment_id:
                 self._load_experiment(str(event.value))
+        elif event.select.id == "agent-preset-select":
+            if event.value not in {Select.NULL, "__none__"}:
+                self._apply_agent_preset(str(event.value))
         elif event.select.id == "run-size-select":
-            self._set_run_size(str(event.value))
+            if str(event.value) != self._run_size():
+                self._set_run_size(str(event.value))
         elif event.select.id == "trace-content-select":
-            self._update_request(trace_content=str(event.value))
+            current = (
+                self.plan.request.trace_content
+                or self.plan.experiment.trace_content
+            )
+            if str(event.value) != current:
+                self._update_request(trace_content=str(event.value))
 
     def on_selection_list_selected_changed(
         self, event: SelectionList.SelectedChanged
@@ -731,38 +825,52 @@ class FugueApp(App[None]):
         if self._syncing:
             return
         if event.selection_list.id == "harness-list":
-            self._update_request(
-                harnesses=tuple(event.selection_list.selected),
-                dirty=True,
-            )
+            selected = tuple(event.selection_list.selected)
+            if selected != self.plan.request.harnesses:
+                self._update_request(harnesses=selected, dirty=True)
         elif event.selection_list.id == "workload-list":
-            self._update_request(
-                workloads=tuple(event.selection_list.selected),
-                dirty=True,
-            )
+            selected = tuple(event.selection_list.selected)
+            if selected != self.plan.request.workloads:
+                self._update_request(workloads=selected, dirty=True)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
         values: dict[str, Any] = {}
+        request = self.plan.request
+        experiment = self.plan.experiment
         if event.input.id == "model-input":
-            values["model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.model or experiment.model):
+                values["model"] = selected
         elif event.input.id == "builder-model-input":
-            values["builder_model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.builder_model or experiment.builder_model):
+                values["builder_model"] = selected
         elif event.input.id == "judge-model-input":
-            values["judge_model"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.judge_model or experiment.judge_model):
+                values["judge_model"] = selected
         elif event.input.id == "run-name-input":
-            values["run_name"] = event.value.strip() or None
+            selected = event.value.strip() or None
+            if selected != (request.run_name or experiment.run_name):
+                values["run_name"] = selected
         elif event.input.id == "concurrency-input":
-            values["n_concurrent"] = _optional_positive(event.value, "Concurrency")
+            selected = _optional_positive(event.value, "Concurrency")
+            if selected != (request.n_concurrent or experiment.n_concurrent):
+                values["n_concurrent"] = selected
         elif event.input.id == "tags-input":
-            values["tags"] = tuple(_csv(event.value))
+            selected = tuple(_csv(event.value))
+            if selected != request.tags:
+                values["tags"] = selected
         elif event.input.id == "tasks-input":
-            values["n_tasks"] = _optional_positive(event.value, "Task limit")
+            selected = _optional_positive(event.value, "Task limit")
+            if selected != (request.n_tasks or experiment.n_tasks):
+                values["n_tasks"] = selected
         elif event.input.id == "attempts-input":
-            values["n_attempts"] = _optional_positive(
-                event.value, "Trials per cell"
-            )
+            selected = _optional_positive(event.value, "Trials per cell")
+            if selected != (request.n_attempts or experiment.n_attempts):
+                values["n_attempts"] = selected
         if values:
             self._update_request(**values, dirty=True)
 
@@ -775,6 +883,7 @@ class FugueApp(App[None]):
             "define-next": lambda: self._show_plan_step("compare-step"),
             "compare-back": lambda: self._show_plan_step("define-step"),
             "compare-next": lambda: self._show_plan_step("review-step"),
+            "generate-evaluation": self._generate_evaluation,
             "review-back": lambda: self._show_plan_step("compare-step"),
             "add-variant": self._add_variant,
             "duplicate-variant": self._duplicate_variant,
@@ -788,6 +897,7 @@ class FugueApp(App[None]):
             "cancel-run": self.action_cancel,
             "export-run": self.action_export,
             "open-agents": self.action_open_agents,
+            "open-trace": self.action_open_trace,
             "results-agents": self.action_open_agents,
             "analyze-ai": self._analyze_with_ai,
             "generate-analysis": self._generate_analysis,
@@ -834,6 +944,59 @@ class FugueApp(App[None]):
         self._queue_preview()
         self._refresh_setup()
 
+    def _apply_agent_preset(self, preset_id: str) -> None:
+        if self.plan.dirty or self.plan.proposal is not None or self.plan.assets:
+            try:
+                proposed = self.service.apply_agent_preset(
+                    self.plan.experiment, preset_id
+                )
+            except Exception as exc:
+                self.notify(str(exc), severity="error")
+                return
+            replacement_diff = "\n".join(
+                difflib.unified_diff(
+                    experiment_to_yaml(self.plan.experiment).splitlines(),
+                    experiment_to_yaml(proposed).splitlines(),
+                    fromfile=f"current/{self.plan.experiment.id}.yaml",
+                    tofile=f"preset/{proposed.id}.yaml",
+                    lineterm="",
+                )
+            )
+            self.push_screen(
+                ConfirmPresetReplacementScreen(preset_id, replacement_diff),
+                lambda confirmed: self._apply_agent_preset_confirmed(
+                    preset_id, confirmed
+                ),
+            )
+            return
+        self._apply_agent_preset_confirmed(preset_id, True)
+
+    def _apply_agent_preset_confirmed(
+        self, preset_id: str, confirmed: bool
+    ) -> None:
+        if not confirmed:
+            self._render_plan()
+            return
+        experiment = self.service.apply_agent_preset(
+            self.plan.experiment, preset_id
+        )
+        request = replace(
+            self.service.request_for_experiment(experiment),
+            agent_preset_id=preset_id,
+        )
+        self.experiment_id = experiment.id
+        self.selected_variant_id = experiment.variants[0].id
+        self.plan = PlanState(
+            base_experiment_id=experiment.id,
+            experiment=experiment,
+            request=request,
+            dirty=True,
+            agent_preset_id=preset_id,
+        )
+        self._render_plan()
+        self._queue_preview()
+        self.notify("New plan started from the selected preset")
+
     def _render_plan(self) -> None:
         self._syncing = True
         self._sync_generation += 1
@@ -845,6 +1008,9 @@ class FugueApp(App[None]):
                 value for _, value in self.service.experiment_items()
             }:
                 selector.value = self.plan.base_experiment_id
+            preset_selects = list(self.query("#agent-preset-select"))
+            if preset_selects:
+                preset_selects[0].value = self.plan.agent_preset_id or "__none__"
             self._render_define_summary()
             self._render_proposal()
             self._render_variants()
@@ -969,6 +1135,8 @@ class FugueApp(App[None]):
             f"Scale: {draft.preview.cells} cells / "
             f"{draft.preview.estimated_trials} trials\n"
             f"Assumptions: {assumptions}\nWarnings: {warnings}"
+            + _evaluation_proposal_summary(draft)
+            + f"\n\nProposed changes:\n{draft.diff or 'No file changes'}"
         )
 
     def _render_variants(self) -> None:
@@ -981,7 +1149,7 @@ class FugueApp(App[None]):
                 "yes" if variant.id in selected else "no",
                 variant.label,
                 variant.prompt_id or "default",
-                ", ".join(variant.skill_ids) or "none",
+                ", ".join(variant.skills) or "none",
                 variant.context.system_id,
                 "custom" if _has_agent_config(variant) else "default",
                 key=variant.id,
@@ -1063,6 +1231,40 @@ class FugueApp(App[None]):
             "Grounding your request in saved experiments, prompts, skills, and context systems..."
         )
         self._compose_ai_worker(request)
+
+    def _generate_evaluation(self) -> None:
+        self.query_one("#preview-status", Static).update(
+            "Generating a grounded evaluation draft for review..."
+        )
+        self._generate_evaluation_worker(self.plan.experiment)
+
+    @work(thread=True, exclusive=True, group="composer")
+    def _generate_evaluation_worker(self, experiment: ExperimentSpec) -> None:
+        request = (
+            "Generate or complete the evaluation assets for this experiment. "
+            "Preserve its comparison, variants, models, and run settings exactly. "
+            "Use the configured sources, fill only missing coverage, produce the "
+            "configured case count, and return the assets for explicit review."
+        )
+        try:
+            draft = asyncio.run(
+                self.service.compose_experiment(
+                    request,
+                    base_experiment=experiment,
+                    trace_content=(
+                        self.plan.request.trace_content or experiment.trace_content
+                    ),
+                )
+            )
+        except Exception as exc:
+            self.call_from_thread(self.notify, str(exc), severity="error")
+            self.call_from_thread(self._queue_preview)
+            return
+        self.call_from_thread(self._show_evaluation_proposal, draft)
+
+    def _show_evaluation_proposal(self, draft: Any) -> None:
+        self._show_proposal(draft)
+        self._show_plan_step("compare-step")
 
     @work(thread=True, exclusive=True, group="composer")
     def _compose_ai_worker(self, request: str) -> None:
@@ -1277,16 +1479,24 @@ class FugueApp(App[None]):
         if self._preview_timer is not None:
             self._preview_timer.stop()
             self._preview_timer = None
+        preview_status = next(iter(self.query("#preview-status")), None)
+        if not self.is_mounted or not isinstance(preview_status, Static):
+            return
         request = self.plan.request
         if not request.harnesses or not request.variants:
-            self.query_one("#preview-status", Static).update(
+            preview_status.update(
                 "Select at least one harness and one variant."
             )
             return
         self._preview_generation += 1
         generation = self._preview_generation
-        self.query_one("#preview-status", Static).update("Updating exact matrix...")
-        self._preview_worker(generation, request, self.plan.experiment)
+        preview_status.update("Updating exact matrix...")
+        self._preview_worker(
+            generation,
+            request,
+            self.plan.experiment,
+            self.plan.assets,
+        )
 
     @work(thread=True, exclusive=True, group="preview")
     def _preview_worker(
@@ -1294,9 +1504,14 @@ class FugueApp(App[None]):
         generation: int,
         request: ExperimentRequest,
         experiment: ExperimentSpec,
+        assets: tuple[Any, ...],
     ) -> None:
         try:
-            preview = self.service.preview_experiment(experiment, request=request)
+            preview = self.service.preview_experiment(
+                experiment,
+                request=request,
+                asset_overlay=_asset_overlay(assets),
+            )
             status = self.service.status(request, experiment=experiment)
         except Exception as exc:
             self.call_from_thread(self._preview_failed, generation, str(exc))
@@ -1335,10 +1550,20 @@ class FugueApp(App[None]):
         }
         experiment = self.plan.experiment
         model = self.plan.request.model or experiment.model or "FUGUE_MODEL"
+        contexts = ", ".join(
+            sorted(
+                {
+                    f"{item.context_system_id} ({item.context_delivery})"
+                    for item in preview.matrix_cells
+                    if item.context_system_id != "none"
+                }
+            )
+        ) or "none"
         self.query_one("#review-summary", Static).update(
             f"{experiment.title}\n{experiment.description}\n\n"
             f"Benchmark: {', '.join(_workload_label(item, item) for item in preview.workloads)}\n"
             f"Model: {model}\nWeave: {self.service.deep_links().weave}\n"
+            f"Context treatments: {contexts}\n"
             f"{_count(preview.cells, 'cell')} / {_count(len(tasks), 'task')} / "
             f"{_count(preview.estimated_trials, 'trial')}"
         )
@@ -1404,6 +1629,26 @@ class FugueApp(App[None]):
             blockers.append(f"Model credentials are missing: {status.model_key_env}")
         if not status.trace_key_present:
             blockers.append("Weave tracing requires WANDB_API_KEY")
+        generated_scoring = any(
+            any(
+                not scorer_reference(scorer).startswith("builtin:")
+                for scorer in workload.scorers
+            )
+            for workload in self.plan.experiment.workloads
+        )
+        explicit_judge = (
+            self.plan.request.judge_model or self.plan.experiment.judge_model
+        )
+        if generated_scoring and not explicit_judge:
+            blockers.append("Generated evaluation rubrics require an explicit judge model")
+        judge_route = next(
+            (route for route in status.routes if route.role == "judge"),
+            None,
+        )
+        if generated_scoring and judge_route is not None and not judge_route.key_present:
+            blockers.append(
+                f"Judge credentials are missing: {judge_route.key_env}"
+            )
         harnesses = tuple(
             dict.fromkeys(
                 item.harness
@@ -1437,7 +1682,7 @@ class FugueApp(App[None]):
         if preview.applicable_cells == 0:
             blockers.append("No matrix cells are applicable")
         if self.plan.assets:
-            blockers.append("Save the proposed prompt or skill assets before running")
+            blockers.append("Save all proposed assets before running")
         return tuple(blockers)
 
     def _show_preview_sequencer(self, preview: PreviewSummary) -> None:
@@ -1580,6 +1825,14 @@ class FugueApp(App[None]):
 
     def action_open_trace(self) -> None:
         if self.selected_run_id:
+            evaluation = self.service.run_evaluation(
+                self.selected_run_id,
+                cell_id=self.selected_cell_id,
+            )
+            if evaluation is not None and evaluation.url:
+                webbrowser.open(evaluation.url)
+                self.notify("Opened the linked Weave evaluation and agent trace")
+                return
             references = self.service.run_trace_refs(
                 self.selected_run_id,
                 cell_id=self.selected_cell_id,
@@ -1597,10 +1850,21 @@ class FugueApp(App[None]):
                 self.notify(f"Copied conversation {conversation_id}")
         self.action_open_agents()
 
-    def _refresh_runs(self) -> None:
-        table = self.query_one("#runs-table", DataTable)
+    def _refresh_runs(self) -> bool:
+        table = next(iter(self.query("#runs-table")), None)
+        if not isinstance(table, DataTable):
+            return False
         table.clear(columns=True)
-        table.add_columns("Run", "Experiment", "Status", "Pass", "Fail", "Waiting")
+        table.add_columns(
+            "Run",
+            "Experiment",
+            "Status",
+            "Pass",
+            "Fail",
+            "Cancelled",
+            "Interrupted",
+            "Waiting",
+        )
         runs = self.service.runs()
         for run in runs:
             table.add_row(
@@ -1609,6 +1873,8 @@ class FugueApp(App[None]):
                 run.status,
                 str(run.passed),
                 str(run.failed),
+                str(run.cancelled),
+                str(run.interrupted),
                 str(run.pending),
                 key=run.run_id,
             )
@@ -1616,24 +1882,82 @@ class FugueApp(App[None]):
             self.selected_run_id = runs[0].run_id
             self._show_run(runs[0].run_id)
         self._update_sequencer(runs)
+        return True
 
     def _poll_runs(self) -> None:
-        self._refresh_runs()
+        if not self.is_mounted or not self._refresh_runs():
+            return
         if self.selected_run_id:
             self._show_run(self.selected_run_id)
 
     def _show_run(self, run_id: str) -> None:
         run = self.service.run_summary(run_id)
+        candidates = self.query_one("#candidates-table", DataTable)
+        candidates.clear(columns=True)
+        candidates.add_columns(
+            "Candidate",
+            "Configuration",
+            "Pass",
+            "Eval fail",
+            "Exec fail",
+            "Cancelled",
+            "Interrupted",
+            "Unscored",
+            "Pending",
+            "N/A",
+            "Complete",
+            "Packageability",
+        )
+        for candidate in run.candidates:
+            configuration = candidate.configuration
+            context = configuration.get("context") or {}
+            summary = ", ".join(
+                str(value)
+                for value in (
+                    configuration.get("harness"),
+                    configuration.get("model"),
+                    context.get("id") if isinstance(context, dict) else context,
+                )
+                if value
+            )
+            candidates.add_row(
+                candidate.display_id,
+                summary or "resolved candidate",
+                str(candidate.passed),
+                str(candidate.failed),
+                str(candidate.execution_failed),
+                str(candidate.cancelled),
+                str(candidate.interrupted),
+                str(candidate.unscored),
+                str(candidate.pending),
+                str(candidate.not_applicable),
+                f"{candidate.completeness:.0%}",
+                candidate.packageability_reason,
+                key=candidate.candidate_id,
+            )
         cells = self.query_one("#cells-table", DataTable)
         cells.clear(columns=True)
-        cells.add_columns("Harness", "Variant", "Context", "Task", "Status", "Time")
+        cells.add_columns(
+            "Harness",
+            "Variant",
+            "Context",
+            "Delivery",
+            "Task",
+            "Candidate",
+            "Execution",
+            "Outcome",
+            "Time",
+        )
         for cell in run.cells:
             cells.add_row(
                 cell.harness,
                 cell.variant_id,
                 cell.context_system_id,
+                cell.context_delivery,
                 cell.task_id,
+                cell.candidate_id,
                 cell.status.replace("_", " "),
+                cell.benchmark_outcome.replace("_", " "),
                 f"{cell.wall_time_sec:.1f}s" if cell.wall_time_sec is not None else "-",
                 key=cell.cell_id,
             )
@@ -1696,7 +2020,10 @@ class FugueApp(App[None]):
             f"${result.cost_usd:.4f}   "
             f"{result.input_tokens:,} in / {result.output_tokens:,} out tokens   "
             f"{result.turns} turns   {result.tool_calls} tools   "
+            f"{result.context_registered}/{result.context_assigned} registered   "
             f"{result.context_invoked}/{result.context_assigned} context used   "
+            f"{result.runtime_mismatched} runtime mismatches   "
+            f"{result.attributed_errors} attributed errors   "
             f"{result.linked_traces} linked traces   "
             f"{result.usage_unavailable} usage N/A"
         )
@@ -1707,6 +2034,7 @@ class FugueApp(App[None]):
             "Experiment",
             "Variant",
             "Context",
+            "Transport",
             "Model",
             "Trials",
             "Pass rate",
@@ -1718,7 +2046,7 @@ class FugueApp(App[None]):
             "Failures",
             "Conversations",
         )
-        groups: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = (
+        groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = (
             defaultdict(list)
         )
         for row in result.rows:
@@ -1727,10 +2055,11 @@ class FugueApp(App[None]):
                 str(row.get("experiment_id") or "unknown"),
                 str(row.get("variant_id") or "baseline"),
                 str(row.get("context_system_id") or "none"),
+                str(row.get("context_delivery") or "portable"),
                 str(row.get("model") or "unknown"),
             )
             groups[key].append(row)
-        for (harness, experiment, variant, context, model), rows in sorted(
+        for (harness, experiment, variant, context, transport, model), rows in sorted(
             groups.items()
         ):
             scored = [row for row in rows if row.get("pass") is not None]
@@ -1768,6 +2097,7 @@ class FugueApp(App[None]):
                 experiment,
                 variant,
                 f"{context} ({invoked}/{assigned} used)" if assigned else context,
+                transport,
                 model,
                 str(len(rows)),
                 pass_rate,
@@ -1829,11 +2159,19 @@ class FugueApp(App[None]):
         self.analysis_result = None
         scope = preview.scope
         warnings = "; ".join(scope.warnings) if scope.warnings else "None"
+        selection = getattr(preview, "selection", None)
+        selection_text = (
+            f"\nSelection: {selection.decision.replace('_', ' ')} / "
+            f"{selection.selected_candidate_id or 'none'}"
+            if selection is not None
+            else ""
+        )
         self.query_one("#analysis-scope", Static).update(
             f"{len(scope.experiments)} experiments / "
             f"{len(scope.runs)} runs / {scope.rows} records / "
             f"{len(scope.tasks)} tasks\n"
             f"Models: {', '.join(scope.models)}\nWarnings: {warnings}"
+            f"{selection_text}"
         )
         report = self.query_one("#analysis-report", RichLog)
         report.clear()
@@ -2058,6 +2396,39 @@ def run_tui(
     ).run()
 
 
+def _asset_overlay(assets: tuple[Any, ...]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for asset in assets:
+        if asset.kind == "prompt":
+            path = Path("configs/fugue/prompts") / f"{asset.id}.md"
+        elif asset.kind == "skill":
+            path = Path("configs/fugue/skills") / asset.id / "SKILL.md"
+        else:
+            path = evaluation_asset_path(asset.kind, asset.id)
+        values[path.as_posix()] = asset.body
+    return values
+
+
+def _evaluation_proposal_summary(draft: Any) -> str:
+    evaluation = getattr(draft, "evaluation", None)
+    if evaluation is None:
+        return ""
+    dimensions = [
+        str(item.get("id")) for item in evaluation.rubric.get("dimensions") or []
+    ]
+    source_hashes = (
+        evaluation.rubric.get("generation", {}).get("source_hashes", {})
+    )
+    coverage = ", ".join(
+        f"{key}={value}" for key, value in sorted(evaluation.coverage.items())
+    )
+    return (
+        f"\nEvaluation: {len(evaluation.cases)} cases ({coverage})"
+        f"\nDimensions: {', '.join(dimensions)}"
+        f"\nProvenance: {len(source_hashes)} checksum-pinned sources"
+    )
+
+
 def _animation_enabled() -> bool:
     return not (
         os.environ.get("FUGUE_NO_ANIMATION") == "1"
@@ -2149,7 +2520,6 @@ def _has_agent_config(variant: FeatureVariant) -> bool:
         (
             variant.agent_kwargs,
             variant.agent_env,
-            variant.mcp_servers,
             variant.environment,
             variant.verifier,
             variant.retry,
@@ -2166,7 +2536,6 @@ def _variant_advanced_summary(variant: FeatureVariant) -> str:
         for label, value in (
             ("agent kwargs", variant.agent_kwargs),
             ("agent env", variant.agent_env),
-            ("MCP servers", variant.mcp_servers),
             ("environment", variant.environment),
             ("verifier", variant.verifier),
             ("retry", variant.retry),

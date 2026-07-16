@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from fugue.redaction import redact_text, secrets_from_env
+from fugue.redaction import redact_text, secrets_from_env, sensitive_key
 
 _MAX_TEXT = 1_000
 _MAX_EVENT_BYTES = 16_384
@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m fugue.mcp_proxy")
     parser.add_argument("--name", required=True)
     parser.add_argument("--cwd", type=Path)
+    parser.add_argument("--allow-tool", action="append", default=[])
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
 
     recorder = _Recorder(
         name=args.name,
+        allowed_tools=set(args.allow_tool) or None,
         path=Path(
             os.environ.get(
                 "FUGUE_CONTEXT_EVENTS_PATH",
@@ -51,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     request_thread = threading.Thread(
         target=_relay_requests,
-        args=(sys.stdin.buffer, process.stdin, recorder),
+        args=(sys.stdin.buffer, process.stdin, sys.stdout.buffer, recorder),
         daemon=True,
     )
     response_thread = threading.Thread(
@@ -68,20 +70,35 @@ def main(argv: list[str] | None = None) -> int:
 
 
 class _Recorder:
-    def __init__(self, *, name: str, path: Path) -> None:
+    def __init__(
+        self, *, name: str, path: Path, allowed_tools: set[str] | None = None
+    ) -> None:
         self.name = name
         self.path = path
+        self.allowed_tools = allowed_tools
         self.started_at = time.perf_counter()
         self.pending: dict[str, tuple[float, str | None]] = {}
         self.lock = threading.Lock()
 
-    def request(self, payload: dict[str, Any], size: int) -> None:
+    def request(self, payload: dict[str, Any], size: int) -> bool:
         request_id = _request_id(payload)
         method = str(payload.get("method") or "")
         tool = None
         if method == "tools/call":
             params = payload.get("params") or {}
             tool = str(params.get("name") or "") if isinstance(params, dict) else None
+            if self.allowed_tools is not None and tool not in self.allowed_tools:
+                self.write(
+                    {
+                        "event": "mcp_tool_denied",
+                        "layer": "proxy",
+                        "server": self.name,
+                        "tool": tool,
+                        "request_id": request_id,
+                        "request_bytes": size,
+                    }
+                )
+                return False
         if request_id:
             with self.lock:
                 self.pending[request_id] = (time.perf_counter(), tool)
@@ -94,9 +111,12 @@ class _Recorder:
                     "tool": tool,
                     "request_id": request_id,
                     "request_bytes": size,
-                    "arguments": _sanitize((payload.get("params") or {}).get("arguments")),
+                    "arguments": _sanitize(
+                        (payload.get("params") or {}).get("arguments")
+                    ),
                 }
             )
+        return True
 
     def response(self, payload: dict[str, Any], size: int) -> None:
         request_id = _request_id(payload)
@@ -139,8 +159,30 @@ class _Recorder:
             pass
 
 
-def _relay_requests(source: BinaryIO, target: BinaryIO, recorder: _Recorder) -> None:
-    _relay(source, target, recorder.request)
+def _relay_requests(
+    source: BinaryIO,
+    target: BinaryIO,
+    client: BinaryIO,
+    recorder: _Recorder,
+) -> None:
+    while line := source.readline():
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            target.write(line)
+            target.flush()
+            continue
+        if not isinstance(payload, dict) or recorder.request(payload, len(line)):
+            target.write(line)
+            target.flush()
+            continue
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "error": {"code": -32601, "message": "Tool denied by Fugue policy"},
+        }
+        client.write((json.dumps(response, separators=(",", ":")) + "\n").encode())
+        client.flush()
 
 
 def _relay_responses(source: BinaryIO, target: BinaryIO, recorder: _Recorder) -> None:
@@ -169,10 +211,12 @@ def _request_id(payload: dict[str, Any]) -> str | None:
 
 
 def _sanitize(value: Any, *, key: str = "") -> Any:
-    if _sensitive_key(key):
+    if sensitive_key(key):
         return "[redacted]"
     if isinstance(value, dict):
-        return {str(name): _sanitize(item, key=str(name)) for name, item in value.items()}
+        return {
+            str(name): _sanitize(item, key=str(name)) for name, item in value.items()
+        }
     if isinstance(value, list):
         return [_sanitize(item, key=key) for item in value[:50]]
     if isinstance(value, str):
@@ -180,17 +224,6 @@ def _sanitize(value: Any, *, key: str = "") -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return str(value)[:_MAX_TEXT]
-
-
-def _sensitive_key(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return (
-        normalized in {"authorization", "password", "secret", "token", "apikey"}
-        or "api_key" in normalized
-        or normalized.endswith(
-            ("_access_token", "_refresh_token", "_auth_token", "_password", "_secret")
-        )
-    )
 
 
 if __name__ == "__main__":

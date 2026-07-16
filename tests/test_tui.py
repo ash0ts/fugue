@@ -9,7 +9,9 @@ import pytest
 from test_operator import make_operator_repo
 from textual.widgets import Button, Collapsible, ContentSwitcher
 
-from fugue.bench.ai import ExperimentDraft
+from fugue.bench.ai import AssetDraft, ExperimentDraft
+from fugue.bench.evaluations import build_evaluation_draft, source_catalog
+from fugue.bench.library import experiment_from_data
 from fugue.bench.operator import OperatorService
 from fugue.tui import (
     CUSTOM_SIZE,
@@ -41,6 +43,7 @@ def test_tui_uses_three_step_plan_and_automatic_preview(
 
             app.action_next_step()
             assert app.plan_step == "compare-step"
+            assert app.query_one("#generate-evaluation", Button)
             app.action_next_step()
             assert app.plan_step == "review-step"
             assert app.query_one("#review-matrix").row_count == 1
@@ -187,6 +190,85 @@ def test_tui_initial_ai_draft_opens_compare_without_writing(
     asyncio.run(exercise())
 
 
+def test_debounced_preview_is_harmless_after_its_widget_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            app._queue_preview()
+            await app.query_one("#preview-status").remove()
+
+            app._begin_preview()
+
+            assert app._preview_timer is None
+
+    asyncio.run(exercise())
+
+
+def test_tui_applies_recommended_agent_preset_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+            assert app.plan.agent_preset_id == "demo-maintainer"
+            assert app.plan.dirty
+            assert app.plan.request.harnesses == ("codex",)
+            assert app.plan.request.variants == ("maintainer-recommended",)
+            assert not (
+                tmp_path
+                / "configs/fugue/experiments/maintainer-recommended.yaml"
+            ).exists()
+
+    asyncio.run(exercise())
+
+
+def test_tui_dirty_plan_shows_preset_replacement_diff_and_requires_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(110, 38)) as pilot:
+            await pilot.pause()
+            app._duplicate_variant()
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+
+            screen = app.screen
+            assert screen.__class__.__name__ == "ConfirmPresetReplacementScreen"
+            replacement = str(screen.query_one("#preset-replacement-diff").render())
+            assert "current/demo.yaml" in replacement
+            assert "maintainer-recommended" in replacement
+
+            await pilot.click("#cancel-run-confirm")
+            await pilot.pause()
+            assert len(app.plan.experiment.variants) == 2
+            assert app.plan.agent_preset_id is None
+
+            app._apply_agent_preset("demo-maintainer")
+            await pilot.pause()
+            await pilot.click("#confirm-run")
+            await pilot.pause()
+            assert app.plan.agent_preset_id == "demo-maintainer"
+            assert [item.id for item in app.plan.experiment.variants] == [
+                "maintainer-recommended"
+            ]
+
+    asyncio.run(exercise())
+
+
 def test_tui_ai_proposal_requires_explicit_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,6 +305,144 @@ def test_tui_ai_proposal_requires_explicit_use(
             assert app.plan.dirty
             assert app.plan_step == "compare-step"
             assert not (tmp_path / ".fugue").exists()
+
+    asyncio.run(exercise())
+
+
+def test_tui_generate_evaluation_reviews_and_saves_all_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    service = make_operator_repo(tmp_path)
+    raw = service.experiment("demo").to_dict()
+    raw.update(
+        {
+            "judge_model": "openai/gpt-5-mini",
+            "workloads": [{"id": "capabilities", "runner": "harbor"}],
+                "evaluation_generation": {
+                    "suite_id": "tui-suite",
+                    "workload_id": "capabilities",
+                    "size": 8,
+                "sources": [
+                    {
+                        "kind": "seed",
+                        "text": "The demo skill uses focused repository search.",
+                    }
+                ],
+            },
+        }
+    )
+    experiment = experiment_from_data(raw)
+    strata = ["easy", "boundary", "failure", "integration"]
+    cases = [
+        {
+            "id": f"case-{index + 1:02d}",
+            "instruction": f"Explain demo behavior {index + 1}.",
+            "family": "skill",
+            "source_refs": ["seed:1"],
+            "expected": {"facts": ["focused repository search"]},
+            "tags": [strata[index % len(strata)]],
+        }
+        for index in range(8)
+    ]
+    updated, evaluation = build_evaluation_draft(
+        {
+            "suite_id": "tui-suite",
+            "cases": cases,
+            "rubric": {
+                "dimensions": [
+                    {
+                        "id": "task_completion",
+                        "criterion": "Complete the requested task.",
+                    },
+                        {
+                            "id": "correctness",
+                            "criterion": "Include the grounded fact.",
+                        },
+                        {
+                            "id": "groundedness",
+                            "criterion": "Ground the answer in the source.",
+                        },
+                ]
+            },
+        },
+        experiment,
+        generator_model="openai/gpt-5-mini",
+        source_catalog=source_catalog(experiment, tmp_path),
+        repo_root=tmp_path,
+    )
+    assets = tuple(
+        AssetDraft(
+            kind=item.kind,
+            id=item.suite_id,
+            title=item.path.name,
+            body=item.body,
+        )
+        for item in evaluation.files
+    )
+    draft = ExperimentDraft(
+        experiment=updated,
+        assets=assets,
+        evaluation=evaluation,
+        rationale="Add grounded capability coverage.",
+        assumptions=(),
+        warnings=(),
+        diff="\n".join(f"+++ {item.path}" for item in evaluation.files),
+        preview=service.preview_experiment(updated, asset_overlay=evaluation.overlay),
+        model="openai/gpt-5-mini",
+        provider="openai",
+        session_id="session-evaluation",
+        input_tokens=100,
+        output_tokens=200,
+    )
+    calls = []
+
+    async def compose(request, **kwargs):
+        calls.append((request, kwargs))
+        return draft
+
+    monkeypatch.setattr(service, "compose_experiment", compose)
+    app = FugueApp(service=service, experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(130, 44)) as pilot:
+            await pilot.pause(1)
+            app.action_next_step()
+            app._generate_evaluation()
+            await pilot.pause(1)
+
+            assert len(calls) == 1
+            assert calls[0][1]["base_experiment"].id == "demo"
+            assert app.plan.proposal is draft
+            assert app.plan_step == "compare-step"
+            summary = str(app.query_one("#proposal-summary").render())
+            assert "Evaluation: 8 cases" in summary
+            assert "Provenance: 1 checksum-pinned sources" in summary
+            assert "cases.jsonl" in summary
+            assert "rubric.yaml" in summary
+            assert "manifest.yaml" in summary
+            assert not (tmp_path / "configs/fugue/evaluations/tui-suite").exists()
+
+            app._use_proposal()
+            await pilot.pause(1)
+            assert len(app.plan.assets) == 3
+            assert app.plan.dirty
+            assert "Save all proposed assets before running" in app._review_blockers
+
+            app._save_plan(("tui-generated", "TUI generated"))
+            await pilot.pause(1)
+
+            suite = tmp_path / "configs/fugue/evaluations/tui-suite"
+            assert {path.name for path in suite.iterdir()} == {
+                "cases.jsonl",
+                "rubric.yaml",
+                "manifest.yaml",
+            }
+            assert (tmp_path / "configs/fugue/experiments/tui-generated.yaml").is_file()
+            assert app.experiment_id == "tui-generated"
+            assert app.plan.assets == ()
+            assert not app.plan.dirty
+            assert app.plan_step == "review-step"
 
     asyncio.run(exercise())
 
@@ -332,14 +552,15 @@ def test_memory_smoke_shows_unavailable_cells_without_counting_trials(
 
             assert app.plan.preview is not None
             assert app.plan.preview.cells == 8
-            assert app.plan.preview.applicable_cells == 7
-            assert app.plan.preview.estimated_trials == 7
+            assert app.plan.preview.applicable_cells == 8
+            assert app.plan.preview.estimated_trials == 8
             assert set(app.plan.preview.variants) == {"none", "rag-bm25"}
-            unavailable = [
-                cell for cell in app.plan.preview.matrix_cells if not cell.applicable
-            ]
-            assert [(cell.harness, cell.variant_id) for cell in unavailable] == [
-                ("codex", "rag-bm25")
-            ]
+            assert all(cell.applicable for cell in app.plan.preview.matrix_cells)
+            codex_rag = next(
+                cell
+                for cell in app.plan.preview.matrix_cells
+                if cell.harness == "codex" and cell.variant_id == "rag-bm25"
+            )
+            assert codex_rag.context_delivery == "portable"
 
     asyncio.run(exercise())

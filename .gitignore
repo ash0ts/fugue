@@ -7,11 +7,31 @@ artifacts/
 reports/
 .fugue/
 
+# The export tests intentionally version a minimal synthetic Harbor job.
+!tests/fixtures/export/jobs/
+!tests/fixtures/export/jobs/**
+
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.egg-info/
 .venv/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.nox/
+junit*.xml
+
+# JavaScript compatibility tests
+node_modules/
 
 # OS
 .DS_Store

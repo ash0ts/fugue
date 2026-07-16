@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from fugue.preflight import PreflightCheck, harbor_import_check, run_preflight
+from fugue.preflight import (
+    HARBOR_VERSION,
+    PreflightCheck,
+    harbor_import_check,
+    run_preflight,
+    validate_harbor_job_configs,
+)
+from fugue.weave_support import resolved_weave_trace_server_url
 
 
 def test_harbor_import_check_uses_resolved_tool_python(
@@ -36,9 +43,7 @@ def test_harbor_import_check_uses_resolved_tool_python(
 
     assert check.ok is True
     assert check.name == "adapters"
-    assert commands == [
-        [harbor_python.as_posix(), "-c", "import fugue.agents"]
-    ]
+    assert commands == [[harbor_python.as_posix(), "-c", "import fugue.agents"]]
 
 
 def test_preflight_reports_harbor_runtime_adapter_check(
@@ -60,6 +65,53 @@ def test_preflight_reports_harbor_runtime_adapter_check(
     adapters = next(check for check in checks if check.name == "adapters")
     assert adapters.ok is True
     assert adapters.detail == "harbor runtime"
+
+
+def test_preflight_reports_the_resolved_provider_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+
+    checks = run_preflight(
+        "anthropic/claude-haiku-4-5-20251001",
+        repo_root=tmp_path,
+        env={"ANTHROPIC_API_KEY": "present"},
+        live=False,
+    )
+
+    route = next(check for check in checks if check.name == "model route")
+    assert route.detail == (
+        "anthropic/claude-haiku-4-5-20251001 via anthropic "
+        "at https://api.anthropic.com"
+    )
+
+
+def test_job_configs_are_validated_by_harbor_tool_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tool_bin = tmp_path / "harbor" / "bin"
+    tool_bin.mkdir(parents=True)
+    harbor = tool_bin / "harbor"
+    harbor.touch()
+    harbor_python = tool_bin / "python"
+    harbor_python.touch()
+    config = tmp_path / "job.json"
+    config.write_text("{}")
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: str(harbor))
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("fugue.preflight.subprocess.run", fake_run)
+
+    validate_harbor_job_configs([config])
+
+    [command] = commands
+    assert command[0] == harbor_python.as_posix()
+    assert command[1] == "-c"
+    assert command[-2:] == [HARBOR_VERSION, config.as_posix()]
 
 
 def test_live_preflight_is_read_only(
@@ -111,3 +163,47 @@ def test_wandb_preflight_attributes_inference_to_trace_project(
 
     assert next(check for check in checks if check.name == "provider metadata").ok
     assert captured_headers["OpenAI-Project"] == "team/billing-project"
+
+
+def test_weave_endpoint_resolution_prefers_run_environment() -> None:
+    assert (
+        resolved_weave_trace_server_url(
+            {
+                "WANDB_BASE_URL": "https://api.wandb.ai",
+                "WANDB_PUBLIC_BASE_URL": "https://ignored.example",
+                "WF_TRACE_SERVER_URL": "https://trace.wandb.ai/",
+            }
+        )
+        == "https://trace.wandb.ai"
+    )
+
+
+def test_live_preflight_probes_the_resolved_weave_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    urls: list[str] = []
+
+    def fake_get(url, *, headers, timeout):
+        del headers, timeout
+        urls.append(url)
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr("fugue.preflight.httpx.get", fake_get)
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.preflight.bridge_status", lambda: {"ok": False, "error": "offline"}
+    )
+
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={
+            "WANDB_API_KEY": "test-only",
+            "WANDB_BASE_URL": "https://api.wandb.ai",
+            "WF_TRACE_SERVER_URL": "https://trace.wandb.ai",
+        },
+        live=True,
+    )
+
+    assert next(check for check in checks if check.name == "weave endpoint").ok
+    assert "https://trace.wandb.ai/server_info" in urls

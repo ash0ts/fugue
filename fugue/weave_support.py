@@ -11,6 +11,7 @@ _LOCK = Lock()
 
 WEAVE_AGENTS_BASE_URL = "https://trace.wandb.ai"
 WEAVE_AGENTS_OTEL_ENDPOINT = f"{WEAVE_AGENTS_BASE_URL}/agents/otel/v1/traces"
+DEFAULT_WANDB_BASE_URL = "https://api.wandb.ai"
 
 
 _WEAVE_ENV_KEYS = (
@@ -50,6 +51,33 @@ def weave_agents_otel_headers(project: str, api_key: str) -> str:
     return f"project_id={project},Authorization=Basic%20{token}"
 
 
+def resolved_weave_trace_server_url(env: Mapping[str, str]) -> str:
+    """Resolve the same trace endpoint as the pinned Weave SDK without mutating env."""
+
+    explicit = env.get("WF_TRACE_SERVER_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    public = env.get("WANDB_PUBLIC_BASE_URL", "").strip()
+    if public:
+        base_url = public.rstrip("/")
+    else:
+        configured = env.get("WANDB_BASE_URL", "").strip()
+        if configured:
+            base_url = configured.rstrip("/")
+        else:
+            try:
+                from weave.trace.env import Settings
+
+                base_url = Settings().base_url.rstrip("/")
+            except ImportError:
+                base_url = DEFAULT_WANDB_BASE_URL
+    return (
+        WEAVE_AGENTS_BASE_URL
+        if base_url == DEFAULT_WANDB_BASE_URL
+        else f"{base_url}/traces"
+    )
+
+
 async def trace_async_operation(
     name: str,
     metadata: dict[str, Any],
@@ -63,15 +91,36 @@ async def trace_async_operation(
 
     try:
         weave = initialize_weave(trace_project_slug(env), env)
-    except RuntimeError:
+    except Exception:
         return await operation()
-    result: Any = None
+    sentinel = object()
+    result: Any = sentinel
+    operation_error: BaseException | None = None
+    started = False
 
-    @weave.op(name=name)
-    async def traced(inputs: dict[str, Any]) -> Any:
-        nonlocal result
-        result = await operation()
+    async def traced_operation(inputs: dict[str, Any]) -> Any:
+        nonlocal result, operation_error, started
+        started = True
+        try:
+            result = await operation()
+        except BaseException as exc:
+            operation_error = exc
+            raise
         return summarize(result)
 
-    await traced(metadata)
+    try:
+        traced = weave.op(name=name)(traced_operation)
+    except Exception:
+        return await operation()
+
+    try:
+        await traced(metadata)
+    except BaseException:
+        if operation_error is not None:
+            raise operation_error from None
+        if not started:
+            return await operation()
+        if result is not sentinel:
+            return result
+        raise
     return result

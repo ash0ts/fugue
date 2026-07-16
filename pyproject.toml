@@ -7,7 +7,8 @@ name = "fugue"
 version = "0.1.0"
 description = "Harbor + Weave runner for comparing agent harnesses and context systems."
 readme = "README.md"
-requires-python = ">=3.11"
+license = "Apache-2.0"
+requires-python = ">=3.12"
 dependencies = [
     "httpx",
     "filelock==3.29.7",
@@ -15,6 +16,7 @@ dependencies = [
     "rich==15.0.0",
     "rich-argparse==1.8.0",
     "textual==8.2.8",
+    "toml==0.10.2",
     "weave==0.53.1",
 ]
 
@@ -23,8 +25,11 @@ fugue = "fugue.bench.cli:main"
 
 [project.optional-dependencies]
 dev = [
+    "deptry==0.25.1",
     "pytest",
     "ruff",
+    "skills-ref==0.1.1",
+    "vulture==2.16",
 ]
 context = [
     "fastembed==0.8.0",
@@ -32,7 +37,27 @@ context = [
     "lancedb==0.34.0",
     "mcp==1.28.1",
     "mem0ai==0.1.118",
+    "pyarrow==25.0.0",
     "qdrant-client==1.18.0",
+]
+serve = [
+    "ag-ui-protocol==0.1.19",
+    "fastapi>=0.115,<1",
+    "fastembed==0.8.0",
+    "harbor==0.18.0; python_version >= '3.13'",
+    "lancedb==0.34.0",
+    "mcp==1.28.1",
+    "uvicorn>=0.34,<1",
+]
+
+[tool.uv]
+# The full context lab contains mem0's older OpenAI client constraint. Candidate
+# serving deliberately supports the production-safe context subset above instead.
+conflicts = [
+    [
+        { extra = "context" },
+        { extra = "serve" },
+    ],
 ]
 
 [tool.setuptools.packages.find]
@@ -40,11 +65,24 @@ include = ["fugue*"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "C90"]
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.deptry]
+known_first_party = ["fugue"]
+optional_dependencies_dev_groups = ["dev"]
+package_module_name_map = { pyyaml = "yaml", mem0ai = "mem0", ag-ui-protocol = "ag_ui" }
+per_rule_ignores = { DEP002 = ["qdrant-client"], DEP004 = ["skills_ref"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    "error",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*:UserWarning",
+]

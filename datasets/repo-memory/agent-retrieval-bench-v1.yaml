@@ -7,34 +7,41 @@ source:
   counts:
     smoke: 3
     full: 225
+    retrieval-study: 225
+    gitnexus-retrieval-study: 225
   materialize_command:
-    - arb
-    - download-benchmark
-    - --version
-    - v1
-    - --local-dir
-    - "{output}"
-    - --force
+  - arb
+  - download-benchmark
+  - --version
+  - v1
+  - --local-dir
+  - '{output}'
+  - --force
 cases:
-  - id: astropy-model-test
-    family: code2test
-    repo: astropy/astropy
+- id: astropy-model-test
+  family: code2test
+  query: Find the tests and implementation context used when changing compound model behavior.
+  expected_paths:
+  - astropy/modeling/tests/test_models.py
+  repository:
+    type: git
+    url: https://github.com/astropy/astropy
     commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
-    query: Find the tests and implementation context used when changing compound model behavior.
-    expected_paths:
-      - astropy/modeling/tests/test_models.py
-  - id: django-form-context
-    family: comment2context
-    repo: django/django
+- id: django-form-context
+  family: comment2context
+  query: Locate the form and model code needed to understand validation behavior across related fields.
+  expected_paths:
+  - django/forms/models.py
+  repository:
+    type: git
+    url: https://github.com/django/django
     commit: 2d67222472f80f251607ae1b720527afceba06ad
-    query: Locate the form and model code needed to understand validation behavior across related fields.
-    expected_paths:
-      - django/forms/models.py
-  - id: xarray-trace-source
-    family: trace2code
-    repo: pydata/xarray
+- id: xarray-trace-source
+  family: trace2code
+  query: A dataset alignment test fails in merge logic; find the likely implementation source.
+  expected_paths:
+  - xarray/core/merge.py
+  repository:
+    type: git
+    url: https://github.com/pydata/xarray
     commit: 118f4d996e7711c9aced916e6049af9f28d5ec66
-    query: A dataset alignment test fails in merge logic; find the likely implementation source.
-    expected_paths:
-      - xarray/core/merge.py
-

@@ -1,0 +1,10 @@
+diff --git a/fugue/bench/catalog.py b/fugue/bench/catalog.py
+--- a/fugue/bench/catalog.py
++++ b/fugue/bench/catalog.py
+@@ -192,5 +192,5 @@ class ExperimentCatalog:
+         if not any(path == root or path.is_relative_to(root) for root in allowed):
+             raise ValueError("artifact path is outside Fugue result directories")
+         lowered = path.as_posix().lower()
+-        if any(part in lowered for part in ("/.env", "secret", "credential", "api-key")):
++        if any(part in lowered for part in ("secret", "credential", "api-key")):
+             raise ValueError("artifact path is blocked by the secret policy")

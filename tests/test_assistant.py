@@ -4,13 +4,21 @@ import asyncio
 import json
 
 import httpx
+import pytest
+import weave
 
 from fugue.assistant import (
+    AssistantAgent,
     AssistantMessage,
     AssistantModelClient,
+    AssistantResponse,
     AssistantTool,
+    AssistantToolCall,
+    AssistantUsage,
+    _AssistantTrace,
     select_assistant_model,
 )
+from fugue.model_plane import resolve_model_route
 
 
 def test_assistant_model_role_precedence() -> None:
@@ -42,6 +50,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
         body = json.loads(request.content)
         if request.url.path.endswith("/responses"):
             assert body["tools"][0]["name"] == "submit"
+            assert body["tool_choice"] == "required"
             return httpx.Response(
                 200,
                 json={
@@ -59,6 +68,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
             )
         if request.url.path.endswith("/v1/messages"):
             assert body["tools"][0]["input_schema"]["type"] == "object"
+            assert body["tool_choice"] == {"type": "any"}
             return httpx.Response(
                 200,
                 json={
@@ -76,6 +86,8 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
             )
         assert request.url.path.endswith("/chat/completions")
         assert body["tools"][0]["function"]["name"] == "submit"
+        assert body["tool_choice"] == "required"
+        assert body["thinking"] == {"type": "disabled"}
         assert request.headers["OpenAI-Project"] == "wandb/fugue-experiments"
         return httpx.Response(
             200,
@@ -117,7 +129,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
         cases = (
             ("openai/gpt-5", {"OPENAI_API_KEY": "secret"}, "openai"),
             ("anthropic/claude", {"ANTHROPIC_API_KEY": "secret"}, "anthropic"),
-            ("wandb/model", {"WANDB_API_KEY": "secret"}, "wandb"),
+            ("wandb/zai-org/GLM-5.2", {"WANDB_API_KEY": "secret"}, "wandb"),
         )
         for model, env, expected in cases:
             client = AssistantModelClient(model, env, transport=transport)
@@ -130,3 +142,179 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
     asyncio.run(exercise())
     assert len(requests) == 3
     assert all(b"secret" not in request.content for request in requests)
+
+
+def test_assistant_trace_preserves_weave_conversation_types(monkeypatch) -> None:
+    class Usage:
+        input_tokens = 0
+        output_tokens = 0
+
+    class Span:
+        def __init__(self) -> None:
+            self.usage = Usage()
+            self.input_messages: list[object] = []
+            self.output_messages: list[object] = []
+            self.closed = False
+
+        def __enter__(self) -> Span:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            assert not isinstance(self.usage, dict)
+            assert self.usage.input_tokens == 13
+            assert self.usage.output_tokens == 5
+            assert [message.role for message in self.input_messages] == ["user"]
+            assert [message.content for message in self.input_messages] == ["question"]
+            assert [message.role for message in self.output_messages] == ["assistant"]
+            assert [message.content for message in self.output_messages] == ["done"]
+            self.closed = True
+
+    trace = _AssistantTrace(
+        role="composer",
+        route=resolve_model_route("wandb/test-model", {}),
+        env={},
+        trace_content="full",
+        session_id="session",
+        attributes={},
+    )
+    span = Span()
+    trace.turn = object()
+    monkeypatch.setattr(weave, "start_llm", lambda **_: span)
+
+    active = trace.start_llm([AssistantMessage("user", "question")])
+    trace.finish_llm(
+        active,
+        response=AssistantResponse(
+            text="done",
+            usage=AssistantUsage(input_tokens=13, output_tokens=5),
+        ),
+    )
+
+    assert span.closed is True
+
+
+def test_assistant_retries_unstructured_response_with_terminal_tool_contract() -> None:
+    class Client:
+        route = resolve_model_route("wandb/test-model", {})
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[AssistantMessage, ...]] = []
+
+        async def complete(
+            self,
+            messages: list[AssistantMessage],
+            *,
+            tools: tuple[AssistantTool, ...],
+            max_tokens: int,
+        ) -> AssistantResponse:
+            assert max_tokens == 4_096
+            self.calls.append(tuple(messages))
+            if len(self.calls) == 1:
+                return AssistantResponse(text="I can help with that.")
+            assert messages[-1].role == "user"
+            assert "submit" in messages[-1].content
+            return AssistantResponse(
+                text="",
+                tool_calls=(
+                    AssistantToolCall(
+                        id="call-1",
+                        name="submit",
+                        arguments={"value": "accepted"},
+                    ),
+                ),
+            )
+
+    client = Client()
+    agent = AssistantAgent(
+        client,  # type: ignore[arg-type]
+        role="composer",
+        tools=(
+            AssistantTool(
+                "submit",
+                "Submit the result",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+                terminal=True,
+            ),
+        ),
+        env={},
+        max_rounds=2,
+    )
+
+    result = asyncio.run(agent.run([AssistantMessage("user", "compose")]))
+
+    assert result.payload == {"value": "accepted"}
+    assert len(client.calls) == 2
+
+
+def test_assistant_fails_once_when_structured_output_is_truncated() -> None:
+    class Client:
+        route = resolve_model_route("wandb/test-model", {})
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(
+            self,
+            messages: list[AssistantMessage],
+            *,
+            tools: tuple[AssistantTool, ...],
+            max_tokens: int,
+        ) -> AssistantResponse:
+            self.calls += 1
+            return AssistantResponse(text="", finish_reason="length")
+
+    client = Client()
+    agent = AssistantAgent(
+        client,  # type: ignore[arg-type]
+        role="composer",
+        tools=(
+            AssistantTool(
+                "submit",
+                "Submit the result",
+                {"type": "object", "properties": {}},
+                terminal=True,
+            ),
+        ),
+        env={},
+        max_rounds=8,
+    )
+
+    with pytest.raises(RuntimeError, match="truncated before structured output"):
+        asyncio.run(agent.run([AssistantMessage("user", "compose")]))
+
+    assert client.calls == 1
+
+
+def test_assistant_trace_reports_errors_through_typed_span_exit() -> None:
+    class Span:
+        __slots__ = ("exited",)
+
+        def __init__(self) -> None:
+            self.exited: tuple[object, ...] | None = None
+
+        def __exit__(self, *error: object) -> None:
+            self.exited = error
+
+    trace = _AssistantTrace(
+        role="composer",
+        route=resolve_model_route("wandb/test-model", {}),
+        env={},
+        trace_content="full",
+        session_id="session",
+        attributes={},
+    )
+    failure = TimeoutError("provider timed out")
+    llm = Span()
+    tool = Span()
+
+    trace.finish_llm(llm, error=failure)
+    trace.finish_tool(tool, error=failure)
+
+    assert llm.exited is not None
+    assert llm.exited[:2] == (TimeoutError, failure)
+    assert tool.exited is not None
+    assert tool.exited[:2] == (TimeoutError, failure)

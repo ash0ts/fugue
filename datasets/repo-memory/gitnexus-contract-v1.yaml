@@ -1,0 +1,24 @@
+dataset:
+  path: datasets/repo-memory/gitnexus-contract
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 4
+jobs_dir: jobs/repo-memory-impact/gitnexus-contract
+harnesses:
+  - {name: hermes, agent: fugue.agents:FugueHermes}
+  - {name: openclaw, agent: fugue.agents:FugueOpenClaw}
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - id: gitnexus-vector-lexical-mismatch
+    repository:
+      type: fixture
+      path: datasets/repo-memory/gitnexus-contract/gitnexus-vector-lexical-mismatch/environment/repository
+      sha256: 936d4c9b87bd2eb9d3242ed90a6dd713400a660dffa0ab7d9e546d303890584b
+    expected_paths: [src/relay/amber_lantern.py]
+    metadata:
+      architecture: arm64
+      retrieval_contract: assigned-context-invocation-v1
+      semantic_probe:
+        query: hierarchical cleanup upstream grant invalid
+        expected_path: src/relay/amber_lantern.py

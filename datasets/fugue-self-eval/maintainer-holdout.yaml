@@ -1,0 +1,100 @@
+dataset:
+  path: datasets/fugue-self-eval/v1/maintainer
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 2
+jobs_dir: jobs/fugue-maintainer-self-eval
+harnesses:
+- name: hermes
+  agent: fugue.agents:FugueHermes
+- name: openclaw
+  agent: fugue.agents:FugueOpenClaw
+- name: claude-code
+  agent: fugue.agents:FugueClaudeCode
+- name: codex
+  agent: fugue.agents:FugueCodex
+tasks:
+- id: fugue-maintainer-model-role-precedence
+  notes: model-routing
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: model-routing
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/model_plane.py
+  - tests/test_model_plane.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-candidate-identity
+  notes: experiment-identity
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: experiment-identity
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/job_config.py
+  - tests/test_job_config.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-usage-na-preservation
+  notes: weave-enrichment
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: weave-enrichment
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/export.py
+  - tests/test_export.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-publication-ledger-finalization
+  notes: weave-publication
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: weave-publication
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/export.py
+  - tests/test_export.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-tui-review-authority
+  notes: terminal-operator
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: terminal-operator
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/tui.py
+  - tests/test_tui.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-maintainer-context-applicability
+  notes: context-binding
+  metadata:
+    suite: fugue-maintainer-v1
+    split: holdout
+    category: context-binding
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  expected_paths:
+  - fugue/bench/job_config.py
+  - tests/test_job_config.py
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e

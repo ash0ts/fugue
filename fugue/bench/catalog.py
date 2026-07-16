@@ -4,13 +4,14 @@ import hashlib
 import json
 import sqlite3
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fugue.bench.export import export_rows
+from fugue.bench.export import compile_export
 from fugue.bench.library import (
     ExperimentSpec,
     get_experiment,
@@ -18,7 +19,7 @@ from fugue.bench.library import (
 )
 from fugue.redaction import redact_value
 
-CATALOG_PATH = Path(".fugue/cache/catalog/v2/catalog.sqlite")
+CATALOG_PATH = Path(".fugue/cache/catalog/v1/catalog.sqlite")
 FILTER_FIELDS = {
     "record_type",
     "experiment_id",
@@ -31,12 +32,15 @@ FILTER_FIELDS = {
     "preset_id",
     "prompt_id",
     "skill_id",
+    "integration_id",
     "context_system_id",
     "provider",
     "model",
     "status",
     "intervention_type",
     "source",
+    "candidate_id",
+    "tag",
 }
 
 
@@ -124,11 +128,17 @@ class ExperimentCatalog:
         for key, value in (filters or {}).items():
             if key not in FILTER_FIELDS:
                 raise ValueError(f"unsupported catalog filter: {key}")
-            if key in {"preset_id", "prompt_id"}:
+            if key in {"preset_id", "prompt_id", "candidate_id"}:
                 clauses.append(f"json_extract(payload, '$.{key}') = ?")
-            elif key == "skill_id":
+            elif key in {"skill_id", "integration_id"}:
+                field = "skill_ids" if key == "skill_id" else "integration_ids"
                 clauses.append(
-                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, '$.skill_ids')) "
+                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, "
+                    f"'$.{field}')) WHERE json_each.value = ?)"
+                )
+            elif key == "tag":
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM json_each(json_extract(payload, '$.tags')) "
                     "WHERE json_each.value = ?)"
                 )
             else:
@@ -159,6 +169,7 @@ class ExperimentCatalog:
             "status",
             "intervention_type",
             "source",
+            "candidate_id",
         )
         result = {
             field: dict(
@@ -178,6 +189,23 @@ class ExperimentCatalog:
             else:
                 skills["none"] += 1
         result["skill_id"] = dict(sorted(skills.items()))
+        integrations: Counter[str] = Counter()
+        for row in values:
+            selected = row.get("integration_ids") or []
+            if isinstance(selected, str):
+                selected = [selected]
+            if selected:
+                integrations.update(str(item) for item in selected)
+            else:
+                integrations["none"] += 1
+        result["integration_id"] = dict(sorted(integrations.items()))
+        tags: Counter[str] = Counter()
+        for row in values:
+            selected_tags = row.get("tags") or []
+            if isinstance(selected_tags, str):
+                selected_tags = [selected_tags]
+            tags.update(str(item) for item in selected_tags if item)
+        result["tag"] = dict(sorted(tags.items()))
         return result
 
     def read_artifact(self, value: str | Path, *, max_bytes: int = 32_768) -> ArtifactExcerpt:
@@ -244,7 +272,7 @@ class ExperimentCatalog:
         else:
             connection.execute("DELETE FROM experiments")
 
-        rows = export_rows(
+        export = compile_export(
             [
                 path
                 for path in (
@@ -254,6 +282,7 @@ class ExperimentCatalog:
                 if path.exists()
             ]
         )
+        rows = [*export.predictions, *export.measurements]
         reports = self.repo_root / "reports"
         if reports.is_dir():
             for path in reports.rglob("*.jsonl"):
@@ -331,11 +360,19 @@ class ExperimentCatalog:
         source = "\n".join(str(row[0]) for row in [*experiments, *values])
         return hashlib.sha256(source.encode()).hexdigest()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA foreign_keys=ON")
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
@@ -405,15 +442,16 @@ def _variant_intervention(variant: Any) -> str:
     values: list[str] = []
     if variant.prompt_id:
         values.append("prompt")
-    if variant.skill_ids:
+    if variant.skills:
         values.append("skill")
     if variant.context.system_id != "none":
         values.append("context")
+    if variant.integrations:
+        values.append("integration")
     if any(
         (
             variant.agent_kwargs,
             variant.agent_env,
-            variant.mcp_servers,
             variant.environment,
             variant.verifier,
             variant.retry,

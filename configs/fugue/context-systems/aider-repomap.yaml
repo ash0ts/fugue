@@ -1,15 +1,37 @@
 id: aider-repomap
 title: Aider RepoMap
 description: Tree-sitter and PageRank based compact repository map.
-provider: fugue.bench.context:CommandContextProvider
+provider: fugue.bench.context:AiderRepoMapContextProvider
 version: aider-chat@0.86.2
-capabilities: [prepare, bind]
+capabilities: [prepare, bind, serve]
+deliveries: [portable]
+serve_deliveries: [portable]
 required_commands: [uvx]
 license: Apache-2.0
 source_url: https://github.com/Aider-AI/aider
 config:
   prepare:
-    command: [uvx, --from, "aider-chat==0.86.2", aider, --show-repo-map, --exit]
+    command:
+      - uvx
+      - --from
+      - aider-chat==0.86.2
+      - aider
+      - --model
+      - openai/fugue-builder
+      - --openai-api-base
+      - http://127.0.0.1:4000/v1
+      - --map-tokens
+      - "1024"
+      - --no-pretty
+      - --no-show-model-warnings
+      - --no-check-update
+      - --no-show-release-notes
+      - --no-gitignore
+      - --no-analytics
+      - --show-repo-map
+    env:
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY}
     stdout_path: REPO_MAP.md
+    output_marker: "Here are summaries of some files present in my git repository.\n"
   binding:
     extra_instruction_paths: ["{artifact}/REPO_MAP.md"]

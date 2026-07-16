@@ -1,0 +1,11 @@
+diff --git a/fugue/bench/job_config.py b/fugue/bench/job_config.py
+--- a/fugue/bench/job_config.py
++++ b/fugue/bench/job_config.py
+@@ -185,6 +185,6 @@ def _build_jobs(
+                     applicable
+                     and harness.name == "codex"
+                     and binding.mcp_servers
+-                    and route.provider != "openai"
++                    and route.provider == "openai"
+                 ):
+                     applicable = False
