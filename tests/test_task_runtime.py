@@ -53,12 +53,12 @@ def _verifier_fixture(tmp_path: Path):
     return load_manifest(manifest_path), dataset
 
 
-def _swebench_verifier_fixture(tmp_path: Path):
+def _swebench_verifier_fixture(tmp_path: Path, *, editable_target: str = "."):
     manifest, dataset = _fixture(tmp_path)
     (dataset / "tests").mkdir()
     script = (
         "#!/bin/bash\n"
-        "python -m pip install -e .\n"
+        f"python -m pip install -e {editable_target}\n"
         "from swebench.harness.test_spec.test_spec import make_test_spec\n"
         "test_spec   = make_test_spec(datum)\n"
         'uv run parser.py | tee -a "$LOG_FILE"\n'
@@ -229,6 +229,20 @@ def test_swebench_verifier_is_prepared_for_offline_trial(
         "original_sha256": hashlib.sha256(original_script.encode()).hexdigest(),
         "prepared_sha256": hashlib.sha256(rewritten.encode()).hexdigest(),
     }
+
+
+def test_swebench_verifier_accepts_locked_editable_extras(tmp_path: Path) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(
+        tmp_path, editable_target=".[test] --verbose"
+    )
+
+    task_runtime._lock_verifier_script(
+        source, manifest.tasks[0], manifest.dataset.verifier_runtime
+    )
+
+    rewritten = (source / "tests" / "test.sh").read_text()
+    assert "pip install" not in rewritten
+    assert "Setup prepared the task environment" in rewritten
 
 
 def test_swebench_verifier_rewrite_fails_closed_on_upstream_shape_change(
