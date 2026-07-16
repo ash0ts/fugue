@@ -271,12 +271,9 @@ tasks:
     assert config["n_attempts"] == 1
     assert config["fugue"]["trial_index"] == 1
     assert config["fugue"]["comparison_example_id"] == job.comparison_example_id
-    assert config["fugue"]["expected_evidence_paths"] == {
-        "astropy__astropy-12907": ["astropy/modeling/separable.py"]
-    }
-    assert json.loads(job.env["FUGUE_EXPECTED_EVIDENCE_PATHS"]) == {
-        "astropy__astropy-12907": ["astropy/modeling/separable.py"]
-    }
+    assert "expected_evidence_paths" not in config["fugue"]
+    assert "FUGUE_EXPECTED_EVIDENCE_PATHS" not in job.env
+    assert job.expected_evidence_paths == ("astropy/modeling/separable.py",)
     assert config["fugue"]["candidate_id"] == job.candidate_id
     assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "3"
     assert job.resolved_candidate.definition["harness_version"] == (

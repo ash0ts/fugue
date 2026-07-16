@@ -2045,11 +2045,10 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
             "FUGUE_DATASET": "fixture/tasks@1",
             "FUGUE_REPOSITORY": "org/repo",
             "FUGUE_BASE_COMMIT": "abc123",
-            "FUGUE_EXPECTED_EVIDENCE_PATHS": json.dumps(
-                {"task-a": ["src/expected.py"]}
-            ),
         },
         n_attempts=1,
+        expected_evidence_paths=("src/expected.py",),
+        evaluation_asset_lock_sha256="e" * 64,
     )
     planned = export._planned_evaluation_row(cell)
 
@@ -2062,7 +2061,8 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
     assert row["task_name"] == "task-a"
     assert row["dataset"] == "fixture/tasks@1"
     assert row["comparison_example_id"] == "example-a"
-    assert row["expected_evidence_paths"] == ["src/expected.py"]
+    assert "expected_evidence_paths" not in row
+    assert row["evaluation_asset_lock_sha256"] == "e" * 64
     assert (
         export._publication_candidates([row])[0]["evaluation_scope_id"]
         == export._publication_candidates([planned])[0]["evaluation_scope_id"]

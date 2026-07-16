@@ -22,6 +22,10 @@ from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
 from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.reproducibility import (
+    EVALUATION_ASSET_LOCK_NAME,
+    read_evaluation_asset_lock,
+)
 from fugue.bench.scoring import latency_summary, score_evidence_paths
 from fugue.model_plane import (
     ModelRoute,
@@ -667,7 +671,6 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
             f"t{cell.trial_index:03d}",
         )
     )
-    expected_paths = _json_mapping(env.get("FUGUE_EXPECTED_EVIDENCE_PATHS"))
     row = {
         "schema_version": PREDICTION_SCHEMA_VERSION,
         "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
@@ -707,7 +710,7 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "dataset": env.get("FUGUE_DATASET"),
         "repository": env.get("FUGUE_REPOSITORY"),
         "base_commit": env.get("FUGUE_BASE_COMMIT"),
-        "expected_evidence_paths": expected_paths.get(cell.task_id),
+        "evaluation_asset_lock_sha256": cell.evaluation_asset_lock_sha256 or None,
         "model_provider": cell.model_provider,
         "model": cell.model,
         "trace_project": env.get("WEAVE_PROJECT")
@@ -801,7 +804,7 @@ def _completed_evaluation_row(
         "episode_id",
         "repository",
         "base_commit",
-        "expected_evidence_paths",
+        "evaluation_asset_lock_sha256",
     ):
         if key in planned:
             row[key] = planned[key]
@@ -810,6 +813,11 @@ def _completed_evaluation_row(
         row["exception_message"] = outcome.error
     if outcome.status == "failed" and row.get("pass") is None:
         row["pass"] = False
+    _apply_host_evidence_scores(
+        row,
+        cell.expected_evidence_paths,
+        cell.evaluation_asset_lock_sha256,
+    )
     return row
 
 
@@ -911,6 +919,7 @@ def export_rows(
     fetch_weave: bool = False,
     weave_project: str | None = None,
     env: Mapping[str, str] | None = None,
+    repo_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     jobs = list(dict.fromkeys(path.resolve(strict=False) for path in jobs))
     rows = [
@@ -925,6 +934,7 @@ def export_rows(
     for row in rows:
         if row.get("record_type") == "trial" and row.get("run_key") in live_by_run_key:
             _merge_live_evaluation_row(row, live_by_run_key[str(row["run_key"])])
+    _apply_evaluation_asset_locks(rows, jobs, repo_root=repo_root)
     if fetch_weave:
         run_keys = list(
             dict.fromkeys(str(row["run_key"]) for row in rows if row.get("run_key"))
@@ -968,6 +978,76 @@ def export_rows(
             _merge_error_events(row)
     _apply_runtime_equivalence(rows)
     return rows
+
+
+def _apply_evaluation_asset_locks(
+    rows: list[dict[str, Any]],
+    jobs: list[Path],
+    *,
+    repo_root: Path | None,
+) -> None:
+    root = repo_root or _repo_root_from_export_paths(jobs)
+    if root is None:
+        return
+    locks: dict[str, Any] = {}
+    for row in rows:
+        run_id = str(row.get("run_id") or "")
+        if not run_id or run_id in locks:
+            continue
+        path = root / ".fugue" / "runtime" / run_id / EVALUATION_ASSET_LOCK_NAME
+        if path.is_file():
+            locks[run_id] = read_evaluation_asset_lock(path)
+    for row in rows:
+        if row.get("record_type") != "trial":
+            continue
+        run_id = str(row.get("run_id") or "")
+        lock = locks.get(run_id)
+        if lock is None:
+            continue
+        prediction_id = _prediction_id_from_row(row)
+        entry = lock.predictions.get(prediction_id) if prediction_id else None
+        expected = tuple((entry or {}).get("expected_evidence_paths") or ())
+        _apply_host_evidence_scores(row, expected, lock.lock_sha256)
+
+
+def _repo_root_from_export_paths(paths: list[Path]) -> Path | None:
+    for path in paths:
+        for parent in (path, *path.parents):
+            if parent.name == ".fugue":
+                return parent.parent
+    return None
+
+
+def _prediction_id_from_row(row: Mapping[str, Any]) -> str | None:
+    run_id = str(row.get("run_id") or "")
+    candidate_id = str(row.get("candidate_id") or "")
+    comparison_id = str(row.get("comparison_example_id") or "")
+    trial_index = _positive_int(row.get("trial_index"))
+    if not all((run_id, candidate_id, comparison_id, trial_index)):
+        return None
+    return _stable_digest(
+        {
+            "schema_version": PREDICTION_SCHEMA_VERSION,
+            "run_id": run_id,
+            "candidate_id": candidate_id,
+            "comparison_example_id": comparison_id,
+            "trial_index": trial_index,
+        }
+    )
+
+
+def _apply_host_evidence_scores(
+    row: dict[str, Any],
+    expected_paths: tuple[str, ...],
+    lock_sha256: str,
+) -> None:
+    if lock_sha256:
+        row["evaluation_asset_lock_sha256"] = lock_sha256
+    if not expected_paths:
+        return
+    scores = score_evidence_paths(expected_paths, row.get("evidence_paths") or ())
+    row["evidence_recall"] = scores["evidence_recall"]
+    row["citation_correctness"] = scores["evidence_precision"]
 
 
 def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1058,7 +1138,7 @@ _LOCAL_RESULT_FIELDS = {
     "evaluation_scope_id",
     "evidence_paths",
     "evidence_recall",
-    "expected_evidence_paths",
+    "evaluation_asset_lock_sha256",
     "inspected_paths",
     "local_error_events",
     "runtime_fingerprints",
@@ -1967,7 +2047,8 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
         "episode_id": row.get("episode_id") or row.get("episode"),
         "repository": row.get("repository"),
         "base_commit": row.get("base_commit"),
-        "expected_evidence_paths": row.get("expected_evidence_paths") or None,
+        "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256")
+        or None,
         "evaluation_case": row.get("evaluation_case") or None,
         "evaluation_scorers": row.get("evaluation_scorers") or None,
         "evaluation_rubrics": row.get("evaluation_rubrics") or None,
@@ -3317,8 +3398,6 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     )
     evidence = _evidence_summary(
         trial_dir,
-        trial.get("task_name"),
-        meta.get("expected_evidence_paths") or {},
         changed_paths=meta.get("changed_paths") or [],
     )
     trajectory_activity = _trajectory_activity(trial_dir)
@@ -3803,8 +3882,6 @@ def _gateway_identity_matches(
 
 def _evidence_summary(
     trial_dir: Path,
-    task_name: str | None,
-    expected_by_task: dict[str, Any],
     *,
     changed_paths: list[str],
 ) -> dict[str, Any]:
@@ -3825,11 +3902,6 @@ def _evidence_summary(
             item = value.get("path") if isinstance(value, dict) else value
             if item:
                 authored.append(str(item)[:1_000])
-    expected: list[str] = []
-    for key, values in expected_by_task.items():
-        if task_name == key or str(task_name or "").endswith(f"/{key}"):
-            expected = [str(value) for value in values]
-            break
     activity = _trajectory_activity(trial_dir)
     changed = [
         value
@@ -3837,14 +3909,10 @@ def _evidence_summary(
         if value
     ]
     observed = list(dict.fromkeys([*activity["inspected_paths"], *changed, *authored]))
-    scores = score_evidence_paths(expected, observed)
     return {
         "evidence_paths": observed,
         "agent_evidence_paths": list(dict.fromkeys(authored)),
         "changed_paths": list(dict.fromkeys(changed)),
-        "expected_evidence_paths": expected,
-        "evidence_recall": scores["evidence_recall"],
-        "citation_correctness": scores["evidence_precision"],
     }
 
 

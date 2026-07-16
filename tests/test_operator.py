@@ -29,9 +29,13 @@ from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.bench.reproducibility import (
     RunSnapshotV1,
     RunSnapshotV2,
+    RunSnapshotV3,
+    build_evaluation_asset_lock,
     build_run_snapshot,
+    read_evaluation_asset_lock,
     read_run_snapshot,
     verify_snapshot,
+    write_evaluation_asset_lock,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 from fugue.preflight import PreflightCheck
@@ -639,7 +643,7 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     )
 
 
-def test_snapshot_v2_records_resolved_plan_and_reads_v1(tmp_path: Path) -> None:
+def test_snapshot_v3_records_resolved_plan_and_reads_v1_v2(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     experiment = service.experiment("demo")
     request = service.request_for_experiment(experiment)
@@ -660,17 +664,32 @@ def test_snapshot_v2_records_resolved_plan_and_reads_v1(tmp_path: Path) -> None:
         env=service.env,
     )
 
-    assert isinstance(snapshot, RunSnapshotV2)
-    assert snapshot.schema_version == 2
+    assert isinstance(snapshot, RunSnapshotV3)
+    assert snapshot.schema_version == 3
     assert snapshot.source_experiment is not None
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
     assert read_run_snapshot(snapshot.to_dict()) == snapshot
 
-    legacy = {
+    v2 = {
         key: value
         for key, value in snapshot.to_dict().items()
+        if key
+        not in {
+            "evaluation_asset_lock_sha256",
+            "cohort_id",
+            "treatment_selection_sha256",
+        }
+    }
+    v2["schema_version"] = 2
+    parsed_v2 = read_run_snapshot(v2)
+    assert isinstance(parsed_v2, RunSnapshotV2)
+    assert not isinstance(parsed_v2, RunSnapshotV3)
+
+    legacy = {
+        key: value
+        for key, value in v2.items()
         if key
         not in {
             "source_experiment",
@@ -685,6 +704,42 @@ def test_snapshot_v2_records_resolved_plan_and_reads_v1(tmp_path: Path) -> None:
     parsed = read_run_snapshot(legacy)
     assert isinstance(parsed, RunSnapshotV1)
     assert not isinstance(parsed, RunSnapshotV2)
+
+
+def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(request, run_id="gold-lock", experiment=experiment)
+    jobs = [replace(job, expected_evidence_paths=("src/private-gold.py",)) for job in jobs]
+    cells = plan_cells(jobs, run_id="gold-lock", run_name="gold lock")
+    evaluation_assets = build_evaluation_asset_lock("gold-lock", cells)
+    path = write_evaluation_asset_lock(tmp_path, evaluation_assets)
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert read_evaluation_asset_lock(path) == evaluation_assets
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="gold-lock",
+        experiment=experiment,
+        request={"experiment_id": "demo", "cohort_id": "qualification"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+        evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+    )
+    serialized = json.dumps(snapshot.to_dict(), sort_keys=True)
+
+    assert snapshot.evaluation_asset_lock_sha256 == evaluation_assets.lock_sha256
+    assert snapshot.cohort_id == "qualification"
+    assert "src/private-gold.py" not in serialized
+    assert all(
+        "expected_evidence_paths" not in job.config.get("fugue", {})
+        and "FUGUE_EXPECTED_EVIDENCE_PATHS" not in job.env
+        for job in jobs
+    )
 
 
 def test_operator_resolves_source_provenance_once_per_plan(

@@ -346,6 +346,15 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--jobs-dir", type=Path)
     parser.add_argument(
+        "--cohort-id",
+        help="Stable cohort identity recorded in the immutable run snapshot",
+    )
+    parser.add_argument(
+        "--selection-lock",
+        type=Path,
+        help="Treatment selection lock required by preregistered confirmatory presets",
+    )
+    parser.add_argument(
         "--run-name",
         help="W&B/Weave run grouping name. Defaults to FUGUE_RUN_NAME or a timestamp.",
     )
@@ -732,6 +741,8 @@ def _request_from_args(
         tags=tuple(_csv(getattr(args, "tags", None)) or []),
         jobs_dir=getattr(args, "jobs_dir", None),
         trace_content=getattr(args, "trace_content", None),
+        cohort_id=getattr(args, "cohort_id", None),
+        selection_lock=getattr(args, "selection_lock", None),
     )
 
 

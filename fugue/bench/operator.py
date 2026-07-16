@@ -86,7 +86,12 @@ from fugue.bench.manifest import (
 )
 from fugue.bench.portable_runtime import prepare_runtime as prepare_portable_runtime
 from fugue.bench.portable_runtime import runtime_ready as portable_runtime_ready
-from fugue.bench.reproducibility import build_run_snapshot, write_run_input_lock
+from fugue.bench.reproducibility import (
+    build_evaluation_asset_lock,
+    build_run_snapshot,
+    write_evaluation_asset_lock,
+    write_run_input_lock,
+)
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.services import (
@@ -152,6 +157,8 @@ class ExperimentRequest:
     jobs_dir: Path | None = None
     trace_content: str | None = None
     agent_preset_id: str | None = None
+    cohort_id: str | None = None
+    selection_lock: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1828,6 +1835,18 @@ class OperatorService:
                 run_name=run_name,
                 scheduling_seed=selected_preset.scheduling_seed,
             )
+            evaluation_assets = build_evaluation_asset_lock(run_id, cells)
+            write_evaluation_asset_lock(self.repo_root, evaluation_assets)
+            cells = [
+                replace(
+                    cell,
+                    evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+                )
+                for cell in cells
+            ]
+            treatment_selection_sha256 = _selection_lock_digest(
+                request.selection_lock, self.repo_root
+            )
             run_snapshot = build_run_snapshot(
                 repo_root=self.repo_root,
                 run_id=run_id,
@@ -1836,6 +1855,8 @@ class OperatorService:
                 jobs=rendered,
                 cells=cells,
                 env=self.env,
+                evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+                treatment_selection_sha256=treatment_selection_sha256,
             )
             write_run_input_lock(self.repo_root, run_snapshot)
             if cancel_event.is_set():
@@ -3148,6 +3169,15 @@ def _env_id(value: str) -> str:
 
 def _resolve(root: Path, path: Path) -> Path:
     return path if path.is_absolute() else root / path
+
+
+def _selection_lock_digest(path: Path | None, repo_root: Path) -> str:
+    if path is None:
+        return ""
+    resolved = _resolve(repo_root, path)
+    if not resolved.is_file():
+        raise ValueError(f"treatment selection lock does not exist: {resolved}")
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
 
 
 def _run_job_paths(root: Path, run: ManagedRun) -> list[Path]:

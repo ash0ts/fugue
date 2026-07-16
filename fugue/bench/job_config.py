@@ -107,6 +107,7 @@ class RenderedJob:
     candidate_id: str
     resolved_candidate: ResolvedCandidate
     execution_kind: str
+    expected_evidence_paths: tuple[str, ...] = ()
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -529,6 +530,7 @@ def _build_jobs(
                         candidate_id=candidate_id,
                         resolved_candidate=resolved_candidate,
                         execution_kind="agent",
+                        expected_evidence_paths=tuple(tasks[0].expected_paths),
                         evaluation_case=evaluation_cases.get(tasks[0].id),
                         evaluation_rubrics=evaluation_rubrics,
                         scorer_hashes=dict(scorer_hashes),
@@ -709,9 +711,6 @@ def _job_config(
             resolved_skills=resolved_skills,
             repo_root=repo_root,
         ),
-        "expected_evidence_paths": {
-            task.id: list(task.expected_paths) for task in tasks if task.expected_paths
-        },
         "task_id": tasks[0].id,
         "repository": tasks[0].repo,
         "base_commit": tasks[0].base_commit,
@@ -948,14 +947,6 @@ def _job_env(
             "FUGUE_CONTEXT_CONFIG_HASH": _context_config_hash(context_spec),
             "FUGUE_CONTEXT_CACHE_KEYS": json.dumps(context_cache_keys, sort_keys=True),
             "FUGUE_CONTEXT_CACHE_ROOT": (repo_root / DEFAULT_CACHE_ROOT).as_posix(),
-            "FUGUE_EXPECTED_EVIDENCE_PATHS": json.dumps(
-                {
-                    task.id: list(task.expected_paths)
-                    for task in manifest.tasks
-                    if task.expected_paths
-                },
-                sort_keys=True,
-            ),
             "FUGUE_EXPECTED_ARTIFACT_PATHS": json.dumps(
                 expected_artifact_paths, sort_keys=True
             ),

@@ -70,6 +70,8 @@ class PlannedCell:
     n_attempts: int
     execution_kind: ExecutionKind = "agent"
     context_delivery: str = "portable"
+    expected_evidence_paths: tuple[str, ...] = ()
+    evaluation_asset_lock_sha256: str = ""
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -177,6 +179,7 @@ def plan_cells(
                 env=job.env,
                 n_attempts=job.n_attempts,
                 context_delivery=job.context_delivery,
+                expected_evidence_paths=job.expected_evidence_paths,
                 evaluation_case=job.evaluation_case,
                 evaluation_rubrics=job.evaluation_rubrics,
                 scorer_hashes=job.scorer_hashes,

@@ -568,7 +568,6 @@ done
             "context_gateway_events_path": os.environ.get(
                 "FUGUE_CONTEXT_GATEWAY_EVENTS_PATH"
             ),
-            "expected_evidence_paths": _json_env("FUGUE_EXPECTED_EVIDENCE_PATHS"),
             "expected_artifact_paths": _json_env("FUGUE_EXPECTED_ARTIFACT_PATHS"),
             "prompt_id": prompt_id,
             "prompt_hashes": _json_env("FUGUE_PROMPT_HASHES"),

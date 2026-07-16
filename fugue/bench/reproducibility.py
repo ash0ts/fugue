@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from fugue.bench.job_config import RenderedJob
 
 INPUT_LOCK_NAME = "input-lock.json"
+EVALUATION_ASSET_LOCK_NAME = "evaluation-assets.json"
+PREDICTION_ID_SCHEMA_VERSION = 2
 _SENSITIVE_NAME = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
@@ -71,7 +73,25 @@ class RunSnapshotV2(RunSnapshotV1):
         return value
 
 
-RunSnapshot = RunSnapshotV1 | RunSnapshotV2
+@dataclass(frozen=True)
+class RunSnapshotV3(RunSnapshotV2):
+    evaluation_asset_lock_sha256: str = ""
+    cohort_id: str = ""
+    treatment_selection_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class EvaluationAssetLockV1:
+    schema_version: int
+    run_id: str
+    predictions: dict[str, dict[str, Any]]
+    lock_sha256: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+RunSnapshot = RunSnapshotV1 | RunSnapshotV2 | RunSnapshotV3
 
 
 def build_run_snapshot(
@@ -83,7 +103,9 @@ def build_run_snapshot(
     jobs: list[RenderedJob],
     cells: list[PlannedCell],
     env: Mapping[str, str],
-) -> RunSnapshotV2:
+    evaluation_asset_lock_sha256: str = "",
+    treatment_selection_sha256: str = "",
+) -> RunSnapshotV3:
     secret_names = {
         value: name
         for name, value in env.items()
@@ -318,8 +340,8 @@ def build_run_snapshot(
             key=lambda item: item["candidate_id"],
         )
     )
-    base = RunSnapshotV2(
-        schema_version=2,
+    base = RunSnapshotV3(
+        schema_version=3,
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
         experiment=resolved_experiment,
@@ -345,13 +367,96 @@ def build_run_snapshot(
             int(item["planned_prediction_count"]) for item in planned_matrix
         ),
         runtime_locks=runtime_locks,
+        evaluation_asset_lock_sha256=evaluation_asset_lock_sha256,
+        cohort_id=str(request.get("cohort_id") or ""),
+        treatment_selection_sha256=treatment_selection_sha256,
     )
     serialized = json.dumps(base.to_dict(), sort_keys=True, default=str)
     for name, value in env.items():
         if _SENSITIVE_NAME.search(name) and len(value) >= 8 and value in serialized:
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
-    return RunSnapshotV2(**{**asdict(base), "snapshot_sha256": digest})
+    return RunSnapshotV3(**{**asdict(base), "snapshot_sha256": digest})
+
+
+def build_evaluation_asset_lock(
+    run_id: str, cells: list[PlannedCell]
+) -> EvaluationAssetLockV1:
+    predictions = {
+        _prediction_id(cell): {
+            "task_id": cell.task_id,
+            "expected_evidence_paths": list(cell.expected_evidence_paths),
+        }
+        for cell in cells
+        if cell.expected_evidence_paths
+    }
+    base = EvaluationAssetLockV1(
+        schema_version=1,
+        run_id=run_id,
+        predictions=predictions,
+    )
+    digest = stable_digest(base.to_dict())
+    return EvaluationAssetLockV1(
+        **{**asdict(base), "lock_sha256": digest}
+    )
+
+
+def write_evaluation_asset_lock(
+    repo_root: Path, lock: EvaluationAssetLockV1
+) -> Path:
+    path = repo_root / ".fugue" / "runtime" / lock.run_id / EVALUATION_ASSET_LOCK_NAME
+    payload = lock.to_dict()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise ValueError(
+                f"evaluation asset lock already exists with different content: {path}"
+            )
+        os.chmod(path, 0o600)
+        return path
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.chmod(path, 0o600)
+    return path
+
+
+def read_evaluation_asset_lock(path: Path) -> EvaluationAssetLockV1:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if int(payload.get("schema_version") or 0) != 1:
+        raise ValueError("unsupported evaluation asset lock schema")
+    expected = str(payload.get("lock_sha256") or "")
+    unsigned = {**payload, "lock_sha256": ""}
+    if not expected or stable_digest(unsigned) != expected:
+        raise ValueError("evaluation asset lock digest does not match its content")
+    return EvaluationAssetLockV1(
+        schema_version=1,
+        run_id=str(payload.get("run_id") or ""),
+        predictions=dict(payload.get("predictions") or {}),
+        lock_sha256=expected,
+    )
+
+
+def _prediction_id(cell: PlannedCell) -> str:
+    return stable_digest(
+        {
+            "schema_version": PREDICTION_ID_SCHEMA_VERSION,
+            "run_id": cell.run_id,
+            "candidate_id": cell.candidate_id,
+            "comparison_example_id": cell.comparison_example_id,
+            "trial_index": cell.trial_index,
+        }
+    )
 
 
 def write_run_input_lock(
@@ -402,6 +507,12 @@ def read_run_snapshot(payload: Mapping[str, Any]) -> RunSnapshot:
         values["capability_plan"] = tuple(values.get("capability_plan") or ())
         values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
         return RunSnapshotV2(**values)
+    if version == 3:
+        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
+        values["required_env"] = tuple(values.get("required_env") or ())
+        values["capability_plan"] = tuple(values.get("capability_plan") or ())
+        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
+        return RunSnapshotV3(**values)
     raise ValueError(f"unsupported run snapshot schema: {version}")
 
 
