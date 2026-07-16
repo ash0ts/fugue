@@ -233,9 +233,6 @@ def build_run_snapshot(
         agent_runtime = resolved.execution_definition.get("agent_runtime")
         if agent_runtime is not None:
             runtime["agent_runtime"] = agent_runtime
-        task_runtime = resolved.execution_definition.get("task_runtime")
-        if task_runtime is not None:
-            runtime["task_runtime"] = task_runtime
         if selected_fugue_source is not None:
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
@@ -317,16 +314,10 @@ def build_run_snapshot(
     runtime_locks = tuple(
         sorted(
             (
-                {
-                    "candidate_id": candidate_id,
-                    "configuration_sha256": runtime["configuration_sha256"],
-                    "context_runtime": runtime.get("context_runtime"),
-                    "agent_runtime": runtime.get("agent_runtime"),
-                    "task_runtime": runtime.get("task_runtime"),
-                }
-                for candidate_id, runtime in runtimes.items()
+                _execution_runtime_lock(fingerprint, execution)
+                for fingerprint, execution in executions.items()
             ),
-            key=lambda item: item["candidate_id"],
+            key=lambda item: item["execution_fingerprint"],
         )
     )
     base = RunSnapshotV1(
@@ -366,6 +357,19 @@ def build_run_snapshot(
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
     return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
+
+
+def _execution_runtime_lock(
+    execution_fingerprint: str, execution: Mapping[str, Any]
+) -> dict[str, Any]:
+    lock = {
+        "execution_fingerprint": execution_fingerprint,
+        "candidate_id": execution.get("candidate_id"),
+        "context_runtime": execution.get("context_runtime"),
+        "agent_runtime": execution.get("agent_runtime"),
+        "task_runtime": execution.get("task_runtime"),
+    }
+    return {**lock, "configuration_sha256": stable_digest(lock)}
 
 
 def build_evaluation_asset_lock(
