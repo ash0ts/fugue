@@ -48,11 +48,11 @@ def test_codex_runtime_uses_cell_home_and_structured_mcp_config(
 def test_static_context_registration_has_a_behavioral_digest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = object.__new__(FugueCodex)
-    agent.mcp_servers = []
-    agent.context_system_id = "agentsmd"
+    monkeypatch.setenv("FUGUE_CONTEXT_SYSTEM_ID", "agentsmd")
     monkeypatch.setenv("FUGUE_CONTEXT_DELIVERY", "portable")
     monkeypatch.setenv("FUGUE_CONTEXT_CONFIG_HASH", "config-a")
+    agent = object.__new__(FugueCodex)
+    agent.mcp_servers = []
 
     registration = agent._context_registration(
         {"status": "static", "delivery": "portable", "servers": 0}
