@@ -209,6 +209,8 @@ def test_cancel_cleanup_targets_only_snapshot_compose_projects(
         commands.append(command)
         if command[1:3] == ["ps", "-aq"]:
             return subprocess.CompletedProcess(command, 0, "container-a\n", "")
+        if command[1:4] == ["network", "ls", "-q"]:
+            return subprocess.CompletedProcess(command, 0, "network-a\n", "")
         return subprocess.CompletedProcess(command, 0, "container-a\n", "")
 
     monkeypatch.setattr(supervisor_module.shutil, "which", lambda name: "/docker")
@@ -229,4 +231,48 @@ def test_cancel_cleanup_targets_only_snapshot_compose_projects(
             "label=com.docker.compose.project=task-a__abc123__env",
         ],
         ["/docker", "rm", "-f", "container-a"],
+        [
+            "/docker",
+            "network",
+            "ls",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.project=task-a__abc123__env",
+        ],
+        ["/docker", "network", "rm", "network-a"],
     ]
+
+
+def test_cancel_cleanup_removes_network_after_failed_compose_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / ".fugue/runtime/run-cleanup"
+    run_dir.mkdir(parents=True)
+    job_dir = tmp_path / "jobs/demo/job-a"
+    (job_dir / "task-a__AbC123").mkdir(parents=True)
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {"planned_matrix": [{"result_path": "jobs/demo/job-a/result.json"}]}
+        )
+    )
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs):
+        commands.append(command)
+        if command[1:3] == ["ps", "-aq"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[1:4] == ["network", "ls", "-q"]:
+            return subprocess.CompletedProcess(command, 0, "network-a\n", "")
+        return subprocess.CompletedProcess(command, 0, "network-a\n", "")
+
+    monkeypatch.setattr(supervisor_module.shutil, "which", lambda name: "/docker")
+    monkeypatch.setattr(supervisor_module.subprocess, "run", run)
+
+    projects, errors = supervisor_module._cleanup_run_compose_projects(
+        tmp_path, run_dir
+    )
+
+    assert projects == ["task-a__abc123__env"]
+    assert errors == []
+    assert ["/docker", "rm", "-f", "container-a"] not in commands
+    assert commands[-1] == ["/docker", "network", "rm", "network-a"]

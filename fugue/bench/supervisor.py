@@ -397,16 +397,48 @@ def _cleanup_run_compose_projects(
             errors.append(f"{project}: docker ps failed: {listed.stderr.strip()}")
             continue
         container_ids = [item for item in listed.stdout.splitlines() if item]
-        if not container_ids:
-            continue
-        removed = subprocess.run(
-            [docker, "rm", "-f", *container_ids],
+        if container_ids:
+            removed = subprocess.run(
+                [docker, "rm", "-f", *container_ids],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if removed.returncode != 0:
+                errors.append(f"{project}: docker rm failed: {removed.stderr.strip()}")
+                continue
+        networks = subprocess.run(
+            [
+                docker,
+                "network",
+                "ls",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+            ],
             text=True,
             capture_output=True,
             check=False,
         )
-        if removed.returncode != 0:
-            errors.append(f"{project}: docker rm failed: {removed.stderr.strip()}")
+        if networks.returncode != 0:
+            errors.append(
+                f"{project}: docker network ls failed: {networks.stderr.strip()}"
+            )
+            continue
+        network_ids = [item for item in networks.stdout.splitlines() if item]
+        if not network_ids:
+            continue
+        removed_networks = subprocess.run(
+            [docker, "network", "rm", *network_ids],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if removed_networks.returncode != 0:
+            errors.append(
+                f"{project}: docker network rm failed: "
+                f"{removed_networks.stderr.strip()}"
+            )
     return projects, errors
 
 
