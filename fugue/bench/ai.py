@@ -243,7 +243,7 @@ class ExperimentComposer:
             env=env,
             trace_content=trace_content or base.trace_content,
             max_rounds=8,
-            max_tokens=16_384,
+            max_tokens=32_768,
             attributes={
                 "fugue.ai.base_experiment": base.id,
                 "fugue.ai.action": "compose",
