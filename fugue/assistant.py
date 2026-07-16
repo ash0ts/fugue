@@ -100,7 +100,7 @@ class AssistantModelClient:
         model: str,
         env: Mapping[str, str],
         *,
-        timeout_sec: float = 120.0,
+        timeout_sec: float = 300.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.env = dict(env)
@@ -730,8 +730,6 @@ class _AssistantTrace:
                         [AssistantMessage("assistant", response.text)]
                     )
                 _record_llm_usage(span, response.usage)
-            if error is not None:
-                span.error = f"{type(error).__name__}: {error}"
         finally:
             _exit(span, error)
 
@@ -762,8 +760,6 @@ class _AssistantTrace:
         try:
             if self.include_content and error is None:
                 span.result = redact_value(result)
-            if error is not None:
-                span.error = f"{type(error).__name__}: {error}"
         finally:
             _exit(span, error)
 

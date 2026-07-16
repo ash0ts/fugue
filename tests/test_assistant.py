@@ -287,3 +287,34 @@ def test_assistant_fails_once_when_structured_output_is_truncated() -> None:
         asyncio.run(agent.run([AssistantMessage("user", "compose")]))
 
     assert client.calls == 1
+
+
+def test_assistant_trace_reports_errors_through_typed_span_exit() -> None:
+    class Span:
+        __slots__ = ("exited",)
+
+        def __init__(self) -> None:
+            self.exited: tuple[object, ...] | None = None
+
+        def __exit__(self, *error: object) -> None:
+            self.exited = error
+
+    trace = _AssistantTrace(
+        role="composer",
+        route=resolve_model_route("wandb/test-model", {}),
+        env={},
+        trace_content="full",
+        session_id="session",
+        attributes={},
+    )
+    failure = TimeoutError("provider timed out")
+    llm = Span()
+    tool = Span()
+
+    trace.finish_llm(llm, error=failure)
+    trace.finish_tool(tool, error=failure)
+
+    assert llm.exited is not None
+    assert llm.exited[:2] == (TimeoutError, failure)
+    assert tool.exited is not None
+    assert tool.exited[:2] == (TimeoutError, failure)
