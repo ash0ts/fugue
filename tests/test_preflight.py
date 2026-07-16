@@ -67,6 +67,25 @@ def test_preflight_reports_harbor_runtime_adapter_check(
     assert adapters.detail == "harbor runtime"
 
 
+def test_preflight_reports_the_resolved_provider_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+
+    checks = run_preflight(
+        "anthropic/claude-haiku-4-5-20251001",
+        repo_root=tmp_path,
+        env={"ANTHROPIC_API_KEY": "present"},
+        live=False,
+    )
+
+    route = next(check for check in checks if check.name == "model route")
+    assert route.detail == (
+        "anthropic/claude-haiku-4-5-20251001 via anthropic "
+        "at https://api.anthropic.com"
+    )
+
+
 def test_job_configs_are_validated_by_harbor_tool_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

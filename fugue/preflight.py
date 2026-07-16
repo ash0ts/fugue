@@ -71,7 +71,7 @@ def run_preflight(
         PreflightCheck(
             "model route",
             True,
-            f"{route.display_model} via {route.provider}",
+            f"{route.display_model} via {route.provider} at {_route_endpoint(route)}",
         )
     )
     _append_env_checks(checks, route, values)
@@ -94,6 +94,15 @@ def run_preflight(
         )
     )
     return checks
+
+
+def _route_endpoint(route: ModelRoute) -> str:
+    return str(
+        route.responses_base_url
+        or route.messages_base_url
+        or route.chat_base_url
+        or "unavailable"
+    )
 
 
 def _append_env_checks(
