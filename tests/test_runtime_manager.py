@@ -226,12 +226,13 @@ def test_repository_preparation_uses_the_active_runtime_paths(
     )
     artifact = tmp_path / "artifact"
     (artifact / "repository").mkdir(parents=True)
-    commands: list[list[str]] = []
-    monkeypatch.setattr(
-        runtime_manager.subprocess,
-        "run",
-        lambda command, **kwargs: commands.append(command),
-    )
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(command: list[str], **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "index output", "diagnostic")
+
+    monkeypatch.setattr(runtime_manager.subprocess, "run", run)
 
     runtime_manager.prepare_runtime_repository(
         "gitnexus",
@@ -241,11 +242,57 @@ def test_repository_preparation_uses_the_active_runtime_paths(
         config={"retrieval_mode": "bm25"},
     )
 
-    command = commands[0]
+    command, kwargs = calls[0]
     assert any(value.endswith(",dst=/workspace/repository") for value in command)
     assert any(value.endswith(",dst=/workspace/state/home") for value in command)
     assert command[-1] == "/workspace/repository"
     assert "GITNEXUS_HOME=/workspace/state/home/.gitnexus" in command
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+
+
+def test_repository_preparation_reports_captured_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = runtime_manager.RUNTIMES["gitnexus"]
+    root = tmp_path / runtime_manager.RUNTIME_ROOT / "gitnexus"
+    root.mkdir(parents=True)
+    (root / "runtime-lock.json").write_text(
+        json.dumps(
+            {
+                "recipe_sha256": spec.recipe_sha256,
+                "image": spec.image,
+                "image_id": "sha256:" + "a" * 64,
+            }
+        )
+    )
+    artifact = tmp_path / "artifact"
+    (artifact / "repository").mkdir(parents=True)
+
+    def fail(command: list[str], **kwargs):
+        raise subprocess.CalledProcessError(
+            17,
+            command,
+            output="index output",
+            stderr="index diagnostic",
+        )
+
+    monkeypatch.setattr(runtime_manager.subprocess, "run", fail)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "(?s)gitnexus repository preparation failed: "
+            "index output.*index diagnostic"
+        ),
+    ):
+        runtime_manager.prepare_runtime_repository(
+            "gitnexus",
+            repo_root=tmp_path,
+            artifact=artifact,
+            env={},
+            config={"retrieval_mode": "bm25"},
+        )
 
 
 def test_gitnexus_hybrid_preparation_is_offline_and_fails_closed(

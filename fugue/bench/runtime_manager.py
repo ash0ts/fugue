@@ -530,6 +530,8 @@ def probe_runtime_install(system_id: str, repo_root: Path) -> None:
         ],
         cwd=repo_root,
         check=True,
+        capture_output=True,
+        text=True,
         timeout=30,
     )
 
@@ -631,42 +633,52 @@ def _run_repository_prepare(
     runtime_env: list[str],
     docker_env: dict[str, str],
 ) -> None:
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=1g",
-            "--mount",
-            f"type=bind,src={repository.resolve()},dst={spec.repository_mount}",
-            "--mount",
-            f"type=bind,src={home.resolve()},dst={spec.state_mount}/home",
-            "--env",
-            f"HOME={spec.state_mount}/home",
-            *selected_env,
-            *runtime_env,
-            "--workdir",
-            spec.repository_mount,
-            "--entrypoint",
-            command[0],
-            image,
-            *command[1:],
-        ],
-        cwd=repo_root,
-        env=docker_env,
-        check=True,
-        timeout=1800,
-    )
+    invocation = [
+        "docker",
+        "run",
+        "--rm",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=1g",
+        "--mount",
+        f"type=bind,src={repository.resolve()},dst={spec.repository_mount}",
+        "--mount",
+        f"type=bind,src={home.resolve()},dst={spec.state_mount}/home",
+        "--env",
+        f"HOME={spec.state_mount}/home",
+        *selected_env,
+        *runtime_env,
+        "--workdir",
+        spec.repository_mount,
+        "--entrypoint",
+        command[0],
+        image,
+        *command[1:],
+    ]
+    try:
+        subprocess.run(
+            invocation,
+            cwd=repo_root,
+            env=docker_env,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = f"{exc.stdout or ''}\n{exc.stderr or ''}".strip()[-2_000:]
+        raise RuntimeError(
+            f"{spec.system_id} repository preparation failed: "
+            f"{detail or f'exit code {exc.returncode}'}"
+        ) from exc
 
 
 def _gitnexus_graph_stats(artifact: Path) -> tuple[int, int]:
