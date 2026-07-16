@@ -1815,6 +1815,12 @@ class OperatorService:
                 else request.run_name or resolved.run_name or resolved.id
             )
             selected_preset = select_preset(resolved, request.preset)
+            max_workers = (
+                request.n_concurrent
+                or selected_preset.n_concurrent
+                or resolved.n_concurrent
+                or 2
+            )
             cells = plan_cells(
                 rendered,
                 run_id=run_id,
@@ -1864,6 +1870,7 @@ class OperatorService:
                     "input_lock": "input-lock.json",
                     "snapshot_sha256": run_snapshot.snapshot_sha256,
                     "scheduling_seed": selected_preset.scheduling_seed,
+                    "max_workers": max_workers,
                 },
             )
             running = True
@@ -1896,7 +1903,7 @@ class OperatorService:
             outcomes = execute_cells(
                 cells,
                 repo_root=self.repo_root,
-                max_workers=request.n_concurrent or resolved.n_concurrent or 2,
+                max_workers=max_workers,
                 runner=cell_runner,
                 cell_started=live.begin_cell if live is not None else None,
                 cell_finished=(

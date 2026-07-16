@@ -11,7 +11,12 @@ import pytest
 
 import fugue.bench.operator as operator_module
 from fugue.bench.ai import AssetDraft
-from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
+from fugue.bench.execution import (
+    CellOutcome,
+    plan_cells,
+    read_run_manifest,
+    write_run_manifest,
+)
 from fugue.bench.export import PublicationResult, PublishedEvaluation
 from fugue.bench.library import (
     ContextSelection,
@@ -430,6 +435,42 @@ def test_execute_run_persists_snapshot_before_first_cell(
     assert manifest is not None
     assert manifest["evaluation_runs"][0]["agent_predictions"] == 1
     assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
+
+
+def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment_path = tmp_path / "configs/fugue/experiments/demo.yaml"
+    experiment_path.write_text(
+        experiment_path.read_text()
+        + "\npresets:\n  parallel:\n    n_concurrent: 4\n"
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    captured: dict[str, int] = {}
+
+    def execute(cells, *, max_workers, **kwargs):
+        captured["max_workers"] = max_workers
+        return [CellOutcome(cell.id, "passed", returncode=0) for cell in cells]
+
+    monkeypatch.setattr("fugue.bench.operator.execute_cells", execute)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo", preset="parallel"),
+        run_id="preset-concurrency",
+    )
+
+    assert result.status == "passed"
+    assert captured["max_workers"] == 4
+    manifest = read_run_manifest(
+        tmp_path / ".fugue/runtime/preset-concurrency"
+    )
+    assert manifest is not None
+    assert manifest["max_workers"] == 4
 
 
 def test_execute_run_only_validates_agent_job_configs(
