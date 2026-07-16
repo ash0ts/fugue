@@ -20,6 +20,7 @@ from fugue.assistant import (
     AssistantModelClient,
     AssistantRunResult,
     AssistantTool,
+    AssistantUsage,
     select_assistant_model,
 )
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
@@ -270,6 +271,12 @@ class ExperimentComposer:
         for attempt in range(3):
             result = await agent.run(messages)
             try:
+                result = await self._complete_generated_evaluation(
+                    result,
+                    request=request,
+                    client=client,
+                    trace_content=trace_content or base.trace_content,
+                )
                 draft = self._validate_draft(result, base)
             except Exception as exc:
                 validation_error = exc
@@ -287,6 +294,110 @@ class ExperimentComposer:
             return draft
         assert validation_error is not None
         raise ValueError(f"composer draft remained invalid: {validation_error}")
+
+    async def _complete_generated_evaluation(
+        self,
+        result: AssistantRunResult,
+        *,
+        request: str,
+        client: AssistantModelClient,
+        trace_content: str,
+    ) -> AssistantRunResult:
+        raw = result.payload
+        experiment_raw = raw.get("experiment")
+        if not isinstance(experiment_raw, dict):
+            raise ValueError("submit_experiment requires an experiment object")
+        assets = tuple(_asset_draft(item) for item in raw.get("assets") or [])
+        experiment = experiment_from_data(experiment_raw)
+        if not needs_evaluation_generation(experiment):
+            return result
+        _validate_experiment_references(
+            experiment,
+            assets,
+            self.repo_root,
+            self.operator.env,
+            overlay=_asset_overlay(assets),
+        )
+        sources = source_catalog(
+            experiment,
+            self.repo_root,
+            allow_mcp_io=True,
+            draft_assets={(item.kind, item.id): item.body for item in assets},
+        )
+        base_messages = [
+            AssistantMessage("system", _evaluation_generator_instructions()),
+            AssistantMessage(
+                "user",
+                json.dumps(
+                    {
+                        "request": request,
+                        "experiment": experiment.to_dict(),
+                        "sources": [source.public() for source in sources],
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            ),
+        ]
+        input_tokens = result.usage.input_tokens or 0
+        output_tokens = result.usage.output_tokens or 0
+        validation_error: Exception | None = None
+        for _ in range(3):
+            messages = list(base_messages)
+            if validation_error is not None:
+                messages.append(
+                    AssistantMessage(
+                        "user",
+                        "The generated evaluation failed deterministic validation. "
+                        f"Correct only the cases or rubric. Error: {validation_error}",
+                    )
+                )
+            generator = AssistantAgent(
+                client,
+                role="composer",
+                tools=(
+                    AssistantTool(
+                        "submit_evaluation",
+                        "Submit the complete generated evaluation cases and rubric.",
+                        _evaluation_submission_schema(),
+                        terminal=True,
+                    ),
+                ),
+                env=self.operator.env,
+                trace_content=trace_content,
+                max_rounds=2,
+                max_tokens=32_768,
+                attributes={
+                    "fugue.ai.action": "generate_evaluation",
+                    "fugue.ai.experiment_id": experiment.id,
+                },
+            )
+            generated = await generator.run(messages)
+            input_tokens += generated.usage.input_tokens or 0
+            output_tokens += generated.usage.output_tokens or 0
+            try:
+                build_evaluation_draft(
+                    generated.payload,
+                    experiment,
+                    generator_model=generated.model,
+                    source_catalog=sources,
+                    repo_root=self.repo_root,
+                )
+            except Exception as exc:
+                validation_error = exc
+                continue
+            return AssistantRunResult(
+                payload={**raw, "evaluation": generated.payload},
+                messages=(*result.messages, *generated.messages),
+                usage=AssistantUsage(input_tokens, output_tokens),
+                model=result.model,
+                provider=result.provider,
+                session_id=result.session_id,
+            )
+        assert validation_error is not None
+        raise ValueError(
+            f"generated evaluation remained invalid: {validation_error}"
+        )
 
     def save(
         self,
@@ -1647,7 +1758,11 @@ def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:
 
 
 def _composer_instructions() -> str:
-    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Never copy an existing catalog asset into assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Every authored variant must declare context as a mapping with both system_id and delivery, including no-context variants. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Keep generated cases concise; do not repeat source content or the base experiment inside instructions, assertions, or rationale. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, context, integration, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Never copy an existing catalog asset into assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Every authored variant must declare context as a mapping with both system_id and delivery, including no-context variants. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, configure evaluation_generation with the exact suite id, workload id, size, and typed sources. Do not generate cases or a rubric in this stage; Fugue runs that explicit bounded generation after the experiment plan validates. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional new prompt/skill asset drafts, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+
+
+def _evaluation_generator_instructions() -> str:
+    return """Generate only the evaluation suite configured by the supplied experiment. Call submit_evaluation with exactly evaluation_generation.size concise grounded cases and one rubric. Do not repeat source content or the experiment inside instructions or assertions. Every case must cite supplied source ids and contain at least one expected fact, tool assertion, or artifact assertion. Cover easy, boundary, failure, and integration behavior across the applicable families. Use only the five supported rubric dimensions, separate 0..1 scores, and a default 0.7 threshold. Never invent sources, include secrets, or claim the suite has run."""
 
 
 def _analyst_planner_instructions() -> str:
@@ -1678,25 +1793,28 @@ def _experiment_submission_schema() -> dict[str, Any]:
                     "additionalProperties": False,
                 },
             },
-            "evaluation": {
-                "type": "object",
-                "properties": {
-                    "suite_id": {"type": "string"},
-                    "cases": {
-                        "type": "array",
-                        "maxItems": 64,
-                        "items": _evaluation_case_submission_schema(),
-                    },
-                    "rubric": _evaluation_rubric_submission_schema(),
-                },
-                "required": ["suite_id", "cases", "rubric"],
-                "additionalProperties": False,
-            },
             "rationale": {"type": "string"},
             "assumptions": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["experiment", "rationale", "assumptions", "warnings"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_submission_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "suite_id": {"type": "string", "maxLength": 128},
+            "cases": {
+                "type": "array",
+                "maxItems": 64,
+                "items": _evaluation_case_submission_schema(),
+            },
+            "rubric": _evaluation_rubric_submission_schema(),
+        },
+        "required": ["suite_id", "cases", "rubric"],
         "additionalProperties": False,
     }
 
