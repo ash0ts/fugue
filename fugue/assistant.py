@@ -246,7 +246,23 @@ class AssistantAgent:
                     )
                 )
                 if not response.tool_calls:
-                    payload = _json_object(response.text)
+                    try:
+                        payload = _json_object(response.text)
+                    except ValueError:
+                        terminal_tools = [tool.name for tool in self.tools if tool.terminal]
+                        if not terminal_tools:
+                            raise
+                        history.append(
+                            AssistantMessage(
+                                role="user",
+                                content=(
+                                    "Your response did not satisfy the required structured "
+                                    "output contract. Call exactly one terminal tool: "
+                                    f"{', '.join(terminal_tools)}."
+                                ),
+                            )
+                        )
+                        continue
                     tracer.finish(payload)
                     return self._result(payload, history, input_tokens, output_tokens)
                 for call in response.tool_calls:

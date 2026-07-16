@@ -7,10 +7,12 @@ import httpx
 import weave
 
 from fugue.assistant import (
+    AssistantAgent,
     AssistantMessage,
     AssistantModelClient,
     AssistantResponse,
     AssistantTool,
+    AssistantToolCall,
     AssistantUsage,
     _AssistantTrace,
     select_assistant_model,
@@ -184,3 +186,58 @@ def test_assistant_trace_preserves_weave_conversation_types(monkeypatch) -> None
     )
 
     assert span.closed is True
+
+
+def test_assistant_retries_unstructured_response_with_terminal_tool_contract() -> None:
+    class Client:
+        route = resolve_model_route("wandb/test-model", {})
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[AssistantMessage, ...]] = []
+
+        async def complete(
+            self,
+            messages: list[AssistantMessage],
+            *,
+            tools: tuple[AssistantTool, ...],
+        ) -> AssistantResponse:
+            self.calls.append(tuple(messages))
+            if len(self.calls) == 1:
+                return AssistantResponse(text="I can help with that.")
+            assert messages[-1].role == "user"
+            assert "submit" in messages[-1].content
+            return AssistantResponse(
+                text="",
+                tool_calls=(
+                    AssistantToolCall(
+                        id="call-1",
+                        name="submit",
+                        arguments={"value": "accepted"},
+                    ),
+                ),
+            )
+
+    client = Client()
+    agent = AssistantAgent(
+        client,  # type: ignore[arg-type]
+        role="composer",
+        tools=(
+            AssistantTool(
+                "submit",
+                "Submit the result",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+                terminal=True,
+            ),
+        ),
+        env={},
+        max_rounds=2,
+    )
+
+    result = asyncio.run(agent.run([AssistantMessage("user", "compose")]))
+
+    assert result.payload == {"value": "accepted"}
+    assert len(client.calls) == 2
