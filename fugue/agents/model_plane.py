@@ -1197,7 +1197,10 @@ class FugueHermes(_TrialMetaMixin, Hermes):
             "model": self.model_route.model_id,
             "provider": provider,
             "toolsets": ["hermes-cli"],
-            "agent": {"max_turns": 90},
+            "agent": {
+                "max_turns": 90,
+                "disabled_toolsets": ["delegation"],
+            },
             "memory": {"memory_enabled": False, "user_profile_enabled": False},
             "compression": {"enabled": True, "threshold": 0.85},
             "terminal": {"backend": "local", "timeout": 180},

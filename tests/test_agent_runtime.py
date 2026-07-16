@@ -59,6 +59,8 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             assert forbidden not in adapter, (harness, forbidden)
 
     hermes_adapter = ranges["hermes"]
+    assert agent_runtime.RUNTIMES["hermes"].version.endswith("+single-agent.1")
+    assert '"disabled_toolsets": ["delegation"]' in hermes_adapter
     assert 'cat >> "$HOME/.hermes/config.yaml"' in hermes_adapter
     assert 'mkdir -p "$HOME/.hermes/skills"' in hermes_adapter
     assert "/tmp/hermes/config.yaml" not in hermes_adapter
