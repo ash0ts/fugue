@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from fugue.bench.files import require_unique
 from fugue.bench.sources import (
     GitSourceSpec,
     canonical_git_url,
@@ -271,8 +272,8 @@ def load_manifest(path: Path | str, *, text: str | None = None) -> BenchmarkMani
         raise ValueError(f"{manifest_path}: at least one harness is required")
     if not tasks:
         raise ValueError(f"{manifest_path}: at least one task is required")
-    _require_unique([harness.name for harness in harnesses], "harness", manifest_path)
-    _require_unique([task.id for task in tasks], "task", manifest_path)
+    require_unique([harness.name for harness in harnesses], "harness", manifest_path)
+    require_unique([task.id for task in tasks], "task", manifest_path)
     k = _positive_int(raw.get("k", 1), "k", manifest_path)
     n_concurrent = _positive_int(
         raw.get("n_concurrent", 2), "n_concurrent", manifest_path
@@ -500,12 +501,3 @@ def fixture_repository_digest(root: Path) -> str:
         digest.update(len(body).to_bytes(8, "big"))
         digest.update(body)
     return digest.hexdigest()
-
-
-def _require_unique(values: list[str], kind: str, path: Path) -> None:
-    counts: dict[str, int] = {}
-    for value in values:
-        counts[value] = counts.get(value, 0) + 1
-    duplicates = sorted(value for value, count in counts.items() if count > 1)
-    if duplicates:
-        raise ValueError(f"{path}: duplicate {kind} id(s): {', '.join(duplicates)}")

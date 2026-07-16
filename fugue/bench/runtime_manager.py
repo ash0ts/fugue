@@ -5,12 +5,14 @@ import json
 import os
 import shutil
 import subprocess
-import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 
 RUNTIME_ROOT = Path(".fugue/runtime/context-runtimes")
 GATEWAY_PORT = 8765
@@ -470,7 +472,7 @@ def prepare_runtime(
         "repository_state_paths": list(spec.repository_state_paths),
         "runtime_env": dict(spec.runtime_env),
     }
-    _atomic_json(root / "runtime-lock.json", lock)
+    atomic_write_json(root / "runtime-lock.json", lock)
     return lock
 
 
@@ -839,7 +841,10 @@ def query_gitnexus(
         telemetry["vector_model_digest"] = telemetry.pop("model_digest")
     if "query_latency_ms" in telemetry:
         telemetry["vector_query_latency_ms"] = telemetry.pop("query_latency_ms")
-    if mode == GITNEXUS_VECTOR_MODE and telemetry.get("vector_search_succeeded") is not True:
+    if (
+        mode == GITNEXUS_VECTOR_MODE
+        and telemetry.get("vector_search_succeeded") is not True
+    ):
         raise RuntimeError("GitNexus hybrid query did not execute vector retrieval")
     return payload, telemetry
 
@@ -1027,33 +1032,6 @@ done
 cd /workspace/repository
 exec /opt/gateway/bin/python /opt/fugue/mcp_gateway.py --host 0.0.0.0 --port 8765 -- "$@"
 """
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if (
-        not isinstance(values, list)
-        or len(values) != 1
-        or not isinstance(values[0], dict)
-    ):
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
 
 
 def _digest(value: Any) -> str:

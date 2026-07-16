@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
-import uuid
 from pathlib import Path
 from typing import Any
 
 from filelock import FileLock
+
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 
 RUNTIME_ROOT = Path(".fugue/runtime/portable-context-runtime")
 
@@ -76,7 +77,7 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
             "architecture": inspected.get("Architecture"),
             "os": inspected.get("Os"),
         }
-        _atomic_json(root / "runtime-lock.json", lock)
+        atomic_write_json(root / "runtime-lock.json", lock)
         return lock
 
 
@@ -108,25 +109,3 @@ def runtime_ready(repo_root: Path) -> tuple[bool, str]:
     if inspected.get("Id") != lock.get("image_id"):
         return False, "portable runtime image does not match runtime-lock.json"
     return True, f"{lock['image']} matches {str(lock['image_id'])[:19]}"
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if not isinstance(values, list) or len(values) != 1:
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)

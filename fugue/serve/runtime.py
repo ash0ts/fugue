@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import uuid
@@ -14,6 +13,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from fugue.bench.files import terminate_async_process_group as _terminate_process
 from fugue.weave_support import trace_async_operation
 
 
@@ -22,9 +22,7 @@ class ConversationRequest:
     messages: tuple[dict[str, str], ...]
 
     @classmethod
-    def normalized(
-        cls, messages: tuple[dict[str, str], ...]
-    ) -> ConversationRequest:
+    def normalized(cls, messages: tuple[dict[str, str], ...]) -> ConversationRequest:
         if not messages:
             raise ValueError("a non-empty text message history is required")
         if len(messages) > 128:
@@ -45,17 +43,20 @@ class ConversationRequest:
         return cls(messages=tuple(normalized))
 
     def render_json(self) -> str:
-        return json.dumps(
-            {
-                "instruction": (
-                    "Continue this stateless conversation and return only the "
-                    "assistant's next response."
-                ),
-                "messages": list(self.messages),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ) + "\n"
+        return (
+            json.dumps(
+                {
+                    "instruction": (
+                        "Continue this stateless conversation and return only the "
+                        "assistant's next response."
+                    ),
+                    "messages": list(self.messages),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
 
 
 @dataclass(frozen=True)
@@ -103,9 +104,7 @@ class HarborWorkerBackend:
         self.env = dict(os.environ if env is None else env)
         self.runtime_dir = (
             runtime_dir
-            or Path(
-                self.env.get("FUGUE_SERVE_RUNTIME_DIR", "/var/lib/fugue/requests")
-            )
+            or Path(self.env.get("FUGUE_SERVE_RUNTIME_DIR", "/var/lib/fugue/requests"))
         ).resolve()
         self.python = python or sys.executable
 
@@ -171,9 +170,7 @@ class HarborWorkerBackend:
             (task_dir / "instruction.md").write_text(
                 request.conversation.render_json(), encoding="utf-8"
             )
-            (task_dir / "task.toml").write_text(
-                self._task_toml(), encoding="utf-8"
-            )
+            (task_dir / "task.toml").write_text(self._task_toml(), encoding="utf-8")
             config_path = request_dir / "job-config.json"
             config_path.write_text(
                 json.dumps(
@@ -214,9 +211,7 @@ class HarborWorkerBackend:
         finally:
             shutil.rmtree(request_dir, ignore_errors=True)
 
-    def _job_config(
-        self, request: WorkerRequest, task_dir: Path
-    ) -> dict[str, Any]:
+    def _job_config(self, request: WorkerRequest, task_dir: Path) -> dict[str, Any]:
         candidate = self.deployment["candidate"]
         agent = _resolve_runtime_env(candidate["agent"], self.env)
         agent_env = dict(agent.get("env") or {})
@@ -246,9 +241,7 @@ class HarborWorkerBackend:
                 "FUGUE_TRIAL_INDEX": "1",
                 "FUGUE_COMPARISON_EXAMPLE_ID": request.request_id,
                 "FUGUE_CONVERSATION_KEY": request.request_id,
-                "FUGUE_TRACE_CONTENT": str(
-                    candidate.get("trace_content") or "full"
-                ),
+                "FUGUE_TRACE_CONTENT": str(candidate.get("trace_content") or "full"),
                 "FUGUE_SERVE_DEPLOYMENT_ID": self.deployment["deployment_id"],
                 "FUGUE_SERVE_REQUEST_ID": request.request_id,
                 "FUGUE_SERVE_PROTOCOL": request.protocol,
@@ -256,12 +249,8 @@ class HarborWorkerBackend:
         )
         agent_env.update(_model_route_env(self.deployment))
         agent["env"] = agent_env
-        agent["override_timeout_sec"] = int(
-            self.deployment["resources"]["timeout_sec"]
-        )
-        environment = _resolve_runtime_env(
-            candidate.get("environment") or {}, self.env
-        )
+        agent["override_timeout_sec"] = int(self.deployment["resources"]["timeout_sec"])
+        environment = _resolve_runtime_env(candidate.get("environment") or {}, self.env)
         environment.update(
             {
                 "type": self._harbor_environment(),
@@ -284,8 +273,7 @@ class HarborWorkerBackend:
             "environment": environment,
             "verifier": {"disable": True},
             "retry": {"max_retries": 0},
-            "extra_instruction_paths": candidate.get("extra_instruction_paths")
-            or [],
+            "extra_instruction_paths": candidate.get("extra_instruction_paths") or [],
         }
 
     def _task_toml(self) -> str:
@@ -367,30 +355,12 @@ class HarborWorkerBackend:
 
     def _harbor_environment(self) -> str:
         return (
-            self.env.get("FUGUE_SERVE_HARBOR_ENVIRONMENT", "docker").strip()
-            or "docker"
+            self.env.get("FUGUE_SERVE_HARBOR_ENVIRONMENT", "docker").strip() or "docker"
         )
 
 
 def render_conversation(messages: tuple[dict[str, str], ...]) -> str:
     return ConversationRequest.normalized(messages).render_json()
-
-
-async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(process.wait(), timeout=10)
-    except TimeoutError:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await process.wait()
 
 
 def _read_worker_result(path: Path) -> dict[str, Any]:
@@ -422,14 +392,15 @@ def _resolve_runtime_env(value: Any, env: dict[str, str]) -> Any:
         return [_resolve_runtime_env(item, env) for item in value]
     if isinstance(value, dict):
         return {
-            str(key): _resolve_runtime_env(item, env)
-            for key, item in value.items()
+            str(key): _resolve_runtime_env(item, env) for key, item in value.items()
         }
     if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
         name = value[2:-1]
         resolved = env.get(name)
         if resolved is None:
-            raise RuntimeError(f"required runtime environment variable is missing: {name}")
+            raise RuntimeError(
+                f"required runtime environment variable is missing: {name}"
+            )
         return resolved
     return value
 

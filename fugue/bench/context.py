@@ -11,7 +11,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import threading
@@ -33,6 +32,9 @@ from fugue.bench.context_contracts import (
     ContextDelivery,
     SupportLevel,
 )
+from fugue.bench.files import as_list as _list
+from fugue.bench.files import as_mapping as _dict
+from fugue.bench.files import terminate_async_process_group
 from fugue.bench.library import validate_id
 from fugue.bench.manifest import fixture_repository_digest
 from fugue.bench.runtime_manager import (
@@ -46,7 +48,7 @@ from fugue.bench.runtime_manager import (
 )
 
 CONTEXT_SYSTEMS_DIR = Path("configs") / "fugue" / "context-systems"
-DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v2"
+DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v1"
 CONTEXT_MANIFEST = "context-manifest.json"
 CONTEXT_INDEX = "index.json"
 
@@ -846,18 +848,7 @@ async def _run_context_command(
             process.communicate(), timeout=timeout_seconds
         )
     except (TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except TimeoutError:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            await process.wait()
+        await terminate_async_process_group(process)
         raise
     if process.returncode:
         raise subprocess.CalledProcessError(
@@ -2424,9 +2415,7 @@ def _fixture_repository_text(
     snapshot: RepositorySnapshot,
 ) -> list[tuple[str, str]]:
     if snapshot.commit != snapshot.fixture_digest:
-        raise ValueError(
-            "fixture repository commit and declared digest must match"
-        )
+        raise ValueError("fixture repository commit and declared digest must match")
     actual = fixture_repository_digest(snapshot.checkout)
     if actual != snapshot.fixture_digest:
         raise ValueError(
@@ -2583,8 +2572,7 @@ def _valid_dense_artifact(
         or hashlib.sha256(chunks_path.read_bytes()).hexdigest()
         != contract["chunks_digest"]
         or _tree_content_digest(index) != manifest.get("index_tree_digest")
-        or _tree_content_digest(model_cache)
-        != manifest.get("model_cache_tree_digest")
+        or _tree_content_digest(model_cache) != manifest.get("model_cache_tree_digest")
     ):
         return None
     return manifest
@@ -2774,24 +2762,8 @@ def _count_headings(path: Path) -> int:
     return sum(1 for line in path.read_text().splitlines() if line.startswith("## "))
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"expected mapping, got {type(value).__name__}")
-    return dict(value)
-
-
 def _dict_list(value: Any) -> list[dict[str, Any]]:
     return [_dict(item) for item in _list(value)]
-
-
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"expected list, got {type(value).__name__}")
-    return list(value)
 
 
 def _optional_str(value: Any) -> str | None:

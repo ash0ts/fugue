@@ -3,9 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import random
-import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -13,6 +11,7 @@ from statistics import median
 from typing import Any, Literal
 
 from fugue.bench.context import RetrievalHit, RetrievalQuery
+from fugue.bench.files import atomic_write_json
 
 
 @dataclass(frozen=True)
@@ -147,9 +146,7 @@ def select_candidate_configuration(
             reasons.append("missing deterministic outcome")
         examples = {item[0] for item in present}
         if policy.required_examples and len(examples) != policy.required_examples:
-            reasons.append(
-                f"expected {policy.required_examples} comparison examples"
-            )
+            reasons.append(f"expected {policy.required_examples} comparison examples")
         if policy.required_harnesses:
             harness_counts = {
                 harness: sum(row.get("harness") == harness for row in candidate_rows)
@@ -255,8 +252,7 @@ def select_candidate_configuration(
             CandidateScore(
                 **{
                     **asdict(score),
-                    "delta_to_best": (score.pass_rate or 0.0)
-                    - (best.pass_rate or 0.0),
+                    "delta_to_best": (score.pass_rate or 0.0) - (best.pass_rate or 0.0),
                     "confidence_low": low,
                     "confidence_high": high,
                     "competitive": low >= -policy.noninferiority_margin,
@@ -325,28 +321,14 @@ def build_treatment_selection_lock(
     return TreatmentSelectionLockV1(**{**asdict(base), "lock_sha256": digest})
 
 
-def write_treatment_selection_lock(
-    path: Path, lock: TreatmentSelectionLockV1
-) -> Path:
+def write_treatment_selection_lock(path: Path, lock: TreatmentSelectionLockV1) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = lock.to_dict()
     if path.exists():
         if json.loads(path.read_text(encoding="utf-8")) != payload:
             raise ValueError(f"treatment selection lock already differs: {path}")
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    return path
+    return atomic_write_json(path, payload)
 
 
 def read_treatment_selection_lock(path: Path) -> TreatmentSelectionLockV1:
@@ -362,9 +344,7 @@ def read_treatment_selection_lock(path: Path) -> TreatmentSelectionLockV1:
         calibration_snapshot_sha256=str(
             payload.get("calibration_snapshot_sha256") or ""
         ),
-        discovery_snapshot_sha256=str(
-            payload.get("discovery_snapshot_sha256") or ""
-        ),
+        discovery_snapshot_sha256=str(payload.get("discovery_snapshot_sha256") or ""),
         rankings=tuple(dict(value) for value in payload.get("rankings") or ()),
         selected_variants=tuple(
             str(value) for value in payload.get("selected_variants") or ()
@@ -394,13 +374,23 @@ def _promotion_decision(
 ) -> tuple[str, str]:
     incumbent_id = policy.incumbent_candidate_id
     if not incumbent_id:
-        return "recommend", "no incumbent was supplied; propose the selected candidate for review"
+        return (
+            "recommend",
+            "no incumbent was supplied; propose the selected candidate for review",
+        )
     incumbent = next(
-        (item for item in scores if item.candidate_id == incumbent_id and item.eligible),
+        (
+            item
+            for item in scores
+            if item.candidate_id == incumbent_id and item.eligible
+        ),
         None,
     )
     if incumbent is None:
-        return "blocked", "the incumbent is absent or ineligible in this comparison scope"
+        return (
+            "blocked",
+            "the incumbent is absent or ineligible in this comparison scope",
+        )
     if incumbent.candidate_id == selected.candidate_id:
         return "no_promotion", "the incumbent remains the selected candidate"
     low, _ = _paired_delta_interval(
@@ -411,7 +401,10 @@ def _promotion_decision(
         seed=f"{seed}:{selected.candidate_id}:{incumbent.candidate_id}:incumbent",
     )
     if low < -policy.noninferiority_margin:
-        return "no_promotion", "the selected candidate is not quality non-inferior to the incumbent"
+        return (
+            "no_promotion",
+            "the selected candidate is not quality non-inferior to the incumbent",
+        )
     pass_improvement = (selected.pass_rate or 0.0) - (incumbent.pass_rate or 0.0)
     cost_improvement = _relative_improvement(
         incumbent.cost_per_success, selected.cost_per_success
@@ -424,8 +417,14 @@ def _promotion_decision(
         or cost_improvement >= policy.minimum_cost_improvement
         or latency_improvement >= policy.minimum_latency_improvement
     ):
-        return "promote", "quality is non-inferior and an explicit improvement threshold was met"
-    return "no_promotion", "quality is non-inferior, but no promotion improvement threshold was met"
+        return (
+            "promote",
+            "quality is non-inferior and an explicit improvement threshold was met",
+        )
+    return (
+        "no_promotion",
+        "quality is non-inferior, but no promotion improvement threshold was met",
+    )
 
 
 def _paired_delta_interval(
@@ -460,8 +459,7 @@ def _example_outcomes(rows: list[dict[str, Any]]) -> dict[str, float]:
         example_id = str(row["comparison_example_id"])
         grouped.setdefault(example_id, []).append(float(row.get("pass") is True))
     return {
-        example_id: sum(values) / len(values)
-        for example_id, values in grouped.items()
+        example_id: sum(values) / len(values) for example_id, values in grouped.items()
     }
 
 
@@ -509,7 +507,9 @@ def _task_harness_trial(row: Mapping[str, Any]) -> tuple[str, str, int] | None:
 def _mean_metric(rows: list[dict[str, Any]], *names: str) -> float | None:
     values: list[float] = []
     for row in rows:
-        value = next((row.get(name) for name in names if row.get(name) is not None), None)
+        value = next(
+            (row.get(name) for name in names if row.get(name) is not None), None
+        )
         if value is not None:
             values.append(float(value))
     return sum(values) / len(values) if values else None
@@ -521,10 +521,21 @@ def _selection_tie_key(
     values: list[Any] = []
     for name in tie_breakers:
         value = getattr(score, name)
-        values.extend((value is None, -value if name in {
-            "localization_recall_at_10",
-            "localization_mrr",
-        } and value is not None else value if value is not None else math.inf))
+        values.extend(
+            (
+                value is None,
+                -value
+                if name
+                in {
+                    "localization_recall_at_10",
+                    "localization_mrr",
+                }
+                and value is not None
+                else value
+                if value is not None
+                else math.inf,
+            )
+        )
     return (*values, score.candidate_id)
 
 

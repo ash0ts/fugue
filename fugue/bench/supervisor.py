@@ -23,6 +23,7 @@ from fugue.bench.execution import (
     update_run_manifest,
     write_run_manifest,
 )
+from fugue.bench.files import latest_jsonl_records
 
 
 @dataclass(frozen=True)
@@ -308,7 +309,9 @@ class RunSupervisor:
         run_id = str(metadata.get("run_id") or "")
         run_dir = self._run_dir(run_id)
         configured_log = metadata.get("combined_log")
-        log_path = Path(str(configured_log)) if configured_log else run_dir / "combined.log"
+        log_path = (
+            Path(str(configured_log)) if configured_log else run_dir / "combined.log"
+        )
         return ManagedRun(
             run_id=run_id,
             status=str(metadata.get("status") or "unknown"),
@@ -329,9 +332,7 @@ class RunSupervisor:
 
     @staticmethod
     def _log_path(run: ManagedRun, cell_id: str | None) -> Path:
-        return (
-            run.run_dir / "logs" / f"{cell_id}.log" if cell_id else run.log_path
-        )
+        return run.run_dir / "logs" / f"{cell_id}.log" if cell_id else run.log_path
 
 
 def _pid_alive(pid: int) -> bool:
@@ -454,7 +455,9 @@ def _compose_projects_from_snapshot(repo_root: Path, run_dir: Path) -> list[str]
         if not isinstance(raw_result, str) or not raw_result:
             continue
         result = Path(raw_result)
-        job_dir = (result if result.is_absolute() else repo_root / result).parent.resolve()
+        job_dir = (
+            result if result.is_absolute() else repo_root / result
+        ).parent.resolve()
         if not job_dir.is_relative_to(jobs_root):
             continue
         try:
@@ -470,21 +473,14 @@ def _compose_projects_from_snapshot(repo_root: Path, run_dir: Path) -> list[str]
     return sorted(projects)
 
 
-def _record_forced_evaluation_cancellation(
-    run_dir: Path, message: str
-) -> list[str]:
+def _record_forced_evaluation_cancellation(run_dir: Path, message: str) -> list[str]:
     path = run_dir / "evaluations.jsonl"
     if not path.is_file():
         return []
-    latest: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(errors="replace").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        cell_id = str(record.get("cell_id") or "")
-        if cell_id:
-            latest[cell_id] = record
+    latest = {
+        str(record["cell_id"]): record
+        for record in latest_jsonl_records(path, "cell_id")
+    }
     failures: list[str] = []
     terminal = {"cancelled", "cancelled_unclosed", "failed", "finalized"}
     records: list[dict[str, Any]] = []

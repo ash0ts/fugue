@@ -15,6 +15,8 @@ from typing import Any, Literal
 import yaml
 from filelock import FileLock
 
+from fugue.bench.files import atomic_write_json
+
 SERVICES_RUNTIME_ROOT = Path(".fugue") / "runtime" / "services"
 SERVICE_INSTANCE_FILE = ".instance-id"
 GRAPHITI_SERVICE_ID = "graphiti-neo4j"
@@ -420,23 +422,7 @@ def _write_credentials(
     values: Mapping[str, str],
 ) -> None:
     path = _credentials_path(spec, repo_root)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "w") as handle:
-            json.dump(dict(values), handle, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        os.chmod(path, 0o600)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    atomic_write_json(path, dict(values))
 
 
 def _write_compose(spec: ManagedServiceSpec, repo_root: Path) -> Path:
@@ -490,7 +476,9 @@ def _read_service_instance(repo_root: Path) -> str:
     if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise RuntimeError(f"managed service instance must use mode 0600: {path}")
     value = path.read_text().strip()
-    if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
+    if len(value) != 32 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise RuntimeError(f"managed service instance is invalid: {path}")
     return value
 

@@ -14,6 +14,7 @@ import httpx
 import yaml
 
 from fugue.bench.context import get_context_system
+from fugue.bench.files import require_unique
 from fugue.bench.integrations import declared_mcp_servers, effective_selections
 from fugue.bench.library import (
     BuiltinScorerSelection,
@@ -148,7 +149,7 @@ def build_evaluation_draft(
         _evaluation_case(item, index, catalog)
         for index, item in enumerate(raw.get("cases") or [], start=1)
     )
-    _require_unique([str(item["id"]) for item in proposed], "evaluation case")
+    require_unique([str(item["id"]) for item in proposed], "evaluation case")
     del repo_root
     cases = proposed
     if len(cases) != expected_size:
@@ -166,10 +167,9 @@ def build_evaluation_draft(
         missing_strata = sorted(CASE_STRATA - strata)
         if missing_strata:
             raise ValueError(
-                "evaluation suite is missing case strata: "
-                + ", ".join(missing_strata)
+                "evaluation suite is missing case strata: " + ", ".join(missing_strata)
             )
-    _require_unique([str(item["id"]) for item in cases], "evaluation case")
+    require_unique([str(item["id"]) for item in cases], "evaluation case")
     rubric = _evaluation_rubric(
         raw.get("rubric"),
         suite_id=suite_id,
@@ -178,8 +178,7 @@ def build_evaluation_draft(
         source_catalog=source_catalog,
     )
     case_body = "".join(
-        json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n"
-        for item in cases
+        json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in cases
     )
     rubric_body = yaml.safe_dump(rubric, sort_keys=False)
     case_sha = _sha256(case_body)
@@ -217,7 +216,9 @@ def build_evaluation_draft(
     updated = attach_evaluation_suite(
         experiment,
         suite_id,
-        workload_id=(configured.workload_id if configured is not None else "capabilities"),
+        workload_id=(
+            configured.workload_id if configured is not None else "capabilities"
+        ),
     )
     coverage: dict[str, int] = {}
     for case in cases:
@@ -438,9 +439,7 @@ def source_catalog(
     return tuple(bounded)
 
 
-def load_cases(
-    path: Path, *, text: str | None = None
-) -> tuple[dict[str, Any], ...]:
+def load_cases(path: Path, *, text: str | None = None) -> tuple[dict[str, Any], ...]:
     raw = text if text is not None else path.read_text()
     rows: list[dict[str, Any]] = []
     for number, line in enumerate(raw.splitlines(), start=1):
@@ -451,7 +450,7 @@ def load_cases(
             raise ValueError(f"{path}:{number}: evaluation case must be an object")
         _validate_saved_case(value, path, number)
         rows.append(value)
-    _require_unique([str(item.get("id") or "") for item in rows], "evaluation case")
+    require_unique([str(item.get("id") or "") for item in rows], "evaluation case")
     return tuple(rows)
 
 
@@ -586,17 +585,13 @@ def apply_generated_evaluation(
                 "evaluation_judge_output_tokens": usage.get("output_tokens"),
             }
         )
-        row["evaluation_judge_reasons"] = redact_value(
-            row["evaluation_judge_reasons"]
-        )
+        row["evaluation_judge_reasons"] = redact_value(row["evaluation_judge_reasons"])
         row["evaluation_judge_status"] = "scored"
     except Exception as exc:
         row["evaluation_judge_status"] = "failed"
         row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
     finally:
-        row["evaluation_judge_latency_ms"] = (
-            time.perf_counter() - started
-        ) * 1000
+        row["evaluation_judge_latency_ms"] = (time.perf_counter() - started) * 1000
 
 
 def _deterministic_assertions(
@@ -757,10 +752,7 @@ def _post_judge(
         response.raise_for_status()
         body = response.json()
         content = str(
-            ((body.get("choices") or [{}])[0].get("message") or {}).get(
-                "content"
-            )
-            or ""
+            ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         )
         raw_usage = body.get("usage") or {}
         usage = {
@@ -815,7 +807,10 @@ def _evaluation_case(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("evaluation case must be an object")
-    if len(json.dumps(raw, separators=(",", ":"), default=str).encode()) > MAX_GENERATED_CASE_BYTES:
+    if (
+        len(json.dumps(raw, separators=(",", ":"), default=str).encode())
+        > MAX_GENERATED_CASE_BYTES
+    ):
         raise ValueError(
             f"evaluation case exceeds {MAX_GENERATED_CASE_BYTES} serialized bytes"
         )
@@ -845,7 +840,7 @@ def _evaluation_case(
     refs = [str(value) for value in raw.get("source_refs") or []]
     if not refs:
         raise ValueError(f"evaluation case {case_id} requires source_refs")
-    _require_unique(refs, f"evaluation case {case_id} source")
+    require_unique(refs, f"evaluation case {case_id} source")
     unknown_refs = sorted(set(refs) - set(source_catalog))
     if unknown_refs:
         raise ValueError(
@@ -853,7 +848,9 @@ def _evaluation_case(
             f"{', '.join(unknown_refs)}"
         )
     expected = _expected_assertions(raw.get("expected"), case_id)
-    attachments = [_attachment(value, case_id) for value in raw.get("attachments") or []]
+    attachments = [
+        _attachment(value, case_id) for value in raw.get("attachments") or []
+    ]
     default_dimensions = ["task_completion"]
     if expected["facts"] or expected.get("reference_answer"):
         default_dimensions.append("correctness")
@@ -864,8 +861,7 @@ def _evaluation_case(
     if expected["artifacts"]:
         default_dimensions.append("artifact_quality")
     dimensions = [
-        str(value)
-        for value in raw.get("scorer_dimensions") or default_dimensions
+        str(value) for value in raw.get("scorer_dimensions") or default_dimensions
     ]
     unknown_dimensions = sorted(set(dimensions) - EVALUATION_DIMENSIONS)
     if unknown_dimensions:
@@ -873,7 +869,9 @@ def _evaluation_case(
             f"evaluation case {case_id} has unknown scorer dimension(s): "
             f"{', '.join(unknown_dimensions)}"
         )
-    turns = [str(value).strip() for value in raw.get("turns") or [] if str(value).strip()]
+    turns = [
+        str(value).strip() for value in raw.get("turns") or [] if str(value).strip()
+    ]
     return {
         "schema_version": 1,
         "id": case_id,
@@ -906,9 +904,15 @@ def _expected_assertions(raw: Any, case_id: str) -> dict[str, Any]:
             f"evaluation case {case_id} has unknown expected field(s): "
             f"{', '.join(unknown)}"
         )
-    facts = [str(value).strip() for value in raw.get("facts") or [] if str(value).strip()]
-    tool_calls = [_tool_assertion(value, case_id) for value in raw.get("tool_calls") or []]
-    artifacts = [_artifact_assertion(value, case_id) for value in raw.get("artifacts") or []]
+    facts = [
+        str(value).strip() for value in raw.get("facts") or [] if str(value).strip()
+    ]
+    tool_calls = [
+        _tool_assertion(value, case_id) for value in raw.get("tool_calls") or []
+    ]
+    artifacts = [
+        _artifact_assertion(value, case_id) for value in raw.get("artifacts") or []
+    ]
     reference = str(raw.get("reference_answer") or "").strip() or None
     if not facts and not tool_calls and not artifacts:
         raise ValueError(
@@ -980,7 +984,9 @@ def _attachment(raw: Any, case_id: str) -> dict[str, Any]:
             f"{', '.join(unknown)}"
         )
     source = _safe_repo_path(str(raw.get("path") or ""), "attachment path")
-    target = _safe_relative_path(str(raw.get("target") or source.name), "attachment target")
+    target = _safe_relative_path(
+        str(raw.get("target") or source.name), "attachment target"
+    )
     digest = str(raw.get("sha256") or "")
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError(f"evaluation case {case_id} attachment sha256 is required")
@@ -997,7 +1003,10 @@ def _evaluation_rubric(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("evaluation rubric must be an object")
-    if len(json.dumps(raw, separators=(",", ":"), default=str).encode()) > MAX_GENERATED_RUBRIC_BYTES:
+    if (
+        len(json.dumps(raw, separators=(",", ":"), default=str).encode())
+        > MAX_GENERATED_RUBRIC_BYTES
+    ):
         raise ValueError(
             f"evaluation rubric exceeds {MAX_GENERATED_RUBRIC_BYTES} serialized bytes"
         )
@@ -1005,12 +1014,10 @@ def _evaluation_rubric(
     if unknown:
         raise ValueError(f"unknown evaluation rubric field(s): {', '.join(unknown)}")
     dimensions = [_rubric_dimension(value) for value in raw.get("dimensions") or []]
-    _require_unique([str(value["id"]) for value in dimensions], "rubric dimension")
+    require_unique([str(value["id"]) for value in dimensions], "rubric dimension")
     dimension_ids = {str(value["id"]) for value in dimensions}
     required = {
-        str(dimension)
-        for case in cases
-        for dimension in case["scorer_dimensions"]
+        str(dimension) for case in cases for dimension in case["scorer_dimensions"]
     }
     missing = sorted(required - dimension_ids)
     if missing:
@@ -1035,9 +1042,7 @@ def _evaluation_rubric(
 def _rubric_dimension(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("rubric dimension must be an object")
-    unknown = sorted(
-        set(raw) - {"id", "kind", "criterion", "threshold", "evidence"}
-    )
+    unknown = sorted(set(raw) - {"id", "kind", "criterion", "threshold", "evidence"})
     if unknown:
         raise ValueError(f"unknown rubric dimension field(s): {', '.join(unknown)}")
     dimension_id = str(raw.get("id") or "").strip()
@@ -1063,9 +1068,7 @@ def _rubric_dimension(raw: Any) -> dict[str, Any]:
 
 
 def _validate_saved_rubric(raw: dict[str, Any], path: Path) -> None:
-    unknown = sorted(
-        set(raw) - {"schema_version", "id", "dimensions", "generation"}
-    )
+    unknown = sorted(set(raw) - {"schema_version", "id", "dimensions", "generation"})
     if unknown:
         raise ValueError(f"{path}: unknown rubric field(s): {', '.join(unknown)}")
     if int(raw.get("schema_version") or 0) != 1:
@@ -1075,7 +1078,7 @@ def _validate_saved_rubric(raw: dict[str, Any], path: Path) -> None:
     if not isinstance(dimensions, list) or not dimensions:
         raise ValueError(f"{path}: rubric dimensions are required")
     parsed = [_rubric_dimension(value) for value in dimensions]
-    _require_unique([str(value["id"]) for value in parsed], "rubric dimension")
+    require_unique([str(value["id"]) for value in parsed], "rubric dimension")
 
 
 def _validate_saved_case(raw: dict[str, Any], path: Path, number: int) -> None:
@@ -1094,8 +1097,7 @@ def _validate_saved_case(raw: dict[str, Any], path: Path, number: int) -> None:
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(
-            f"{path}:{number}: unknown evaluation case field(s): "
-            + ", ".join(unknown)
+            f"{path}:{number}: unknown evaluation case field(s): " + ", ".join(unknown)
         )
     if int(raw.get("schema_version") or 0) != 1:
         raise ValueError(f"{path}:{number}: unsupported case schema_version")
@@ -1113,10 +1115,12 @@ def _validate_saved_case(raw: dict[str, Any], path: Path, number: int) -> None:
         if not isinstance(ref, dict):
             raise ValueError(f"{path}:{number}: source ref must be an object")
         source_id = str(ref.get("id") or "")
-        if not source_id or not re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256") or "")):
+        if not source_id or not re.fullmatch(
+            r"[0-9a-f]{64}", str(ref.get("sha256") or "")
+        ):
             raise ValueError(f"{path}:{number}: source ref id and sha256 are required")
         source_ids.append(source_id)
-    _require_unique(source_ids, f"evaluation case {case_id} source")
+    require_unique(source_ids, f"evaluation case {case_id} source")
     _expected_assertions(raw.get("expected"), case_id)
     for attachment in raw.get("attachments") or []:
         _attachment(attachment, case_id)
@@ -1154,13 +1158,9 @@ def _generated_manifest(
     return {
         "dataset": {
             "path": (GENERATED_DATASET_ROOT / fingerprint).as_posix(),
-            "materializer": (
-                "fugue.bench.evaluations:GeneratedCapabilityMaterializer"
-            ),
+            "materializer": ("fugue.bench.evaluations:GeneratedCapabilityMaterializer"),
             "source": {
-                "path": evaluation_asset_path(
-                    "evaluation_cases", suite_id
-                ).as_posix(),
+                "path": evaluation_asset_path("evaluation_cases", suite_id).as_posix(),
                 "sha256": cases_sha256,
                 "rubric": evaluation_asset_path(
                     "evaluation_rubric", suite_id
@@ -1172,9 +1172,7 @@ def _generated_manifest(
         "k": 1,
         "n_concurrent": experiment.n_concurrent or 2,
         "jobs_dir": f"jobs/{suite_id}",
-        "harnesses": [
-            {"name": name, "agent": agents[name]} for name in harness_names
-        ],
+        "harnesses": [{"name": name, "agent": agents[name]} for name in harness_names],
         "tasks": [
             {
                 "id": str(case["id"]),
@@ -1297,7 +1295,10 @@ def _discover_mcp_source(
                         "mcp_schema",
                         f"{source.server} tools",
                         json.dumps(public_tools, sort_keys=True, default=str),
-                        {"server": source.server, "tools": [v["name"] for v in public_tools]},
+                        {
+                            "server": source.server,
+                            "tools": [v["name"] for v in public_tools],
+                        },
                     )
                 )
                 for uri in source.resources[:MAX_MCP_ITEMS]:
@@ -1385,17 +1386,13 @@ def _merge_mapping(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[st
 
 def _public_mcp_definition(value: Mapping[str, Any]) -> dict[str, Any]:
     secrets = tuple(
-        str(item)
-        for item in (value.get("env") or {}).values()
-        if str(item).strip()
+        str(item) for item in (value.get("env") or {}).values() if str(item).strip()
     )
     return {
         str(key): redact_value(item, secrets=secrets)
         for key, item in value.items()
         if str(key).lower() != "env"
-        and not any(
-            token in str(key).lower() for token in ("key", "secret", "token")
-        )
+        and not any(token in str(key).lower() for token in ("key", "secret", "token"))
     }
 
 
@@ -1424,9 +1421,7 @@ def _dedupe_sources(values: Sequence[EvaluationSource]) -> list[EvaluationSource
     return list(result.values())
 
 
-def _write_generated_task(
-    root: Path, case: Mapping[str, Any], repo_root: Path
-) -> None:
+def _write_generated_task(root: Path, case: Mapping[str, Any], repo_root: Path) -> None:
     root.mkdir(parents=True)
     for name in ("environment", "solution", "tests"):
         (root / name).mkdir()
@@ -1442,9 +1437,7 @@ def _write_generated_task(
             raise FileNotFoundError(f"evaluation attachment not found: {item['path']}")
         actual = hashlib.sha256(source.read_bytes()).hexdigest()
         if actual != item["sha256"]:
-            raise ValueError(
-                f"evaluation attachment checksum mismatch: {item['path']}"
-            )
+            raise ValueError(f"evaluation attachment checksum mismatch: {item['path']}")
         local = Path("fixtures") / f"{index:03d}-{source.name}"
         destination = root / "environment" / local
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1556,14 +1549,3 @@ def _sha256(value: str | bytes) -> str:
 def _stable_digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
-
-
-def _require_unique(values: Sequence[str], kind: str) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen:
-            duplicates.add(value)
-        seen.add(value)
-    if duplicates:
-        raise ValueError(f"duplicate {kind} id(s): {', '.join(sorted(duplicates))}")

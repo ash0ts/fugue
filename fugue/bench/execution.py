@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import signal
 import subprocess
 import threading
 import time
@@ -18,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from filelock import FileLock
 
+from fugue.bench.files import atomic_write_json, latest_jsonl_records
+from fugue.bench.files import terminate_process_group as _terminate_process_group
 from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
@@ -533,24 +533,6 @@ def _path_digest(path: Path) -> str:
         raise RuntimeError(f"cannot read immutable input {path}: {exc}") from exc
 
 
-def _terminate_process_group(
-    process: subprocess.Popen[str], *, grace_sec: float = 2.0
-) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=grace_sec)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-
 def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     path = cell.result_path
     if not path.is_absolute():
@@ -616,24 +598,17 @@ def update_run_manifest(
         existing = read_run_manifest(path.parent) or {}
         values = updater(dict(existing))
         created_at = existing.get("created_at") or datetime.now(UTC).isoformat()
-        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temp.write_text(
-            json.dumps(
-                {
-                    **existing,
-                    "schema_version": 1,
-                    "run_id": run_id,
-                    "created_at": created_at,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    **values,
-                },
-                indent=2,
-                sort_keys=True,
-                default=str,
-            )
-            + "\n"
+        atomic_write_json(
+            path,
+            {
+                **existing,
+                "schema_version": 1,
+                "run_id": run_id,
+                "created_at": created_at,
+                "updated_at": datetime.now(UTC).isoformat(),
+                **values,
+            },
         )
-        os.replace(temp, path)
     return path
 
 
@@ -696,17 +671,7 @@ def mark_unfinished_cells(
 
 
 def latest_cell_records(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    latest: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(errors="replace").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("cell_id"):
-            latest[str(record["cell_id"])] = record
-    return list(latest.values())
+    return latest_jsonl_records(path, "cell_id")
 
 
 class _RunStore:

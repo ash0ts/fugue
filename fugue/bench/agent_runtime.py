@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import uuid
@@ -11,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from filelock import FileLock
+
+from fugue.bench.files import atomic_write_json
+from fugue.bench.files import inspect_docker_image as _inspect_image
 
 AGENT_RUNTIME_ROOT = Path(".fugue/runtime/agent-runtimes")
 AGENT_RUNTIME_MOUNT = "/opt/fugue-agent-runtime"
@@ -141,12 +143,12 @@ def _node_agent_dockerfile(harness: str, command: str, version: str) -> str:
         if harness == "openclaw"
         else (
             "RUN mkdir -p lib/node_modules && "
-            "cp -a \"$(npm root -g)/npm\" lib/node_modules/npm && "
+            'cp -a "$(npm root -g)/npm" lib/node_modules/npm && '
             "ln -s ../../node_modules/weave-claude-code "
             "lib/node_modules/weave-claude-code && "
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
-            "test -s \"$(npm root -g)/weave-claude-code/"
-            ".claude-plugin/marketplace.json\"\n"
+            'test -s "$(npm root -g)/weave-claude-code/'
+            '.claude-plugin/marketplace.json"\n'
         )
     )
     return f"""FROM {_NODE_IMAGE}
@@ -207,8 +209,7 @@ RUNTIMES = {
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
         version=(
-            "openclaw@2026.7.1+weave-openclaw@0.1.1+"
-            "weave-otel2.1+fugue-load-path.1"
+            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+fugue-load-path.1"
         ),
         dockerfile=_node_agent_dockerfile("openclaw", "openclaw", "2026.7.1"),
         probe=(
@@ -231,8 +232,8 @@ RUNTIMES = {
             f"export NPM_CONFIG_PREFIX={AGENT_RUNTIME_MOUNT} && "
             "npm root -g | "
             f"grep -F {AGENT_RUNTIME_MOUNT}/lib/node_modules && "
-            "test -s \"$(npm root -g)/weave-claude-code/"
-            ".claude-plugin/marketplace.json\"",
+            'test -s "$(npm root -g)/weave-claude-code/'
+            '.claude-plugin/marketplace.json"',
         ),
     ),
     "codex": AgentRuntimeSpec(
@@ -320,7 +321,7 @@ def prepare_runtime(
                 "os": inspected.get("Os"),
                 "probe": list(spec.probe),
             }
-            _atomic_json(root / f"runtime-lock-{architecture}.json", lock)
+            atomic_write_json(root / f"runtime-lock-{architecture}.json", lock)
             return lock
         finally:
             shutil.rmtree(build, ignore_errors=True)
@@ -393,29 +394,6 @@ def _build_assets(harness: str) -> tuple[Path, ...]:
     if harness == "openclaw":
         assets.append(Path(__file__).resolve().parents[2] / "vendor/weave-node-sdk.tgz")
     return tuple(assets)
-
-
-def _inspect_image(image: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "image missing").strip())
-    values = json.loads(result.stdout)
-    if not isinstance(values, list) or len(values) != 1:
-        raise RuntimeError("docker image inspect returned invalid JSON")
-    return values[0]
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temporary, path)
 
 
 def _digest(value: Any) -> str:

@@ -6,7 +6,6 @@ import os
 import re
 import threading
 import time
-import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -22,6 +21,7 @@ from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
 from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.files import atomic_write_json
 from fugue.bench.reproducibility import (
     EVALUATION_ASSET_LOCK_NAME,
     read_evaluation_asset_lock,
@@ -1722,20 +1722,15 @@ def _add_sequence_measurement_summary(
 def _write_publication_marker(
     path: Path, project: str, publication_id: str, **metadata: Any
 ) -> None:
-    temp = path.with_suffix(".tmp")
-    temp.write_text(
-        json.dumps(
-            {
-                "project": project,
-                "publication_id": publication_id,
-                "published_at": datetime.now(UTC).isoformat(),
-                **metadata,
-            },
-            sort_keys=True,
-        )
-        + "\n"
+    atomic_write_json(
+        path,
+        {
+            "project": project,
+            "publication_id": publication_id,
+            "published_at": datetime.now(UTC).isoformat(),
+            **metadata,
+        },
     )
-    os.replace(temp, path)
 
 
 def _prediction_ledger_paths(
@@ -1784,7 +1779,7 @@ def _reserve_prediction_publication(
             )
         previous.append((path, current))
     for path, identity in _prediction_ledger_paths(ledger, project, candidate):
-        _write_json_atomic(
+        atomic_write_json(
             path,
             {
                 **identity,
@@ -1804,7 +1799,7 @@ def _finalize_prediction_publication(
     revision: int,
 ) -> None:
     for path, identity in _prediction_ledger_paths(ledger, project, candidate):
-        _write_json_atomic(
+        atomic_write_json(
             path,
             {
                 **identity,
@@ -1822,13 +1817,7 @@ def _restore_prediction_publications(
         if value is None:
             path.unlink(missing_ok=True)
         else:
-            _write_json_atomic(path, value)
-
-
-def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    os.replace(temp, path)
+            atomic_write_json(path, value)
 
 
 def _latest_publication_marker(
@@ -1851,9 +1840,7 @@ def _set_publication_marker_active(path: Path, active: bool) -> None:
     if not isinstance(value, dict):
         raise ValueError(f"invalid publication marker: {path}")
     value["active"] = active
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(value, sort_keys=True) + "\n")
-    os.replace(temp, path)
+    atomic_write_json(path, value)
 
 
 def _published_evaluation_from_marker(
@@ -2038,8 +2025,7 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
         "episode_id": row.get("episode_id") or row.get("episode"),
         "repository": row.get("repository"),
         "base_commit": row.get("base_commit"),
-        "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256")
-        or None,
+        "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256") or None,
         "evaluation_case": row.get("evaluation_case") or None,
         "evaluation_scorers": row.get("evaluation_scorers") or None,
         "evaluation_rubrics": row.get("evaluation_rubrics") or None,
@@ -2632,9 +2618,7 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         }
     )
     vector_events = [
-        value
-        for span in tool_spans
-        if (value := _gateway_vector(span)) is not None
+        value for span in tool_spans if (value := _gateway_vector(span)) is not None
     ]
     return {
         "weave_span_count": len(values),
@@ -3224,9 +3208,10 @@ def _set_adapter_outcome(
         deterministic = "failed"
     if row.get("judge_error") or row.get("evaluation_error"):
         judge = "failed"
-    elif row.get("judge_overall") is not None or row.get(
-        "evaluation_judge_status"
-    ) == "scored":
+    elif (
+        row.get("judge_overall") is not None
+        or row.get("evaluation_judge_status") == "scored"
+    ):
         judge = "scored"
     elif row.get("evaluation_rubrics"):
         judge = "pending"
@@ -3465,9 +3450,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "runtime_fingerprints": _runtime_fingerprints(trial_dir, meta),
         "context_registration": context_registration,
         "context_registration_status": registration_status or "unavailable",
-        "context_registration_digest": context_registration.get(
-            "registration_digest"
-        ),
+        "context_registration_digest": context_registration.get("registration_digest"),
         "context_registered": context_registered if context_assigned else None,
         "context_artifact": meta.get("context_artifact"),
         "context_assigned": context_assigned,

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +14,7 @@ from fugue.bench.context import (
     context_behavior_digest,
     get_context_system,
 )
+from fugue.bench.files import atomic_write_json
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
 
@@ -138,9 +137,7 @@ def build_run_snapshot(
                 ) from exc
             runtime_path = _snapshot_path(runtime_file, repo_root)
             path_id = hashlib.sha256(runtime_path.encode()).hexdigest()[:12]
-            asset_id = (
-                f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
-            )
+            asset_id = f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
             record = {
                 "kind": "generated_runtime",
                 "path": runtime_path,
@@ -381,14 +378,10 @@ def build_evaluation_asset_lock(
         predictions=predictions,
     )
     digest = stable_digest(base.to_dict())
-    return EvaluationAssetLockV1(
-        **{**asdict(base), "lock_sha256": digest}
-    )
+    return EvaluationAssetLockV1(**{**asdict(base), "lock_sha256": digest})
 
 
-def write_evaluation_asset_lock(
-    repo_root: Path, lock: EvaluationAssetLockV1
-) -> Path:
+def write_evaluation_asset_lock(repo_root: Path, lock: EvaluationAssetLockV1) -> Path:
     path = repo_root / ".fugue" / "runtime" / lock.run_id / EVALUATION_ASSET_LOCK_NAME
     payload = lock.to_dict()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -398,22 +391,9 @@ def write_evaluation_asset_lock(
             raise ValueError(
                 f"evaluation asset lock already exists with different content: {path}"
             )
-        os.chmod(path, 0o600)
+        path.chmod(0o600)
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    os.chmod(path, 0o600)
-    return path
+    return atomic_write_json(path, payload)
 
 
 def read_evaluation_asset_lock(path: Path) -> EvaluationAssetLockV1:
@@ -459,12 +439,7 @@ def write_run_input_lock(
                 f"run input lock already exists with different content: {path}"
             )
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary, path)
-    return path
+    return atomic_write_json(path, payload)
 
 
 def verify_snapshot(payload: Mapping[str, Any]) -> bool:
