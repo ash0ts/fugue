@@ -59,6 +59,7 @@ class AssistantResponse:
     tool_calls: tuple[AssistantToolCall, ...] = ()
     usage: AssistantUsage = field(default_factory=AssistantUsage)
     raw_id: str | None = None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ class AssistantAgent:
         trace_content: str = "full",
         session_id: str | None = None,
         max_rounds: int = 8,
+        max_tokens: int = 4_096,
         attributes: Mapping[str, Any] | None = None,
     ) -> None:
         self.client = client
@@ -203,6 +205,7 @@ class AssistantAgent:
         self.trace_content = trace_content
         self.session_id = session_id or uuid.uuid4().hex
         self.max_rounds = max_rounds
+        self.max_tokens = max_tokens
         self.attributes = dict(attributes or {})
 
     async def run(
@@ -229,7 +232,11 @@ class AssistantAgent:
             for _ in range(self.max_rounds):
                 llm = tracer.start_llm(history)
                 try:
-                    response = await self.client.complete(history, tools=self.tools)
+                    response = await self.client.complete(
+                        history,
+                        tools=self.tools,
+                        max_tokens=self.max_tokens,
+                    )
                 except BaseException as exc:
                     tracer.finish_llm(llm, error=exc)
                     raise
@@ -248,7 +255,16 @@ class AssistantAgent:
                 if not response.tool_calls:
                     try:
                         payload = _json_object(response.text)
-                    except ValueError:
+                    except ValueError as exc:
+                        if response.finish_reason in {
+                            "length",
+                            "max_tokens",
+                            "max_output_tokens",
+                        }:
+                            raise RuntimeError(
+                                "assistant output was truncated before structured output "
+                                f"({response.finish_reason}, max_tokens={self.max_tokens})"
+                            ) from exc
                         terminal_tools = [tool.name for tool in self.tools if tool.terminal]
                         if not terminal_tools:
                             raise
@@ -523,7 +539,8 @@ def _messages_payload(
 
 
 def _parse_chat(body: dict[str, Any]) -> AssistantResponse:
-    message = ((body.get("choices") or [{}])[0].get("message") or {})
+    choice = (body.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
     calls = tuple(
         AssistantToolCall(
             id=str(item.get("id") or uuid.uuid4().hex),
@@ -538,6 +555,7 @@ def _parse_chat(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=calls,
         usage=AssistantUsage(usage.get("prompt_tokens"), usage.get("completion_tokens")),
         raw_id=body.get("id"),
+        finish_reason=choice.get("finish_reason"),
     )
 
 
@@ -562,6 +580,8 @@ def _parse_responses(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
         raw_id=body.get("id"),
+        finish_reason=(body.get("incomplete_details") or {}).get("reason")
+        or body.get("status"),
     )
 
 
@@ -585,6 +605,7 @@ def _parse_messages(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
         raw_id=body.get("id"),
+        finish_reason=body.get("stop_reason"),
     )
 
 

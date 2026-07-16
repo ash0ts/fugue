@@ -165,6 +165,7 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
+        assert json.loads(request.content)["max_output_tokens"] == 16_384
         return httpx.Response(
             200,
             json=_tool_response(
