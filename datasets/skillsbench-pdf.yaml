@@ -1,10 +1,12 @@
 dataset:
   ref: benchflow/skillsbench
   version: "sha256:145925c10bc09425dc0201772cfa50d9b800010081cf5ad77969554a644d7ae1"
+  source:
+    path: configs/fugue/evaluations/skillsbench-pdf-v1/cases.jsonl
 
 model: wandb/zai-org/GLM-5.2
-k: 2
-n_concurrent: 2
+k: 1
+n_concurrent: 4
 jobs_dir: jobs/skillsbench-pdf-ab
 
 harnesses:
@@ -21,6 +23,11 @@ tasks:
   - id: court-form-filling
     notes: Fill and validate a structured court PDF form.
     artifacts: [/root/sc100-filled.pdf]
+    verifier_runtime:
+      python_packages:
+        - pytest==8.4.1
+        - pytest-json-ctrf==0.3.5
+      test_script_sha256: 3b737fad7a00d6b8f63ffef481beea1e4b8ca518a558cfb6d28772cd49eefa38
   - id: pdf-excel-diff
     notes: Extract a PDF table and compare it with an Excel workbook.
     artifacts: [/root/diff_report.json]

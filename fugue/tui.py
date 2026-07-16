@@ -1855,7 +1855,16 @@ class FugueApp(App[None]):
         if not isinstance(table, DataTable):
             return False
         table.clear(columns=True)
-        table.add_columns("Run", "Experiment", "Status", "Pass", "Fail", "Waiting")
+        table.add_columns(
+            "Run",
+            "Experiment",
+            "Status",
+            "Pass",
+            "Fail",
+            "Cancelled",
+            "Interrupted",
+            "Waiting",
+        )
         runs = self.service.runs()
         for run in runs:
             table.add_row(
@@ -1864,6 +1873,8 @@ class FugueApp(App[None]):
                 run.status,
                 str(run.passed),
                 str(run.failed),
+                str(run.cancelled),
+                str(run.interrupted),
                 str(run.pending),
                 key=run.run_id,
             )
@@ -1889,6 +1900,8 @@ class FugueApp(App[None]):
             "Pass",
             "Eval fail",
             "Exec fail",
+            "Cancelled",
+            "Interrupted",
             "Unscored",
             "Pending",
             "N/A",
@@ -1913,6 +1926,8 @@ class FugueApp(App[None]):
                 str(candidate.passed),
                 str(candidate.failed),
                 str(candidate.execution_failed),
+                str(candidate.cancelled),
+                str(candidate.interrupted),
                 str(candidate.unscored),
                 str(candidate.pending),
                 str(candidate.not_applicable),

@@ -16,10 +16,11 @@ def test_catalog_filters_and_facets_skill_and_integration_variants(
 id: study
 title: Study
 variants:
-  - {id: baseline, label: Baseline}
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
   - id: treatment
     label: Treatment
     skills: [reviewed-skill]
+    context: {system_id: none, delivery: portable}
     integrations: [search-api]
 """
     )

@@ -2,22 +2,18 @@ id: gitnexus
 title: GitNexus
 description: Local code knowledge graph with native MCP tools.
 provider: fugue.bench.context:GitNexusContextProvider
-version: gitnexus@1.6.3
+version: gitnexus@1.6.3+fugue-vector.6
 support: experimental
-capabilities: [prepare, bind]
+capabilities: [prepare, retrieve, bind]
 deliveries: [native_mcp]
-required_commands: [npx]
 license: PolyForm-Noncommercial-1.0.0
 license_url: https://github.com/abhigyanpatwari/GitNexus/blob/main/LICENSE
 source_url: https://github.com/abhigyanpatwari/GitNexus
 enabled_by_default: false
 requires_license_approval: true
 config:
+  retrieval_mode: bm25
   binding:
-    mcp_servers:
-      - name: gitnexus
-        command: npx
-        args: [-y, "gitnexus@1.6.3", mcp]
-        cwd: .fugue-context/artifact/repository
-        env:
-          HOME: .fugue-context/artifact/home
+    managed_runtime: pinned_mcp
+    repository_path: /workspace/repository
+    extra_instruction_paths: ["{artifact}/FUGUE_NATIVE_MCP.md"]

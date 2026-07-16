@@ -8,6 +8,16 @@ from typing import Any, Literal
 
 import yaml
 
+from fugue.bench.context_contracts import (
+    ContextCapability,
+    ContextDelivery,
+    WorkloadRunner,
+    context_capabilities,
+)
+from fugue.bench.files import as_list as _list
+from fugue.bench.files import as_mapping as _dict
+from fugue.bench.files import require_unique
+
 CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
 SKILLS_DIR = "skills"
@@ -46,7 +56,7 @@ class Skill:
 @dataclass(frozen=True)
 class ContextSelection:
     system_id: str = "none"
-    delivery: Literal["portable", "native_mcp"] = "portable"
+    delivery: ContextDelivery = "portable"
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -216,11 +226,13 @@ def scorer_reference(scorer: ScorerSelection) -> str:
 @dataclass(frozen=True)
 class WorkloadSpec:
     id: str
-    runner: str
+    runner: WorkloadRunner
     manifest: Path | None = None
     dataset: str | None = None
     systems: list[str] = field(default_factory=list)
-    required_capabilities: list[str] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
+    harness_assignment: Literal["cross", "latin_square"] = "cross"
+    required_capabilities: list[ContextCapability] = field(default_factory=list)
     n_tasks: int | None = None
     n_attempts: int | None = None
     artifacts: list[Any] = field(default_factory=list)
@@ -254,6 +266,8 @@ class PresetSpec:
     n_tasks: int | None = None
     n_attempts: int | None = None
     n_concurrent: int | None = None
+    scheduling_seed: str | None = None
+    selection_lock_required: bool = False
     workload_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -296,6 +310,7 @@ class ExperimentSpec:
         ]
         return value
 
+
 def library_root(repo_root: Path | None = None) -> Path:
     root = repo_root or Path.cwd()
     return root / CONFIG_ROOT
@@ -327,14 +342,6 @@ def get_prompt(item_id: str, repo_root: Path | None = None) -> Prompt:
         path=path.as_posix(),
         sha256=_file_sha256(path),
     )
-
-
-def save_prompt(item_id: str, body: str, repo_root: Path | None = None) -> Prompt:
-    item_id = validate_id(item_id, kind="prompt id")
-    path = library_root(repo_root) / PROMPTS_DIR / f"{item_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_prompt(item_id, repo_root)
 
 
 def list_skills(repo_root: Path | None = None) -> list[LibraryItem]:
@@ -370,14 +377,6 @@ def get_skill(item_id: str, repo_root: Path | None = None) -> Skill:
     )
 
 
-def save_skill(item_id: str, body: str, repo_root: Path | None = None) -> Skill:
-    item_id = validate_id(item_id, kind="skill id")
-    path = library_root(repo_root) / SKILLS_DIR / item_id / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_skill(item_id, repo_root)
-
-
 def list_experiments(repo_root: Path | None = None) -> list[LibraryItem]:
     return _list_yaml_items(library_root(repo_root) / EXPERIMENTS_DIR)
 
@@ -386,9 +385,7 @@ def list_agent_presets(repo_root: Path | None = None) -> list[LibraryItem]:
     return _list_yaml_items(library_root(repo_root) / AGENT_PRESETS_DIR)
 
 
-def get_agent_preset(
-    item_id: str, repo_root: Path | None = None
-) -> AgentPreset:
+def get_agent_preset(item_id: str, repo_root: Path | None = None) -> AgentPreset:
     item_id = validate_id(item_id, kind="agent preset id")
     path = library_root(repo_root) / AGENT_PRESETS_DIR / f"{item_id}.yaml"
     if not path.is_file():
@@ -424,7 +421,7 @@ def get_agent_preset(
         validate_id(prompt_id, kind="prompt id")
         get_prompt(prompt_id, repo_root)
     skill_ids = _string_list(candidate_raw.get("skills"))
-    _require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
+    require_unique(skill_ids, kind=f"agent preset {preset_id} skill")
     for skill_id in skill_ids:
         get_skill(skill_id, repo_root)
     suite_digest = str(evidence_raw.get("suite_digest") or "")
@@ -434,7 +431,10 @@ def get_agent_preset(
     if not re.fullmatch(r"[0-9a-f]{40}", base_commit):
         raise ValueError("agent preset base_commit must be a full Git commit")
     metrics = _dict(evidence_raw.get("metrics"))
-    if any(value is not None and not isinstance(value, (int, float)) for value in metrics.values()):
+    if any(
+        value is not None and not isinstance(value, (int, float))
+        for value in metrics.values()
+    ):
         raise ValueError("agent preset metrics must be numeric or null")
     return AgentPreset(
         id=preset_id,
@@ -454,8 +454,7 @@ def get_agent_preset(
             ),
             agent_kwargs=_dict(candidate_raw.get("agent_kwargs")),
             agent_env={
-                str(k): str(v)
-                for k, v in _dict(candidate_raw.get("agent_env")).items()
+                str(k): str(v) for k, v in _dict(candidate_raw.get("agent_env")).items()
             },
             environment=_dict(candidate_raw.get("environment")),
             verifier=_dict(candidate_raw.get("verifier")),
@@ -486,14 +485,6 @@ def get_experiment(item_id: str, repo_root: Path | None = None) -> ExperimentSpe
     return experiment
 
 
-def get_experiment_text(item_id: str, repo_root: Path | None = None) -> str:
-    item_id = validate_id(item_id, kind="experiment id")
-    path = library_root(repo_root) / EXPERIMENTS_DIR / f"{item_id}.yaml"
-    if not path.is_file():
-        raise FileNotFoundError(f"experiment not found: {item_id}")
-    return path.read_text()
-
-
 def save_experiment(
     item_id: str, body: str, repo_root: Path | None = None
 ) -> ExperimentSpec:
@@ -518,9 +509,7 @@ def save_experiment_data(
     return save_experiment(item_id, experiment_to_yaml(experiment), repo_root)
 
 
-def experiment_from_yaml(
-    text: str, *, item_id: str | None = None
-) -> ExperimentSpec:
+def experiment_from_yaml(text: str, *, item_id: str | None = None) -> ExperimentSpec:
     raw = yaml.safe_load(text) or {}
     if not isinstance(raw, dict):
         raise ValueError("experiment YAML must be a mapping")
@@ -539,9 +528,9 @@ def experiment_from_data(
         variants = [FeatureVariant(id="baseline", label="Baseline")]
     workloads = _workloads(raw.get("workloads"))
     presets = _presets(raw.get("presets"))
-    _require_unique([variant.id for variant in variants], kind="variant")
-    _require_unique([workload.id for workload in workloads], kind="workload")
-    _require_unique([preset.id for preset in presets], kind="preset")
+    require_unique([variant.id for variant in variants], kind="variant")
+    require_unique([workload.id for workload in workloads], kind="workload")
+    require_unique([preset.id for preset in presets], kind="preset")
     workload_ids = {workload.id for workload in workloads}
     for preset in presets:
         unknown = sorted(
@@ -550,6 +539,14 @@ def experiment_from_data(
         if unknown:
             raise ValueError(
                 f"preset {preset.id} overrides unknown workload(s): {', '.join(unknown)}"
+            )
+    variant_ids = {variant.id for variant in variants}
+    for workload in workloads:
+        unknown_variants = sorted(set(workload.variants) - variant_ids)
+        if unknown_variants:
+            raise ValueError(
+                f"workload {workload.id} selects unknown variant(s): "
+                + ", ".join(unknown_variants)
             )
     default_preset = _optional_str(raw.get("default_preset"))
     if default_preset and default_preset not in {preset.id for preset in presets}:
@@ -578,7 +575,9 @@ def experiment_from_data(
         retry=_dict(raw.get("retry")),
         agent_kwargs=_dict(raw.get("agent_kwargs")),
         agent_env={str(k): str(v) for k, v in _dict(raw.get("agent_env")).items()},
-        integrations=_integration_selections(raw.get("integrations"), kind="experiment"),
+        integrations=_integration_selections(
+            raw.get("integrations"), kind="experiment"
+        ),
         workloads=workloads,
         evaluation_generation=_evaluation_generation(raw.get("evaluation_generation")),
         presets=presets,
@@ -604,21 +603,6 @@ def experiment_with_overrides(
     return experiment_from_yaml(yaml.safe_dump(data), item_id=experiment.id)
 
 
-def content_hashes_for_ids(
-    *,
-    prompt_ids: list[str],
-    skill_ids: list[str],
-    repo_root: Path | None = None,
-) -> dict[str, dict[str, str]]:
-    from fugue.bench.sources import resolve_skills
-
-    resolved = resolve_skills(skill_ids, repo_root or Path.cwd())
-    return {
-        "prompts": {item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids},
-        "skills": {item.id: item.digest.removeprefix("sha256:") for item in resolved},
-    }
-
-
 def _variants(raw: dict[str, Any]) -> list[FeatureVariant]:
     values = raw.get("variants")
     if values is None:
@@ -641,7 +625,7 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
     skills = _string_list(raw.get("skills"))
     for skill_id in skills:
         validate_id(skill_id, kind="skill id")
-    _require_unique(skills, kind=f"variant {variant_id} skill")
+    require_unique(skills, kind=f"variant {variant_id} skill")
     return FeatureVariant(
         id=variant_id,
         label=str(raw.get("label") or variant_id),
@@ -663,15 +647,24 @@ def _feature_variant(raw: Any, index: int) -> FeatureVariant:
 
 def _context_selection(raw: Any) -> ContextSelection:
     if raw in (None, ""):
-        return ContextSelection()
+        raise ValueError(
+            "variant context must be a mapping with explicit delivery and system_id"
+        )
     if isinstance(raw, str):
-        system_id = validate_id(raw, kind="context system id")
-        return ContextSelection(system_id=system_id)
+        raise ValueError(
+            "variant context must be a mapping with explicit delivery and system_id"
+        )
     if not isinstance(raw, dict):
-        raise ValueError("variant context must be a string or mapping")
+        raise ValueError("variant context must be a mapping")
     _reject_unknown(raw, ContextSelection, kind="variant context")
-    system_id = validate_id(raw.get("system_id") or "none", kind="context system id")
-    delivery = str(raw.get("delivery") or "portable")
+    if not str(raw.get("system_id") or "").strip():
+        raise ValueError("variant context requires an explicit context system_id")
+    system_id = validate_id(raw["system_id"], kind="context system id")
+    if not str(raw.get("delivery") or "").strip():
+        raise ValueError(
+            f"context system {system_id} requires an explicit context delivery"
+        )
+    delivery = str(raw["delivery"])
     if delivery not in {"portable", "native_mcp"}:
         raise ValueError(f"unknown context delivery: {delivery}")
     return ContextSelection(
@@ -703,7 +696,7 @@ def _integration_selections(raw: Any, *, kind: str) -> list[IntegrationSelection
         result.append(
             IntegrationSelection(id=integration_id, config=_dict(value.get("config")))
         )
-    _require_unique([item.id for item in result], kind=f"{kind} integration")
+    require_unique([item.id for item in result], kind=f"{kind} integration")
     return result
 
 
@@ -720,14 +713,26 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
         runner = str(value.get("runner") or "harbor")
         if runner not in {"harbor", "retrieval", "sequence"}:
             raise ValueError(f"unknown workload runner: {runner}")
+        required_capabilities = sorted(
+            context_capabilities(
+                _string_list(value.get("required_capabilities")),
+                kind=f"workload {workload_id}",
+            )
+        )
         workloads.append(
             WorkloadSpec(
                 id=workload_id,
                 runner=runner,
-                manifest=Path(str(value["manifest"])) if value.get("manifest") else None,
+                manifest=Path(str(value["manifest"]))
+                if value.get("manifest")
+                else None,
                 dataset=_optional_str(value.get("dataset")),
                 systems=_string_list(value.get("systems")),
-                required_capabilities=_string_list(value.get("required_capabilities")),
+                variants=_string_list(value.get("variants")),
+                harness_assignment=_harness_assignment(
+                    value.get("harness_assignment"), workload_id
+                ),
+                required_capabilities=required_capabilities,
                 n_tasks=_positive_int(
                     value.get("n_tasks"), kind=f"workload {workload_id} n_tasks"
                 ),
@@ -742,15 +747,22 @@ def _workloads(raw: Any) -> list[WorkloadSpec]:
     return workloads
 
 
+def _harness_assignment(value: Any, workload_id: str) -> str:
+    assignment = str(value or "cross")
+    if assignment not in {"cross", "latin_square"}:
+        raise ValueError(
+            f"workload {workload_id} harness_assignment must be cross or latin_square"
+        )
+    return assignment
+
+
 def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:
     if raw in (None, ""):
         return None
     if not isinstance(raw, dict):
         raise ValueError("evaluation_generation must be a mapping")
     _reject_unknown(raw, EvaluationGenerationSpec, kind="evaluation generation")
-    size = _positive_int(
-        raw.get("size", 8), kind="evaluation generation size"
-    )
+    size = _positive_int(raw.get("size", 8), kind="evaluation generation size")
     assert size is not None
     sources: list[EvaluationSourceSpec] = []
     for index, value in enumerate(_list(raw.get("sources")), start=1):
@@ -832,7 +844,7 @@ def _scorer_refs(value: Any, workload_id: str) -> list[ScorerSelection]:
             )
         result.append(RubricScorerSelection(type="rubric", path=ref))
     refs = [scorer_reference(item) for item in result]
-    _require_unique(refs, kind=f"workload {workload_id} scorer")
+    require_unique(refs, kind=f"workload {workload_id} scorer")
     return result
 
 
@@ -873,6 +885,10 @@ def _presets(raw: Any) -> list[PresetSpec]:
                 n_concurrent=_positive_int(
                     value.get("n_concurrent"),
                     kind=f"preset {preset_id} n_concurrent",
+                ),
+                scheduling_seed=_optional_str(value.get("scheduling_seed")),
+                selection_lock_required=bool(
+                    value.get("selection_lock_required", False)
                 ),
                 workload_overrides=_workload_overrides(
                     value.get("workload_overrides"), preset_id
@@ -982,25 +998,6 @@ def _positive_int(value: Any, *, kind: str) -> int | None:
     return parsed
 
 
-def _require_unique(values: list[str], *, kind: str) -> None:
-    seen: set[str] = set()
-    duplicates: set[str] = set()
-    for value in values:
-        if value in seen:
-            duplicates.add(value)
-        seen.add(value)
-    if duplicates:
-        raise ValueError(f"duplicate {kind} id(s): {', '.join(sorted(duplicates))}")
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"expected mapping, got {type(value).__name__}")
-    return dict(value)
-
-
 def _workload_overrides(value: Any, preset_id: str) -> dict[str, dict[str, Any]]:
     values = _dict(value)
     allowed = {"n_tasks", "n_attempts", "n_concurrent"}
@@ -1021,14 +1018,6 @@ def _workload_overrides(value: Any, preset_id: str) -> dict[str, dict[str, Any]]
             for name, selected in settings.items()
         }
     return result
-
-
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"expected list, got {type(value).__name__}")
-    return list(value)
 
 
 def _paths_to_strings(value: Any) -> Any:

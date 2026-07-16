@@ -1,69 +1,82 @@
 dataset:
   path: datasets/fugue-self-eval/v1/operator
-
 model: wandb/zai-org/GLM-5.2
 k: 1
 n_concurrent: 2
 jobs_dir: jobs/fugue-operator-self-eval
-
 harnesses:
-  - {name: hermes, agent: "fugue.agents:FugueHermes"}
-  - {name: openclaw, agent: "fugue.agents:FugueOpenClaw"}
-  - {name: claude-code, agent: "fugue.agents:FugueClaudeCode"}
-  - {name: codex, agent: "fugue.agents:FugueCodex"}
-
+- name: hermes
+  agent: fugue.agents:FugueHermes
+- name: openclaw
+  agent: fugue.agents:FugueOpenClaw
+- name: claude-code
+  agent: fugue.agents:FugueClaudeCode
+- name: codex
+  agent: fugue.agents:FugueCodex
 tasks:
-  - id: fugue-operator-classify-applicability
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: preview
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: preview
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
-  - id: fugue-operator-resolve-comparable-cohort
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: analysis
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: analysis
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
-  - id: fugue-operator-select-weave-destination
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: observability
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: observability
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
-  - id: fugue-operator-interpret-cancellation
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: runs
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: runs
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
-  - id: fugue-operator-respect-trace-policy
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: setup
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: setup
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
-  - id: fugue-operator-evidence-recommendation
-    repo: ash0ts/fugue
-    base_commit: 96512017842d68add2546a057f0601de3eaf610e
-    notes: analysis
-    metadata:
-      suite: fugue-operator-v1
-      split: holdout
-      category: analysis
-      source_commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-classify-applicability
+  notes: preview
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: preview
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-resolve-comparable-cohort
+  notes: analysis
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: analysis
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-select-weave-destination
+  notes: observability
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: observability
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-interpret-cancellation
+  notes: runs
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: runs
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-respect-trace-policy
+  notes: setup
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: setup
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e
+- id: fugue-operator-evidence-recommendation
+  notes: analysis
+  metadata:
+    suite: fugue-operator-v1
+    split: holdout
+    category: analysis
+    source_commit: 96512017842d68add2546a057f0601de3eaf610e
+  repository:
+    type: git
+    url: https://github.com/ash0ts/fugue
+    commit: 96512017842d68add2546a057f0601de3eaf610e

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from fugue.bench.job_config import preview_jobs
 from fugue.bench.library import get_experiment, get_skill
 from fugue.bench.manifest import load_manifest
@@ -15,7 +17,14 @@ SKILLSBENCH_DIGEST = (
 )
 
 
-def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
+def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This assertion covers the authored remote dataset, not machine-local setup state.
+    monkeypatch.setattr(
+        "fugue.bench.job_config.read_task_runtime_lock",
+        lambda *_args, **_kwargs: None,
+    )
     manifest = load_manifest(MANIFEST_PATH)
     experiment = get_experiment("skillsbench-pdf-ab", REPO_ROOT)
     skill = get_skill("pdf-artifact-workflow", REPO_ROOT)
@@ -49,7 +58,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
         run_id=run_id,
     )
 
-    assert len(rendered) == 48
+    assert len(rendered) == 24
     assert not runtime_dir.exists()
     assert all(not job.config_path.exists() for job in rendered)
 
@@ -70,7 +79,7 @@ def test_skillsbench_pdf_demo_is_a_balanced_side_effect_free_preview() -> None:
 
     for harness in ("hermes", "openclaw", "claude-code", "codex"):
         for task_id in expected_tasks:
-            for trial_index in (1, 2):
+            for trial_index in (1,):
                 baseline_job = cells[(harness, "baseline", task_id, trial_index)]
                 skilled_job = cells[
                     (harness, "with-pdf-skill", task_id, trial_index)
@@ -115,7 +124,7 @@ def _assert_balanced_skill_pair(
         }
     ]
     assert baseline["n_attempts"] == skilled["n_attempts"] == 1
-    assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 2
+    assert baseline["n_concurrent_trials"] == skilled["n_concurrent_trials"] == 4
     assert baseline["artifacts"] == skilled["artifacts"] == expected_artifacts
     assert baseline["environment"] == skilled["environment"]
     assert baseline.get("extra_instruction_paths", []) == []

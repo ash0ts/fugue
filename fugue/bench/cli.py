@@ -83,6 +83,7 @@ def _internal_context_evaluate(argv: list[str]) -> int:
     parser.add_argument("--experiment", required=True)
     parser.add_argument("--workload", required=True)
     parser.add_argument("--system", required=True)
+    parser.add_argument("--variant", required=True)
     parser.add_argument("--preset", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--attempts", type=_positive_cli_int, default=1)
@@ -157,6 +158,7 @@ def _parser() -> FugueArgumentParser:
     export_run.add_argument("--fetch-weave", action="store_true")
     export_run.add_argument("--to-weave", action="store_true")
     export_run.add_argument("--republish", action="store_true")
+    export_run.add_argument("--republish-reason")
     _add_common_args(export_run, json_output=True)
     package = run_actions.add_parser("package", help="Package one candidate")
     package.add_argument("candidate")
@@ -217,6 +219,11 @@ def _parser() -> FugueArgumentParser:
     setup.add_argument("--manifest", type=Path)
     setup.add_argument("--workloads")
     setup.add_argument("--systems")
+    setup.add_argument("--harnesses")
+    setup.add_argument("--variants")
+    setup.add_argument("-k", "--n-attempts", type=int)
+    setup.add_argument("-n", "--n-concurrent", type=int)
+    setup.add_argument("-l", "--n-tasks", type=int)
     setup.add_argument("--trace-content", choices=("full", "metadata"))
     operation = setup.add_mutually_exclusive_group()
     operation.add_argument(
@@ -224,6 +231,26 @@ def _parser() -> FugueArgumentParser:
     )
     operation.add_argument(
         "--start-bridge", action="store_true", help="Start the local LiteLLM bridge"
+    )
+    operation.add_argument(
+        "--start-services",
+        action="store_true",
+        help="Start selected managed context services",
+    )
+    operation.add_argument(
+        "--service-status",
+        action="store_true",
+        help="Inspect selected managed context services without changing them",
+    )
+    operation.add_argument(
+        "--stop-services",
+        action="store_true",
+        help="Stop selected managed context services and preserve their data",
+    )
+    operation.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Build all locked context and harness artifacts selected by the plan",
     )
     operation.add_argument(
         "--prepare-context",
@@ -278,7 +305,10 @@ def _add_common_args(
     parser: argparse.ArgumentParser, *, json_output: bool = False
 ) -> None:
     parser.add_argument(
-        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Read credentials from this file without copying it into the repository",
     )
     parser.add_argument(
         "--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS
@@ -309,9 +339,21 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-n", "--n-concurrent", type=_positive_cli_int)
     parser.add_argument("-l", "--n-tasks", type=_positive_cli_int)
     parser.add_argument(
-        "--env-file", type=Path, default=Path(".env"), help=argparse.SUPPRESS
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Read credentials from this file without copying it into the repository",
     )
     parser.add_argument("--jobs-dir", type=Path)
+    parser.add_argument(
+        "--cohort-id",
+        help="Stable cohort identity recorded in the immutable run snapshot",
+    )
+    parser.add_argument(
+        "--selection-lock",
+        type=Path,
+        help="Treatment selection lock required by preregistered confirmatory presets",
+    )
     parser.add_argument(
         "--run-name",
         help="W&B/Weave run grouping name. Defaults to FUGUE_RUN_NAME or a timestamp.",
@@ -557,11 +599,32 @@ def _print_checks(checks: Any) -> None:
     CONSOLE.print(Panel(table, title="Preflight", border_style="fugue.gold"))
 
 
+def _print_service_statuses(statuses: Any) -> None:
+    table = Table("Service", "State", "Detail", box=box.SIMPLE_HEAD)
+    for status in statuses:
+        table.add_row(
+            status.service_id,
+            _state(status.ready),
+            f"{status.state}: {status.detail}",
+        )
+    if not statuses:
+        table.add_row("none", "—", "no selected context system needs a service")
+    CONSOLE.print(Panel(table, title="Managed services", border_style="fugue.gold"))
+
+
 def _print_context_preparation(records: Any) -> None:
-    table = Table("System", "Task", "State", "Detail", box=box.SIMPLE_HEAD)
+    table = Table(
+        "System", "Variant / mode", "Task", "State", "Detail", box=box.SIMPLE_HEAD
+    )
     for record in records:
         table.add_row(
             record.system_id,
+            " / ".join(
+                value
+                for value in (record.variant_id, record.retrieval_mode)
+                if value
+            )
+            or "—",
             record.task_id,
             record.status,
             record.detail,
@@ -678,6 +741,8 @@ def _request_from_args(
         tags=tuple(_csv(getattr(args, "tags", None)) or []),
         jobs_dir=getattr(args, "jobs_dir", None),
         trace_content=getattr(args, "trace_content", None),
+        cohort_id=getattr(args, "cohort_id", None),
+        selection_lock=getattr(args, "selection_lock", None),
     )
 
 
@@ -868,9 +933,14 @@ def _setup(args: argparse.Namespace) -> int:
         preset=args.preset,
         workloads=tuple(_csv(args.workloads) or []),
         systems=tuple(_csv(args.systems) or []),
+        harnesses=tuple(_csv(args.harnesses) or []),
+        variants=tuple(_csv(args.variants) or []),
         model=args.model,
         builder_model=args.builder_model,
         judge_model=args.judge_model,
+        n_attempts=args.n_attempts,
+        n_tasks=args.n_tasks,
+        n_concurrent=args.n_concurrent,
         trace_content=args.trace_content,
     )
     if args.check:
@@ -893,13 +963,48 @@ def _setup(args: argparse.Namespace) -> int:
                 )
             )
         return 0
+    service_result = _setup_service_action(args, service, request, as_json)
+    if service_result is not None:
+        return service_result
+    if args.prepare:
+        prepared = service.prepare(request, rebuild=args.rebuild)
+        if args.json:
+            print(as_json(prepared))
+        else:
+            _print_context_preparation(prepared.context)
+            for runtime in prepared.agent_runtimes:
+                CONSOLE.print(
+                    f"[fugue.success]{runtime.harness}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+            for runtime in prepared.task_runtimes:
+                CONSOLE.print(
+                    f"[fugue.success]task {runtime.task_id}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+            for dataset in prepared.workload_datasets:
+                CONSOLE.print(
+                    f"[fugue.success]dataset {dataset.dataset_id}[/] "
+                    f"{dataset.status}: {dataset.sample_count} samples "
+                    f"({dataset.sha256[:19]})"
+                )
+            if prepared.portable_context_runtime is not None:
+                runtime = prepared.portable_context_runtime
+                CONSOLE.print(
+                    f"[fugue.success]{runtime.harness}[/] {runtime.status}: "
+                    f"{runtime.image} [{runtime.architecture}] "
+                    f"({runtime.image_id[:19]})"
+                )
+        return 0 if all(item.status != "skipped" for item in prepared.context) else 1
     if args.prepare_context:
         records = service.prepare_context(request, rebuild=args.rebuild)
         if args.json:
             print(as_json(records))
         else:
             _print_context_preparation(records)
-        return 0
+        return 0 if all(item.status != "skipped" for item in records) else 1
     if args.skills:
         inspections = service.prepare_skills(request, refresh=args.refresh_skills)
         if args.json:
@@ -938,6 +1043,24 @@ def _setup(args: argparse.Namespace) -> int:
     )
 
 
+def _setup_service_action(args, service, request, as_json) -> int | None:
+    actions = (
+        (args.start_services, service.start_services, True),
+        (args.service_status, service.service_status, True),
+        (args.stop_services, service.stop_services, False),
+    )
+    selected = next((item for item in actions if item[0]), None)
+    if selected is None:
+        return None
+    _, action, expected_ready = selected
+    statuses = action(request)
+    if args.json:
+        print(as_json(statuses))
+    else:
+        _print_service_statuses(statuses)
+    return 0 if all(item.ready is expected_ready for item in statuses) else 1
+
+
 def _runs(args: argparse.Namespace) -> int:
     from fugue.bench.operator import OperatorService, as_json
 
@@ -945,132 +1068,16 @@ def _runs(args: argparse.Namespace) -> int:
     if not args.run_id:
         if args.runs_action:
             raise ValueError("a run id is required for this action")
-        runs = service.runs()[: args.limit]
-        if args.json:
-            print(as_json(runs))
-            return 0
-        table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
-        for name in ("Run", "Experiment", "Status", "Passed", "Failed", "Pending"):
-            table.add_column(name)
-        for run in runs:
-            table.add_row(
-                run.run_id,
-                run.experiment_id,
-                _status_markup(run.status),
-                str(run.passed),
-                str(run.failed),
-                str(run.pending),
-            )
-        if runs:
-            CONSOLE.print(table)
-        else:
-            CONSOLE.print(
-                "[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]"
-            )
-        return 0
-    if args.runs_action == "logs":
-        if args.follow:
-            try:
-                for chunk in service.supervisor.follow_log(
-                    args.run_id, cell_id=args.cell
-                ):
-                    print(chunk, end="", flush=True)
-            except KeyboardInterrupt:
-                return 130
-        else:
-            print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
-        return 0
-    if args.runs_action == "cancel":
-        run = service.supervisor.cancel(args.run_id)
-        if args.json:
-            print(as_json(service.run_summary(args.run_id)))
-        else:
-            CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
-        return 0
-    if args.runs_action == "package":
-        if not args.yes:
-            if not CONSOLE.is_terminal:
-                raise ValueError("use --yes to confirm packaging non-interactively")
-            if not Confirm.ask(
-                f"Package candidate {args.candidate} from run {args.run_id} "
-                f"(allow failed: {'yes' if args.allow_failed else 'no'}) "
-                f"as {args.image}?"
-            ):
-                return 1
-        result = service.package_candidate(
-            args.run_id,
-            args.candidate,
-            workspace=args.workspace,
-            image=args.image,
-            platform=args.platform,
-            allow_failed=args.allow_failed,
-        )
-        if args.json:
-            print(as_json(result))
-        else:
-            CONSOLE.print(
-                f"Packaged [bold]{result.candidate_id}[/] as "
-                f"[cyan]{result.image}[/] ({result.deployment_id})"
-            )
-            CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
-        return 0
-    if args.runs_action == "export":
-        summary = service.export_run(
-            args.run_id,
-            out=args.out,
-            fetch_weave=args.fetch_weave,
-            to_weave=args.to_weave,
-            republish=args.republish,
-        )
-        if args.json:
-            print(as_json(summary))
-        else:
-            if summary.published:
-                CONSOLE.print(
-                    f"Published {summary.published} finalized candidate evaluation(s)"
-                )
-                for evaluation in summary.evaluations:
-                    suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
-                    CONSOLE.print(
-                        f"  {evaluation.name} ({evaluation.examples} examples; "
-                        f"{evaluation.linked_agent_predictions}/"
-                        f"{evaluation.agent_predictions} Agent-linked; "
-                        f"{evaluation.direct_predictions} direct){suffix}"
-                    )
-                    for reason in evaluation.linking_failures:
-                        CONSOLE.print(f"    [red]{reason}[/]")
-            if summary.skipped:
-                CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
-            for failure in summary.publication_failures:
-                CONSOLE.print(f"[red]Publication failed:[/] {failure}")
-            CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
-        return 0
-    if args.runs_action == "open":
-        links = service.run_links(args.run_id)
-        url = links.project if args.destination == "project" else links.agents
-        conversation_id = None
-        if args.destination == "evaluation":
-            evaluation = service.run_evaluation(args.run_id, cell_id=args.cell)
-            if evaluation is None or evaluation.url is None:
-                raise ValueError("run has no linked Weave evaluation")
-            url = evaluation.url
-        if args.destination == "trace":
-            url = links.trace or links.agents
-            refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
-            conversation_id = next(
-                (value for reference in refs for value in reference.conversation_ids),
-                None,
-            )
-        if args.json:
-            print(as_json({"url": url, "conversation_id": conversation_id}))
-        elif args.print_only:
-            print(url)
-        else:
-            webbrowser.open(url)
-            CONSOLE.print(f"Opened [link={url}]{url}[/link]")
-        if conversation_id and not args.json:
-            CONSOLE.print(f"Conversation: [cyan]{conversation_id}[/]")
-        return 0
+        return _runs_list(args, service, as_json)
+    handlers = {
+        "logs": _runs_logs,
+        "cancel": _runs_cancel,
+        "package": _runs_package,
+        "export": _runs_export,
+        "open": _runs_open,
+    }
+    if handler := handlers.get(args.runs_action):
+        return handler(args, service, as_json)
     run = service.run_summary(args.run_id)
     if args.json:
         print(as_json(run))
@@ -1078,6 +1085,153 @@ def _runs(args: argparse.Namespace) -> int:
         CONSOLE.print(_run_panel(run))
         CONSOLE.print(_candidates_table(run))
         CONSOLE.print(_cells_table(run))
+    return 0
+
+
+def _runs_list(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    runs = service.runs()[: args.limit]
+    if args.json:
+        print(as_json(runs))
+        return 0
+    table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
+    for name in (
+        "Run",
+        "Experiment",
+        "Status",
+        "Passed",
+        "Failed",
+        "Cancelled",
+        "Interrupted",
+        "Pending",
+    ):
+        table.add_column(name)
+    for run in runs:
+        table.add_row(
+            run.run_id,
+            run.experiment_id,
+            _status_markup(run.status),
+            str(run.passed),
+            str(run.failed),
+            str(run.cancelled),
+            str(run.interrupted),
+            str(run.pending),
+        )
+    if runs:
+        CONSOLE.print(table)
+    else:
+        CONSOLE.print("[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]")
+    return 0
+
+
+def _runs_logs(args: argparse.Namespace, service: Any, _: Any) -> int:
+    if not args.follow:
+        print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
+        return 0
+    try:
+        for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
+            print(chunk, end="", flush=True)
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+def _runs_cancel(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    run = service.supervisor.cancel(args.run_id)
+    if args.json:
+        print(as_json(service.run_summary(args.run_id)))
+    else:
+        CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
+    return 0
+
+
+def _runs_package(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    if not args.yes:
+        if not CONSOLE.is_terminal:
+            raise ValueError("use --yes to confirm packaging non-interactively")
+        confirmed = Confirm.ask(
+            f"Package candidate {args.candidate} from run {args.run_id} "
+            f"(allow failed: {'yes' if args.allow_failed else 'no'}) as {args.image}?"
+        )
+        if not confirmed:
+            return 1
+    result = service.package_candidate(
+        args.run_id,
+        args.candidate,
+        workspace=args.workspace,
+        image=args.image,
+        platform=args.platform,
+        allow_failed=args.allow_failed,
+    )
+    if args.json:
+        print(as_json(result))
+    else:
+        CONSOLE.print(
+            f"Packaged [bold]{result.candidate_id}[/] as "
+            f"[cyan]{result.image}[/] ({result.deployment_id})"
+        )
+        CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
+    return 0
+
+
+def _runs_export(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    summary = service.export_run(
+        args.run_id,
+        out=args.out,
+        fetch_weave=args.fetch_weave,
+        to_weave=args.to_weave,
+        republish=args.republish,
+        republish_reason=args.republish_reason,
+    )
+    if args.json:
+        print(as_json(summary))
+        return 0
+    if summary.published:
+        CONSOLE.print(
+            f"Published {summary.published} finalized candidate evaluation(s)"
+        )
+        for evaluation in summary.evaluations:
+            suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
+            CONSOLE.print(
+                f"  {evaluation.name} ({evaluation.examples} examples; "
+                f"{evaluation.linked_agent_predictions}/"
+                f"{evaluation.agent_predictions} Agent-linked; "
+                f"{evaluation.direct_predictions} direct){suffix}"
+            )
+            for reason in evaluation.linking_failures:
+                CONSOLE.print(f"    [red]{reason}[/]")
+    if summary.skipped:
+        CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
+    for failure in summary.publication_failures:
+        CONSOLE.print(f"[red]Publication failed:[/] {failure}")
+    CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
+    return 0
+
+
+def _runs_open(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    links = service.run_links(args.run_id)
+    url = links.project if args.destination == "project" else links.agents
+    conversation_id = None
+    if args.destination == "evaluation":
+        evaluation = service.run_evaluation(args.run_id, cell_id=args.cell)
+        if evaluation is None or evaluation.url is None:
+            raise ValueError("run has no linked Weave evaluation")
+        url = evaluation.url
+    if args.destination == "trace":
+        url = links.trace or links.agents
+        refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
+        conversation_id = next(
+            (value for reference in refs for value in reference.conversation_ids),
+            None,
+        )
+    if args.json:
+        print(as_json({"url": url, "conversation_id": conversation_id}))
+    elif args.print_only:
+        print(url)
+    else:
+        webbrowser.open(url)
+        CONSOLE.print(f"Opened [link={url}]{url}[/link]")
+    if conversation_id and not args.json:
+        CONSOLE.print(f"Conversation: [cyan]{conversation_id}[/]")
     return 0
 
 
@@ -1098,8 +1252,18 @@ def _run_panel(run: Any) -> Panel:
         f"{_status_markup(run.status)}  "
         f"[fugue.success]{run.passed} passed[/]  "
         f"[fugue.coral]{run.failed} failed[/]  "
+        f"[yellow]{run.cancelled} cancelled[/]  "
+        f"[yellow]{run.interrupted} interrupted[/]  "
         f"{run.pending} pending  {run.not_applicable} not applicable"
     )
+    if run.cancellation_cleanup_status:
+        details += (
+            "\nCancellation cleanup: "
+            f"{run.cancellation_cleanup_status} "
+            f"({len(run.cancellation_cleanup_projects)} Compose projects)"
+        )
+        for error in run.cancellation_cleanup_errors:
+            details += f"\n  [fugue.coral]{error}[/]"
     if run.evaluations:
         details += "\n\nWeave evaluations:"
         for evaluation in run.evaluations:
@@ -1133,6 +1297,7 @@ def _cells_table(run: Any) -> Table:
         "Candidate",
         "Execution",
         "Outcome",
+        "Reason",
         box=box.SIMPLE_HEAD,
     )
     for cell in run.cells:
@@ -1145,6 +1310,7 @@ def _cells_table(run: Any) -> Table:
             cell.candidate_id,
             _status_markup(cell.status),
             cell.benchmark_outcome.replace("_", " "),
+            cell.error or cell.skip_reason or "-",
         )
     if not run.cells:
         table.add_row(
@@ -1155,6 +1321,7 @@ def _cells_table(run: Any) -> Table:
             "waiting for planner",
             "-",
             _status_markup(run.status),
+            "-",
             "-",
         )
     return table
@@ -1167,6 +1334,8 @@ def _candidates_table(run: Any) -> Table:
         "Passed",
         "Eval failed",
         "Exec failed",
+        "Cancelled",
+        "Interrupted",
         "Unscored",
         "Pending",
         "N/A",
@@ -1189,6 +1358,8 @@ def _candidates_table(run: Any) -> Table:
             str(candidate.passed),
             str(candidate.failed),
             str(candidate.execution_failed),
+            str(candidate.cancelled),
+            str(candidate.interrupted),
             str(candidate.unscored),
             str(candidate.pending),
             str(candidate.not_applicable),
@@ -1266,14 +1437,16 @@ def _context_evaluate(args: argparse.Namespace) -> int:
     if workload is None or not workload.dataset:
         raise ValueError(f"unknown direct workload: {args.workload}")
     dataset = load_workload_dataset(_resolve(args.repo_root, Path(workload.dataset)))
-    variant = next(
-        (item for item in experiment.variants if item.context.system_id == args.system),
-        None,
-    )
+    variant = next((item for item in experiment.variants if item.id == args.variant), None)
+    if variant is None or variant.context.system_id != args.system:
+        raise ValueError(
+            f"variant {args.variant!r} does not select context system {args.system!r}"
+        )
     runtime_env = load_env(args.env_file)
     runtime_env["FUGUE_CONTEXT_DELIVERY"] = (
-        variant.context.delivery if variant is not None else "portable"
+        variant.context.delivery
     )
+    runtime_env["FUGUE_VARIANT_ID"] = variant.id
     runtime = ContextRuntime(
         repo_root=args.repo_root,
         cache_root=args.repo_root / DEFAULT_CACHE_ROOT,
@@ -1294,6 +1467,7 @@ def _context_evaluate(args: argparse.Namespace) -> int:
             run_id=args.run_id,
             attempts=args.attempts,
             limit=args.limit,
+            context_config=variant.context.config,
             **(
                 {"concurrency": args.concurrency}
                 if workload.runner == "sequence"

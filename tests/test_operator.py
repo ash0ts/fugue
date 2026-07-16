@@ -9,8 +9,14 @@ from pathlib import Path
 
 import pytest
 
+import fugue.bench.operator as operator_module
 from fugue.bench.ai import AssetDraft
-from fugue.bench.execution import plan_cells, read_run_manifest, write_run_manifest
+from fugue.bench.execution import (
+    CellOutcome,
+    plan_cells,
+    read_run_manifest,
+    write_run_manifest,
+)
 from fugue.bench.export import PublicationResult, PublishedEvaluation
 from fugue.bench.library import (
     ContextSelection,
@@ -20,7 +26,15 @@ from fugue.bench.library import (
     WorkloadSpec,
 )
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
-from fugue.bench.reproducibility import build_run_snapshot, verify_snapshot
+from fugue.bench.reproducibility import (
+    RunSnapshotV1,
+    build_evaluation_asset_lock,
+    build_run_snapshot,
+    read_evaluation_asset_lock,
+    verify_snapshot,
+    write_evaluation_asset_lock,
+)
+from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 from fugue.preflight import PreflightCheck
 
 
@@ -54,7 +68,7 @@ jobs_dir: jobs/demo
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-one, repo: test/repo, base_commit: abc123}
+  - {id: task-one, repository: {type: git, url: https://github.com/test/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
 """
     )
     (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
@@ -65,7 +79,7 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: baseline, label: Baseline, context: {system_id: none}}
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
 n_attempts: 1
 n_concurrent: 1
 jobs_dir: jobs/demo
@@ -89,7 +103,7 @@ candidate:
   model: openai/gpt-5
   prompt_id: demo-prompt
   skills: [demo-skill]
-  context: {system_id: none}
+  context: {system_id: none, delivery: portable}
 evidence:
   suite_id: demo-v1
   suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -106,6 +120,86 @@ evidence:
         "WANDB_PROJECT=fugue-experiments\n"
     )
     return OperatorService(tmp_path, tmp_path / ".env")
+
+
+def test_managed_service_lifecycle_selects_only_requested_context_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo", systems=("none", "graphiti"))
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    status = ManagedServiceStatus(
+        GRAPHITI_SERVICE.id,
+        "healthy",
+        True,
+        "container is healthy",
+        GRAPHITI_SERVICE.container_name,
+        GRAPHITI_SERVICE.image,
+        GRAPHITI_SERVICE.host_uri,
+    )
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.managed_service_statuses",
+        lambda specs, **kwargs: calls.append(("status", tuple(specs))) or (status,),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.start_managed_services",
+        lambda specs, **kwargs: calls.append(("start", tuple(specs))) or (status,),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.operator.stop_managed_services",
+        lambda specs, **kwargs: calls.append(("stop", tuple(specs))) or (status,),
+    )
+
+    assert service.service_status(request) == (status,)
+    assert service.start_services(request) == (status,)
+    assert service.stop_services(request) == (status,)
+    assert calls == [
+        ("status", (GRAPHITI_SERVICE,)),
+        ("start", (GRAPHITI_SERVICE,)),
+        ("stop", (GRAPHITI_SERVICE,)),
+    ]
+
+
+def test_external_graphiti_uri_does_not_require_managed_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/graphiti.yaml").write_text(
+        """
+id: graphiti
+title: Graphiti
+provider: fugue.bench.context:EmptyContextProvider
+version: test
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable]
+support: experimental
+required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
+"""
+    )
+    with (tmp_path / ".env").open("a") as handle:
+        handle.write(
+            "FUGUE_GRAPHITI_URI=bolt+s://graph.example.test\n"
+            "FUGUE_GRAPHITI_USER=neo4j\n"
+            "FUGUE_GRAPHITI_PASSWORD=external-password\n"
+        )
+    observed: list[tuple[object, ...]] = []
+    monkeypatch.setattr("fugue.preflight.run_preflight", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "fugue.bench.operator.managed_service_statuses",
+        lambda specs, **kwargs: observed.append(tuple(specs)) or (),
+    )
+
+    checks = service.preflight(
+        ExperimentRequest(experiment_id="demo", systems=("graphiti",)),
+        live=False,
+    )
+
+    assert observed == [()]
+    assert not any(check.name.startswith("managed service") for check in checks)
+    assert all(
+        check.ok for check in checks if check.name.startswith("context graphiti: env:")
+    )
 
 
 def test_operator_status_masks_secrets_and_links_to_agents(tmp_path: Path) -> None:
@@ -144,6 +238,40 @@ def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_preview_setup_and_execution_resolve_the_same_coordinates(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo")
+
+    preview = service.resolve_run_plan(request, run_id="preview")
+    setup = service.resolve_run_plan(request, run_id="setup")
+    materialized = service._materialize_run_plan(
+        service.resolve_run_plan(request, run_id="execution"),
+        run_id="execution",
+    )
+
+    def coordinates(plan):
+        return [
+            (
+                cell.workload_id,
+                cell.task_id,
+                cell.harness,
+                cell.context_system_id,
+                cell.trial_index,
+                cell.comparison_example_id,
+                cell.candidate_id,
+                cell.execution_fingerprint,
+                cell.applicable,
+            )
+            for cell in plan.cells
+        ]
+
+    assert coordinates(preview) == coordinates(setup) == coordinates(materialized)
+    assert preview.cells[0].config_sha256 == ""
+    assert materialized.cells[0].config_sha256
+
+
 def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
     tmp_path: Path,
 ) -> None:
@@ -177,6 +305,65 @@ def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
         )
 
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_context_rebuild_keeps_content_addressed_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    rebuild_values: list[bool] = []
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda manifest, repo_root, *, rebuild=False: rebuild_values.append(rebuild),
+    )
+    experiment = replace(
+        service.experiment("demo"),
+        workloads=[
+            WorkloadSpec(
+                id="coding",
+                runner="harbor",
+                manifest=Path("datasets/demo.yaml"),
+            )
+        ],
+    )
+
+    service.prepare_context(
+        service.request_for_experiment(experiment),
+        rebuild=True,
+        experiment=experiment,
+    )
+
+    assert rebuild_values == [False]
+
+
+def test_setup_materializes_a_dataset_before_preparing_its_task_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: events.append("dataset"),
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+
+    def prepare_task(manifest, task, **kwargs):
+        assert events == ["dataset"]
+        events.append("task")
+        return {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        }
+
+    monkeypatch.setattr(operator_module, "prepare_task_runtime", prepare_task)
+
+    service.prepare(ExperimentRequest(experiment_id="demo"))
+
+    assert events == ["dataset", "task"]
 
 
 def test_generated_evaluation_preflight_requires_explicit_judge(
@@ -246,6 +433,8 @@ def test_execute_run_persists_snapshot_before_first_cell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     run_id = "transaction-order"
     observed: list[str] = []
 
@@ -283,9 +472,7 @@ def test_execute_run_persists_snapshot_before_first_cell(
         assert config_paths
         observed.append("validate")
 
-    monkeypatch.setattr(
-        "fugue.bench.operator.validate_harbor_job_configs", validate
-    )
+    monkeypatch.setattr("fugue.bench.operator.validate_harbor_job_configs", validate)
 
     def runner(command, **kwargs):
         lock_path = tmp_path / ".fugue/runtime" / run_id / "input-lock.json"
@@ -314,10 +501,48 @@ def test_execute_run_persists_snapshot_before_first_cell(
     assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
 
 
+def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment_path = tmp_path / "configs/fugue/experiments/demo.yaml"
+    experiment_path.write_text(
+        experiment_path.read_text()
+        + "\npresets:\n  parallel:\n    n_concurrent: 4\n"
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    captured: dict[str, int] = {}
+
+    def execute(cells, *, max_workers, **kwargs):
+        captured["max_workers"] = max_workers
+        return [CellOutcome(cell.id, "passed", returncode=0) for cell in cells]
+
+    monkeypatch.setattr("fugue.bench.operator.execute_cells", execute)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo", preset="parallel"),
+        run_id="preset-concurrency",
+    )
+
+    assert result.status == "passed"
+    assert captured["max_workers"] == 4
+    manifest = read_run_manifest(
+        tmp_path / ".fugue/runtime/preset-concurrency"
+    )
+    assert manifest is not None
+    assert manifest["max_workers"] == 4
+
+
 def test_execute_run_only_validates_agent_job_configs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     request = ExperimentRequest(experiment_id="demo")
     [agent_job] = service.rendered_jobs(request, run_id="validation-fixture")
     dataset = tmp_path / "direct-diagnostic.yaml"
@@ -357,6 +582,8 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
     run_id = "operator-cancellation"
     cancellation = threading.Event()
     events: list[tuple[str, object]] = []
@@ -476,6 +703,75 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     )
 
 
+def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="snapshot-v2",
+        experiment=experiment,
+    )
+    cells = plan_cells(jobs, run_id="snapshot-v2", run_name="snapshot v2")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="snapshot-v2",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    )
+
+    assert isinstance(snapshot, RunSnapshotV1)
+    assert snapshot.schema_version == 1
+    assert snapshot.source_experiment is not None
+    assert snapshot.resolved_experiment_sha256
+    assert snapshot.planned_prediction_count == len(cells)
+    assert len(snapshot.capability_plan) == len(cells)
+    assert verify_snapshot(snapshot.to_dict())
+    for unsupported in (2, 3):
+        payload = {**snapshot.to_dict(), "schema_version": unsupported}
+        assert not verify_snapshot(payload)
+
+
+def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(request, run_id="gold-lock", experiment=experiment)
+    jobs = [replace(job, expected_evidence_paths=("src/private-gold.py",)) for job in jobs]
+    cells = plan_cells(jobs, run_id="gold-lock", run_name="gold lock")
+    evaluation_assets = build_evaluation_asset_lock("gold-lock", cells)
+    path = write_evaluation_asset_lock(tmp_path, evaluation_assets)
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert read_evaluation_asset_lock(path) == evaluation_assets
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="gold-lock",
+        experiment=experiment,
+        request={"experiment_id": "demo", "cohort_id": "qualification"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+        evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+    )
+    serialized = json.dumps(snapshot.to_dict(), sort_keys=True)
+
+    assert snapshot.evaluation_asset_lock_sha256 == evaluation_assets.lock_sha256
+    assert snapshot.cohort_id == "qualification"
+    assert "src/private-gold.py" not in serialized
+    assert all(
+        "expected_evidence_paths" not in job.config.get("fugue", {})
+        and "FUGUE_EXPECTED_EVIDENCE_PATHS" not in job.env
+        for job in jobs
+    )
+
+
 def test_operator_resolves_source_provenance_once_per_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -558,9 +854,17 @@ config:
 
     [job] = jobs
     [planned] = snapshot["planned_matrix"]
-    [asset_id] = planned["generated_runtime_asset_ids"]
+    asset_id = next(
+        item
+        for item in planned["generated_runtime_asset_ids"]
+        if "/context-runtime/" in snapshot["assets"][item]["path"]
+    )
     asset = snapshot["assets"][asset_id]
-    [runtime_file] = job.generated_runtime_files
+    runtime_file = next(
+        item
+        for item in job.generated_runtime_files
+        if "context-runtime" in item.as_posix()
+    )
     raw = runtime_file.read_bytes()
     assert asset["kind"] == "generated_runtime"
     assert asset["path"].startswith(".fugue/runtime/context-lock/context-runtime/")
@@ -631,8 +935,16 @@ interfaces:
     ).to_dict()
 
     [job] = jobs
-    [runtime_file] = job.generated_runtime_files
-    [asset_id] = snapshot["planned_matrix"][0]["generated_runtime_asset_ids"]
+    runtime_file = next(
+        item
+        for item in job.generated_runtime_files
+        if "integrations" in item.as_posix()
+    )
+    asset_id = next(
+        item
+        for item in snapshot["planned_matrix"][0]["generated_runtime_asset_ids"]
+        if "/integrations/" in snapshot["assets"][item]["path"]
+    )
     asset = snapshot["assets"][asset_id]
     assert asset["kind"] == "generated_runtime"
     assert asset["path"].startswith(".fugue/runtime/integration-lock/integrations/")
@@ -740,6 +1052,106 @@ def test_candidate_summary_separates_execution_and_benchmark_outcomes(
     assert "1 failed benchmark cell(s)" in candidate.packageability_reason
 
 
+def test_run_summary_keeps_cancellation_separate_from_failures(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "cancelled-summary"
+    candidate_id = "c" * 64
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {
+            "status": "cancelled",
+            "run_name": "cancelled",
+            "experiment_id": "demo",
+            "cancellation_cleanup_status": "passed",
+            "cancellation_cleanup_projects": ["fugue-run-cell"],
+            "cancellation_cleanup_errors": [],
+        },
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {candidate_id: {"harness": "codex"}},
+                "planned_matrix": [
+                    {"cell_id": "cancelled", "candidate_id": candidate_id},
+                    {"cell_id": "interrupted", "candidate_id": candidate_id},
+                    {"cell_id": "failed", "candidate_id": candidate_id},
+                ],
+            }
+        )
+    )
+    (run_dir / "cells.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "cell_id": cell_id,
+                    "candidate_id": candidate_id,
+                    "status": status,
+                    "benchmark_outcome": "unscored",
+                }
+            )
+            for cell_id, status in (
+                ("cancelled", "cancelled"),
+                ("interrupted", "interrupted"),
+                ("failed", "failed"),
+            )
+        )
+        + "\n"
+    )
+
+    summary = service.run_summary(run_id)
+    [candidate] = summary.candidates
+
+    assert summary.failed == 1
+    assert summary.cancelled == 1
+    assert summary.interrupted == 1
+    assert summary.cancellation_cleanup_status == "passed"
+    assert summary.cancellation_cleanup_projects == ("fugue-run-cell",)
+    assert summary.cancellation_cleanup_errors == ()
+    assert candidate.execution_failed == 1
+    assert candidate.cancelled == 1
+    assert candidate.interrupted == 1
+
+
+def test_run_summary_preserves_not_applicable_reason(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    run_id = "not-applicable-reason"
+    candidate_id = "b" * 64
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    write_run_manifest(
+        tmp_path,
+        run_id,
+        {"status": "passed", "run_name": "n-a", "experiment_id": "demo"},
+    )
+    (run_dir / "input-lock.json").write_text(
+        json.dumps(
+            {
+                "candidates": {candidate_id: {"harness": "sequence"}},
+                "planned_matrix": [{"cell_id": "latmd", "candidate_id": candidate_id}],
+            }
+        )
+    )
+    (run_dir / "cells.jsonl").write_text(
+        json.dumps(
+            {
+                "cell_id": "latmd",
+                "candidate_id": candidate_id,
+                "status": "not_applicable",
+                "benchmark_outcome": "not_applicable",
+                "skip_reason": "LAT_LLM_KEY is missing",
+            }
+        )
+        + "\n"
+    )
+
+    [cell] = service.run_summary(run_id).cells
+
+    assert cell.skip_reason == "LAT_LLM_KEY is missing"
+
+
 def test_multi_file_plan_save_cleans_new_assets_when_commit_marker_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -832,7 +1244,7 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: remote, label: Remote, skills: [remote], context: {system_id: none}}
+  - {id: remote, label: Remote, skills: [remote], context: {system_id: none, delivery: portable}}
 """
     )
     calls: list[tuple[str, bool]] = []
@@ -923,6 +1335,9 @@ def test_operator_results_prefers_enriched_normalized_exports(tmp_path: Path) ->
             {
                 "record_type": "trial",
                 "run_id": "run-1",
+                "candidate_id": "candidate-1",
+                "comparison_example_id": "example-1",
+                "trial_index": 1,
                 "run_key": "run-1:task:codex:trial-1",
                 "harness": "codex",
                 "experiment_id": "demo",

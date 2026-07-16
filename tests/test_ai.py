@@ -132,16 +132,22 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
             },
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
                 {
                     "id": "with-skill",
                     "label": "With skill",
                     "skills": ["demo-skill"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }
     )
-    attempts = 0
+    experiment_attempts = 0
+    evaluation_attempts = 0
 
     def cases(count: int) -> list[dict]:
         strata = ["easy", "boundary", "failure", "integration"]
@@ -158,40 +164,59 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
         ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
+        nonlocal experiment_attempts, evaluation_attempts
+        request_body = json.loads(request.content)
+        assert request_body["max_output_tokens"] == 32_768
+        tools = {tool["name"]: tool for tool in request_body["tools"]}
+        if "submit_experiment" in tools:
+            experiment_attempts += 1
+            assert "evaluation" not in tools["submit_experiment"]["parameters"][
+                "properties"
+            ]
+            return httpx.Response(
+                200,
+                json=_tool_response(
+                    "submit_experiment",
+                    {
+                        "experiment": base,
+                        "assets": [],
+                        "rationale": "Compare the skill against a true baseline.",
+                        "assumptions": [],
+                        "warnings": [],
+                    },
+                    f"experiment-{experiment_attempts}",
+                ),
+            )
+        evaluation_attempts += 1
+        submit_tool = tools["submit_evaluation"]
+        case_schema = submit_tool["parameters"]["properties"]["cases"]["items"]
+        assert case_schema["properties"]["instruction"]["maxLength"] == 2_000
+        assert case_schema["additionalProperties"] is False
         return httpx.Response(
             200,
             json=_tool_response(
-                "submit_experiment",
+                "submit_evaluation",
                 {
-                    "experiment": base,
-                    "assets": [],
-                    "evaluation": {
-                        "suite_id": "generated-suite",
-                        "cases": cases(7 if attempts == 1 else 8),
-                        "rubric": {
-                            "dimensions": [
-                                {
-                                    "id": "task_completion",
-                                    "criterion": "The task is complete.",
-                                },
-                                {
-                                    "id": "correctness",
-                                    "criterion": "Expected facts are correct.",
-                                },
-                                {
-                                    "id": "groundedness",
-                                    "criterion": "Claims use the supplied source.",
-                                },
-                            ]
-                        },
+                    "suite_id": "generated-suite",
+                    "cases": cases(7 if evaluation_attempts == 1 else 8),
+                    "rubric": {
+                        "dimensions": [
+                            {
+                                "id": "task_completion",
+                                "criterion": "The task is complete.",
+                            },
+                            {
+                                "id": "correctness",
+                                "criterion": "Expected facts are correct.",
+                            },
+                            {
+                                "id": "groundedness",
+                                "criterion": "Claims use the supplied source.",
+                            },
+                        ]
                     },
-                    "rationale": "Compare the skill against a true baseline.",
-                    "assumptions": [],
-                    "warnings": [],
                 },
-                f"call-{attempts}",
+                f"evaluation-{evaluation_attempts}",
             ),
         )
 
@@ -203,7 +228,8 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
         composer.compose("Generate the missing evaluation", base_experiment="demo")
     )
 
-    assert attempts == 2
+    assert experiment_attempts == 1
+    assert evaluation_attempts == 2
     assert draft.evaluation is not None
     assert len(draft.evaluation.cases) == 8
     assert len(draft.assets) == 3
@@ -270,7 +296,7 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
     catalog = ExperimentCatalog(tmp_path)
     status = catalog.refresh()
 
-    assert "/catalog/v2/" in status.path
+    assert "/catalog/v1/" in status.path
     assert status.experiments == 1
     assert status.records == 1
     assert catalog.facets()["intervention_type"] == {"baseline": 1}

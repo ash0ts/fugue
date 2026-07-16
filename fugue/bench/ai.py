@@ -20,11 +20,13 @@ from fugue.assistant import (
     AssistantModelClient,
     AssistantRunResult,
     AssistantTool,
+    AssistantUsage,
     select_assistant_model,
 )
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
 from fugue.bench.evaluations import (
+    EVALUATION_DIMENSIONS,
     EvaluationDraft,
     build_evaluation_draft,
     evaluation_asset_path,
@@ -52,7 +54,9 @@ from fugue.bench.manifest import load_manifest
 from fugue.bench.scoring import (
     CandidateSelection,
     SelectionPolicy,
+    build_treatment_selection_lock,
     select_candidate_configuration,
+    write_treatment_selection_lock,
 )
 from fugue.bench.sources import list_skill_source_ids, load_skill_source
 from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
@@ -241,6 +245,7 @@ class ExperimentComposer:
             env=env,
             trace_content=trace_content or base.trace_content,
             max_rounds=8,
+            max_tokens=32_768,
             attributes={
                 "fugue.ai.base_experiment": base.id,
                 "fugue.ai.action": "compose",
@@ -266,6 +271,12 @@ class ExperimentComposer:
         for attempt in range(3):
             result = await agent.run(messages)
             try:
+                result = await self._complete_generated_evaluation(
+                    result,
+                    request=request,
+                    client=client,
+                    trace_content=trace_content or base.trace_content,
+                )
                 draft = self._validate_draft(result, base)
             except Exception as exc:
                 validation_error = exc
@@ -283,6 +294,110 @@ class ExperimentComposer:
             return draft
         assert validation_error is not None
         raise ValueError(f"composer draft remained invalid: {validation_error}")
+
+    async def _complete_generated_evaluation(
+        self,
+        result: AssistantRunResult,
+        *,
+        request: str,
+        client: AssistantModelClient,
+        trace_content: str,
+    ) -> AssistantRunResult:
+        raw = result.payload
+        experiment_raw = raw.get("experiment")
+        if not isinstance(experiment_raw, dict):
+            raise ValueError("submit_experiment requires an experiment object")
+        assets = tuple(_asset_draft(item) for item in raw.get("assets") or [])
+        experiment = experiment_from_data(experiment_raw)
+        if not needs_evaluation_generation(experiment):
+            return result
+        _validate_experiment_references(
+            experiment,
+            assets,
+            self.repo_root,
+            self.operator.env,
+            overlay=_asset_overlay(assets),
+        )
+        sources = source_catalog(
+            experiment,
+            self.repo_root,
+            allow_mcp_io=True,
+            draft_assets={(item.kind, item.id): item.body for item in assets},
+        )
+        base_messages = [
+            AssistantMessage("system", _evaluation_generator_instructions()),
+            AssistantMessage(
+                "user",
+                json.dumps(
+                    {
+                        "request": request,
+                        "experiment": experiment.to_dict(),
+                        "sources": [source.public() for source in sources],
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            ),
+        ]
+        input_tokens = result.usage.input_tokens or 0
+        output_tokens = result.usage.output_tokens or 0
+        validation_error: Exception | None = None
+        for _ in range(3):
+            messages = list(base_messages)
+            if validation_error is not None:
+                messages.append(
+                    AssistantMessage(
+                        "user",
+                        "The generated evaluation failed deterministic validation. "
+                        f"Correct only the cases or rubric. Error: {validation_error}",
+                    )
+                )
+            generator = AssistantAgent(
+                client,
+                role="composer",
+                tools=(
+                    AssistantTool(
+                        "submit_evaluation",
+                        "Submit the complete generated evaluation cases and rubric.",
+                        _evaluation_submission_schema(),
+                        terminal=True,
+                    ),
+                ),
+                env=self.operator.env,
+                trace_content=trace_content,
+                max_rounds=2,
+                max_tokens=32_768,
+                attributes={
+                    "fugue.ai.action": "generate_evaluation",
+                    "fugue.ai.experiment_id": experiment.id,
+                },
+            )
+            generated = await generator.run(messages)
+            input_tokens += generated.usage.input_tokens or 0
+            output_tokens += generated.usage.output_tokens or 0
+            try:
+                build_evaluation_draft(
+                    generated.payload,
+                    experiment,
+                    generator_model=generated.model,
+                    source_catalog=sources,
+                    repo_root=self.repo_root,
+                )
+            except Exception as exc:
+                validation_error = exc
+                continue
+            return AssistantRunResult(
+                payload={**raw, "evaluation": generated.payload},
+                messages=(*result.messages, *generated.messages),
+                usage=AssistantUsage(input_tokens, output_tokens),
+                model=result.model,
+                provider=result.provider,
+                session_id=result.session_id,
+            )
+        assert validation_error is not None
+        raise ValueError(
+            f"generated evaluation remained invalid: {validation_error}"
+        )
 
     def save(
         self,
@@ -1047,16 +1162,26 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
         raise ValueError("analysis selection noninferiority_margin must be in [0, 1)")
     if samples < 100:
         raise ValueError("analysis selection bootstrap_samples must be at least 100")
+    selection_unit = str(raw.get("selection_unit") or "candidate")
+    if selection_unit not in {"candidate", "variant"}:
+        raise ValueError("analysis selection_unit must be candidate or variant")
     tie_breakers = tuple(
         str(item)
         for item in raw.get("tie_breakers")
         or SelectionPolicy.__dataclass_fields__["tie_breakers"].default
     )
-    expected_ties = SelectionPolicy.__dataclass_fields__["tie_breakers"].default
-    if tie_breakers != expected_ties:
+    supported_ties = {
+        "cost_per_success",
+        "median_wall_time_sec",
+        "recoverable_error_rate",
+        "localization_recall_at_10",
+        "localization_mrr",
+    }
+    unknown_ties = sorted(set(tie_breakers) - supported_ties)
+    if unknown_ties:
         raise ValueError(
-            "analysis selection tie_breakers must be cost_per_success, "
-            "median_wall_time_sec, recoverable_error_rate"
+            "unsupported analysis selection tie breaker(s): "
+            + ", ".join(unknown_ties)
         )
     improvement_values = {
         "minimum_pass_rate_improvement": float(
@@ -1072,6 +1197,20 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
     if any(not 0 <= value < 1.0 for value in improvement_values.values()):
         raise ValueError("analysis selection improvement thresholds must be in [0, 1)")
     return SelectionPolicy(
+        selection_unit=selection_unit,  # type: ignore[arg-type]
+        baseline_variant_id=(
+            str(raw["baseline_variant_id"])
+            if raw.get("baseline_variant_id")
+            else None
+        ),
+        required_examples=(
+            int(raw["required_examples"]) if raw.get("required_examples") else None
+        ),
+        required_harnesses=tuple(
+            str(value) for value in raw.get("required_harnesses") or ()
+        ),
+        require_agent_links=bool(raw.get("require_agent_links", False)),
+        require_registration=bool(raw.get("require_registration", False)),
         metric=metric,
         confidence=confidence,
         noninferiority_margin=margin,
@@ -1302,6 +1441,9 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     selection = result.selection
     if selection is None or selection.selected_candidate_id is None:
         return
+    if result.spec.id == "repo-memory-discovery-selection":
+        _write_memory_treatment_lock(result)
+        return
     rows = [dict(row) for row in result.snapshot.rows]
     selected_rows = [
         row
@@ -1437,6 +1579,77 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     )
 
 
+def _write_memory_treatment_lock(result: AnalysisResult) -> None:
+    selection = result.selection
+    assert selection is not None
+    if any(not candidate.eligible for candidate in selection.candidates):
+        return
+    eligible = [candidate for candidate in selection.candidates if candidate.eligible]
+    ranked = sorted(
+        eligible,
+        key=lambda candidate: (
+            -(candidate.paired_pass_rate_delta or 0.0),
+            -(
+                candidate.localization_recall_at_10
+                if candidate.localization_recall_at_10 is not None
+                else -1.0
+            ),
+            -(
+                candidate.localization_mrr
+                if candidate.localization_mrr is not None
+                else -1.0
+            ),
+            candidate.recoverable_error_rate
+            if candidate.recoverable_error_rate is not None
+            else float("inf"),
+            candidate.cost_per_success
+            if candidate.cost_per_success is not None
+            else float("inf"),
+            candidate.candidate_id,
+        ),
+    )
+    if len(ranked) < 3:
+        return
+    rows = [dict(row) for row in result.snapshot.rows]
+    calibration = {
+        str(row.get("run_snapshot_sha256") or "")
+        for row in rows
+        if row.get("workload_id") == "hard-calibration"
+    }
+    discovery = {
+        str(row.get("run_snapshot_sha256") or "")
+        for row in rows
+        if row.get("workload_id") == "hard-discovery"
+    }
+    source_commits = {str(row.get("source_commit") or "") for row in rows}
+    if len(calibration) != 1 or len(discovery) != 1 or len(source_commits) != 1:
+        return
+    rankings = tuple(
+        {
+            "rank": index,
+            "variant_id": candidate.candidate_id,
+            "eligible": candidate.eligible,
+            "paired_pass_rate_delta": candidate.paired_pass_rate_delta,
+            "localization_recall_at_10": candidate.localization_recall_at_10,
+            "localization_mrr": candidate.localization_mrr,
+            "recoverable_error_rate": candidate.recoverable_error_rate,
+            "cost_per_success": candidate.cost_per_success,
+            "reasons": list(candidate.reasons),
+        }
+        for index, candidate in enumerate(ranked, start=1)
+    )
+    lock = build_treatment_selection_lock(
+        source_commit=next(iter(source_commits)),
+        calibration_snapshot_sha256=next(iter(calibration)),
+        discovery_snapshot_sha256=next(iter(discovery)),
+        rankings=rankings,
+        selected_variants=[candidate.candidate_id for candidate in ranked[:3]],
+    )
+    write_treatment_selection_lock(
+        result.report_dir / "treatment-selection-lock.json", lock
+    )
+
+
 def _suite_provenance(
     experiment: ExperimentSpec,
     rows: Sequence[dict[str, Any]],
@@ -1545,7 +1758,11 @@ def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:
 
 
 def _composer_instructions() -> str:
-    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, provide exactly evaluation_generation.size grounded cases (eight by default) and a rubric. Every case must cite supplied evaluation source ids and contain at least one expected fact, tool assertion, or artifact assertion; reference answers are optional. Cover easy, boundary, failure, and integration behavior across prompt, skill, context, integration, agent, or mixed families as applicable. Use only the five supported rubric dimensions, with separate 0..1 scores and a default 0.7 threshold. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional prompt/skill asset drafts, optional evaluation, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+    return """You are Fugue's experiment composer. Build a complete, valid experiment from the user's request and repository catalog. Use only ids present in the catalog unless you include a new prompt or skill in assets. Never copy an existing catalog asset into assets. Evidence-backed agent presets are optional starting points and must be applied explicitly when the request calls for that role. Preserve unspecified settings from the base experiment. Every authored variant must declare context as a mapping with both system_id and delivery, including no-context variants. Keep comparisons controlled: vary only what the user asks to vary, and include a baseline variant that omits the tested capability. Use positive trials, task limits, and concurrency. When an evaluation is missing, configure evaluation_generation with the exact suite id, workload id, size, and typed sources. Do not generate cases or a rubric in this stage; Fugue runs that explicit bounded generation after the experiment plan validates. Generated rubrics require an explicit judge_model. Never include secrets. Call submit_experiment with the complete experiment, optional new prompt/skill asset drafts, rationale, assumptions, and warnings. Do not claim that a draft has run."""
+
+
+def _evaluation_generator_instructions() -> str:
+    return """Generate only the evaluation suite configured by the supplied experiment. Call submit_evaluation with exactly evaluation_generation.size concise grounded cases and one rubric. Do not repeat source content or the experiment inside instructions or assertions. Every case must cite supplied source ids and contain at least one expected fact, tool assertion, or artifact assertion. Cover easy, boundary, failure, and integration behavior across the applicable families. Use only the five supported rubric dimensions, separate 0..1 scores, and a default 0.7 threshold. Never invent sources, include secrets, or claim the suite has run."""
 
 
 def _analyst_planner_instructions() -> str:
@@ -1561,22 +1778,182 @@ def _experiment_submission_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "experiment": {"type": "object"},
-            "assets": {"type": "array", "items": {"type": "object"}},
-            "evaluation": {
-                "type": "object",
-                "properties": {
-                    "suite_id": {"type": "string"},
-                    "cases": {"type": "array", "items": {"type": "object"}},
-                    "rubric": {"type": "object"},
+            "assets": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["prompt", "skill"]},
+                        "id": {"type": "string", "maxLength": 128},
+                        "title": {"type": "string", "maxLength": 256},
+                        "body": {"type": "string", "maxLength": 64_000},
+                    },
+                    "required": ["kind", "id", "title", "body"],
+                    "additionalProperties": False,
                 },
-                "required": ["suite_id", "cases", "rubric"],
-                "additionalProperties": False,
             },
             "rationale": {"type": "string"},
             "assumptions": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["experiment", "rationale", "assumptions", "warnings"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_submission_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "suite_id": {"type": "string", "maxLength": 128},
+            "cases": {
+                "type": "array",
+                "maxItems": 64,
+                "items": _evaluation_case_submission_schema(),
+            },
+            "rubric": _evaluation_rubric_submission_schema(),
+        },
+        "required": ["suite_id", "cases", "rubric"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_case_submission_schema() -> dict[str, Any]:
+    short_text = {"type": "string", "maxLength": 500}
+    return {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "maxLength": 128},
+            "instruction": {"type": "string", "maxLength": 2_000},
+            "family": {
+                "type": "string",
+                "enum": ["prompt", "skill", "mcp", "agent", "mixed"],
+            },
+            "source_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {"type": "string", "maxLength": 256},
+            },
+            "attachments": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "maxLength": 512},
+                        "target": {"type": "string", "maxLength": 512},
+                        "sha256": {"type": "string", "maxLength": 64},
+                    },
+                    "required": ["path", "target", "sha256"],
+                    "additionalProperties": False,
+                },
+            },
+            "expected": {
+                "type": "object",
+                "properties": {
+                    "facts": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": short_text,
+                    },
+                    "tool_calls": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "server": {"type": "string", "maxLength": 128},
+                                "tool": {"type": "string", "maxLength": 128},
+                                "arguments_subset": {
+                                    "type": "object",
+                                    "maxProperties": 16,
+                                },
+                            },
+                            "required": ["tool"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "artifacts": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "maxLength": 512},
+                                "checks": {
+                                    "type": "array",
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["exists", "nonempty", "json"],
+                                    },
+                                },
+                            },
+                            "required": ["path", "checks"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "reference_answer": {"type": "string", "maxLength": 2_000},
+                },
+                "additionalProperties": False,
+            },
+            "scorer_dimensions": {
+                "type": "array",
+                "maxItems": len(EVALUATION_DIMENSIONS),
+                "items": {
+                    "type": "string",
+                    "enum": sorted(EVALUATION_DIMENSIONS),
+                },
+            },
+            "tags": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {"type": "string", "maxLength": 128},
+            },
+            "turns": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 1_000},
+            },
+        },
+        "required": ["id", "instruction", "family", "source_refs", "expected", "tags"],
+        "additionalProperties": False,
+    }
+
+
+def _evaluation_rubric_submission_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "dimensions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": len(EVALUATION_DIMENSIONS),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "enum": sorted(EVALUATION_DIMENSIONS),
+                        },
+                        "kind": {"type": "string", "enum": ["llm_judge"]},
+                        "criterion": {"type": "string", "maxLength": 1_000},
+                        "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+                        "evidence": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "items": {"type": "string", "maxLength": 256},
+                        },
+                    },
+                    "required": ["id", "kind", "criterion", "threshold", "evidence"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["dimensions"],
         "additionalProperties": False,
     }
 

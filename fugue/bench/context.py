@@ -11,7 +11,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import threading
@@ -26,18 +25,33 @@ from typing import Any, Literal, Protocol
 import yaml
 from filelock import FileLock
 
+from fugue.bench.context_contracts import (
+    CONTEXT_CAPABILITIES,
+    CONTEXT_DELIVERIES,
+    ContextCapability,
+    ContextDelivery,
+    SupportLevel,
+)
+from fugue.bench.files import as_list as _list
+from fugue.bench.files import as_mapping as _dict
+from fugue.bench.files import terminate_async_process_group
 from fugue.bench.library import validate_id
+from fugue.bench.manifest import fixture_repository_digest
+from fugue.bench.runtime_manager import (
+    GITNEXUS_VECTOR_MODE,
+    gitnexus_retrieval_mode,
+    prepare_runtime_repository,
+    query_gitnexus,
+    run_runtime_command,
+    runtime_ready,
+    runtime_spec,
+)
 
 CONTEXT_SYSTEMS_DIR = Path("configs") / "fugue" / "context-systems"
-DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v2"
+DEFAULT_CACHE_ROOT = Path(".fugue") / "cache" / "context" / "v1"
 CONTEXT_MANIFEST = "context-manifest.json"
 CONTEXT_INDEX = "index.json"
 
-ContextCapability = Literal[
-    "prepare", "retrieve", "bind", "ingest", "sequence", "serve"
-]
-ContextDelivery = Literal["portable", "native_mcp"]
-SupportLevel = Literal["supported", "experimental", "not_applicable", "disabled"]
 PreflightPhase = Literal["all", "host", "runtime"]
 
 
@@ -80,6 +94,8 @@ class RepositorySnapshot:
     commit: str
     checkout: Path
     dataset_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    fixture_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +118,7 @@ class ContextBinding:
     mounts: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
     artifacts: tuple[Any, ...] = ()
+    runtime_descriptor: dict[str, Any] | None = None
 
 
 def context_behavior_definition(spec: ContextSystemSpec) -> dict[str, Any]:
@@ -231,6 +248,9 @@ class BaseContextProvider:
             )
             for name in spec.required_env
         )
+        if runtime_spec(spec.id) is not None:
+            ready, detail = runtime_ready(spec.id, runtime.repo_root)
+            checks.append(ContextCheck("managed runtime", ready, detail))
         approved = _license_approved(spec, runtime.env)
         if spec.requires_license_approval:
             checks.append(
@@ -264,21 +284,22 @@ class BaseContextProvider:
             for item in _dict_list(binding.get("mcp_servers"))
         )
         managed_runtime = str(binding.get("managed_runtime") or "") or None
-        if managed_runtime not in {None, "fugue_context"}:
+        if managed_runtime not in {None, "fugue_context", "pinned_mcp"}:
             raise ValueError(
                 f"context system {spec.id} declares unknown managed runtime "
                 f"{managed_runtime}"
             )
         if delivery == "portable" and declared_mcp_servers and not managed_runtime:
-            raise ValueError(
-                f"context system {spec.id} has no portable implementation"
-            )
+            raise ValueError(f"context system {spec.id} has no portable implementation")
         mcp_servers = declared_mcp_servers if delivery == "native_mcp" else ()
         env = {
-            str(key): str(
-                _expand_value(value, spec=spec, prepared=prepared, runtime=runtime)
-            )
-            for key, value in _dict(binding.get("env")).items()
+            **{name: f"${{{name}}}" for name in spec.required_env},
+            **{
+                str(key): str(
+                    _expand_value(value, spec=spec, prepared=prepared, runtime=runtime)
+                )
+                for key, value in _dict(binding.get("env")).items()
+            },
         }
         return ContextBinding(
             extra_instruction_paths=instruction_paths,
@@ -287,7 +308,9 @@ class BaseContextProvider:
             managed_runtime=managed_runtime,
             env=env,
             mounts=tuple(_dict_list(binding.get("mounts"))),
-            compose_files=tuple(Path(item) for item in _list(binding.get("compose_files"))),
+            compose_files=tuple(
+                Path(item) for item in _list(binding.get("compose_files"))
+            ),
             artifacts=tuple(_list(binding.get("artifacts"))),
         )
 
@@ -355,7 +378,9 @@ class AgentsMdContextProvider(BaseContextProvider):
         artifact.mkdir(parents=True, exist_ok=True)
         entries = [
             path.name + ("/" if path.is_dir() else "")
-            for path in sorted(snapshot.checkout.iterdir(), key=lambda item: item.name.lower())
+            for path in sorted(
+                snapshot.checkout.iterdir(), key=lambda item: item.name.lower()
+            )
             if path.name not in _IGNORED_DIRS
         ][:60]
         interesting = [
@@ -469,20 +494,25 @@ class LatMdContextProvider(MarkdownLogContextProvider):
         output = _require_output_dir(runtime)
         artifact = output / "artifact"
         artifact.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["npx", "-y", "lat.md@0.11.0", "init"],
-            cwd=artifact,
-            env=runtime.env,
-            check=True,
-            capture_output=True,
-            text=True,
+        repository = artifact / "repository"
+        _copy_repository_snapshot(
+            snapshot.checkout,
+            repository,
+            ignored=(".git", ".fugue"),
         )
-        lattice = artifact / "lat.md"
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+        )
+        lattice = repository / "lat.md"
         lattice.mkdir(parents=True, exist_ok=True)
         episodes = lattice / "episodes.md"
         if not episodes.exists():
             episodes.write_text("# Experiment Context\n\n")
+        _write_managed_repository_instruction(spec, artifact)
         return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
 
     async def ingest(
@@ -515,22 +545,25 @@ class LatMdContextProvider(MarkdownLogContextProvider):
         runtime: ContextRuntime,
     ) -> list[RetrievalHit]:
         result = await asyncio.to_thread(
-            subprocess.run,
-            ["npx", "-y", "lat.md@0.11.0", "search", query.text],
-            cwd=prepared.path,
+            run_runtime_command,
+            spec.id,
+            repo_root=runtime.repo_root,
+            repository=prepared.path,
             env=runtime.env,
-            capture_output=True,
-            text=True,
-            check=True,
+            command=("lat", "search", query.text),
         )
         text = result.stdout.strip()
-        return [
-            RetrievalHit(
-                path="lat.md",
-                text=text,
-                metadata={"retriever": "lat search"},
-            )
-        ] if text else []
+        return (
+            [
+                RetrievalHit(
+                    path="lat.md",
+                    text=text,
+                    metadata={"retriever": "lat search"},
+                )
+            ]
+            if text
+            else []
+        )
 
 
 class Mem0ContextProvider(BaseContextProvider):
@@ -640,23 +673,58 @@ class GraphitiContextProvider(BaseContextProvider):
         prepared: PreparedContext,
         runtime: ContextRuntime,
     ) -> list[RetrievalHit]:
+        from datetime import UTC, datetime
+
+        from graphiti_core.nodes import EpisodeType
+        from graphiti_core.search.search_config import (
+            EpisodeReranker,
+            EpisodeSearchConfig,
+            EpisodeSearchMethod,
+            SearchConfig,
+        )
+
         graph = _graphiti(spec, runtime)
+        group_ids = [_namespace_id(prepared.path)]
         try:
-            values = await graph.search(
+            results = await graph.search_(
                 query.text,
-                group_ids=[_namespace_id(prepared.path)],
-                num_results=query.top_k,
+                config=SearchConfig(
+                    episode_config=EpisodeSearchConfig(
+                        search_methods=[EpisodeSearchMethod.bm25],
+                        reranker=EpisodeReranker.rrf,
+                    ),
+                    limit=query.top_k,
+                ),
+                group_ids=group_ids,
+            )
+            recent = await graph.retrieve_episodes(
+                datetime.now(UTC),
+                last_n=query.top_k,
+                group_ids=group_ids,
+                source=EpisodeType.text,
             )
         finally:
             await graph.close()
+        scores = {
+            str(getattr(item, "uuid", "")): float(
+                results.episode_reranker_scores[index]
+            )
+            for index, item in enumerate(results.episodes)
+            if index < len(results.episode_reranker_scores)
+        }
+        values = list(results.episodes)
+        seen = {str(getattr(item, "uuid", "")) for item in values}
+        values.extend(
+            item for item in recent if str(getattr(item, "uuid", "")) not in seen
+        )
         return [
             RetrievalHit(
-                path="GRAPHITI",
-                score=float(getattr(item, "score", 0) or 0),
-                text=str(getattr(item, "fact", None) or getattr(item, "name", item)),
+                path="MEMORY.md",
+                score=scores.get(str(getattr(item, "uuid", ""))),
+                text=str(getattr(item, "content", None) or getattr(item, "name", item)),
                 metadata={"uuid": str(getattr(item, "uuid", ""))},
             )
-            for item in values
+            for item in values[: query.top_k]
         ]
 
 
@@ -674,13 +742,14 @@ class CommandContextProvider(BaseContextProvider):
         command = _command(prepare.get("command"))
         if command:
             expanded = [
-                _format_token(token, spec, snapshot, artifact, runtime) for token in command
+                _format_token(token, spec, snapshot, artifact, runtime)
+                for token in command
             ]
             result = await _run_context_command(
                 expanded,
                 cwd=snapshot.checkout,
                 env=_command_env(runtime.env, prepare.get("env")),
-                capture_output=bool(prepare.get("stdout_path")),
+                capture_output=True,
                 timeout_seconds=(
                     float(prepare["timeout_seconds"])
                     if prepare.get("timeout_seconds") is not None
@@ -706,6 +775,21 @@ class CommandContextProvider(BaseContextProvider):
                 shutil.copytree(source, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(source, target)
+        if prepare.get("copy_repository"):
+            repository = artifact / "repository"
+            _copy_repository_snapshot(
+                snapshot.checkout,
+                repository,
+                ignored=(".fugue",),
+            )
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+        )
+        _write_managed_repository_instruction(spec, artifact)
         metrics = _tree_metrics(artifact)
         metrics["command"] = command
         return _prepared(spec, snapshot, runtime, metrics)
@@ -764,18 +848,7 @@ async def _run_context_command(
             process.communicate(), timeout=timeout_seconds
         )
     except (TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except TimeoutError:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            await process.wait()
+        await terminate_async_process_group(process)
         raise
     if process.returncode:
         raise subprocess.CalledProcessError(
@@ -805,38 +878,47 @@ async def _isolated_repository(
         home = isolated / "home"
         home.mkdir()
         clone_env = {**runtime.env, "GIT_LFS_SKIP_SMUDGE": "1"}
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "git",
-                "clone",
-                "--quiet",
-                "--no-hardlinks",
-                "--no-recurse-submodules",
-                snapshot.checkout.as_posix(),
-                checkout.as_posix(),
-            ],
-            env=clone_env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        await asyncio.to_thread(
-            subprocess.run,
-            [
-                "git",
-                "-C",
-                checkout.as_posix(),
-                "checkout",
-                "--quiet",
-                "--detach",
-                snapshot.commit,
-            ],
-            env=clone_env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        if (snapshot.checkout / ".git").exists():
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "clone",
+                    "--quiet",
+                    "--no-hardlinks",
+                    "--no-recurse-submodules",
+                    snapshot.checkout.as_posix(),
+                    checkout.as_posix(),
+                ],
+                env=clone_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "git",
+                    "-C",
+                    checkout.as_posix(),
+                    "checkout",
+                    "--quiet",
+                    "--detach",
+                    snapshot.commit,
+                ],
+                env=clone_env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            await asyncio.to_thread(
+                _copy_repository_snapshot,
+                snapshot.checkout,
+                checkout,
+                ignored=(".fugue",),
+            )
+            await asyncio.to_thread(_initialize_fixture_repository, checkout)
         original_home = Path.home()
         isolated_env = {
             **runtime.env,
@@ -868,9 +950,7 @@ class IsolatedCommandContextProvider(CommandContextProvider):
         async with _isolated_repository(
             snapshot, runtime, prefix=f"fugue-{spec.id}-"
         ) as (isolated_snapshot, isolated_runtime):
-            return await super().prepare(
-                spec, isolated_snapshot, isolated_runtime
-            )
+            return await super().prepare(spec, isolated_snapshot, isolated_runtime)
 
 
 class AiderRepoMapContextProvider(IsolatedCommandContextProvider):
@@ -915,65 +995,173 @@ class GitNexusContextProvider(CommandContextProvider):
         snapshot: RepositorySnapshot,
         runtime: ContextRuntime,
     ) -> PreparedContext:
-        async with _isolated_repository(
-            snapshot, runtime, prefix="fugue-gitnexus-"
-        ) as (isolated_snapshot, isolated_runtime):
-            return await self._prepare_isolated(
-                spec, isolated_snapshot, isolated_runtime
-            )
-
-    async def _prepare_isolated(
-        self,
-        spec: ContextSystemSpec,
-        snapshot: RepositorySnapshot,
-        runtime: ContextRuntime,
-    ) -> PreparedContext:
         output = _require_output_dir(runtime)
         artifact = output / "artifact"
         repository = artifact / "repository"
         home = artifact / "home"
-        repository.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
-        env = dict(runtime.env)
-        env["HOME"] = home.as_posix()
         await asyncio.to_thread(
-            subprocess.run,
-            [
-                "npx",
-                "-y",
-                "gitnexus@1.6.3",
-                "analyze",
-                "--skip-agents-md",
-                "--force",
-                snapshot.checkout.as_posix(),
-            ],
-            cwd=snapshot.checkout,
-            env=env,
-            check=True,
-        )
-        index = snapshot.checkout / ".gitnexus"
-        if not index.is_dir():
-            raise FileNotFoundError("GitNexus did not create .gitnexus")
-        await asyncio.to_thread(
-            shutil.copytree,
+            _copy_repository_snapshot,
             snapshot.checkout,
             repository,
-            dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns(".gitnexus", ".git"),
+            ignored=(".fugue", ".gitnexus"),
         )
-        shutil.copytree(index, repository / ".gitnexus")
-        git_dir = snapshot.checkout / ".git"
-        if git_dir.is_dir():
-            shutil.copytree(git_dir, repository / ".git")
+        if snapshot.repo.startswith("fixture/"):
+            await asyncio.to_thread(_initialize_fixture_repository, repository)
+        await asyncio.to_thread(
+            prepare_runtime_repository,
+            spec.id,
+            repo_root=runtime.repo_root,
+            artifact=artifact,
+            env=runtime.env,
+            config=spec.config,
+            semantic_probe=snapshot.metadata.get("semantic_probe"),
+        )
+        _write_managed_repository_instruction(spec, artifact)
+        index = repository / ".gitnexus"
+        if not index.is_dir():
+            raise FileNotFoundError("GitNexus did not create .gitnexus")
         registry = home / ".gitnexus" / "registry.json"
         if not registry.is_file():
             raise FileNotFoundError("GitNexus did not register the prepared repository")
-        text = registry.read_text().replace(
-            snapshot.checkout.resolve().as_posix(),
-            "/fugue-context/artifact/repository",
+        metadata_path = index / "meta.json"
+        if not metadata_path.is_file():
+            raise FileNotFoundError("GitNexus did not record graph metadata")
+        metadata = json.loads(metadata_path.read_text())
+        stats = metadata.get("stats") if isinstance(metadata, dict) else None
+        if not isinstance(stats, dict):
+            raise RuntimeError("GitNexus graph metadata has no stats")
+        mode = gitnexus_retrieval_mode(spec.config)
+        embeddings = int(stats.get("embeddings") or 0)
+        if mode == "bm25" and embeddings:
+            raise RuntimeError(
+                "GitNexus BM25 preparation unexpectedly built embeddings"
+            )
+        if mode == GITNEXUS_VECTOR_MODE and embeddings <= 0:
+            raise RuntimeError("GitNexus hybrid preparation produced zero embeddings")
+        metrics = {
+            **_tree_metrics(artifact),
+            "retrieval_mode": mode,
+            "graph_nodes": int(stats.get("nodes") or 0),
+            "embedding_count": embeddings,
+            "embedding_dimensions": 384 if mode == GITNEXUS_VECTOR_MODE else None,
+            "vector_required": mode == GITNEXUS_VECTOR_MODE,
+        }
+        return _prepared(spec, snapshot, runtime, metrics)
+
+    async def retrieve(
+        self,
+        spec: ContextSystemSpec,
+        query: RetrievalQuery,
+        prepared: PreparedContext,
+        runtime: ContextRuntime,
+    ) -> list[RetrievalHit]:
+        payload, telemetry = await asyncio.to_thread(
+            query_gitnexus,
+            repo_root=runtime.repo_root,
+            artifact=prepared.path / "artifact",
+            config=spec.config,
+            query=query.text,
+            top_k=query.top_k,
         )
-        registry.write_text(text)
-        return _prepared(spec, snapshot, runtime, _tree_metrics(artifact))
+        values = [
+            item
+            for key in ("definitions", "process_symbols", "processes")
+            for item in payload.get(key, [])
+            if isinstance(item, dict) and item.get("filePath")
+        ]
+        hits: list[RetrievalHit] = []
+        seen: set[str] = set()
+        for item in values:
+            path = str(item["filePath"])
+            if path in seen:
+                continue
+            seen.add(path)
+            hits.append(
+                RetrievalHit(
+                    path=path,
+                    score=1.0 / (len(hits) + 1),
+                    text=json.dumps(item, sort_keys=True),
+                    metadata={"retriever": "gitnexus", **telemetry},
+                )
+            )
+            if len(hits) >= query.top_k:
+                break
+        return hits
+
+
+def _initialize_fixture_repository(repository: Path) -> None:
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+    }
+    subprocess.run(["git", "init", "--quiet"], cwd=repository, env=env, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=repository, env=env, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue",
+            "-c",
+            "user.email=fugue@example.invalid",
+            "commit",
+            "--quiet",
+            "--message",
+            "fixture snapshot",
+        ],
+        cwd=repository,
+        env=env,
+        check=True,
+    )
+
+
+def _write_managed_repository_instruction(
+    spec: ContextSystemSpec,
+    artifact: Path,
+) -> None:
+    binding = _dict(spec.config.get("binding"))
+    repository_path = str(binding.get("repository_path") or "")
+    if not repository_path:
+        return
+    if not repository_path.startswith("/workspace/"):
+        raise ValueError(
+            f"context system {spec.id} repository_path must be under /workspace"
+        )
+    (artifact / "FUGUE_NATIVE_MCP.md").write_text(
+        "The managed context server has the task repository at "
+        f"`{repository_path}`. When a tool requires a repository or path "
+        "argument, pass this exact path. Do not substitute a host path.\n"
+    )
+
+
+def _copy_repository_snapshot(
+    source: Path,
+    target: Path,
+    *,
+    ignored: tuple[str, ...],
+) -> None:
+    root = source.resolve()
+    for path in source.rglob("*"):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(source).as_posix()
+        link = Path(os.readlink(path))
+        if link.is_absolute():
+            raise ValueError(f"absolute repository symlink is not allowed: {relative}")
+        try:
+            (path.parent / link).resolve().relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"repository symlink escapes checkout: {relative}"
+            ) from exc
+    shutil.copytree(
+        source,
+        target,
+        dirs_exist_ok=True,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*ignored),
+    )
 
 
 class RagContextProvider(BaseContextProvider):
@@ -1051,7 +1239,9 @@ class RagContextProvider(BaseContextProvider):
                 _resolved_embedding_model(spec, runtime),
                 max(query.top_k, 20),
             )
-            ranked = dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
+            ranked = (
+                dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
+            )
             ranked = ranked[: query.top_k]
         return [
             RetrievalHit(
@@ -1116,7 +1306,9 @@ def list_context_systems(repo_root: Path | None = None) -> list[ContextSystemSpe
     return [load_context_system(path) for path in sorted(root.glob("*.yaml"))]
 
 
-def get_context_system(system_id: str, repo_root: Path | None = None) -> ContextSystemSpec:
+def get_context_system(
+    system_id: str, repo_root: Path | None = None
+) -> ContextSystemSpec:
     system_id = validate_id(system_id, kind="context system id")
     path = context_system_root(repo_root) / f"{system_id}.yaml"
     if not path.is_file():
@@ -1129,23 +1321,36 @@ def load_context_system(path: Path) -> ContextSystemSpec:
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: context system must be a mapping")
     known = {
-        "id", "title", "description", "provider", "version", "capabilities",
-        "deliveries", "serve_deliveries", "support", "required_env",
-        "required_commands", "required_packages", "runtime_image", "license",
-        "license_url", "source_url", "enabled_by_default",
-        "requires_license_approval", "config",
+        "id",
+        "title",
+        "description",
+        "provider",
+        "version",
+        "capabilities",
+        "deliveries",
+        "serve_deliveries",
+        "support",
+        "required_env",
+        "required_commands",
+        "required_packages",
+        "runtime_image",
+        "license",
+        "license_url",
+        "source_url",
+        "enabled_by_default",
+        "requires_license_approval",
+        "config",
     }
     unknown = sorted(set(raw) - known)
     if unknown:
         raise ValueError(f"{path}: unknown fields: {', '.join(unknown)}")
     system_id = validate_id(raw.get("id") or path.stem, kind="context system id")
     capabilities = frozenset(str(item) for item in _list(raw.get("capabilities")))
-    allowed = {"prepare", "retrieve", "bind", "ingest", "sequence", "serve"}
-    invalid = sorted(capabilities - allowed)
+    invalid = sorted(capabilities - CONTEXT_CAPABILITIES)
     if invalid:
         raise ValueError(f"{path}: unknown capabilities: {', '.join(invalid)}")
     deliveries = frozenset(str(item) for item in _list(raw.get("deliveries")))
-    invalid_deliveries = sorted(deliveries - {"portable", "native_mcp"})
+    invalid_deliveries = sorted(deliveries - CONTEXT_DELIVERIES)
     if invalid_deliveries or not deliveries:
         detail = ", ".join(invalid_deliveries) or "none declared"
         raise ValueError(f"{path}: invalid context deliveries: {detail}")
@@ -1210,8 +1415,6 @@ def context_cache_key(
     payload = {
         "repo": snapshot.repo,
         "commit": snapshot.commit,
-        "dataset": snapshot.dataset_id,
-        "task": snapshot.task_id,
         "system": spec.id,
         "version": spec.version,
         "config": spec.config,
@@ -1288,7 +1491,9 @@ async def prepare_context(
             )
             resource_metrics = await asyncio.to_thread(resources.stop)
             metrics = dict(prepared.metrics)
-            metrics.setdefault("build_latency_ms", (time.perf_counter() - started) * 1000)
+            metrics.setdefault(
+                "build_latency_ms", (time.perf_counter() - started) * 1000
+            )
             metrics.setdefault("cpu_time_sec", resource_metrics["cpu_time_sec"])
             metrics.setdefault("max_memory_mb", resource_metrics["max_memory_mb"])
             metrics.setdefault("index_size_bytes", _tree_metrics(temp_dir)["bytes"])
@@ -1297,11 +1502,9 @@ async def prepare_context(
             metrics.setdefault("builder_cost_usd", None)
             manifest = {
                 **prepared.manifest,
-                "schema_version": 2,
+                "schema_version": 1,
                 "system": spec.to_dict(),
-                "snapshot": {
-                    "task_id": snapshot.task_id,
-                    "dataset_id": snapshot.dataset_id,
+                "repository": {
                     "repo": snapshot.repo,
                     "commit": snapshot.commit,
                 },
@@ -1369,6 +1572,23 @@ async def query_context(
         "query_latency_ms": (time.perf_counter() - started) * 1000,
         "result_count": len(hits),
         "result_tokens": sum(_token_count(hit.text or "") for hit in hits),
+        **(
+            {
+                key: hits[0].metadata[key]
+                for key in (
+                    "retrieval_mode",
+                    "vector_search_attempted",
+                    "vector_search_succeeded",
+                    "semantic_result_count",
+                    "bm25_result_count",
+                    "vector_model_digest",
+                    "vector_query_latency_ms",
+                )
+                if key in hits[0].metadata
+            }
+            if hits
+            else {}
+        ),
     }
 
 
@@ -1382,20 +1602,6 @@ def run_async(coro: Any) -> Any:
     # lifecycle in a worker thread instead of nesting event loops.
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
-
-
-def prepared_from_index(
-    cache_root: Path, system_id: str, task_id: str
-) -> PreparedContext | None:
-    index_path = cache_root / CONTEXT_INDEX
-    if not index_path.is_file():
-        return None
-    raw = json.loads(index_path.read_text())
-    key = ((raw.get("latest") or {}).get(system_id) or {}).get(task_id)
-    if not key:
-        return None
-    path = cache_root / key
-    return _read_prepared(path) if (path / CONTEXT_MANIFEST).is_file() else None
 
 
 def expected_prepared_context(
@@ -1426,8 +1632,6 @@ def checkout_repository(
     identity = hashlib.sha256(
         json.dumps(
             {
-                "dataset_id": dataset_id,
-                "task_id": task_id,
                 "repo": repo,
                 "commit": commit,
             },
@@ -1443,9 +1647,7 @@ def checkout_repository(
         if checkout.is_dir() and marker.is_file() and not rebuild:
             data = json.loads(marker.read_text())
             if data.get("repo") == repo and data.get("commit") == commit:
-                return RepositorySnapshot(
-                    task_id, repo, commit, checkout, dataset_id
-                )
+                return RepositorySnapshot(task_id, repo, commit, checkout, dataset_id)
         temp = Path(tempfile.mkdtemp(prefix=f".{identity}.", dir=checkout_root))
         try:
             url = (
@@ -1454,16 +1656,23 @@ def checkout_repository(
                 else f"https://github.com/{repo}.git"
             )
             subprocess.run(
-                ["git", "clone", "--no-tags", "--filter=blob:none", url, temp.as_posix()],
+                [
+                    "git",
+                    "clone",
+                    "--no-tags",
+                    "--filter=blob:none",
+                    url,
+                    temp.as_posix(),
+                ],
                 check=True,
             )
-            subprocess.run(["git", "checkout", "--detach", commit], cwd=temp, check=True)
+            subprocess.run(
+                ["git", "checkout", "--detach", commit], cwd=temp, check=True
+            )
             subprocess.run(["git", "remote", "remove", "origin"], cwd=temp, check=False)
             (temp / ".fugue-snapshot.json").write_text(
                 json.dumps(
                     {
-                        "dataset_id": dataset_id,
-                        "task_id": task_id,
                         "repo": repo,
                         "commit": commit,
                     },
@@ -1639,7 +1848,7 @@ def _update_context_index(
     path = cache_root / CONTEXT_INDEX
     cache_root.mkdir(parents=True, exist_ok=True)
     with FileLock(cache_root / ".index.lock", timeout=120):
-        raw = json.loads(path.read_text()) if path.is_file() else {"schema_version": 2}
+        raw = json.loads(path.read_text()) if path.is_file() else {"schema_version": 1}
         identity = hashlib.sha256(
             json.dumps(
                 {
@@ -1671,9 +1880,9 @@ def _update_context_index(
                 "embedding_model"
             ),
         }
-        raw.setdefault("latest", {}).setdefault(system_id, {})[
-            snapshot.task_id
-        ] = prepared.cache_key
+        raw.setdefault("latest", {}).setdefault(system_id, {})[snapshot.task_id] = (
+            prepared.cache_key
+        )
         temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         temp.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n")
         os.replace(temp, path)
@@ -1819,12 +2028,8 @@ def _mem0_config(
         "embedder": {
             "provider": "huggingface",
             "config": {
-                "model": spec.config.get(
-                    "embedding_model", "BAAI/bge-small-en-v1.5"
-                ),
-                "embedding_dims": int(
-                    spec.config.get("embedding_dimensions", 384)
-                ),
+                "model": spec.config.get("embedding_model", "BAAI/bge-small-en-v1.5"),
+                "embedding_dims": int(spec.config.get("embedding_dimensions", 384)),
             },
         },
         "vector_store": {
@@ -1890,13 +2095,14 @@ def _graphiti(spec: ContextSystemSpec, runtime: ContextRuntime) -> Any:
 
             self.model = TextEmbedding(
                 model_name=str(
-                    spec.config.get("embedding_model")
-                    or "BAAI/bge-small-en-v1.5"
+                    spec.config.get("embedding_model") or "BAAI/bge-small-en-v1.5"
                 )
             )
 
         async def create(self, input_data: Any) -> list[float]:
-            values = [str(input_data)] if isinstance(input_data, str) else list(input_data)
+            values = (
+                [str(input_data)] if isinstance(input_data, str) else list(input_data)
+            )
             vectors = await asyncio.to_thread(lambda: list(self.model.embed(values)))
             return vectors[0].tolist()
 
@@ -1913,7 +2119,6 @@ def _graphiti(spec: ContextSystemSpec, runtime: ContextRuntime) -> Any:
         llm_client=llm_client,
         embedder=LocalEmbedder(),
         cross_encoder=OpenAIRerankerClient(
-            client=llm_client,
             config=llm_config,
         ),
     )
@@ -2082,8 +2287,9 @@ _TEXT_SUFFIXES = {
     ".yml",
 }
 _RAG_CHUNK_SCHEMA = "fugue.git-lines.v1"
-_DENSE_ARTIFACT_SCHEMA = "fugue.rag-dense-artifact.v1"
+_DENSE_ARTIFACT_SCHEMA = "fugue.rag-dense-artifact.v2"
 _DENSE_BATCH_SIZE = 256
+_FASTEMBED_CACHE_DIR = "fastembed-cache"
 _CONTEXT_BUILD_LOCK_TIMEOUT_SECONDS = 3600
 
 
@@ -2115,6 +2321,8 @@ def _repository_chunks(
 def _tracked_repository_text(
     snapshot: RepositorySnapshot,
 ) -> list[tuple[str, str]]:
+    if snapshot.fixture_digest is not None:
+        return _fixture_repository_text(snapshot)
     listing = subprocess.run(
         [
             "git",
@@ -2203,6 +2411,41 @@ def _tracked_repository_text(
     return values
 
 
+def _fixture_repository_text(
+    snapshot: RepositorySnapshot,
+) -> list[tuple[str, str]]:
+    if snapshot.commit != snapshot.fixture_digest:
+        raise ValueError("fixture repository commit and declared digest must match")
+    actual = fixture_repository_digest(snapshot.checkout)
+    if actual != snapshot.fixture_digest:
+        raise ValueError(
+            "fixture repository digest changed: "
+            f"expected {snapshot.fixture_digest}, got {actual}"
+        )
+
+    values: list[tuple[str, str]] = []
+    for path in sorted(
+        snapshot.checkout.rglob("*"),
+        key=lambda item: item.relative_to(snapshot.checkout).as_posix(),
+    ):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(snapshot.checkout).as_posix()
+        pure_path = PurePosixPath(relative)
+        if (
+            any(part in _IGNORED_DIRS for part in pure_path.parts)
+            or pure_path.suffix.lower() not in _TEXT_SUFFIXES
+            or path.stat().st_size > 1_000_000
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="strict")
+        except UnicodeDecodeError:
+            continue
+        values.append((relative, text))
+    return values
+
+
 def _bm25(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tokens = _tokens(query)
     if not tokens or not chunks:
@@ -2220,8 +2463,14 @@ def _bm25(query: str, chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
             frequency = frequencies[token]
             if not frequency:
                 continue
-            idf = math.log(1 + (len(documents) - document_frequency[token] + 0.5) / (document_frequency[token] + 0.5))
-            denominator = frequency + 1.5 * (1 - 0.75 + 0.75 * len(document) / max(avg_length, 1))
+            idf = math.log(
+                1
+                + (len(documents) - document_frequency[token] + 0.5)
+                / (document_frequency[token] + 0.5)
+            )
+            denominator = frequency + 1.5 * (
+                1 - 0.75 + 0.75 * len(document) / max(avg_length, 1)
+            )
             score += idf * (frequency * 2.5 / denominator)
         if score:
             scored.append({**chunk, "score": score})
@@ -2242,9 +2491,7 @@ def _canonical_chunks(chunks: list[dict[str, Any]]) -> bytes:
     )
 
 
-def _resolved_embedding_model(
-    spec: ContextSystemSpec, runtime: ContextRuntime
-) -> str:
+def _resolved_embedding_model(spec: ContextSystemSpec, runtime: ContextRuntime) -> str:
     return str(
         runtime.env.get("FUGUE_EMBEDDING_MODEL")
         or spec.config.get("embedding_model")
@@ -2292,13 +2539,27 @@ def _tree_content_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _link_or_copy(source: str, target: str) -> str:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
 def _valid_dense_artifact(
     root: Path, key: str, contract: dict[str, Any], rows: int
 ) -> dict[str, Any] | None:
     manifest_path = root / "artifact-manifest.json"
     chunks_path = root / "chunks.jsonl"
     index = root / "lancedb"
-    if not manifest_path.is_file() or not chunks_path.is_file() or not index.is_dir():
+    model_cache = root / _FASTEMBED_CACHE_DIR
+    if (
+        not manifest_path.is_file()
+        or not chunks_path.is_file()
+        or not index.is_dir()
+        or not model_cache.is_dir()
+    ):
         return None
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -2311,6 +2572,7 @@ def _valid_dense_artifact(
         or hashlib.sha256(chunks_path.read_bytes()).hexdigest()
         != contract["chunks_digest"]
         or _tree_content_digest(index) != manifest.get("index_tree_digest")
+        or _tree_content_digest(model_cache) != manifest.get("model_cache_tree_digest")
     ):
         return None
     return manifest
@@ -2324,7 +2586,7 @@ def _materialize_dense_artifact(
     cache_root: Path,
 ) -> dict[str, Any]:
     key, contract = _dense_artifact_contract(chunks, embedding_model, dimensions)
-    shared_root = cache_root / "artifacts" / "rag-dense" / "v1"
+    shared_root = cache_root / "artifacts" / "rag-dense" / "v2"
     final = shared_root / key
     shared_root.mkdir(parents=True, exist_ok=True)
     lock = FileLock(
@@ -2347,6 +2609,7 @@ def _materialize_dense_artifact(
                     chunks,
                     embedding_model,
                     dimensions,
+                    allow_model_download=True,
                 )
                 manifest = {
                     "schema": _DENSE_ARTIFACT_SCHEMA,
@@ -2362,6 +2625,9 @@ def _materialize_dense_artifact(
                     "rows": len(chunks),
                     "vector_dimensions": dimensions,
                     "index_tree_digest": _tree_content_digest(temp / "lancedb"),
+                    "model_cache_tree_digest": _tree_content_digest(
+                        temp / _FASTEMBED_CACHE_DIR
+                    ),
                     "bytes": _tree_metrics(temp)["bytes"],
                 }
                 (temp / "artifact-manifest.json").write_text(
@@ -2380,7 +2646,17 @@ def _materialize_dense_artifact(
     target = artifact / "lancedb"
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(final / "lancedb", target)
+    shutil.copytree(final / "lancedb", target, copy_function=_link_or_copy)
+    target_model_cache = artifact / _FASTEMBED_CACHE_DIR
+    if target_model_cache.exists():
+        shutil.rmtree(target_model_cache)
+    shutil.copytree(
+        final / _FASTEMBED_CACHE_DIR,
+        target_model_cache,
+        copy_function=_link_or_copy,
+    )
+    if not _dense_search(artifact, "offline readiness probe", embedding_model, 1):
+        raise RuntimeError("dense artifact offline semantic probe returned no results")
     (artifact / "dense-artifact.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
@@ -2392,13 +2668,18 @@ def _build_lance_index(
     chunks: list[dict[str, Any]],
     embedding_model: str,
     dimensions: int,
+    *,
+    allow_model_download: bool = False,
 ) -> None:
     import lancedb
     from fastembed import TextEmbedding
 
     embedder = TextEmbedding(
         model_name=embedding_model,
+        cache_dir=(artifact / _FASTEMBED_CACHE_DIR).as_posix(),
         providers=["CPUExecutionProvider"],
+        cuda=False,
+        local_files_only=not allow_model_download,
     )
     vectors = list(
         embedder.embed(
@@ -2406,10 +2687,15 @@ def _build_lance_index(
             batch_size=_DENSE_BATCH_SIZE,
         )
     )
-    if len(vectors) != len(chunks) or any(len(vector) != dimensions for vector in vectors):
+    if len(vectors) != len(chunks) or any(
+        len(vector) != dimensions for vector in vectors
+    ):
         raise RuntimeError("embedding output did not match the dense artifact contract")
     rows = [
-        {**chunk, "vector": vector.tolist() if hasattr(vector, "tolist") else list(vector)}
+        {
+            **chunk,
+            "vector": vector.tolist() if hasattr(vector, "tolist") else list(vector),
+        }
         for chunk, vector in zip(chunks, vectors, strict=True)
     ]
     database = lancedb.connect((artifact / "lancedb").as_posix())
@@ -2424,7 +2710,10 @@ def _dense_search(
 
     embedder = TextEmbedding(
         model_name=embedding_model,
+        cache_dir=(artifact / _FASTEMBED_CACHE_DIR).as_posix(),
         providers=["CPUExecutionProvider"],
+        cuda=False,
+        local_files_only=True,
     )
     vector = next(iter(embedder.embed([query], batch_size=1)))
     database = lancedb.connect((artifact / "lancedb").as_posix())
@@ -2450,7 +2739,9 @@ def _reciprocal_rank_fusion(
             scores[item_id] += 1.0 / (k + rank)
     return [
         {**values[item_id], "score": score}
-        for item_id, score in sorted(scores.items(), key=lambda pair: (-pair[1], pair[0]))
+        for item_id, score in sorted(
+            scores.items(), key=lambda pair: (-pair[1], pair[0])
+        )
     ]
 
 
@@ -2471,24 +2762,8 @@ def _count_headings(path: Path) -> int:
     return sum(1 for line in path.read_text().splitlines() if line.startswith("## "))
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError(f"expected mapping, got {type(value).__name__}")
-    return dict(value)
-
-
 def _dict_list(value: Any) -> list[dict[str, Any]]:
     return [_dict(item) for item in _list(value)]
-
-
-def _list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"expected list, got {type(value).__name__}")
-    return list(value)
 
 
 def _optional_str(value: Any) -> str | None:

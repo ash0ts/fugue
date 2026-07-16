@@ -154,8 +154,8 @@ tasks:
       path: packages/core
 ```
 
-The legacy `repo` and `base_commit` fields remain readable. Do not mix the two
-forms in one task. The typed form currently admits public GitHub HTTPS inputs;
+`repository` is the only accepted task source. Fugue rejects the old `repo` and
+`base_commit` fields. Public GitHub HTTPS inputs are currently supported;
 private credential brokers are a future source-provider extension. `path` is
 immutable source provenance for an adapter or materializer; it does not by
 itself limit Harbor's workspace to that subdirectory.

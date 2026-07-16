@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +14,7 @@ from fugue.bench.context import (
     context_behavior_digest,
     get_context_system,
 )
+from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
 
@@ -24,6 +23,8 @@ if TYPE_CHECKING:
     from fugue.bench.job_config import RenderedJob
 
 INPUT_LOCK_NAME = "input-lock.json"
+EVALUATION_ASSET_LOCK_NAME = "evaluation-assets.json"
+PREDICTION_ID_SCHEMA_VERSION = 1
 _SENSITIVE_NAME = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
@@ -45,14 +46,36 @@ class RunSnapshotV1:
     runtime: dict[str, Any]
     required_env: tuple[str, ...]
     preset: dict[str, Any] | None = None
+    source_experiment: dict[str, Any] | None = None
+    resolved_experiment_sha256: str = ""
+    capability_plan: tuple[dict[str, Any], ...] = ()
+    planned_prediction_count: int = 0
+    runtime_locks: tuple[dict[str, Any], ...] = ()
+    publication_schema_version: int = 1
+    evaluation_asset_lock_sha256: str = ""
+    cohort_id: str = ""
+    treatment_selection_sha256: str = ""
     snapshot_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["planned_matrix"] = list(self.planned_matrix)
         value["required_env"] = list(self.required_env)
+        value["capability_plan"] = list(self.capability_plan)
+        value["runtime_locks"] = list(self.runtime_locks)
         value["lock_sha256"] = self.snapshot_sha256
         return value
+
+
+@dataclass(frozen=True)
+class EvaluationAssetLockV1:
+    schema_version: int
+    run_id: str
+    predictions: dict[str, dict[str, Any]]
+    lock_sha256: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def build_run_snapshot(
@@ -64,6 +87,8 @@ def build_run_snapshot(
     jobs: list[RenderedJob],
     cells: list[PlannedCell],
     env: Mapping[str, str],
+    evaluation_asset_lock_sha256: str = "",
+    treatment_selection_sha256: str = "",
 ) -> RunSnapshotV1:
     secret_names = {
         value: name
@@ -79,19 +104,20 @@ def build_run_snapshot(
     fugue_source: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
-        existing = candidates.get(job.candidate_id)
-        if existing is not None and existing != resolved.definition:
-            raise ValueError(f"candidate {job.candidate_id} resolved inconsistently")
-        candidates[job.candidate_id] = resolved.definition
-        prior_execution = executions.get(resolved.execution_fingerprint)
-        if (
-            prior_execution is not None
-            and prior_execution != resolved.execution_definition
-        ):
-            raise ValueError(
+        store_consistent(
+            candidates,
+            job.candidate_id,
+            resolved.definition,
+            error=f"candidate {job.candidate_id} resolved inconsistently",
+        )
+        store_consistent(
+            executions,
+            resolved.execution_fingerprint,
+            resolved.execution_definition,
+            error=(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
-            )
-        executions[resolved.execution_fingerprint] = resolved.execution_definition
+            ),
+        )
         selected_fugue_source = resolved.execution_definition.get("fugue_source")
         if selected_fugue_source is not None:
             if not isinstance(selected_fugue_source, dict):
@@ -110,26 +136,32 @@ def build_run_snapshot(
                 raise ValueError(
                     f"generated runtime asset is not UTF-8: {runtime_file}"
                 ) from exc
-            asset_id = f"generated-runtime:{job.job_name}:{runtime_file.name}"
+            runtime_path = _snapshot_path(runtime_file, repo_root)
+            path_id = hashlib.sha256(runtime_path.encode()).hexdigest()[:12]
+            asset_id = f"generated-runtime:{job.job_name}:{path_id}:{runtime_file.name}"
             record = {
                 "kind": "generated_runtime",
-                "path": _snapshot_path(runtime_file, repo_root),
+                "path": runtime_path,
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "body": body,
                 "generated": True,
                 "execution_fingerprint": resolved.execution_fingerprint,
             }
-            prior_asset = assets.get(asset_id)
-            if prior_asset is not None and prior_asset != record:
-                raise ValueError(f"generated runtime asset {asset_id} differs")
-            assets[asset_id] = record
+            store_consistent(
+                assets,
+                asset_id,
+                record,
+                error=f"generated runtime asset {asset_id} differs",
+            )
             generated_runtime_asset_ids.append(asset_id)
         config_key = job.config_path.resolve().as_posix()
-        prior_asset_ids = generated_runtime_assets_by_config.get(config_key)
         selected_asset_ids = tuple(generated_runtime_asset_ids)
-        if prior_asset_ids is not None and prior_asset_ids != selected_asset_ids:
-            raise ValueError(f"job config {job.config_path} has inconsistent assets")
-        generated_runtime_assets_by_config[config_key] = selected_asset_ids
+        store_consistent(
+            generated_runtime_assets_by_config,
+            config_key,
+            selected_asset_ids,
+            error=f"job config {job.config_path} has inconsistent assets",
+        )
         context = get_context_system(job.context_system_id, repo_root)
         candidate_required_env: set[str] = {
             job.route.api_key_env,
@@ -198,15 +230,26 @@ def build_run_snapshot(
         context_runtime = resolved.execution_definition.get("context_runtime")
         if context_runtime is not None:
             runtime["context_runtime"] = context_runtime
+        agent_runtime = resolved.execution_definition.get("agent_runtime")
+        if agent_runtime is not None:
+            runtime["agent_runtime"] = agent_runtime
+        task_runtime = resolved.execution_definition.get("task_runtime")
+        if task_runtime is not None:
+            runtime["task_runtime"] = task_runtime
         if selected_fugue_source is not None:
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
         runtime["configuration_sha256"] = stable_digest(runtime)
-        prior = runtimes.get(job.candidate_id)
-        if prior is not None and prior != runtime:
-            raise ValueError(f"candidate {job.candidate_id} runtime binding differs")
-        runtimes[job.candidate_id] = runtime
+        store_consistent(
+            runtimes,
+            job.candidate_id,
+            runtime,
+            error=f"candidate {job.candidate_id} runtime binding differs",
+        )
 
+    jobs_by_execution = {
+        job.resolved_candidate.execution_fingerprint: job for job in jobs
+    }
     planned_matrix = tuple(
         {
             "cell_id": cell.id,
@@ -220,13 +263,32 @@ def build_run_snapshot(
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,
             "config_path": cell.config_path.as_posix(),
+            "config_sha256": cell.config_sha256,
             "result_path": cell.result_path.as_posix(),
+            "runtime_assets": [list(item) for item in cell.runtime_assets],
             "generated_runtime_asset_ids": list(
                 generated_runtime_assets_by_config.get(
                     cell.config_path.resolve().as_posix(),
                     (),
                 )
             ),
+            "planned_prediction_count": _planned_prediction_count(
+                cell,
+                jobs_by_execution.get(cell.execution_fingerprint),
+            ),
+        }
+        for cell in cells
+    )
+    capability_plan = tuple(
+        {
+            "cell_id": cell.id,
+            "workload_id": cell.workload_id,
+            "execution_kind": cell.execution_kind,
+            "harness": cell.harness,
+            "context_system_id": cell.context_system_id,
+            "delivery": cell.context_delivery,
+            "applicable": cell.applicable,
+            "reason": cell.skip_reason,
         }
         for cell in cells
     )
@@ -250,11 +312,28 @@ def build_run_snapshot(
             "id": selected.id,
             "digest": stable_digest(selected.to_dict()),
         }
+    resolved_experiment = _portable(experiment.to_dict(), required_env, secret_names)
+    source_experiment = _source_experiment(experiment, repo_root)
+    runtime_locks = tuple(
+        sorted(
+            (
+                {
+                    "candidate_id": candidate_id,
+                    "configuration_sha256": runtime["configuration_sha256"],
+                    "context_runtime": runtime.get("context_runtime"),
+                    "agent_runtime": runtime.get("agent_runtime"),
+                    "task_runtime": runtime.get("task_runtime"),
+                }
+                for candidate_id, runtime in runtimes.items()
+            ),
+            key=lambda item: item["candidate_id"],
+        )
+    )
     base = RunSnapshotV1(
         schema_version=1,
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
-        experiment=_portable(experiment.to_dict(), required_env, secret_names),
+        experiment=resolved_experiment,
         request=_portable(dict(request), required_env, secret_names),
         assets=assets,
         candidates=candidates,
@@ -270,6 +349,16 @@ def build_run_snapshot(
         },
         required_env=tuple(sorted(name for name in required_env if name)),
         preset=preset,
+        source_experiment=source_experiment,
+        resolved_experiment_sha256=stable_digest(resolved_experiment),
+        capability_plan=capability_plan,
+        planned_prediction_count=sum(
+            int(item["planned_prediction_count"]) for item in planned_matrix
+        ),
+        runtime_locks=runtime_locks,
+        evaluation_asset_lock_sha256=evaluation_asset_lock_sha256,
+        cohort_id=str(request.get("cohort_id") or ""),
+        treatment_selection_sha256=treatment_selection_sha256,
     )
     serialized = json.dumps(base.to_dict(), sort_keys=True, default=str)
     for name, value in env.items():
@@ -277,6 +366,69 @@ def build_run_snapshot(
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
     return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
+
+
+def build_evaluation_asset_lock(
+    run_id: str, cells: list[PlannedCell]
+) -> EvaluationAssetLockV1:
+    predictions = {
+        _prediction_id(cell): {
+            "task_id": cell.task_id,
+            "expected_evidence_paths": list(cell.expected_evidence_paths),
+        }
+        for cell in cells
+        if cell.expected_evidence_paths
+    }
+    base = EvaluationAssetLockV1(
+        schema_version=1,
+        run_id=run_id,
+        predictions=predictions,
+    )
+    digest = stable_digest(base.to_dict())
+    return EvaluationAssetLockV1(**{**asdict(base), "lock_sha256": digest})
+
+
+def write_evaluation_asset_lock(repo_root: Path, lock: EvaluationAssetLockV1) -> Path:
+    path = repo_root / ".fugue" / "runtime" / lock.run_id / EVALUATION_ASSET_LOCK_NAME
+    payload = lock.to_dict()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise ValueError(
+                f"evaluation asset lock already exists with different content: {path}"
+            )
+        path.chmod(0o600)
+        return path
+    return atomic_write_json(path, payload)
+
+
+def read_evaluation_asset_lock(path: Path) -> EvaluationAssetLockV1:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if int(payload.get("schema_version") or 0) != 1:
+        raise ValueError("unsupported evaluation asset lock schema")
+    expected = str(payload.get("lock_sha256") or "")
+    unsigned = {**payload, "lock_sha256": ""}
+    if not expected or stable_digest(unsigned) != expected:
+        raise ValueError("evaluation asset lock digest does not match its content")
+    return EvaluationAssetLockV1(
+        schema_version=1,
+        run_id=str(payload.get("run_id") or ""),
+        predictions=dict(payload.get("predictions") or {}),
+        lock_sha256=expected,
+    )
+
+
+def _prediction_id(cell: PlannedCell) -> str:
+    return stable_digest(
+        {
+            "schema_version": PREDICTION_ID_SCHEMA_VERSION,
+            "run_id": cell.run_id,
+            "candidate_id": cell.candidate_id,
+            "comparison_example_id": cell.comparison_example_id,
+            "trial_index": cell.trial_index,
+        }
+    )
 
 
 def write_run_input_lock(
@@ -294,20 +446,38 @@ def write_run_input_lock(
                 f"run input lock already exists with different content: {path}"
             )
         return path
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary, path)
-    return path
+    return atomic_write_json(path, payload)
 
 
 def verify_snapshot(payload: Mapping[str, Any]) -> bool:
+    if payload.get("schema_version") != 1:
+        return False
     expected = str(payload.get("snapshot_sha256") or payload.get("lock_sha256") or "")
     unsigned = dict(payload)
     unsigned["snapshot_sha256"] = ""
     unsigned["lock_sha256"] = ""
     return bool(expected) and expected == stable_digest(unsigned)
+
+
+def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int:
+    if cell.execution_kind == "agent":
+        return 1
+    fugue = dict((job.config if job is not None else {}).get("fugue") or {})
+    task_count = int(fugue.get("task_count") or 1)
+    attempts = int(fugue.get("n_attempts") or cell.n_attempts or 1)
+    return task_count * attempts
+
+
+def _source_experiment(
+    experiment: ExperimentSpec, repo_root: Path
+) -> dict[str, Any] | None:
+    path = repo_root / "configs" / "fugue" / "experiments" / f"{experiment.id}.yaml"
+    if not path.is_file():
+        return None
+    return {
+        "path": _snapshot_path(path, repo_root),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
 
 
 def _portable(

@@ -7,47 +7,171 @@ source:
   counts:
     smoke: 1
     full: 2
+    continuity-study: 6
 sequences:
-  - id: astropy-maintainer-preferences
-    repo: astropy/astropy
+- id: astropy-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: The team requires regression tests for modeling changes and keeps them in astropy/modeling/tests/test_models.py.
+  - episode: 2
+    kind: correction
+    content: Use pytest for focused validation; do not add a standalone validation script.
+  probes:
+  - id: regression-test-location
+    after_episode: 1
+    query: Where should a regression test for a modeling change be added?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - astropy/modeling/tests/test_models.py
+  - id: validation-policy
+    after_episode: 2
+    query: How should this modeling change be validated?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - pytest
+  repository:
+    type: git
+    url: https://github.com/astropy/astropy
     commit: d16bfe05a744909de4b27f5875fe0d4ed41ce607
-    events:
-      - episode: 1
-        kind: decision
-        content: The team requires regression tests for modeling changes and keeps them in astropy/modeling/tests/test_models.py.
-      - episode: 2
-        kind: correction
-        content: Use pytest for focused validation; do not add a standalone validation script.
-    probes:
-      - id: regression-test-location
-        after_episode: 1
-        query: Where should a regression test for a modeling change be added?
-        expected_paths: [MEMORY.md]
-        expected_facts: [astropy/modeling/tests/test_models.py]
-      - id: validation-policy
-        after_episode: 2
-        query: How should this modeling change be validated?
-        expected_paths: [MEMORY.md]
-        expected_facts: [pytest]
-  - id: django-maintainer-preferences
-    repo: django/django
+- id: django-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: Model form validation changes should preserve backwards compatibility and add tests under tests/model_forms.
+  - episode: 2
+    kind: correction
+    content: Prefer the smallest focused test invocation before running the broader model_forms suite.
+  probes:
+  - id: model-form-test-location
+    after_episode: 1
+    query: Where do validation regression tests belong?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - tests/model_forms
+  - id: focused-validation
+    after_episode: 2
+    query: What validation order should the agent use?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - smallest focused test
+  repository:
+    type: git
+    url: https://github.com/django/django
     commit: 2d67222472f80f251607ae1b720527afceba06ad
-    events:
-      - episode: 1
-        kind: decision
-        content: Model form validation changes should preserve backwards compatibility and add tests under tests/model_forms.
-      - episode: 2
-        kind: correction
-        content: Prefer the smallest focused test invocation before running the broader model_forms suite.
-    probes:
-      - id: model-form-test-location
-        after_episode: 1
-        query: Where do validation regression tests belong?
-        expected_paths: [MEMORY.md]
-        expected_facts: [tests/model_forms]
-      - id: focused-validation
-        after_episode: 2
-        query: What validation order should the agent use?
-        expected_paths: [MEMORY.md]
-        expected_facts: [smallest focused test]
-
+- id: xarray-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: Alignment regressions belong beside the merge tests under xarray/tests and should cover labeled dimensions.
+  - episode: 2
+    kind: correction
+    content: Reproduce the smallest failing merge before running the complete xarray test suite.
+  probes:
+  - id: alignment-test-location
+    after_episode: 1
+    query: Where should an alignment regression be tested and what must it cover?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - xarray/tests
+    - labeled dimensions
+  - id: xarray-validation-order
+    after_episode: 2
+    query: What validation order did the maintainer request?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - smallest failing merge
+  repository:
+    type: git
+    url: https://github.com/pydata/xarray
+    commit: 45c0a114e2b7b27b83c9618bc05b36afac82183c
+- id: sphinx-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: Domain-reference regressions need a focused fixture in tests/test_domains and an asserted warning message.
+  - episode: 2
+    kind: correction
+    content: Preserve the public warning wording unless the release note explicitly documents the change.
+  probes:
+  - id: domain-test-contract
+    after_episode: 1
+    query: What is required for a domain-reference regression test?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - tests/test_domains
+    - warning message
+  - id: warning-compatibility
+    after_episode: 2
+    query: When may public warning text change?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - release note
+  repository:
+    type: git
+    url: https://github.com/sphinx-doc/sphinx
+    commit: 2e506c5ab457cba743bb47eb5b8c8eb9dd51d23d
+- id: sympy-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: Assumption-system fixes need symbolic and numeric regression cases in the closest assumptions test module.
+  - episode: 2
+    kind: correction
+    content: Avoid broad simplification changes when a local predicate correction resolves the reported case.
+  probes:
+  - id: assumptions-regression-shape
+    after_episode: 1
+    query: Which regression cases and location are expected for an assumptions fix?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - symbolic and numeric
+    - assumptions test module
+  - id: sympy-fix-scope
+    after_episode: 2
+    query: What implementation scope should the agent prefer?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - local predicate correction
+  repository:
+    type: git
+    url: https://github.com/sympy/sympy
+    commit: 7b127bdf71a36d85216315f80c1b54d22b060818
+- id: sklearn-maintainer-preferences
+  events:
+  - episode: 1
+    kind: decision
+    content: Estimator fixes must preserve clone behavior and add a non-regression test in the estimator's module.
+  - episode: 2
+    kind: correction
+    content: Run the estimator checks only after the focused test passes.
+  probes:
+  - id: estimator-regression-contract
+    after_episode: 1
+    query: What compatibility and test requirements apply to the estimator fix?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - clone behavior
+    - non-regression test
+  - id: estimator-validation-order
+    after_episode: 2
+    query: When should estimator checks run?
+    expected_paths:
+    - MEMORY.md
+    expected_facts:
+    - after the focused test passes
+  repository:
+    type: git
+    url: https://github.com/scikit-learn/scikit-learn
+    commit: f9a1cf072da9d7375d6c2163f68a6038b13b310f

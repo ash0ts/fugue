@@ -21,6 +21,7 @@ from fugue.bench.context import (
     load_context_system,
     preflight_context,
 )
+from fugue.bench.context_contracts import resolve_context_capabilities
 from fugue.bench.library import experiment_from_yaml
 from fugue.bench.sources import (
     SKILL_SOURCE_ROOT,
@@ -299,26 +300,7 @@ def evaluate_candidate(
     if official_exception:
         warnings.append("verified_owner_popularity_exception")
 
-    if candidate.kind == "skill":
-        if not candidate.path:
-            reasons.append("skill_path_required")
-        if candidate.target_experiment not in policy.skill_experiments:
-            reasons.append("target_experiment_not_allowed")
-        if not candidate.capabilities:
-            reasons.append("skill_capabilities_required")
-        elif not set(candidate.capabilities) <= policy.skill_capabilities:
-            reasons.append("skill_capabilities_not_allowed")
-        if candidate.has_executable_files:
-            reasons.append("executable_skill_bundle")
-    else:
-        if candidate.path:
-            reasons.append("context_path_not_allowed")
-        if candidate.target_experiment != policy.context_experiment:
-            reasons.append("target_experiment_not_allowed")
-        if not candidate.capabilities:
-            reasons.append("context_capabilities_required")
-        elif not set(candidate.capabilities) <= policy.context_capabilities:
-            reasons.append("context_capabilities_not_allowed")
+    reasons.extend(_candidate_contract_reasons(candidate, policy))
 
     if candidate.requires_new_dependencies:
         reasons.append("new_dependencies_required")
@@ -341,6 +323,34 @@ def evaluate_candidate(
         official_popularity_exception=official_exception,
         evaluated_at=now,
     )
+
+
+def _candidate_contract_reasons(
+    candidate: CandidateRecord, policy: CurationPolicy
+) -> list[str]:
+    if candidate.kind == "skill":
+        reasons = []
+        if not candidate.path:
+            reasons.append("skill_path_required")
+        if candidate.target_experiment not in policy.skill_experiments:
+            reasons.append("target_experiment_not_allowed")
+        if not candidate.capabilities:
+            reasons.append("skill_capabilities_required")
+        elif not set(candidate.capabilities) <= policy.skill_capabilities:
+            reasons.append("skill_capabilities_not_allowed")
+        if candidate.has_executable_files:
+            reasons.append("executable_skill_bundle")
+        return reasons
+    reasons = []
+    if candidate.path:
+        reasons.append("context_path_not_allowed")
+    if candidate.target_experiment != policy.context_experiment:
+        reasons.append("target_experiment_not_allowed")
+    if not candidate.capabilities:
+        reasons.append("context_capabilities_required")
+    elif not set(candidate.capabilities) <= policy.context_capabilities:
+        reasons.append("context_capabilities_not_allowed")
+    return reasons
 
 
 def existing_source_keys(repo_root: Path) -> frozenset[str]:
@@ -546,10 +556,21 @@ async def validate_context_proposal(
         for workload in experiment.workloads
         if spec.id in workload.systems
     ]
+    matching_variants = [
+        variant for variant in experiment.variants if variant.context.system_id == spec.id
+    ]
     matching_workloads = [
         workload
         for workload in assigned_workloads
-        if set(workload.required_capabilities) <= spec.capabilities
+        if any(
+            resolve_context_capabilities(
+                spec,
+                delivery=variant.context.delivery,
+                runner=workload.runner,
+                additional=workload.required_capabilities,
+            ).applicable
+            for variant in matching_variants
+        )
     ]
     if experiment.id != candidate.target_experiment:
         errors.append("context experiment does not match candidate evidence")
@@ -559,9 +580,6 @@ async def validate_context_proposal(
         errors.append("context proposal is not assigned to an applicable workload")
     if len(matching_workloads) != len(assigned_workloads):
         errors.append("context proposal is assigned to an incompatible workload")
-    matching_variants = [
-        variant for variant in experiment.variants if variant.context.system_id == spec.id
-    ]
     if not matching_variants:
         errors.append("context proposal requires an experiment variant")
     elif any(variant.context.delivery not in spec.deliveries for variant in matching_variants):

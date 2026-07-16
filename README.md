@@ -40,11 +40,11 @@ flowchart LR
 uv venv --python 3.12
 source .venv/bin/activate
 uv sync --extra dev
-cp .env.example .env
 ```
 
-Configure W&B for tracing and the credentials required by the selected model
-route:
+Keep credentials outside the checkout and pass their existing path directly to
+`--env-file`. Fugue reads the file but never copies it into runtime artifacts,
+snapshots, jobs, or Git. `.env.example` lists the supported names:
 
 ```dotenv
 WANDB_API_KEY=
@@ -85,8 +85,29 @@ Check dependencies and prepare only what the selected experiment requires:
 ```bash
 fugue setup --experiment pilot --check
 fugue setup --experiment pilot --skills
-fugue setup --experiment repo-memory-impact --prepare-context
+fugue setup --experiment repo-memory-impact --prepare \
+  --env-file /path/to/existing/.env
 ```
+
+`--check` is observational. `--prepare` is the plan-resolved state-changing
+boundary: it content-locks remote workload data, context indexes, harness
+runtimes, and unique task images for the selected architecture. Repeated setup
+reuses verified locks. `--prepare-context` remains a narrower adapter-only
+action. Preview and active trials never install, download, build, pull, start a
+service, or use the Docker socket. Graphiti has a separate local Neo4j lifecycle:
+
+```bash
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --start-services --env-file /path/to/existing/.env
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --service-status --env-file /path/to/existing/.env
+fugue setup --experiment repo-memory-impact --systems graphiti \
+  --stop-services --env-file /path/to/existing/.env
+```
+
+When Graphiti credentials are absent, Fugue generates an ignored mode-0600
+credential file and resolves host and Harbor endpoints internally. Stopping the
+service preserves its named data volume; 0.1.1 has no destructive purge action.
 
 Remote skills are fetched for review but not executed. Approve one exact
 reviewed digest before it can enter a run:
@@ -202,6 +223,15 @@ names, variant IDs and labels, preset names, run names, judge/scorer state, and
 trial ordinals do not affect it. Runtime, Harbor, concurrency, and tracing
 policy instead affect a separate execution fingerprint.
 
+Model routing and tool delivery are independent for Codex. Model traffic still
+uses the selected W&B bridge route, while each native-MCP cell receives a new,
+isolated `CODEX_HOME` containing only that route and its resolved allowlisted
+servers. Fugue never reads or mutates the user's global Codex credentials,
+skills, configuration, or MCP definitions, and it never downgrades native MCP
+to portable instructions. The locked runtime contains Codex 0.143.0 and
+weave-codex 0.1.1; trial startup verifies the exact MCP inventory before the
+model turn.
+
 ## Experiment contract
 
 Saved experiments live in `configs/fugue/experiments/`. The public YAML schema
@@ -243,6 +273,52 @@ injects native MCP, while `native_mcp` preserves the provider interface.
 Selecting an unsupported delivery makes the cell `not_applicable` before
 binding. Research adapters remain outside default presets until their pinned
 Harbor runtimes pass live integration tests.
+
+The experimental managed adapters are opt-in:
+
+| System | Delivery | Explicit requirement |
+| --- | --- | --- |
+| GitNexus 1.6.3 | native MCP | `FUGUE_LICENSE_APPROVED_GITNEXUS=true`; noncommercial research only |
+| CodeGraph 0.9.0 | native MCP | Prepared pinned platform bundle |
+| Semble 0.5.1 | native MCP | Prepared local model and parser assets |
+| Project RAG `d5abf98…` | native MCP | Prepared Rust runtime and isolated LanceDB state |
+| Graphiti 0.29.2 | portable or native MCP | Managed Neo4j 5.26 service or explicit compatible endpoint |
+| OpenWiki 0.1.1 | portable | Isolated builder workspace and Fugue model bridge |
+| lat.md 0.11.0 | native MCP | `LAT_LLM_KEY` and `FUGUE_ENABLE_EXPERIMENTAL_LATMD=true` |
+
+GitNexus, CodeGraph, Semble, Project RAG, and lat.md receive the same read-only
+task snapshot at `/workspace/repository` and a separate writable state area.
+The Fugue gateway preserves upstream MCP schemas and cancellation while adding
+cell correlation to tool results. Without a lat.md key, semantic lat.md cells
+are deterministically `not_applicable` and are not a release failure.
+
+GitNexus has two strict candidates. Their mode and model assets participate in
+candidate identity and context cache keys:
+
+```yaml
+context:
+  system_id: gitnexus
+  delivery: native_mcp
+  config: {retrieval_mode: bm25}
+```
+
+```yaml
+context:
+  system_id: gitnexus
+  delivery: native_mcp
+  config:
+    retrieval_mode: hybrid_vector
+    embedding_model: Snowflake/snowflake-arctic-embed-xs
+    embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
+    embedding_dimensions: 384
+    vector_required: true
+```
+
+Hybrid setup bundles and verifies the 384-dimensional model and CPU ONNX
+runtime, builds the index with networking disabled, and runs a semantic probe.
+It fails closed for an absent index, zero embeddings, wrong dimensions, failed
+vector query, or GitNexus's 50,000-node vector limit. It never reports BM25
+fallback as a vector result.
 
 ```mermaid
 flowchart LR
@@ -329,6 +405,74 @@ dataset, workload, and task; trial index is a separate cell coordinate.
 Deterministic outcomes, rubric scores, and judge errors remain separate—Fugue
 does not invent a composite score or convert a judge outage into a Harbor
 failure. Unmeasured token usage remains unavailable rather than becoming zero.
+
+`RunSnapshotV1` records source and resolved experiment digests, capability
+decisions, logical predictions, runtime locks, planned cells, asset identities,
+cohort identity, treatment-selection digest, evaluation-lock digest, and
+publication schema before execution. This is the first public contract, so
+earlier development snapshots are intentionally unreadable. A normalized
+prediction is distinct from its raw retrieval or episode
+measurements. Summaries therefore report planned and executed cells, logical
+predictions, measurements, Agent and direct predictions, conversations, links,
+canaries, and remediation cohorts separately.
+
+Answer-bearing localization data lives in a mode-0600 host-only
+`EvaluationAssetLockV1`. Fugue never mounts its raw paths in a task or Agent
+container and never puts them in rendered jobs, snapshots, Agent metadata, or
+trace inputs. Host-side scoring may publish derived recall and MRR together
+with the lock digest.
+
+W&B publication is idempotent by project, prediction ID, scorer version, and
+revision. An explicit republish creates a new active revision with a reason and
+`supersedes` link; it never merges evidence by a display label. Dashboard views
+should filter to the active revision and facet by source commit, snapshot
+digest, cohort, execution kind, harness, context system, and skill treatment.
+
+The hard-memory study is encoded as separate immutable cohorts. Discovery uses
+a fixed Latin-square harness assignment; holdout and control treatments must be
+selected from discovery results instead of being silently baked into the
+experiment:
+
+```bash
+fugue run repo-memory-impact --preset context-contract --preview
+fugue run repo-memory-impact --preset hard-calibration --preview
+fugue run repo-memory-impact --preset hard-discovery --preview
+fugue analyze --saved repo-memory-discovery-selection --yes
+fugue run repo-memory-impact --preset hard-holdout \
+  --selection-lock REPORT_DIR/treatment-selection-lock.json --preview
+fugue run repo-memory-impact --preset gitnexus-ablation --preview
+fugue run repo-memory-impact --preset gitnexus-swe-contract --preview
+fugue run repo-memory-impact --preset retrieval-study --preview
+fugue run repo-memory-impact --preset gitnexus-retrieval-study --preview
+fugue run repo-memory-impact --preset continuity-study --preview
+```
+
+The planned prediction counts are 48 context-contract, 32 calibration, 80
+discovery, 192 holdout, 96 easy-control, 128 repository-QA, 96 independent
+GitNexus ablation, and 72 PDF-skill Agent predictions: 744 primary cells in
+total. Direct cohorts contain 900 general
+retrieval measurements, 450 GitNexus BM25/vector measurements, and 108
+continuity sequence attempts. The 225-probe retrieval source is materialized
+and locked by `setup --prepare`; a trial refuses to download it.
+
+Discovery ranks variants against the same task, harness, and trial baseline.
+Official SWE resolution is primary, followed by localization recall@10, MRR,
+recoverable-error rate, measured cost, and stable variant ID. The versioned
+`TreatmentSelectionLockV1` captures the complete ranking and chosen three;
+holdout, controls, and repository-QA reject manual treatments that disagree
+with it. A separate 16-cell uptake diagnostic uses qualification-only tasks and
+never contributes to efficacy denominators.
+
+`gitnexus-swe-contract` is a one-cell Codex qualification canary. It explicitly
+requires a semantic lookup before editing so it can prove native MCP, vector
+telemetry, the official verifier, and the Agent deep link together. It is not
+part of the unbiased GitNexus ablation and must not enter an efficacy estimate.
+
+SWE-bench verifier dependencies and grading metadata are prepared into the
+locked task image. Qualification runs the official verifier offline twice: the
+base checkout must fail and the pinned gold patch must pass. A verifier that
+tries to resolve packages or metadata during a trial invalidates the task
+image instead of producing a benchmark result.
 
 Analysis first resolves and displays an immutable local scope. `--yes` is the
 explicit boundary for model interpretation and report writing:
@@ -477,7 +621,7 @@ uv build
 
 Core and context suites support Python 3.12 and 3.13. Serving and protocol
 compatibility run on Python 3.13. See `docs/extension-guide.md` for context and
-integration definitions, and `docs/releases/0.1.md` for release scope and
-manual gates.
+integration definitions, `docs/releases/0.1.md` for the base release, and
+`docs/releases/0.1.1.md` for the stacked hardening scope and evidence rules.
 
 Fugue is licensed under the Apache License 2.0. See `LICENSE`.

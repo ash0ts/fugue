@@ -2,7 +2,7 @@ id: rag-dense
 title: Fugue RAG (dense)
 description: Controlled dense retrieval baseline with local FastEmbed and LanceDB.
 provider: fugue.bench.context:RagContextProvider
-version: "3"
+version: "4"
 capabilities: [prepare, retrieve, bind]
 deliveries: [portable, native_mcp]
 required_packages: [fastembed, lancedb]

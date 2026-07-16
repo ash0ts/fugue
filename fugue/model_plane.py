@@ -137,6 +137,15 @@ def model_route_identity(route: ModelRoute) -> dict[str, object]:
     }
 
 
+def structured_assistant_options(route: ModelRoute) -> dict[str, object]:
+    # GLM-5.2 spent the entire structured-output budget on reasoning in the
+    # release canary. W&B Inference accepts this route-specific control and
+    # still returns native tool calls; Agent execution keeps normal thinking.
+    if (route.provider, route.model_id) == ("wandb", "zai-org/GLM-5.2"):
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
 def _tool_result_modalities(
     provider: Provider, model_id: str
 ) -> tuple[ToolResultModality, ...]:

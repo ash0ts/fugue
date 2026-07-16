@@ -36,8 +36,16 @@ def _experiment(*, size: int = 8):
             "judge_model": "openai/gpt-5-mini",
             "harnesses": ["codex"],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
-                {"id": "with-skill", "label": "With skill"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
+                {
+                    "id": "with-skill",
+                    "label": "With skill",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
             ],
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "evaluation_generation": {
@@ -173,6 +181,13 @@ def test_evaluation_draft_is_stratified_grounded_and_reviewable(
             ],
             "missing case strata",
         ),
+        (
+            lambda cases: [
+                {**cases[0], "instruction": "x" * 13_000},
+                *cases[1:],
+            ],
+            "evaluation case exceeds 12000 serialized bytes",
+        ),
     ],
 )
 def test_evaluation_draft_rejects_invalid_case_sets(
@@ -272,11 +287,13 @@ def test_generated_evaluation_requires_feature_omission_baseline(
                     "id": "one",
                     "label": "One",
                     "skills": ["always-on"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
                 {
                     "id": "two",
                     "label": "Two",
                     "skills": ["always-on"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }
@@ -382,11 +399,16 @@ def test_generated_evaluation_lifecycle_preview_save_prepare_and_render(
             },
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
             "variants": [
-                {"id": "baseline", "label": "Baseline"},
+                {
+                    "id": "baseline",
+                    "label": "Baseline",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
                 {
                     "id": "with-skill",
                     "label": "With skill",
                     "skills": ["demo-skill"],
+                    "context": {"system_id": "none", "delivery": "portable"},
                 },
             ],
         }
@@ -600,6 +622,26 @@ def test_judge_failure_is_an_evaluation_error_not_a_harbor_failure(
     assert row["pass"] is True
     assert "provider unavailable" in row["evaluation_error"]
     assert "evaluation_task_completion" not in row
+
+
+def test_case_assertions_do_not_select_a_rubric_scorer(tmp_path: Path) -> None:
+    row = {"status": "passed", "pass": True}
+
+    apply_generated_evaluation(
+        row,
+        case={
+            **_cases(1)[0],
+            "scorer_dimensions": ["task_completion", "artifact_quality"],
+        },
+        rubrics=[],
+        judge_model="openai/gpt-5-mini",
+        env={},
+        trial_dir=tmp_path,
+    )
+
+    assert row["evaluation_assertions"]["task_completion"] == 1
+    assert row["evaluation_judge_status"] == "not_requested"
+    assert "evaluation_error" not in row
 
 
 def test_artifact_assertions_bound_the_structured_judge_score(

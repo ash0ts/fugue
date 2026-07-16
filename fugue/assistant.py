@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -14,6 +14,7 @@ from fugue.model_plane import (
     provider_request_headers,
     resolve_model_route,
     select_model,
+    structured_assistant_options,
     trace_project_slug,
 )
 from fugue.redaction import redact_value
@@ -59,6 +60,7 @@ class AssistantResponse:
     tool_calls: tuple[AssistantToolCall, ...] = ()
     usage: AssistantUsage = field(default_factory=AssistantUsage)
     raw_id: str | None = None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +100,7 @@ class AssistantModelClient:
         model: str,
         env: Mapping[str, str],
         *,
-        timeout_sec: float = 120.0,
+        timeout_sec: float = 300.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.env = dict(env)
@@ -194,6 +196,7 @@ class AssistantAgent:
         trace_content: str = "full",
         session_id: str | None = None,
         max_rounds: int = 8,
+        max_tokens: int = 4_096,
         attributes: Mapping[str, Any] | None = None,
     ) -> None:
         self.client = client
@@ -203,6 +206,7 @@ class AssistantAgent:
         self.trace_content = trace_content
         self.session_id = session_id or uuid.uuid4().hex
         self.max_rounds = max_rounds
+        self.max_tokens = max_tokens
         self.attributes = dict(attributes or {})
 
     async def run(
@@ -229,7 +233,11 @@ class AssistantAgent:
             for _ in range(self.max_rounds):
                 llm = tracer.start_llm(history)
                 try:
-                    response = await self.client.complete(history, tools=self.tools)
+                    response = await self.client.complete(
+                        history,
+                        tools=self.tools,
+                        max_tokens=self.max_tokens,
+                    )
                 except BaseException as exc:
                     tracer.finish_llm(llm, error=exc)
                     raise
@@ -246,7 +254,32 @@ class AssistantAgent:
                     )
                 )
                 if not response.tool_calls:
-                    payload = _json_object(response.text)
+                    try:
+                        payload = _json_object(response.text)
+                    except ValueError as exc:
+                        if response.finish_reason in {
+                            "length",
+                            "max_tokens",
+                            "max_output_tokens",
+                        }:
+                            raise RuntimeError(
+                                "assistant output was truncated before structured output "
+                                f"({response.finish_reason}, max_tokens={self.max_tokens})"
+                            ) from exc
+                        terminal_tools = [tool.name for tool in self.tools if tool.terminal]
+                        if not terminal_tools:
+                            raise
+                        history.append(
+                            AssistantMessage(
+                                role="user",
+                                content=(
+                                    "Your response did not satisfy the required structured "
+                                    "output contract. Call exactly one terminal tool: "
+                                    f"{', '.join(terminal_tools)}."
+                                ),
+                            )
+                        )
+                        continue
                     tracer.finish(payload)
                     return self._result(payload, history, input_tokens, output_tokens)
                 for call in response.tool_calls:
@@ -361,7 +394,8 @@ def _chat_payload(
             }
             for tool in tools
         ]
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = "required"
+        payload.update(structured_assistant_options(route))
     return payload
 
 
@@ -441,6 +475,7 @@ def _responses_payload(
             }
             for tool in tools
         ]
+        payload["tool_choice"] = "required"
     return payload
 
 
@@ -501,11 +536,13 @@ def _messages_payload(
             }
             for tool in tools
         ]
+        payload["tool_choice"] = {"type": "any"}
     return payload
 
 
 def _parse_chat(body: dict[str, Any]) -> AssistantResponse:
-    message = ((body.get("choices") or [{}])[0].get("message") or {})
+    choice = (body.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
     calls = tuple(
         AssistantToolCall(
             id=str(item.get("id") or uuid.uuid4().hex),
@@ -520,6 +557,7 @@ def _parse_chat(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=calls,
         usage=AssistantUsage(usage.get("prompt_tokens"), usage.get("completion_tokens")),
         raw_id=body.get("id"),
+        finish_reason=choice.get("finish_reason"),
     )
 
 
@@ -544,6 +582,8 @@ def _parse_responses(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
         raw_id=body.get("id"),
+        finish_reason=(body.get("incomplete_details") or {}).get("reason")
+        or body.get("status"),
     )
 
 
@@ -567,6 +607,7 @@ def _parse_messages(body: dict[str, Any]) -> AssistantResponse:
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
         raw_id=body.get("id"),
+        finish_reason=body.get("stop_reason"),
     )
 
 
@@ -666,11 +707,9 @@ class _AssistantTrace:
             )
             _enter(span)
             if self.include_content:
-                span.input_messages = [
-                    {"role": message.role, "content": message.content}
-                    for message in messages
-                    if message.role != "tool"
-                ]
+                span.input_messages = _weave_messages(
+                    message for message in messages if message.role != "tool"
+                )
             return span
         except Exception:
             return None
@@ -687,13 +726,10 @@ class _AssistantTrace:
         try:
             if response is not None:
                 if self.include_content:
-                    span.output_messages = [{"role": "assistant", "content": response.text}]
-                span.usage = {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                }
-            if error is not None:
-                span.error = f"{type(error).__name__}: {error}"
+                    span.output_messages = _weave_messages(
+                        [AssistantMessage("assistant", response.text)]
+                    )
+                _record_llm_usage(span, response.usage)
         finally:
             _exit(span, error)
 
@@ -724,8 +760,6 @@ class _AssistantTrace:
         try:
             if self.include_content and error is None:
                 span.result = redact_value(result)
-            if error is not None:
-                span.error = f"{type(error).__name__}: {error}"
         finally:
             _exit(span, error)
 
@@ -752,6 +786,27 @@ def _enter(value: Any) -> None:
     enter = getattr(value, "__enter__", None)
     if enter is not None:
         enter()
+
+
+def _record_llm_usage(span: Any, usage: AssistantUsage) -> None:
+    # Weave owns this concrete Usage type. Replacing it with a dict makes the
+    # span fail during publication after the model call has already completed.
+    target = getattr(span, "usage", None)
+    if target is None:
+        return
+    for name in ("input_tokens", "output_tokens"):
+        value = getattr(usage, name)
+        if value is not None:
+            setattr(target, name, int(value))
+
+
+def _weave_messages(messages: Iterable[AssistantMessage]) -> list[Any]:
+    import weave
+
+    return [
+        weave.Message(role=message.role, content=message.content)
+        for message in messages
+    ]
 
 
 def _exit(value: Any, error: BaseException | None) -> None:

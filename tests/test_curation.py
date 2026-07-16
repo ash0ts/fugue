@@ -325,7 +325,7 @@ jobs_dir: jobs/demo
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-one, repo: test/repo, base_commit: abc123}
+  - {id: task-one, repository: {type: git, url: https://github.com/test/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
 """
     )
     base = tmp_path / "configs/fugue/experiments/pilot.yaml"
@@ -336,7 +336,7 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: baseline, label: Baseline, context: {system_id: none}}
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
 """
     )
     proposal = tmp_path / "configs/fugue/experiments/repository-guide-ab.yaml"
@@ -347,11 +347,11 @@ manifest: datasets/demo.yaml
 model: openai/gpt-5
 harnesses: [codex]
 variants:
-  - {id: baseline, label: No skill, context: {system_id: none}}
+  - {id: baseline, label: No skill, context: {system_id: none, delivery: portable}}
   - id: with-repository-guide
     label: Repository guide
     skills: [repository-guide]
-    context: {system_id: none}
+    context: {system_id: none, delivery: portable}
 """
     )
     source_path.write_text(
@@ -414,7 +414,7 @@ presets:
     workloads: [coding]
     systems: [none]
 variants:
-  - {id: none, label: None, context: {system_id: none}}
+  - {id: none, label: None, context: {system_id: none, delivery: portable}}
   - id: example-context
     label: Example context
     context: {system_id: example-context, delivery: native_mcp}
@@ -457,7 +457,7 @@ config:
 workloads:
   - {id: coding, runner: harbor, required_capabilities: [bind], systems: [example-context]}
 variants:
-  - {id: control, context: {system_id: none}}
+  - {id: control, context: {system_id: none, delivery: portable}}
   - {id: treatment, context: {system_id: example-context, delivery: native_mcp}}
 """
     )

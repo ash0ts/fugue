@@ -3,7 +3,9 @@ title: SkillsBench PDF skill A/B
 description: Compare an original PDF artifact workflow skill with a no-skill baseline across four agent harnesses.
 manifest: datasets/skillsbench-pdf.yaml
 model: wandb/zai-org/GLM-5.2
+judge_model: wandb/zai-org/GLM-5.1
 run_name: skillsbench-pdf-ab
+default_preset: smoke
 tags:
   - demo
   - skillsbench
@@ -14,19 +16,47 @@ harnesses:
   - openclaw
   - claude-code
   - codex
+workloads:
+  - id: pdf-smoke
+    runner: harbor
+    manifest: datasets/skillsbench-pdf.yaml
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+  - id: pdf-study
+    runner: harbor
+    manifest: datasets/skillsbench-pdf.yaml
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+      - {type: rubric, path: configs/fugue/evaluations/skillsbench-pdf-v1/rubric.yaml}
+presets:
+  smoke:
+    workloads: [pdf-smoke]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 4
+  study:
+    workloads: [pdf-study]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 3
+    n_tasks: 3
+    n_concurrent: 4
+    scheduling_seed: skillsbench-pdf-study-v1
 variants:
   - id: baseline
     label: No skill
     context:
       system_id: none
+      delivery: portable
   - id: with-pdf-skill
     label: PDF artifact workflow
     skills:
       - pdf-artifact-workflow
     context:
       system_id: none
-n_attempts: 2
-n_concurrent: 2
+      delivery: portable
+n_attempts: 1
+n_concurrent: 4
 n_tasks: 3
 jobs_dir: jobs/skillsbench-pdf-ab
 environment:

@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import signal
 import subprocess
 import threading
 import time
@@ -18,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from filelock import FileLock
 
+from fugue.bench.files import atomic_write_json, latest_jsonl_records
+from fugue.bench.files import terminate_process_group as _terminate_process_group
 from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
@@ -29,14 +29,6 @@ CellStatus = Literal[
     "passed",
     "failed",
     "not_applicable",
-    "cancelled",
-    "interrupted",
-]
-RunStatus = Literal[
-    "starting",
-    "running",
-    "passed",
-    "failed",
     "cancelled",
     "interrupted",
 ]
@@ -70,12 +62,18 @@ class PlannedCell:
     n_attempts: int
     execution_kind: ExecutionKind = "agent"
     context_delivery: str = "portable"
+    expected_evidence_paths: tuple[str, ...] = ()
+    evaluation_asset_lock_sha256: str = ""
+    run_snapshot_sha256: str = ""
+    source_commit: str = ""
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
     scorer_refs: tuple[str, ...] = ()
     applicable: bool = True
     skip_reason: str | None = None
+    config_sha256: str = ""
+    runtime_assets: tuple[tuple[str, str], ...] = ()
 
     def record(self, status: CellStatus, **values: Any) -> dict[str, Any]:
         return {
@@ -102,6 +100,8 @@ class PlannedCell:
             "n_attempts": self.n_attempts,
             "status": status,
             "skip_reason": self.skip_reason,
+            "config_sha256": self.config_sha256,
+            "runtime_assets": [list(item) for item in self.runtime_assets],
             "recorded_at": datetime.now(UTC).isoformat(),
             **values,
         }
@@ -130,7 +130,12 @@ def new_run_id() -> str:
 
 
 def plan_cells(
-    jobs: list[RenderedJob], *, run_id: str, run_name: str
+    jobs: list[RenderedJob],
+    *,
+    run_id: str,
+    run_name: str,
+    scheduling_seed: str | None = None,
+    verify_inputs: bool = True,
 ) -> list[PlannedCell]:
     cells: list[PlannedCell] = []
     for job in jobs:
@@ -169,15 +174,50 @@ def plan_cells(
                 env=job.env,
                 n_attempts=job.n_attempts,
                 context_delivery=job.context_delivery,
+                expected_evidence_paths=job.expected_evidence_paths,
                 evaluation_case=job.evaluation_case,
                 evaluation_rubrics=job.evaluation_rubrics,
                 scorer_hashes=job.scorer_hashes,
                 scorer_refs=job.scorer_refs,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
+                config_sha256=(
+                    _path_digest(job.config_path) if verify_inputs else ""
+                ),
+                runtime_assets=(
+                    tuple(
+                        (path.as_posix(), _path_digest(path))
+                        for path in job.generated_runtime_files
+                    )
+                    if verify_inputs
+                    else ()
+                ),
             )
         )
-    return cells
+    return schedule_cells(cells, scheduling_seed)
+
+
+def schedule_cells(
+    cells: list[PlannedCell], scheduling_seed: str | None
+) -> list[PlannedCell]:
+    if not scheduling_seed:
+        return cells
+    return sorted(
+        cells,
+        key=lambda cell: hashlib.sha256(
+            ":".join(
+                (
+                    scheduling_seed,
+                    cell.workload_id,
+                    cell.task_id,
+                    cell.harness,
+                    cell.context_system_id,
+                    cell.variant_id,
+                    str(cell.trial_index),
+                )
+            ).encode()
+        ).hexdigest(),
+    )
 
 
 def execute_cells(
@@ -215,9 +255,7 @@ def execute_cells(
             runnable.append(cell)
         else:
             store.append_cell(
-                cell.record(
-                    "not_applicable", benchmark_outcome="not_applicable"
-                )
+                cell.record("not_applicable", benchmark_outcome="not_applicable")
             )
             store.append_event(
                 "cell_state",
@@ -253,14 +291,28 @@ def execute_cells(
                 message=cancellation_message,
             )
             return outcome
+        try:
+            _verify_cell_inputs(cell, repo_root)
+        except Exception as exc:
+            error = f"immutable run input verification failed: {exc}"
+            outcome = CellOutcome(cell.id, "failed", error=error)
+            store.append_cell(
+                cell.record(
+                    "failed",
+                    error=error,
+                    benchmark_outcome="unscored",
+                    ended_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            store.append_event("cell_state", cell=cell, status="failed", message=error)
+            return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
         execution_env = dict(cell.env)
         cell_started_called = False
-        if (
-            cell_started is not None
-            and not (cancellation_event is not None and cancellation_event.is_set())
+        if cell_started is not None and not (
+            cancellation_event is not None and cancellation_event.is_set()
         ):
             try:
                 cell_started_called = True
@@ -324,9 +376,7 @@ def execute_cells(
                 returncode = int(result.returncode)
             harbor_result = (
                 _harbor_job_result(cell, repo_root)
-                if runner is None
-                and returncode == 0
-                and cell.execution_kind == "agent"
+                if runner is None and returncode == 0 and cell.execution_kind == "agent"
                 else _HarborJobResult(None, "unscored")
             )
             trial_error = harbor_result.error
@@ -461,22 +511,25 @@ def _run_cell_process(
     return returncode
 
 
-def _terminate_process_group(
-    process: subprocess.Popen[str], *, grace_sec: float = 2.0
-) -> None:
-    if process.poll() is not None:
-        return
+def _verify_cell_inputs(cell: PlannedCell, repo_root: Path) -> None:
+    config_path = cell.config_path
+    if not config_path.is_absolute():
+        config_path = repo_root / config_path
+    if cell.config_sha256 and _path_digest(config_path) != cell.config_sha256:
+        raise RuntimeError(f"config drift: {config_path}")
+    for raw_path, expected in cell.runtime_assets:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = repo_root / path
+        if _path_digest(path) != expected:
+            raise RuntimeError(f"runtime asset drift: {path}")
+
+
+def _path_digest(path: Path) -> str:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=grace_sec)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read immutable input {path}: {exc}") from exc
 
 
 def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
@@ -493,18 +546,16 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
     if errored:
-        return _HarborJobResult(
-            f"{errored} Harbor trial(s) errored", "unscored"
-        )
+        return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
         return _HarborJobResult(
             f"{cancelled} Harbor trial(s) were cancelled", "unscored"
         )
     rewards: list[float] = []
     for evaluation in (stats.get("evals") or {}).values():
-        reward_buckets = (
-            ((evaluation or {}).get("reward_stats") or {}).get("reward") or {}
-        )
+        reward_buckets = ((evaluation or {}).get("reward_stats") or {}).get(
+            "reward"
+        ) or {}
         for raw_reward, trial_ids in reward_buckets.items():
             try:
                 reward = float(raw_reward)
@@ -546,24 +597,17 @@ def update_run_manifest(
         existing = read_run_manifest(path.parent) or {}
         values = updater(dict(existing))
         created_at = existing.get("created_at") or datetime.now(UTC).isoformat()
-        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temp.write_text(
-            json.dumps(
-                {
-                    **existing,
-                    "schema_version": 2,
-                    "run_id": run_id,
-                    "created_at": created_at,
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    **values,
-                },
-                indent=2,
-                sort_keys=True,
-                default=str,
-            )
-            + "\n"
+        atomic_write_json(
+            path,
+            {
+                **existing,
+                "schema_version": 1,
+                "run_id": run_id,
+                "created_at": created_at,
+                "updated_at": datetime.now(UTC).isoformat(),
+                **values,
+            },
         )
-        os.replace(temp, path)
     return path
 
 
@@ -598,7 +642,7 @@ def list_run_manifests(repo_root: Path) -> list[dict[str, Any]]:
 
 def mark_unfinished_cells(
     run_dir: Path,
-    status: Literal["cancelled", "interrupted"],
+    status: Literal["failed", "cancelled", "interrupted"],
     *,
     message: str,
 ) -> None:
@@ -612,7 +656,7 @@ def mark_unfinished_cells(
             **record,
             "status": status,
             "error": message,
-            "benchmark_outcome": "unscored",
+            "benchmark_outcome": "failed" if status == "failed" else "unscored",
             "recorded_at": datetime.now(UTC).isoformat(),
             "ended_at": datetime.now(UTC).isoformat(),
         }
@@ -626,17 +670,7 @@ def mark_unfinished_cells(
 
 
 def latest_cell_records(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    latest: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(errors="replace").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if record.get("cell_id"):
-            latest[str(record["cell_id"])] = record
-    return list(latest.values())
+    return latest_jsonl_records(path, "cell_id")
 
 
 class _RunStore:

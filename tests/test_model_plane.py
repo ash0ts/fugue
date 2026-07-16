@@ -13,6 +13,7 @@ from fugue.model_plane import (
     provider_request_headers,
     resolve_model_route,
     select_model,
+    structured_assistant_options,
     trace_entity_project,
     trace_env_defaults,
     trace_project_slug,
@@ -30,9 +31,13 @@ def test_resolve_model_route_for_supported_providers() -> None:
     assert wandb.messages_base_url is None
     assert wandb.tool_result_modalities == ("text",)
     assert model_route_identity(wandb)["tool_result_modalities"] == ["text"]
+    assert structured_assistant_options(wandb) == {
+        "thinking": {"type": "disabled"}
+    }
 
     openai = resolve_model_route("openai/gpt-5", {})
     assert openai.provider == "openai"
+    assert structured_assistant_options(openai) == {}
     assert openai.model_id == "gpt-5"
     assert openai.api_key_env == "OPENAI_API_KEY"
     assert openai.responses_base_url == "https://api.openai.com/v1"

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fugue.bench.export import export_rows
+from fugue.bench.export import compile_export
 from fugue.bench.library import (
     ExperimentSpec,
     get_experiment,
@@ -19,7 +19,7 @@ from fugue.bench.library import (
 )
 from fugue.redaction import redact_value
 
-CATALOG_PATH = Path(".fugue/cache/catalog/v2/catalog.sqlite")
+CATALOG_PATH = Path(".fugue/cache/catalog/v1/catalog.sqlite")
 FILTER_FIELDS = {
     "record_type",
     "experiment_id",
@@ -272,7 +272,7 @@ class ExperimentCatalog:
         else:
             connection.execute("DELETE FROM experiments")
 
-        rows = export_rows(
+        export = compile_export(
             [
                 path
                 for path in (
@@ -282,6 +282,7 @@ class ExperimentCatalog:
                 if path.exists()
             ]
         )
+        rows = [*export.predictions, *export.measurements]
         reports = self.repo_root / "reports"
         if reports.is_dir():
             for path in reports.rglob("*.jsonl"):

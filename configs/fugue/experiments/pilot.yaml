@@ -16,6 +16,7 @@ variants:
     label: Baseline
     context:
       system_id: none
+      delivery: portable
   - id: prompt-skill
     label: Prompt + skill
     prompt_id: repository-memory
@@ -23,6 +24,7 @@ variants:
       - repository-orientation
     context:
       system_id: none
+      delivery: portable
   - id: context-skill
     label: Repository context + skill
     prompt_id: repository-memory
@@ -30,6 +32,7 @@ variants:
       - repository-orientation
     context:
       system_id: agentsmd
+      delivery: portable
 n_attempts: 1
 n_concurrent: 2
 jobs_dir: jobs/pilot

@@ -11,8 +11,6 @@ from fugue.bench.library import (
     get_experiment,
     get_prompt,
     save_experiment,
-    save_prompt,
-    save_skill,
     validate_id,
 )
 
@@ -26,8 +24,12 @@ def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
 
 
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
-    save_prompt("fugue-maintainer", "# Maintainer\n", tmp_path)
-    save_skill("fugue-maintainer", "# Maintainer\n", tmp_path)
+    prompt = tmp_path / "configs/fugue/prompts/fugue-maintainer.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("# Maintainer\n")
+    skill = tmp_path / "configs/fugue/skills/fugue-maintainer/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Maintainer\n")
     root = tmp_path / "configs/fugue/agent-presets"
     root.mkdir(parents=True)
     (root / "maintainer-best.yaml").write_text(
@@ -41,7 +43,7 @@ candidate:
   model: openai/gpt-5
   prompt_id: fugue-maintainer
   skills: [fugue-maintainer]
-  context: {system_id: agentsmd}
+  context: {system_id: agentsmd, delivery: portable}
 evidence:
   suite_id: fugue-maintainer-v1
   suite_digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -79,13 +81,14 @@ invented: true
 
 
 def test_prompt_save_reload_and_hash(tmp_path):
-    item = save_prompt("prompt-a", "# Prompt A\n\nUse tests.\n", tmp_path)
+    path = tmp_path / "configs/fugue/prompts/prompt-a.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# Prompt A\n\nUse tests.\n")
 
     loaded = get_prompt("prompt-a", tmp_path)
 
     assert loaded.body == "# Prompt A\n\nUse tests.\n"
     assert loaded.title == "Prompt A"
-    assert loaded.sha256 == item.sha256
     assert len(loaded.sha256) == 64
 
 
@@ -99,7 +102,7 @@ manifest: datasets/pilot.yaml
 variants:
   - id: baseline
     label: Baseline
-    context: {system_id: none}
+    context: {system_id: none, delivery: portable}
   - id: prompt-skill
     label: Prompt plus skill
     prompt_id: prompt-a
@@ -143,6 +146,66 @@ presets:
     assert experiment.presets[0].workload_overrides == {"coding": {"n_tasks": 1}}
 
 
+def test_workload_selects_exact_variants_and_latin_square_assignment() -> None:
+    experiment = experiment_from_data(
+        {
+            "id": "memory-study",
+            "title": "Memory study",
+            "variants": [
+                {
+                    "id": "none",
+                    "context": {"system_id": "none", "delivery": "portable"},
+                },
+                {
+                    "id": "vector",
+                    "context": {
+                        "system_id": "gitnexus",
+                        "delivery": "native_mcp",
+                    },
+                },
+            ],
+            "workloads": [
+                {
+                    "id": "discovery",
+                    "runner": "harbor",
+                    "variants": ["none", "vector"],
+                    "harness_assignment": "latin_square",
+                }
+            ],
+        }
+    )
+
+    workload = experiment.workloads[0]
+    assert workload.variants == ["none", "vector"]
+    assert workload.harness_assignment == "latin_square"
+
+
+def test_workload_rejects_unknown_variant_and_assignment() -> None:
+    common = {
+        "id": "memory-study",
+        "variants": [
+            {
+                "id": "none",
+                "context": {"system_id": "none", "delivery": "portable"},
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="unknown variant"):
+        experiment_from_data(
+            {
+                **common,
+                "workloads": [{"id": "study", "variants": ["missing"]}],
+            }
+        )
+    with pytest.raises(ValueError, match="harness_assignment"):
+        experiment_from_data(
+            {
+                **common,
+                "workloads": [
+                    {"id": "study", "harness_assignment": "random"}
+                ],
+            }
+        )
 def test_experiment_defaults_to_baseline_variant(tmp_path):
     save_experiment(
         "experiment-b",
@@ -172,6 +235,7 @@ variants:
   - id: treatment
     label: Treatment
     skills: [remote-skill]
+    context: {system_id: none, delivery: portable}
     integrations:
       - id: repository-search
         config: {top_k: 5}
@@ -226,6 +290,76 @@ id: bad-transport
 variants:
   - id: rag
     context: {system_id: rag-bm25, delivery: magic}
+""",
+            tmp_path,
+        )
+
+
+def test_non_none_context_requires_explicit_delivery(tmp_path):
+    with pytest.raises(ValueError, match="requires an explicit context delivery"):
+        save_experiment(
+            "implicit-delivery",
+            """
+id: implicit-delivery
+variants:
+  - id: rag
+    context: {system_id: rag-bm25}
+""",
+            tmp_path,
+        )
+
+
+def test_none_context_requires_explicit_delivery(tmp_path):
+    with pytest.raises(ValueError, match="requires an explicit context delivery"):
+        save_experiment(
+            "implicit-none-delivery",
+            """
+id: implicit-none-delivery
+variants:
+  - id: baseline
+    context: {system_id: none}
+""",
+            tmp_path,
+        )
+
+
+def test_authored_variant_requires_explicit_context(tmp_path):
+    with pytest.raises(ValueError, match="mapping with explicit delivery"):
+        save_experiment(
+            "implicit-context",
+            """
+id: implicit-context
+variants:
+  - id: baseline
+""",
+            tmp_path,
+        )
+
+
+def test_string_context_cannot_hide_non_none_delivery(tmp_path):
+    with pytest.raises(ValueError, match="mapping with explicit delivery"):
+        save_experiment(
+            "string-context",
+            """
+id: string-context
+variants:
+  - id: rag
+    context: rag-bm25
+""",
+            tmp_path,
+        )
+
+
+def test_unknown_required_context_capability_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="unknown context capabilities: remember"):
+        save_experiment(
+            "bad-capability",
+            """
+id: bad-capability
+workloads:
+  - id: memory
+    runner: retrieval
+    required_capabilities: [remember]
 """,
             tmp_path,
         )
@@ -398,8 +532,8 @@ def test_experiment_rejects_duplicate_ids_and_nonpositive_counts(tmp_path):
             """
 id: duplicates
 variants:
-  - {id: same, label: One}
-  - {id: same, label: Two}
+  - {id: same, label: One, context: {system_id: none, delivery: portable}}
+  - {id: same, label: Two, context: {system_id: none, delivery: portable}}
 """,
             tmp_path,
         )

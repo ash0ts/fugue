@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Literal
 
 from fugue.bench.context import RetrievalHit, RetrievalQuery
+from fugue.bench.files import atomic_write_json
 
 
 @dataclass(frozen=True)
 class SelectionPolicy:
+    selection_unit: Literal["candidate", "variant"] = "candidate"
+    baseline_variant_id: str | None = None
+    required_examples: int | None = None
+    required_harnesses: tuple[str, ...] = ()
+    require_agent_links: bool = False
+    require_registration: bool = False
     metric: str = "pass_rate"
     confidence: float = 0.95
     noninferiority_margin: float = 0.05
@@ -39,6 +49,9 @@ class CandidateScore:
     cost_per_success: float | None
     median_wall_time_sec: float | None
     recoverable_error_rate: float | None
+    paired_pass_rate_delta: float | None = None
+    localization_recall_at_10: float | None = None
+    localization_mrr: float | None = None
     delta_to_best: float | None = None
     confidence_low: float | None = None
     confidence_high: float | None = None
@@ -56,7 +69,29 @@ class CandidateSelection:
     candidates: tuple[CandidateScore, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            **asdict(self),
+            "selection_unit": self.policy.selection_unit,
+            "best_selection_id": self.best_candidate_id,
+            "selected_selection_id": self.selected_candidate_id,
+        }
+
+
+@dataclass(frozen=True)
+class TreatmentSelectionLockV1:
+    schema_version: int
+    source_commit: str
+    calibration_snapshot_sha256: str
+    discovery_snapshot_sha256: str
+    rankings: tuple[dict[str, Any], ...]
+    selected_variants: tuple[str, ...]
+    lock_sha256: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["rankings"] = list(self.rankings)
+        value["selected_variants"] = list(self.selected_variants)
+        return value
 
 
 def select_candidate_configuration(
@@ -67,11 +102,17 @@ def select_candidate_configuration(
 ) -> CandidateSelection:
     """Select a candidate from normalized trials without model-authored arithmetic."""
     values = [dict(row) for row in rows]
+    baseline_rows = [
+        row
+        for row in values
+        if policy.baseline_variant_id
+        and str(row.get("variant_id") or "") == policy.baseline_variant_id
+    ]
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in values:
-        candidate_id = str(row.get("candidate_id") or "").strip()
-        if candidate_id:
-            grouped.setdefault(candidate_id, []).append(row)
+        selection_id = str(row.get(f"{policy.selection_unit}_id") or "").strip()
+        if selection_id and selection_id != policy.baseline_variant_id:
+            grouped.setdefault(selection_id, []).append(row)
     expected = {
         _trial_coordinate(row)
         for rows_for_candidate in grouped.values()
@@ -103,6 +144,30 @@ def select_candidate_configuration(
             reasons.append("candidates do not share one comparison grid")
         if any(row.get("pass") is None for row in candidate_rows):
             reasons.append("missing deterministic outcome")
+        examples = {item[0] for item in present}
+        if policy.required_examples and len(examples) != policy.required_examples:
+            reasons.append(f"expected {policy.required_examples} comparison examples")
+        if policy.required_harnesses:
+            harness_counts = {
+                harness: sum(row.get("harness") == harness for row in candidate_rows)
+                for harness in policy.required_harnesses
+            }
+            if len(set(harness_counts.values())) != 1 or not all(
+                harness_counts.values()
+            ):
+                reasons.append("harness assignment is not balanced")
+        if policy.require_agent_links and any(
+            row.get("trace_link_status") != "linked" for row in candidate_rows
+        ):
+            reasons.append("missing or ambiguous Agent link")
+        if policy.require_registration and any(
+            row.get("context_registration_status") not in {"registered", "static"}
+            for row in candidate_rows
+        ):
+            reasons.append("context registration is incomplete")
+        paired_delta = _paired_baseline_delta(candidate_rows, baseline_rows)
+        if policy.baseline_variant_id and paired_delta is None:
+            reasons.append("missing same-task/harness baseline")
         eligible = not reasons
         if eligible:
             eligible_rows[candidate_id] = candidate_rows
@@ -125,7 +190,7 @@ def select_candidate_configuration(
                 eligible=eligible,
                 reasons=tuple(reasons),
                 trials=len(candidate_rows),
-                examples=len({item[0] for item in present}),
+                examples=len(examples),
                 pass_rate=(successes / len(candidate_rows) if candidate_rows else None),
                 cost_per_success=(
                     sum(float(value) for value in costs) / successes
@@ -139,6 +204,13 @@ def select_candidate_configuration(
                 ),
                 recoverable_error_rate=(
                     len(error_rows) / len(candidate_rows) if candidate_rows else None
+                ),
+                paired_pass_rate_delta=paired_delta,
+                localization_recall_at_10=_mean_metric(
+                    candidate_rows, "localization_recall_at_10", "recall_at_10"
+                ),
+                localization_mrr=_mean_metric(
+                    candidate_rows, "localization_mrr", "mrr"
                 ),
             )
         )
@@ -155,7 +227,14 @@ def select_candidate_configuration(
         )
     best = sorted(
         eligible_scores,
-        key=lambda item: (-(item.pass_rate or 0.0), item.candidate_id),
+        key=lambda item: (
+            -(
+                item.paired_pass_rate_delta
+                if item.paired_pass_rate_delta is not None
+                else item.pass_rate or 0.0
+            ),
+            item.candidate_id,
+        ),
     )[0]
     enriched: list[CandidateScore] = []
     for score in scores:
@@ -173,8 +252,7 @@ def select_candidate_configuration(
             CandidateScore(
                 **{
                     **asdict(score),
-                    "delta_to_best": (score.pass_rate or 0.0)
-                    - (best.pass_rate or 0.0),
+                    "delta_to_best": (score.pass_rate or 0.0) - (best.pass_rate or 0.0),
                     "confidence_low": low,
                     "confidence_high": high,
                     "competitive": low >= -policy.noninferiority_margin,
@@ -184,18 +262,7 @@ def select_candidate_configuration(
     competitive = [score for score in enriched if score.competitive]
     selected = sorted(
         competitive,
-        key=lambda item: (
-            item.cost_per_success is None,
-            item.cost_per_success if item.cost_per_success is not None else math.inf,
-            item.median_wall_time_sec is None,
-            item.median_wall_time_sec
-            if item.median_wall_time_sec is not None
-            else math.inf,
-            item.recoverable_error_rate
-            if item.recoverable_error_rate is not None
-            else math.inf,
-            item.candidate_id,
-        ),
+        key=lambda item: _selection_tie_key(item, policy.tie_breakers),
     )[0]
     decision, reason = _promotion_decision(
         selected,
@@ -215,6 +282,88 @@ def select_candidate_configuration(
     )
 
 
+def build_treatment_selection_lock(
+    *,
+    source_commit: str,
+    calibration_snapshot_sha256: str,
+    discovery_snapshot_sha256: str,
+    rankings: Iterable[Mapping[str, Any]],
+    selected_variants: Iterable[str],
+) -> TreatmentSelectionLockV1:
+    selected = tuple(str(value) for value in selected_variants)
+    if len(selected) != 3 or len(set(selected)) != 3 or "none" in selected:
+        raise ValueError("treatment selection lock requires three unique treatments")
+    for label, digest in (
+        ("calibration snapshot", calibration_snapshot_sha256),
+        ("discovery snapshot", discovery_snapshot_sha256),
+    ):
+        if not _sha256(digest):
+            raise ValueError(f"{label} must be a SHA-256 digest")
+    if len(source_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in source_commit
+    ):
+        raise ValueError("treatment selection source commit must be a full Git commit")
+    normalized = tuple(dict(value) for value in rankings)
+    ranked_ids = [str(value.get("variant_id") or "") for value in normalized]
+    if not normalized or len(ranked_ids) != len(set(ranked_ids)) or "" in ranked_ids:
+        raise ValueError("treatment rankings require unique variant_id values")
+    if not set(selected) <= set(ranked_ids):
+        raise ValueError("selected treatments must appear in the complete rankings")
+    base = TreatmentSelectionLockV1(
+        schema_version=1,
+        source_commit=source_commit,
+        calibration_snapshot_sha256=calibration_snapshot_sha256,
+        discovery_snapshot_sha256=discovery_snapshot_sha256,
+        rankings=normalized,
+        selected_variants=selected,
+    )
+    digest = _digest(base.to_dict())
+    return TreatmentSelectionLockV1(**{**asdict(base), "lock_sha256": digest})
+
+
+def write_treatment_selection_lock(path: Path, lock: TreatmentSelectionLockV1) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = lock.to_dict()
+    if path.exists():
+        if json.loads(path.read_text(encoding="utf-8")) != payload:
+            raise ValueError(f"treatment selection lock already differs: {path}")
+        return path
+    return atomic_write_json(path, payload)
+
+
+def read_treatment_selection_lock(path: Path) -> TreatmentSelectionLockV1:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if int(payload.get("schema_version") or 0) != 1:
+        raise ValueError("unsupported treatment selection lock schema")
+    expected = str(payload.get("lock_sha256") or "")
+    if not expected or _digest({**payload, "lock_sha256": ""}) != expected:
+        raise ValueError("treatment selection lock digest does not match its content")
+    return TreatmentSelectionLockV1(
+        schema_version=1,
+        source_commit=str(payload.get("source_commit") or ""),
+        calibration_snapshot_sha256=str(
+            payload.get("calibration_snapshot_sha256") or ""
+        ),
+        discovery_snapshot_sha256=str(payload.get("discovery_snapshot_sha256") or ""),
+        rankings=tuple(dict(value) for value in payload.get("rankings") or ()),
+        selected_variants=tuple(
+            str(value) for value in payload.get("selected_variants") or ()
+        ),
+        lock_sha256=expected,
+    )
+
+
+def _sha256(value: str) -> bool:
+    return len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _digest(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _promotion_decision(
     selected: CandidateScore,
     scores: list[CandidateScore],
@@ -225,13 +374,23 @@ def _promotion_decision(
 ) -> tuple[str, str]:
     incumbent_id = policy.incumbent_candidate_id
     if not incumbent_id:
-        return "recommend", "no incumbent was supplied; propose the selected candidate for review"
+        return (
+            "recommend",
+            "no incumbent was supplied; propose the selected candidate for review",
+        )
     incumbent = next(
-        (item for item in scores if item.candidate_id == incumbent_id and item.eligible),
+        (
+            item
+            for item in scores
+            if item.candidate_id == incumbent_id and item.eligible
+        ),
         None,
     )
     if incumbent is None:
-        return "blocked", "the incumbent is absent or ineligible in this comparison scope"
+        return (
+            "blocked",
+            "the incumbent is absent or ineligible in this comparison scope",
+        )
     if incumbent.candidate_id == selected.candidate_id:
         return "no_promotion", "the incumbent remains the selected candidate"
     low, _ = _paired_delta_interval(
@@ -242,7 +401,10 @@ def _promotion_decision(
         seed=f"{seed}:{selected.candidate_id}:{incumbent.candidate_id}:incumbent",
     )
     if low < -policy.noninferiority_margin:
-        return "no_promotion", "the selected candidate is not quality non-inferior to the incumbent"
+        return (
+            "no_promotion",
+            "the selected candidate is not quality non-inferior to the incumbent",
+        )
     pass_improvement = (selected.pass_rate or 0.0) - (incumbent.pass_rate or 0.0)
     cost_improvement = _relative_improvement(
         incumbent.cost_per_success, selected.cost_per_success
@@ -255,8 +417,14 @@ def _promotion_decision(
         or cost_improvement >= policy.minimum_cost_improvement
         or latency_improvement >= policy.minimum_latency_improvement
     ):
-        return "promote", "quality is non-inferior and an explicit improvement threshold was met"
-    return "no_promotion", "quality is non-inferior, but no promotion improvement threshold was met"
+        return (
+            "promote",
+            "quality is non-inferior and an explicit improvement threshold was met",
+        )
+    return (
+        "no_promotion",
+        "quality is non-inferior, but no promotion improvement threshold was met",
+    )
 
 
 def _paired_delta_interval(
@@ -291,8 +459,7 @@ def _example_outcomes(rows: list[dict[str, Any]]) -> dict[str, float]:
         example_id = str(row["comparison_example_id"])
         grouped.setdefault(example_id, []).append(float(row.get("pass") is True))
     return {
-        example_id: sum(values) / len(values)
-        for example_id, values in grouped.items()
+        example_id: sum(values) / len(values) for example_id, values in grouped.items()
     }
 
 
@@ -303,6 +470,73 @@ def _trial_coordinate(row: dict[str, Any]) -> tuple[str, int] | None:
     except (TypeError, ValueError):
         return None
     return (example_id, trial_index) if example_id and trial_index > 0 else None
+
+
+def _paired_baseline_delta(
+    candidate_rows: list[dict[str, Any]], baseline_rows: list[dict[str, Any]]
+) -> float | None:
+    if not baseline_rows:
+        return None
+    baseline: dict[tuple[str, str, int], bool] = {}
+    for row in baseline_rows:
+        key = _task_harness_trial(row)
+        if key is None or key in baseline:
+            return None
+        baseline[key] = row.get("pass") is True
+    deltas: list[float] = []
+    for row in candidate_rows:
+        key = _task_harness_trial(row)
+        if key is None or key not in baseline:
+            return None
+        deltas.append(float(row.get("pass") is True) - float(baseline[key]))
+    return sum(deltas) / len(deltas) if deltas else None
+
+
+def _task_harness_trial(row: Mapping[str, Any]) -> tuple[str, str, int] | None:
+    task_id = str(row.get("task_name") or "")
+    harness = str(row.get("harness") or "")
+    try:
+        trial_index = int(row.get("trial_index"))
+    except (TypeError, ValueError):
+        return None
+    if not task_id or not harness or trial_index < 1:
+        return None
+    return task_id, harness, trial_index
+
+
+def _mean_metric(rows: list[dict[str, Any]], *names: str) -> float | None:
+    values: list[float] = []
+    for row in rows:
+        value = next(
+            (row.get(name) for name in names if row.get(name) is not None), None
+        )
+        if value is not None:
+            values.append(float(value))
+    return sum(values) / len(values) if values else None
+
+
+def _selection_tie_key(
+    score: CandidateScore, tie_breakers: tuple[str, ...]
+) -> tuple[Any, ...]:
+    values: list[Any] = []
+    for name in tie_breakers:
+        value = getattr(score, name)
+        values.extend(
+            (
+                value is None,
+                -value
+                if name
+                in {
+                    "localization_recall_at_10",
+                    "localization_mrr",
+                }
+                and value is not None
+                else value
+                if value is not None
+                else math.inf,
+            )
+        )
+    return (*values, score.candidate_id)
 
 
 def _relative_improvement(before: float | None, after: float | None) -> float:

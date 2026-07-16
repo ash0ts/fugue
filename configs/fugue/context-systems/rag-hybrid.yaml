@@ -2,7 +2,7 @@ id: rag-hybrid
 title: Fugue RAG (hybrid)
 description: Controlled reciprocal-rank fusion of shared BM25 and dense indexes.
 provider: fugue.bench.context:RagContextProvider
-version: "3"
+version: "4"
 capabilities: [prepare, retrieve, bind, ingest, sequence]
 deliveries: [portable, native_mcp]
 required_packages: [fastembed, lancedb]

@@ -17,6 +17,7 @@ from fugue.bench.execution import (
     latest_cell_records,
     new_run_id,
     read_run_manifest,
+    schedule_cells,
     update_run_manifest,
     write_run_manifest,
 )
@@ -111,6 +112,17 @@ def test_cells_are_bounded_failure_isolated_and_durable(tmp_path: Path) -> None:
 
 def test_run_ids_are_immutable_and_unique() -> None:
     assert new_run_id() != new_run_id()
+
+
+def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:
+    first = [_cell("run-a", name) for name in ("one", "two", "three", "four")]
+    second = [_cell("run-b", name) for name in ("four", "three", "two", "one")]
+
+    first_order = [cell.task_id for cell in schedule_cells(first, "study-v1")]
+    second_order = [cell.task_id for cell in schedule_cells(second, "study-v1")]
+
+    assert first_order == second_order
+    assert schedule_cells(first, None) is first
 
 
 def test_real_cell_fails_when_harbor_reports_trial_errors(
@@ -316,9 +328,7 @@ def test_update_run_manifest_merges_partial_updater_result(tmp_path: Path) -> No
         tmp_path,
         "run-update",
         lambda manifest: {
-            "evaluation_runs": [
-                {"candidate_id": "candidate-a", "name": "evaluation-a"}
-            ]
+            "evaluation_runs": [{"candidate_id": "candidate-a", "name": "evaluation-a"}]
         },
     )
 

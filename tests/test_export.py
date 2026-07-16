@@ -19,9 +19,8 @@ from fugue.bench.export import (
     _fetch_agents_spans,
     _fetch_calls_spans,
     _summarize_spans,
-    _weave_safe_row,
+    compile_export,
     export_rows,
-    judge_qa_rows,
     publish_to_weave,
     write_jsonl,
 )
@@ -134,9 +133,7 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["context_system_id"] == "rag-bm25"
     assert row["context_version"] == "1"
     assert row["context_cache_keys"] == {"bridge-check": "cache123"}
-    assert row["expected_artifact_paths"] == [
-        "/logs/artifacts/fugue-answer.md"
-    ]
+    assert row["expected_artifact_paths"] == ["/logs/artifacts/fugue-answer.md"]
     assert row["artifact_normalization"][0]["status"] == "recovered"
     assert row["context_assigned"] is True
     assert row["context_available"] is True
@@ -192,31 +189,6 @@ def test_export_marks_unattributed_harbor_zero_usage_unavailable(
     assert "total_cost_usd" not in scores
 
 
-def test_weave_payload_redacts_secrets_and_keeps_full_hits_local() -> None:
-    row = {
-        "query": "q" * 2_000,
-        "api_key": "secret",
-        "n_input_tokens": 123,
-        "hits": [
-            {
-                "path": "src/app.py",
-                "score": 0.9,
-                "text": "repository source that remains local",
-            }
-        ],
-        "trial_dir": "/private/jobs/trial",
-    }
-
-    safe = _weave_safe_row(row)
-
-    assert len(safe["query"]) == 1_000
-    assert safe["api_key"] == "[redacted]"
-    assert safe["n_input_tokens"] == 123
-    assert safe["hits"] == [{"path": "src/app.py", "score": 0.9}]
-    assert "trial_dir" not in safe
-    assert row["hits"][0]["text"].startswith("repository")
-
-
 def test_jsonl_export_redacts_secret_keys_and_values(tmp_path: Path) -> None:
     output = tmp_path / "results.jsonl"
 
@@ -234,62 +206,6 @@ def test_jsonl_export_redacts_secret_keys_and_values(tmp_path: Path) -> None:
     payload = json.loads(output.read_text())
     assert payload["api_key"] == "[redacted]"
     assert payload["error"] == "provider rejected [redacted]"
-
-
-def test_qa_judge_uses_local_reference_and_records_separate_metrics(
-    tmp_path: Path, monkeypatch
-) -> None:
-    dataset = tmp_path / ".fugue" / "cache" / "datasets" / "qa" / "revision"
-    dataset.mkdir(parents=True)
-    (dataset / "selection.json").write_text(
-        json.dumps([{"task_id": "qa-001", "source_index": 0}])
-    )
-    (dataset / "_source.jsonl").write_text(
-        json.dumps({"answer": "Reference answer"}) + "\n"
-    )
-    trial = tmp_path / "jobs" / "trial"
-    artifacts = trial / "artifacts"
-    artifacts.mkdir(parents=True)
-    (artifacts / "fugue-answer.md").write_text("Candidate answer")
-    rows = [
-        {
-            "record_type": "trial",
-            "workload_id": "qa",
-            "task_name": "fugue/qa-001",
-            "trial_dir": trial.as_posix(),
-            "evidence_paths": ["src/app.py"],
-        }
-    ]
-
-    def fake_request(client, route, api_key, **kwargs):
-        assert kwargs["reference"] == "Reference answer"
-        assert kwargs["answer"] == "Candidate answer"
-        assert kwargs["evidence_paths"] == ["src/app.py"]
-        return (
-            {
-                "correctness": 0.8,
-                "completeness": 0.7,
-                "groundedness": 0.9,
-                "overall": 0.8,
-                "reasoning": "Grounded but incomplete.",
-            },
-            {"input_tokens": 100, "output_tokens": 20},
-        )
-
-    monkeypatch.setattr(export, "_judge_request", fake_request)
-    judge_qa_rows(
-        rows,
-        model="openai/gpt-5-mini",
-        env={"OPENAI_API_KEY": "test-only"},
-        repo_root=tmp_path,
-    )
-
-    assert rows[0]["judge_correctness"] == 0.8
-    assert rows[0]["judge_groundedness"] == 0.9
-    assert rows[0]["judge_input_tokens"] == 100
-    assert rows[0]["judge_model"] == "openai/gpt-5-mini"
-    safe = _weave_safe_row(rows[0])
-    assert "judge_reasoning" not in safe
 
 
 def test_weave_publication_uses_current_signature_and_local_ledger(
@@ -361,7 +277,13 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     }
     first = publish_to_weave(rows, project, ledger_root=tmp_path, env=env)
     second = publish_to_weave(rows, project, ledger_root=tmp_path)
-    third = publish_to_weave(rows, project, ledger_root=tmp_path, republish=True)
+    third = publish_to_weave(
+        rows,
+        project,
+        ledger_root=tmp_path,
+        republish=True,
+        republish_reason="verify revised publication",
+    )
 
     assert (first.published, first.skipped, first.failures) == (1, 0, ())
     assert (second.published, second.skipped) == (0, 1)
@@ -396,7 +318,16 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert scores == {"reward": 1.0, "passed": True}
         assert logger.summary is True
         assert logger.failed is None
-    assert list((tmp_path / "v3").glob("**/*.json"))
+    markers = [
+        path
+        for path in (tmp_path / "v1").glob("**/*.json")
+        if path.parent.name != "predictions"
+    ]
+    assert len(markers) == 2
+    assert len(list((tmp_path / "v1").glob("**/predictions/*.json"))) == 1
+    marker_values = [json.loads(path.read_text()) for path in markers]
+    assert sorted(value["revision"] for value in marker_values) == [1, 2]
+    assert sum(value["active"] is True for value in marker_values) == 1
     assert ("init", project, "https://api.wandb.ai") in calls
 
 
@@ -425,7 +356,14 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
         SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
     )
     rows = [
-        {"record_type": "trial", "task_name": "trial"},
+        {
+            "record_type": "trial",
+            "task_name": "trial",
+            "run_id": "run-trial",
+            "candidate_id": "candidate-trial",
+            "comparison_example_id": "example-trial",
+            "trial_index": 1,
+        },
         {
             "record_type": "retrieval",
             "task_name": "query",
@@ -436,6 +374,7 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
             "execution_kind": "provider_diagnostic",
             "trial_index": 1,
             "workload_id": "retrieval-dataset",
+            "comparison_example_id": "example-query",
         },
         {
             "record_type": "episode",
@@ -508,35 +447,39 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
         "execution_fingerprint": "fingerprint-a",
         "trial_index": 1,
     }
-    rows = [
-        {
-            **common,
-            "record_type": "episode",
-            "sequence_id": "maintainer-preferences",
-            "comparison_example_id": f"episode-{index}",
-            "write_latency_ms": 2.0,
-            "storage_bytes": 100 + index,
-        }
-        for index in range(2)
-    ] + [
-        {
-            **common,
-            "record_type": "retrieval",
-            "sequence_id": "maintainer-preferences",
-            "comparison_example_id": f"probe-{index}",
-            "mrr": float(index),
-            "query_latency_ms": 3.0,
-        }
-        for index in range(2)
-    ] + [
-        {
-            **common,
-            "record_type": "cell",
-            "workload_id": "continuity",
-            "comparison_example_id": "sequence-cell",
-            "status": "passed",
-        }
-    ]
+    rows = (
+        [
+            {
+                **common,
+                "record_type": "episode",
+                "sequence_id": "maintainer-preferences",
+                "comparison_example_id": f"episode-{index}",
+                "write_latency_ms": 2.0,
+                "storage_bytes": 100 + index,
+            }
+            for index in range(2)
+        ]
+        + [
+            {
+                **common,
+                "record_type": "retrieval",
+                "sequence_id": "maintainer-preferences",
+                "comparison_example_id": f"probe-{index}",
+                "mrr": float(index),
+                "query_latency_ms": 3.0,
+            }
+            for index in range(2)
+        ]
+        + [
+            {
+                **common,
+                "record_type": "cell",
+                "workload_id": "continuity",
+                "comparison_example_id": "sequence-cell",
+                "status": "passed",
+            }
+        ]
+    )
 
     result = publish_to_weave(
         rows,
@@ -597,11 +540,36 @@ def test_direct_evaluation_projection_requires_a_completed_cell() -> None:
 
     projected = export._evaluation_rows(rows)
 
-    assert [row["comparison_example_id"] for row in projected] == [
-        "published-query"
-    ]
+    assert [row["comparison_example_id"] for row in projected] == ["published-query"]
     assert projected[0]["dataset"] == "retrieval-dataset"
     assert projected[0]["workload_id"] == "retrieval"
+
+    normalized = export.normalize_prediction_rows(rows)
+    assert len(normalized) == 1
+    assert normalized[0]["record_type"] == "trial"
+    assert normalized[0]["source_record_type"] == "retrieval"
+    assert normalized[0]["prediction_schema_version"] == 1
+    assert normalized[0]["prediction_id"]
+    assert normalized[0]["execution_kind"] == "provider_diagnostic"
+
+
+def test_prediction_identity_ignores_scores_but_rejects_duplicate_execution() -> None:
+    row = {
+        "record_type": "trial",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "execution_kind": "agent",
+        "reward": 1.0,
+    }
+
+    first = export.normalize_prediction_rows([row])[0]
+    changed = export.normalize_prediction_rows([{**row, "reward": 0.0}])[0]
+
+    assert first["prediction_id"] == changed["prediction_id"]
+    with pytest.raises(ValueError, match="duplicate evaluation trial"):
+        export.normalize_prediction_rows([row, dict(row)])
 
 
 def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
@@ -648,18 +616,25 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
             PublicationResult(1, 0, (updated_direct,)),
         )
     )
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         operator,
-        "publish_to_weave",
-        lambda *args, **kwargs: next(publications),
+        "compile_export",
+        lambda *args, **kwargs: SimpleNamespace(
+            predictions=(), measurements=(), publication=next(publications)
+        ),
     )
     service = OperatorService(tmp_path)
     output = tmp_path / "reports" / "run-a.jsonl"
 
     service.export_run("run-a", out=output, to_weave=True)
     service.export_run("run-a", out=output, to_weave=True)
-    service.export_run("run-a", out=output, to_weave=True, republish=True)
+    service.export_run(
+        "run-a",
+        out=output,
+        to_weave=True,
+        republish=True,
+        republish_reason="correct direct evaluation scope",
+    )
 
     evaluations = service.run_summary("run-a").evaluations
     assert len(evaluations) == 2
@@ -689,16 +664,49 @@ def test_run_export_reads_only_the_exact_planned_job_roots(
     )
     observed: list[Path] = []
 
-    def fake_export_rows(paths, **kwargs):
+    def fake_compile_export(paths, **kwargs):
         observed.extend(paths)
-        return []
+        return SimpleNamespace(predictions=(), measurements=(), publication=None)
 
-    monkeypatch.setattr(operator, "export_rows", fake_export_rows)
+    monkeypatch.setattr(operator, "compile_export", fake_compile_export)
 
     OperatorService(tmp_path).export_run(run_id)
 
     assert observed == [selected, tmp_path / ".fugue" / "runtime" / run_id]
     assert unrelated not in observed
+
+
+def test_compile_export_normalizes_before_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw = {
+        "record_type": "retrieval",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "execution_kind": "provider_diagnostic",
+        "execution_fingerprint": "fingerprint-a",
+    }
+    cell = {
+        **raw,
+        "record_type": "cell",
+        "status": "passed",
+    }
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(export, "export_rows", lambda *args, **kwargs: [raw, cell])
+
+    def publish(rows, *args, **kwargs):
+        observed.extend(rows)
+        return PublicationResult(published=1, skipped=0)
+
+    monkeypatch.setattr(export, "publish_to_weave", publish)
+
+    bundle = compile_export([tmp_path], publish=True)
+
+    assert len(bundle.predictions) == len(bundle.measurements) == 1
+    assert observed == list(bundle.predictions)
+    assert observed[0]["prediction_id"]
 
 
 def test_export_recovers_direct_evaluation_after_marker_only_crash(
@@ -772,7 +780,7 @@ def test_export_recovers_direct_evaluation_after_marker_only_crash(
             "evaluation_runs": [],
         },
     )
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(export, "export_rows", lambda *args, **kwargs: rows)
 
     recovered = OperatorService(tmp_path).export_run(
         "run-a",
@@ -859,11 +867,14 @@ def test_export_persists_publication_failures_without_clobbering_agent_metadata(
         },
     )
     failure = "candidate-direct: RuntimeError: direct publication failed"
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         operator,
-        "publish_to_weave",
-        lambda *args, **kwargs: PublicationResult(0, 0, failures=(failure,)),
+        "compile_export",
+        lambda *args, **kwargs: SimpleNamespace(
+            predictions=(),
+            measurements=(),
+            publication=PublicationResult(0, 0, failures=(failure,)),
+        ),
     )
     service = OperatorService(tmp_path)
 
@@ -1120,6 +1131,11 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "FUGUE_TRACE_CONTENT": "full",
         },
         n_attempts=1,
+        evaluation_case={
+            "id": "task-a",
+            "scorer_dimensions": ["task_completion", "artifact_quality"],
+            "expected": {"artifacts": []},
+        },
     )
 
     def summaries(**kwargs):
@@ -1184,6 +1200,10 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
     assert live_row["evaluation_prediction_latency_sec"] >= 0
+    assert live_row["evaluation_judge_status"] == "not_requested"
+    assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_requested"
+    )
     assert predictions[0].predict_and_score_call.summary == {
         "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }
@@ -1388,9 +1408,7 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
     assert prediction.output["trace_link_status"] == "cancelled"
     statuses = [
         json.loads(line)["status"]
-        for line in (
-            tmp_path / ".fugue/runtime/run-poll-cancel/evaluations.jsonl"
-        )
+        for line in (tmp_path / ".fugue/runtime/run-poll-cancel/evaluations.jsonl")
         .read_text()
         .splitlines()
     ]
@@ -1610,6 +1628,20 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
                     "gen_ai.operation.name": "execute_tool",
                     "gen_ai.conversation.id": resolved,
                 },
+                "output": {
+                    "_meta": {
+                        "fugue_gateway_call_id": "gateway-a",
+                        "fugue_context_system_id": "gitnexus",
+                        "fugue_gitnexus_vector": {
+                            "vector_search_attempted": True,
+                            "vector_search_succeeded": True,
+                            "semantic_result_count": 4,
+                            "bm25_result_count": 2,
+                            "model_digest": "sha256:model",
+                            "query_latency_ms": 12.5,
+                        },
+                    }
+                },
             },
         ]
     )
@@ -1618,6 +1650,169 @@ def test_agent_hierarchy_uses_one_resolved_conversation_identity() -> None:
     assert summary["weave_turn_count"] == 1
     assert summary["weave_llm_call_count"] == 1
     assert summary["weave_tool_call_count"] == 1
+    assert summary["weave_gateway_tool_call_count"] == 1
+    assert summary["weave_gateway_call_ids"] == ["gateway-a"]
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 4
+    assert summary["gitnexus_bm25_result_count"] == 2
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 12.5
+
+    row = {"context_assigned": True}
+    export._apply_trace_summary(row, dict(summary))
+    assert row["context_invoked"] is True
+    assert row["context_invocation_evidence"]["source"] == (
+        "mcp_gateway_result_metadata"
+    )
+
+
+def test_agent_hierarchy_decodes_gateway_metadata_from_remote_tool_result() -> None:
+    result = json.dumps(
+        {
+            "Ok": {
+                "content": [{"type": "text", "text": "result"}],
+                "_meta": {
+                    "fugue_gateway_call_id": "gateway-remote",
+                    "fugue_gitnexus_vector": {
+                        "vector_search_attempted": True,
+                        "vector_search_succeeded": True,
+                        "semantic_result_count": 3,
+                        "bm25_result_count": 0,
+                        "model_digest": "sha256:remote-model",
+                        "query_latency_ms": 22.5,
+                    },
+                },
+            }
+        }
+    )
+    raw_span = {
+        "attributes": {
+            "gen_ai": {
+                "operation": {"name": "execute_tool"},
+                "tool": {"call": {"result": result}},
+            }
+        }
+    }
+    summary = _summarize_spans(
+        [
+            {
+                "span_id": "tool",
+                "operation_name": "execute_tool",
+                "raw_span_dump": json.dumps(raw_span),
+            }
+        ]
+    )
+
+    assert summary["weave_gateway_call_ids"] == ["gateway-remote"]
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 3
+    assert summary["gitnexus_bm25_result_count"] == 0
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:remote-model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 22.5
+
+
+def test_gateway_event_log_is_identity_checked_and_preserves_vector_evidence(
+    tmp_path: Path,
+) -> None:
+    event_log = (
+        tmp_path
+        / ".fugue/runtime/run-a/gateway-evidence/job-a/context-gateway.jsonl"
+    )
+    event_log.parent.mkdir(parents=True)
+    identity = {
+        "fugue_run_id": "run-a",
+        "fugue_candidate_id": "candidate-a",
+        "fugue_comparison_example_id": "example-a",
+        "fugue_trial_index": "1",
+        "fugue_execution_fingerprint": "execution-a",
+        "fugue_context_system_id": "gitnexus",
+    }
+    events = [
+        {"event": "gateway_ready", **identity},
+        {
+            "event": "tool_end",
+            "gateway_call_id": "gateway-a",
+            "duration_ms": 18.5,
+            "is_error": False,
+            "vector": {
+                "vector_search_attempted": True,
+                "vector_search_succeeded": True,
+                "semantic_result_count": 4,
+                "bm25_result_count": 0,
+                "model_digest": "sha256:model",
+                "query_latency_ms": 12.5,
+            },
+            **identity,
+        },
+        {
+            "event": "tool_end",
+            "gateway_call_id": "wrong-cell",
+            **{**identity, "fugue_candidate_id": "candidate-b"},
+        },
+    ]
+    event_log.write_text("".join(f"{json.dumps(event)}\n" for event in events))
+
+    summary = export._context_event_summary(
+        tmp_path / "jobs/job-a/trial-a",
+        gateway_event_path=event_log.as_posix(),
+        expected_identity={
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "comparison_example_id": "example-a",
+            "trial_index": 1,
+            "execution_fingerprint": "execution-a",
+            "context_system_id": "gitnexus",
+        },
+    )
+
+    assert summary["context_gateway_event_log_status"] == "available"
+    assert summary["context_gateway_tool_call_count"] == 1
+    assert summary["context_gateway_call_ids"] == ["gateway-a"]
+    assert summary["context_gateway_identity_mismatch_count"] == 1
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 4
+    assert summary["gitnexus_bm25_result_count"] == 0
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 12.5
+
+    row = {"context_assigned": True, **summary}
+    export._apply_trace_summary(
+        row,
+        {
+            "weave_gateway_tool_call_count": 0,
+            "weave_gateway_call_ids": [],
+            "gitnexus_vector_search_attempted": False,
+            "gitnexus_vector_search_succeeded": False,
+            "gitnexus_semantic_result_count": 0,
+            "gitnexus_bm25_result_count": 0,
+            "gitnexus_vector_model_digests": [],
+            "gitnexus_vector_query_latency_ms": 0.0,
+        },
+    )
+    assert row["context_invoked"] is True
+    assert row["context_invocation_evidence"] == {
+        "status": "observed",
+        "source": "mcp_gateway_event_log",
+        "tool_calls": 1,
+        "gateway_call_ids": ["gateway-a"],
+    }
+    assert row["gitnexus_vector_search_succeeded"] is True
+
+
+def test_gateway_event_log_rejects_paths_outside_runtime(tmp_path: Path) -> None:
+    event_log = tmp_path / "context-gateway.jsonl"
+    event_log.write_text('{"event":"tool_end","gateway_call_id":"a"}\n')
+
+    summary = export._context_event_summary(
+        tmp_path / "trial",
+        gateway_event_path=event_log.as_posix(),
+    )
+
+    assert summary["context_gateway_event_log_status"] == "rejected"
+    assert summary["context_gateway_tool_call_count"] == 0
 
 
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
@@ -1813,22 +2008,24 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
             "FUGUE_DATASET": "fixture/tasks@1",
             "FUGUE_REPOSITORY": "org/repo",
             "FUGUE_BASE_COMMIT": "abc123",
-            "FUGUE_EXPECTED_EVIDENCE_PATHS": json.dumps(
-                {"task-a": ["src/expected.py"]}
-            ),
         },
         n_attempts=1,
+        expected_evidence_paths=("src/expected.py",),
+        evaluation_asset_lock_sha256="e" * 64,
     )
     planned = export._planned_evaluation_row(cell)
 
     row = export._completed_evaluation_row(
         cell, CellOutcome(cell.id, "passed", returncode=0), planned
     )
+    row["citation_correctness"] = 0.0
+    row["evidence_recall"] = 0.0
 
     assert row["task_name"] == "task-a"
     assert row["dataset"] == "fixture/tasks@1"
     assert row["comparison_example_id"] == "example-a"
-    assert row["expected_evidence_paths"] == ["src/expected.py"]
+    assert "expected_evidence_paths" not in row
+    assert row["evaluation_asset_lock_sha256"] == "e" * 64
     assert (
         export._publication_candidates([row])[0]["evaluation_scope_id"]
         == export._publication_candidates([planned])[0]["evaluation_scope_id"]
@@ -2049,6 +2246,9 @@ def test_completed_evaluation_recovers_setup_failure_and_fingerprint(
     )
     assert row["harness_adapter_error_count"] == 1
     assert row["error_events"][0]["terminal"] is True
+    assert row["adapter_outcome"]["execution"]["state"] == "failed"
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == ("unscored")
+    assert row["adapter_outcome"]["exploratory_tools"]["state"] == "clean"
 
 
 def test_weave_publication_never_republishes_finalized_live_predictions(
@@ -2114,7 +2314,16 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
         SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
     )
     result = publish_to_weave(
-        [{"record_type": "trial", "task_name": "task-a"}],
+        [
+            {
+                "record_type": "trial",
+                "task_name": "task-a",
+                "run_id": "run-a",
+                "candidate_id": "candidate-a",
+                "comparison_example_id": "example-a",
+                "trial_index": 1,
+            }
+        ],
         f"entity/project-{tmp_path.name}",
         ledger_root=tmp_path,
         env={"WANDB_API_KEY": "test-only"},
@@ -2123,7 +2332,7 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
     assert result.published == 0
     assert result.failures and "summary failed" in result.failures[0]
     assert isinstance(failed[0], RuntimeError)
-    assert not list((tmp_path / "v3").glob("**/*.json"))
+    assert not list((tmp_path / "v1").glob("**/*.json"))
 
 
 def test_weave_publication_rejects_duplicate_candidate_examples(
@@ -2136,8 +2345,10 @@ def test_weave_publication_rejects_duplicate_candidate_examples(
     )
     row = {
         "record_type": "trial",
+        "run_id": "run-a",
         "candidate_id": "candidate-a",
         "comparison_example_id": "example-a",
+        "trial_index": 1,
     }
     with pytest.raises(ValueError, match="duplicate evaluation trial"):
         publish_to_weave(
@@ -2146,6 +2357,76 @@ def test_weave_publication_rejects_duplicate_candidate_examples(
             ledger_root=tmp_path,
             env={"WANDB_API_KEY": "test-only"},
         )
+
+
+def test_publication_ledger_rejects_prediction_overlap_across_evaluations(
+    tmp_path: Path, monkeypatch
+) -> None:
+    published: list[str] = []
+
+    class FakeLogger:
+        ui_url = "https://wandb.invalid/evaluation"
+
+        def __init__(self, **kwargs) -> None:
+            self._pseudo_evaluation = None
+            self.model = None
+
+        def log_example(self, inputs, output, scores) -> None:
+            published.append(inputs["comparison_example_id"])
+
+        def log_summary(self) -> None:
+            pass
+
+        def fail(self, exception) -> None:
+            raise AssertionError(exception)
+
+    monkeypatch.setattr(
+        export,
+        "initialize_weave",
+        lambda project, env: SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    common = {
+        "schema_version": 1,
+        "prediction_schema_version": 1,
+        "record_type": "trial",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "workload_id": "retrieval",
+        "dataset": "fixture",
+        "execution_kind": "provider_diagnostic",
+        "trial_index": 1,
+        "status": "passed",
+    }
+    first_row = {
+        **common,
+        "prediction_id": "prediction-a",
+        "comparison_example_id": "example-a",
+        "task_name": "task-a",
+    }
+    second_row = {
+        **common,
+        "prediction_id": "prediction-b",
+        "comparison_example_id": "example-b",
+        "task_name": "task-b",
+    }
+
+    first = publish_to_weave(
+        [first_row],
+        "entity/project",
+        ledger_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+    overlapping = publish_to_weave(
+        [first_row, second_row],
+        "entity/project",
+        ledger_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+
+    assert first.published == 1
+    assert overlapping.published == 0
+    assert "already published" in overlapping.failures[0]
+    assert published == ["example-a"]
 
 
 def test_calls_query_uses_current_shape_and_decodes_ndjson() -> None:
@@ -2633,6 +2914,29 @@ def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:
     rows[1]["runtime_fingerprints"]["pre_install"]["comparable_digest"] = "other"
     export._apply_runtime_equivalence(rows)
     assert all(row["runtime_equivalence_status"] == "mismatch" for row in rows)
+
+
+def test_prepared_runtime_equivalence_and_in_trial_drift_are_separate() -> None:
+    rows = [
+        {
+            "record_type": "trial",
+            "run_id": "run",
+            "comparison_example_id": "example",
+            "trial_index": 1,
+            "model": "wandb/model",
+            "runtime_fingerprints": {
+                "pre_execution": {"comparable_digest": "prepared"},
+                "post_execution": {"comparable_digest": post},
+            },
+        }
+        for post in ("prepared", "drifted")
+    ]
+
+    export._apply_runtime_equivalence(rows)
+
+    assert all(row["runtime_equivalent"] is True for row in rows)
+    assert rows[0]["runtime_drift"] is False
+    assert rows[1]["runtime_drift"] is True
 
 
 def test_agent_span_summary_preserves_measured_zero_usage() -> None:
