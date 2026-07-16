@@ -193,14 +193,16 @@ def test_managed_environment_uses_host_and_container_uris_only_when_healthy(
 def test_managed_environment_accepts_user_credentials_without_storing_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Environment resolution describes the selected service contract. Runtime
+    # readiness is an independent preflight check and must not mutate a plan.
     monkeypatch.setattr(
         services,
         "managed_service_status",
         lambda spec: services.ManagedServiceStatus(
             spec.id,
-            "healthy",
-            True,
-            "container is healthy",
+            "stopped",
+            False,
+            "container is stopped",
             spec.container_name,
             spec.image,
             spec.host_uri,

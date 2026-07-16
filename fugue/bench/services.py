@@ -298,10 +298,7 @@ def managed_service_environment(
         name: values.get(name, "").strip() or credentials.get(name, "").strip()
         for name in GRAPHITI_SERVICE.credential_env_names
     }
-    if (
-        not all(effective_credentials.values())
-        or not managed_service_status(GRAPHITI_SERVICE).ready
-    ):
+    if not all(effective_credentials.values()):
         return values
     values.update(effective_credentials)
     values["FUGUE_GRAPHITI_URI"] = (
