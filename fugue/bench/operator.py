@@ -803,6 +803,7 @@ class OperatorService:
             manifest_override=request.manifest,
             repo_root=self.repo_root,
             requested_variants=list(request.variants) or None,
+            requested_n_tasks=request.n_tasks,
         )
         records: list[ContextPreparation] = []
         checkouts: dict[tuple[str, str, str], RepositorySnapshot] = {}
@@ -2745,6 +2746,7 @@ def _preparation_targets(
     manifest_override: Path | None,
     repo_root: Path,
     requested_variants: list[str] | None = None,
+    requested_n_tasks: int | None = None,
 ) -> list[ContextPreparationTarget]:
     targets: dict[
         tuple[str, str, str, str, str], ContextPreparationTarget
@@ -2786,7 +2788,8 @@ def _preparation_targets(
             ).applicable:
                 effective.append((variant, spec))
         limit = (
-            preset_workload_int(preset, workload.id, "n_tasks")
+            requested_n_tasks
+            or preset_workload_int(preset, workload.id, "n_tasks")
             or workload.n_tasks
             or preset.n_tasks
         )

@@ -81,6 +81,27 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     assert {target.spec.id for target in targets} <= set(smoke.systems)
 
 
+def test_context_preparation_honors_request_task_limit() -> None:
+    experiment = get_experiment("repo-memory-impact", REPO_ROOT)
+    workload = next(
+        item for item in experiment.workloads if item.id == "gitnexus-ablation"
+    )
+    targets = _preparation_targets(
+        experiment=experiment,
+        workloads=[workload],
+        preset=select_preset(experiment, "gitnexus-ablation"),
+        requested_systems=["gitnexus"],
+        requested_variants=["gitnexus-vector"],
+        requested_n_tasks=1,
+        manifest_override=None,
+        repo_root=REPO_ROOT,
+    )
+
+    assert {target.snapshot.task_id for target in targets} == {
+        "pydata__xarray-6992"
+    }
+
+
 def test_pdf_skill_presets_are_controlled_and_study_plans_72_cells(
     tmp_path: Path,
 ) -> None:
