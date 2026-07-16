@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - name: Install core
         if: matrix.suite == 'core'
         run: uv sync --frozen --extra dev
@@ -84,10 +84,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - run: uv sync --frozen --extra dev
       - run: uv lock --check
       - run: uv run ruff check .
@@ -121,12 +121,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: tests/compat/package-lock.json
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - run: uv sync --frozen --extra dev --extra serve
       - name: Test serving with warnings as errors
         env:
@@ -152,7 +152,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - run: uv sync --frozen --extra dev --extra context
       - name: Build and lock the pinned runtime
         env:
@@ -244,7 +244,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - run: uv sync --frozen --extra dev --extra context
       - name: Start and verify the pinned service
         env:
@@ -270,7 +270,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.3.2
       - run: uv sync --frozen --extra dev
       - name: Install pinned gh-aw compiler
         run: gh extension install github/gh-aw --pin v0.81.6
