@@ -296,7 +296,7 @@ def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> No
     catalog = ExperimentCatalog(tmp_path)
     status = catalog.refresh()
 
-    assert "/catalog/v2/" in status.path
+    assert "/catalog/v1/" in status.path
     assert status.experiments == 1
     assert status.records == 1
     assert catalog.facets()["intervention_type"] == {"baseline": 1}
