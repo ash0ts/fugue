@@ -1349,7 +1349,11 @@ class OperatorService:
         selected = _experiment_with_request_overrides(selected, request)
         env = self.env
         if "graphiti" in _selected_request_system_ids(selected, request):
-            env = managed_service_environment(env, repo_root=self.repo_root)
+            env = managed_service_environment(
+                env,
+                repo_root=self.repo_root,
+                planning=not write_configs,
+            )
         env |= trace_env_defaults(env)
         if request.model:
             env["FUGUE_MODEL"] = request.model

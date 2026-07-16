@@ -287,6 +287,7 @@ def managed_service_environment(
     *,
     repo_root: Path,
     target: Literal["host", "container"] = "host",
+    planning: bool = False,
 ) -> dict[str, str]:
     values = dict(env)
     uri = values.get("FUGUE_GRAPHITI_URI", "").strip()
@@ -298,6 +299,11 @@ def managed_service_environment(
         name: values.get(name, "").strip() or credentials.get(name, "").strip()
         for name in GRAPHITI_SERVICE.credential_env_names
     }
+    if planning:
+        effective_credentials = {
+            name: value or f"${{{name}}}"
+            for name, value in effective_credentials.items()
+        }
     if not all(effective_credentials.values()):
         return values
     values.update(effective_credentials)

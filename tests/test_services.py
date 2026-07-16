@@ -223,6 +223,21 @@ def test_managed_environment_accepts_user_credentials_without_storing_them(
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_managed_environment_plans_without_creating_credentials(tmp_path: Path) -> None:
+    planned = managed_service_environment(
+        {},
+        repo_root=tmp_path,
+        target="container",
+        planning=True,
+    )
+
+    assert planned["FUGUE_GRAPHITI_URI"] == GRAPHITI_SERVICE.container_uri
+    assert planned["FUGUE_GRAPHITI_USER"] == "${FUGUE_GRAPHITI_USER}"
+    assert planned["FUGUE_GRAPHITI_PASSWORD"] == "${FUGUE_GRAPHITI_PASSWORD}"
+    assert planned[GRAPHITI_MANAGED_MARKER] == GRAPHITI_SERVICE.id
+    assert not (tmp_path / ".fugue").exists()
+
+
 def test_stop_preserves_credentials_and_named_volume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
