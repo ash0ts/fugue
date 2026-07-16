@@ -43,3 +43,19 @@ def test_codex_runtime_uses_cell_home_and_structured_mcp_config(
     )
     assert registration["context_system_id"] == "gitnexus"
     assert registration["registration_digest"].startswith("sha256:")
+
+
+def test_static_context_registration_has_a_behavioral_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = object.__new__(FugueCodex)
+    agent.mcp_servers = []
+    agent.context_system_id = "agentsmd"
+    monkeypatch.setenv("FUGUE_CONTEXT_DELIVERY", "portable")
+    monkeypatch.setenv("FUGUE_CONTEXT_CONFIG_HASH", "config-a")
+
+    registration = agent._context_registration(
+        {"status": "static", "delivery": "portable", "servers": 0}
+    )
+
+    assert registration["registration_digest"].startswith("sha256:")

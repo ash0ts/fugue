@@ -26,6 +26,7 @@ from fugue.bench.context import (
     _command_env,
     _copy_repository_snapshot,
     _dense_artifact_contract,
+    _dense_search,
     _materialize_dense_artifact,
     _mem0_config,
     _Mem0FastEmbedder,
@@ -649,13 +650,23 @@ def test_dense_artifact_is_shared_by_dense_and_hybrid(
     ]
     builds = []
 
-    def fake_build(artifact, values, model, dimensions):
+    def fake_build(
+        artifact, values, model, dimensions, *, allow_model_download=False
+    ):
         builds.append((values, model, dimensions))
+        assert allow_model_download is True
         index = artifact / "lancedb"
         index.mkdir()
         (index / "data").write_text("stable-index")
+        model_cache = artifact / "fastembed-cache"
+        model_cache.mkdir()
+        (model_cache / "model.onnx").write_text("stable-model")
 
     monkeypatch.setattr("fugue.bench.context._build_lance_index", fake_build)
+    monkeypatch.setattr(
+        "fugue.bench.context._dense_search",
+        lambda *args: [{"id": "probe"}],
+    )
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()
@@ -685,11 +696,70 @@ def test_dense_artifact_is_shared_by_dense_and_hybrid(
     assert (first / "lancedb" / "data").read_bytes() == (
         second / "lancedb" / "data"
     ).read_bytes()
+    assert (first / "fastembed-cache" / "model.onnx").read_bytes() == (
+        second / "fastembed-cache" / "model.onnx"
+    ).read_bytes()
     dense_key, _ = _dense_artifact_contract(chunks, "BAAI/bge-small-en-v1.5", 384)
     hybrid_key, _ = _dense_artifact_contract(chunks, "BAAI/bge-small-en-v1.5", 384)
     changed_key, _ = _dense_artifact_contract(chunks, "other/model", 384)
     assert dense_key == hybrid_key
     assert changed_key != dense_key
+
+
+def test_dense_query_uses_bundled_model_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeEmbedding:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def embed(self, values, **kwargs):
+            del values, kwargs
+            return iter([[0.0, 0.0]])
+
+    class FakeSearch:
+        def limit(self, value):
+            assert value == 1
+            return self
+
+        def to_list(self):
+            return [{"id": "src/app.py:1", "path": "src/app.py", "_distance": 0.0}]
+
+    class FakeTable:
+        def search(self, vector):
+            assert list(vector) == [0.0, 0.0]
+            return FakeSearch()
+
+    class FakeDatabase:
+        def open_table(self, name):
+            assert name == "chunks"
+            return FakeTable()
+
+    monkeypatch.setitem(
+        sys.modules, "fastembed", SimpleNamespace(TextEmbedding=FakeEmbedding)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "lancedb",
+        SimpleNamespace(connect=lambda path: FakeDatabase()),
+    )
+    (tmp_path / "fastembed-cache").mkdir()
+    (tmp_path / "lancedb").mkdir()
+
+    rows = _dense_search(tmp_path, "semantic query", "local/model", 1)
+
+    assert rows[0]["path"] == "src/app.py"
+    assert calls == [
+        {
+            "model_name": "local/model",
+            "cache_dir": (tmp_path / "fastembed-cache").as_posix(),
+            "providers": ["CPUExecutionProvider"],
+            "cuda": False,
+            "local_files_only": True,
+        }
+    ]
 
 
 def test_embedding_model_override_is_used_by_the_provider_contract(

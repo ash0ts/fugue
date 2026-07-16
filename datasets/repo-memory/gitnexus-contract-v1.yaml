@@ -18,7 +18,7 @@ tasks:
     expected_paths: [src/relay/amber_lantern.py]
     metadata:
       architecture: arm64
-      retrieval_contract: gitnexus-vector-only-v1
+      retrieval_contract: assigned-context-invocation-v1
       semantic_probe:
         query: hierarchical cleanup upstream grant invalid
         expected_path: src/relay/amber_lantern.py

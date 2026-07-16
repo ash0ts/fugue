@@ -2310,8 +2310,9 @@ _TEXT_SUFFIXES = {
     ".yml",
 }
 _RAG_CHUNK_SCHEMA = "fugue.git-lines.v1"
-_DENSE_ARTIFACT_SCHEMA = "fugue.rag-dense-artifact.v1"
+_DENSE_ARTIFACT_SCHEMA = "fugue.rag-dense-artifact.v2"
 _DENSE_BATCH_SIZE = 256
+_FASTEMBED_CACHE_DIR = "fastembed-cache"
 _CONTEXT_BUILD_LOCK_TIMEOUT_SECONDS = 3600
 
 
@@ -2563,13 +2564,27 @@ def _tree_content_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _link_or_copy(source: str, target: str) -> str:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+    return target
+
+
 def _valid_dense_artifact(
     root: Path, key: str, contract: dict[str, Any], rows: int
 ) -> dict[str, Any] | None:
     manifest_path = root / "artifact-manifest.json"
     chunks_path = root / "chunks.jsonl"
     index = root / "lancedb"
-    if not manifest_path.is_file() or not chunks_path.is_file() or not index.is_dir():
+    model_cache = root / _FASTEMBED_CACHE_DIR
+    if (
+        not manifest_path.is_file()
+        or not chunks_path.is_file()
+        or not index.is_dir()
+        or not model_cache.is_dir()
+    ):
         return None
     try:
         manifest = json.loads(manifest_path.read_text())
@@ -2582,6 +2597,8 @@ def _valid_dense_artifact(
         or hashlib.sha256(chunks_path.read_bytes()).hexdigest()
         != contract["chunks_digest"]
         or _tree_content_digest(index) != manifest.get("index_tree_digest")
+        or _tree_content_digest(model_cache)
+        != manifest.get("model_cache_tree_digest")
     ):
         return None
     return manifest
@@ -2595,7 +2612,7 @@ def _materialize_dense_artifact(
     cache_root: Path,
 ) -> dict[str, Any]:
     key, contract = _dense_artifact_contract(chunks, embedding_model, dimensions)
-    shared_root = cache_root / "artifacts" / "rag-dense" / "v1"
+    shared_root = cache_root / "artifacts" / "rag-dense" / "v2"
     final = shared_root / key
     shared_root.mkdir(parents=True, exist_ok=True)
     lock = FileLock(
@@ -2618,6 +2635,7 @@ def _materialize_dense_artifact(
                     chunks,
                     embedding_model,
                     dimensions,
+                    allow_model_download=True,
                 )
                 manifest = {
                     "schema": _DENSE_ARTIFACT_SCHEMA,
@@ -2633,6 +2651,9 @@ def _materialize_dense_artifact(
                     "rows": len(chunks),
                     "vector_dimensions": dimensions,
                     "index_tree_digest": _tree_content_digest(temp / "lancedb"),
+                    "model_cache_tree_digest": _tree_content_digest(
+                        temp / _FASTEMBED_CACHE_DIR
+                    ),
                     "bytes": _tree_metrics(temp)["bytes"],
                 }
                 (temp / "artifact-manifest.json").write_text(
@@ -2651,7 +2672,17 @@ def _materialize_dense_artifact(
     target = artifact / "lancedb"
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(final / "lancedb", target)
+    shutil.copytree(final / "lancedb", target, copy_function=_link_or_copy)
+    target_model_cache = artifact / _FASTEMBED_CACHE_DIR
+    if target_model_cache.exists():
+        shutil.rmtree(target_model_cache)
+    shutil.copytree(
+        final / _FASTEMBED_CACHE_DIR,
+        target_model_cache,
+        copy_function=_link_or_copy,
+    )
+    if not _dense_search(artifact, "offline readiness probe", embedding_model, 1):
+        raise RuntimeError("dense artifact offline semantic probe returned no results")
     (artifact / "dense-artifact.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
@@ -2663,13 +2694,18 @@ def _build_lance_index(
     chunks: list[dict[str, Any]],
     embedding_model: str,
     dimensions: int,
+    *,
+    allow_model_download: bool = False,
 ) -> None:
     import lancedb
     from fastembed import TextEmbedding
 
     embedder = TextEmbedding(
         model_name=embedding_model,
+        cache_dir=(artifact / _FASTEMBED_CACHE_DIR).as_posix(),
         providers=["CPUExecutionProvider"],
+        cuda=False,
+        local_files_only=not allow_model_download,
     )
     vectors = list(
         embedder.embed(
@@ -2700,7 +2736,10 @@ def _dense_search(
 
     embedder = TextEmbedding(
         model_name=embedding_model,
+        cache_dir=(artifact / _FASTEMBED_CACHE_DIR).as_posix(),
         providers=["CPUExecutionProvider"],
+        cuda=False,
+        local_files_only=True,
     )
     vector = next(iter(embedder.embed([query], batch_size=1)))
     database = lancedb.connect((artifact / "lancedb").as_posix())

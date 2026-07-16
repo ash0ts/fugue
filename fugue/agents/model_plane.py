@@ -754,7 +754,7 @@ done
 
     def _context_registration(self, value: dict[str, Any]) -> dict[str, Any]:
         registration = dict(value)
-        if registration.get("status") != "registered":
+        if registration.get("status") not in {"registered", "static"}:
             registration.setdefault("registration_digest", None)
             return registration
         servers = []
