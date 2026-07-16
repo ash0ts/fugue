@@ -49,8 +49,15 @@ def test_checked_in_dynamic_imports_are_declared_and_agent_allowlist_is_exact() 
         assert object_name in declared, import_path
 
 
+def _harbor_execution_available() -> bool:
+    try:
+        return importlib.util.find_spec("harbor.agents.installed.base") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 @pytest.mark.skipif(
-    importlib.util.find_spec("harbor") is None,
+    not _harbor_execution_available(),
     reason="Harbor is a Python 3.13 execution dependency",
 )
 def test_checked_in_dynamic_imports_resolve_with_execution_dependencies() -> None:
