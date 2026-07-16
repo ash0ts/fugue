@@ -87,6 +87,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
         assert request.url.path.endswith("/chat/completions")
         assert body["tools"][0]["function"]["name"] == "submit"
         assert body["tool_choice"] == "required"
+        assert body["thinking"] == {"type": "disabled"}
         assert request.headers["OpenAI-Project"] == "wandb/fugue-experiments"
         return httpx.Response(
             200,
@@ -128,7 +129,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
         cases = (
             ("openai/gpt-5", {"OPENAI_API_KEY": "secret"}, "openai"),
             ("anthropic/claude", {"ANTHROPIC_API_KEY": "secret"}, "anthropic"),
-            ("wandb/model", {"WANDB_API_KEY": "secret"}, "wandb"),
+            ("wandb/zai-org/GLM-5.2", {"WANDB_API_KEY": "secret"}, "wandb"),
         )
         for model, env, expected in cases:
             client = AssistantModelClient(model, env, transport=transport)

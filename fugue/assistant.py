@@ -14,6 +14,7 @@ from fugue.model_plane import (
     provider_request_headers,
     resolve_model_route,
     select_model,
+    structured_assistant_options,
     trace_project_slug,
 )
 from fugue.redaction import redact_value
@@ -394,6 +395,7 @@ def _chat_payload(
             for tool in tools
         ]
         payload["tool_choice"] = "required"
+        payload.update(structured_assistant_options(route))
     return payload
 
 
