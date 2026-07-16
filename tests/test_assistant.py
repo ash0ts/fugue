@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import httpx
+import weave
 
 from fugue.assistant import (
     AssistantMessage,
@@ -136,7 +137,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
     assert all(b"secret" not in request.content for request in requests)
 
 
-def test_assistant_trace_preserves_weave_usage_object() -> None:
+def test_assistant_trace_preserves_weave_conversation_types(monkeypatch) -> None:
     class Usage:
         input_tokens = 0
         output_tokens = 0
@@ -144,13 +145,21 @@ def test_assistant_trace_preserves_weave_usage_object() -> None:
     class Span:
         def __init__(self) -> None:
             self.usage = Usage()
-            self.output_messages: list[dict[str, str]] = []
+            self.input_messages: list[object] = []
+            self.output_messages: list[object] = []
             self.closed = False
+
+        def __enter__(self) -> Span:
+            return self
 
         def __exit__(self, *_: object) -> None:
             assert not isinstance(self.usage, dict)
             assert self.usage.input_tokens == 13
             assert self.usage.output_tokens == 5
+            assert [message.role for message in self.input_messages] == ["user"]
+            assert [message.content for message in self.input_messages] == ["question"]
+            assert [message.role for message in self.output_messages] == ["assistant"]
+            assert [message.content for message in self.output_messages] == ["done"]
             self.closed = True
 
     trace = _AssistantTrace(
@@ -162,9 +171,12 @@ def test_assistant_trace_preserves_weave_usage_object() -> None:
         attributes={},
     )
     span = Span()
+    trace.turn = object()
+    monkeypatch.setattr(weave, "start_llm", lambda **_: span)
 
+    active = trace.start_llm([AssistantMessage("user", "question")])
     trace.finish_llm(
-        span,
+        active,
         response=AssistantResponse(
             text="done",
             usage=AssistantUsage(input_tokens=13, output_tokens=5),
@@ -172,4 +184,3 @@ def test_assistant_trace_preserves_weave_usage_object() -> None:
     )
 
     assert span.closed is True
-    assert span.output_messages == [{"role": "assistant", "content": "done"}]

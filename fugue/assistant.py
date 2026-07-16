@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -666,11 +666,9 @@ class _AssistantTrace:
             )
             _enter(span)
             if self.include_content:
-                span.input_messages = [
-                    {"role": message.role, "content": message.content}
-                    for message in messages
-                    if message.role != "tool"
-                ]
+                span.input_messages = _weave_messages(
+                    message for message in messages if message.role != "tool"
+                )
             return span
         except Exception:
             return None
@@ -687,7 +685,9 @@ class _AssistantTrace:
         try:
             if response is not None:
                 if self.include_content:
-                    span.output_messages = [{"role": "assistant", "content": response.text}]
+                    span.output_messages = _weave_messages(
+                        [AssistantMessage("assistant", response.text)]
+                    )
                 _record_llm_usage(span, response.usage)
             if error is not None:
                 span.error = f"{type(error).__name__}: {error}"
@@ -761,6 +761,15 @@ def _record_llm_usage(span: Any, usage: AssistantUsage) -> None:
         value = getattr(usage, name)
         if value is not None:
             setattr(target, name, int(value))
+
+
+def _weave_messages(messages: Iterable[AssistantMessage]) -> list[Any]:
+    import weave
+
+    return [
+        weave.Message(role=message.role, content=message.content)
+        for message in messages
+    ]
 
 
 def _exit(value: Any, error: BaseException | None) -> None:
