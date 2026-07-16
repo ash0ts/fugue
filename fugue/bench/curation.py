@@ -300,26 +300,7 @@ def evaluate_candidate(
     if official_exception:
         warnings.append("verified_owner_popularity_exception")
 
-    if candidate.kind == "skill":
-        if not candidate.path:
-            reasons.append("skill_path_required")
-        if candidate.target_experiment not in policy.skill_experiments:
-            reasons.append("target_experiment_not_allowed")
-        if not candidate.capabilities:
-            reasons.append("skill_capabilities_required")
-        elif not set(candidate.capabilities) <= policy.skill_capabilities:
-            reasons.append("skill_capabilities_not_allowed")
-        if candidate.has_executable_files:
-            reasons.append("executable_skill_bundle")
-    else:
-        if candidate.path:
-            reasons.append("context_path_not_allowed")
-        if candidate.target_experiment != policy.context_experiment:
-            reasons.append("target_experiment_not_allowed")
-        if not candidate.capabilities:
-            reasons.append("context_capabilities_required")
-        elif not set(candidate.capabilities) <= policy.context_capabilities:
-            reasons.append("context_capabilities_not_allowed")
+    reasons.extend(_candidate_contract_reasons(candidate, policy))
 
     if candidate.requires_new_dependencies:
         reasons.append("new_dependencies_required")
@@ -342,6 +323,34 @@ def evaluate_candidate(
         official_popularity_exception=official_exception,
         evaluated_at=now,
     )
+
+
+def _candidate_contract_reasons(
+    candidate: CandidateRecord, policy: CurationPolicy
+) -> list[str]:
+    if candidate.kind == "skill":
+        reasons = []
+        if not candidate.path:
+            reasons.append("skill_path_required")
+        if candidate.target_experiment not in policy.skill_experiments:
+            reasons.append("target_experiment_not_allowed")
+        if not candidate.capabilities:
+            reasons.append("skill_capabilities_required")
+        elif not set(candidate.capabilities) <= policy.skill_capabilities:
+            reasons.append("skill_capabilities_not_allowed")
+        if candidate.has_executable_files:
+            reasons.append("executable_skill_bundle")
+        return reasons
+    reasons = []
+    if candidate.path:
+        reasons.append("context_path_not_allowed")
+    if candidate.target_experiment != policy.context_experiment:
+        reasons.append("target_experiment_not_allowed")
+    if not candidate.capabilities:
+        reasons.append("context_capabilities_required")
+    elif not set(candidate.capabilities) <= policy.context_capabilities:
+        reasons.append("context_capabilities_not_allowed")
+    return reasons
 
 
 def existing_source_keys(repo_root: Path) -> frozenset[str]:

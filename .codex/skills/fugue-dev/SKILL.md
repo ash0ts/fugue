@@ -5,9 +5,9 @@ description: Use when modifying Fugue experiments, candidate resolution, context
 
 # Fugue Development
 
-Preserve these invariants across schema, execution, presentation, and tests.
+Preserve these invariants across code, configuration, presentation, and tests.
 
-## Identity and planning
+## Contracts and planning
 
 - Resolve one immutable candidate and reuse it everywhere. Version its identity.
 - Candidate identity contains behavior only: harness, model route, prompt,
@@ -16,17 +16,22 @@ Preserve these invariants across schema, execution, presentation, and tests.
   state never affect it.
 - Operational runtime, Harbor, gateway, tracing, and scheduling details belong
   only to the execution fingerprint.
+- Keep one canonical V1 for each Fugue-owned persisted artifact. Reject unknown
+  versions and incomplete identity; do not add prerelease compatibility paths.
 - Require authored context delivery. Resolve typed capabilities for the exact
   workload, context, delivery, harness, and provider route before binding.
+- Compile preview, setup, and execution from the same pure resolved plan. A
+  materialized plan must preserve its coordinates and identities.
 
 ## Execution and evidence
 
 - `OperatorService` owns resolve, immutable secret-free snapshot, preparation,
   render/plan, atomic input lock, running transition, and cell execution in that
   order. Nothing executes before the lock is durable.
-- Setup is the only stateful preparation boundary. Preview and active trials do
-  not install packages, download runtimes, start services, use the Docker
-  socket, or mutate the production checkout.
+- Setup is the only stateful preparation boundary. Setup may build and download
+  locked assets; preview and active trials may not install, download, build,
+  pull, start services, use the Docker socket, or mutate the checkout. Require
+  architecture-qualified runtime locks.
 - Dataset verifiers use a pinned offline profile prepared into the task image.
   Validate base failure and gold success before a paid cohort; a verifier may
   not resolve packages or benchmark metadata during a trial.
@@ -40,8 +45,9 @@ Preserve these invariants across schema, execution, presentation, and tests.
   required treatment does not execute when registration failed. Invocation
   evidence stays explicit and may remain unavailable; assignment is not use.
 - Normalize every logical outcome into one versioned prediction row. Keep raw
-  retrieval and episode measurements separate. Reconcile every planned
-  coordinate to terminal, not applicable, or explicitly cancelled.
+  retrieval and episode measurements separate. Export through one ordered
+  pipeline and reconcile every planned coordinate to terminal, not applicable,
+  or explicitly cancelled.
 - Freeze discovery rankings in a versioned treatment-selection lock.
   Confirmatory cohorts reject treatments that disagree with that lock.
 - Publish idempotently by project, prediction identity, scorer version, and
@@ -69,6 +75,6 @@ Preserve these invariants across schema, execution, presentation, and tests.
 - Curator output stays inside its immutable declaration allowlist. It cannot
   modify code or tests, and it cannot bypass reviewed skill-source setup.
 
-When a contract changes, update its parser, resolver, operator consumer,
-snapshot/result representation, presentation, checked-in configurations, and
-focused failure tests together.
+Change a contract only with its parser, resolver, operator consumer,
+representation, presentation, checked-in configuration, and focused failure
+tests in the same patch.

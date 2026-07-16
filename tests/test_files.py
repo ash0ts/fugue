@@ -11,6 +11,7 @@ from fugue.bench.files import (
     atomic_write_json,
     latest_jsonl_records,
     require_unique,
+    store_consistent,
 )
 
 
@@ -32,6 +33,10 @@ def test_shared_schema_coercion_and_duplicate_validation() -> None:
         as_mapping([])
     with pytest.raises(ValueError, match="duplicate item id.*same"):
         require_unique(["same", "same"], "item")
+    values = {"same": {"value": 1}}
+    store_consistent(values, "same", {"value": 1}, error="changed")
+    with pytest.raises(ValueError, match="changed"):
+        store_consistent(values, "same", {"value": 2}, error="changed")
 
 
 def test_latest_jsonl_records_ignores_damage_and_keeps_latest(tmp_path: Path) -> None:

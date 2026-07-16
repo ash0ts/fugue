@@ -154,6 +154,20 @@ def test_auth_cors_health_and_readiness() -> None:
     assert preflight.headers["access-control-allow-origin"] == "https://app.example"
 
 
+def test_protocol_route_allowlist_is_exact() -> None:
+    client = _client(FakeBackend())
+
+    assert {route.path for route in client.app.routes} == {
+        "/healthz",
+        "/readyz",
+        "/v1/models",
+        "/v1/responses",
+        "/v1/responses/compact",
+        "/v1/chat/completions",
+        "/ag-ui",
+    }
+
+
 def test_responses_and_chat_sync_preserve_full_history() -> None:
     backend = FakeBackend()
     client = _client(backend)

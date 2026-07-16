@@ -14,7 +14,7 @@ from fugue.bench.context import (
     context_behavior_digest,
     get_context_system,
 )
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
 
@@ -104,19 +104,20 @@ def build_run_snapshot(
     fugue_source: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
-        existing = candidates.get(job.candidate_id)
-        if existing is not None and existing != resolved.definition:
-            raise ValueError(f"candidate {job.candidate_id} resolved inconsistently")
-        candidates[job.candidate_id] = resolved.definition
-        prior_execution = executions.get(resolved.execution_fingerprint)
-        if (
-            prior_execution is not None
-            and prior_execution != resolved.execution_definition
-        ):
-            raise ValueError(
+        store_consistent(
+            candidates,
+            job.candidate_id,
+            resolved.definition,
+            error=f"candidate {job.candidate_id} resolved inconsistently",
+        )
+        store_consistent(
+            executions,
+            resolved.execution_fingerprint,
+            resolved.execution_definition,
+            error=(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
-            )
-        executions[resolved.execution_fingerprint] = resolved.execution_definition
+            ),
+        )
         selected_fugue_source = resolved.execution_definition.get("fugue_source")
         if selected_fugue_source is not None:
             if not isinstance(selected_fugue_source, dict):
@@ -146,17 +147,21 @@ def build_run_snapshot(
                 "generated": True,
                 "execution_fingerprint": resolved.execution_fingerprint,
             }
-            prior_asset = assets.get(asset_id)
-            if prior_asset is not None and prior_asset != record:
-                raise ValueError(f"generated runtime asset {asset_id} differs")
-            assets[asset_id] = record
+            store_consistent(
+                assets,
+                asset_id,
+                record,
+                error=f"generated runtime asset {asset_id} differs",
+            )
             generated_runtime_asset_ids.append(asset_id)
         config_key = job.config_path.resolve().as_posix()
-        prior_asset_ids = generated_runtime_assets_by_config.get(config_key)
         selected_asset_ids = tuple(generated_runtime_asset_ids)
-        if prior_asset_ids is not None and prior_asset_ids != selected_asset_ids:
-            raise ValueError(f"job config {job.config_path} has inconsistent assets")
-        generated_runtime_assets_by_config[config_key] = selected_asset_ids
+        store_consistent(
+            generated_runtime_assets_by_config,
+            config_key,
+            selected_asset_ids,
+            error=f"job config {job.config_path} has inconsistent assets",
+        )
         context = get_context_system(job.context_system_id, repo_root)
         candidate_required_env: set[str] = {
             job.route.api_key_env,
@@ -235,10 +240,12 @@ def build_run_snapshot(
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
         runtime["configuration_sha256"] = stable_digest(runtime)
-        prior = runtimes.get(job.candidate_id)
-        if prior is not None and prior != runtime:
-            raise ValueError(f"candidate {job.candidate_id} runtime binding differs")
-        runtimes[job.candidate_id] = runtime
+        store_consistent(
+            runtimes,
+            job.candidate_id,
+            runtime,
+            error=f"candidate {job.candidate_id} runtime binding differs",
+        )
 
     jobs_by_execution = {
         job.resolved_candidate.execution_fingerprint: job for job in jobs

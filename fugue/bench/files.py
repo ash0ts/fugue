@@ -71,6 +71,14 @@ def require_unique(
         )
 
 
+def store_consistent(
+    values: dict[str, Any], key: str, value: Any, *, error: str
+) -> None:
+    existing = values.setdefault(key, value)
+    if existing != value:
+        raise ValueError(error)
+
+
 def as_mapping(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
