@@ -275,6 +275,11 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         assert f'"{attribute}"' in source
     assert "FUGUE_TRACE_ATTRIBUTES_JSON" in source
     assert "key: str(value)" in source
+    assert "self._resolved_env_vars.update(trace_environment)" in source
+    assert 'env.update(self._trace_environment("hermes", self.model_route))' in source
+    assert (
+        'env.update(self._trace_environment("openclaw", self.model_route))' in source
+    )
 
 
 def test_hermes_staging_promotes_resource_attributes_to_spans() -> None:

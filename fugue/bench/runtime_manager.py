@@ -942,6 +942,8 @@ def render_runtime_compose(
     context_env = (
         {"FUGUE_GITNEXUS_VECTOR_REQUIRED": "1"} if mode == GITNEXUS_VECTOR_MODE else {}
     )
+    evidence_dir = runtime_root / "gateway-evidence" / job_name
+    event_log = evidence_dir / "context-gateway.jsonl"
     compose = {
         "services": {
             service: {
@@ -957,6 +959,13 @@ def render_runtime_compose(
                         f"{(artifact / 'repository').resolve().as_posix()}:"
                         f"{spec.repository_mount}:ro"
                     ),
+                    {
+                        "type": "bind",
+                        "source": evidence_dir.resolve().as_posix(),
+                        "target": "/fugue-evidence",
+                        "read_only": False,
+                        "bind": {"create_host_path": False},
+                    },
                 ],
                 "tmpfs": [
                     "/tmp:rw,noexec,nosuid,size=64m",
@@ -974,6 +983,9 @@ def render_runtime_compose(
                         spec.repository_state_paths
                     ),
                     "FUGUE_CONTEXT_SYSTEM_ID": system_id,
+                    "FUGUE_GATEWAY_EVENT_LOG": (
+                        "/fugue-evidence/context-gateway.jsonl"
+                    ),
                     **{
                         name: f"${{{name}}}"
                         for name in (
@@ -1002,6 +1014,8 @@ def render_runtime_compose(
     }
     path = runtime_root / "context-runtimes" / f"{job_name}.yaml"
     if write:
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        event_log.unlink(missing_ok=True)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml.safe_dump(compose, sort_keys=False))
     server = {

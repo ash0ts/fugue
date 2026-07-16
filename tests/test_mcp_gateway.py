@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -59,6 +60,7 @@ server.run("stdio")
 """
     )
     port = _unused_port()
+    event_log = tmp_path / "gateway-events.jsonl"
     process = subprocess.Popen(
         [
             sys.executable,
@@ -80,6 +82,7 @@ server.run("stdio")
             **os.environ,
             "FUGUE_RUN_ID": "run-a",
             "FUGUE_CANDIDATE_ID": "candidate-a",
+            "FUGUE_GATEWAY_EVENT_LOG": event_log.as_posix(),
         },
     )
     try:
@@ -109,6 +112,13 @@ server.run("stdio")
     assert '"event": "tool_end"' in stdout
     assert '"fugue_run_id": "run-a"' in stdout
     assert "ERROR" not in stderr
+    persisted = [json.loads(line) for line in event_log.read_text().splitlines()]
+    assert [event["event"] for event in persisted] == [
+        "gateway_ready",
+        "tool_start",
+        "tool_end",
+    ]
+    assert persisted[-1]["fugue_candidate_id"] == "candidate-a"
 
 
 async def _call_echo(port: int) -> tuple[list[str], str, dict[str, str]]:

@@ -1100,6 +1100,15 @@ def _context_binding(
                     binding,
                     mcp_servers=(server,),
                     compose_files=(*binding.compose_files, compose_path),
+                    env={
+                        **binding.env,
+                        "FUGUE_CONTEXT_GATEWAY_EVENTS_PATH": (
+                            runtime_root
+                            / "gateway-evidence"
+                            / job_name
+                            / "context-gateway.jsonl"
+                        ).resolve().as_posix(),
+                    },
                     runtime_descriptor=descriptor,
                 )
             env = dict(binding.env)

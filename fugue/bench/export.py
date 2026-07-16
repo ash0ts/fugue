@@ -1180,15 +1180,41 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
 
 def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
     response = summary.pop("_weave_agent_response", None)
+    local_gateway_calls = int(row.get("context_gateway_tool_call_count") or 0)
+    local_vector = {
+        key: row.get(key)
+        for key in (
+            "gitnexus_vector_search_attempted",
+            "gitnexus_vector_search_succeeded",
+            "gitnexus_semantic_result_count",
+            "gitnexus_bm25_result_count",
+            "gitnexus_vector_model_digests",
+            "gitnexus_vector_query_latency_ms",
+        )
+    }
     row.update(summary)
-    gateway_calls = int(row.get("weave_gateway_tool_call_count") or 0)
+    gateway_calls = max(
+        local_gateway_calls,
+        int(row.get("weave_gateway_tool_call_count") or 0),
+    )
     if row.get("context_assigned") and gateway_calls:
+        if local_gateway_calls:
+            row.update(local_vector)
         row["context_invoked"] = True
         row["context_invocation_evidence"] = {
             "status": "observed",
-            "source": "mcp_gateway_result_metadata",
+            "source": (
+                "mcp_gateway_event_log"
+                if local_gateway_calls
+                else "mcp_gateway_result_metadata"
+            ),
             "tool_calls": gateway_calls,
-            "gateway_call_ids": row.get("weave_gateway_call_ids") or [],
+            "gateway_call_ids": (
+                row.get("context_gateway_call_ids")
+                if local_gateway_calls
+                else row.get("weave_gateway_call_ids")
+            )
+            or [],
         }
     _merge_error_events(row)
     if not isinstance(response, str) or not response.strip():
@@ -3284,7 +3310,11 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     started = _parse_time(trial.get("started_at"))
     finished = _parse_time(trial.get("finished_at"))
     wall_time = (finished - started).total_seconds() if started and finished else None
-    context_events = _context_event_summary(trial_dir)
+    context_events = _context_event_summary(
+        trial_dir,
+        gateway_event_path=meta.get("context_gateway_events_path"),
+        expected_identity=meta,
+    )
     evidence = _evidence_summary(
         trial_dir,
         trial.get("task_name"),
@@ -3402,8 +3432,13 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
                 if context_events["context_query_count"] > 0
                 else "not_observed"
             ),
-            "source": "local_context_events",
+            "source": (
+                "mcp_gateway_event_log"
+                if context_events["context_gateway_tool_call_count"] > 0
+                else "local_context_events"
+            ),
             "tool_calls": context_events["context_query_count"],
+            "gateway_call_ids": context_events["context_gateway_call_ids"],
         },
         **context_events,
         **evidence,
@@ -3578,7 +3613,12 @@ def _cell_result_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
+def _context_event_summary(
+    trial_dir: Path,
+    *,
+    gateway_event_path: Any = None,
+    expected_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     paths = list(trial_dir.rglob("fugue-context-events.jsonl"))
     events: list[dict[str, Any]] = []
     for path in paths:
@@ -3587,6 +3627,24 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+    gateway_path, gateway_log_status = _safe_gateway_event_path(gateway_event_path)
+    gateway_events: list[dict[str, Any]] = []
+    mismatched_gateway_events = 0
+    if gateway_path is not None and gateway_path.is_file():
+        gateway_log_status = "available"
+        for line in gateway_path.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if _gateway_identity_matches(event, expected_identity or {}):
+                gateway_events.append(event)
+            else:
+                mismatched_gateway_events += 1
+    elif gateway_path is not None:
+        gateway_log_status = "missing"
     proxy_responses = [
         event for event in events if event.get("event") == "mcp_tool_response"
     ]
@@ -3594,6 +3652,19 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         event for event in events if event.get("event") == "retrieve"
     ]
     logical_events = proxy_responses or provider_retrievals
+    gateway_calls_by_id = {
+        str(event.get("gateway_call_id")): event
+        for event in gateway_events
+        if event.get("event") in {"tool_end", "tool_failed", "tool_cancelled"}
+        and event.get("gateway_call_id")
+    }
+    gateway_calls = list(gateway_calls_by_id.values())
+    gateway_call_ids = sorted(gateway_calls_by_id)
+    vector_events = [
+        value
+        for event in gateway_calls
+        if isinstance((value := event.get("vector")), dict)
+    ]
     latencies = [
         float(
             (event.get("metrics") or {}).get("query_latency_ms")
@@ -3604,6 +3675,11 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         if (event.get("metrics") or {}).get("query_latency_ms") is not None
         or event.get("latency_ms") is not None
     ]
+    latencies.extend(
+        float(event["duration_ms"])
+        for event in gateway_calls
+        if event.get("duration_ms") is not None
+    )
     latency_percentiles = latency_summary(latencies)
     first_context = [
         float(event["elapsed_ms"])
@@ -3619,11 +3695,16 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         int((event.get("metrics") or {}).get("result_tokens") or 0)
         for event in logical_events
     ]
+    vector_result_count = sum(
+        int(value.get("semantic_result_count") or 0)
+        + int(value.get("bm25_result_count") or 0)
+        for value in vector_events
+    )
     return {
-        "context_telemetry_available": bool(paths),
-        "context_event_count": len(events),
-        "context_call_count": len(logical_events),
-        "context_query_count": len(logical_events),
+        "context_telemetry_available": bool(paths or gateway_events),
+        "context_event_count": len(events) + len(gateway_events),
+        "context_call_count": len(logical_events) + len(gateway_calls),
+        "context_query_count": len(logical_events) + len(gateway_calls),
         "context_proxy_event_count": sum(
             1 for event in events if event.get("layer") == "proxy"
         ),
@@ -3633,8 +3714,14 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         "context_provider_event_count": sum(
             1 for event in events if event.get("layer") == "provider"
         ),
-        "context_error_count": sum(1 for event in events if event.get("error")),
-        "context_result_count": sum(result_counts),
+        "context_error_count": sum(1 for event in events if event.get("error"))
+        + sum(
+            event.get("event") in {"tool_failed", "tool_cancelled"}
+            or event.get("is_error") is True
+            for event in gateway_calls
+        )
+        + mismatched_gateway_events,
+        "context_result_count": sum(result_counts) + vector_result_count,
         "context_result_tokens": sum(result_tokens),
         "context_query_latency_ms": (
             sum(latencies) / len(latencies) if latencies else None
@@ -3642,7 +3729,76 @@ def _context_event_summary(trial_dir: Path) -> dict[str, Any]:
         "context_query_latency_p50_ms": latency_percentiles["p50_ms"],
         "context_query_latency_p95_ms": latency_percentiles["p95_ms"],
         "time_to_first_context_ms": min(first_context) if first_context else None,
+        "context_gateway_event_log_status": gateway_log_status,
+        "context_gateway_event_count": len(gateway_events),
+        "context_gateway_tool_call_count": len(gateway_calls),
+        "context_gateway_call_ids": gateway_call_ids,
+        "context_gateway_identity_mismatch_count": mismatched_gateway_events,
+        "gitnexus_vector_search_attempted": any(
+            value.get("vector_search_attempted") is True for value in vector_events
+        ),
+        "gitnexus_vector_search_succeeded": any(
+            value.get("vector_search_succeeded") is True for value in vector_events
+        ),
+        "gitnexus_semantic_result_count": sum(
+            int(value.get("semantic_result_count") or 0) for value in vector_events
+        ),
+        "gitnexus_bm25_result_count": sum(
+            int(value.get("bm25_result_count") or 0) for value in vector_events
+        ),
+        "gitnexus_vector_model_digests": sorted(
+            {
+                str(digest)
+                for value in vector_events
+                if (digest := value.get("model_digest"))
+            }
+        ),
+        "gitnexus_vector_query_latency_ms": sum(
+            float(value.get("query_latency_ms") or 0.0) for value in vector_events
+        ),
     }
+
+
+def _safe_gateway_event_path(value: Any) -> tuple[Path | None, str]:
+    if not isinstance(value, str) or not value.strip():
+        return None, "not_configured"
+    path = Path(value)
+    parts = path.parts
+    try:
+        fugue_index = parts.index(".fugue")
+    except ValueError:
+        return None, "rejected"
+    if (
+        not path.is_absolute()
+        or path.name != "context-gateway.jsonl"
+        or parts[fugue_index + 1 : fugue_index + 2] != ("runtime",)
+    ):
+        return None, "rejected"
+    runtime_root = Path(*parts[: fugue_index + 2]).resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(runtime_root):
+        return None, "rejected"
+    return resolved, "configured"
+
+
+def _gateway_identity_matches(
+    event: Mapping[str, Any], expected: Mapping[str, Any]
+) -> bool:
+    fields = {
+        "fugue_run_id": "run_id",
+        "fugue_candidate_id": "candidate_id",
+        "fugue_comparison_example_id": "comparison_example_id",
+        "fugue_trial_index": "trial_index",
+        "fugue_execution_fingerprint": "execution_fingerprint",
+        "fugue_context_system_id": "context_system_id",
+    }
+    for event_key, expected_key in fields.items():
+        expected_value = expected.get(expected_key)
+        if expected_value in (None, ""):
+            continue
+        if str(event.get(event_key) or "") != str(expected_value):
+            return False
+    return True
 
 
 def _evidence_summary(

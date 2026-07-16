@@ -564,6 +564,9 @@ done
             "context_support": os.environ.get("FUGUE_CONTEXT_SUPPORT"),
             "context_config_hash": os.environ.get("FUGUE_CONTEXT_CONFIG_HASH"),
             "context_cache_keys": _json_env("FUGUE_CONTEXT_CACHE_KEYS"),
+            "context_gateway_events_path": os.environ.get(
+                "FUGUE_CONTEXT_GATEWAY_EVENTS_PATH"
+            ),
             "expected_evidence_paths": _json_env("FUGUE_EXPECTED_EVIDENCE_PATHS"),
             "expected_artifact_paths": _json_env("FUGUE_EXPECTED_ARTIFACT_PATHS"),
             "prompt_id": prompt_id,
@@ -736,6 +739,12 @@ done
     def _set_context_registration(self, value: dict[str, Any]) -> None:
         value = self._context_registration(value)
         self._context_registration_meta = value
+        trace_environment = self._trace_environment(
+            self.TRACE_HARNESS, self.model_route
+        )
+        os.environ.update(trace_environment)
+        if hasattr(self, "_resolved_env_vars"):
+            self._resolved_env_vars.update(trace_environment)
         try:
             meta = json.loads(self._meta_path().read_text())
         except (OSError, json.JSONDecodeError):
@@ -1316,6 +1325,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                     "probe": "$HOME/.hermes/config.yaml",
                 }
             )
+            env.update(self._trace_environment("hermes", self.model_route))
         skills_command = self._build_register_skills_command()
         if skills_command:
             result = await self.exec_as_agent(
@@ -1676,6 +1686,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                         "probe": "openclaw gateway ready",
                     }
                 )
+                env.update(self._trace_environment("openclaw", self.model_route))
 
             self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
                 self.conversation_id

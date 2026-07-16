@@ -1750,6 +1750,108 @@ def test_agent_hierarchy_decodes_gateway_metadata_from_remote_tool_result() -> N
     assert summary["gitnexus_vector_query_latency_ms"] == 22.5
 
 
+def test_gateway_event_log_is_identity_checked_and_preserves_vector_evidence(
+    tmp_path: Path,
+) -> None:
+    event_log = (
+        tmp_path
+        / ".fugue/runtime/run-a/gateway-evidence/job-a/context-gateway.jsonl"
+    )
+    event_log.parent.mkdir(parents=True)
+    identity = {
+        "fugue_run_id": "run-a",
+        "fugue_candidate_id": "candidate-a",
+        "fugue_comparison_example_id": "example-a",
+        "fugue_trial_index": "1",
+        "fugue_execution_fingerprint": "execution-a",
+        "fugue_context_system_id": "gitnexus",
+    }
+    events = [
+        {"event": "gateway_ready", **identity},
+        {
+            "event": "tool_end",
+            "gateway_call_id": "gateway-a",
+            "duration_ms": 18.5,
+            "is_error": False,
+            "vector": {
+                "vector_search_attempted": True,
+                "vector_search_succeeded": True,
+                "semantic_result_count": 4,
+                "bm25_result_count": 0,
+                "model_digest": "sha256:model",
+                "query_latency_ms": 12.5,
+            },
+            **identity,
+        },
+        {
+            "event": "tool_end",
+            "gateway_call_id": "wrong-cell",
+            **{**identity, "fugue_candidate_id": "candidate-b"},
+        },
+    ]
+    event_log.write_text("".join(f"{json.dumps(event)}\n" for event in events))
+
+    summary = export._context_event_summary(
+        tmp_path / "jobs/job-a/trial-a",
+        gateway_event_path=event_log.as_posix(),
+        expected_identity={
+            "run_id": "run-a",
+            "candidate_id": "candidate-a",
+            "comparison_example_id": "example-a",
+            "trial_index": 1,
+            "execution_fingerprint": "execution-a",
+            "context_system_id": "gitnexus",
+        },
+    )
+
+    assert summary["context_gateway_event_log_status"] == "available"
+    assert summary["context_gateway_tool_call_count"] == 1
+    assert summary["context_gateway_call_ids"] == ["gateway-a"]
+    assert summary["context_gateway_identity_mismatch_count"] == 1
+    assert summary["gitnexus_vector_search_attempted"] is True
+    assert summary["gitnexus_vector_search_succeeded"] is True
+    assert summary["gitnexus_semantic_result_count"] == 4
+    assert summary["gitnexus_bm25_result_count"] == 0
+    assert summary["gitnexus_vector_model_digests"] == ["sha256:model"]
+    assert summary["gitnexus_vector_query_latency_ms"] == 12.5
+
+    row = {"context_assigned": True, **summary}
+    export._apply_trace_summary(
+        row,
+        {
+            "weave_gateway_tool_call_count": 0,
+            "weave_gateway_call_ids": [],
+            "gitnexus_vector_search_attempted": False,
+            "gitnexus_vector_search_succeeded": False,
+            "gitnexus_semantic_result_count": 0,
+            "gitnexus_bm25_result_count": 0,
+            "gitnexus_vector_model_digests": [],
+            "gitnexus_vector_query_latency_ms": 0.0,
+        },
+    )
+    assert row["context_invoked"] is True
+    assert row["context_invocation_evidence"] == {
+        "status": "observed",
+        "source": "mcp_gateway_event_log",
+        "tool_calls": 1,
+        "gateway_call_ids": ["gateway-a"],
+    }
+    assert row["gitnexus_vector_search_succeeded"] is True
+
+
+def test_gateway_event_log_rejects_paths_outside_runtime(tmp_path: Path) -> None:
+    event_log = tmp_path / "context-gateway.jsonl"
+    event_log.write_text('{"event":"tool_end","gateway_call_id":"a"}\n')
+
+    summary = export._context_event_summary(
+        tmp_path / "trial",
+        gateway_event_path=event_log.as_posix(),
+    )
+
+    assert summary["context_gateway_event_log_status"] == "rejected"
+    assert summary["context_gateway_tool_call_count"] == 0
+
+
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
     trace_id = "a" * 32
     root_span_id = "b" * 16

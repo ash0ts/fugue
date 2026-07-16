@@ -214,18 +214,29 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _event(event: str, **values: Any) -> None:
-    correlation = _correlation()
-    print(
-        json.dumps(
-            {
-                "event": event,
-                **correlation,
-                **values,
-            },
-            sort_keys=True,
-        ),
-        flush=True,
+    payload = json.dumps(
+        {
+            "event": event,
+            **_correlation(),
+            **values,
+        },
+        sort_keys=True,
     )
+    print(payload, flush=True)
+    event_log = os.environ.get("FUGUE_GATEWAY_EVENT_LOG", "").strip()
+    if not event_log:
+        return
+    # One encoded write under O_APPEND keeps each event intact without giving
+    # the gateway access to the agent's broader log volume.
+    descriptor = os.open(
+        event_log,
+        os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+        0o600,
+    )
+    try:
+        os.write(descriptor, f"{payload}\n".encode())
+    finally:
+        os.close(descriptor)
 
 
 def _correlation() -> dict[str, str]:

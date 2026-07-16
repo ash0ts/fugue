@@ -181,13 +181,21 @@ def test_runtime_compose_uses_isolated_sidecar_and_read_only_repository(
     assert service["network_mode"] == "service:main"
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
-    assert service["volumes"] == [
+    assert service["volumes"][:2] == [
         f"{repository.resolve().as_posix()}:/fugue-context:ro",
         (
             f"{(repository / 'repository').resolve().as_posix()}:"
             "/workspace/repository:ro"
         ),
     ]
+    evidence_mount = service["volumes"][2]
+    assert evidence_mount["target"] == "/fugue-evidence"
+    assert evidence_mount["read_only"] is False
+    assert evidence_mount["bind"]["create_host_path"] is False
+    assert Path(evidence_mount["source"]).is_dir()
+    assert service["environment"]["FUGUE_GATEWAY_EVENT_LOG"] == (
+        "/fugue-evidence/context-gateway.jsonl"
+    )
     assert service["tmpfs"] == [
         "/tmp:rw,noexec,nosuid,size=64m",
         "/workspace/state:rw,noexec,nosuid,size=2g",
