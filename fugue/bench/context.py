@@ -1613,20 +1613,6 @@ def run_async(coro: Any) -> Any:
         return pool.submit(asyncio.run, coro).result()
 
 
-def prepared_from_index(
-    cache_root: Path, system_id: str, task_id: str
-) -> PreparedContext | None:
-    index_path = cache_root / CONTEXT_INDEX
-    if not index_path.is_file():
-        return None
-    raw = json.loads(index_path.read_text())
-    key = ((raw.get("latest") or {}).get(system_id) or {}).get(task_id)
-    if not key:
-        return None
-    path = cache_root / key
-    return _read_prepared(path) if (path / CONTEXT_MANIFEST).is_file() else None
-
-
 def expected_prepared_context(
     spec: ContextSystemSpec,
     snapshot: RepositorySnapshot,

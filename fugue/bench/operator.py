@@ -3320,11 +3320,6 @@ def _result_identity(row: dict[str, Any]) -> tuple[str, str]:
     return record_type, str(identity)
 
 
-def _stable_identity(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def _float(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None

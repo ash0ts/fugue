@@ -1458,11 +1458,6 @@ def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -
     )
 
 
-def _stable_id(value: Any) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
     servers: list[dict[str, Any]] = []
     names: set[str] = set()

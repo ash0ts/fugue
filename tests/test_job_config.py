@@ -13,8 +13,6 @@ from fugue.bench.library import (
     ExperimentSpec,
     FeatureVariant,
     IntegrationSelection,
-    save_prompt,
-    save_skill,
 )
 from fugue.bench.manifest import load_manifest
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
@@ -185,8 +183,12 @@ tasks:
     expected_paths: [astropy/modeling/separable.py]
 """
     )
-    save_prompt("prompt-a", "# Prompt A\n", tmp_path)
-    save_skill("skill-a", "# Skill A\n", tmp_path)
+    prompt = tmp_path / "configs/fugue/prompts/prompt-a.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("# Prompt A\n")
+    skill = tmp_path / "configs/fugue/skills/skill-a/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Skill A\n")
     experiment = ExperimentSpec(
         id="experiment-a",
         title="Experiment A",

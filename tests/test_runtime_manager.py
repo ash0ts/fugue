@@ -546,36 +546,6 @@ def test_mutable_adapter_index_is_isolated_from_the_read_only_repository(
     assert service["environment"]["FUGUE_REPOSITORY_STATE_PATHS"] == ".gitnexus"
 
 
-def test_install_probe_is_offline_and_does_not_start_the_gateway(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    spec = runtime_manager.RUNTIMES["latmd"]
-    root = tmp_path / runtime_manager.RUNTIME_ROOT / "latmd"
-    root.mkdir(parents=True)
-    (root / "runtime-lock.json").write_text(
-        json.dumps(
-            {
-                "recipe_sha256": spec.recipe_sha256,
-                "image": spec.image,
-                "image_id": "sha256:" + "a" * 64,
-            }
-        )
-    )
-    commands: list[list[str]] = []
-    monkeypatch.setattr(
-        runtime_manager.subprocess,
-        "run",
-        lambda command, **kwargs: commands.append(command),
-    )
-
-    runtime_manager.probe_runtime_install("latmd", tmp_path)
-
-    assert "--network" in commands[0]
-    assert commands[0][commands[0].index("--network") + 1] == "none"
-    assert commands[0][commands[0].index("--entrypoint") + 1] == "lat"
-    assert commands[0][-2:] == ["mcp", "--help"]
-
-
 def test_managed_runtime_command_passes_secret_by_environment_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

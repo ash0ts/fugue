@@ -341,14 +341,6 @@ def get_prompt(item_id: str, repo_root: Path | None = None) -> Prompt:
     )
 
 
-def save_prompt(item_id: str, body: str, repo_root: Path | None = None) -> Prompt:
-    item_id = validate_id(item_id, kind="prompt id")
-    path = library_root(repo_root) / PROMPTS_DIR / f"{item_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_prompt(item_id, repo_root)
-
-
 def list_skills(repo_root: Path | None = None) -> list[LibraryItem]:
     root = library_root(repo_root) / SKILLS_DIR
     if not root.exists():
@@ -380,14 +372,6 @@ def get_skill(item_id: str, repo_root: Path | None = None) -> Skill:
         path=path.as_posix(),
         sha256=_file_sha256(path),
     )
-
-
-def save_skill(item_id: str, body: str, repo_root: Path | None = None) -> Skill:
-    item_id = validate_id(item_id, kind="skill id")
-    path = library_root(repo_root) / SKILLS_DIR / item_id / "SKILL.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_normalize_text(body))
-    return get_skill(item_id, repo_root)
 
 
 def list_experiments(repo_root: Path | None = None) -> list[LibraryItem]:
@@ -496,14 +480,6 @@ def get_experiment(item_id: str, repo_root: Path | None = None) -> ExperimentSpe
             f"experiment file {path.name!r} declares mismatched id {experiment.id!r}"
         )
     return experiment
-
-
-def get_experiment_text(item_id: str, repo_root: Path | None = None) -> str:
-    item_id = validate_id(item_id, kind="experiment id")
-    path = library_root(repo_root) / EXPERIMENTS_DIR / f"{item_id}.yaml"
-    if not path.is_file():
-        raise FileNotFoundError(f"experiment not found: {item_id}")
-    return path.read_text()
 
 
 def save_experiment(
@@ -622,23 +598,6 @@ def experiment_with_overrides(
             continue
         data[key] = value
     return experiment_from_yaml(yaml.safe_dump(data), item_id=experiment.id)
-
-
-def content_hashes_for_ids(
-    *,
-    prompt_ids: list[str],
-    skill_ids: list[str],
-    repo_root: Path | None = None,
-) -> dict[str, dict[str, str]]:
-    from fugue.bench.sources import resolve_skills
-
-    resolved = resolve_skills(skill_ids, repo_root or Path.cwd())
-    return {
-        "prompts": {
-            item_id: get_prompt(item_id, repo_root).sha256 for item_id in prompt_ids
-        },
-        "skills": {item.id: item.digest.removeprefix("sha256:") for item in resolved},
-    }
 
 
 def _variants(raw: dict[str, Any]) -> list[FeatureVariant]:

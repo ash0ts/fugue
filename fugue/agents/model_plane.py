@@ -22,7 +22,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -71,39 +70,6 @@ from fugue.weave_support import (
     weave_agents_otel_headers,
 )
 
-# Local working tree of the hermes-otel plugin (uploaded into Hermes
-# containers; see README "Trace plane").
-HERMES_OTEL_CHECKOUT = Path(
-    os.environ.get(
-        "HERMES_OTEL_CHECKOUT",
-        str(Path.home() / "Documents" / "GitHub" / "hermes-otel"),
-    )
-)
-
-# Weave node SDK built from the OTel-2.x migration branch
-# (wandb/weave ashah/node-sdk-otel-2x, sdks/node -> `pnpm pack`). The published
-# weave SDK (<=0.16.2) ships the OTel 1.x trace stack, which crashes at load
-# under OpenClaw's managed override @opentelemetry/core@2.8.0
-# ("TracesSamplerValues.AlwaysOn"). Drop once the branch is released to npm.
-# vendor/ sits at the repo root, two levels above this module (fugue/agents/).
-WEAVE_NODE_SDK_TGZ = Path(
-    os.environ.get(
-        "WEAVE_NODE_SDK_TGZ",
-        Path(__file__).resolve().parent.parent.parent / "vendor" / "weave-node-sdk.tgz",
-    )
-)
-
-# Plugin runtime files (per hermes-otel README "File structure" + packaging
-# needs). Everything else in the checkout (website/ is 746MB, tests, video,
-# dashboard) stays on the host.
-_HERMES_OTEL_FILES = (
-    "plugin.yaml",
-    "pyproject.toml",
-    "README.md",
-    "LICENSE",
-    "config.yaml.example",
-)
-_HERMES_OTEL_DIRS = ("skills",)
 _SECRET_ENV_NAME = re.compile(
     r"(?:^|_)(?:api_?key|key|token|secret|password|credential|private_?key|auth|authorization|headers?)(?:$|_)",
     re.IGNORECASE,
@@ -244,50 +210,6 @@ def _responses_key(route: ModelRoute) -> str:
 
 def _codex_provider_name(route: ModelRoute) -> str:
     return "openai" if route.provider == "openai" else "fugue"
-
-
-_STAGED_HERMES_OTEL: Path | None = None
-
-
-def stage_hermes_otel_checkout() -> Path:
-    """Copy the plugin's runtime files from the local checkout to a temp dir.
-
-    Cached per-process so concurrent trials share one staging copy.
-    """
-    global _STAGED_HERMES_OTEL
-    if _STAGED_HERMES_OTEL is not None and _STAGED_HERMES_OTEL.exists():
-        return _STAGED_HERMES_OTEL
-
-    src = HERMES_OTEL_CHECKOUT
-    if not (src / "plugin.yaml").exists():
-        raise FileNotFoundError(
-            f"hermes-otel checkout not found at {src} (set HERMES_OTEL_CHECKOUT)"
-        )
-
-    staged = Path(tempfile.mkdtemp(prefix="hermes-otel-staged-"))
-    for name in _HERMES_OTEL_FILES:
-        if (src / name).exists():
-            shutil.copy2(src / name, staged / name)
-    for py in src.glob("*.py"):
-        shutil.copy2(py, staged / py.name)
-    for dirname in _HERMES_OTEL_DIRS:
-        if (src / dirname).is_dir():
-            shutil.copytree(
-                src / dirname,
-                staged / dirname,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-            )
-    tracer_path = staged / "tracer.py"
-    source = tracer_path.read_text()
-    needle = "attrs = dict(attributes or {})"
-    replacement = (
-        "attrs = {**(self.config.resource_attributes or {}), **dict(attributes or {})}"
-    )
-    if needle not in source and replacement not in source:
-        raise RuntimeError("hermes-otel span attribute patch target was not found")
-    tracer_path.write_text(source.replace(needle, replacement))
-    _STAGED_HERMES_OTEL = staged
-    return staged
 
 
 class _TrialMetaMixin:

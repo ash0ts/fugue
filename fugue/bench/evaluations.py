@@ -232,52 +232,6 @@ def build_evaluation_draft(
     )
 
 
-def _fill_case_gaps(
-    suite_id: str,
-    proposed: tuple[dict[str, Any], ...],
-    *,
-    expected_size: int,
-    source_catalog: Mapping[str, EvaluationSource],
-    repo_root: Path | None,
-) -> tuple[dict[str, Any], ...]:
-    if len(proposed) >= expected_size or repo_root is None:
-        return proposed
-    path = repo_root / evaluation_asset_path("evaluation_cases", suite_id)
-    if not path.is_file():
-        return proposed
-    replacements = {str(value["id"]): value for value in proposed}
-    merged: list[dict[str, Any]] = []
-    for index, saved in enumerate(load_cases(path), start=1):
-        saved_id = str(saved.get("id") or "")
-        replacement = replacements.pop(saved_id, None)
-        if replacement is not None:
-            merged.append(replacement)
-            continue
-        source_refs = saved.get("source_refs") or []
-        source_ids = [
-            str(value.get("id")) if isinstance(value, dict) else str(value)
-            for value in source_refs
-        ]
-        normalized = {
-            key: value
-            for key, value in saved.items()
-            if key != "schema_version"
-        }
-        normalized["source_refs"] = source_ids
-        candidate = _evaluation_case(normalized, index, source_catalog)
-        for ref in source_refs:
-            if not isinstance(ref, dict):
-                continue
-            source_id = str(ref.get("id") or "")
-            if str(ref.get("sha256") or "") != source_catalog[source_id].sha256:
-                raise ValueError(
-                    f"evaluation case {saved_id} source drifted: {source_id}"
-                )
-        merged.append(candidate)
-    merged.extend(replacements.values())
-    return tuple(merged[:expected_size])
-
-
 def attach_evaluation_suite(
     experiment: ExperimentSpec, suite_id: str, *, workload_id: str
 ) -> ExperimentSpec:
@@ -507,10 +461,6 @@ def load_rubric(path: Path, *, text: str | None = None) -> dict[str, Any]:
         raise ValueError(f"{path}: evaluation rubric must be a mapping")
     _validate_saved_rubric(raw, path)
     return raw
-
-
-def evaluation_overlay(files: Sequence[EvaluationFile]) -> dict[str, str]:
-    return {item.path.as_posix(): item.body for item in files}
 
 
 def scorer_bundle(

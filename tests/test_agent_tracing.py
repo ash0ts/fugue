@@ -344,11 +344,11 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
     )
 
 
-def test_hermes_staging_promotes_resource_attributes_to_spans() -> None:
-    source = AGENT_MODEL_PLANE.read_text()
+def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
+    patch = (REPO_ROOT / "configs/fugue/runtime/hermes/patch-plugin.py").read_text()
 
-    assert "self.config.resource_attributes or {}" in source
-    assert "hermes-otel span attribute patch target was not found" in source
+    assert "self.config.resource_attributes or {}" in patch
+    assert "hermes-otel tracer patch target mismatch" in patch
 
 
 def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:

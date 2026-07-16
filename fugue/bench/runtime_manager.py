@@ -503,39 +503,6 @@ def runtime_ready(system_id: str, repo_root: Path) -> tuple[bool, str]:
     return True, f"{lock['image']} matches {str(lock['image_id'])[:19]}"
 
 
-def probe_runtime_install(system_id: str, repo_root: Path) -> None:
-    spec = RUNTIMES.get(system_id)
-    lock = read_runtime_lock(system_id, repo_root)
-    if spec is None or lock is None:
-        raise RuntimeError(f"managed runtime for {system_id} is not prepared")
-    command = spec.install_probe_command
-    subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
-            "--entrypoint",
-            command[0],
-            str(lock["image_id"]),
-            *command[1:],
-        ],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-
-
 def prepare_runtime_repository(
     system_id: str,
     *,
