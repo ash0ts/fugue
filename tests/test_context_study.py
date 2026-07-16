@@ -102,6 +102,48 @@ def test_context_preparation_honors_request_task_limit() -> None:
     }
 
 
+def test_gitnexus_swe_contract_is_a_distinct_retrieval_required_canary(
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+
+    canary = service.rendered_jobs(
+        ExperimentRequest(
+            experiment_id="repo-memory-impact",
+            preset="gitnexus-swe-contract",
+        ),
+        run_id="plan-gitnexus-swe-contract",
+        write_configs=False,
+    )
+    natural = service.rendered_jobs(
+        ExperimentRequest(
+            experiment_id="repo-memory-impact",
+            preset="gitnexus-ablation",
+            harnesses=("codex",),
+            variants=("gitnexus-vector",),
+            n_tasks=1,
+            n_attempts=1,
+        ),
+        run_id="plan-gitnexus-natural-uptake",
+        write_configs=False,
+    )
+
+    assert len(canary) == len(natural) == 1
+    contract = canary[0]
+    unbiased = natural[0]
+    assert contract.workload_id == "gitnexus-swe-contract"
+    assert contract.task_id == unbiased.task_id == "pydata__xarray-6992"
+    assert contract.harness == unbiased.harness == "codex"
+    assert contract.prompt_id == "repository-memory-contract"
+    assert unbiased.prompt_id is None
+    assert (
+        contract.resolved_candidate.definition["context"]
+        == unbiased.resolved_candidate.definition["context"]
+    )
+    assert contract.candidate_id != unbiased.candidate_id
+
+
 def test_pdf_skill_presets_are_controlled_and_study_plans_72_cells(
     tmp_path: Path,
 ) -> None:

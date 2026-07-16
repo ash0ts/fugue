@@ -431,6 +431,7 @@ fugue run repo-memory-impact --preset hard-discovery --preview
 fugue run repo-memory-impact --preset hard-holdout \
   --variants none,TOP_TREATMENT_1,TOP_TREATMENT_2,TOP_TREATMENT_3 --preview
 fugue run repo-memory-impact --preset gitnexus-ablation --preview
+fugue run repo-memory-impact --preset gitnexus-swe-contract --preview
 fugue run repo-memory-impact --preset retrieval-study --preview
 fugue run repo-memory-impact --preset gitnexus-retrieval-study --preview
 fugue run repo-memory-impact --preset continuity-study --preview
@@ -442,6 +443,11 @@ GitNexus ablation Agent predictions. Direct cohorts contain 900 general
 retrieval measurements, 450 GitNexus BM25/vector measurements, and 108
 continuity sequence attempts. The 225-probe retrieval source is materialized
 and locked by `setup --prepare`; a trial refuses to download it.
+
+`gitnexus-swe-contract` is a one-cell Codex qualification canary. It explicitly
+requires a semantic lookup before editing so it can prove native MCP, vector
+telemetry, the official verifier, and the Agent deep link together. It is not
+part of the unbiased GitNexus ablation and must not enter an efficacy estimate.
 
 SWE-bench verifier dependencies and grading metadata are prepared into the
 locked task image. Qualification runs the official verifier offline twice: the

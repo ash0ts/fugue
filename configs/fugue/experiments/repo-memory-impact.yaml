@@ -78,6 +78,12 @@ workloads:
     required_capabilities: [bind]
     systems: [gitnexus]
     variants: [gitnexus-bm25, gitnexus-vector]
+  - id: gitnexus-swe-contract
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-gitnexus-holdout-v1.yaml
+    required_capabilities: [bind]
+    systems: [gitnexus]
+    variants: [gitnexus-vector-contract]
   - id: gitnexus-contract
     runner: harbor
     manifest: datasets/repo-memory/gitnexus-contract-v1.yaml
@@ -191,6 +197,14 @@ presets:
     n_tasks: 1
     n_concurrent: 4
     scheduling_seed: gitnexus-contract-v1
+  gitnexus-swe-contract:
+    workloads: [gitnexus-swe-contract]
+    systems: [gitnexus]
+    harnesses: [codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: gitnexus-swe-contract-v1
 variants:
   - {id: none, label: No added context, context: {system_id: none, delivery: portable}}
   - {id: agentsmd, label: AGENTS.md map, context: {system_id: agentsmd, delivery: portable}}
@@ -198,6 +212,18 @@ variants:
   - {id: gitnexus-bm25, label: GitNexus BM25, context: {system_id: gitnexus, delivery: native_mcp, config: {retrieval_mode: bm25}}}
   - id: gitnexus-vector
     label: GitNexus hybrid vector
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config:
+        retrieval_mode: hybrid_vector
+        embedding_model: Snowflake/snowflake-arctic-embed-xs
+        embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
+        embedding_dimensions: 384
+        vector_required: true
+  - id: gitnexus-vector-contract
+    label: GitNexus hybrid vector contract canary
+    prompt_id: repository-memory-contract
     context:
       system_id: gitnexus
       delivery: native_mcp
