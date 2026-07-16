@@ -42,7 +42,6 @@ class ManagedMCPRuntimeSpec:
     state_mount: str = "/workspace/state"
     repository_state_paths: tuple[str, ...] = ()
     runtime_env: tuple[tuple[str, str], ...] = ()
-    probe_command: tuple[str, ...] = ()
 
     @property
     def recipe_sha256(self) -> str:
@@ -65,11 +64,6 @@ class ManagedMCPRuntimeSpec:
     @property
     def image(self) -> str:
         return f"fugue-context-{self.system_id}:{self.recipe_sha256[:12]}"
-
-    @property
-    def install_probe_command(self) -> tuple[str, ...]:
-        return self.probe_command or (*self.upstream_command, "--help")
-
 
 _GATEWAY_INSTALL = (
     "python3 -m venv /opt/gateway && "
@@ -254,14 +248,6 @@ RUNTIMES = {
                 "cf2698d30ff05da02c70a088313bad56e5c2f401d734cb24a8390d446111936c",
             ),
         ),
-        probe_command=(
-            "node",
-            "-e",
-            "import('/opt/gitnexus-runtime/node_modules/gitnexus/dist/mcp/core/"
-            "embedder.js').then(async m => { const v=await m.embedQuery('offline "
-            "semantic readiness'); if(v.length!==384) process.exit(2); "
-            "console.log(v.length) })",
-        ),
     ),
     "codegraph": ManagedMCPRuntimeSpec(
         "codegraph",
@@ -326,11 +312,6 @@ RUNTIMES = {
             ("SEMBLE_MODEL_NAME", "/opt/semble-model"),
             ("SEMBLE_TREE_SITTER_CACHE", "/opt/tree-sitter-languages"),
             ("HF_HUB_OFFLINE", "1"),
-        ),
-        probe_command=(
-            "/opt/gateway/bin/python",
-            "-c",
-            "import semble.mcp",
         ),
     ),
     "latmd": ManagedMCPRuntimeSpec(

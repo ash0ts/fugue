@@ -238,6 +238,40 @@ def test_operator_preview_is_side_effect_free(tmp_path: Path) -> None:
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_preview_setup_and_execution_resolve_the_same_coordinates(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    request = ExperimentRequest(experiment_id="demo")
+
+    preview = service.resolve_run_plan(request, run_id="preview")
+    setup = service.resolve_run_plan(request, run_id="setup")
+    materialized = service._materialize_run_plan(
+        service.resolve_run_plan(request, run_id="execution"),
+        run_id="execution",
+    )
+
+    def coordinates(plan):
+        return [
+            (
+                cell.workload_id,
+                cell.task_id,
+                cell.harness,
+                cell.context_system_id,
+                cell.trial_index,
+                cell.comparison_example_id,
+                cell.candidate_id,
+                cell.execution_fingerprint,
+                cell.applicable,
+            )
+            for cell in plan.cells
+        ]
+
+    assert coordinates(preview) == coordinates(setup) == coordinates(materialized)
+    assert preview.cells[0].config_sha256 == ""
+    assert materialized.cells[0].config_sha256
+
+
 def test_run_rejects_incomplete_generated_evaluation_with_planning_command(
     tmp_path: Path,
 ) -> None:

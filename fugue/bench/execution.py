@@ -32,14 +32,6 @@ CellStatus = Literal[
     "cancelled",
     "interrupted",
 ]
-RunStatus = Literal[
-    "starting",
-    "running",
-    "passed",
-    "failed",
-    "cancelled",
-    "interrupted",
-]
 EventCallback = Callable[[dict[str, Any]], None]
 ExecutionKind = Literal["agent", "provider_diagnostic"]
 BenchmarkOutcome = Literal["passed", "failed", "unscored", "not_applicable"]
@@ -143,6 +135,7 @@ def plan_cells(
     run_id: str,
     run_name: str,
     scheduling_seed: str | None = None,
+    verify_inputs: bool = True,
 ) -> list[PlannedCell]:
     cells: list[PlannedCell] = []
     for job in jobs:
@@ -188,10 +181,16 @@ def plan_cells(
                 scorer_refs=job.scorer_refs,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
-                config_sha256=_path_digest(job.config_path),
-                runtime_assets=tuple(
-                    (path.as_posix(), _path_digest(path))
-                    for path in job.generated_runtime_files
+                config_sha256=(
+                    _path_digest(job.config_path) if verify_inputs else ""
+                ),
+                runtime_assets=(
+                    tuple(
+                        (path.as_posix(), _path_digest(path))
+                        for path in job.generated_runtime_files
+                    )
+                    if verify_inputs
+                    else ()
                 ),
             )
         )
@@ -643,7 +642,7 @@ def list_run_manifests(repo_root: Path) -> list[dict[str, Any]]:
 
 def mark_unfinished_cells(
     run_dir: Path,
-    status: Literal["cancelled", "interrupted"],
+    status: Literal["failed", "cancelled", "interrupted"],
     *,
     message: str,
 ) -> None:
@@ -657,7 +656,7 @@ def mark_unfinished_cells(
             **record,
             "status": status,
             "error": message,
-            "benchmark_outcome": "unscored",
+            "benchmark_outcome": "failed" if status == "failed" else "unscored",
             "recorded_at": datetime.now(UTC).isoformat(),
             "ended_at": datetime.now(UTC).isoformat(),
         }

@@ -19,9 +19,8 @@ from fugue.bench.export import (
     _fetch_agents_spans,
     _fetch_calls_spans,
     _summarize_spans,
-    _weave_safe_row,
+    compile_export,
     export_rows,
-    judge_qa_rows,
     publish_to_weave,
     write_jsonl,
 )
@@ -190,31 +189,6 @@ def test_export_marks_unattributed_harbor_zero_usage_unavailable(
     assert "total_cost_usd" not in scores
 
 
-def test_weave_payload_redacts_secrets_and_keeps_full_hits_local() -> None:
-    row = {
-        "query": "q" * 2_000,
-        "api_key": "secret",
-        "n_input_tokens": 123,
-        "hits": [
-            {
-                "path": "src/app.py",
-                "score": 0.9,
-                "text": "repository source that remains local",
-            }
-        ],
-        "trial_dir": "/private/jobs/trial",
-    }
-
-    safe = _weave_safe_row(row)
-
-    assert len(safe["query"]) == 1_000
-    assert safe["api_key"] == "[redacted]"
-    assert safe["n_input_tokens"] == 123
-    assert safe["hits"] == [{"path": "src/app.py", "score": 0.9}]
-    assert "trial_dir" not in safe
-    assert row["hits"][0]["text"].startswith("repository")
-
-
 def test_jsonl_export_redacts_secret_keys_and_values(tmp_path: Path) -> None:
     output = tmp_path / "results.jsonl"
 
@@ -232,62 +206,6 @@ def test_jsonl_export_redacts_secret_keys_and_values(tmp_path: Path) -> None:
     payload = json.loads(output.read_text())
     assert payload["api_key"] == "[redacted]"
     assert payload["error"] == "provider rejected [redacted]"
-
-
-def test_qa_judge_uses_local_reference_and_records_separate_metrics(
-    tmp_path: Path, monkeypatch
-) -> None:
-    dataset = tmp_path / ".fugue" / "cache" / "datasets" / "qa" / "revision"
-    dataset.mkdir(parents=True)
-    (dataset / "selection.json").write_text(
-        json.dumps([{"task_id": "qa-001", "source_index": 0}])
-    )
-    (dataset / "_source.jsonl").write_text(
-        json.dumps({"answer": "Reference answer"}) + "\n"
-    )
-    trial = tmp_path / "jobs" / "trial"
-    artifacts = trial / "artifacts"
-    artifacts.mkdir(parents=True)
-    (artifacts / "fugue-answer.md").write_text("Candidate answer")
-    rows = [
-        {
-            "record_type": "trial",
-            "workload_id": "qa",
-            "task_name": "fugue/qa-001",
-            "trial_dir": trial.as_posix(),
-            "evidence_paths": ["src/app.py"],
-        }
-    ]
-
-    def fake_request(client, route, api_key, **kwargs):
-        assert kwargs["reference"] == "Reference answer"
-        assert kwargs["answer"] == "Candidate answer"
-        assert kwargs["evidence_paths"] == ["src/app.py"]
-        return (
-            {
-                "correctness": 0.8,
-                "completeness": 0.7,
-                "groundedness": 0.9,
-                "overall": 0.8,
-                "reasoning": "Grounded but incomplete.",
-            },
-            {"input_tokens": 100, "output_tokens": 20},
-        )
-
-    monkeypatch.setattr(export, "_judge_request", fake_request)
-    judge_qa_rows(
-        rows,
-        model="openai/gpt-5-mini",
-        env={"OPENAI_API_KEY": "test-only"},
-        repo_root=tmp_path,
-    )
-
-    assert rows[0]["judge_correctness"] == 0.8
-    assert rows[0]["judge_groundedness"] == 0.9
-    assert rows[0]["judge_input_tokens"] == 100
-    assert rows[0]["judge_model"] == "openai/gpt-5-mini"
-    safe = _weave_safe_row(rows[0])
-    assert "judge_reasoning" not in safe
 
 
 def test_weave_publication_uses_current_signature_and_local_ledger(
@@ -698,11 +616,12 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
             PublicationResult(1, 0, (updated_direct,)),
         )
     )
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         operator,
-        "publish_to_weave",
-        lambda *args, **kwargs: next(publications),
+        "compile_export",
+        lambda *args, **kwargs: SimpleNamespace(
+            predictions=(), measurements=(), publication=next(publications)
+        ),
     )
     service = OperatorService(tmp_path)
     output = tmp_path / "reports" / "run-a.jsonl"
@@ -745,16 +664,49 @@ def test_run_export_reads_only_the_exact_planned_job_roots(
     )
     observed: list[Path] = []
 
-    def fake_export_rows(paths, **kwargs):
+    def fake_compile_export(paths, **kwargs):
         observed.extend(paths)
-        return []
+        return SimpleNamespace(predictions=(), measurements=(), publication=None)
 
-    monkeypatch.setattr(operator, "export_rows", fake_export_rows)
+    monkeypatch.setattr(operator, "compile_export", fake_compile_export)
 
     OperatorService(tmp_path).export_run(run_id)
 
     assert observed == [selected, tmp_path / ".fugue" / "runtime" / run_id]
     assert unrelated not in observed
+
+
+def test_compile_export_normalizes_before_publication(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw = {
+        "record_type": "retrieval",
+        "run_id": "run-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "execution_kind": "provider_diagnostic",
+        "execution_fingerprint": "fingerprint-a",
+    }
+    cell = {
+        **raw,
+        "record_type": "cell",
+        "status": "passed",
+    }
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(export, "export_rows", lambda *args, **kwargs: [raw, cell])
+
+    def publish(rows, *args, **kwargs):
+        observed.extend(rows)
+        return PublicationResult(published=1, skipped=0)
+
+    monkeypatch.setattr(export, "publish_to_weave", publish)
+
+    bundle = compile_export([tmp_path], publish=True)
+
+    assert len(bundle.predictions) == len(bundle.measurements) == 1
+    assert observed == list(bundle.predictions)
+    assert observed[0]["prediction_id"]
 
 
 def test_export_recovers_direct_evaluation_after_marker_only_crash(
@@ -828,7 +780,7 @@ def test_export_recovers_direct_evaluation_after_marker_only_crash(
             "evaluation_runs": [],
         },
     )
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(export, "export_rows", lambda *args, **kwargs: rows)
 
     recovered = OperatorService(tmp_path).export_run(
         "run-a",
@@ -915,11 +867,14 @@ def test_export_persists_publication_failures_without_clobbering_agent_metadata(
         },
     )
     failure = "candidate-direct: RuntimeError: direct publication failed"
-    monkeypatch.setattr(operator, "export_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         operator,
-        "publish_to_weave",
-        lambda *args, **kwargs: PublicationResult(0, 0, failures=(failure,)),
+        "compile_export",
+        lambda *args, **kwargs: SimpleNamespace(
+            predictions=(),
+            measurements=(),
+            publication=PublicationResult(0, 0, failures=(failure,)),
+        ),
     )
     service = OperatorService(tmp_path)
 

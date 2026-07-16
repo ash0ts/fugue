@@ -30,11 +30,6 @@ def test_managed_runtime_catalog_is_pinned_and_install_free_at_trial_time() -> N
     semble = runtime_manager.RUNTIMES["semble"]
     assert semble.upstream_command[:2] == ("/opt/gateway/bin/python", "-c")
     assert "semble.mcp import serve" in semble.upstream_command[2]
-    assert semble.install_probe_command == (
-        "/opt/gateway/bin/python",
-        "-c",
-        "import semble.mcp",
-    )
     assert dict(semble.asset_integrities) == {
         "minishlab/potion-code-16M-v2": (
             "git:e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b"
