@@ -621,7 +621,7 @@ def update_run_manifest(
             json.dumps(
                 {
                     **existing,
-                    "schema_version": 2,
+                    "schema_version": 1,
                     "run_id": run_id,
                     "created_at": created_at,
                     "updated_at": datetime.now(UTC).isoformat(),

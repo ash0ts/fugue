@@ -74,9 +74,9 @@ def test_tool_result_modalities_are_candidate_behavior() -> None:
     first = resolve_candidate(**original)
     second = resolve_candidate(**changed)
 
-    assert CANDIDATE_IDENTITY_SCHEMA_VERSION == 3
+    assert CANDIDATE_IDENTITY_SCHEMA_VERSION == 1
     assert first.candidate_id != second.candidate_id
-    assert first.definition["identity_schema_version"] == 3
+    assert first.definition["identity_schema_version"] == 1
 
 
 def test_harness_behavior_version_changes_candidate_identity() -> None:

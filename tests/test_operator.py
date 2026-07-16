@@ -28,12 +28,9 @@ from fugue.bench.library import (
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.bench.reproducibility import (
     RunSnapshotV1,
-    RunSnapshotV2,
-    RunSnapshotV3,
     build_evaluation_asset_lock,
     build_run_snapshot,
     read_evaluation_asset_lock,
-    read_run_snapshot,
     verify_snapshot,
     write_evaluation_asset_lock,
 )
@@ -71,7 +68,7 @@ jobs_dir: jobs/demo
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-one, repo: test/repo, base_commit: abc123}
+  - {id: task-one, repository: {type: git, url: https://github.com/test/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
 """
     )
     (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
@@ -643,7 +640,7 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     )
 
 
-def test_snapshot_v3_records_resolved_plan_and_reads_v1_v2(tmp_path: Path) -> None:
+def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     experiment = service.experiment("demo")
     request = service.request_for_experiment(experiment)
@@ -664,46 +661,16 @@ def test_snapshot_v3_records_resolved_plan_and_reads_v1_v2(tmp_path: Path) -> No
         env=service.env,
     )
 
-    assert isinstance(snapshot, RunSnapshotV3)
-    assert snapshot.schema_version == 3
+    assert isinstance(snapshot, RunSnapshotV1)
+    assert snapshot.schema_version == 1
     assert snapshot.source_experiment is not None
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
-    assert read_run_snapshot(snapshot.to_dict()) == snapshot
-
-    v2 = {
-        key: value
-        for key, value in snapshot.to_dict().items()
-        if key
-        not in {
-            "evaluation_asset_lock_sha256",
-            "cohort_id",
-            "treatment_selection_sha256",
-        }
-    }
-    v2["schema_version"] = 2
-    parsed_v2 = read_run_snapshot(v2)
-    assert isinstance(parsed_v2, RunSnapshotV2)
-    assert not isinstance(parsed_v2, RunSnapshotV3)
-
-    legacy = {
-        key: value
-        for key, value in v2.items()
-        if key
-        not in {
-            "source_experiment",
-            "resolved_experiment_sha256",
-            "capability_plan",
-            "planned_prediction_count",
-            "runtime_locks",
-            "publication_schema_version",
-        }
-    }
-    legacy["schema_version"] = 1
-    parsed = read_run_snapshot(legacy)
-    assert isinstance(parsed, RunSnapshotV1)
-    assert not isinstance(parsed, RunSnapshotV2)
+    assert verify_snapshot(snapshot.to_dict())
+    for unsupported in (2, 3):
+        payload = {**snapshot.to_dict(), "schema_version": unsupported}
+        assert not verify_snapshot(payload)
 
 
 def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
@@ -1305,6 +1272,9 @@ def test_operator_results_prefers_enriched_normalized_exports(tmp_path: Path) ->
             {
                 "record_type": "trial",
                 "run_id": "run-1",
+                "candidate_id": "candidate-1",
+                "comparison_example_id": "example-1",
+                "trial_index": 1,
                 "run_key": "run-1:task:codex:trial-1",
                 "harness": "codex",
                 "experiment_id": "demo",

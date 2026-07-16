@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-CANDIDATE_IDENTITY_SCHEMA_VERSION = 3
+CANDIDATE_IDENTITY_SCHEMA_VERSION = 1
 EXECUTION_IDENTITY_SCHEMA_VERSION = 1
 COMPARISON_IDENTITY_SCHEMA_VERSION = 1
 

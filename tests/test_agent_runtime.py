@@ -139,6 +139,27 @@ def test_agent_runtime_lock_rejects_contract_drift(tmp_path: Path) -> None:
     assert agent_runtime.read_runtime_lock("codex", tmp_path) is None
 
 
+def test_agent_runtime_lock_requires_architecture_qualified_name(tmp_path: Path) -> None:
+    spec = agent_runtime.RUNTIMES["codex"]
+    root = tmp_path / agent_runtime.AGENT_RUNTIME_ROOT / "codex"
+    root.mkdir(parents=True)
+    (root / "runtime-lock.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "harness": "codex",
+                "version": spec.version,
+                "recipe_sha256": spec.recipe_sha256,
+                "image": spec.image,
+                "image_id": "sha256:" + "a" * 64,
+                "architecture": "amd64",
+            }
+        )
+    )
+
+    assert agent_runtime.read_runtime_lock("codex", tmp_path) is None
+
+
 def test_prepare_agent_runtime_records_image_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

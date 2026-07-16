@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 INPUT_LOCK_NAME = "input-lock.json"
 EVALUATION_ASSET_LOCK_NAME = "evaluation-assets.json"
-PREDICTION_ID_SCHEMA_VERSION = 2
+PREDICTION_ID_SCHEMA_VERSION = 1
 _SENSITIVE_NAME = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
@@ -47,37 +47,25 @@ class RunSnapshotV1:
     runtime: dict[str, Any]
     required_env: tuple[str, ...]
     preset: dict[str, Any] | None = None
+    source_experiment: dict[str, Any] | None = None
+    resolved_experiment_sha256: str = ""
+    capability_plan: tuple[dict[str, Any], ...] = ()
+    planned_prediction_count: int = 0
+    runtime_locks: tuple[dict[str, Any], ...] = ()
+    publication_schema_version: int = 1
+    evaluation_asset_lock_sha256: str = ""
+    cohort_id: str = ""
+    treatment_selection_sha256: str = ""
     snapshot_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["planned_matrix"] = list(self.planned_matrix)
         value["required_env"] = list(self.required_env)
-        value["lock_sha256"] = self.snapshot_sha256
-        return value
-
-
-@dataclass(frozen=True)
-class RunSnapshotV2(RunSnapshotV1):
-    source_experiment: dict[str, Any] | None = None
-    resolved_experiment_sha256: str = ""
-    capability_plan: tuple[dict[str, Any], ...] = ()
-    planned_prediction_count: int = 0
-    runtime_locks: tuple[dict[str, Any], ...] = ()
-    publication_schema_version: int = 4
-
-    def to_dict(self) -> dict[str, Any]:
-        value = super().to_dict()
         value["capability_plan"] = list(self.capability_plan)
         value["runtime_locks"] = list(self.runtime_locks)
+        value["lock_sha256"] = self.snapshot_sha256
         return value
-
-
-@dataclass(frozen=True)
-class RunSnapshotV3(RunSnapshotV2):
-    evaluation_asset_lock_sha256: str = ""
-    cohort_id: str = ""
-    treatment_selection_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,9 +79,6 @@ class EvaluationAssetLockV1:
         return asdict(self)
 
 
-RunSnapshot = RunSnapshotV1 | RunSnapshotV2 | RunSnapshotV3
-
-
 def build_run_snapshot(
     *,
     repo_root: Path,
@@ -105,7 +90,7 @@ def build_run_snapshot(
     env: Mapping[str, str],
     evaluation_asset_lock_sha256: str = "",
     treatment_selection_sha256: str = "",
-) -> RunSnapshotV3:
+) -> RunSnapshotV1:
     secret_names = {
         value: name
         for name, value in env.items()
@@ -340,8 +325,8 @@ def build_run_snapshot(
             key=lambda item: item["candidate_id"],
         )
     )
-    base = RunSnapshotV3(
-        schema_version=3,
+    base = RunSnapshotV1(
+        schema_version=1,
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
         experiment=resolved_experiment,
@@ -376,7 +361,7 @@ def build_run_snapshot(
         if _SENSITIVE_NAME.search(name) and len(value) >= 8 and value in serialized:
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
-    return RunSnapshotV3(**{**asdict(base), "snapshot_sha256": digest})
+    return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
 
 
 def build_evaluation_asset_lock(
@@ -461,7 +446,7 @@ def _prediction_id(cell: PlannedCell) -> str:
 
 def write_run_input_lock(
     repo_root: Path,
-    snapshot: RunSnapshot,
+    snapshot: RunSnapshotV1,
 ) -> Path:
     path = repo_root / ".fugue" / "runtime" / snapshot.run_id / INPUT_LOCK_NAME
     payload = snapshot.to_dict()
@@ -483,37 +468,13 @@ def write_run_input_lock(
 
 
 def verify_snapshot(payload: Mapping[str, Any]) -> bool:
+    if payload.get("schema_version") != 1:
+        return False
     expected = str(payload.get("snapshot_sha256") or payload.get("lock_sha256") or "")
     unsigned = dict(payload)
     unsigned["snapshot_sha256"] = ""
     unsigned["lock_sha256"] = ""
     return bool(expected) and expected == stable_digest(unsigned)
-
-
-def read_run_snapshot(payload: Mapping[str, Any]) -> RunSnapshot:
-    """Parse input locks without rewriting their historical schema."""
-    version = int(payload.get("schema_version") or 1)
-    values = dict(payload)
-    values.pop("lock_sha256", None)
-    if "snapshot_sha256" not in values:
-        values["snapshot_sha256"] = str(payload.get("lock_sha256") or "")
-    if version == 1:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        return RunSnapshotV1(**values)
-    if version == 2:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        values["capability_plan"] = tuple(values.get("capability_plan") or ())
-        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
-        return RunSnapshotV2(**values)
-    if version == 3:
-        values["planned_matrix"] = tuple(values.get("planned_matrix") or ())
-        values["required_env"] = tuple(values.get("required_env") or ())
-        values["capability_plan"] = tuple(values.get("capability_plan") or ())
-        values["runtime_locks"] = tuple(values.get("runtime_locks") or ())
-        return RunSnapshotV3(**values)
-    raise ValueError(f"unsupported run snapshot schema: {version}")
 
 
 def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int:

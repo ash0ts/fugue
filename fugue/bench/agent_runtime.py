@@ -335,9 +335,6 @@ def read_runtime_lock(
     path = (
         repo_root / AGENT_RUNTIME_ROOT / harness / f"runtime-lock-{architecture}.json"
     )
-    legacy = repo_root / AGENT_RUNTIME_ROOT / harness / "runtime-lock.json"
-    if architecture == "amd64" and not path.is_file() and legacy.is_file():
-        path = legacy
     if spec is None or not path.is_file():
         return None
     value = json.loads(path.read_text())

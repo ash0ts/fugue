@@ -1511,7 +1511,7 @@ async def prepare_context(
             metrics.setdefault("builder_cost_usd", None)
             manifest = {
                 **prepared.manifest,
-                "schema_version": 2,
+                "schema_version": 1,
                 "system": spec.to_dict(),
                 "repository": {
                     "repo": snapshot.repo,
@@ -1871,7 +1871,7 @@ def _update_context_index(
     path = cache_root / CONTEXT_INDEX
     cache_root.mkdir(parents=True, exist_ok=True)
     with FileLock(cache_root / ".index.lock", timeout=120):
-        raw = json.loads(path.read_text()) if path.is_file() else {"schema_version": 2}
+        raw = json.loads(path.read_text()) if path.is_file() else {"schema_version": 1}
         identity = hashlib.sha256(
             json.dumps(
                 {

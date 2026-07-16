@@ -27,6 +27,7 @@ from fugue.bench.context import (
     query_context,
 )
 from fugue.bench.library import validate_id
+from fugue.bench.manifest import RepositorySpec
 from fugue.bench.scoring import score_fact_recall, score_retrieval
 from fugue.model_plane import resolve_model_route, trace_project_slug
 from fugue.weave_support import trace_async_operation
@@ -576,10 +577,11 @@ async def _run_sequence_cohort(
 def _retrieval_case(raw: Any) -> RetrievalCase:
     if not isinstance(raw, dict):
         raise ValueError("retrieval case must be a mapping")
+    repository = _workload_repository(raw)
     return RetrievalCase(
         id=validate_id(raw["id"], kind="retrieval case id"),
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         query=str(raw["query"]),
         expected_paths=tuple(str(item) for item in raw.get("expected_paths", [])),
         family=str(raw["family"]) if raw.get("family") else None,
@@ -626,12 +628,30 @@ def _sequence_case(raw: Any) -> SequenceCase:
         raise ValueError(
             f"sequence {sequence_id} probes must reference an existing episode"
         )
+    repository = _workload_repository(raw)
     return SequenceCase(
         id=sequence_id,
-        repo=str(raw["repo"]),
-        commit=str(raw["commit"]),
+        repo=repository.slug,
+        commit=repository.commit,
         events=events,
         probes=probes,
+    )
+
+
+def _workload_repository(raw: dict[str, Any]) -> RepositorySpec:
+    if "repo" in raw or "commit" in raw or "base_commit" in raw:
+        raise ValueError("workload cases must use a typed repository mapping")
+    value = raw.get("repository")
+    if not isinstance(value, dict):
+        raise ValueError("workload case repository must be a mapping")
+    unknown = sorted(set(value) - {"type", "url", "commit", "path"})
+    if unknown:
+        raise ValueError("unknown workload repository field(s): " + ", ".join(unknown))
+    return RepositorySpec(
+        type=str(value.get("type") or ""),
+        url=str(value.get("url") or ""),
+        commit=str(value.get("commit") or ""),
+        path=str(value["path"]) if value.get("path") else None,
     )
 
 

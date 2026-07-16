@@ -325,7 +325,7 @@ jobs_dir: jobs/demo
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-one, repo: test/repo, base_commit: abc123}
+  - {id: task-one, repository: {type: git, url: https://github.com/test/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
 """
     )
     base = tmp_path / "configs/fugue/experiments/pilot.yaml"

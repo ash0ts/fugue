@@ -275,7 +275,7 @@ tasks:
     assert "FUGUE_EXPECTED_EVIDENCE_PATHS" not in job.env
     assert job.expected_evidence_paths == ("astropy/modeling/separable.py",)
     assert config["fugue"]["candidate_id"] == job.candidate_id
-    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "3"
+    assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "1"
     assert job.resolved_candidate.definition["harness_version"] == (
         "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
     )
@@ -1316,8 +1316,8 @@ dataset: {ref: fixture/tasks}
 harnesses:
   - {name: codex, agent: fugue.agents:FugueCodex}
 tasks:
-  - {id: task-a, repo: fixture/a, base_commit: abc}
-  - {id: task-b, repo: fixture/b, base_commit: def}
+  - {id: task-a, repository: {type: git, url: https://github.com/fixture/a, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}}
+  - {id: task-b, repository: {type: git, url: https://github.com/fixture/b, commit: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}}
 """
     )
     experiment = ExperimentSpec(

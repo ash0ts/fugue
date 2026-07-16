@@ -402,11 +402,11 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert logger.failed is None
     markers = [
         path
-        for path in (tmp_path / "v4").glob("**/*.json")
+        for path in (tmp_path / "v1").glob("**/*.json")
         if path.parent.name != "predictions"
     ]
     assert len(markers) == 2
-    assert len(list((tmp_path / "v4").glob("**/predictions/*.json"))) == 1
+    assert len(list((tmp_path / "v1").glob("**/predictions/*.json"))) == 1
     marker_values = [json.loads(path.read_text()) for path in markers]
     assert sorted(value["revision"] for value in marker_values) == [1, 2]
     assert sum(value["active"] is True for value in marker_values) == 1
@@ -438,7 +438,14 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
         SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
     )
     rows = [
-        {"record_type": "trial", "task_name": "trial"},
+        {
+            "record_type": "trial",
+            "task_name": "trial",
+            "run_id": "run-trial",
+            "candidate_id": "candidate-trial",
+            "comparison_example_id": "example-trial",
+            "trial_index": 1,
+        },
         {
             "record_type": "retrieval",
             "task_name": "query",
@@ -449,6 +456,7 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
             "execution_kind": "provider_diagnostic",
             "trial_index": 1,
             "workload_id": "retrieval-dataset",
+            "comparison_example_id": "example-query",
         },
         {
             "record_type": "episode",
@@ -622,7 +630,7 @@ def test_direct_evaluation_projection_requires_a_completed_cell() -> None:
     assert len(normalized) == 1
     assert normalized[0]["record_type"] == "trial"
     assert normalized[0]["source_record_type"] == "retrieval"
-    assert normalized[0]["prediction_schema_version"] == 2
+    assert normalized[0]["prediction_schema_version"] == 1
     assert normalized[0]["prediction_id"]
     assert normalized[0]["execution_kind"] == "provider_diagnostic"
 
@@ -2351,7 +2359,16 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
         SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
     )
     result = publish_to_weave(
-        [{"record_type": "trial", "task_name": "task-a"}],
+        [
+            {
+                "record_type": "trial",
+                "task_name": "task-a",
+                "run_id": "run-a",
+                "candidate_id": "candidate-a",
+                "comparison_example_id": "example-a",
+                "trial_index": 1,
+            }
+        ],
         f"entity/project-{tmp_path.name}",
         ledger_root=tmp_path,
         env={"WANDB_API_KEY": "test-only"},
@@ -2360,7 +2377,7 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
     assert result.published == 0
     assert result.failures and "summary failed" in result.failures[0]
     assert isinstance(failed[0], RuntimeError)
-    assert not list((tmp_path / "v4").glob("**/*.json"))
+    assert not list((tmp_path / "v1").glob("**/*.json"))
 
 
 def test_weave_publication_rejects_duplicate_candidate_examples(
@@ -2373,8 +2390,10 @@ def test_weave_publication_rejects_duplicate_candidate_examples(
     )
     row = {
         "record_type": "trial",
+        "run_id": "run-a",
         "candidate_id": "candidate-a",
         "comparison_example_id": "example-a",
+        "trial_index": 1,
     }
     with pytest.raises(ValueError, match="duplicate evaluation trial"):
         publish_to_weave(
@@ -2412,8 +2431,8 @@ def test_publication_ledger_rejects_prediction_overlap_across_evaluations(
         lambda project, env: SimpleNamespace(EvaluationLogger=FakeLogger),
     )
     common = {
-        "schema_version": 2,
-        "prediction_schema_version": 2,
+        "schema_version": 1,
+        "prediction_schema_version": 1,
         "record_type": "trial",
         "run_id": "run-a",
         "candidate_id": "candidate-a",

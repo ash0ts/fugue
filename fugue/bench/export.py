@@ -36,12 +36,12 @@ from fugue.model_plane import (
 from fugue.redaction import redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
-PREDICTION_SCHEMA_VERSION = 2
-PUBLICATION_SCHEMA_VERSION = 4
+PREDICTION_SCHEMA_VERSION = 1
+PUBLICATION_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
-class PredictionRowV2:
+class PredictionRowV1:
     prediction_id: str
     run_id: str
     candidate_id: str
@@ -1055,37 +1055,32 @@ def _apply_host_evidence_scores(
 def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Resolve every executable result to one stable logical prediction row."""
     normalized: list[dict[str, Any]] = []
-    positions: dict[str, int] = {}
-    canonical_inputs: dict[str, bool] = {}
+    prediction_ids: set[str] = set()
     for raw in _evaluation_rows(rows):
         row = dict(raw)
         run_id = str(row.get("run_id") or "")
-        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
-        comparison_id = str(_evaluation_inputs(row)["comparison_example_id"])
-        trial_index = _positive_int(row.get("trial_index") or row.get("attempt")) or 1
+        candidate_id = str(row.get("candidate_id") or "")
+        comparison_id = str(row.get("comparison_example_id") or "")
+        trial_index = _positive_int(row.get("trial_index"))
+        missing = [
+            name
+            for name, value in (
+                ("run_id", run_id),
+                ("candidate_id", candidate_id),
+                ("comparison_example_id", comparison_id),
+                ("trial_index", trial_index),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "evaluation prediction is missing canonical identity: "
+                + ", ".join(missing)
+            )
         execution_kind = str(
             row.get("execution_kind")
             or ("agent" if _is_agent_row(row) else "provider_diagnostic")
         )
-        current_schema = (
-            row.get("identity_schema_version") == CANDIDATE_IDENTITY_SCHEMA_VERSION
-            or row.get("prediction_schema_version") == PREDICTION_SCHEMA_VERSION
-        )
-        if not run_id and current_schema:
-            raise ValueError("current-schema evaluation prediction is missing run_id")
-        if not run_id:
-            run_id = (
-                "legacy-"
-                + _stable_digest(
-                    {
-                        "experiment_id": row.get("experiment_id"),
-                        "run_name": row.get("run_name"),
-                        "run_key": row.get("run_key"),
-                    }
-                )[:16]
-            )
-        if not candidate_id:
-            raise ValueError("evaluation prediction is missing candidate_id")
         prediction_id = _stable_digest(
             {
                 "schema_version": PREDICTION_SCHEMA_VERSION,
@@ -1098,7 +1093,7 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
         source_record_type = str(
             row.get("source_record_type") or row.get("record_type") or "trial"
         )
-        value = PredictionRowV2(
+        value = PredictionRowV1(
             prediction_id=prediction_id,
             run_id=run_id,
             candidate_id=candidate_id,
@@ -1108,19 +1103,11 @@ def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             source_record_type=source_record_type,
             payload=row,
         ).to_dict()
-        already_canonical = bool(row.get("prediction_schema_version"))
-        if prediction_id in positions:
-            prior_canonical = canonical_inputs[prediction_id]
-            if not prior_canonical and not already_canonical:
-                raise ValueError(
-                    f"duplicate evaluation trial (normalized prediction): {prediction_id}"
-                )
-            if already_canonical:
-                normalized[positions[prediction_id]] = value
-                canonical_inputs[prediction_id] = True
-            continue
-        positions[prediction_id] = len(normalized)
-        canonical_inputs[prediction_id] = already_canonical
+        if prediction_id in prediction_ids:
+            raise ValueError(
+                f"duplicate evaluation trial (normalized prediction): {prediction_id}"
+            )
+        prediction_ids.add(prediction_id)
         normalized.append(value)
     return normalized
 
@@ -1947,7 +1934,9 @@ def _publication_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         list[tuple[dict[str, Any], dict[str, Any]]],
     ] = {}
     for row in rows:
-        candidate_id = str(row.get("candidate_id") or _candidate_id_from_row(row))
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id:
+            raise ValueError("evaluation prediction is missing candidate_id")
         inputs = _evaluation_inputs(row)
         partition = (
             candidate_id,
@@ -2030,7 +2019,7 @@ def _evaluation_row_id(row: dict[str, Any]) -> str:
     return _stable_digest(
         {
             "run_id": row.get("run_id"),
-            "candidate_id": row.get("candidate_id") or _candidate_id_from_row(row),
+            "candidate_id": row.get("candidate_id"),
             "comparison_example_id": _evaluation_inputs(row)["comparison_example_id"],
             "trial_index": _positive_int(row.get("trial_index")) or 1,
             "status": _outcome_status(row),
@@ -2058,29 +2047,6 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
     }
     comparison_id = row.get("comparison_example_id") or _stable_digest(values)
     return {"comparison_example_id": comparison_id, **_drop_none(values)}
-
-
-def _candidate_id_from_row(row: dict[str, Any]) -> str:
-    if row.get("identity_schema_version") == CANDIDATE_IDENTITY_SCHEMA_VERSION:
-        raise ValueError("current-schema evaluation row is missing candidate_id")
-    return _stable_digest(
-        {
-            "harness": row.get("harness"),
-            "model_provider": row.get("model_provider"),
-            "model": row.get("model"),
-            "context_system_id": row.get("context_system_id"),
-            "context_delivery": row.get("context_delivery"),
-            "context_version": row.get("context_version"),
-            "context_config_hash": row.get("context_config_hash"),
-            "prompt_id": row.get("prompt_id"),
-            "prompt_hashes": row.get("prompt_hashes") or {},
-            "skill_ids": row.get("skill_ids") or [],
-            "skill_hashes": row.get("skill_hashes") or {},
-            "integration_ids": row.get("integration_ids") or [],
-            "integration_provenance": row.get("integration_provenance") or [],
-            "agent_config_hash": row.get("agent_config_hash"),
-        }
-    )
 
 
 def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:

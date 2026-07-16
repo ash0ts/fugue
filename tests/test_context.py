@@ -1143,8 +1143,8 @@ def test_workload_dataset_rejects_duplicate_cases_and_invalid_counts(
 id: retrieval
 runner: retrieval
 cases:
-  - {id: same, repo: fixture/repo, commit: abc, query: first}
-  - {id: same, repo: fixture/repo, commit: abc, query: second}
+  - {id: same, repository: {type: git, url: https://github.com/fixture/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}, query: first}
+  - {id: same, repository: {type: git, url: https://github.com/fixture/repo, commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}, query: second}
 """
     )
     with pytest.raises(ValueError, match="duplicate retrieval case"):
