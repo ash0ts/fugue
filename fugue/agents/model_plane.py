@@ -104,6 +104,11 @@ _HERMES_OTEL_FILES = (
     "config.yaml.example",
 )
 _HERMES_OTEL_DIRS = ("skills",)
+_SECRET_ENV_NAME = re.compile(
+    r"(?:^|_)(?:api_?key|key|token|secret|password|credential|private_?key|auth|authorization|headers?)(?:$|_)",
+    re.IGNORECASE,
+)
+_CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
 
 
 def _require_env(key_name: str, purpose: str) -> str:
@@ -142,6 +147,17 @@ def _split_tags(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _partition_exec_environment(
+    env: dict[str, str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    public: dict[str, str] = {}
+    secrets: dict[str, str] = {}
+    for name, value in env.items():
+        target = secrets if _SECRET_ENV_NAME.search(name) else public
+        target[name] = value
+    return public, secrets
 
 
 def _json_env(key: str) -> Any:
@@ -284,6 +300,120 @@ class _TrialMetaMixin:
 
     logs_dir: Path  # provided by BaseAgent
     TRACE_HARNESS: ClassVar[str]
+
+    def __init__(self, *args, **kwargs):
+        extra_env = dict(kwargs.get("extra_env") or {})
+        public_env, secret_env = _partition_exec_environment(extra_env)
+        kwargs["extra_env"] = public_env
+        self._fugue_secret_env = secret_env
+        self._fugue_secret_files: dict[str, str] = {}
+        super().__init__(*args, **kwargs)
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ) -> Any:
+        command, public_env = await self._isolate_exec_secrets(
+            environment, command, env
+        )
+        return await super().exec_as_agent(
+            environment,
+            command=command,
+            env=public_env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+    async def exec_as_root(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ) -> Any:
+        command, public_env = await self._isolate_exec_secrets(
+            environment, command, env
+        )
+        return await super().exec_as_root(
+            environment,
+            command=command,
+            env=public_env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+    async def _isolate_exec_secrets(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None,
+    ) -> tuple[str, dict[str, str] | None]:
+        public_env, secret_env = _partition_exec_environment(env or {})
+        secret_env = {**getattr(self, "_fugue_secret_env", {}), **secret_env}
+        if not secret_env:
+            return command, public_env or None
+        path = await self._stage_exec_secrets(environment, secret_env)
+        return f". {shlex.quote(path)}; {command}", public_env or None
+
+    async def _stage_exec_secrets(
+        self,
+        environment: BaseEnvironment,
+        values: dict[str, str],
+    ) -> str:
+        digest = hashlib.sha256(
+            json.dumps(values, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        existing = getattr(self, "_fugue_secret_files", {}).get(digest)
+        if existing:
+            return existing
+        target = (_CONTAINER_SECRET_ROOT / f"{digest}.env").as_posix()
+        owner = getattr(environment, "default_user", None)
+        await environment.exec(
+            command=f"install -d -m 0700 {_CONTAINER_SECRET_ROOT.as_posix()}",
+            user="root",
+            timeout_sec=10,
+        )
+        with tempfile.TemporaryDirectory(prefix="fugue-agent-secrets-") as temporary:
+            source = Path(temporary) / "environment"
+            source.write_text(
+                "".join(
+                    f"export {name}={shlex.quote(value)}\n"
+                    for name, value in sorted(values.items())
+                )
+            )
+            source.chmod(0o600)
+            await environment.upload_file(source_path=source, target_path=target)
+        ownership = (
+            f"chown {shlex.quote(str(owner))} {shlex.quote(target)} && "
+            if owner is not None
+            else ""
+        )
+        result = await environment.exec(
+            command=f"{ownership}chmod 0600 {shlex.quote(target)}",
+            user="root",
+            timeout_sec=10,
+        )
+        if result.return_code != 0:
+            raise RuntimeError("failed to stage the per-cell secret environment")
+        self._fugue_secret_files[digest] = target
+        return target
+
+    async def _remove_exec_secrets(self, environment: BaseEnvironment) -> None:
+        if not getattr(self, "_fugue_secret_files", {}):
+            return
+        try:
+            await environment.exec(
+                command=f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}",
+                user="root",
+                timeout_sec=10,
+            )
+        finally:
+            self._fugue_secret_files.clear()
 
     @property
     def context_system_id(self) -> str:
@@ -643,10 +773,13 @@ done
             )
         except Exception:
             pass
-        self._meta_end(
-            changed_paths=changed_paths,
-            artifact_normalization=artifact_normalization,
-        )
+        try:
+            self._meta_end(
+                changed_paths=changed_paths,
+                artifact_normalization=artifact_normalization,
+            )
+        finally:
+            await self._remove_exec_secrets(environment)
 
     async def _normalize_artifact_paths(
         self, environment: BaseEnvironment
