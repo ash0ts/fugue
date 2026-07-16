@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -140,6 +141,19 @@ def test_managed_service_resources_are_isolated_per_checkout(tmp_path: Path) -> 
         first_service["labels"]["io.fugue.managed-service-namespace"]
         != second_service["labels"]["io.fugue.managed-service-namespace"]
     )
+
+
+def test_fresh_managed_state_gets_a_new_volume_namespace(tmp_path: Path) -> None:
+    first_instance = services._ensure_service_instance(tmp_path)
+    first = managed_service_compose(GRAPHITI_SERVICE, repo_root=tmp_path)
+
+    shutil.rmtree(tmp_path / ".fugue")
+    second_instance = services._ensure_service_instance(tmp_path)
+    second = managed_service_compose(GRAPHITI_SERVICE, repo_root=tmp_path)
+
+    assert first_instance != second_instance
+    assert first["name"] != second["name"]
+    assert first["volumes"] != second["volumes"]
 
 
 def test_status_rejects_a_container_outside_the_pinned_contract(

@@ -16,6 +16,7 @@ import yaml
 from filelock import FileLock
 
 SERVICES_RUNTIME_ROOT = Path(".fugue") / "runtime" / "services"
+SERVICE_INSTANCE_FILE = ".instance-id"
 GRAPHITI_SERVICE_ID = "graphiti-neo4j"
 GRAPHITI_MANAGED_MARKER = "FUGUE_GRAPHITI_MANAGED_SERVICE_ID"
 ManagedServiceState = Literal[
@@ -242,6 +243,8 @@ def start_managed_services(
     selected = tuple(specs)
     if selected and shutil.which("docker") is None:
         raise RuntimeError("docker is required to start managed services")
+    if selected:
+        _ensure_service_instance(repo_root)
     for spec in selected:
         service_env = _service_environment(spec, repo_root, env, create=True)
         compose_path = _write_compose(spec, repo_root)
@@ -467,10 +470,68 @@ def _compose_path(spec: ManagedServiceSpec, repo_root: Path) -> Path:
     return _runtime_dir(spec, repo_root) / "docker-compose.yaml"
 
 
+def _service_instance_path(repo_root: Path) -> Path:
+    root = repo_root.resolve()
+    path = repo_root / SERVICES_RUNTIME_ROOT / SERVICE_INSTANCE_FILE
+    if not path.resolve(strict=False).is_relative_to(root):
+        raise RuntimeError(
+            f"managed service runtime must remain inside the repository: {path}"
+        )
+    return path
+
+
+def _read_service_instance(repo_root: Path) -> str:
+    path = _service_instance_path(repo_root)
+    if not path.exists():
+        return ""
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"managed service instance path is unsafe: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RuntimeError(f"managed service instance must use mode 0600: {path}")
+    value = path.read_text().strip()
+    if len(value) != 32 or any(character not in "0123456789abcdef" for character in value):
+        raise RuntimeError(f"managed service instance is invalid: {path}")
+    return value
+
+
+def _ensure_service_instance(repo_root: Path) -> str:
+    path = _service_instance_path(repo_root)
+    existing = _read_service_instance(repo_root)
+    if existing:
+        return existing
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    lock = FileLock(path.with_suffix(".lock"))
+    with lock:
+        existing = _read_service_instance(repo_root)
+        if existing:
+            return existing
+        value = secrets.token_hex(16)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(f"{value}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return value
+
+
 def _service_namespace(repo_root: Path | None) -> str:
     if repo_root is None:
         return ""
-    return hashlib.sha256(repo_root.resolve().as_posix().encode()).hexdigest()[:12]
+    identity = f"{repo_root.resolve().as_posix()}\0{_read_service_instance(repo_root)}"
+    return hashlib.sha256(identity.encode()).hexdigest()[:12]
 
 
 def _status(
