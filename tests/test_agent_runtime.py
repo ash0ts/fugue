@@ -28,7 +28,7 @@ def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> Non
     assert "codex-wrapper.sh" in spec.dockerfile
     source = (Path("fugue/agents/model_plane.py")).read_text()
     codex_install = source[
-        source.index("class FugueCodex") : source.index("class FugueLetta")
+        source.index("class FugueCodex") :
     ]
     assert "npm install" not in codex_install
     assert "apt-get" not in codex_install
@@ -49,7 +49,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             source.index("class FugueClaudeCode") : source.index("class FugueCodex")
         ],
         "codex": source[
-            source.index("class FugueCodex") : source.index("class FugueLetta")
+            source.index("class FugueCodex") :
         ],
     }
     assert set(ranges) == set(agent_runtime.RUNTIMES)

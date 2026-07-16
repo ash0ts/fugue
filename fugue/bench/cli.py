@@ -1068,144 +1068,16 @@ def _runs(args: argparse.Namespace) -> int:
     if not args.run_id:
         if args.runs_action:
             raise ValueError("a run id is required for this action")
-        runs = service.runs()[: args.limit]
-        if args.json:
-            print(as_json(runs))
-            return 0
-        table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
-        for name in (
-            "Run",
-            "Experiment",
-            "Status",
-            "Passed",
-            "Failed",
-            "Cancelled",
-            "Interrupted",
-            "Pending",
-        ):
-            table.add_column(name)
-        for run in runs:
-            table.add_row(
-                run.run_id,
-                run.experiment_id,
-                _status_markup(run.status),
-                str(run.passed),
-                str(run.failed),
-                str(run.cancelled),
-                str(run.interrupted),
-                str(run.pending),
-            )
-        if runs:
-            CONSOLE.print(table)
-        else:
-            CONSOLE.print(
-                "[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]"
-            )
-        return 0
-    if args.runs_action == "logs":
-        if args.follow:
-            try:
-                for chunk in service.supervisor.follow_log(
-                    args.run_id, cell_id=args.cell
-                ):
-                    print(chunk, end="", flush=True)
-            except KeyboardInterrupt:
-                return 130
-        else:
-            print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
-        return 0
-    if args.runs_action == "cancel":
-        run = service.supervisor.cancel(args.run_id)
-        if args.json:
-            print(as_json(service.run_summary(args.run_id)))
-        else:
-            CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
-        return 0
-    if args.runs_action == "package":
-        if not args.yes:
-            if not CONSOLE.is_terminal:
-                raise ValueError("use --yes to confirm packaging non-interactively")
-            if not Confirm.ask(
-                f"Package candidate {args.candidate} from run {args.run_id} "
-                f"(allow failed: {'yes' if args.allow_failed else 'no'}) "
-                f"as {args.image}?"
-            ):
-                return 1
-        result = service.package_candidate(
-            args.run_id,
-            args.candidate,
-            workspace=args.workspace,
-            image=args.image,
-            platform=args.platform,
-            allow_failed=args.allow_failed,
-        )
-        if args.json:
-            print(as_json(result))
-        else:
-            CONSOLE.print(
-                f"Packaged [bold]{result.candidate_id}[/] as "
-                f"[cyan]{result.image}[/] ({result.deployment_id})"
-            )
-            CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
-        return 0
-    if args.runs_action == "export":
-        summary = service.export_run(
-            args.run_id,
-            out=args.out,
-            fetch_weave=args.fetch_weave,
-            to_weave=args.to_weave,
-            republish=args.republish,
-            republish_reason=args.republish_reason,
-        )
-        if args.json:
-            print(as_json(summary))
-        else:
-            if summary.published:
-                CONSOLE.print(
-                    f"Published {summary.published} finalized candidate evaluation(s)"
-                )
-                for evaluation in summary.evaluations:
-                    suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
-                    CONSOLE.print(
-                        f"  {evaluation.name} ({evaluation.examples} examples; "
-                        f"{evaluation.linked_agent_predictions}/"
-                        f"{evaluation.agent_predictions} Agent-linked; "
-                        f"{evaluation.direct_predictions} direct){suffix}"
-                    )
-                    for reason in evaluation.linking_failures:
-                        CONSOLE.print(f"    [red]{reason}[/]")
-            if summary.skipped:
-                CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
-            for failure in summary.publication_failures:
-                CONSOLE.print(f"[red]Publication failed:[/] {failure}")
-            CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
-        return 0
-    if args.runs_action == "open":
-        links = service.run_links(args.run_id)
-        url = links.project if args.destination == "project" else links.agents
-        conversation_id = None
-        if args.destination == "evaluation":
-            evaluation = service.run_evaluation(args.run_id, cell_id=args.cell)
-            if evaluation is None or evaluation.url is None:
-                raise ValueError("run has no linked Weave evaluation")
-            url = evaluation.url
-        if args.destination == "trace":
-            url = links.trace or links.agents
-            refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
-            conversation_id = next(
-                (value for reference in refs for value in reference.conversation_ids),
-                None,
-            )
-        if args.json:
-            print(as_json({"url": url, "conversation_id": conversation_id}))
-        elif args.print_only:
-            print(url)
-        else:
-            webbrowser.open(url)
-            CONSOLE.print(f"Opened [link={url}]{url}[/link]")
-        if conversation_id and not args.json:
-            CONSOLE.print(f"Conversation: [cyan]{conversation_id}[/]")
-        return 0
+        return _runs_list(args, service, as_json)
+    handlers = {
+        "logs": _runs_logs,
+        "cancel": _runs_cancel,
+        "package": _runs_package,
+        "export": _runs_export,
+        "open": _runs_open,
+    }
+    if handler := handlers.get(args.runs_action):
+        return handler(args, service, as_json)
     run = service.run_summary(args.run_id)
     if args.json:
         print(as_json(run))
@@ -1213,6 +1085,153 @@ def _runs(args: argparse.Namespace) -> int:
         CONSOLE.print(_run_panel(run))
         CONSOLE.print(_candidates_table(run))
         CONSOLE.print(_cells_table(run))
+    return 0
+
+
+def _runs_list(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    runs = service.runs()[: args.limit]
+    if args.json:
+        print(as_json(runs))
+        return 0
+    table = Table(title="Recent runs", box=box.SIMPLE_HEAD)
+    for name in (
+        "Run",
+        "Experiment",
+        "Status",
+        "Passed",
+        "Failed",
+        "Cancelled",
+        "Interrupted",
+        "Pending",
+    ):
+        table.add_column(name)
+    for run in runs:
+        table.add_row(
+            run.run_id,
+            run.experiment_id,
+            _status_markup(run.status),
+            str(run.passed),
+            str(run.failed),
+            str(run.cancelled),
+            str(run.interrupted),
+            str(run.pending),
+        )
+    if runs:
+        CONSOLE.print(table)
+    else:
+        CONSOLE.print("[fugue.muted]No runs yet. Start one with `fugue run pilot`.[/]")
+    return 0
+
+
+def _runs_logs(args: argparse.Namespace, service: Any, _: Any) -> int:
+    if not args.follow:
+        print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
+        return 0
+    try:
+        for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
+            print(chunk, end="", flush=True)
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+def _runs_cancel(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    run = service.supervisor.cancel(args.run_id)
+    if args.json:
+        print(as_json(service.run_summary(args.run_id)))
+    else:
+        CONSOLE.print(f"{run.run_id}: {_status_markup(run.status)}")
+    return 0
+
+
+def _runs_package(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    if not args.yes:
+        if not CONSOLE.is_terminal:
+            raise ValueError("use --yes to confirm packaging non-interactively")
+        confirmed = Confirm.ask(
+            f"Package candidate {args.candidate} from run {args.run_id} "
+            f"(allow failed: {'yes' if args.allow_failed else 'no'}) as {args.image}?"
+        )
+        if not confirmed:
+            return 1
+    result = service.package_candidate(
+        args.run_id,
+        args.candidate,
+        workspace=args.workspace,
+        image=args.image,
+        platform=args.platform,
+        allow_failed=args.allow_failed,
+    )
+    if args.json:
+        print(as_json(result))
+    else:
+        CONSOLE.print(
+            f"Packaged [bold]{result.candidate_id}[/] as "
+            f"[cyan]{result.image}[/] ({result.deployment_id})"
+        )
+        CONSOLE.print(f"Deployment: [cyan]{result.path}[/]")
+    return 0
+
+
+def _runs_export(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    summary = service.export_run(
+        args.run_id,
+        out=args.out,
+        fetch_weave=args.fetch_weave,
+        to_weave=args.to_weave,
+        republish=args.republish,
+        republish_reason=args.republish_reason,
+    )
+    if args.json:
+        print(as_json(summary))
+        return 0
+    if summary.published:
+        CONSOLE.print(
+            f"Published {summary.published} finalized candidate evaluation(s)"
+        )
+        for evaluation in summary.evaluations:
+            suffix = f" [cyan]{evaluation.url}[/]" if evaluation.url else ""
+            CONSOLE.print(
+                f"  {evaluation.name} ({evaluation.examples} examples; "
+                f"{evaluation.linked_agent_predictions}/"
+                f"{evaluation.agent_predictions} Agent-linked; "
+                f"{evaluation.direct_predictions} direct){suffix}"
+            )
+            for reason in evaluation.linking_failures:
+                CONSOLE.print(f"    [red]{reason}[/]")
+    if summary.skipped:
+        CONSOLE.print(f"Skipped {summary.skipped} published candidate(s)")
+    for failure in summary.publication_failures:
+        CONSOLE.print(f"[red]Publication failed:[/] {failure}")
+    CONSOLE.print(f"Exported {summary.rows} rows to [cyan]{summary.path}[/]")
+    return 0
+
+
+def _runs_open(args: argparse.Namespace, service: Any, as_json: Any) -> int:
+    links = service.run_links(args.run_id)
+    url = links.project if args.destination == "project" else links.agents
+    conversation_id = None
+    if args.destination == "evaluation":
+        evaluation = service.run_evaluation(args.run_id, cell_id=args.cell)
+        if evaluation is None or evaluation.url is None:
+            raise ValueError("run has no linked Weave evaluation")
+        url = evaluation.url
+    if args.destination == "trace":
+        url = links.trace or links.agents
+        refs = service.run_trace_refs(args.run_id, cell_id=args.cell)
+        conversation_id = next(
+            (value for reference in refs for value in reference.conversation_ids),
+            None,
+        )
+    if args.json:
+        print(as_json({"url": url, "conversation_id": conversation_id}))
+    elif args.print_only:
+        print(url)
+    else:
+        webbrowser.open(url)
+        CONSOLE.print(f"Opened [link={url}]{url}[/link]")
+    if conversation_id and not args.json:
+        CONSOLE.print(f"Conversation: [cyan]{conversation_id}[/]")
     return 0
 
 

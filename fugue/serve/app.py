@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,17 @@ class _Reservation:
             self._admission._admitted -= 1
 
 
+@dataclass(frozen=True)
+class _ServingState:
+    backend: WorkerBackend
+    deployment: dict[str, Any]
+    timeout_sec: float
+    model_id: str
+    api_key: str
+    admission: _Admission
+    heartbeat_sec: float
+
+
 def create_app(
     *,
     deployment_path: Path | None = None,
@@ -93,11 +105,6 @@ def create_app(
     )
     api_key = selected_env.get("FUGUE_SERVE_API_KEY", "")
     cors_origins = _csv(selected_env.get("FUGUE_SERVE_CORS_ORIGINS"))
-    admission = _Admission(
-        int(selected_env.get("FUGUE_SERVE_MAX_CONCURRENCY", "1")),
-        int(selected_env.get("FUGUE_SERVE_QUEUE_DEPTH", "8")),
-    )
-
     app = FastAPI(
         title="Fugue Candidate Service",
         version=str(deployment.get("deployment_id") or "unknown"),
@@ -113,7 +120,27 @@ def create_app(
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type"],
         )
+    state = _ServingState(
+        backend=backend,
+        deployment=deployment,
+        timeout_sec=timeout,
+        model_id=model_id,
+        api_key=api_key,
+        admission=_Admission(
+            int(selected_env.get("FUGUE_SERVE_MAX_CONCURRENCY", "1")),
+            int(selected_env.get("FUGUE_SERVE_QUEUE_DEPTH", "8")),
+        ),
+        heartbeat_sec=heartbeat_sec,
+    )
+    _register_authentication(app, state)
+    _register_metadata_routes(app, state)
+    _register_responses_routes(app, state)
+    _register_chat_routes(app, state)
+    _register_ag_ui_routes(app, state)
+    return app
 
+
+def _register_authentication(app: FastAPI, state: _ServingState) -> None:
     @app.middleware("http")
     async def authenticate(request: Request, call_next):
         if request.method != "OPTIONS" and request.url.path not in {
@@ -121,8 +148,8 @@ def create_app(
             "/readyz",
         }:
             authorization = request.headers.get("authorization", "")
-            expected = f"Bearer {api_key}"
-            if not api_key or not hmac.compare_digest(authorization, expected):
+            expected = f"Bearer {state.api_key}"
+            if not state.api_key or not hmac.compare_digest(authorization, expected):
                 return _error(
                     "invalid or missing bearer token",
                     code="invalid_api_key",
@@ -131,22 +158,27 @@ def create_app(
                 )
         return await call_next(request)
 
+
+def _register_metadata_routes(app: FastAPI, state: _ServingState) -> None:
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
-        return {"status": "ok", "deployment_id": deployment["deployment_id"]}
+        return {
+            "status": "ok",
+            "deployment_id": state.deployment["deployment_id"],
+        }
 
     @app.get("/readyz")
     async def readyz():
         try:
             ready, missing = await asyncio.wait_for(
-                asyncio.to_thread(backend.readiness), timeout=2.0
+                asyncio.to_thread(state.backend.readiness), timeout=2.0
             )
         except TimeoutError:
             ready, missing = False, ("harbor-probe-timeout",)
         return JSONResponse(
             {
                 "status": "ready" if ready else "not_ready",
-                "deployment_id": deployment["deployment_id"],
+                "deployment_id": state.deployment["deployment_id"],
                 "missing": list(missing),
             },
             status_code=200 if ready else 503,
@@ -158,18 +190,20 @@ def create_app(
             "object": "list",
             "data": [
                 {
-                    "id": model_id,
+                    "id": state.model_id,
                     "object": "model",
-                    "created": int(deployment.get("model_created") or 0),
+                    "created": int(state.deployment.get("model_created") or 0),
                     "owned_by": "fugue",
                     "metadata": {
-                        "deployment_id": deployment["deployment_id"],
-                        "candidate_id": deployment["candidate_id"],
+                        "deployment_id": state.deployment["deployment_id"],
+                        "candidate_id": state.deployment["candidate_id"],
                     },
                 }
             ],
         }
 
+
+def _register_responses_routes(app: FastAPI, state: _ServingState) -> None:
     @app.post("/v1/responses/compact")
     async def compact_response():
         return _unsupported("compact responses are not supported", "compact")
@@ -180,8 +214,7 @@ def create_app(
             payload = await _json_body(request)
         except ValueError as exc:
             return _error(str(exc), code="request_too_large", status=413)
-        error = _responses_unsupported(payload)
-        if error:
+        if error := _responses_unsupported(payload):
             return error
         try:
             messages = _responses_messages(payload.get("input"))
@@ -189,19 +222,13 @@ def create_app(
             if instructions is not None and not isinstance(instructions, str):
                 raise ValueError("instructions must be text")
             if isinstance(instructions, str) and instructions.strip():
-                messages = (
-                    {"role": "developer", "content": instructions},
-                    *messages,
-                )
-        except ValueError as exc:
-            return _unsupported(str(exc), "input")
-        request_id = new_request_id("resp")
-        try:
+                messages = ({"role": "developer", "content": instructions}, *messages)
             conversation = ConversationRequest.normalized(messages)
         except ValueError as exc:
             return _unsupported(str(exc), "input")
+        request_id = new_request_id("resp")
         worker_request = WorkerRequest(request_id, "open-responses", conversation)
-        reservation = await admission.reserve()
+        reservation = await state.admission.reserve()
         if reservation is None:
             return _admission_error()
         if payload.get("stream") is True:
@@ -209,11 +236,11 @@ def create_app(
                 _reserved_stream(
                     reservation,
                     _responses_stream(
-                        backend,
+                        state.backend,
                         worker_request,
-                        model_id=model_id,
-                        heartbeat_sec=heartbeat_sec,
-                        timeout_sec=timeout,
+                        model_id=state.model_id,
+                        heartbeat_sec=state.heartbeat_sec,
+                        timeout_sec=state.timeout_sec,
                     ),
                 ),
                 media_type="text/event-stream",
@@ -221,21 +248,24 @@ def create_app(
             )
         try:
             async with reservation:
-                answer = await _run_backend(backend, worker_request, timeout)
+                answer = await _run_backend(
+                    state.backend, worker_request, state.timeout_sec
+                )
         except TimeoutError:
             return _error("worker timed out", code="worker_timeout", status=504)
         except Exception:
             return _error("worker failed", code="worker_error", status=500)
-        return _response_object(request_id, model_id, answer)
+        return _response_object(request_id, state.model_id, answer)
 
+
+def _register_chat_routes(app: FastAPI, state: _ServingState) -> None:
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         try:
             payload = await _json_body(request)
         except ValueError as exc:
             return _error(str(exc), code="request_too_large", status=413)
-        error = _chat_unsupported(payload)
-        if error:
+        if error := _chat_unsupported(payload):
             return error
         try:
             messages = _message_list(payload.get("messages"))
@@ -245,7 +275,7 @@ def create_app(
         worker_request = WorkerRequest(
             request_id, "chat-completions", ConversationRequest.normalized(messages)
         )
-        reservation = await admission.reserve()
+        reservation = await state.admission.reserve()
         if reservation is None:
             return _admission_error()
         if payload.get("stream") is True:
@@ -253,11 +283,11 @@ def create_app(
                 _reserved_stream(
                     reservation,
                     _chat_stream(
-                        backend,
+                        state.backend,
                         worker_request,
-                        model_id=model_id,
-                        heartbeat_sec=heartbeat_sec,
-                        timeout_sec=timeout,
+                        model_id=state.model_id,
+                        heartbeat_sec=state.heartbeat_sec,
+                        timeout_sec=state.timeout_sec,
                     ),
                 ),
                 media_type="text/event-stream",
@@ -265,7 +295,9 @@ def create_app(
             )
         try:
             async with reservation:
-                answer = await _run_backend(backend, worker_request, timeout)
+                answer = await _run_backend(
+                    state.backend, worker_request, state.timeout_sec
+                )
         except TimeoutError:
             return _error("worker timed out", code="worker_timeout", status=504)
         except Exception:
@@ -274,7 +306,7 @@ def create_app(
             "id": request_id,
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": model_id,
+            "model": state.model_id,
             "choices": [
                 {
                     "index": 0,
@@ -284,6 +316,8 @@ def create_app(
             ],
         }
 
+
+def _register_ag_ui_routes(app: FastAPI, state: _ServingState) -> None:
     @app.post("/ag-ui")
     async def ag_ui(request: Request):
         try:
@@ -303,26 +337,24 @@ def create_app(
             "ag-ui",
             ConversationRequest.normalized(messages),
         )
-        reservation = await admission.reserve()
+        reservation = await state.admission.reserve()
         if reservation is None:
             return _admission_error()
         return StreamingResponse(
             _reserved_stream(
                 reservation,
                 _ag_ui_stream(
-                    backend,
+                    state.backend,
                     worker_request,
                     run_id=run_id,
                     thread_id=thread_id,
-                    heartbeat_sec=heartbeat_sec,
-                    timeout_sec=timeout,
+                    heartbeat_sec=state.heartbeat_sec,
+                    timeout_sec=state.timeout_sec,
                 ),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    return app
 
 
 async def _run_backend(

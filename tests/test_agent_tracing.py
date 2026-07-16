@@ -78,7 +78,7 @@ def test_conversation_names_are_human_readable_and_bounded() -> None:
 def test_model_plane_uses_the_typed_trace_conversation_hook() -> None:
     source = AGENT_MODEL_PLANE.read_text()
 
-    for harness in ("hermes", "openclaw", "claude-code", "codex", "letta"):
+    for harness in ("hermes", "openclaw", "claude-code", "codex"):
         assert f'TRACE_HARNESS = "{harness}"' in source
     assert '"gen_ai.conversation.id": self.trace_conversation_id' in source
     assert '"weave.conversation.name": agent_conversation_name(' in source

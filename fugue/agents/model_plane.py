@@ -26,17 +26,9 @@ import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, ClassVar
+from typing import Any, ClassVar, override
 
-try:
-    from typing import override
-except ImportError:  # pragma: no cover - Python 3.11 fallback
-
-    def override(func):
-        return func
-
-
-from harbor.agents.installed.base import BaseInstalledAgent, CliFlag
+from harbor.agents.installed.base import CliFlag
 from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
@@ -2280,113 +2272,3 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 )
                 ids.append(m.group(1) if m else p.stem)
         return ids
-
-
-class FugueLetta(_TrialMetaMixin, BaseInstalledAgent):
-    """Pinned Letta Code harness with isolated local state per Harbor trial.
-
-    Letta is intentionally an agent harness, not a portable context provider.
-    Its MemFS and conversation state are collected under ``/logs/agent`` so
-    stateful results remain separate from the four-harness context matrix.
-    """
-
-    TRACE_HARNESS = "letta"
-    LETTA_VERSION = "0.26.2"
-
-    @staticmethod
-    @override
-    def name() -> str:
-        return "fugue-letta"
-
-    def __init__(self, *args, model_name: str | None = None, **kwargs):
-        self.model_route = resolve_model_route(model_name)
-        _require_model_key(self.model_route)
-        _require_trace_key()
-        _weave_entity_project()
-        kwargs.pop("version", None)
-        super().__init__(
-            *args,
-            model_name=self.model_route.display_model,
-            version=self.LETTA_VERSION,
-            **kwargs,
-        )
-
-    def get_version_command(self) -> str:
-        return "letta --version"
-
-    @override
-    async def install(self, environment: BaseEnvironment) -> None:
-        await self.exec_as_root(
-            environment,
-            command=(
-                "apt-get update && apt-get install -y --no-install-recommends "
-                "nodejs npm ca-certificates && rm -rf /var/lib/apt/lists/* && "
-                f"npm install -g @letta-ai/letta-code@{self.LETTA_VERSION}"
-            ),
-            env={"DEBIAN_FRONTEND": "noninteractive"},
-            timeout_sec=600,
-        )
-
-    def _connection(self) -> tuple[str, str, str]:
-        route = self.model_route
-        if route.provider == "anthropic":
-            return "anthropic", route.display_model, route.messages_base_url or ""
-        if route.provider == "openai":
-            return "openai", route.display_model, route.chat_base_url or ""
-        return (
-            "openai",
-            f"openai/{route.model_id}",
-            f"{BRIDGE_BASE_URL_CONTAINER}/v1",
-        )
-
-    @override
-    async def run(
-        self, instruction: str, environment: BaseEnvironment, context: AgentContext
-    ) -> None:
-        await self._begin_trial("letta", self.model_route, environment)
-        provider, letta_model, base_url = self._connection()
-        model_key = (
-            bridge_master_key()
-            if self.model_route.provider == "wandb"
-            else _require_model_key(self.model_route)
-        )
-        env = {
-            **provider_client_env(self.model_route, os.environ),
-            "FUGUE_LETTA_API_KEY": model_key,
-            "LETTA_LOCAL_BACKEND_DIR": "/logs/agent/letta-state",
-            "WANDB_API_KEY": _require_trace_key(),
-            "WEAVE_PROJECT": _weave_project_slug(),
-        }
-        connect = (
-            f"letta --backend local connect {shlex.quote(provider)} "
-            '--api-key "$FUGUE_LETTA_API_KEY"'
-        )
-        if base_url:
-            connect += f" --base-url {shlex.quote(base_url)}"
-        skills = ""
-        if self.skills_dir:
-            skills = (
-                "mkdir -p .agents/skills; "
-                f"cp -R {shlex.quote(str(self.skills_dir))}/. .agents/skills/; "
-            )
-        command = (
-            'mkdir -p "$LETTA_LOCAL_BACKEND_DIR" /logs/agent; '
-            f"{skills}"
-            f"{connect} > /logs/agent/letta-connect.log 2>&1 && "
-            "letta --backend local --new-agent "
-            f"--model {shlex.quote(letta_model)} "
-            f"-p {shlex.quote(self.render_instruction(instruction))} "
-            "--output-format text --no-system-info-reminder "
-            "2>&1 | tee /logs/agent/letta-output.txt"
-        )
-        try:
-            await self.exec_as_agent(environment, command=command, env=env)
-        finally:
-            await self._finish_trial(environment)
-
-    @override
-    def _extract_session_ids(self) -> list[str]:
-        root = self.logs_dir / "letta-state" / "memfs"
-        if not root.is_dir():
-            return []
-        return sorted(path.name for path in root.iterdir() if path.is_dir())
