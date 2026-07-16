@@ -833,7 +833,7 @@ done
             "skills_assigned": assigned,
             "skills_registered": payload.get("skills_registered", []),
             "registration_digest": payload.get("registration_digest"),
-            "directory": directory,
+            "directory": payload.get("directory", directory),
         }
         self._set_skill_registration(registration)
         if result.return_code != 0:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -129,6 +130,43 @@ def test_skill_registration_probe_requires_every_assigned_skill(
         text=True,
     )
     assert incomplete.returncode == 2
+
+    wrong = subprocess.run(
+        skill_registration_probe_command(root.as_posix(), ["other"]),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    wrong_payload = json.loads(wrong.stdout)
+    assert wrong.returncode == 2
+    assert wrong_payload["missing_skills"] == ["other"]
+    assert wrong_payload["unexpected_skills"] == ["pdf"]
+
+
+def test_skill_registration_probe_resolves_agent_home(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "agent-home"
+    skill = home / ".hermes" / "skills" / "pdf-artifact-workflow"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# PDF\n")
+
+    result = subprocess.run(
+        skill_registration_probe_command(
+            "$HOME/.hermes/skills", ["pdf-artifact-workflow"]
+        ),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": home.as_posix()},
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["directory"] == (home / ".hermes" / "skills").as_posix()
+    assert payload["skills_registered"] == ["pdf-artifact-workflow"]
 
 
 def test_codex_skill_read_is_normalized_from_a_successful_structured_event(
