@@ -12,6 +12,7 @@ workloads:
     dataset: datasets/repo-memory/agent-retrieval-bench-v1.yaml
     required_capabilities: [retrieve]
     systems: [none, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, codegraph, rag-bm25, rag-dense, rag-hybrid]
   - id: gitnexus-retrieval
     runner: retrieval
     dataset: datasets/repo-memory/agent-retrieval-bench-v1.yaml
@@ -24,16 +25,19 @@ workloads:
     required_capabilities: [bind]
     artifacts: [/logs/artifacts/fugue-answer.md]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
   - id: coding
     runner: harbor
     manifest: datasets/pilot.yaml
     required_capabilities: [bind]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
+    variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
   - id: continuity
     runner: sequence
     dataset: datasets/repo-memory/continuity-smoke.yaml
     required_capabilities: [sequence]
     systems: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
+    variants: [none, markdown-log, latmd, mem0, graphiti, rag-hybrid]
   - id: context-contract
     runner: harbor
     manifest: datasets/repo-memory/gitnexus-contract-v1.yaml
@@ -42,20 +46,20 @@ workloads:
     variants: [none, agentsmd, openwiki, gitnexus-bm25, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
   - id: hard-calibration
     runner: harbor
-    manifest: datasets/repo-memory/swe-bench-hard-memory-v1.yaml
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
     required_capabilities: [bind]
     systems: [none]
     variants: [none]
   - id: hard-discovery
     runner: harbor
-    manifest: datasets/repo-memory/swe-bench-hard-memory-v1.yaml
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
     required_capabilities: [bind]
     systems: [agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
     variants: [agentsmd, openwiki, gitnexus-vector, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
     harness_assignment: latin_square
   - id: hard-holdout
     runner: harbor
-    manifest: datasets/repo-memory/swe-bench-gitnexus-holdout-v1.yaml
+    manifest: datasets/repo-memory/swe-bench-hard-holdout-v2.yaml
     required_capabilities: [bind]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
     variants: [none]
@@ -74,21 +78,28 @@ workloads:
     variants: [none]
   - id: gitnexus-ablation
     runner: harbor
-    manifest: datasets/repo-memory/swe-bench-gitnexus-holdout-v1.yaml
+    manifest: datasets/repo-memory/swe-bench-gitnexus-ablation-v2.yaml
     required_capabilities: [bind]
     systems: [gitnexus]
     variants: [gitnexus-bm25, gitnexus-vector]
   - id: gitnexus-swe-contract
     runner: harbor
-    manifest: datasets/repo-memory/swe-bench-gitnexus-holdout-v1.yaml
+    manifest: datasets/repo-memory/swe-bench-qualification-v1.yaml
     required_capabilities: [bind]
     systems: [gitnexus]
     variants: [gitnexus-vector-contract]
+  - id: uptake-diagnostic
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-qualification-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, gitnexus]
+    variants: [uptake-none, uptake-vector, uptake-oriented-none, uptake-oriented-vector]
   - id: gitnexus-contract
     runner: harbor
     manifest: datasets/repo-memory/gitnexus-contract-v1.yaml
     required_capabilities: [bind]
     systems: [gitnexus]
+    variants: [gitnexus-bm25, gitnexus-vector]
 presets:
   smoke:
     workloads: [retrieval, qa, coding, continuity]
@@ -133,7 +144,7 @@ presets:
     systems: [none]
     harnesses: [hermes, openclaw, claude-code, codex]
     n_attempts: 1
-    n_tasks: 14
+    n_tasks: 8
     n_concurrent: 4
     scheduling_seed: hard-calibration-v1
   hard-discovery:
@@ -152,6 +163,7 @@ presets:
     n_tasks: 4
     n_concurrent: 4
     scheduling_seed: hard-holdout-v1
+    selection_lock_required: true
   hard-controls:
     workloads: [hard-controls]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
@@ -160,6 +172,7 @@ presets:
     n_tasks: 2
     n_concurrent: 4
     scheduling_seed: hard-controls-v1
+    selection_lock_required: true
   hard-repository-qa:
     workloads: [hard-repository-qa]
     systems: [none, agentsmd, openwiki, gitnexus, codegraph, aider-repomap, semble, project-rag, rag-bm25, rag-dense, rag-hybrid]
@@ -168,6 +181,15 @@ presets:
     n_tasks: 8
     n_concurrent: 4
     scheduling_seed: hard-repository-qa-v1
+    selection_lock_required: true
+  uptake-diagnostic:
+    workloads: [uptake-diagnostic]
+    systems: [none, gitnexus]
+    harnesses: [codex]
+    n_attempts: 1
+    n_tasks: 4
+    n_concurrent: 4
+    scheduling_seed: uptake-diagnostic-v1
   retrieval-study:
     workloads: [retrieval]
     systems: [none, rag-bm25, rag-dense, rag-hybrid]
@@ -233,6 +255,21 @@ variants:
         embedding_revision: d8c86521100d3556476a063fc2342036d45c106f
         embedding_dimensions: 384
         vector_required: true
+  - {id: uptake-none, label: Availability control, context: {system_id: none, delivery: portable}}
+  - id: uptake-vector
+    label: Vector available
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config: {retrieval_mode: hybrid_vector, embedding_model: Snowflake/snowflake-arctic-embed-xs, embedding_revision: d8c86521100d3556476a063fc2342036d45c106f, embedding_dimensions: 384, vector_required: true}
+  - {id: uptake-oriented-none, label: Orientation prompt without context, prompt_id: repository-memory-orientation, context: {system_id: none, delivery: portable}}
+  - id: uptake-oriented-vector
+    label: Orientation prompt with vector
+    prompt_id: repository-memory-orientation
+    context:
+      system_id: gitnexus
+      delivery: native_mcp
+      config: {retrieval_mode: hybrid_vector, embedding_model: Snowflake/snowflake-arctic-embed-xs, embedding_revision: d8c86521100d3556476a063fc2342036d45c106f, embedding_dimensions: 384, vector_required: true}
   - {id: codegraph, label: CodeGraph, context: {system_id: codegraph, delivery: native_mcp}}
   - {id: aider-repomap, label: Aider RepoMap, context: {system_id: aider-repomap, delivery: portable}}
   - {id: semble, label: Semble, context: {system_id: semble, delivery: native_mcp}}

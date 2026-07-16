@@ -1,0 +1,26 @@
+id: repo-memory-discovery-selection
+title: Repository-memory discovery treatment selection
+question: Which three context variants have the strongest paired official SWE resolution delta against the same task and harness no-context calibration, with localization and operational evidence used only as preregistered tie-breakers?
+filters:
+  experiment_id: repo-memory-impact
+  tag: selection:repo-memory-v2
+group_by: [variant_id, harness, context_system_id, model]
+metrics: [pass_rate, reward, wall_time_sec, cost_usd, failures, tool_calls]
+source: hybrid
+include_artifacts: false
+selection:
+  selection_unit: variant
+  baseline_variant_id: none
+  metric: pass_rate
+  confidence: 0.95
+  noninferiority_margin: 0.05
+  require_complete_grid: true
+  required_examples: 8
+  required_harnesses: [hermes, openclaw, claude-code, codex]
+  require_agent_links: true
+  require_registration: true
+  bootstrap_samples: 2000
+  tie_breakers: [localization_recall_at_10, localization_mrr, recoverable_error_rate, cost_per_success]
+  minimum_pass_rate_improvement: 0.05
+  minimum_cost_improvement: 0.15
+  minimum_latency_improvement: 0.15

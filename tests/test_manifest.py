@@ -110,8 +110,10 @@ tasks: [{id: task}]
 @pytest.mark.parametrize(
     "name",
     [
-        "swe-bench-hard-memory-v1.yaml",
-        "swe-bench-gitnexus-holdout-v1.yaml",
+        "swe-bench-hard-discovery-v2.yaml",
+        "swe-bench-hard-holdout-v2.yaml",
+        "swe-bench-gitnexus-ablation-v2.yaml",
+        "swe-bench-qualification-v1.yaml",
         "swe-bench-controls-v1.yaml",
     ],
 )

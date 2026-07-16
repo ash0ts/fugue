@@ -41,6 +41,10 @@ from fugue.bench.context import (
 )
 from fugue.bench.context_contracts import resolve_context_capabilities
 from fugue.bench.datasets import materialize_manifest_dataset
+from fugue.bench.evaluation_assets import (
+    attach_evaluation_assets,
+    prepare_evaluation_assets,
+)
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
 from fugue.bench.execution import (
     execute_cells,
@@ -94,6 +98,7 @@ from fugue.bench.reproducibility import (
 )
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.scoring import read_treatment_selection_lock
 from fugue.bench.services import (
     GRAPHITI_SERVICE_ID,
     ManagedServiceStatus,
@@ -354,6 +359,7 @@ class SetupPreparation:
     agent_runtimes: tuple[AgentRuntimePreparation, ...]
     task_runtimes: tuple[TaskRuntimePreparation, ...] = ()
     workload_datasets: tuple[PreparedWorkloadDataset, ...] = ()
+    evaluation_asset_locks: tuple[str, ...] = ()
     portable_context_runtime: AgentRuntimePreparation | None = None
 
 
@@ -929,6 +935,7 @@ class OperatorService:
             ]
         selected_tasks: list[tuple[BenchmarkManifest, Any]] = []
         workload_datasets: list[PreparedWorkloadDataset] = []
+        evaluation_asset_locks: set[str] = set()
         dataset_runtime = ContextRuntime(
             repo_root=self.repo_root,
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
@@ -955,6 +962,9 @@ class OperatorService:
                     request.manifest or workload.manifest or selected.manifest,
                 )
             )
+            evaluation_assets = prepare_evaluation_assets(manifest, self.repo_root)
+            if evaluation_assets is not None:
+                evaluation_asset_locks.add(evaluation_assets.as_posix())
             limit = (
                 request.n_tasks
                 or preset_workload_int(preset, workload.id, "n_tasks")
@@ -1057,6 +1067,7 @@ class OperatorService:
             agent_runtimes=tuple(prepared_agents),
             task_runtimes=tuple(prepared_tasks),
             workload_datasets=tuple(workload_datasets),
+            evaluation_asset_locks=tuple(sorted(evaluation_asset_locks)),
             portable_context_runtime=portable,
         )
 
@@ -1334,6 +1345,7 @@ class OperatorService:
         asset_overlay: dict[str, str] | None = None,
     ) -> list[RenderedJob]:
         selected = experiment or self.experiment(request.experiment_id)
+        request = _request_with_selection_lock(selected, request, self.repo_root)
         selected = _experiment_with_request_overrides(selected, request)
         env = self.env
         if "graphiti" in _selected_request_system_ids(selected, request):
@@ -1393,7 +1405,11 @@ class OperatorService:
                     if manifest_path.is_relative_to(self.repo_root)
                     else manifest_path.as_posix()
                 )
-                manifest = load_manifest(manifest_path, text=manifest_text)
+                manifest = attach_evaluation_assets(
+                    load_manifest(manifest_path, text=manifest_text),
+                    self.repo_root,
+                    required=write_configs,
+                )
                 env["FUGUE_TAGS"] = ",".join(
                     _run_tags(
                         env=env,
@@ -1782,6 +1798,7 @@ class OperatorService:
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
         selected = experiment or self.experiment(request.experiment_id)
+        request = _request_with_selection_lock(selected, request, self.repo_root)
         resolved = _experiment_with_request_overrides(selected, request)
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1858,6 +1875,17 @@ class OperatorService:
                 evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
                 treatment_selection_sha256=treatment_selection_sha256,
             )
+            source_commit = str(
+                (run_snapshot.runtime.get("fugue_source") or {}).get("commit") or ""
+            )
+            cells = [
+                replace(
+                    cell,
+                    run_snapshot_sha256=run_snapshot.snapshot_sha256,
+                    source_commit=source_commit,
+                )
+                for cell in cells
+            ]
             write_run_input_lock(self.repo_root, run_snapshot)
             if cancel_event.is_set():
                 raise _RunCancellation
@@ -3177,7 +3205,28 @@ def _selection_lock_digest(path: Path | None, repo_root: Path) -> str:
     resolved = _resolve(repo_root, path)
     if not resolved.is_file():
         raise ValueError(f"treatment selection lock does not exist: {resolved}")
-    return hashlib.sha256(resolved.read_bytes()).hexdigest()
+    return read_treatment_selection_lock(resolved).lock_sha256
+
+
+def _request_with_selection_lock(
+    experiment: ExperimentSpec,
+    request: ExperimentRequest,
+    repo_root: Path,
+) -> ExperimentRequest:
+    preset = select_preset(experiment, request.preset)
+    if not preset.selection_lock_required:
+        return request
+    if request.selection_lock is None:
+        raise ValueError(f"preset {preset.id} requires --selection-lock")
+    path = _resolve(repo_root, request.selection_lock)
+    lock = read_treatment_selection_lock(path)
+    selected = ("none", *lock.selected_variants)
+    if request.variants and set(request.variants) != set(selected):
+        raise ValueError(
+            "requested variants disagree with the treatment selection lock: "
+            + ", ".join(selected)
+        )
+    return replace(request, variants=selected)
 
 
 def _run_job_paths(root: Path, run: ManagedRun) -> list[Path]:

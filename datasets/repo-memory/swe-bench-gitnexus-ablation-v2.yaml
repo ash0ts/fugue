@@ -1,0 +1,19 @@
+dataset:
+  ref: swe-bench/swe-bench-verified
+  version: sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341
+  source: {name: princeton-nlp/SWE-bench_Verified, revision: c104f840cc67f8b6eec6f759ebc8b2693d585d4a, parquet_sha256: a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd}
+  verifier_runtime: {profile: swebench-v4-offline, python_interpreter: /opt/fugue-verifier/bin/python, python_packages: [swebench==4.0.3, datasets==2.16.1, fastcore==1.10.5]}
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 4
+jobs_dir: jobs/repo-memory-impact/gitnexus-ablation-v2
+harnesses:
+  - {name: hermes, agent: fugue.agents:FugueHermes}
+  - {name: openclaw, agent: fugue.agents:FugueOpenClaw}
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: sphinx-doc__sphinx-7748, repo: sphinx-doc/sphinx, base_commit: 9988d5ce267bf0df4791770b469431b1fb00dcdd, metadata: {partition: gitnexus_ablation, selection_rank: 13}}
+  - {id: pylint-dev__pylint-6528, repo: pylint-dev/pylint, base_commit: 273a8b25620467c1e5686aa8d2a1dbb8c02c78d0, metadata: {partition: gitnexus_ablation, selection_rank: 14}}
+  - {id: pylint-dev__pylint-4604, repo: pylint-dev/pylint, base_commit: 1e55ae64624d28c5fe8b63ad7979880ee2e6ef3f, metadata: {partition: gitnexus_ablation, selection_rank: 15}}
+  - {id: scikit-learn__scikit-learn-13142, repo: scikit-learn/scikit-learn, base_commit: 1c8668b0a021832386470ddf740d834e02c66f69, metadata: {partition: gitnexus_ablation, selection_rank: 16}}

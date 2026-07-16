@@ -1,0 +1,37 @@
+schema_version: 1
+id: repo-memory-hard-v2
+source:
+  dataset: princeton-nlp/SWE-bench_Verified
+  revision: c104f840cc67f8b6eec6f759ebc8b2693d585d4a
+  parquet_sha256: a45b1fe4e2f0c8390b2b2938ac83e92ed5979000856808f3679c07812e9e6dcd
+selection_seed: fugue-hard-memory-v2
+eligibility:
+  touched_files: {minimum: 2, maximum: 8}
+  requires_production_and_test_code: true
+  excludes_generated_vendor_binary: true
+  requires_cross_production_directories_or_issue_path_lexical_mismatch: true
+  maximum_tasks_per_repository: 2
+  minimum_eligible_tasks: 16
+excluded_prior_live_tasks:
+  - astropy__astropy-12907
+  - pydata__xarray-6992
+partitions:
+  discovery:
+    - {rank: 1, id: sympy__sympy-13031, repo: sympy/sympy, base_commit: 2dfa7457f20ee187fbb09b5b6a1631da4458388c, selection_sha256: 0177868f24271204645882af5dd1290ad5af6500af5ac3e63971101acd27e571, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 2, id: astropy__astropy-13033, repo: astropy/astropy, base_commit: 298ccb478e6bf092953bca67a3d29dc6c35f6752, selection_sha256: 019f1db37f14e99c9f663435076e6f8e8553b5102b5655bad5eabd9dab9bc9e0, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 3, id: django__django-17087, repo: django/django, base_commit: 4a72da71001f154ea60906a2f74898d32b7322a7, selection_sha256: 01b01622db5e06baf27e048c1776a796e6a3009c145ec56a5f547ef7368ac2c3, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 4, id: django__django-11477, repo: django/django, base_commit: e28671187903e6aca2428374fdd504fca3032aee, selection_sha256: 01b85e8e56b11b6f2300f0c9185395be7fd51e30cec91b09d8fdd737abbeb65c, touched_files: 6, production_files: 1, test_files: 5, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 5, id: sympy__sympy-18199, repo: sympy/sympy, base_commit: ba80d1e493f21431b4bf729b3e0452cd47eb9566, selection_sha256: 0457fbeb3d19749b7d0d1d3d79e1d251ad68d7b5f773e95764af9af974607eed, touched_files: 3, production_files: 1, test_files: 2, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 6, id: sphinx-doc__sphinx-9461, repo: sphinx-doc/sphinx, base_commit: 939c7bb7ff7c53a4d27df067cea637540f0e1dad, selection_sha256: 04d324c47d8464d5f3159e2e903592448e319a225fad49790516302d911162e3, touched_files: 7, production_files: 3, test_files: 4, cross_production_directories: true, lexical_mismatch: false}
+    - {rank: 7, id: mwaskom__seaborn-3069, repo: mwaskom/seaborn, base_commit: 54cab15bdacfaa05a88fbc5502a5b322d99f148e, selection_sha256: 0be326975467c5ec84ef3b3c2c54981f171aec3d4d6260a7411a4f59d7967014, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 8, id: scikit-learn__scikit-learn-25102, repo: scikit-learn/scikit-learn, base_commit: f9a1cf072da9d7375d6c2163f68a6038b13b310f, selection_sha256: 0cfe58f048b4aeda9fb0695502fe258ab6babffb13512b90af572068521c8f34, touched_files: 4, production_files: 2, test_files: 2, cross_production_directories: true, lexical_mismatch: true}
+  holdout:
+    - {rank: 9, id: matplotlib__matplotlib-13989, repo: matplotlib/matplotlib, base_commit: a3e2897bfaf9eaac1d6649da535c4e721c89fa69, selection_sha256: 188632461b47da064db3c2e4dfc44de97997b7547a0518800c11964c17d18fd2, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 10, id: mwaskom__seaborn-3187, repo: mwaskom/seaborn, base_commit: 22cdfb0c93f8ec78492d87edb810f10cb7f57a31, selection_sha256: 1eb5917f06490d0bb3913813a94e5113057704e35126fa43f87b06fef7058270, touched_files: 4, production_files: 2, test_files: 2, cross_production_directories: true, lexical_mismatch: false}
+    - {rank: 11, id: pytest-dev__pytest-7490, repo: pytest-dev/pytest, base_commit: 7f7a36478abe7dd1fa993b115d22606aa0e35e88, selection_sha256: 1ff44ab936c8746757c5e11807d4d031281bc512fd0787a21edb4ba026e584d8, touched_files: 2, production_files: 1, test_files: 1, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 12, id: matplotlib__matplotlib-23314, repo: matplotlib/matplotlib, base_commit: 97fc1154992f64cfb2f86321155a7404efeb2d8a, selection_sha256: 202f7968f69aa36bb0e95670a3d6d21a69294b26b64bd47c537927613a6702da, touched_files: 3, production_files: 1, test_files: 2, cross_production_directories: false, lexical_mismatch: true}
+  gitnexus_ablation:
+    - {rank: 13, id: sphinx-doc__sphinx-7748, repo: sphinx-doc/sphinx, base_commit: 9988d5ce267bf0df4791770b469431b1fb00dcdd, selection_sha256: 26c56556f816415a52971bffaffde5e348dc0ff1884657e824ed4226f55fce5d, touched_files: 3, production_files: 1, test_files: 2, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 14, id: pylint-dev__pylint-6528, repo: pylint-dev/pylint, base_commit: 273a8b25620467c1e5686aa8d2a1dbb8c02c78d0, selection_sha256: 2d359669dabca58b1f8b5226118351e48960adf64385f166f5402c31a5ef3603, touched_files: 5, production_files: 2, test_files: 3, cross_production_directories: false, lexical_mismatch: true}
+    - {rank: 15, id: pylint-dev__pylint-4604, repo: pylint-dev/pylint, base_commit: 1e55ae64624d28c5fe8b63ad7979880ee2e6ef3f, selection_sha256: 3ef417d60050c515ac8a923842da070899ca5933a24a75413a169a5996e05c17, touched_files: 3, production_files: 2, test_files: 1, cross_production_directories: true, lexical_mismatch: true}
+    - {rank: 16, id: scikit-learn__scikit-learn-13142, repo: scikit-learn/scikit-learn, base_commit: 1c8668b0a021832386470ddf740d834e02c66f69, selection_sha256: 43324ec3f3eef6cd86a7263720b35c8b7409f970dc71102bab52019abc6f6021, touched_files: 3, production_files: 1, test_files: 2, cross_production_directories: false, lexical_mismatch: true}

@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
+import yaml
+
 from fugue.bench.context import ContextRuntime, get_context_system, list_context_systems
+from fugue.bench.execution import plan_cells
 from fugue.bench.library import get_experiment
+from fugue.bench.manifest import load_manifest
 from fugue.bench.operator import (
     ExperimentRequest,
     OperatorService,
     _preparation_targets,
     select_preset,
+)
+from fugue.bench.reproducibility import _planned_prediction_count
+from fugue.bench.scoring import (
+    build_treatment_selection_lock,
+    write_treatment_selection_lock,
 )
 from fugue.bench.workloads import _add_runtime_correlation
 
@@ -81,6 +92,43 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     assert {target.spec.id for target in targets} <= set(smoke.systems)
 
 
+def test_hard_memory_v2_lock_is_deterministic_disjoint_and_gold_free() -> None:
+    path = REPO_ROOT / "datasets/repo-memory/swe-bench-hard-memory-v2.lock.yaml"
+    lock = yaml.safe_load(path.read_text())
+    partitions = lock["partitions"]
+    rows = [
+        row
+        for name in ("discovery", "holdout", "gitnexus_ablation")
+        for row in partitions[name]
+    ]
+    ids = [row["id"] for row in rows]
+
+    assert [len(partitions[name]) for name in partitions] == [8, 4, 4]
+    assert len(ids) == len(set(ids)) == 16
+    assert set(ids).isdisjoint(lock["excluded_prior_live_tasks"])
+    assert "expected_paths" not in path.read_text()
+    assert all(
+        row["selection_sha256"]
+        == hashlib.sha256(
+            f"{lock['selection_seed']}:{row['id']}".encode()
+        ).hexdigest()
+        for row in rows
+    )
+    repositories = {row["repo"] for row in rows}
+    assert all(sum(row["repo"] == repo for row in rows) <= 2 for repo in repositories)
+
+    manifests = {
+        "discovery": "swe-bench-hard-discovery-v2.yaml",
+        "holdout": "swe-bench-hard-holdout-v2.yaml",
+        "gitnexus_ablation": "swe-bench-gitnexus-ablation-v2.yaml",
+    }
+    for partition, name in manifests.items():
+        selected = load_manifest(REPO_ROOT / "datasets/repo-memory" / name)
+        assert [task.id for task in selected.tasks] == [
+            row["id"] for row in partitions[partition]
+        ]
+
+
 def test_context_preparation_honors_request_task_limit() -> None:
     experiment = get_experiment("repo-memory-impact", REPO_ROOT)
     workload = next(
@@ -98,7 +146,7 @@ def test_context_preparation_honors_request_task_limit() -> None:
     )
 
     assert {target.snapshot.task_id for target in targets} == {
-        "pydata__xarray-6992"
+        "sphinx-doc__sphinx-7748"
     }
 
 
@@ -119,9 +167,9 @@ def test_gitnexus_swe_contract_is_a_distinct_retrieval_required_canary(
     natural = service.rendered_jobs(
         ExperimentRequest(
             experiment_id="repo-memory-impact",
-            preset="gitnexus-ablation",
+            preset="uptake-diagnostic",
             harnesses=("codex",),
-            variants=("gitnexus-vector",),
+            variants=("uptake-vector",),
             n_tasks=1,
             n_attempts=1,
         ),
@@ -247,12 +295,12 @@ def test_repo_memory_direct_cells_use_direct_result_contract(monkeypatch) -> Non
     }
 
 
-def test_hard_memory_presets_encode_exact_cohorts(monkeypatch) -> None:
+def test_hard_memory_presets_encode_exact_cohorts(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(REPO_ROOT)
     service = OperatorService(REPO_ROOT)
     expected = {
         "context-contract": 48,
-        "hard-calibration": 56,
+        "hard-calibration": 32,
         "hard-discovery": 80,
         "gitnexus-ablation": 96,
     }
@@ -268,6 +316,19 @@ def test_hard_memory_presets_encode_exact_cohorts(monkeypatch) -> None:
         assert sum(job.n_attempts for job in jobs) == count
 
     treatments = ("none", "gitnexus-vector", "rag-dense", "rag-hybrid")
+    lock = build_treatment_selection_lock(
+        source_commit="a" * 40,
+        calibration_snapshot_sha256="b" * 64,
+        discovery_snapshot_sha256="c" * 64,
+        rankings=(
+            {"variant_id": "gitnexus-vector"},
+            {"variant_id": "rag-dense"},
+            {"variant_id": "rag-hybrid"},
+            {"variant_id": "agentsmd"},
+        ),
+        selected_variants=treatments[1:],
+    )
+    lock_path = write_treatment_selection_lock(tmp_path / "selection.json", lock)
     for preset, count in {
         "hard-holdout": 192,
         "hard-controls": 96,
@@ -278,12 +339,63 @@ def test_hard_memory_presets_encode_exact_cohorts(monkeypatch) -> None:
                 experiment_id="repo-memory-impact",
                 preset=preset,
                 variants=treatments,
+                selection_lock=lock_path,
             ),
             run_id=f"plan-{preset}",
             write_configs=False,
         )
         assert sum(job.n_attempts for job in jobs) == count
         assert {job.variant_id for job in jobs} == set(treatments)
+
+    with pytest.raises(ValueError, match="requires --selection-lock"):
+        service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="repo-memory-impact",
+                preset="hard-holdout",
+            ),
+            run_id="plan-holdout-without-lock",
+            write_configs=False,
+        )
+    with pytest.raises(ValueError, match="disagree"):
+        service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="repo-memory-impact",
+                preset="hard-holdout",
+                variants=("none", "agentsmd"),
+                selection_lock=lock_path,
+            ),
+            run_id="plan-holdout-wrong-treatment",
+            write_configs=False,
+        )
+
+
+def test_uptake_diagnostic_is_preregistered_and_excluded_from_primary_grid(
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    jobs = OperatorService(REPO_ROOT).rendered_jobs(
+        ExperimentRequest(
+            experiment_id="repo-memory-impact",
+            preset="uptake-diagnostic",
+        ),
+        run_id="plan-uptake-diagnostic",
+        write_configs=False,
+    )
+
+    assert len(jobs) == 16
+    assert {job.variant_id for job in jobs} == {
+        "uptake-none",
+        "uptake-vector",
+        "uptake-oriented-none",
+        "uptake-oriented-vector",
+    }
+    assert {job.harness for job in jobs} == {"codex"}
+    assert {job.task_id for job in jobs} == {
+        "pydata__xarray-6992",
+        "sphinx-doc__sphinx-7590",
+        "django__django-11885",
+        "django__django-11400",
+    }
 
 
 def test_direct_study_presets_keep_modes_and_measurement_counts(monkeypatch) -> None:
@@ -321,6 +433,31 @@ def test_direct_study_presets_keep_modes_and_measurement_counts(monkeypatch) -> 
         "gitnexus-bm25",
         "gitnexus-vector",
     }
+    continuity = service.rendered_jobs(
+        ExperimentRequest(
+            experiment_id=experiment.id,
+            preset="continuity-study",
+        ),
+        run_id="plan-continuity-reconciliation",
+        write_configs=False,
+    )
+    cells = plan_cells(
+        continuity,
+        run_id="plan-continuity-reconciliation",
+        run_name="continuity reconciliation",
+    )
+    by_fingerprint = {
+        job.resolved_candidate.execution_fingerprint: job for job in continuity
+    }
+    assert sum(
+        _planned_prediction_count(cell, by_fingerprint[cell.execution_fingerprint])
+        for cell in cells
+    ) == 108
+    assert sum(
+        _planned_prediction_count(cell, by_fingerprint[cell.execution_fingerprint])
+        for cell in cells
+        if cell.applicable
+    ) == 90
 
 
 def test_explicit_experimental_system_remains_visible_as_not_applicable(

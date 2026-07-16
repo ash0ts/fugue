@@ -72,6 +72,8 @@ class PlannedCell:
     context_delivery: str = "portable"
     expected_evidence_paths: tuple[str, ...] = ()
     evaluation_asset_lock_sha256: str = ""
+    run_snapshot_sha256: str = ""
+    source_commit: str = ""
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None

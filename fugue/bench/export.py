@@ -711,6 +711,8 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "repository": env.get("FUGUE_REPOSITORY"),
         "base_commit": env.get("FUGUE_BASE_COMMIT"),
         "evaluation_asset_lock_sha256": cell.evaluation_asset_lock_sha256 or None,
+        "run_snapshot_sha256": cell.run_snapshot_sha256 or None,
+        "source_commit": cell.source_commit or None,
         "model_provider": cell.model_provider,
         "model": cell.model,
         "trace_project": env.get("WEAVE_PROJECT")

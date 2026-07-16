@@ -264,6 +264,7 @@ class PresetSpec:
     n_attempts: int | None = None
     n_concurrent: int | None = None
     scheduling_seed: str | None = None
+    selection_lock_required: bool = False
     workload_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -924,6 +925,9 @@ def _presets(raw: Any) -> list[PresetSpec]:
                     kind=f"preset {preset_id} n_concurrent",
                 ),
                 scheduling_seed=_optional_str(value.get("scheduling_seed")),
+                selection_lock_required=bool(
+                    value.get("selection_lock_required", False)
+                ),
                 workload_overrides=_workload_overrides(
                     value.get("workload_overrides"), preset_id
                 ),

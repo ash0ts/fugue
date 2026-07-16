@@ -517,8 +517,6 @@ def read_run_snapshot(payload: Mapping[str, Any]) -> RunSnapshot:
 
 
 def _planned_prediction_count(cell: PlannedCell, job: RenderedJob | None) -> int:
-    if not cell.applicable:
-        return 0
     if cell.execution_kind == "agent":
         return 1
     fugue = dict((job.config if job is not None else {}).get("fugue") or {})

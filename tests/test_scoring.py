@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from fugue.bench.scoring import SelectionPolicy, select_candidate_configuration
+import json
+from pathlib import Path
+
+import pytest
+
+from fugue.bench.scoring import (
+    SelectionPolicy,
+    build_treatment_selection_lock,
+    read_treatment_selection_lock,
+    select_candidate_configuration,
+    write_treatment_selection_lock,
+)
 
 
 def _rows(candidate: str, *, cost: float | None, wall: float = 2.0):
@@ -84,3 +95,77 @@ def test_incumbent_requires_explicit_improvement_for_promotion():
 
     assert unchanged.decision == "no_promotion"
     assert promoted.decision == "promote"
+
+
+def test_variant_selection_pairs_each_latin_square_row_to_its_baseline() -> None:
+    harnesses = ("hermes", "openclaw", "claude-code", "codex")
+    rows = []
+    for index, harness in enumerate(harnesses, start=1):
+        common = {
+            "task_name": f"task-{index}",
+            "harness": harness,
+            "comparison_example_id": f"example-{index}",
+            "trial_index": 1,
+            "trace_link_status": "linked",
+            "context_registration_status": "registered",
+            "cost_usd": 1.0,
+            "wall_time_sec": 2.0,
+        }
+        rows.extend(
+            (
+                {**common, "variant_id": "none", "pass": False},
+                {
+                    **common,
+                    "variant_id": "vector",
+                    "pass": True,
+                    "localization_recall_at_10": 1.0,
+                    "localization_mrr": 1.0,
+                },
+                {**common, "variant_id": "bm25", "pass": index == 1},
+            )
+        )
+
+    selection = select_candidate_configuration(
+        rows,
+        SelectionPolicy(
+            selection_unit="variant",
+            baseline_variant_id="none",
+            required_examples=4,
+            required_harnesses=harnesses,
+            require_agent_links=True,
+            require_registration=True,
+            tie_breakers=(
+                "localization_recall_at_10",
+                "localization_mrr",
+                "recoverable_error_rate",
+                "cost_per_success",
+            ),
+            bootstrap_samples=200,
+        ),
+        seed="latin-square",
+    )
+
+    assert selection.selected_candidate_id == "vector"
+    vector = next(item for item in selection.candidates if item.candidate_id == "vector")
+    assert vector.paired_pass_rate_delta == 1.0
+    assert selection.to_dict()["selection_unit"] == "variant"
+
+
+def test_treatment_selection_lock_is_immutable_and_digest_verified(
+    tmp_path: Path,
+) -> None:
+    lock = build_treatment_selection_lock(
+        source_commit="a" * 40,
+        calibration_snapshot_sha256="b" * 64,
+        discovery_snapshot_sha256="c" * 64,
+        rankings=tuple({"variant_id": value} for value in ("a", "b", "c", "d")),
+        selected_variants=("a", "b", "c"),
+    )
+    path = write_treatment_selection_lock(tmp_path / "selection.json", lock)
+
+    assert read_treatment_selection_lock(path) == lock
+    payload = json.loads(path.read_text())
+    payload["selected_variants"] = ["b", "c", "d"]
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="digest"):
+        read_treatment_selection_lock(path)

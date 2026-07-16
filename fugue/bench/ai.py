@@ -52,7 +52,9 @@ from fugue.bench.manifest import load_manifest
 from fugue.bench.scoring import (
     CandidateSelection,
     SelectionPolicy,
+    build_treatment_selection_lock,
     select_candidate_configuration,
+    write_treatment_selection_lock,
 )
 from fugue.bench.sources import list_skill_source_ids, load_skill_source
 from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
@@ -1047,16 +1049,26 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
         raise ValueError("analysis selection noninferiority_margin must be in [0, 1)")
     if samples < 100:
         raise ValueError("analysis selection bootstrap_samples must be at least 100")
+    selection_unit = str(raw.get("selection_unit") or "candidate")
+    if selection_unit not in {"candidate", "variant"}:
+        raise ValueError("analysis selection_unit must be candidate or variant")
     tie_breakers = tuple(
         str(item)
         for item in raw.get("tie_breakers")
         or SelectionPolicy.__dataclass_fields__["tie_breakers"].default
     )
-    expected_ties = SelectionPolicy.__dataclass_fields__["tie_breakers"].default
-    if tie_breakers != expected_ties:
+    supported_ties = {
+        "cost_per_success",
+        "median_wall_time_sec",
+        "recoverable_error_rate",
+        "localization_recall_at_10",
+        "localization_mrr",
+    }
+    unknown_ties = sorted(set(tie_breakers) - supported_ties)
+    if unknown_ties:
         raise ValueError(
-            "analysis selection tie_breakers must be cost_per_success, "
-            "median_wall_time_sec, recoverable_error_rate"
+            "unsupported analysis selection tie breaker(s): "
+            + ", ".join(unknown_ties)
         )
     improvement_values = {
         "minimum_pass_rate_improvement": float(
@@ -1072,6 +1084,20 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
     if any(not 0 <= value < 1.0 for value in improvement_values.values()):
         raise ValueError("analysis selection improvement thresholds must be in [0, 1)")
     return SelectionPolicy(
+        selection_unit=selection_unit,  # type: ignore[arg-type]
+        baseline_variant_id=(
+            str(raw["baseline_variant_id"])
+            if raw.get("baseline_variant_id")
+            else None
+        ),
+        required_examples=(
+            int(raw["required_examples"]) if raw.get("required_examples") else None
+        ),
+        required_harnesses=tuple(
+            str(value) for value in raw.get("required_harnesses") or ()
+        ),
+        require_agent_links=bool(raw.get("require_agent_links", False)),
+        require_registration=bool(raw.get("require_registration", False)),
         metric=metric,
         confidence=confidence,
         noninferiority_margin=margin,
@@ -1302,6 +1328,9 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     selection = result.selection
     if selection is None or selection.selected_candidate_id is None:
         return
+    if result.spec.id == "repo-memory-discovery-selection":
+        _write_memory_treatment_lock(result)
+        return
     rows = [dict(row) for row in result.snapshot.rows]
     selected_rows = [
         row
@@ -1434,6 +1463,77 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     }
     (output / "candidate-preset.yaml").write_text(
         yaml.safe_dump(redact_value(candidate), sort_keys=False)
+    )
+
+
+def _write_memory_treatment_lock(result: AnalysisResult) -> None:
+    selection = result.selection
+    assert selection is not None
+    if any(not candidate.eligible for candidate in selection.candidates):
+        return
+    eligible = [candidate for candidate in selection.candidates if candidate.eligible]
+    ranked = sorted(
+        eligible,
+        key=lambda candidate: (
+            -(candidate.paired_pass_rate_delta or 0.0),
+            -(
+                candidate.localization_recall_at_10
+                if candidate.localization_recall_at_10 is not None
+                else -1.0
+            ),
+            -(
+                candidate.localization_mrr
+                if candidate.localization_mrr is not None
+                else -1.0
+            ),
+            candidate.recoverable_error_rate
+            if candidate.recoverable_error_rate is not None
+            else float("inf"),
+            candidate.cost_per_success
+            if candidate.cost_per_success is not None
+            else float("inf"),
+            candidate.candidate_id,
+        ),
+    )
+    if len(ranked) < 3:
+        return
+    rows = [dict(row) for row in result.snapshot.rows]
+    calibration = {
+        str(row.get("run_snapshot_sha256") or "")
+        for row in rows
+        if row.get("workload_id") == "hard-calibration"
+    }
+    discovery = {
+        str(row.get("run_snapshot_sha256") or "")
+        for row in rows
+        if row.get("workload_id") == "hard-discovery"
+    }
+    source_commits = {str(row.get("source_commit") or "") for row in rows}
+    if len(calibration) != 1 or len(discovery) != 1 or len(source_commits) != 1:
+        return
+    rankings = tuple(
+        {
+            "rank": index,
+            "variant_id": candidate.candidate_id,
+            "eligible": candidate.eligible,
+            "paired_pass_rate_delta": candidate.paired_pass_rate_delta,
+            "localization_recall_at_10": candidate.localization_recall_at_10,
+            "localization_mrr": candidate.localization_mrr,
+            "recoverable_error_rate": candidate.recoverable_error_rate,
+            "cost_per_success": candidate.cost_per_success,
+            "reasons": list(candidate.reasons),
+        }
+        for index, candidate in enumerate(ranked, start=1)
+    )
+    lock = build_treatment_selection_lock(
+        source_commit=next(iter(source_commits)),
+        calibration_snapshot_sha256=next(iter(calibration)),
+        discovery_snapshot_sha256=next(iter(discovery)),
+        rankings=rankings,
+        selected_variants=[candidate.candidate_id for candidate in ranked[:3]],
+    )
+    write_treatment_selection_lock(
+        result.report_dir / "treatment-selection-lock.json", lock
     )
 
 
