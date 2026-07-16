@@ -377,7 +377,7 @@ def _chat_payload(
             }
             for tool in tools
         ]
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = "required"
     return payload
 
 
@@ -457,6 +457,7 @@ def _responses_payload(
             }
             for tool in tools
         ]
+        payload["tool_choice"] = "required"
     return payload
 
 
@@ -517,6 +518,7 @@ def _messages_payload(
             }
             for tool in tools
         ]
+        payload["tool_choice"] = {"type": "any"}
     return payload
 
 

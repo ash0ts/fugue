@@ -49,6 +49,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
         body = json.loads(request.content)
         if request.url.path.endswith("/responses"):
             assert body["tools"][0]["name"] == "submit"
+            assert body["tool_choice"] == "required"
             return httpx.Response(
                 200,
                 json={
@@ -66,6 +67,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
             )
         if request.url.path.endswith("/v1/messages"):
             assert body["tools"][0]["input_schema"]["type"] == "object"
+            assert body["tool_choice"] == {"type": "any"}
             return httpx.Response(
                 200,
                 json={
@@ -83,6 +85,7 @@ def test_provider_clients_normalize_tool_calls_and_usage() -> None:
             )
         assert request.url.path.endswith("/chat/completions")
         assert body["tools"][0]["function"]["name"] == "submit"
+        assert body["tool_choice"] == "required"
         assert request.headers["OpenAI-Project"] == "wandb/fugue-experiments"
         return httpx.Response(
             200,
