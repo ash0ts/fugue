@@ -1181,7 +1181,10 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         await self.exec_as_root(
             environment,
             command=(
+                f"test -x {runtime}/bin/node && test -x {runtime}/bin/npm && "
                 f"test -x {runtime}/bin/hermes && "
+                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+                f"ln -sf {runtime}/bin/npm /usr/local/bin/npm && "
                 f"ln -sf {runtime}/bin/hermes /usr/local/bin/hermes"
             ),
             timeout_sec=30,
@@ -1189,6 +1192,8 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         result = await self.exec_as_agent(
             environment,
             command=(
+                f"PATH={runtime}/bin:$PATH node --version | grep -F v22.23.0 && "
+                f"PATH={runtime}/bin:$PATH npm --version | grep -F 10.9.8 && "
                 f"PATH={runtime}/bin:$PATH hermes version && "
                 f"test -s {runtime}/hermes-otel/fugue-patch-lock.json"
             ),
@@ -1393,7 +1398,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         await self._lock_trial_mutators(environment)
 
         run_cmd = (
-            'export PATH="$HOME/.local/bin:$PATH" && '
+            'export PATH="/opt/fugue-agent-runtime/bin:$HOME/.local/bin:$PATH" && '
             'hermes --yolo chat -q "$HARBOR_INSTRUCTION" -Q '
             f"--provider {shlex.quote(self._provider_name())} "
             f"--model {shlex.quote(self.model_route.model_id)} "
@@ -1407,7 +1412,8 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 await self.exec_as_agent(
                     environment,
                     command=(
-                        'export PATH="$HOME/.local/bin:$PATH" && '
+                        'export PATH="/opt/fugue-agent-runtime/bin:'
+                        '$HOME/.local/bin:$PATH" && '
                         "hermes sessions export /logs/agent/hermes-session.jsonl "
                         "--source cli 2>/dev/null; "
                         'cp "$HOME/.hermes/plugins/hermes_otel/debug.log" '

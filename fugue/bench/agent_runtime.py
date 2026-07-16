@@ -166,19 +166,27 @@ RUN PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH {command} --version | grep -F {json.dum
 
 def _hermes_dockerfile() -> str:
     plugin_commit = "670e98ff503e574994e6e64fa0d1294f4d7eefdf"
-    return f"""FROM {_PYTHON_IMAGE}
+    return f"""FROM {_NODE_IMAGE} AS node-runtime
+
+FROM {_PYTHON_IMAGE}
+COPY --from=node-runtime /usr/local/bin/node {AGENT_RUNTIME_MOUNT}/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm \
+  {AGENT_RUNTIME_MOUNT}/lib/node_modules/npm
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git ripgrep xz-utils && \
     rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 fugue && \
-    mkdir -p {AGENT_RUNTIME_MOUNT} && chown -R fugue:fugue {AGENT_RUNTIME_MOUNT}
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js {AGENT_RUNTIME_MOUNT}/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js {AGENT_RUNTIME_MOUNT}/bin/npx && \
+    chown -R fugue:fugue {AGENT_RUNTIME_MOUNT}
 ENV HOME={AGENT_RUNTIME_MOUNT}/home
 WORKDIR {AGENT_RUNTIME_MOUNT}
 USER fugue
 RUN curl -fsSLo /tmp/hermes-install.sh \
       https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.6.5/scripts/install.sh && \
     echo "5562d544934751313f16c57ed3dd17b052600cd8fae9f6e6977bfc9ef1e72f38  /tmp/hermes-install.sh" | sha256sum -c - && \
-    bash /tmp/hermes-install.sh --skip-setup --skip-browser --no-skills \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH bash /tmp/hermes-install.sh \
+      --skip-setup --skip-browser --no-skills \
       --non-interactive --branch v2026.6.5 && rm /tmp/hermes-install.sh
 RUN curl -fsSLo /tmp/hermes-otel.tar.gz \
       https://github.com/briancaffey/hermes-otel/archive/{plugin_commit}.tar.gz && \
@@ -191,7 +199,9 @@ RUN python patch-plugin.py && \
     test -x "$VENV_PY" && \
     "$HOME/.hermes/bin/uv" pip install --quiet --python "$VENV_PY" -e \
       "{AGENT_RUNTIME_MOUNT}/hermes-otel[yaml]"
-RUN mkdir -p bin && ln -s ../home/.local/bin/hermes bin/hermes && \
+RUN ln -s ../home/.local/bin/hermes bin/hermes && \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH node --version | grep -F "v22.23.0" && \
+    PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH npm --version | grep -F "10.9.8" && \
     PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH hermes version
 """
 
@@ -201,10 +211,15 @@ RUNTIMES = {
         harness="hermes",
         version=(
             "hermes-agent@v2026.6.5+hermes-otel@670e98f+"
-            "fugue-span-attrs.2+single-agent.1"
+            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-agent.1"
         ),
         dockerfile=_hermes_dockerfile(),
-        probe=("/bin/sh", "-c", f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH hermes version"),
+        probe=(
+            "/bin/sh",
+            "-c",
+            f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH node --version | "
+            "grep -F v22.23.0 && npm --version | grep -F 10.9.8 && hermes version",
+        ),
     ),
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
