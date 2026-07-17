@@ -15,6 +15,19 @@ from fugue.bench.files import atomic_write_json
 SCHEMA_VERSION = 1
 
 
+def _measured_row_cost(row: Mapping[str, Any]) -> float | None:
+    values: list[float] = []
+    for field in ("cost_usd", "weave_total_cost_usd"):
+        raw = row.get(field)
+        if raw is None:
+            continue
+        value = float(raw)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("measured campaign costs must be finite and non-negative")
+        values.append(value)
+    return max(values) if values else None
+
+
 def load_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -79,12 +92,9 @@ def validate_canary(
             or row.get("observed_conversation_id") != conversation_ids[0]
         ):
             raise ValueError("each canary prediction must have exactly one conversation")
-        cost = row.get("cost_usd")
+        cost = _measured_row_cost(row)
         if cost is not None:
-            value = float(cost)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError("measured canary costs must be finite and non-negative")
-            measured_costs.append(value)
+            measured_costs.append(cost)
     if not measured_costs:
         raise ValueError("cannot forecast a cohort without any measured canary cost")
     maximum = max(measured_costs)
@@ -175,12 +185,10 @@ def complete_cohort(
         expected_predictions=int(entry["cohort_predictions"]),
         model=str(entry["model"]),
     )
-    costs = [row.get("cost_usd") for row in rows]
-    measured = [float(value) for value in costs if value is not None]
+    costs = [_measured_row_cost(row) for row in rows]
+    measured = [value for value in costs if value is not None]
     if not measured:
         raise ValueError("completed cohort has no measured cost")
-    if any(not math.isfinite(value) or value < 0 for value in measured):
-        raise ValueError("completed cohort costs must be finite and non-negative")
     actual = sum(measured) + (len(costs) - len(measured)) * max(measured)
     entry["status"] = "completed"
     entry["actual_cost_usd"] = actual

@@ -5,7 +5,12 @@ import pytest
 from tools.frontier_campaign import admit_cohort, complete_cohort, validate_canary
 
 
-def _row(index: int, *, cost: float | None = 2.0) -> dict[str, object]:
+def _row(
+    index: int,
+    *,
+    cost: float | None = 2.0,
+    weave_cost: float | None = None,
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "prediction_schema_version": 1,
@@ -20,6 +25,7 @@ def _row(index: int, *, cost: float | None = 2.0) -> dict[str, object]:
         "observed_conversation_id": f"conversation-{index}",
         "weave_conversation_ids": [f"conversation-{index}"],
         "cost_usd": cost,
+        "weave_total_cost_usd": weave_cost,
     }
 
 
@@ -64,6 +70,23 @@ def test_admission_refuses_missing_cost_and_budget_overflow() -> None:
             cohort_predictions=32,
             safety_margin=1.5,
         )
+
+
+def test_admission_uses_the_larger_measured_local_or_weave_cost() -> None:
+    canary = validate_canary(
+        [
+            _row(1, cost=1.0, weave_cost=4.0),
+            _row(2, cost=3.0, weave_cost=2.0),
+            _row(3, cost=None, weave_cost=None),
+        ],
+        expected_predictions=3,
+        model="wandb/zai-org/GLM-5.2",
+    )
+
+    assert canary["measured_predictions"] == 2
+    assert canary["observed_cost_usd"] == 7.0
+    assert canary["maximum_measured_cell_cost_usd"] == 4.0
+    assert canary["accounted_cost_usd"] == 11.0
 
 
 def test_completion_reconciles_actual_cost_without_fabricating_public_values() -> None:
