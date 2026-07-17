@@ -313,16 +313,14 @@ def _verify_bridge_runtime(
     judge_route: ModelRoute | None,
     env: Mapping[str, str] | None,
 ) -> dict[str, Any]:
-    root = Path.cwd() if repo_root is None else Path(repo_root)
-    runtime_dir = root / BRIDGE_RUNTIME_DIR
+    runtime_dir = (Path.cwd() if repo_root is None else Path(repo_root)) / BRIDGE_RUNTIME_DIR
     expected = bridge_runtime_lock_for_route(
         route,
         builder_route=builder_route,
         judge_route=judge_route,
         env=env,
     )
-    lock_path = runtime_dir / BRIDGE_LOCK_NAME
-    actual = json.loads(lock_path.read_text(encoding="utf-8"))
+    actual = json.loads((runtime_dir / BRIDGE_LOCK_NAME).read_text(encoding="utf-8"))
     if actual != expected:
         raise RuntimeError(
             "generated bridge runtime lock differs from the selected route"
@@ -355,11 +353,10 @@ def _verify_bridge_runtime(
         raise RuntimeError(
             "bridge container command differs from the locked compose plan"
         )
-    mounts = container.get("Mounts") or []
     mounted = next(
         (
             item
-            for item in mounts
+            for item in container.get("Mounts") or []
             if str(item.get("Destination") or "") == "/app/config.yaml"
         ),
         None,

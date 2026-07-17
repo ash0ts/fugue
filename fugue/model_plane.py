@@ -153,12 +153,11 @@ def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, ob
             f"unsupported Agent harness for model routing: {harness}"
         ) from exc
     _, bridge_required = model_protocol_endpoint(route, protocol)
-    upstream_url = _provider_endpoint(route)
     return {
         "harness": normalized,
         "wire_protocol": protocol,
         "endpoint_kind": "fugue_bridge" if bridge_required else "provider_direct",
-        "upstream_host": _url_host(upstream_url),
+        "upstream_host": _provider_host(route),
         "bridge_required": bridge_required,
     }
 
@@ -181,19 +180,13 @@ def model_protocol_endpoint(
     return bridge, True
 
 
-def _provider_endpoint(route: ModelRoute) -> str:
+def _provider_host(route: ModelRoute) -> str:
     endpoint = (
         route.responses_base_url or route.messages_base_url or route.chat_base_url
     )
-    if not endpoint:
-        raise ValueError(f"{route.display_model} has no provider endpoint")
-    return endpoint
-
-
-def _url_host(url: str) -> str:
-    host = urlparse(url).hostname
+    host = urlparse(endpoint).hostname if endpoint else None
     if not host:
-        raise ValueError(f"model route endpoint has no host: {url}")
+        raise ValueError(f"{route.display_model} has no provider endpoint host")
     return host
 
 
