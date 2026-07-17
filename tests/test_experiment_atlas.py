@@ -13,6 +13,7 @@ from tools.experiment_atlas import (
     build_public_experiment,
     load_editorial,
     validate_public_experiment,
+    validate_publication,
     write_publication,
 )
 
@@ -490,6 +491,15 @@ def test_public_generation_is_reproducible(tmp_path: Path) -> None:
     ).read_bytes() == (
         second / "experiments" / "controlled-grid.json"
     ).read_bytes()
+    assert validate_publication(list(editorial_dir.glob("*.yaml")), first) == left
+
+    changed = yaml.safe_load((editorial_dir / "controlled-grid.yaml").read_text())
+    changed["title"] = "Changed without rebuilding"
+    (editorial_dir / "controlled-grid.yaml").write_text(
+        yaml.safe_dump(changed), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="does not match editorial title"):
+        validate_publication(list(editorial_dir.glob("*.yaml")), first)
 
 
 def test_trusted_publication_rejects_unverified_snapshot_schema(tmp_path: Path) -> None:

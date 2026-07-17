@@ -176,13 +176,12 @@ jobs:
       - name: Reject vulnerable production dependencies
         working-directory: atlas
         run: npm audit --audit-level=high
-      - name: Regenerate reviewed public snapshots
+      - name: Validate reviewed public snapshots
         run: >-
           uv run python tools/experiment_atlas.py
           --editorial-dir atlas/editorial
           --output atlas/public/data
-      - name: Public snapshots are current
-        run: git diff --exit-code -- atlas/public/data
+          --validate-only
       - name: Build static atlas
         working-directory: atlas
         run: npm run build

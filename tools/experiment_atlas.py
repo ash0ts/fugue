@@ -375,6 +375,61 @@ def write_publication(
     return index
 
 
+def validate_publication(editorial_paths: Sequence[Path], output: Path) -> ExperimentIndexV1:
+    editorials = {
+        str(value["id"]): value
+        for value in (load_editorial(path) for path in sorted(editorial_paths))
+    }
+    experiment_dir = output / "experiments"
+    published_paths = sorted(experiment_dir.glob("*.json"))
+    if {path.stem for path in published_paths} != set(editorials):
+        raise ValueError("reviewed public snapshots do not match the editorial registry")
+    experiments: list[PublicExperimentV1] = []
+    for path in published_paths:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("reviewed public snapshot must be an object")
+        validate_public_experiment(value)
+        _validate_editorial_projection(editorials[path.stem], value)
+        experiments.append(PublicExperimentV1(**value))
+    expected = build_index(experiments)
+    index_value = json.loads((output / "index.json").read_text(encoding="utf-8"))
+    if not isinstance(index_value, dict):
+        raise ValueError("reviewed public index must be an object")
+    validate_experiment_index(index_value)
+    if _canonical_json(index_value) != _canonical_json(expected.to_dict()):
+        raise ValueError("reviewed public index does not match its experiment snapshots")
+    return expected
+
+
+def _validate_editorial_projection(
+    editorial: Mapping[str, Any], public: Mapping[str, Any]
+) -> None:
+    fields = (
+        "schema_version",
+        "id",
+        "title",
+        "summary",
+        "question",
+        "hypothesis",
+        "why_it_matters",
+        "task_selection",
+        "evidence_tier",
+        "decision_value",
+        "status",
+        "matrix",
+        "provenance",
+        "findings",
+        "caveats",
+    )
+    for field in fields:
+        if _canonical_json(editorial[field]) != _canonical_json(public[field]):
+            raise ValueError(f"reviewed public snapshot does not match editorial {field}")
+    links = _mapping(public.get("links"), "public links")
+    if links.get("project") != editorial["links"]["project"]:
+        raise ValueError("reviewed public snapshot does not match editorial project link")
+
+
 def _validated_provenance(
     editorial: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -1021,10 +1076,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--run-summary", action="append", default=[])
     parser.add_argument("--snapshot", action="append", default=[])
     parser.add_argument("--repo-root", type=Path, default=Path("."))
+    parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
     paths = list(args.editorial_dir.glob("*.yaml"))
     if not paths:
         parser.error("editorial directory has no YAML records")
+    if args.validate_only:
+        if args.rows or args.run_summary or args.snapshot:
+            parser.error("--validate-only does not accept private evidence inputs")
+        index = validate_publication(paths, args.output)
+        print(json.dumps({"experiments": len(index.experiments), "digest": index.content_sha256}))
+        return 0
     parsed_rows = _parse_paths(args.rows, "--rows")
     duplicate_rows = [key for key, values in parsed_rows.items() if len(values) != 1]
     if duplicate_rows:
