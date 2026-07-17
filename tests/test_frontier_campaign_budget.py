@@ -6,6 +6,7 @@ from tools.frontier_campaign import (
     admit_cohort,
     complete_cohort,
     reconcile_failed_cohort,
+    record_incident,
     validate_canary,
 )
 
@@ -235,3 +236,38 @@ def test_completion_records_actual_overspend_for_future_admission() -> None:
 
     assert completed["accounted_cost_usd"] == 11.0
     assert completed["remaining_budget_usd"] == -6.0
+
+
+def test_budget_incident_reserves_unreconciled_attempt_spend() -> None:
+    ledger = record_incident(
+        {"schema_version": 1, "cap_usd": 20.0, "cohorts": []},
+        incident_id="cancelled-canary",
+        model="anthropic/claude-sonnet-5",
+        accounted_cost_usd=7.5,
+        reason="the run was cancelled before publication closed",
+    )
+
+    assert ledger["accounted_cost_usd"] == 7.5
+    assert ledger["remaining_budget_usd"] == 12.5
+    assert ledger["cohorts"] == [
+        {
+            "cohort_id": "cancelled-canary",
+            "model": "anthropic/claude-sonnet-5",
+            "status": "incident",
+            "failure_reason": "the run was cancelled before publication closed",
+            "actual_cost_usd": None,
+            "accounted_cost_usd": 7.5,
+        }
+    ]
+
+
+@pytest.mark.parametrize("cost", [0.0, -1.0, float("inf"), float("nan")])
+def test_budget_incident_rejects_invalid_cost(cost: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        record_incident(
+            {"schema_version": 1, "cap_usd": 20.0, "cohorts": []},
+            incident_id="bad-cost",
+            model="anthropic/claude-sonnet-5",
+            accounted_cost_usd=cost,
+            reason="invalid",
+        )

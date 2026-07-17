@@ -290,6 +290,44 @@ def reconcile_failed_cohort(
     return result
 
 
+def record_incident(
+    ledger: Mapping[str, Any],
+    *,
+    incident_id: str,
+    model: str,
+    accounted_cost_usd: float,
+    reason: str,
+) -> dict[str, Any]:
+    """Reserve known or conservatively estimated spend from an invalid attempt."""
+    identifier = incident_id.strip()
+    explanation = reason.strip()
+    cost = float(accounted_cost_usd)
+    if not identifier or not model.strip() or not explanation:
+        raise ValueError("budget incidents require an ID, model, and reason")
+    if not math.isfinite(cost) or cost <= 0:
+        raise ValueError("budget incident cost must be finite and positive")
+    entries = [dict(item) for item in ledger.get("cohorts", [])]
+    if any(item.get("cohort_id") == identifier for item in entries):
+        raise ValueError(f"campaign ledger entry already exists: {identifier}")
+    entries.append(
+        {
+            "cohort_id": identifier,
+            "model": model,
+            "status": "incident",
+            "failure_reason": explanation,
+            "actual_cost_usd": None,
+            "accounted_cost_usd": cost,
+        }
+    )
+    cap = float(ledger["cap_usd"])
+    accounted = sum(float(item["accounted_cost_usd"]) for item in entries)
+    result = dict(ledger)
+    result["cohorts"] = entries
+    result["accounted_cost_usd"] = accounted
+    result["remaining_budget_usd"] = cap - accounted
+    return result
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -311,6 +349,12 @@ def _parser() -> argparse.ArgumentParser:
     failed.add_argument("--cohort-id", required=True)
     failed.add_argument("--rows", type=Path, required=True)
     failed.add_argument("--reason", required=True)
+    incident = subparsers.add_parser("record-incident")
+    incident.add_argument("--ledger", type=Path, required=True)
+    incident.add_argument("--incident-id", required=True)
+    incident.add_argument("--model", required=True)
+    incident.add_argument("--accounted-cost-usd", type=float, required=True)
+    incident.add_argument("--reason", required=True)
     return parser
 
 
@@ -338,7 +382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = complete_cohort(
             raw, cohort_id=args.cohort_id, rows=load_rows(args.rows)
         )
-    else:
+    elif args.command == "reconcile-failed":
         raw = json.loads(args.ledger.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("campaign ledger must be an object")
@@ -346,6 +390,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw,
             cohort_id=args.cohort_id,
             rows=load_rows(args.rows),
+            reason=args.reason,
+        )
+    else:
+        raw = json.loads(args.ledger.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("campaign ledger must be an object")
+        result = record_incident(
+            raw,
+            incident_id=args.incident_id,
+            model=args.model,
+            accounted_cost_usd=args.accounted_cost_usd,
             reason=args.reason,
         )
     atomic_write_json(args.ledger, result)
