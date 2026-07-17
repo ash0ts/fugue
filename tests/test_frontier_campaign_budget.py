@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from tools.frontier_campaign import admit_cohort, complete_cohort, validate_canary
+from tools.frontier_campaign import (
+    admit_cohort,
+    complete_cohort,
+    reconcile_failed_cohort,
+    validate_canary,
+)
 
 
 def _row(
@@ -124,3 +129,61 @@ def test_canary_requires_exact_agent_contract() -> None:
             expected_predictions=1,
             model="wandb/zai-org/GLM-5.2",
         )
+
+
+def test_failed_cohort_reconciles_spend_without_claiming_completion() -> None:
+    canary = validate_canary(
+        [_row(1, cost=1.0)],
+        expected_predictions=1,
+        model="wandb/zai-org/GLM-5.2",
+    )
+    admitted = admit_cohort(
+        {"schema_version": 1, "cap_usd": 2000.0, "cohorts": []},
+        cohort_id="glm",
+        model="wandb/zai-org/GLM-5.2",
+        canary=canary,
+        cohort_predictions=2,
+        safety_margin=1.5,
+    )
+    incomplete = [_row(1, cost=3.0), _row(2, cost=None)]
+    incomplete[1]["trace_link_status"] = "missing"
+    incomplete[1]["weave_root_span_ids"] = ["root-a", "root-b"]
+
+    reconciled = reconcile_failed_cohort(
+        admitted,
+        cohort_id="glm",
+        rows=incomplete,
+        reason="one prediction emitted two Agent roots",
+    )
+
+    [entry] = reconciled["cohorts"]
+    assert entry["status"] == "failed"
+    assert entry["failure_reason"] == "one prediction emitted two Agent roots"
+    assert entry["actual_cost_usd"] == 6.0
+    assert entry["accounted_cost_usd"] == 7.0
+    assert reconciled["remaining_budget_usd"] == 1993.0
+
+
+def test_completion_records_actual_overspend_for_future_admission() -> None:
+    canary = validate_canary(
+        [_row(1, cost=1.0)],
+        expected_predictions=1,
+        model="wandb/zai-org/GLM-5.2",
+    )
+    admitted = admit_cohort(
+        {"schema_version": 1, "cap_usd": 5.0, "cohorts": []},
+        cohort_id="glm",
+        model="wandb/zai-org/GLM-5.2",
+        canary=canary,
+        cohort_predictions=1,
+        safety_margin=1.0,
+    )
+
+    completed = complete_cohort(
+        admitted,
+        cohort_id="glm",
+        rows=[_row(1, cost=10.0)],
+    )
+
+    assert completed["accounted_cost_usd"] == 11.0
+    assert completed["remaining_budget_usd"] == -6.0

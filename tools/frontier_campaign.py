@@ -195,8 +195,52 @@ def complete_cohort(
     entry["accounted_cost_usd"] = float(entry["canary_accounted_cost_usd"]) + actual
     cap = float(ledger["cap_usd"])
     accounted = sum(float(item["accounted_cost_usd"]) for item in entries)
-    if accounted > cap:
-        raise ValueError("completed cohort exceeded the cumulative campaign cap")
+    result = dict(ledger)
+    result["cohorts"] = entries
+    result["accounted_cost_usd"] = accounted
+    result["remaining_budget_usd"] = cap - accounted
+    return result
+
+
+def reconcile_failed_cohort(
+    ledger: Mapping[str, Any],
+    *,
+    cohort_id: str,
+    rows: Sequence[Mapping[str, Any]],
+    reason: str,
+) -> dict[str, Any]:
+    """Record real spend without treating incomplete evidence as publishable."""
+    entries = [dict(item) for item in ledger.get("cohorts", [])]
+    matching = [item for item in entries if item.get("cohort_id") == cohort_id]
+    if len(matching) != 1:
+        raise ValueError("cohort must have exactly one admission record")
+    entry = matching[0]
+    if entry.get("status") != "admitted":
+        raise ValueError("only an admitted cohort may be reconciled as failed")
+    if len(rows) != int(entry["cohort_predictions"]):
+        raise ValueError("failed cohort row count does not match its admission")
+    prediction_ids: set[str] = set()
+    costs: list[float | None] = []
+    for row in rows:
+        if row.get("schema_version") != 1 or row.get("prediction_schema_version") != 1:
+            raise ValueError("failed cohort rows must use canonical schema 1")
+        if row.get("model") != entry["model"]:
+            raise ValueError("failed cohort row model does not match its admission")
+        prediction_id = str(row.get("prediction_id") or "")
+        if not prediction_id or prediction_id in prediction_ids:
+            raise ValueError("failed cohort prediction IDs must be non-empty and unique")
+        prediction_ids.add(prediction_id)
+        costs.append(_measured_row_cost(row))
+    measured = [value for value in costs if value is not None]
+    if not measured:
+        raise ValueError("failed cohort has no measured cost")
+    actual = sum(measured) + (len(costs) - len(measured)) * max(measured)
+    entry["status"] = "failed"
+    entry["failure_reason"] = reason.strip() or "unspecified"
+    entry["actual_cost_usd"] = actual
+    entry["accounted_cost_usd"] = float(entry["canary_accounted_cost_usd"]) + actual
+    cap = float(ledger["cap_usd"])
+    accounted = sum(float(item["accounted_cost_usd"]) for item in entries)
     result = dict(ledger)
     result["cohorts"] = entries
     result["accounted_cost_usd"] = accounted
@@ -220,6 +264,11 @@ def _parser() -> argparse.ArgumentParser:
     complete.add_argument("--ledger", type=Path, required=True)
     complete.add_argument("--cohort-id", required=True)
     complete.add_argument("--rows", type=Path, required=True)
+    failed = subparsers.add_parser("reconcile-failed")
+    failed.add_argument("--ledger", type=Path, required=True)
+    failed.add_argument("--cohort-id", required=True)
+    failed.add_argument("--rows", type=Path, required=True)
+    failed.add_argument("--reason", required=True)
     return parser
 
 
@@ -240,12 +289,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             cohort_predictions=args.cohort_predictions,
             safety_margin=args.safety_margin,
         )
-    else:
+    elif args.command == "complete":
         raw = json.loads(args.ledger.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("campaign ledger must be an object")
         result = complete_cohort(
             raw, cohort_id=args.cohort_id, rows=load_rows(args.rows)
+        )
+    else:
+        raw = json.loads(args.ledger.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("campaign ledger must be an object")
+        result = reconcile_failed_cohort(
+            raw,
+            cohort_id=args.cohort_id,
+            rows=load_rows(args.rows),
+            reason=args.reason,
         )
     atomic_write_json(args.ledger, result)
     print(json.dumps(result, indent=2, sort_keys=True))
