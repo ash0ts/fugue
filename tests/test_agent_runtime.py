@@ -140,6 +140,8 @@ def test_trial_mutator_lock_covers_task_image_conda_environments() -> None:
         assert executable in guard
     assert 'for module in pip ensurepip' in guard
     assert "Fugue trial policy blocks package installation" in guard
+    assert "mutator-modes" in guard
+    assert "_restore_verifier_runtime(environment)" in source
     assert "_apply_trial_policy_environment(public_env)" in source
     assert '"PIP_NO_INDEX": "1"' in source
     assert '"UV_OFFLINE": "1"' in source

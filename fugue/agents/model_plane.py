@@ -493,6 +493,10 @@ if [ -S /var/run/docker.sock ]; then
   echo 'trial policy rejected a mounted Docker socket' >&2
   exit 86
 fi
+policy=/tmp/fugue-trial-policy
+manifest="$policy/mutator-modes"
+install -d -m 0755 "$policy"
+: > "$manifest"
 for name in apt apt-get apk dnf yum microdnf pip pip3 conda mamba micromamba \
             uv uvx npm npx pnpm yarn cargo rustup curl wget docker podman buildah; do
   for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin \
@@ -504,13 +508,17 @@ for name in apt apt-get apk dnf yum microdnf pip pip3 conda mamba micromamba \
       resolved="$(readlink -f "$candidate" 2>/dev/null || printf %s "$candidate")"
       case "$resolved" in
         /opt/fugue-agent-runtime/*) ;;
-        *) chmod 000 "$resolved" 2>/dev/null || true ;;
+        *)
+          if ! grep -Fq "|$resolved" "$manifest"; then
+            mode="$(stat -c '%a' "$resolved")"
+            printf '%s|%s\n' "$mode" "$resolved" >> "$manifest"
+            chmod 000 "$resolved" 2>/dev/null || true
+          fi
+          ;;
       esac
     fi
   done
 done
-policy=/tmp/fugue-trial-policy
-install -d -m 0755 "$policy"
 for module in pip ensurepip; do
   printf '%s\n' \
     'raise SystemExit("Fugue trial policy blocks package installation")' \
@@ -525,6 +533,30 @@ done
             ).strip()
             raise RuntimeError(detail[-2_000:])
         self._fugue_trial_mutators_locked = True
+
+    async def _restore_verifier_runtime(self, environment: BaseEnvironment) -> None:
+        if not getattr(self, "_fugue_trial_mutators_locked", False):
+            return
+        policy = _CONTAINER_TRIAL_POLICY_ROOT.as_posix()
+        result = await self.exec_as_root(
+            environment,
+            command=(
+                f'manifest={policy}/mutator-modes\n'
+                'if [ -f "$manifest" ]; then\n'
+                "  while IFS='|' read -r mode path; do\n"
+                '    chmod "$mode" "$path"\n'
+                '  done < "$manifest"\n'
+                "fi\n"
+                f"rm -rf {policy}"
+            ),
+            timeout_sec=30,
+        )
+        if result.return_code != 0:
+            detail = (
+                result.stderr or result.stdout or "verifier runtime restore failed"
+            ).strip()
+            raise RuntimeError(detail[-2_000:])
+        self._fugue_trial_mutators_locked = False
 
     async def _install_context_runtime(
         self, environment: BaseEnvironment
@@ -704,6 +736,9 @@ done
 
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
+        # Harbor runs the prepared verifier after the Agent exits. Restore the
+        # immutable image's tool modes only after no Agent shell remains.
+        await self._restore_verifier_runtime(environment)
         try:
             await self._capture_runtime_fingerprint(environment, "post_execution")
         except Exception:
