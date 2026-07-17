@@ -90,7 +90,6 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         'export PATH="/opt/fugue-agent-runtime/bin:$HOME/.local/bin:$PATH"'
         in hermes_adapter
     )
-
     openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
     assert openclaw_runtime.version == (
         "openclaw@2026.7.1+weave-openclaw@0.1.1+"
@@ -125,6 +124,20 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         ranges["claude-code"]
     )
     assert "hermes-install.sh" in agent_runtime.RUNTIMES["hermes"].dockerfile
+
+
+def test_trial_mutator_lock_covers_task_image_conda_environments() -> None:
+    source = Path("fugue/agents/model_plane.py").read_text()
+    guard = source[
+        source.index("async def _lock_trial_mutators") : source.index(
+            "async def _install_context_runtime"
+        )
+    ]
+
+    assert "/opt/miniconda3/envs/*/bin" in guard
+    assert "/opt/conda/envs/*/bin" in guard
+    for executable in ("pip", "pip3", "conda", "mamba", "micromamba"):
+        assert executable in guard
 
 
 def test_weave_codex_patch_preserves_gateway_metadata() -> None:

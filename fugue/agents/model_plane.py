@@ -466,9 +466,12 @@ if [ -S /var/run/docker.sock ]; then
   echo 'trial policy rejected a mounted Docker socket' >&2
   exit 86
 fi
-for name in apt apt-get apk dnf yum microdnf pip pip3 uv uvx npm npx pnpm yarn \
-            cargo rustup curl wget docker podman buildah; do
-  for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+for name in apt apt-get apk dnf yum microdnf pip pip3 conda mamba micromamba \
+            uv uvx npm npx pnpm yarn cargo rustup curl wget docker podman buildah; do
+  for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin \
+                   /opt/conda/bin /opt/conda/envs/*/bin \
+                   /opt/miniconda3/bin /opt/miniconda3/envs/*/bin; do
+    [ -d "$directory" ] || continue
     candidate="$directory/$name"
     if [ -e "$candidate" ]; then
       resolved="$(readlink -f "$candidate" 2>/dev/null || printf %s "$candidate")"
