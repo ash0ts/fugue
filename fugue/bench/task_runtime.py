@@ -25,7 +25,7 @@ from fugue.bench.manifest import (
 )
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 6
+TASK_RUNTIME_CONTRACT_VERSION = 7
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 
@@ -342,9 +342,9 @@ def _rewrite_dataset_verifier(
     rewritten, installs = install_pattern.subn(
         "        # Setup prepared the task environment before the trial.", source
     )
-    if installs != 1:
+    if installs > 1:
         raise RuntimeError(
-            f"task {task.id} verifier must contain one exact editable install"
+            f"task {task.id} verifier contains multiple editable installs"
         )
     interpreter = shlex.quote(runtime.python_interpreter)
     rewritten, parser_runs = parser_pattern.subn(
