@@ -1,0 +1,92 @@
+schema_version: 1
+id: frontier-swe-v1
+title: Frontier model × harness baseline
+summary: A planned capability map across fixed frontier models, four harnesses, and eight locked hard SWE-bench discovery tasks with no added context.
+question: How much of hard SWE-bench performance comes from the model, the agent harness, and their interaction before memory is added?
+hypothesis: Harness effects will interact with model capability and efficiency; a single model or single harness will not represent the frontier.
+why_it_matters: Memory lift is uninterpretable without a fixed no-context capability baseline. This matrix establishes that denominator and exposes cost and latency tradeoffs without combining them into a synthetic score.
+task_selection: The locked discovery partition requires production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.
+evidence_tier: active
+decision_value: 100
+status: ready_for_canaries
+matrix:
+  experiment_id: swe-frontier-harness
+  workload_id: hard-baseline
+  expected_predictions: 144
+  attempts: 1
+  models:
+    - wandb/zai-org/GLM-5.2
+    - wandb/moonshotai/Kimi-K2.7-Code
+    - anthropic/claude-sonnet-5
+    - anthropic/claude-opus-4-8
+    - anthropic/claude-fable-5
+  harnesses: [hermes, openclaw, claude-code, codex]
+  treatments: [baseline]
+  tasks:
+    - sympy__sympy-13031
+    - astropy__astropy-13033
+    - django__django-17087
+    - django__django-11477
+    - sympy__sympy-18199
+    - sphinx-doc__sphinx-9461
+    - mwaskom__seaborn-3069
+    - scikit-learn__scikit-learn-25102
+  cohorts:
+    - id: glm-5-2
+      label: GLM-5.2 across four harnesses
+      models: [wandb/zai-org/GLM-5.2]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: &frontier_tasks
+        - sympy__sympy-13031
+        - astropy__astropy-13033
+        - django__django-17087
+        - django__django-11477
+        - sympy__sympy-18199
+        - sphinx-doc__sphinx-9461
+        - mwaskom__seaborn-3069
+        - scikit-learn__scikit-learn-25102
+      expected_predictions: 32
+    - id: kimi-k2-7-code
+      label: Kimi K2.7 Code across four harnesses
+      models: [wandb/moonshotai/Kimi-K2.7-Code]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: *frontier_tasks
+      expected_predictions: 32
+    - id: claude-sonnet-5
+      label: Claude Sonnet 5 across four harnesses
+      models: [anthropic/claude-sonnet-5]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: *frontier_tasks
+      expected_predictions: 32
+    - id: claude-opus-4-8
+      label: Claude Opus 4.8 across four harnesses
+      models: [anthropic/claude-opus-4-8]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: *frontier_tasks
+      expected_predictions: 32
+    - id: claude-fable-5-ceiling
+      label: Claude Fable 5 ceiling cohort
+      models: [anthropic/claude-fable-5]
+      harnesses: [claude-code, codex]
+      treatments: [baseline]
+      tasks: *frontier_tasks
+      expected_predictions: 16
+provenance:
+  source_commit: pending
+  source_url: https://github.com/ash0ts/fugue
+  dataset_id: swe-bench-hard-discovery-v2
+  dataset_digest: c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970
+  snapshot_digest: pending
+  run_ids: []
+links:
+  project: https://wandb.ai/wandb/fugue-swe-frontier-v1/weave
+  evaluations: []
+findings: []
+caveats:
+  - Provider model-list preflights passed on July 16, 2026; every cohort still requires its own tool-use and observability canary.
+  - Direct Anthropic cohorts use the Anthropic API and never route through W&B Inference.
+  - Fable uses Claude Code and Codex only and is reported as a separate ceiling cohort.

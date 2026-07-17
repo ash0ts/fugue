@@ -428,6 +428,60 @@ revision. An explicit republish creates a new active revision with a reason and
 should filter to the active revision and facet by source commit, snapshot
 digest, cohort, execution kind, harness, context system, and skill treatment.
 
+### Public Experiment Atlas
+
+The static Experiment Atlas is a reviewed evidence publication layer, not a
+browser frontend for the operator. `tools/experiment_atlas.py` reduces
+canonical normalized JSONL through an explicit allowlist, verifies the source,
+dataset, coordinates, and digest against immutable run snapshots, recomputes
+metrics, and writes versioned `PublicExperimentV1` snapshots plus an ordered
+`ExperimentIndexV1`. Editorial YAML explains the question and decision; it
+cannot supply or override results, links, or provenance.
+
+Public snapshots may contain task IDs, fixed routes, harnesses, treatments,
+outcomes, efficiency measurements, provenance, and verified Weave links. They
+reject prompts, outputs, reasoning, tool content, gold data, exceptions, local
+paths, environment values, secrets, unknown fields, and unapproved URL
+domains. GitHub Pages builds only the committed snapshots. It receives no W&B
+credential and makes no browser API call; Weave links are user-initiated and
+explicitly labeled as requiring sign-in.
+
+```bash
+uv run python tools/experiment_atlas.py \
+  --editorial-dir atlas/editorial \
+  --rows EXPERIMENT_ID=reports/RUN_ID.jsonl \
+  --run-summary EXPERIMENT_ID=.fugue/runtime/RUN_ID/run.json \
+  --snapshot EXPERIMENT_ID=.fugue/runtime/RUN_ID/input-lock.json \
+  --output atlas/public/data
+npm --prefix atlas ci
+npm --prefix atlas run build
+python tools/check_atlas_build.py atlas/dist
+```
+
+The atlas orders complete experiments by evidence tier and then explicit
+decision value. Active and blocked studies remain visible but unranked.
+One-attempt grids show raw numerators and denominators without confidence
+claims; only replicated holdout evidence receives the deterministic paired
+bootstrap used by Fugue's selection policy. Quality, cost, latency, retrieval,
+errors, and observability remain separate—there is no composite score.
+
+The no-context frontier campaign uses one fixed model per immutable run:
+
+```bash
+fugue run swe-frontier-harness --preset canary \
+  --model wandb/zai-org/GLM-5.2 --preview
+fugue run swe-frontier-harness --preset discovery \
+  --model wandb/zai-org/GLM-5.2 --preview
+fugue run swe-frontier-harness --preset frontier-ceiling \
+  --model anthropic/claude-fable-5 --preview
+```
+
+Its locked hard discovery cases require production and test changes, two to
+eight touched files, repository diversity, and either issue-path lexical
+mismatch or cross-directory production work. Model cohorts share comparison
+example identities while model and harness changes remain distinct behavioral
+candidates.
+
 The hard-memory study is encoded as separate immutable cohorts. Discovery uses
 a fixed Latin-square harness assignment; holdout and control treatments must be
 selected from discovery results instead of being silently baked into the

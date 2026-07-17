@@ -1,0 +1,58 @@
+name: Experiment Atlas Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "atlas/**"
+      - "tools/check_atlas_build.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: experiment-atlas-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: atlas/package-lock.json
+      - name: Install reviewed frontend dependencies
+        working-directory: atlas
+        run: npm ci
+      - name: Reject vulnerable production dependencies
+        working-directory: atlas
+        run: npm audit --audit-level=high
+      - name: Build static atlas
+        working-directory: atlas
+        run: npm run build
+      - name: Verify static publication boundary
+        run: python tools/check_atlas_build.py atlas/dist
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: atlas/dist
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy reviewed atlas
+        id: deployment
+        uses: actions/deploy-pages@v4

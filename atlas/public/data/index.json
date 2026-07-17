@@ -1,0 +1,105 @@
+{
+  "content_sha256": "014293eeb1a42a8085625ad220ed907037ff44b3711530a8a383b5ed82e3b340",
+  "experiments": [
+    {
+      "content_sha256": "e0bedbb761f44625c050103d66cf498b3f94047c02cda9819f379da5d179538f",
+      "decision_value": 100,
+      "evidence_tier": "active",
+      "harnesses": [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex"
+      ],
+      "id": "frontier-swe-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 144,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "wandb/zai-org/GLM-5.2",
+        "wandb/moonshotai/Kimi-K2.7-Code",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-4-8",
+        "anthropic/claude-fable-5"
+      ],
+      "status": "ready_for_canaries",
+      "summary": "A planned capability map across fixed frontier models, four harnesses, and eight locked hard SWE-bench discovery tasks with no added context.",
+      "title": "Frontier model \u00d7 harness baseline",
+      "treatments": [
+        "baseline"
+      ]
+    },
+    {
+      "content_sha256": "d8c780d14b91e023b407c5e3415fe33fd6fb98407a7e115351978f9ed2cdf61d",
+      "decision_value": 88,
+      "evidence_tier": "blocked",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "id": "glm-memory-pilot",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 32,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "wandb/zai-org/GLM-5.2"
+      ],
+      "status": "cancelled_incomplete",
+      "summary": "A controlled one-attempt pilot comparing no context, BM25, dense, and hybrid repository context for Claude Code and Codex on four locked hard SWE-bench tasks.",
+      "title": "GLM memory \u00d7 harness pilot",
+      "treatments": [
+        "none",
+        "rag-bm25",
+        "rag-dense",
+        "rag-hybrid"
+      ]
+    }
+  ],
+  "schema_version": 1
+}
