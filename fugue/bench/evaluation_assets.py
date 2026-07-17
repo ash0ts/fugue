@@ -5,7 +5,7 @@ import json
 import os
 import re
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,13 @@ SWE_BENCH_VERIFIED_PARQUET_SHA256 = (
 )
 _SOURCE_FILE = "data/test-00000-of-00001.parquet"
 _DIFF_PATH = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class EvaluationGoldPatch:
+    task_id: str
+    patch: str
+    patch_sha256: str
 
 
 def prepare_evaluation_assets(
@@ -66,6 +73,41 @@ def prepare_evaluation_assets(
     payload = {**base, "lock_sha256": stable_digest(base)}
     atomic_write_json(destination, payload)
     return destination
+
+
+def load_evaluation_gold_patch(
+    manifest: BenchmarkManifest, task_id: str, repo_root: Path
+) -> EvaluationGoldPatch | None:
+    """Read one pinned gold patch without adding it to a Fugue lock."""
+    if not _uses_pinned_swe_bench_source(manifest):
+        return None
+    source = _source_path(repo_root)
+    if (
+        not source.is_file()
+        or _file_sha256(source) != SWE_BENCH_VERIFIED_PARQUET_SHA256
+    ):
+        raise ValueError("pinned SWE-bench evaluation source is unavailable or changed")
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError as exc:
+        raise RuntimeError(
+            "SWE-bench gold verification requires the Fugue context extra"
+        ) from exc
+    rows = parquet.read_table(
+        source,
+        columns=["instance_id", "patch"],
+        filters=[("instance_id", "=", task_id)],
+    ).to_pylist()
+    if len(rows) != 1 or str(rows[0].get("instance_id") or "") != task_id:
+        raise ValueError(f"pinned SWE-bench source does not contain {task_id}")
+    patch = str(rows[0].get("patch") or "")
+    if not patch.strip():
+        raise ValueError(f"pinned SWE-bench source has no gold patch for {task_id}")
+    return EvaluationGoldPatch(
+        task_id=task_id,
+        patch=patch,
+        patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+    )
 
 
 def attach_evaluation_assets(

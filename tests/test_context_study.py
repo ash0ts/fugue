@@ -92,6 +92,87 @@ def test_repo_memory_study_has_truthful_capabilities_and_preset_sizes(
     assert {target.spec.id for target in targets} <= set(smoke.systems)
 
 
+def test_retrieval_to_action_study_has_exact_factorial_coordinates(
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+    experiment = get_experiment("retrieval-to-action", REPO_ROOT)
+
+    assert experiment.model == "wandb/zai-org/GLM-5.2"
+    assert experiment.judge_model is None
+    assert {variant.id for variant in experiment.variants} == {
+        "baseline",
+        "memory-only",
+        "policy-only",
+        "memory-policy",
+    }
+    assert {
+        variant.id: (variant.prompt_id, variant.context.system_id)
+        for variant in experiment.variants
+    } == {
+        "baseline": (None, "none"),
+        "memory-only": (None, "rag-dense"),
+        "policy-only": ("repository-evidence-gate", "none"),
+        "memory-policy": ("repository-evidence-gate", "rag-dense"),
+    }
+    canary = service.preview(
+        ExperimentRequest(experiment_id=experiment.id, preset="canary")
+    )
+    study = service.preview(
+        ExperimentRequest(experiment_id=experiment.id, preset="study")
+    )
+    assert (canary.cells, canary.estimated_trials) == (4, 4)
+    assert (study.cells, study.estimated_trials) == (64, 64)
+    assert {cell.task_id for cell in canary.matrix_cells} == {"sympy__sympy-13031"}
+    assert {cell.harness for cell in study.matrix_cells} == {
+        "claude-code",
+        "codex",
+    }
+    assert {cell.variant_id for cell in study.matrix_cells} == {
+        "baseline",
+        "memory-only",
+        "policy-only",
+        "memory-policy",
+    }
+
+    jobs = service.rendered_jobs(
+        ExperimentRequest(experiment_id=experiment.id, preset="study"),
+        run_id="retrieval-to-action-identity",
+        write_configs=False,
+    )
+    assert len(jobs) == 64
+    for harness in ("claude-code", "codex"):
+        harness_jobs = [job for job in jobs if job.harness == harness]
+        assert len({job.candidate_id for job in harness_jobs}) == 4
+        for variant_id in (
+            "baseline",
+            "memory-only",
+            "policy-only",
+            "memory-policy",
+        ):
+            variant_jobs = [job for job in harness_jobs if job.variant_id == variant_id]
+            assert {job.trial_index for job in variant_jobs} == {1, 2}
+            assert len({job.candidate_id for job in variant_jobs}) == 1
+
+    manifest = load_manifest(
+        REPO_ROOT / "datasets/repo-memory/swe-bench-retrieval-to-action-v1.yaml"
+    )
+    assert [task.id for task in manifest.tasks] == [
+        "sympy__sympy-18199",
+        "sphinx-doc__sphinx-9461",
+        "mwaskom__seaborn-3069",
+        "scikit-learn__scikit-learn-25102",
+    ]
+    prompt = (
+        REPO_ROOT / "configs/fugue/prompts/repository-evidence-gate.md"
+    ).read_text()
+    assert "official task verifier" in prompt
+    assert "alternate implementation, backend, or relevant test" in prompt
+    assert "plausible but incorrect" in prompt
+    assert all(task.id not in prompt for task in manifest.tasks)
+
+
 def test_hard_memory_v2_lock_is_deterministic_disjoint_and_gold_free() -> None:
     path = REPO_ROOT / "datasets/repo-memory/swe-bench-hard-memory-v2.lock.yaml"
     lock = yaml.safe_load(path.read_text())

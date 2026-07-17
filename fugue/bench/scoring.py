@@ -77,6 +77,42 @@ class CandidateSelection:
         }
 
 
+def factorial_difference_in_differences(
+    selection: CandidateSelection,
+    *,
+    factor_a_id: str,
+    factor_b_id: str,
+    combined_id: str,
+) -> dict[str, float | str]:
+    """Derive a 2x2 interaction from already paired baseline deltas."""
+    scores = {score.candidate_id: score for score in selection.candidates}
+    requested = (factor_a_id, factor_b_id, combined_id)
+    missing = [item for item in requested if item not in scores]
+    if missing:
+        raise ValueError("factorial contrast is missing arm(s): " + ", ".join(missing))
+    invalid = [
+        item
+        for item in requested
+        if not scores[item].eligible or scores[item].paired_pass_rate_delta is None
+    ]
+    if invalid:
+        raise ValueError(
+            "factorial contrast requires eligible paired arms: " + ", ".join(invalid)
+        )
+    factor_a = float(scores[factor_a_id].paired_pass_rate_delta)
+    factor_b = float(scores[factor_b_id].paired_pass_rate_delta)
+    combined = float(scores[combined_id].paired_pass_rate_delta)
+    return {
+        "factor_a_id": factor_a_id,
+        "factor_b_id": factor_b_id,
+        "combined_id": combined_id,
+        "factor_a_delta": factor_a,
+        "factor_b_delta": factor_b,
+        "combined_delta": combined,
+        "interaction": combined - factor_a - factor_b,
+    }
+
+
 @dataclass(frozen=True)
 class TreatmentSelectionLockV1:
     schema_version: int
@@ -102,6 +138,7 @@ def select_candidate_configuration(
 ) -> CandidateSelection:
     """Select a candidate from normalized trials without model-authored arithmetic."""
     values = [dict(row) for row in rows]
+    include_harness = policy.selection_unit == "variant"
     baseline_rows = [
         row
         for row in values
@@ -114,16 +151,17 @@ def select_candidate_configuration(
         if selection_id and selection_id != policy.baseline_variant_id:
             grouped.setdefault(selection_id, []).append(row)
     expected = {
-        _trial_coordinate(row)
+        _trial_coordinate(row, include_harness=include_harness)
         for rows_for_candidate in grouped.values()
         for row in rows_for_candidate
-        if _trial_coordinate(row) is not None
+        if _trial_coordinate(row, include_harness=include_harness) is not None
     }
     candidate_grids = {
         candidate_id: {
             coordinate
             for row in candidate_rows
-            if (coordinate := _trial_coordinate(row)) is not None
+            if (coordinate := _trial_coordinate(row, include_harness=include_harness))
+            is not None
         }
         for candidate_id, candidate_rows in grouped.items()
     }
@@ -132,10 +170,13 @@ def select_candidate_configuration(
     eligible_rows: dict[str, list[dict[str, Any]]] = {}
     for candidate_id, candidate_rows in sorted(grouped.items()):
         reasons: list[str] = []
-        coordinates = [_trial_coordinate(row) for row in candidate_rows]
+        coordinates = [
+            _trial_coordinate(row, include_harness=include_harness)
+            for row in candidate_rows
+        ]
         present = {item for item in coordinates if item is not None}
         if any(item is None for item in coordinates):
-            reasons.append("missing comparison_example_id or trial_index")
+            reasons.append("missing comparison_example_id, harness, or trial_index")
         if len(present) != len(coordinates):
             reasons.append("duplicate candidate/example/trial row")
         if policy.require_complete_grid and present != expected:
@@ -207,10 +248,13 @@ def select_candidate_configuration(
                 ),
                 paired_pass_rate_delta=paired_delta,
                 localization_recall_at_10=_mean_metric(
-                    candidate_rows, "localization_recall_at_10", "recall_at_10"
+                    candidate_rows,
+                    "localization_recall_at_10",
+                    "retrieval_recall_at_10",
+                    "recall_at_10",
                 ),
                 localization_mrr=_mean_metric(
-                    candidate_rows, "localization_mrr", "mrr"
+                    candidate_rows, "localization_mrr", "retrieval_mrr", "mrr"
                 ),
             )
         )
@@ -463,13 +507,20 @@ def _example_outcomes(rows: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def _trial_coordinate(row: dict[str, Any]) -> tuple[str, int] | None:
+def _trial_coordinate(
+    row: dict[str, Any], *, include_harness: bool
+) -> tuple[str, int] | tuple[str, str, int] | None:
     example_id = str(row.get("comparison_example_id") or "").strip()
+    harness = str(row.get("harness") or "").strip()
     try:
         trial_index = int(row.get("trial_index"))
     except (TypeError, ValueError):
         return None
-    return (example_id, trial_index) if example_id and trial_index > 0 else None
+    if not example_id or trial_index < 1:
+        return None
+    if include_harness:
+        return (example_id, harness, trial_index) if harness else None
+    return example_id, trial_index
 
 
 def _paired_baseline_delta(

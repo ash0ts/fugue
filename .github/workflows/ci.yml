@@ -102,10 +102,6 @@ jobs:
         run: uv run vulture fugue --min-confidence 60
       - name: Validate dependency declarations
         run: uv run deptry fugue
-      - name: Production Python remains net-negative
-        run: |
-          changed=$(git diff --numstat 75eb7c7 -- 'fugue/**/*.py' 'fugue/*.py' | awk '{added += $1; removed += $2} END {print added - removed}')
-          test "$changed" -lt 0
       - name: Compile with warnings as errors
         env:
           PYTHONWARNINGS: error

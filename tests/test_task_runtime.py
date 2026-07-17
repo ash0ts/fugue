@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -231,9 +232,12 @@ def test_swebench_verifier_is_prepared_for_offline_trial(
     }
 
 
-def test_swebench_verifier_accepts_locked_editable_extras(tmp_path: Path) -> None:
+@pytest.mark.parametrize("editable_target", [".[test]", ".[test,dev] --verbose"])
+def test_swebench_verifier_accepts_locked_editable_extras(
+    tmp_path: Path, editable_target: str
+) -> None:
     manifest, source, _script = _swebench_verifier_fixture(
-        tmp_path, editable_target=".[test] --verbose"
+        tmp_path, editable_target=editable_target
     )
 
     task_runtime._lock_verifier_script(
@@ -261,17 +265,21 @@ def test_swebench_verifier_accepts_a_prepared_base_without_install(
     assert "/opt/fugue-verifier/bin/python parser.py" in rewritten
 
 
-def test_swebench_verifier_rejects_multiple_editable_installs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("second_target", [".", ".[test]"])
+def test_swebench_verifier_rejects_multiple_local_installs(
+    tmp_path: Path, second_target: str
+) -> None:
     manifest, source, _script = _swebench_verifier_fixture(tmp_path)
     script = source / "tests" / "test.sh"
     script.write_text(
         script.read_text().replace(
             "python -m pip install -e .\n",
-            "python -m pip install -e .\npython -m pip install -e .\n",
+            "python -m pip install -e .\n"
+            f"python -m pip install -e {second_target}\n",
         )
     )
 
-    with pytest.raises(RuntimeError, match="multiple editable installs"):
+    with pytest.raises(RuntimeError, match="multiple local editable installs"):
         task_runtime._lock_verifier_script(
             source, manifest.tasks[0], manifest.dataset.verifier_runtime
         )
@@ -287,6 +295,28 @@ def test_swebench_verifier_rewrite_fails_closed_on_upstream_shape_change(
     )
 
     with pytest.raises(RuntimeError, match="one exact uv parser invocation"):
+        task_runtime._lock_verifier_script(
+            source, manifest.tasks[0], manifest.dataset.verifier_runtime
+        )
+
+
+@pytest.mark.parametrize(
+    "install",
+    [
+        "python -m pip install -e .[test] extra-package",
+        "python -m pip install -e '.[test]' && curl https://example.invalid",
+    ],
+)
+def test_swebench_verifier_rewrite_rejects_nonlocal_install(
+    tmp_path: Path, install: str
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    script = source / "tests" / "test.sh"
+    script.write_text(
+        script.read_text().replace("python -m pip install -e .", install)
+    )
+
+    with pytest.raises(RuntimeError, match="trial-time resolver"):
         task_runtime._lock_verifier_script(
             source, manifest.tasks[0], manifest.dataset.verifier_runtime
         )
@@ -318,14 +348,17 @@ def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:
     )
 
 
-def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contract_version", [7, 8])
+def test_task_runtime_lock_rejects_preintegration_contracts(
+    tmp_path: Path, contract_version: int
+) -> None:
     manifest, _source = _fixture(tmp_path)
     root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)
     dataset = root / "dataset-deadbeef"
     dataset.mkdir(parents=True)
     value = {
         "schema_version": 1,
-        "contract_version": task_runtime.TASK_RUNTIME_CONTRACT_VERSION - 1,
+        "contract_version": contract_version,
         "dataset": manifest.dataset.harbor_ref,
         "task_id": "task-one",
         "architecture": "arm64",
@@ -337,6 +370,134 @@ def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> Non
     assert (
         task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path)
         is None
+    )
+
+
+def test_swebench_runtime_lock_requires_base_fail_gold_pass_verification(
+    tmp_path: Path,
+) -> None:
+    manifest, _source = _fixture(tmp_path)
+    manifest = replace(
+        manifest,
+        dataset=replace(
+            manifest.dataset,
+            ref="swe-bench/swe-bench-verified",
+        ),
+    )
+    root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)
+    dataset = root / "dataset-deadbeef"
+    dataset.mkdir(parents=True)
+    value = {
+        "schema_version": 1,
+        "contract_version": task_runtime.TASK_RUNTIME_CONTRACT_VERSION,
+        "dataset": manifest.dataset.harbor_ref,
+        "task_id": "task-one",
+        "architecture": "arm64",
+        "verifier_runtime": None,
+        "image_id": "sha256:" + "a" * 64,
+        "dataset_path": dataset.as_posix(),
+    }
+    (root / "runtime-lock-arm64.json").write_text(json.dumps(value))
+
+    assert (
+        task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path)
+        is None
+    )
+
+
+def test_swebench_setup_verifies_base_and_gold_without_persisting_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    calls: list[Path | None] = []
+    patch = "diff --git a/src/a.py b/src/a.py\n"
+    patch_sha256 = hashlib.sha256(patch.encode()).hexdigest()
+
+    def verify(*args, gold_patch_path=None, **kwargs) -> bool:
+        calls.append(gold_patch_path)
+        if gold_patch_path is not None:
+            assert gold_patch_path.read_text() == patch
+        return gold_patch_path is not None
+
+    monkeypatch.setattr(task_runtime, "_run_swe_bench_verifier", verify)
+    verification = task_runtime._verify_swe_bench_outcomes(
+        "task-image",
+        manifest.tasks[0],
+        source,
+        gold_patch=patch,
+        gold_patch_sha256=patch_sha256,
+        architecture="arm64",
+        repo_root=tmp_path,
+    )
+
+    assert calls[0] is None
+    assert calls[1] is not None
+    assert verification == {
+        "base_failed": True,
+        "gold_passed": True,
+        "gold_patch_sha256": patch_sha256,
+    }
+    assert patch not in json.dumps(verification)
+    assert not list((tmp_path / ".fugue/runtime").glob("fugue-task-verify-*"))
+
+
+@pytest.mark.parametrize("base_resolved,gold_resolved", [(True, True), (False, False)])
+def test_swebench_setup_verification_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base_resolved: bool,
+    gold_resolved: bool,
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+
+    def verify(*args, gold_patch_path=None, **kwargs) -> bool:
+        return gold_resolved if gold_patch_path is not None else base_resolved
+
+    monkeypatch.setattr(task_runtime, "_run_swe_bench_verifier", verify)
+    with pytest.raises(RuntimeError, match="base checkout|gold patch"):
+        task_runtime._verify_swe_bench_outcomes(
+            "task-image",
+            manifest.tasks[0],
+            source,
+            gold_patch="patch",
+            gold_patch_sha256=hashlib.sha256(b"patch").hexdigest(),
+            architecture="arm64",
+            repo_root=tmp_path,
+        )
+
+
+def test_swebench_setup_container_prepares_harbor_verifier_log_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+
+    def run(command: list[str], **kwargs):
+        logs_mount = next(
+            value
+            for value in command
+            if value.startswith("type=bind,source=") and value.endswith("target=/logs")
+        )
+        mount = dict(item.split("=", 1) for item in logs_mount.split(","))
+        logs = Path(mount["source"])
+        assert (logs / "verifier").is_dir()
+        (logs / "verifier" / "report.json").write_text(
+            json.dumps({"task-one": {"resolved": False}})
+        )
+        return subprocess.CompletedProcess(command, 1, "", "")
+
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+
+    assert (
+        task_runtime._run_swe_bench_verifier(
+            "task-image",
+            manifest.tasks[0],
+            source,
+            architecture="arm64",
+            logs=tmp_path / "logs",
+            gold_patch_path=None,
+            repo_root=tmp_path,
+        )
+        is False
     )
 
 

@@ -1042,6 +1042,45 @@ def _apply_host_evidence_scores(
     scores = score_evidence_paths(expected_paths, row.get("evidence_paths") or ())
     row["evidence_recall"] = scores["evidence_recall"]
     row["citation_correctness"] = scores["evidence_precision"]
+    expected = {
+        value
+        for path in expected_paths
+        if (value := _normalize_repo_path(path)) is not None
+    }
+    returned = [
+        value
+        for path in row.get("context_result_paths") or ()
+        if (value := _normalize_repo_path(str(path))) is not None
+    ]
+    inspected = {
+        value
+        for path in row.get("inspected_paths") or ()
+        if (value := _normalize_repo_path(str(path))) is not None
+    }
+    changed = {
+        value
+        for path in row.get("changed_paths") or ()
+        if (value := _normalize_repo_path(str(path))) is not None
+    }
+    ranked = list(dict.fromkeys(returned))
+    relevant_ranks = [
+        rank for rank, path in enumerate(ranked, start=1) if path in expected
+    ]
+    for cutoff in (5, 10):
+        row[f"retrieval_recall_at_{cutoff}"] = (
+            len(expected & set(ranked[:cutoff])) / len(expected) if expected else None
+        )
+    row["retrieval_mrr"] = 1.0 / min(relevant_ranks) if relevant_ranks else 0.0
+    relevant_returned = expected & set(ranked)
+    row["relevant_retrieval_observed"] = bool(relevant_returned)
+    row["relevant_retrieval_opened"] = bool(relevant_returned & inspected)
+    row["relevant_retrieval_changed"] = bool(relevant_returned & changed)
+    row["off_target_change_only"] = bool(changed) and not bool(expected & changed)
+    row["premature_completion"] = bool(
+        row.get("agent_execution_status") == "started"
+        and row.get("pass") is False
+        and not changed
+    )
 
 
 def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3271,6 +3310,20 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         changed_paths=meta.get("changed_paths") or [],
     )
     trajectory_activity = _trajectory_activity(trial_dir)
+    inspected_paths = trajectory_activity["inspected_paths"]
+    changed_paths = list(
+        dict.fromkeys(
+            [
+                *evidence.get("changed_paths", []),
+                *trajectory_activity["changed_paths"],
+            ]
+        )
+    )
+    retrieval_activity = _retrieval_to_action_activity(
+        context_events["context_result_paths"],
+        inspected_paths,
+        changed_paths,
+    )
     terminal_error = _terminal_exception_event(exception)
     agent_response = _agent_response(trial_dir)
     context_system_id = meta.get("context_system_id", "none")
@@ -3389,16 +3442,10 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
             "gateway_call_ids": context_events["context_gateway_call_ids"],
         },
         **context_events,
+        **retrieval_activity,
         **evidence,
-        "inspected_paths": trajectory_activity["inspected_paths"],
-        "changed_paths": list(
-            dict.fromkeys(
-                [
-                    *evidence.get("changed_paths", []),
-                    *trajectory_activity["changed_paths"],
-                ]
-            )
-        ),
+        "inspected_paths": inspected_paths,
+        "changed_paths": changed_paths,
         "local_error_events": [
             *trajectory_activity["error_events"],
             *([terminal_error] if terminal_error else []),
@@ -3567,7 +3614,7 @@ def _context_event_summary(
     gateway_event_path: Any = None,
     expected_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    paths = list(trial_dir.rglob("fugue-context-events.jsonl"))
+    paths = sorted(trial_dir.rglob("fugue-context-events.jsonl"))
     events: list[dict[str, Any]] = []
     for path in paths:
         for line in path.read_text(errors="replace").splitlines():
@@ -3648,6 +3695,7 @@ def _context_event_summary(
         + int(value.get("bm25_result_count") or 0)
         for value in vector_events
     )
+    context_result_paths = _ordered_context_result_paths(events)
     return {
         "context_telemetry_available": bool(paths or gateway_events),
         "context_event_count": len(events) + len(gateway_events),
@@ -3669,7 +3717,10 @@ def _context_event_summary(
             for event in gateway_calls
         )
         + mismatched_gateway_events,
-        "context_result_count": sum(result_counts) + vector_result_count,
+        "context_result_count": max(sum(result_counts), len(context_result_paths))
+        + vector_result_count,
+        "context_result_paths": context_result_paths,
+        "context_result_path_count": len(context_result_paths),
         "context_result_tokens": sum(result_tokens),
         "context_query_latency_ms": (
             sum(latencies) / len(latencies) if latencies else None
@@ -3703,6 +3754,60 @@ def _context_event_summary(
         ),
         "gitnexus_vector_query_latency_ms": sum(
             float(value.get("query_latency_ms") or 0.0) for value in vector_events
+        ),
+    }
+
+
+def _ordered_context_result_paths(events: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for event in events:
+        hits = event.get("hits")
+        if not isinstance(hits, list):
+            continue
+        for hit in hits:
+            raw_path = hit.get("path") if isinstance(hit, dict) else None
+            if not isinstance(raw_path, str):
+                continue
+            path = _normalize_repo_path(raw_path)
+            if path and path not in paths:
+                paths.append(path)
+                if len(paths) == 200:
+                    return paths
+    return paths
+
+
+def _retrieval_to_action_activity(
+    returned_paths: list[str],
+    inspected_paths: list[str],
+    changed_paths: list[str],
+) -> dict[str, Any]:
+    returned = list(
+        dict.fromkeys(
+            value
+            for path in returned_paths
+            if (value := _normalize_repo_path(path)) is not None
+        )
+    )
+    inspected = {
+        value
+        for path in inspected_paths
+        if (value := _normalize_repo_path(path)) is not None
+    }
+    changed = {
+        value
+        for path in changed_paths
+        if (value := _normalize_repo_path(path)) is not None
+    }
+    opened = [path for path in returned if path in inspected]
+    modified = [path for path in returned if path in changed]
+    return {
+        "context_result_opened_paths": opened,
+        "context_result_changed_paths": modified,
+        "context_result_opened_count": len(opened),
+        "context_result_changed_count": len(modified),
+        "context_result_open_rate": len(opened) / len(returned) if returned else None,
+        "context_result_change_rate": (
+            len(modified) / len(returned) if returned else None
         ),
     }
 

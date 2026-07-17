@@ -59,6 +59,13 @@ def test_swe_bench_gold_paths_are_prepared_only_in_a_private_host_lock(
     )
     assert prepared.tasks[0].expected_paths == ("src/new.py", "tests/test_new.py")
     assert manifest.tasks[0].expected_paths == ()
+    gold = evaluation_assets.load_evaluation_gold_patch(
+        manifest, "org__repo-1", tmp_path
+    )
+    assert gold is not None
+    assert gold.patch == "diff --git a/src/old.py b/src/new.py\n"
+    assert gold.patch_sha256 == hashlib.sha256(gold.patch.encode()).hexdigest()
+    assert "diff --git" not in lock_path.read_text()
 
     payload = json.loads(lock_path.read_text())
     payload["tasks"]["org__repo-1"]["expected_evidence_paths"] = ["leaked.py"]
