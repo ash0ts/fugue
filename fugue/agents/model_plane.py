@@ -1769,6 +1769,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             "OPENAI_API_KEY": _chat_key(self.model_route),
             "OPENAI_BASE_URL": _chat_base_url(self.model_route),
             "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
         }
         for key in self._provider_env_keys(provider):
             val = self._get_env(key)

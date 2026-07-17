@@ -93,7 +93,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
     assert openclaw_runtime.version == (
         "openclaw@2026.7.1+weave-openclaw@0.1.1+"
-        "weave-otel2.1+fugue-load-path.1"
+        "weave-otel2.1+fugue-load-path.1+fugue-single-turn.1"
     )
     assert "npm ci --ignore-scripts" in openclaw_runtime.dockerfile
     assert "weave-openclaw/openclaw.plugin.json" in " ".join(
@@ -110,7 +110,17 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     assert r'plugin.status!==\"loaded\"' in openclaw_adapter
     assert r'plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"' in openclaw_adapter
+    assert '"FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id' in (
+        openclaw_adapter
+    )
     assert "~/.openclaw/npm/projects" not in openclaw_adapter
+    patch_source = next(
+        path
+        for path in agent_runtime._build_assets("openclaw")
+        if path.name == "patch-runtime.mjs"
+    ).read_text()
+    assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch_source
+    assert "stableTurn.end();" in patch_source
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
     assert claude_runtime.version.endswith("+empty-response.1")
     assert "npm ci --ignore-scripts" in claude_runtime.dockerfile

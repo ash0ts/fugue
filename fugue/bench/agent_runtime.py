@@ -224,7 +224,8 @@ RUNTIMES = {
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
         version=(
-            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+fugue-load-path.1"
+            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+"
+            "fugue-load-path.1+fugue-single-turn.1"
         ),
         dockerfile=_node_agent_dockerfile("openclaw", "openclaw", "2026.7.1"),
         probe=(
