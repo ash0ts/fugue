@@ -1,5 +1,5 @@
 {
-  "content_sha256": "686c5285ae8750de123550aabcf1ac8289ac5f9c99bda9177e9e2afc46b6f809",
+  "content_sha256": "82d36ace7dedbfa2c06161aa233fcf6d236e9964f1ad7e7b4d0f260b2be51137",
   "experiments": [
     {
       "content_sha256": "868a0012a79e2e0598447da0c418dcf2c22d794cff4259147e59258dbce73fb1",
@@ -44,6 +44,53 @@
       "status": "complete",
       "summary": "A complete no-context capability matrix across four Agent harnesses and eight locked hard SWE-bench discovery tasks.",
       "title": "Kimi K2.7 Code \u00d7 harness baseline",
+      "treatments": [
+        "baseline"
+      ]
+    },
+    {
+      "content_sha256": "82e676483bb2976f6120d0d0199fed243286d5aae653d0020cd6afc43e201110",
+      "decision_value": 82,
+      "evidence_tier": "contract",
+      "harnesses": [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex"
+      ],
+      "id": "opus-4-8-contract",
+      "metrics": {
+        "agent_links": 4,
+        "completion_rate": 1.0,
+        "expected_predictions": 4,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 3,
+        "measured_latency_predictions": 4,
+        "measured_usage_predictions": 2,
+        "median_turns": 1.0,
+        "median_wall_time_sec": 210.0445225,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": 0.75,
+        "passed_predictions": 3,
+        "predictions": 4,
+        "provider_errors": 0,
+        "recoverable_errors": 2,
+        "refusals": 0,
+        "scored_predictions": 4,
+        "tool_calls": 101,
+        "total_cost_usd": null
+      },
+      "models": [
+        "anthropic/claude-opus-4-8"
+      ],
+      "status": "complete_canary",
+      "summary": "A four-harness, one-task canary proving direct Anthropic routing, terminal Agent execution, and exact evaluation links on the frozen frontier runtime.",
+      "title": "Claude Opus 4.8 routing contract",
       "treatments": [
         "baseline"
       ]
