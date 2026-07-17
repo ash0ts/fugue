@@ -492,7 +492,7 @@ def _rewrite_dataset_verifier(
     )
     if installs > 1:
         raise RuntimeError(
-            f"task {task.id} verifier contains multiple editable installs"
+            f"task {task.id} verifier contains multiple local editable installs"
         )
     interpreter = shlex.quote(runtime.python_interpreter)
     rewritten, parser_runs = parser_pattern.subn(
