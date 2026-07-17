@@ -293,6 +293,44 @@ def test_swebench_verifier_rewrite_fails_closed_on_upstream_shape_change(
         )
 
 
+def test_swebench_verifier_rewrite_accepts_local_test_extra(tmp_path: Path) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    script = source / "tests" / "test.sh"
+    script.write_text(
+        script.read_text().replace(
+            "python -m pip install -e .", "python -m pip install -e .[test]"
+        )
+    )
+
+    task_runtime._lock_verifier_script(
+        source, manifest.tasks[0], manifest.dataset.verifier_runtime
+    )
+
+    assert "python -m pip install" not in script.read_text()
+
+
+@pytest.mark.parametrize(
+    "install",
+    [
+        "python -m pip install -e .[test] extra-package",
+        "python -m pip install -e '.[test]' && curl https://example.invalid",
+    ],
+)
+def test_swebench_verifier_rewrite_rejects_nonlocal_install(
+    tmp_path: Path, install: str
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    script = source / "tests" / "test.sh"
+    script.write_text(
+        script.read_text().replace("python -m pip install -e .", install)
+    )
+
+    with pytest.raises(RuntimeError, match="one exact editable install"):
+        task_runtime._lock_verifier_script(
+            source, manifest.tasks[0], manifest.dataset.verifier_runtime
+        )
+
+
 def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:
     manifest, _source = _fixture(tmp_path)
     root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)

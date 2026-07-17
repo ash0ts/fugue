@@ -25,7 +25,7 @@ from fugue.bench.manifest import (
 )
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 8
+TASK_RUNTIME_CONTRACT_VERSION = 9
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 
@@ -477,9 +477,12 @@ def _rewrite_dataset_verifier(
 ) -> str:
     if runtime.profile != "swebench-v4-offline":
         raise RuntimeError(f"unsupported dataset verifier profile: {runtime.profile}")
+    # SWE-bench images install some projects with their local test extra. Setup has
+    # already executed that exact local install; the trial must not repeat it.
     install_pattern = re.compile(
         r"(?m)^[ \t]*python -m pip install -e "
-        r"\.(?:\[[A-Za-z0-9_,.-]+\])?(?:[ \t]+--verbose)?[ \t]*$"
+        r"\.(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?"
+        r"(?:[ \t]+--verbose)?[ \t]*$"
     )
     parser_pattern = re.compile(
         r"(?m)^(?P<indent>[ \t]*)uv run parser\.py(?P<suffix>[ \t]*(?:\|.*)?)$"
