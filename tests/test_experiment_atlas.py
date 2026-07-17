@@ -329,6 +329,14 @@ def test_rich_private_rows_are_reduced_to_the_public_allowlist() -> None:
             "reasoning": "private chain",
             "trial_dir": "/private/tmp/run",
             "exception_class": "RuntimeError",
+            "context_result_paths": ["private/returned.py"],
+            "context_result_opened_paths": ["private/opened.py"],
+            "context_result_changed_paths": ["private/changed.py"],
+            "inspected_paths": ["private/inspected.py"],
+            "changed_paths": ["private/edited.py"],
+            "gold_paths": ["private/gold.py"],
+            "retrieval_recall_at_5": 1.0,
+            "retrieval_mrr": 1.0,
             "arbitrary_new_private_field": {"secret": "not copied"},
         }
     )
@@ -343,6 +351,15 @@ def test_rich_private_rows_are_reduced_to_the_public_allowlist() -> None:
     assert "private chain" not in serialized
     assert "trial_dir" not in serialized
     assert "exception_class" not in serialized
+    assert "context_result_paths" not in serialized
+    assert "context_result_opened_paths" not in serialized
+    assert "context_result_changed_paths" not in serialized
+    assert "inspected_paths" not in serialized
+    assert "changed_paths" not in serialized
+    assert "gold_paths" not in serialized
+    assert "retrieval_recall_at_5" not in serialized
+    assert "retrieval_mrr" not in serialized
+    assert "private/" not in serialized
 
 
 def test_public_snapshot_validator_rejects_raw_or_unexpected_content() -> None:

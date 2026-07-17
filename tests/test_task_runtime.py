@@ -232,9 +232,12 @@ def test_swebench_verifier_is_prepared_for_offline_trial(
     }
 
 
-def test_swebench_verifier_accepts_locked_editable_extras(tmp_path: Path) -> None:
+@pytest.mark.parametrize("editable_target", [".[test]", ".[test,dev] --verbose"])
+def test_swebench_verifier_accepts_locked_editable_extras(
+    tmp_path: Path, editable_target: str
+) -> None:
     manifest, source, _script = _swebench_verifier_fixture(
-        tmp_path, editable_target=".[test] --verbose"
+        tmp_path, editable_target=editable_target
     )
 
     task_runtime._lock_verifier_script(
@@ -262,17 +265,21 @@ def test_swebench_verifier_accepts_a_prepared_base_without_install(
     assert "/opt/fugue-verifier/bin/python parser.py" in rewritten
 
 
-def test_swebench_verifier_rejects_multiple_editable_installs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("second_target", [".", ".[test]"])
+def test_swebench_verifier_rejects_multiple_local_installs(
+    tmp_path: Path, second_target: str
+) -> None:
     manifest, source, _script = _swebench_verifier_fixture(tmp_path)
     script = source / "tests" / "test.sh"
     script.write_text(
         script.read_text().replace(
             "python -m pip install -e .\n",
-            "python -m pip install -e .\npython -m pip install -e .\n",
+            "python -m pip install -e .\n"
+            f"python -m pip install -e {second_target}\n",
         )
     )
 
-    with pytest.raises(RuntimeError, match="multiple editable installs"):
+    with pytest.raises(RuntimeError, match="multiple local editable installs"):
         task_runtime._lock_verifier_script(
             source, manifest.tasks[0], manifest.dataset.verifier_runtime
         )
@@ -293,37 +300,6 @@ def test_swebench_verifier_rewrite_fails_closed_on_upstream_shape_change(
         )
 
 
-def test_swebench_verifier_rewrite_accepts_local_test_extra(tmp_path: Path) -> None:
-    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
-    script = source / "tests" / "test.sh"
-    script.write_text(
-        script.read_text().replace(
-            "python -m pip install -e .", "python -m pip install -e .[test]"
-        )
-    )
-
-    task_runtime._lock_verifier_script(
-        source, manifest.tasks[0], manifest.dataset.verifier_runtime
-    )
-
-    assert "python -m pip install" not in script.read_text()
-
-
-def test_swebench_verifier_rewrite_accepts_no_install(tmp_path: Path) -> None:
-    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
-    script = source / "tests" / "test.sh"
-    script.write_text(
-        script.read_text().replace("python -m pip install -e .\n", "")
-    )
-
-    task_runtime._lock_verifier_script(
-        source, manifest.tasks[0], manifest.dataset.verifier_runtime
-    )
-
-    assert "python -m pip install" not in script.read_text()
-    assert "/opt/fugue-verifier/bin/python parser.py" in script.read_text()
-
-
 @pytest.mark.parametrize(
     "install",
     [
@@ -341,24 +317,6 @@ def test_swebench_verifier_rewrite_rejects_nonlocal_install(
     )
 
     with pytest.raises(RuntimeError, match="trial-time resolver"):
-        task_runtime._lock_verifier_script(
-            source, manifest.tasks[0], manifest.dataset.verifier_runtime
-        )
-
-
-def test_swebench_verifier_rewrite_rejects_multiple_local_installs(
-    tmp_path: Path,
-) -> None:
-    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
-    script = source / "tests" / "test.sh"
-    script.write_text(
-        script.read_text().replace(
-            "python -m pip install -e .",
-            "python -m pip install -e .\npython -m pip install -e .[test]",
-        )
-    )
-
-    with pytest.raises(RuntimeError, match="multiple local editable installs"):
         task_runtime._lock_verifier_script(
             source, manifest.tasks[0], manifest.dataset.verifier_runtime
         )
@@ -390,14 +348,17 @@ def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:
     )
 
 
-def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contract_version", [7, 8])
+def test_task_runtime_lock_rejects_preintegration_contracts(
+    tmp_path: Path, contract_version: int
+) -> None:
     manifest, _source = _fixture(tmp_path)
     root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)
     dataset = root / "dataset-deadbeef"
     dataset.mkdir(parents=True)
     value = {
         "schema_version": 1,
-        "contract_version": task_runtime.TASK_RUNTIME_CONTRACT_VERSION - 1,
+        "contract_version": contract_version,
         "dataset": manifest.dataset.harbor_ref,
         "task_id": "task-one",
         "architecture": "arm64",
