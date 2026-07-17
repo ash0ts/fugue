@@ -40,8 +40,12 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def validate_canary(
-    rows: Sequence[Mapping[str, Any]], *, expected_predictions: int, model: str
+def _validate_agent_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    expected_predictions: int,
+    model: str,
+    require_completed_execution: bool,
 ) -> dict[str, float | int]:
     if len(rows) != expected_predictions:
         raise ValueError(
@@ -60,14 +64,27 @@ def validate_canary(
             raise ValueError("frontier canaries may contain only Agent predictions")
         if row.get("model") != model:
             raise ValueError("canary row model does not match the admitted cohort")
-        if str(row.get("status") or "") != "passed":
-            raise ValueError("canary rows must complete without execution failure")
+        terminal_statuses = (
+            {"passed"}
+            if require_completed_execution
+            else {
+                "passed",
+                "failed",
+            }
+        )
+        if str(row.get("status") or "") not in terminal_statuses:
+            raise ValueError("campaign rows must be terminal")
         outcome = row.get("adapter_outcome")
-        if isinstance(outcome, Mapping):
+        if require_completed_execution and isinstance(outcome, Mapping):
             execution = outcome.get("execution")
-            if not isinstance(execution, Mapping) or execution.get("state") != "completed":
+            if (
+                not isinstance(execution, Mapping)
+                or execution.get("state") != "completed"
+            ):
                 raise ValueError("canary rows must have completed adapter execution")
-        if str(row.get("trace_link_status") or row.get("agent_link_status") or "") not in {
+        if str(
+            row.get("trace_link_status") or row.get("agent_link_status") or ""
+        ) not in {
             "verified",
             "linked",
             "exact",
@@ -80,7 +97,6 @@ def validate_canary(
             or not isinstance(root_ids[0], str)
             or not root_ids[0]
             or row.get("root_span_id") != root_ids[0]
-            or int(row.get("weave_turn_count") or 0) != 1
         ):
             raise ValueError("each canary prediction must have exactly one Agent root")
         conversation_ids = row.get("weave_conversation_ids")
@@ -91,7 +107,9 @@ def validate_canary(
             or not conversation_ids[0]
             or row.get("observed_conversation_id") != conversation_ids[0]
         ):
-            raise ValueError("each canary prediction must have exactly one conversation")
+            raise ValueError(
+                "each canary prediction must have exactly one conversation"
+            )
         cost = _measured_row_cost(row)
         if cost is not None:
             measured_costs.append(cost)
@@ -106,6 +124,28 @@ def validate_canary(
         + (len(rows) - len(measured_costs)) * maximum,
         "maximum_measured_cell_cost_usd": maximum,
     }
+
+
+def validate_canary(
+    rows: Sequence[Mapping[str, Any]], *, expected_predictions: int, model: str
+) -> dict[str, float | int]:
+    return _validate_agent_rows(
+        rows,
+        expected_predictions=expected_predictions,
+        model=model,
+        require_completed_execution=True,
+    )
+
+
+def validate_completed_cohort(
+    rows: Sequence[Mapping[str, Any]], *, expected_predictions: int, model: str
+) -> dict[str, float | int]:
+    return _validate_agent_rows(
+        rows,
+        expected_predictions=expected_predictions,
+        model=model,
+        require_completed_execution=False,
+    )
 
 
 def load_ledger(path: Path, *, cap_usd: float) -> dict[str, Any]:
@@ -180,7 +220,7 @@ def complete_cohort(
     entry = matching[0]
     if len(rows) != int(entry["cohort_predictions"]):
         raise ValueError("completed cohort row count does not match its admission")
-    validate_canary(
+    validate_completed_cohort(
         rows,
         expected_predictions=int(entry["cohort_predictions"]),
         model=str(entry["model"]),
@@ -228,7 +268,9 @@ def reconcile_failed_cohort(
             raise ValueError("failed cohort row model does not match its admission")
         prediction_id = str(row.get("prediction_id") or "")
         if not prediction_id or prediction_id in prediction_ids:
-            raise ValueError("failed cohort prediction IDs must be non-empty and unique")
+            raise ValueError(
+                "failed cohort prediction IDs must be non-empty and unique"
+            )
         prediction_ids.add(prediction_id)
         costs.append(_measured_row_cost(row))
     measured = [value for value in costs if value is not None]

@@ -131,6 +131,54 @@ def test_canary_requires_exact_agent_contract() -> None:
         )
 
 
+def test_canary_allows_nested_continuations_below_one_agent_root() -> None:
+    row = _row(1)
+    row["weave_turn_count"] = 3
+
+    canary = validate_canary(
+        [row],
+        expected_predictions=1,
+        model="wandb/zai-org/GLM-5.2",
+    )
+
+    assert canary["predictions"] == 1
+
+
+def test_completion_keeps_terminal_harness_failures_as_evidence() -> None:
+    canary = validate_canary(
+        [_row(1, cost=1.0)],
+        expected_predictions=1,
+        model="wandb/zai-org/GLM-5.2",
+    )
+    admitted = admit_cohort(
+        {"schema_version": 1, "cap_usd": 2000.0, "cohorts": []},
+        cohort_id="glm",
+        model="wandb/zai-org/GLM-5.2",
+        canary=canary,
+        cohort_predictions=1,
+        safety_margin=1.5,
+    )
+    row = _row(1, cost=3.0)
+    row["weave_turn_count"] = 3
+    row["adapter_outcome"] = {"execution": {"state": "failed"}}
+
+    completed = complete_cohort(admitted, cohort_id="glm", rows=[row])
+
+    assert completed["cohorts"][0]["status"] == "completed"
+
+
+def test_canary_rejects_harness_failure_even_when_the_row_is_terminal() -> None:
+    row = _row(1)
+    row["adapter_outcome"] = {"execution": {"state": "failed"}}
+
+    with pytest.raises(ValueError, match="completed adapter execution"):
+        validate_canary(
+            [row],
+            expected_predictions=1,
+            model="wandb/zai-org/GLM-5.2",
+        )
+
+
 def test_failed_cohort_reconciles_spend_without_claiming_completion() -> None:
     canary = validate_canary(
         [_row(1, cost=1.0)],
