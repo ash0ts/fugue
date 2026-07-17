@@ -111,6 +111,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert r'plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"' in openclaw_adapter
     assert "~/.openclaw/npm/projects" not in openclaw_adapter
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
+    assert claude_runtime.version.endswith("+empty-response.1")
     assert "npm ci --ignore-scripts" in claude_runtime.dockerfile
     assert "lib/node_modules/npm" in claude_runtime.dockerfile
     assert "bin/npm" in claude_runtime.dockerfile
@@ -123,7 +124,21 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime" in (
         ranges["claude-code"]
     )
+    assert 'hook_event_name:"SessionEnd"' in ranges["claude-code"]
+    assert "fugue_trial_finalized" in ranges["claude-code"]
+    assert ranges["claude-code"].index("_finalize_weave_session") < ranges[
+        "claude-code"
+    ].index("_finish_trial")
     assert "hermes-install.sh" in agent_runtime.RUNTIMES["hermes"].dockerfile
+
+
+def test_weave_claude_patch_closes_empty_response_without_fake_usage() -> None:
+    source = Path("configs/fugue/runtime/claude-code/patch-runtime.mjs").read_text()
+
+    assert "if (group.length === 0)" in source
+    assert "existingSpan?.end()" in source
+    assert "session.emittedChatSpanResponseKeys.add(key)" in source
+    assert "usage: 0" not in source
 
 
 def test_trial_mutator_lock_covers_task_image_conda_environments() -> None:

@@ -2032,6 +2032,39 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             timeout_sec=300,
         )
 
+    async def _finalize_weave_session(self, environment: BaseEnvironment) -> None:
+        env = {
+            **self._trace_environment("claude-code", self.model_route),
+            "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
+            "WEAVE_PROJECT": _weave_project_slug(),
+            "WANDB_API_KEY": _require_trace_key(),
+            "NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime",
+        }
+        handler = (
+            "/opt/fugue-agent-runtime/lib/node_modules/"
+            "weave-claude-code/hooks/hook-handler.sh"
+        )
+        await self.exec_as_agent(
+            environment,
+            command=(
+                'export PATH="/opt/fugue-agent-runtime/bin:$PATH"; '
+                f'find "$CLAUDE_CONFIG_DIR/projects" -type f -name "*.jsonl" '
+                "! -path '*/subagents/*' 2>/dev/null | "
+                "while IFS= read -r transcript; do "
+                'session_id="${transcript##*/}"; session_id="${session_id%.jsonl}"; '
+                "node -e 'process.stdout.write(JSON.stringify({"
+                'hook_event_name:"SessionEnd",session_id:process.argv[1],'
+                "transcript_path:process.argv[2],reason:\"fugue_trial_finalized\"}))' "
+                '"$session_id" "$transcript" | '
+                f"bash {handler}; "
+                "done; sleep 5; "
+                "cp -R ~/.weave-claude-code/logs "
+                "/logs/agent/weave-claude-code-logs 2>/dev/null || true"
+            ),
+            env=env,
+            timeout_sec=60,
+        )
+
     @override
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -2085,17 +2118,14 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 )
             await self._lock_trial_mutators(environment)
             await super().run(instruction, environment, context)
-            # Let the plugin daemon flush the final turn before teardown.
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    "sleep 5; "
-                    "cp -R ~/.weave-claude-code/logs /logs/agent/weave-claude-code-logs "
-                    "2>/dev/null || true"
-                ),
-                timeout_sec=60,
-            )
         finally:
+            # Harbor may terminate Claude before its native SessionEnd hook.
+            # Forward that lifecycle event for the real transcript so the
+            # plugin closes the existing turn instead of leaking a root span.
+            try:
+                await self._finalize_weave_session(environment)
+            except Exception:
+                pass
             await self._finish_trial(environment)
 
     @override

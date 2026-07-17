@@ -237,7 +237,10 @@ RUNTIMES = {
     ),
     "claude-code": AgentRuntimeSpec(
         harness="claude-code",
-        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.3",
+        version=(
+            "claude-code@2.1.210+weave-claude-code@0.2.12+"
+            "fugue-attrs.3+empty-response.1"
+        ),
         dockerfile=_node_agent_dockerfile("claude-code", "claude", "2.1.210"),
         probe=(
             "/bin/sh",
