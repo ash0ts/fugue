@@ -11,6 +11,7 @@ from fugue.model_plane import (
     model_route_identity,
     provider_client_env,
     provider_request_headers,
+    resolve_harness_model_route,
     resolve_model_route,
     select_model,
     structured_assistant_options,
@@ -31,9 +32,7 @@ def test_resolve_model_route_for_supported_providers() -> None:
     assert wandb.messages_base_url is None
     assert wandb.tool_result_modalities == ("text",)
     assert model_route_identity(wandb)["tool_result_modalities"] == ["text"]
-    assert structured_assistant_options(wandb) == {
-        "thinking": {"type": "disabled"}
-    }
+    assert structured_assistant_options(wandb) == {"thinking": {"type": "disabled"}}
 
     openai = resolve_model_route("openai/gpt-5", {})
     assert openai.provider == "openai"
@@ -49,6 +48,112 @@ def test_resolve_model_route_for_supported_providers() -> None:
     assert anthropic.api_key_env == "ANTHROPIC_API_KEY"
     assert anthropic.chat_base_url is None
     assert anthropic.messages_base_url == "https://api.anthropic.com"
+
+
+@pytest.mark.parametrize(
+    ("model", "harness", "protocol", "endpoint_kind", "endpoint_host"),
+    [
+        (
+            "wandb/zai-org/GLM-5.2",
+            "hermes",
+            "chat_completions",
+            "provider_direct",
+            "api.inference.wandb.ai",
+        ),
+        (
+            "wandb/zai-org/GLM-5.2",
+            "openclaw",
+            "chat_completions",
+            "provider_direct",
+            "api.inference.wandb.ai",
+        ),
+        (
+            "wandb/zai-org/GLM-5.2",
+            "claude-code",
+            "messages",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+        (
+            "wandb/zai-org/GLM-5.2",
+            "codex",
+            "responses",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+        (
+            "anthropic/claude-sonnet-4-5",
+            "hermes",
+            "chat_completions",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+        (
+            "anthropic/claude-sonnet-4-5",
+            "openclaw",
+            "chat_completions",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+        (
+            "anthropic/claude-sonnet-4-5",
+            "claude-code",
+            "messages",
+            "provider_direct",
+            "api.anthropic.com",
+        ),
+        (
+            "anthropic/claude-sonnet-4-5",
+            "codex",
+            "responses",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+        (
+            "openai/gpt-5",
+            "hermes",
+            "chat_completions",
+            "provider_direct",
+            "api.openai.com",
+        ),
+        (
+            "openai/gpt-5",
+            "openclaw",
+            "chat_completions",
+            "provider_direct",
+            "api.openai.com",
+        ),
+        (
+            "openai/gpt-5",
+            "codex",
+            "responses",
+            "provider_direct",
+            "api.openai.com",
+        ),
+        (
+            "openai/gpt-5",
+            "claude-code",
+            "messages",
+            "fugue_bridge",
+            "host.docker.internal",
+        ),
+    ],
+)
+def test_harness_model_route_is_explicit_and_provider_aware(
+    model: str,
+    harness: str,
+    protocol: str,
+    endpoint_kind: str,
+    endpoint_host: str,
+) -> None:
+    receipt = resolve_harness_model_route(resolve_model_route(model, {}), harness)
+
+    assert receipt["wire_protocol"] == protocol
+    assert receipt["endpoint_kind"] == endpoint_kind
+    assert (
+        "host.docker.internal" if receipt["bridge_required"] else receipt["upstream_host"]
+    ) == endpoint_host
+    assert receipt["bridge_required"] is (endpoint_kind == "fugue_bridge")
 
 
 @pytest.mark.parametrize("model", ["gpt-5", "local/foo", "openai/"])
@@ -125,5 +230,7 @@ def test_wandb_model_requests_use_the_trace_project_for_billing() -> None:
 def test_weave_agents_otel_headers_route_without_exposing_plain_key() -> None:
     headers = weave_agents_otel_headers("wandb/fugue-experiments", "test-key")
 
-    assert headers.startswith("project_id=wandb/fugue-experiments,Authorization=Basic%20")
+    assert headers.startswith(
+        "project_id=wandb/fugue-experiments,Authorization=Basic%20"
+    )
     assert "test-key" not in headers

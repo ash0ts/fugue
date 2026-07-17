@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Compatible comparisons inside Fugue experiments.">
+    <title>Compare · Fugue Atlas</title>
+  </head>
+  <body data-page="compare">
+    <a class="skip-link" href="#main">Skip to comparison</a>
+    <header class="site-header">
+      <a class="wordmark" href="./">Fugue <span>Experiment Atlas</span></a>
+      <nav aria-label="Primary navigation"><a href="./">Experiments</a><a aria-current="page" href="./compare.html">Compare</a><a href="./methods.html">Methods</a></nav>
+    </header>
+    <main id="main">
+      <section class="page-intro ruled"><p class="eyebrow">Counterpoint view</p><h1>Compare like with like.</h1><p class="lede">The atlas will not combine different workloads or silently pool model routes. Choose one frozen experiment, then inspect its harness lanes and treatment voices.</p></section>
+      <section class="compare-controls" aria-label="Comparison controls">
+        <label for="experiment-select">Experiment</label><select id="experiment-select"></select>
+        <label for="cohort-select">Compatible cohort</label><select id="cohort-select"></select>
+      </section>
+      <div id="comparison" aria-live="polite"></div>
+    </main>
+    <footer><span>Fugue Experiment Atlas</span><span>No cross-workload leaderboard</span></footer>
+    <script type="module" src="/src/compare.js"></script>
+  </body>
+</html>

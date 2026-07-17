@@ -25,7 +25,7 @@ from fugue.bench.manifest import (
 )
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 5
+TASK_RUNTIME_CONTRACT_VERSION = 7
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 
@@ -332,16 +332,19 @@ def _rewrite_dataset_verifier(
 ) -> str:
     if runtime.profile != "swebench-v4-offline":
         raise RuntimeError(f"unsupported dataset verifier profile: {runtime.profile}")
-    install_pattern = re.compile(r"(?m)^[ \t]*python -m pip install -e \.[ \t]*$")
+    install_pattern = re.compile(
+        r"(?m)^[ \t]*python -m pip install -e "
+        r"\.(?:\[[A-Za-z0-9_,.-]+\])?(?:[ \t]+--verbose)?[ \t]*$"
+    )
     parser_pattern = re.compile(
         r"(?m)^(?P<indent>[ \t]*)uv run parser\.py(?P<suffix>[ \t]*(?:\|.*)?)$"
     )
     rewritten, installs = install_pattern.subn(
         "        # Setup prepared the task environment before the trial.", source
     )
-    if installs != 1:
+    if installs > 1:
         raise RuntimeError(
-            f"task {task.id} verifier must contain one exact editable install"
+            f"task {task.id} verifier contains multiple editable installs"
         )
     interpreter = shlex.quote(runtime.python_interpreter)
     rewritten, parser_runs = parser_pattern.subn(

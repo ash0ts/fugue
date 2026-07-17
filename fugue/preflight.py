@@ -16,6 +16,7 @@ from fugue.model_plane import (
     missing_model_env,
     missing_trace_env,
     provider_request_headers,
+    resolve_harness_model_route,
     resolve_model_route,
     trace_project_slug,
 )
@@ -57,6 +58,9 @@ def run_preflight(
     repo_root: Path | str | None = None,
     env: Mapping[str, str] | None = None,
     live: bool = True,
+    harnesses: tuple[str, ...] | None = None,
+    builder_model: str | None = None,
+    judge_model: str | None = None,
 ) -> list[PreflightCheck]:
     values = env if env is not None else os.environ
     root = Path.cwd() if repo_root is None else Path(repo_root)
@@ -85,12 +89,47 @@ def run_preflight(
     if not missing_trace_env(values):
         checks.append(_check_weave_endpoint(values))
 
-    status = bridge_status()
+    bridge_required = harnesses is None or any(
+        resolve_harness_model_route(route, harness)["bridge_required"]
+        for harness in harnesses
+    )
+    if not bridge_required:
+        checks.append(
+            PreflightCheck(
+                "bridge health",
+                True,
+                "not required; every selected harness uses its provider endpoint directly",
+            )
+        )
+        return checks
+    status = (
+        bridge_status()
+        if harnesses is None
+        else bridge_status(
+            repo_root=root,
+            route=route,
+            builder_route=(
+                resolve_model_route(builder_model, values) if builder_model else None
+            ),
+            judge_route=(
+                resolve_model_route(judge_model, values) if judge_model else None
+            ),
+            env=values,
+        )
+    )
     checks.append(
         PreflightCheck(
             "bridge health",
             bool(status.get("ok")),
-            str(status.get("body") or status.get("error") or status),
+            str(
+                status.get("error")
+                or (
+                    f"locked {status['runtime_lock']['image']} as "
+                    f"{status['resolved_image_id']}"
+                    if status.get("runtime_lock") and status.get("resolved_image_id")
+                    else status.get("body") or status
+                )
+            ),
         )
     )
     return checks

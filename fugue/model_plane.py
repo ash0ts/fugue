@@ -4,9 +4,11 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
+from urllib.parse import urlparse
 
 Provider = Literal["wandb", "openai", "anthropic"]
 ToolResultModality = Literal["text", "image"]
+ModelWireProtocol = Literal["chat_completions", "messages", "responses"]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
@@ -25,6 +27,12 @@ OPENAI_PROJECT_ID_ENV = "OPENAI_PROJECT_ID"
 # GLM-5.2 rejected image-bearing tool results through both bridge protocols in
 # the release canary. Keep this model-specific: other W&B routes may be visual.
 _TEXT_ONLY_MODEL_ROUTES = {("wandb", "zai-org/GLM-5.2")}
+_HARNESS_PROTOCOLS: dict[str, ModelWireProtocol] = {
+    "hermes": "chat_completions",
+    "openclaw": "chat_completions",
+    "claude-code": "messages",
+    "codex": "responses",
+}
 
 
 @dataclass(frozen=True)
@@ -119,8 +127,7 @@ def resolve_model_route(
         )
 
     raise ValueError(
-        f"unknown model provider {provider_raw!r}; expected wandb, openai, "
-        "or anthropic"
+        f"unknown model provider {provider_raw!r}; expected wandb, openai, or anthropic"
     )
 
 
@@ -135,6 +142,52 @@ def model_route_identity(route: ModelRoute) -> dict[str, object]:
         "litellm_model": route.litellm_model,
         "tool_result_modalities": list(route.tool_result_modalities),
     }
+
+
+def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, object]:
+    normalized = harness.removeprefix("fugue-").strip().lower()
+    try:
+        protocol = _HARNESS_PROTOCOLS[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported Agent harness for model routing: {harness}"
+        ) from exc
+    _, bridge_required = model_protocol_endpoint(route, protocol)
+    return {
+        "harness": normalized,
+        "wire_protocol": protocol,
+        "endpoint_kind": "fugue_bridge" if bridge_required else "provider_direct",
+        "upstream_host": _provider_host(route),
+        "bridge_required": bridge_required,
+    }
+
+
+def model_protocol_endpoint(
+    route: ModelRoute, protocol: ModelWireProtocol
+) -> tuple[str, bool]:
+    direct = {
+        "chat_completions": route.chat_base_url,
+        "messages": route.messages_base_url,
+        "responses": route.responses_base_url,
+    }[protocol]
+    if direct:
+        return direct, False
+    bridge = (
+        BRIDGE_BASE_URL_CONTAINER
+        if protocol == "messages"
+        else f"{BRIDGE_BASE_URL_CONTAINER}/v1"
+    )
+    return bridge, True
+
+
+def _provider_host(route: ModelRoute) -> str:
+    endpoint = (
+        route.responses_base_url or route.messages_base_url or route.chat_base_url
+    )
+    host = urlparse(endpoint).hostname if endpoint else None
+    if not host:
+        raise ValueError(f"{route.display_model} has no provider endpoint host")
+    return host
 
 
 def structured_assistant_options(route: ModelRoute) -> dict[str, object]:

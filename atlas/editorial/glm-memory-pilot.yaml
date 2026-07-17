@@ -1,0 +1,52 @@
+schema_version: 1
+id: glm-memory-pilot
+title: GLM memory × harness pilot
+summary: A controlled one-attempt pilot comparing no context, BM25, dense, and hybrid repository context for Claude Code and Codex on four locked hard SWE-bench tasks.
+question: Does repository context change official SWE-bench resolution for a fixed GLM model, and does that effect depend on the agent harness?
+hypothesis: Semantic retrieval will rescue some search failures, but its lift and efficiency cost will differ by harness.
+why_it_matters: Memory systems should be selected for measured task lift, not for retrieval quality in isolation. This pilot checks whether the intervention changes accepted software repairs before we spend on the complete discovery grid.
+task_selection: The four tasks are the first locked discovery cases. Every case requires production and test changes, bounded touched files, and either lexical mismatch or work across production directories.
+evidence_tier: blocked
+decision_value: 88
+status: cancelled_incomplete
+matrix:
+  experiment_id: repo-memory-impact
+  workload_id: coding
+  expected_predictions: 32
+  attempts: 1
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [claude-code, codex]
+  treatments: [none, rag-bm25, rag-dense, rag-hybrid]
+  tasks:
+    - sympy__sympy-13031
+    - astropy__astropy-13033
+    - django__django-17087
+    - django__django-11477
+  cohorts:
+    - id: glm-pilot
+      label: GLM memory pilot
+      models: [wandb/zai-org/GLM-5.2]
+      harnesses: [claude-code, codex]
+      treatments: [none, rag-bm25, rag-dense, rag-hybrid]
+      tasks:
+        - sympy__sympy-13031
+        - astropy__astropy-13033
+        - django__django-17087
+        - django__django-11477
+      expected_predictions: 32
+provenance:
+  source_commit: e0b56ae3790e43d34f1c4e73f03e5b7420cc2aff
+  source_url: https://github.com/ash0ts/fugue/commit/e0b56ae3790e43d34f1c4e73f03e5b7420cc2aff
+  dataset_id: swe-bench-hard-discovery-v2
+  dataset_digest: c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970
+  snapshot_digest: de144b7e981260a7f345f9bb6433405e5e41379349573fb7f42e9f08e00add21
+  run_ids: [20260716T230402-2af3e4e7cd]
+links:
+  project: https://wandb.ai/wandb/fugue-glm-standup-2026-07-17/weave
+  evaluations: []
+findings: []
+caveats:
+  - The run was cancelled with one Agent prediction incomplete, so it cannot be ranked or promoted to directional evidence.
+  - Blocked experiments are never ranked and have no winner.
+  - One attempt can show a directional interaction but cannot confirm a treatment effect.
+  - Raw conversations and tool content remain in authenticated Weave.

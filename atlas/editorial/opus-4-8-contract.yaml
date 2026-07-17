@@ -1,0 +1,45 @@
+schema_version: 1
+id: opus-4-8-contract
+title: Claude Opus 4.8 routing contract
+summary: A four-harness, one-task canary proving direct Anthropic routing, terminal Agent execution, and exact evaluation links on the frozen frontier runtime.
+question: Can Claude Opus 4.8 execute the same hard task through every supported Agent harness while preserving Fugue's provider and observability contracts?
+hypothesis: All four harnesses can complete one direct-Anthropic Agent prediction without W&B Inference traffic or trial-time preparation.
+why_it_matters: A model cohort is not admissible until routing, tool execution, terminal state, and evaluation-to-Agent navigation work across every selected harness.
+task_selection: The canary uses the first locked hard discovery task so its runtime, verifier, and comparison identity match the planned frontier cohort.
+evidence_tier: contract
+decision_value: 82
+status: complete_canary
+matrix:
+  experiment_id: swe-frontier-harness
+  workload_id: hard-baseline
+  expected_predictions: 4
+  attempts: 1
+  models: [anthropic/claude-opus-4-8]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  treatments: [baseline]
+  tasks: [sympy__sympy-13031]
+  cohorts:
+    - id: opus-4-8-canary
+      label: Claude Opus 4.8 four-harness canary
+      models: [anthropic/claude-opus-4-8]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: [sympy__sympy-13031]
+      expected_predictions: 4
+provenance:
+  source_commit: c5565abfba34eb4d8a834e0136cf5da1ff5fad48
+  source_url: https://github.com/ash0ts/fugue/commit/c5565abfba34eb4d8a834e0136cf5da1ff5fad48
+  dataset_id: swe-bench-hard-discovery-v2
+  dataset_digest: c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970
+  snapshot_digest: 3b2fdfc6311aa22bee319386d4b560af41f1f4989bd4cd8b63dd099d3a32cbf4
+  run_ids: [20260717T092057-3b6f0eba4d]
+links:
+  project: https://wandb.ai/wandb/fugue-swe-frontier-v1/weave
+  evaluations: []
+findings:
+  - All four harnesses completed with one verified conversation, Agent root, and evaluation link per prediction.
+  - Claude Code, Hermes, and OpenClaw resolved the canary task; Codex completed cleanly but did not resolve it.
+caveats:
+  - This record proves routing and observability only; a one-task canary is not a capability benchmark.
+  - The later Opus cohort was cancelled after Codex reproduced an Anthropic tool-history failure on another task.
+  - Raw Agent conversations and tool content remain in authenticated Weave.

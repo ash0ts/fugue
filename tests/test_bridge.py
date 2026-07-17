@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
+import subprocess
+
+import yaml
+
 from fugue.bridge import (
     LITELLM_IMAGE,
+    bridge_runtime_lock_for_route,
+    bridge_status,
     bridge_up,
     docker_compose_for_route,
     litellm_config_for_route,
+    write_bridge_files,
 )
 from fugue.model_plane import resolve_model_route
 
@@ -19,9 +27,7 @@ def test_wandb_bridge_config_keeps_nebius_mapping() -> None:
     assert params["model"] == "nebius/*"
     assert params["api_base"] == "https://api.inference.wandb.ai/v1"
     assert params["api_key"] == "os.environ/WANDB_API_KEY"
-    assert params["extra_headers"] == {
-        "OpenAI-Project": "wandb/billing-project"
-    }
+    assert params["extra_headers"] == {"OpenAI-Project": "wandb/billing-project"}
 
 
 def test_openai_bridge_config_uses_env_reference_only() -> None:
@@ -73,7 +79,108 @@ def test_bridge_uses_distinct_role_aliases_and_pinned_image() -> None:
         judge_route=judge,
     )
     assert compose["services"]["bridge"]["image"] == LITELLM_IMAGE
-    assert "latest" not in LITELLM_IMAGE
+    assert "@sha256:" in LITELLM_IMAGE
+
+
+def test_bridge_files_include_a_secret_free_route_and_image_lock(tmp_path) -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {
+        "WANDB_API_KEY": "sk-secret",
+        "WANDB_ENTITY": "wandb",
+        "WANDB_PROJECT": "route-proof",
+    }
+
+    files = write_bridge_files(route, repo_root=tmp_path, env=env)
+    lock = json.loads(files.lock_path.read_text(encoding="utf-8"))
+
+    assert lock == bridge_runtime_lock_for_route(route, env=env)
+    assert lock["image"] == LITELLM_IMAGE
+    assert "sk-secret" not in files.lock_path.read_text(encoding="utf-8")
+
+
+def test_bridge_status_fails_closed_when_runtime_lock_drifted(
+    monkeypatch, tmp_path
+) -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    files = write_bridge_files(route, repo_root=tmp_path, env={})
+    lock = json.loads(files.lock_path.read_text(encoding="utf-8"))
+    lock["config_sha256"] = "0" * 64
+    files.lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    monkeypatch.setattr(
+        "fugue.bridge.httpx.get",
+        lambda *_args, **_kwargs: type(
+            "Response",
+            (),
+            {"status_code": 200, "json": lambda self: {"status": "ok"}},
+        )(),
+    )
+
+    status = bridge_status(repo_root=tmp_path, route=route, env={})
+
+    assert status["ok"] is False
+    assert "differs from the selected route" in status["error"]
+
+
+def test_bridge_status_fails_closed_when_mounted_config_drifted(
+    monkeypatch, tmp_path
+) -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    files = write_bridge_files(route, repo_root=tmp_path, env={})
+    config = yaml.safe_load(files.config_path.read_text(encoding="utf-8"))
+    config["litellm_settings"]["drop_params"] = False
+    files.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(
+        "fugue.bridge.httpx.get",
+        lambda *_args, **_kwargs: type(
+            "Response",
+            (),
+            {"status_code": 200, "json": lambda self: {"status": "ok"}},
+        )(),
+    )
+
+    status = bridge_status(repo_root=tmp_path, route=route, env={})
+
+    assert status["ok"] is False
+    assert "bridge config differs from its runtime lock" in status["error"]
+
+
+def test_bridge_status_attests_running_image_command_and_mount(
+    monkeypatch, tmp_path
+) -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    files = write_bridge_files(route, repo_root=tmp_path, env={})
+    command = docker_compose_for_route(route)["services"]["bridge"]["command"]
+    container = {
+        "Config": {"Image": LITELLM_IMAGE, "Cmd": command},
+        "Image": "sha256:" + "f" * 64,
+        "Mounts": [
+            {
+                "Destination": "/app/config.yaml",
+                "Source": files.config_path.resolve().as_posix(),
+                "RW": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "fugue.bridge.httpx.get",
+        lambda *_args, **_kwargs: type(
+            "Response",
+            (),
+            {"status_code": 200, "json": lambda self: {"status": "ok"}},
+        )(),
+    )
+    monkeypatch.setattr(
+        "fugue.bridge.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, json.dumps([container]), ""
+        ),
+    )
+
+    status = bridge_status(repo_root=tmp_path, route=route, env={})
+
+    assert status["ok"] is True
+    assert status["runtime_lock"]["image"] == LITELLM_IMAGE
+    assert status["resolved_image_id"] == "sha256:" + "f" * 64
 
 
 def test_bridge_up_reloads_generated_config(monkeypatch, tmp_path) -> None:

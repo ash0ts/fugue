@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Fugue's public, controlled experiment evidence.">
+    <title>Fugue Experiment Atlas</title>
+  </head>
+  <body data-page="home">
+    <a class="skip-link" href="#main">Skip to evidence</a>
+    <header class="site-header">
+      <a class="wordmark" href="./">Fugue <span>Experiment Atlas</span></a>
+      <nav aria-label="Primary navigation">
+        <a aria-current="page" href="./">Experiments</a>
+        <a href="./compare.html">Compare</a>
+        <a href="./methods.html">Methods</a>
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero ruled">
+        <p class="eyebrow">Public evidence / private traces</p>
+        <h1>Experiments as scores,<br>not scoreboards.</h1>
+        <p class="lede">Each study starts with a question, freezes what may vary, and publishes only the evidence needed to inspect the decision. Raw Agent conversations stay in authenticated Weave.</p>
+        <div class="hero-facts" aria-label="Atlas principles">
+          <span>No composite score</span><span>Missing stays missing</span><span>Links are verified</span>
+        </div>
+      </section>
+      <section class="section-heading">
+        <div><p class="eyebrow">Evidence register</p><h2>Ordered by decision value</h2></div>
+        <p>Tier first, then an explicit editorial assessment of what the experiment can decide. Active and blocked work never receives a winner.</p>
+      </section>
+      <div id="experiment-list" class="score-list" aria-live="polite"></div>
+    </main>
+    <footer><span>Fugue Experiment Atlas</span><span>Reviewed snapshots only</span></footer>
+    <script type="module" src="/src/home.js"></script>
+  </body>
+</html>

@@ -49,10 +49,11 @@ from fugue.agent_tracing import (
 from fugue.artifacts import artifact_recoveries
 from fugue.codex_mcp import render_codex_mcp_toml
 from fugue.model_plane import (
-    BRIDGE_BASE_URL_CONTAINER,
     ModelRoute,
     bridge_master_key,
+    model_protocol_endpoint,
     provider_client_env,
+    resolve_harness_model_route,
     resolve_model_route,
     trace_entity_project,
 )
@@ -75,6 +76,7 @@ _SECRET_ENV_NAME = re.compile(
     re.IGNORECASE,
 )
 _CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
+_CONTAINER_TRIAL_POLICY_ROOT = PurePosixPath("/tmp/fugue-trial-policy")
 
 
 def _require_env(key_name: str, purpose: str) -> str:
@@ -172,16 +174,12 @@ def _experiment_tags(
     )
 
 
-def _bridge_url_v1() -> str:
-    return f"{BRIDGE_BASE_URL_CONTAINER}/v1"
-
-
 def _bridge_key() -> str:
     return bridge_master_key(os.environ)
 
 
 def _chat_base_url(route: ModelRoute) -> str:
-    return route.chat_base_url or _bridge_url_v1()
+    return model_protocol_endpoint(route, "chat_completions")[0]
 
 
 def _chat_key_env(route: ModelRoute) -> str:
@@ -193,7 +191,7 @@ def _chat_key(route: ModelRoute) -> str:
 
 
 def _messages_base_url(route: ModelRoute) -> str:
-    return route.messages_base_url or BRIDGE_BASE_URL_CONTAINER
+    return model_protocol_endpoint(route, "messages")[0]
 
 
 def _messages_key(route: ModelRoute) -> str:
@@ -201,7 +199,7 @@ def _messages_key(route: ModelRoute) -> str:
 
 
 def _responses_base_url(route: ModelRoute) -> str:
-    return route.responses_base_url or _bridge_url_v1()
+    return model_protocol_endpoint(route, "responses")[0]
 
 
 def _responses_key(route: ModelRoute) -> str:
@@ -242,6 +240,7 @@ class _TrialMetaMixin:
         command, public_env = await self._isolate_exec_secrets(
             environment, command, env
         )
+        public_env = self._apply_trial_policy_environment(public_env)
         return await super().exec_as_agent(
             environment,
             command=command,
@@ -261,6 +260,7 @@ class _TrialMetaMixin:
         command, public_env = await self._isolate_exec_secrets(
             environment, command, env
         )
+        public_env = self._apply_trial_policy_environment(public_env)
         return await super().exec_as_root(
             environment,
             command=command,
@@ -268,6 +268,30 @@ class _TrialMetaMixin:
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
+
+    def _apply_trial_policy_environment(
+        self, env: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        if not getattr(self, "_fugue_trial_mutators_locked", False):
+            return env
+        locked = dict(env or {})
+        existing_pythonpath = locked.get("PYTHONPATH", "").strip()
+        locked["PYTHONPATH"] = ":".join(
+            part
+            for part in (
+                _CONTAINER_TRIAL_POLICY_ROOT.as_posix(),
+                existing_pythonpath,
+            )
+            if part
+        )
+        locked.update(
+            {
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "PIP_NO_INDEX": "1",
+                "UV_OFFLINE": "1",
+            }
+        )
+        return locked
 
     async def _isolate_exec_secrets(
         self,
@@ -466,18 +490,37 @@ if [ -S /var/run/docker.sock ]; then
   echo 'trial policy rejected a mounted Docker socket' >&2
   exit 86
 fi
-for name in apt apt-get apk dnf yum microdnf pip pip3 uv uvx npm npx pnpm yarn \
-            cargo rustup curl wget docker podman buildah; do
-  for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+policy=/tmp/fugue-trial-policy
+manifest="$policy/mutator-modes"
+install -d -m 0755 "$policy"
+: > "$manifest"
+for name in apt apt-get apk dnf yum microdnf pip pip3 conda mamba micromamba \
+            uv uvx npm npx pnpm yarn cargo rustup curl wget docker podman buildah; do
+  for directory in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin \
+                   /opt/conda/bin /opt/conda/envs/*/bin \
+                   /opt/miniconda3/bin /opt/miniconda3/envs/*/bin; do
+    [ -d "$directory" ] || continue
     candidate="$directory/$name"
     if [ -e "$candidate" ]; then
       resolved="$(readlink -f "$candidate" 2>/dev/null || printf %s "$candidate")"
       case "$resolved" in
         /opt/fugue-agent-runtime/*) ;;
-        *) chmod 000 "$resolved" 2>/dev/null || true ;;
+        *)
+          if ! grep -Fq "|$resolved" "$manifest"; then
+            mode="$(stat -c '%a' "$resolved")"
+            printf '%s|%s\n' "$mode" "$resolved" >> "$manifest"
+            chmod 000 "$resolved" 2>/dev/null || true
+          fi
+          ;;
       esac
     fi
   done
+done
+for module in pip ensurepip; do
+  printf '%s\n' \
+    'raise SystemExit("Fugue trial policy blocks package installation")' \
+    > "$policy/$module.py"
+  chmod 0444 "$policy/$module.py"
 done
 """.strip()
         result = await self.exec_as_root(environment, command=command, timeout_sec=30)
@@ -486,6 +529,31 @@ done
                 result.stderr or result.stdout or "trial mutation policy failed"
             ).strip()
             raise RuntimeError(detail[-2_000:])
+        self._fugue_trial_mutators_locked = True
+
+    async def _restore_verifier_runtime(self, environment: BaseEnvironment) -> None:
+        if not getattr(self, "_fugue_trial_mutators_locked", False):
+            return
+        policy = _CONTAINER_TRIAL_POLICY_ROOT.as_posix()
+        result = await self.exec_as_root(
+            environment,
+            command=(
+                f'manifest={policy}/mutator-modes\n'
+                'if [ -f "$manifest" ]; then\n'
+                "  while IFS='|' read -r mode path; do\n"
+                '    chmod "$mode" "$path"\n'
+                '  done < "$manifest"\n'
+                "fi\n"
+                f"rm -rf {policy}"
+            ),
+            timeout_sec=30,
+        )
+        if result.return_code != 0:
+            detail = (
+                result.stderr or result.stdout or "verifier runtime restore failed"
+            ).strip()
+            raise RuntimeError(detail[-2_000:])
+        self._fugue_trial_mutators_locked = False
 
     async def _install_context_runtime(
         self, environment: BaseEnvironment
@@ -565,6 +633,7 @@ done
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
         tags = _experiment_tags(harness, route, self.context_system_id)
+        model_transport = resolve_harness_model_route(route, harness)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
         variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
         assigned_skills = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
@@ -596,6 +665,7 @@ done
             "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
+            "model_transport": model_transport,
             "tool_result_modalities": list(route.tool_result_modalities),
             "builder_model": os.environ.get("FUGUE_BUILDER_MODEL"),
             "judge_model": os.environ.get("FUGUE_JUDGE_MODEL"),
@@ -665,6 +735,9 @@ done
 
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
+        # Harbor runs the prepared verifier after the Agent exits. Restore the
+        # immutable image's tool modes only after no Agent shell remains.
+        await self._restore_verifier_runtime(environment)
         try:
             await self._capture_runtime_fingerprint(environment, "post_execution")
         except Exception:
@@ -897,6 +970,7 @@ done
 
     def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
         trial_index = int(os.environ.get("FUGUE_TRIAL_INDEX", "1"))
+        model_transport = resolve_harness_model_route(route, harness)
         attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
             "gen_ai.conversation.id": self.trace_conversation_id,
@@ -943,6 +1017,10 @@ done
             ),
             "fugue.model_provider": route.provider,
             "fugue.model": route.display_model,
+            "fugue.model_wire_protocol": model_transport["wire_protocol"],
+            "fugue.model_endpoint_kind": model_transport["endpoint_kind"],
+            "fugue.model_upstream_host": model_transport["upstream_host"],
+            "fugue.model_bridge_required": model_transport["bridge_required"],
             "fugue.tool_result_modalities": "|".join(route.tool_result_modalities),
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
             "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", "").replace(",", "|"),
@@ -1342,6 +1420,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
             "OTEL_EXPORTER_OTLP_TRACES_HEADERS": weave_agents_otel_headers(
                 f"{entity}/{project}", trace_key
             ),
+            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
             "HARBOR_INSTRUCTION": instruction,
             # Per-span detail lands in the plugin dir's debug.log — the
             # fastest signal when validating trace delivery.
@@ -1533,6 +1612,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         models_root = cfg.setdefault("models", {})
         providers = models_root.setdefault("providers", {})
         prov_cfg = providers.setdefault("openai", {})
+        prov_cfg["api"] = "openai-completions"
         raw_models = prov_cfg.get("models")
         if not isinstance(raw_models, list) or not raw_models:
             prov_cfg["models"] = [
@@ -1694,6 +1774,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             "OPENAI_API_KEY": _chat_key(self.model_route),
             "OPENAI_BASE_URL": _chat_base_url(self.model_route),
             "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
         }
         for key in self._provider_env_keys(provider):
             val = self._get_env(key)
@@ -1958,6 +2039,39 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             timeout_sec=300,
         )
 
+    async def _finalize_weave_session(self, environment: BaseEnvironment) -> None:
+        env = {
+            **self._trace_environment("claude-code", self.model_route),
+            "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
+            "WEAVE_PROJECT": _weave_project_slug(),
+            "WANDB_API_KEY": _require_trace_key(),
+            "NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime",
+        }
+        handler = (
+            "/opt/fugue-agent-runtime/lib/node_modules/"
+            "weave-claude-code/hooks/hook-handler.sh"
+        )
+        await self.exec_as_agent(
+            environment,
+            command=(
+                'export PATH="/opt/fugue-agent-runtime/bin:$PATH"; '
+                f'find "$CLAUDE_CONFIG_DIR/projects" -type f -name "*.jsonl" '
+                "! -path '*/subagents/*' 2>/dev/null | "
+                "while IFS= read -r transcript; do "
+                'session_id="${transcript##*/}"; session_id="${session_id%.jsonl}"; '
+                "node -e 'process.stdout.write(JSON.stringify({"
+                'hook_event_name:"SessionEnd",session_id:process.argv[1],'
+                "transcript_path:process.argv[2],reason:\"fugue_trial_finalized\"}))' "
+                '"$session_id" "$transcript" | '
+                f"bash {handler}; "
+                "done; sleep 5; "
+                "cp -R ~/.weave-claude-code/logs "
+                "/logs/agent/weave-claude-code-logs 2>/dev/null || true"
+            ),
+            env=env,
+            timeout_sec=60,
+        )
+
     @override
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
@@ -2011,17 +2125,14 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 )
             await self._lock_trial_mutators(environment)
             await super().run(instruction, environment, context)
-            # Let the plugin daemon flush the final turn before teardown.
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    "sleep 5; "
-                    "cp -R ~/.weave-claude-code/logs /logs/agent/weave-claude-code-logs "
-                    "2>/dev/null || true"
-                ),
-                timeout_sec=60,
-            )
         finally:
+            # Harbor may terminate Claude before its native SessionEnd hook.
+            # Forward that lifecycle event for the real transcript so the
+            # plugin closes the existing turn instead of leaking a root span.
+            try:
+                await self._finalize_weave_session(environment)
+            except Exception:
+                pass
             await self._finish_trial(environment)
 
     @override
@@ -2126,6 +2237,11 @@ class FugueCodex(_TrialMetaMixin, Codex):
         return (
             f'model = "{self.model_route.model_id}"\n'
             f'model_provider = "{provider}"\n'
+            "[shell_environment_policy]\n"
+            'inherit = "all"\n'
+            "ignore_default_excludes = false\n"
+            'exclude = ["*KEY*", "*TOKEN*", "*SECRET*", "*PASSWORD*", '
+            '"*CREDENTIAL*", "*AUTH*"]\n'
             f"[model_providers.{provider}]\n"
             f'name = "Fugue {self.model_route.provider}"\n'
             f'base_url = "{_responses_base_url(self.model_route)}"\n'
@@ -2282,23 +2398,31 @@ class FugueCodex(_TrialMetaMixin, Codex):
         codex_sessions = (EnvironmentPaths.agent_dir / "sessions").as_posix()
 
         try:
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    "set -o pipefail; "
-                    "weave-codex run -- codex exec "
-                    "--dangerously-bypass-approvals-and-sandbox "
-                    "--skip-git-repo-check "
-                    "--json "
-                    f"{feature_flags}"
-                    f"{hook_flags}"
-                    f"{cli_flags_arg}"
-                    "-- "
-                    f"{escaped_instruction} "
-                    f"2>&1 </dev/null | tee {codex_output}"
-                ),
-                env=env,
-            )
+            try:
+                await self.exec_as_agent(
+                    environment,
+                    command=(
+                        "set -o pipefail; "
+                        # The wrapper has already sourced the keys into Codex's
+                        # process. Remove the file before Codex can open a shell.
+                        f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}; "
+                        "weave-codex run -- codex exec "
+                        "--dangerously-bypass-approvals-and-sandbox "
+                        "--skip-git-repo-check "
+                        "--json "
+                        f"{feature_flags}"
+                        f"{hook_flags}"
+                        f"{cli_flags_arg}"
+                        "-- "
+                        f"{escaped_instruction} "
+                        f"2>&1 </dev/null | tee {codex_output}"
+                    ),
+                    env=env,
+                )
+            finally:
+                # The long-running command consumed the staged file. Later
+                # cleanup commands must stage a fresh copy instead of reusing it.
+                self._fugue_secret_files.clear()
         finally:
             try:
                 await self.exec_as_agent(

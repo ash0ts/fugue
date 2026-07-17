@@ -211,7 +211,7 @@ RUNTIMES = {
         harness="hermes",
         version=(
             "hermes-agent@v2026.6.5+hermes-otel@670e98f+"
-            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-agent.1"
+            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-turn.2"
         ),
         dockerfile=_hermes_dockerfile(),
         probe=(
@@ -224,7 +224,8 @@ RUNTIMES = {
     "openclaw": AgentRuntimeSpec(
         harness="openclaw",
         version=(
-            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+fugue-load-path.1"
+            "openclaw@2026.7.1+weave-openclaw@0.1.1+weave-otel2.1+"
+            "fugue-load-path.1+fugue-single-turn.1"
         ),
         dockerfile=_node_agent_dockerfile("openclaw", "openclaw", "2026.7.1"),
         probe=(
@@ -237,7 +238,10 @@ RUNTIMES = {
     ),
     "claude-code": AgentRuntimeSpec(
         harness="claude-code",
-        version="claude-code@2.1.210+weave-claude-code@0.2.12+fugue-attrs.3",
+        version=(
+            "claude-code@2.1.210+weave-claude-code@0.2.12+"
+            "fugue-attrs.3+empty-response.1"
+        ),
         dockerfile=_node_agent_dockerfile("claude-code", "claude", "2.1.210"),
         probe=(
             "/bin/sh",

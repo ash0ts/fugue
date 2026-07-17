@@ -1,0 +1,114 @@
+{
+  "caveats": [
+    "The run was cancelled with one Agent prediction incomplete, so it cannot be ranked or promoted to directional evidence.",
+    "Blocked experiments are never ranked and have no winner.",
+    "One attempt can show a directional interaction but cannot confirm a treatment effect.",
+    "Raw conversations and tool content remain in authenticated Weave."
+  ],
+  "cells": [],
+  "content_sha256": "d8c780d14b91e023b407c5e3415fe33fd6fb98407a7e115351978f9ed2cdf61d",
+  "decision_value": 88,
+  "evidence_tier": "blocked",
+  "findings": [],
+  "groups": [],
+  "hypothesis": "Semantic retrieval will rescue some search failures, but its lift and efficiency cost will differ by harness.",
+  "id": "glm-memory-pilot",
+  "links": {
+    "evaluations": [],
+    "project": "https://wandb.ai/wandb/fugue-glm-standup-2026-07-17/weave"
+  },
+  "matrix": {
+    "attempts": 1,
+    "cohorts": [
+      {
+        "expected_predictions": 32,
+        "harnesses": [
+          "claude-code",
+          "codex"
+        ],
+        "id": "glm-pilot",
+        "label": "GLM memory pilot",
+        "models": [
+          "wandb/zai-org/GLM-5.2"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477"
+        ],
+        "treatments": [
+          "none",
+          "rag-bm25",
+          "rag-dense",
+          "rag-hybrid"
+        ]
+      }
+    ],
+    "expected_predictions": 32,
+    "experiment_id": "repo-memory-impact",
+    "harnesses": [
+      "claude-code",
+      "codex"
+    ],
+    "models": [
+      "wandb/zai-org/GLM-5.2"
+    ],
+    "tasks": [
+      "sympy__sympy-13031",
+      "astropy__astropy-13033",
+      "django__django-17087",
+      "django__django-11477"
+    ],
+    "treatments": [
+      "none",
+      "rag-bm25",
+      "rag-dense",
+      "rag-hybrid"
+    ],
+    "workload_id": "coding"
+  },
+  "metrics": {
+    "agent_links": 0,
+    "completion_rate": 0.0,
+    "expected_predictions": 32,
+    "harness_errors": 0,
+    "input_tokens": null,
+    "mean_cost_usd": null,
+    "mean_mrr": null,
+    "mean_recall_at_10": null,
+    "measured_cost_predictions": 0,
+    "measured_latency_predictions": 0,
+    "measured_usage_predictions": 0,
+    "median_turns": null,
+    "median_wall_time_sec": null,
+    "output_tokens": null,
+    "paired_bootstrap": null,
+    "pass_rate": null,
+    "passed_predictions": 0,
+    "predictions": 0,
+    "provider_errors": 0,
+    "recoverable_errors": 0,
+    "refusals": 0,
+    "scored_predictions": 0,
+    "tool_calls": null,
+    "total_cost_usd": null
+  },
+  "provenance": {
+    "dataset_digest": "c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970",
+    "dataset_id": "swe-bench-hard-discovery-v2",
+    "run_ids": [
+      "20260716T230402-2af3e4e7cd"
+    ],
+    "snapshot_digest": "de144b7e981260a7f345f9bb6433405e5e41379349573fb7f42e9f08e00add21",
+    "source_commit": "e0b56ae3790e43d34f1c4e73f03e5b7420cc2aff",
+    "source_url": "https://github.com/ash0ts/fugue/commit/e0b56ae3790e43d34f1c4e73f03e5b7420cc2aff"
+  },
+  "question": "Does repository context change official SWE-bench resolution for a fixed GLM model, and does that effect depend on the agent harness?",
+  "schema_version": 1,
+  "status": "cancelled_incomplete",
+  "summary": "A controlled one-attempt pilot comparing no context, BM25, dense, and hybrid repository context for Claude Code and Codex on four locked hard SWE-bench tasks.",
+  "task_selection": "The four tasks are the first locked discovery cases. Every case requires production and test changes, bounded touched files, and either lexical mismatch or work across production directories.",
+  "title": "GLM memory \u00d7 harness pilot",
+  "why_it_matters": "Memory systems should be selected for measured task lift, not for retrieval quality in isolation. This pilot checks whether the intervention changes accepted software repairs before we spend on the complete discovery grid."
+}

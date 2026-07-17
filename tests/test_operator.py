@@ -11,6 +11,7 @@ import pytest
 
 import fugue.bench.operator as operator_module
 from fugue.bench.ai import AssetDraft
+from fugue.bench.candidates import ResolvedCandidate, stable_digest
 from fugue.bench.execution import (
     CellOutcome,
     plan_cells,
@@ -35,6 +36,7 @@ from fugue.bench.reproducibility import (
     write_evaluation_asset_lock,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+from fugue.model_plane import model_route_identity
 from fugue.preflight import PreflightCheck
 
 
@@ -507,8 +509,7 @@ def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
     service = make_operator_repo(tmp_path)
     experiment_path = tmp_path / "configs/fugue/experiments/demo.yaml"
     experiment_path.write_text(
-        experiment_path.read_text()
-        + "\npresets:\n  parallel:\n    n_concurrent: 4\n"
+        experiment_path.read_text() + "\npresets:\n  parallel:\n    n_concurrent: 4\n"
     )
     monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
     monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
@@ -530,9 +531,7 @@ def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
 
     assert result.status == "passed"
     assert captured["max_workers"] == 4
-    manifest = read_run_manifest(
-        tmp_path / ".fugue/runtime/preset-concurrency"
-    )
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime/preset-concurrency")
     assert manifest is not None
     assert manifest["max_workers"] == 4
 
@@ -703,10 +702,79 @@ def test_snapshot_groups_presentation_and_scoring_variants_by_pure_candidate(
     )
 
 
-def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
+def test_snapshot_scopes_task_runtime_locks_to_execution_coordinates(
+    tmp_path: Path,
+) -> None:
     service = make_operator_repo(tmp_path)
     experiment = service.experiment("demo")
     request = service.request_for_experiment(experiment)
+    [first] = service.rendered_jobs(
+        request,
+        run_id="multi-task-runtime",
+        experiment=experiment,
+    )
+    execution = {
+        **first.resolved_candidate.execution_definition,
+        "task_runtime": {
+            "task_id": "task-two",
+            "image_id": f"sha256:{'b' * 64}",
+        },
+    }
+    second = replace(
+        first,
+        task_id="task-two",
+        job_name=f"{first.job_name}-task-two",
+        config_path=first.config_path.with_name("task-two.json"),
+        result_path=first.result_path.with_name("task-two.json"),
+        comparison_example_id="comparison-task-two",
+        resolved_candidate=ResolvedCandidate(
+            candidate_id=first.candidate_id,
+            execution_fingerprint=stable_digest(execution),
+            _definition_json=json.dumps(
+                first.resolved_candidate.definition,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            _execution_definition_json=json.dumps(
+                execution,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    second.config_path.write_text(json.dumps(second.config))
+    jobs = [first, second]
+    cells = plan_cells(jobs, run_id="multi-task-runtime", run_name="multi task")
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="multi-task-runtime",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=jobs,
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    assert len(snapshot["candidate_runtime"]) == 1
+    assert "task_runtime" not in snapshot["candidate_runtime"][first.candidate_id]
+    assert len(snapshot["runtime_locks"]) == 2
+    assert {item["execution_fingerprint"] for item in snapshot["runtime_locks"]} == set(
+        snapshot["runtime"]["executions"]
+    )
+    assert {
+        (item.get("task_runtime") or {}).get("task_id")
+        for item in snapshot["runtime_locks"]
+    } == {None, "task-two"}
+    assert verify_snapshot(snapshot)
+
+
+def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = replace(
+        service.request_for_experiment(experiment), model="wandb/example/model"
+    )
     jobs = service.rendered_jobs(
         request,
         run_id="snapshot-v2",
@@ -714,6 +782,14 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     )
     cells = plan_cells(jobs, run_id="snapshot-v2", run_name="snapshot v2")
 
+    route_identity = model_route_identity(jobs[0].route)
+    bridge_runtime = {
+        "schema_version": 1,
+        "image": "ghcr.io/example/bridge@sha256:" + "b" * 64,
+        "config_sha256": "c" * 64,
+        "target_route": route_identity,
+        "resolved_image_id": "sha256:" + "e" * 64,
+    }
     snapshot = build_run_snapshot(
         repo_root=tmp_path,
         run_id="snapshot-v2",
@@ -722,6 +798,7 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
         jobs=jobs,
         cells=cells,
         env=service.env,
+        bridge_runtime=bridge_runtime,
     )
 
     assert isinstance(snapshot, RunSnapshotV1)
@@ -730,6 +807,15 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
+    [runtime] = snapshot.candidate_runtime.values()
+    assert runtime["model_transport"] == {
+        "harness": "codex",
+        "wire_protocol": "responses",
+        "endpoint_kind": "fugue_bridge",
+        "upstream_host": "api.inference.wandb.ai",
+        "bridge_required": True,
+    }
+    assert snapshot.runtime["bridge"] == bridge_runtime
     assert verify_snapshot(snapshot.to_dict())
     for unsupported in (2, 3):
         payload = {**snapshot.to_dict(), "schema_version": unsupported}
@@ -743,7 +829,9 @@ def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
     experiment = service.experiment("demo")
     request = service.request_for_experiment(experiment)
     jobs = service.rendered_jobs(request, run_id="gold-lock", experiment=experiment)
-    jobs = [replace(job, expected_evidence_paths=("src/private-gold.py",)) for job in jobs]
+    jobs = [
+        replace(job, expected_evidence_paths=("src/private-gold.py",)) for job in jobs
+    ]
     cells = plan_cells(jobs, run_id="gold-lock", run_name="gold lock")
     evaluation_assets = build_evaluation_asset_lock("gold-lock", cells)
     path = write_evaluation_asset_lock(tmp_path, evaluation_assets)

@@ -1,0 +1,415 @@
+{
+  "caveats": [
+    "This record proves routing and observability only; a one-task canary is not a capability benchmark.",
+    "The later Opus cohort was cancelled after Codex reproduced an Anthropic tool-history failure on another task.",
+    "Raw Agent conversations and tool content remain in authenticated Weave."
+  ],
+  "cells": [
+    {
+      "agent_link": "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d73-72f5-95c4-065ff0fe8aa1",
+      "candidate_id": "e2c22e6914c7",
+      "comparison_example_id": "f701a1125e65bffa39417726890f92ceee49fe3149176308facd31167a1ced4a",
+      "context_invocation_count": null,
+      "context_invoked": false,
+      "context_registered": null,
+      "cost_usd": 0.7098705,
+      "endpoint_kind": "provider_direct",
+      "execution_kind": "agent",
+      "harness": "claude-code",
+      "harness_errors": 0,
+      "input_tokens": 656455,
+      "model": "anthropic/claude-opus-4-8",
+      "mrr": null,
+      "output_tokens": 9954,
+      "pass": true,
+      "prediction_id": "0e01630f9ffa2f4cdc018e5782090809573ab88dad9d6f678d447171990f9ad7",
+      "provider": "anthropic",
+      "provider_errors": 0,
+      "recall_at_10": null,
+      "recoverable_errors": 1,
+      "refusals": 0,
+      "reward": 1.0,
+      "route_evidence": "configured_only",
+      "run_id": "20260717T092057-3b6f0eba4d",
+      "status": "passed",
+      "task_id": "sympy__sympy-13031",
+      "tool_calls": 22,
+      "treatment": "baseline",
+      "trial_index": 1,
+      "turns": 1,
+      "upstream_host": "api.anthropic.com",
+      "wall_time_sec": 236.430254,
+      "wire_protocol": "messages",
+      "workload_id": "hard-baseline"
+    },
+    {
+      "agent_link": "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d68-7327-a8f6-e7675c0176cd",
+      "candidate_id": "1dabce2fe122",
+      "comparison_example_id": "f701a1125e65bffa39417726890f92ceee49fe3149176308facd31167a1ced4a",
+      "context_invocation_count": null,
+      "context_invoked": false,
+      "context_registered": null,
+      "cost_usd": 2.179475,
+      "endpoint_kind": "fugue_bridge",
+      "execution_kind": "agent",
+      "harness": "codex",
+      "harness_errors": 0,
+      "input_tokens": 412835,
+      "model": "anthropic/claude-opus-4-8",
+      "mrr": null,
+      "output_tokens": 4612,
+      "pass": false,
+      "prediction_id": "12651b846a3e1422ddbe2866f436e6519e43a1ee29598cc00c7563c423a0ec27",
+      "provider": "anthropic",
+      "provider_errors": 0,
+      "recall_at_10": null,
+      "recoverable_errors": 0,
+      "refusals": 0,
+      "reward": 0.0,
+      "route_evidence": "configured_only",
+      "run_id": "20260717T092057-3b6f0eba4d",
+      "status": "passed",
+      "task_id": "sympy__sympy-13031",
+      "tool_calls": 21,
+      "treatment": "baseline",
+      "trial_index": 1,
+      "turns": 1,
+      "upstream_host": "api.anthropic.com",
+      "wall_time_sec": 134.262254,
+      "wire_protocol": "responses",
+      "workload_id": "hard-baseline"
+    },
+    {
+      "agent_link": "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d70-7ceb-9d20-5d3906f92806",
+      "candidate_id": "9357ddd02466",
+      "comparison_example_id": "f701a1125e65bffa39417726890f92ceee49fe3149176308facd31167a1ced4a",
+      "context_invocation_count": null,
+      "context_invoked": false,
+      "context_registered": null,
+      "cost_usd": 4.693504881432091,
+      "endpoint_kind": "fugue_bridge",
+      "execution_kind": "agent",
+      "harness": "hermes",
+      "harness_errors": 0,
+      "input_tokens": null,
+      "model": "anthropic/claude-opus-4-8",
+      "mrr": null,
+      "output_tokens": null,
+      "pass": true,
+      "prediction_id": "3fccc1f64b08c6c4f1648c35544f612a26e7fef55e91942af562193bbc6eb0a6",
+      "provider": "anthropic",
+      "provider_errors": 0,
+      "recall_at_10": null,
+      "recoverable_errors": 0,
+      "refusals": 0,
+      "reward": 1.0,
+      "route_evidence": "configured_only",
+      "run_id": "20260717T092057-3b6f0eba4d",
+      "status": "passed",
+      "task_id": "sympy__sympy-13031",
+      "tool_calls": 32,
+      "treatment": "baseline",
+      "trial_index": 1,
+      "turns": 1,
+      "upstream_host": "api.anthropic.com",
+      "wall_time_sec": 231.053065,
+      "wire_protocol": "chat_completions",
+      "workload_id": "hard-baseline"
+    },
+    {
+      "agent_link": "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d6d-7d1d-b91c-aae822dc1d5f",
+      "candidate_id": "71d9c2934170",
+      "comparison_example_id": "f701a1125e65bffa39417726890f92ceee49fe3149176308facd31167a1ced4a",
+      "context_invocation_count": null,
+      "context_invoked": false,
+      "context_registered": null,
+      "cost_usd": null,
+      "endpoint_kind": "fugue_bridge",
+      "execution_kind": "agent",
+      "harness": "openclaw",
+      "harness_errors": 0,
+      "input_tokens": null,
+      "model": "anthropic/claude-opus-4-8",
+      "mrr": null,
+      "output_tokens": null,
+      "pass": true,
+      "prediction_id": "79e109c26b7dff8f1ac041075e4786670703de2220456d31fd28f033e05ca156",
+      "provider": "anthropic",
+      "provider_errors": 0,
+      "recall_at_10": null,
+      "recoverable_errors": 1,
+      "refusals": 0,
+      "reward": 1.0,
+      "route_evidence": "configured_only",
+      "run_id": "20260717T092057-3b6f0eba4d",
+      "status": "passed",
+      "task_id": "sympy__sympy-13031",
+      "tool_calls": 26,
+      "treatment": "baseline",
+      "trial_index": 1,
+      "turns": 1,
+      "upstream_host": "api.anthropic.com",
+      "wall_time_sec": 189.03598,
+      "wire_protocol": "chat_completions",
+      "workload_id": "hard-baseline"
+    }
+  ],
+  "content_sha256": "3d9e45974fac87f4a9fd893a0f3d4e416e750c51d7fc5957ba1b681fe99acf76",
+  "decision_value": 82,
+  "evidence_tier": "contract",
+  "findings": [
+    "All four harnesses completed with one verified conversation, Agent root, and evaluation link per prediction.",
+    "Claude Code, Hermes, and OpenClaw resolved the canary task; Codex completed cleanly but did not resolve it."
+  ],
+  "groups": [
+    {
+      "harness": "claude-code",
+      "metrics": {
+        "agent_links": 1,
+        "completion_rate": 1.0,
+        "expected_predictions": 1,
+        "harness_errors": 0,
+        "input_tokens": 656455,
+        "mean_cost_usd": 0.7098705,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 1,
+        "measured_latency_predictions": 1,
+        "measured_usage_predictions": 1,
+        "median_turns": 1,
+        "median_wall_time_sec": 236.430254,
+        "output_tokens": 9954,
+        "pass_rate": 1.0,
+        "passed_predictions": 1,
+        "predictions": 1,
+        "provider_errors": 0,
+        "recoverable_errors": 1,
+        "refusals": 0,
+        "scored_predictions": 1,
+        "tool_calls": 22,
+        "total_cost_usd": 0.7098705
+      },
+      "model": "anthropic/claude-opus-4-8",
+      "tasks": [
+        {
+          "pass": true,
+          "reward": 1.0,
+          "task_id": "sympy__sympy-13031",
+          "trial_index": 1
+        }
+      ],
+      "treatment": "baseline"
+    },
+    {
+      "harness": "codex",
+      "metrics": {
+        "agent_links": 1,
+        "completion_rate": 1.0,
+        "expected_predictions": 1,
+        "harness_errors": 0,
+        "input_tokens": 412835,
+        "mean_cost_usd": 2.179475,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 1,
+        "measured_latency_predictions": 1,
+        "measured_usage_predictions": 1,
+        "median_turns": 1,
+        "median_wall_time_sec": 134.262254,
+        "output_tokens": 4612,
+        "pass_rate": 0.0,
+        "passed_predictions": 0,
+        "predictions": 1,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 1,
+        "tool_calls": 21,
+        "total_cost_usd": 2.179475
+      },
+      "model": "anthropic/claude-opus-4-8",
+      "tasks": [
+        {
+          "pass": false,
+          "reward": 0.0,
+          "task_id": "sympy__sympy-13031",
+          "trial_index": 1
+        }
+      ],
+      "treatment": "baseline"
+    },
+    {
+      "harness": "hermes",
+      "metrics": {
+        "agent_links": 1,
+        "completion_rate": 1.0,
+        "expected_predictions": 1,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": 4.693504881432091,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 1,
+        "measured_latency_predictions": 1,
+        "measured_usage_predictions": 0,
+        "median_turns": 1,
+        "median_wall_time_sec": 231.053065,
+        "output_tokens": null,
+        "pass_rate": 1.0,
+        "passed_predictions": 1,
+        "predictions": 1,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 1,
+        "tool_calls": 32,
+        "total_cost_usd": 4.693504881432091
+      },
+      "model": "anthropic/claude-opus-4-8",
+      "tasks": [
+        {
+          "pass": true,
+          "reward": 1.0,
+          "task_id": "sympy__sympy-13031",
+          "trial_index": 1
+        }
+      ],
+      "treatment": "baseline"
+    },
+    {
+      "harness": "openclaw",
+      "metrics": {
+        "agent_links": 1,
+        "completion_rate": 1.0,
+        "expected_predictions": 1,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 1,
+        "measured_usage_predictions": 0,
+        "median_turns": 1,
+        "median_wall_time_sec": 189.03598,
+        "output_tokens": null,
+        "pass_rate": 1.0,
+        "passed_predictions": 1,
+        "predictions": 1,
+        "provider_errors": 0,
+        "recoverable_errors": 1,
+        "refusals": 0,
+        "scored_predictions": 1,
+        "tool_calls": 26,
+        "total_cost_usd": null
+      },
+      "model": "anthropic/claude-opus-4-8",
+      "tasks": [
+        {
+          "pass": true,
+          "reward": 1.0,
+          "task_id": "sympy__sympy-13031",
+          "trial_index": 1
+        }
+      ],
+      "treatment": "baseline"
+    }
+  ],
+  "hypothesis": "All four harnesses can complete one direct-Anthropic Agent prediction without W&B Inference traffic or trial-time preparation.",
+  "id": "opus-4-8-contract",
+  "links": {
+    "evaluations": [
+      "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d68-7327-a8f6-e7675c0176cd",
+      "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d6d-7d1d-b91c-aae822dc1d5f",
+      "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d70-7ceb-9d20-5d3906f92806",
+      "https://wandb.ai/wandb/fugue-swe-frontier-v1/r/call/019f6f61-0d73-72f5-95c4-065ff0fe8aa1"
+    ],
+    "project": "https://wandb.ai/wandb/fugue-swe-frontier-v1/weave"
+  },
+  "matrix": {
+    "attempts": 1,
+    "cohorts": [
+      {
+        "expected_predictions": 4,
+        "harnesses": [
+          "hermes",
+          "openclaw",
+          "claude-code",
+          "codex"
+        ],
+        "id": "opus-4-8-canary",
+        "label": "Claude Opus 4.8 four-harness canary",
+        "models": [
+          "anthropic/claude-opus-4-8"
+        ],
+        "tasks": [
+          "sympy__sympy-13031"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      }
+    ],
+    "expected_predictions": 4,
+    "experiment_id": "swe-frontier-harness",
+    "harnesses": [
+      "hermes",
+      "openclaw",
+      "claude-code",
+      "codex"
+    ],
+    "models": [
+      "anthropic/claude-opus-4-8"
+    ],
+    "tasks": [
+      "sympy__sympy-13031"
+    ],
+    "treatments": [
+      "baseline"
+    ],
+    "workload_id": "hard-baseline"
+  },
+  "metrics": {
+    "agent_links": 4,
+    "completion_rate": 1.0,
+    "expected_predictions": 4,
+    "harness_errors": 0,
+    "input_tokens": null,
+    "mean_cost_usd": null,
+    "mean_mrr": null,
+    "mean_recall_at_10": null,
+    "measured_cost_predictions": 3,
+    "measured_latency_predictions": 4,
+    "measured_usage_predictions": 2,
+    "median_turns": 1.0,
+    "median_wall_time_sec": 210.0445225,
+    "output_tokens": null,
+    "paired_bootstrap": null,
+    "pass_rate": 0.75,
+    "passed_predictions": 3,
+    "predictions": 4,
+    "provider_errors": 0,
+    "recoverable_errors": 2,
+    "refusals": 0,
+    "scored_predictions": 4,
+    "tool_calls": 101,
+    "total_cost_usd": null
+  },
+  "provenance": {
+    "dataset_digest": "c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970",
+    "dataset_id": "swe-bench-hard-discovery-v2",
+    "run_ids": [
+      "20260717T092057-3b6f0eba4d"
+    ],
+    "snapshot_digest": "3b2fdfc6311aa22bee319386d4b560af41f1f4989bd4cd8b63dd099d3a32cbf4",
+    "source_commit": "c5565abfba34eb4d8a834e0136cf5da1ff5fad48",
+    "source_url": "https://github.com/ash0ts/fugue/commit/c5565abfba34eb4d8a834e0136cf5da1ff5fad48"
+  },
+  "question": "Can Claude Opus 4.8 execute the same hard task through every supported Agent harness while preserving Fugue's provider and observability contracts?",
+  "schema_version": 1,
+  "status": "complete_canary",
+  "summary": "A four-harness, one-task canary proving direct Anthropic routing, terminal Agent execution, and exact evaluation links on the frozen frontier runtime.",
+  "task_selection": "The canary uses the first locked hard discovery task so its runtime, verifier, and comparison identity match the planned frontier cohort.",
+  "title": "Claude Opus 4.8 routing contract",
+  "why_it_matters": "A model cohort is not admissible until routing, tool execution, terminal state, and evaluation-to-Agent navigation work across every selected harness."
+}

@@ -1,0 +1,17 @@
+{
+  "name": "fugue-experiment-atlas",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --host 127.0.0.1",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-mono": "5.2.6",
+    "@fontsource/ibm-plex-sans-condensed": "5.2.7",
+    "@fontsource/source-serif-4": "5.2.8",
+    "vite": "8.1.5"
+  }
+}

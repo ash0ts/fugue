@@ -34,10 +34,15 @@ hashes.spans = mutate('dist/genaiSpans.js', source => source
     'if (key.startsWith(WEAVE_INTEGRATION_PREFIX)) {',
     "if (key.startsWith(WEAVE_INTEGRATION_PREFIX) || key.startsWith('fugue.') || key.startsWith('weave.eval.')) {",
   ));
-hashes.daemon = mutate('dist/daemon.js', source => source.replace(
-  'meta: { claude_code_app_version: claudeCodeAppVersion },',
-  "meta: { claude_code_app_version: claudeCodeAppVersion, ...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}') },",
-));
+hashes.daemon = mutate('dist/daemon.js', source => source
+  .replace(
+    'meta: { claude_code_app_version: claudeCodeAppVersion },',
+    "meta: { claude_code_app_version: claudeCodeAppVersion, ...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}') },",
+  )
+  .replace(
+    `        const group = callsForResponseKey(calls, key);\n        const model = group.map(c => c.model).find(Boolean);`,
+    `        const group = callsForResponseKey(calls, key);\n        if (group.length === 0) {\n            existingSpan?.end();\n            session.emittedChatSpanResponseKeys.add(key);\n            return;\n        }\n        const model = group.map(c => c.model).find(Boolean);`,
+  ));
 fs.writeFileSync(
   path.join(root, 'claude-code-patch-lock.json'),
   `${JSON.stringify(hashes, null, 2)}\n`,

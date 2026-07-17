@@ -17,6 +17,7 @@ from fugue.bench.context import (
 from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
+from fugue.model_plane import resolve_harness_model_route
 
 if TYPE_CHECKING:
     from fugue.bench.execution import PlannedCell
@@ -87,6 +88,7 @@ def build_run_snapshot(
     jobs: list[RenderedJob],
     cells: list[PlannedCell],
     env: Mapping[str, str],
+    bridge_runtime: Mapping[str, Any] | None = None,
     evaluation_asset_lock_sha256: str = "",
     treatment_selection_sha256: str = "",
 ) -> RunSnapshotV1:
@@ -207,6 +209,7 @@ def build_run_snapshot(
             "model_provider": job.route.provider,
             "model": job.route.display_model,
             "model_route": asdict(job.route),
+            "model_transport": resolve_harness_model_route(job.route, job.harness),
             "context": {
                 **context_behavior_definition(context),
                 "serve_deliveries": sorted(context.serve_deliveries),
@@ -233,9 +236,6 @@ def build_run_snapshot(
         agent_runtime = resolved.execution_definition.get("agent_runtime")
         if agent_runtime is not None:
             runtime["agent_runtime"] = agent_runtime
-        task_runtime = resolved.execution_definition.get("task_runtime")
-        if task_runtime is not None:
-            runtime["task_runtime"] = task_runtime
         if selected_fugue_source is not None:
             runtime["fugue_source"] = selected_fugue_source
         required_env.update(candidate_required_env)
@@ -317,16 +317,10 @@ def build_run_snapshot(
     runtime_locks = tuple(
         sorted(
             (
-                {
-                    "candidate_id": candidate_id,
-                    "configuration_sha256": runtime["configuration_sha256"],
-                    "context_runtime": runtime.get("context_runtime"),
-                    "agent_runtime": runtime.get("agent_runtime"),
-                    "task_runtime": runtime.get("task_runtime"),
-                }
-                for candidate_id, runtime in runtimes.items()
+                _execution_runtime_lock(fingerprint, execution)
+                for fingerprint, execution in executions.items()
             ),
-            key=lambda item: item["candidate_id"],
+            key=lambda item: item["execution_fingerprint"],
         )
     )
     base = RunSnapshotV1(
@@ -346,6 +340,7 @@ def build_run_snapshot(
             ),
             "executions": executions,
             "fugue_source": fugue_source,
+            "bridge": dict(bridge_runtime) if bridge_runtime is not None else None,
         },
         required_env=tuple(sorted(name for name in required_env if name)),
         preset=preset,
@@ -366,6 +361,19 @@ def build_run_snapshot(
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
     return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
+
+
+def _execution_runtime_lock(
+    execution_fingerprint: str, execution: Mapping[str, Any]
+) -> dict[str, Any]:
+    lock = {
+        "execution_fingerprint": execution_fingerprint,
+        "candidate_id": execution.get("candidate_id"),
+        "context_runtime": execution.get("context_runtime"),
+        "agent_runtime": execution.get("agent_runtime"),
+        "task_runtime": execution.get("task_runtime"),
+    }
+    return {**lock, "configuration_sha256": stable_digest(lock)}
 
 
 def build_evaluation_asset_lock(

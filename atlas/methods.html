@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Fugue Experiment Atlas methods and evidence rules.">
+    <title>Methods · Fugue Atlas</title>
+  </head>
+  <body data-page="methods">
+    <a class="skip-link" href="#main">Skip to methods</a>
+    <header class="site-header">
+      <a class="wordmark" href="./">Fugue <span>Experiment Atlas</span></a>
+      <nav aria-label="Primary navigation"><a href="./">Experiments</a><a href="./compare.html">Compare</a><a aria-current="page" href="./methods.html">Methods</a></nav>
+    </header>
+    <main id="main">
+      <section class="page-intro ruled"><p class="eyebrow">Rules before results</p><h1>How evidence enters the atlas.</h1><p class="lede">The public layer recomputes metrics from canonical normalized rows. Editorial text explains decisions; it cannot change arithmetic.</p></section>
+      <section class="route-method section-block" aria-labelledby="routing-title">
+        <div class="section-heading"><div><p class="eyebrow">Model plane</p><h2 id="routing-title">The harness keeps its own wire protocol.</h2></div><p>Fugue freezes one provider/model route. Each adapter consumes that route through the protocol its harness actually speaks. A provider is called directly when it offers that protocol; otherwise a local, digest-pinned LiteLLM bridge translates the wire format. Candidate identity does not change.</p></div>
+        <div class="table-scroll">
+          <table class="evidence-table routing-table">
+            <caption>Effective route by harness and upstream provider</caption>
+            <thead><tr><th scope="col">Harness</th><th scope="col">Native wire</th><th scope="col">W&amp;B Inference</th><th scope="col">OpenAI</th><th scope="col">Anthropic</th></tr></thead>
+            <tbody>
+              <tr><td>Hermes</td><td>Chat Completions</td><td>Provider direct</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+              <tr><td>OpenClaw</td><td>Chat Completions</td><td>Provider direct</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+              <tr><td>Claude Code</td><td>Messages</td><td>Fugue bridge</td><td>Fugue bridge</td><td>Provider direct</td></tr>
+              <tr><td>Codex</td><td>Responses</td><td>Fugue bridge</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <ol class="proof-chain" aria-label="Routing proof chain">
+          <li><strong>Resolve once.</strong><span>The immutable candidate and snapshot record provider, model, endpoints, modalities, harness and expected native protocol.</span></li>
+          <li><strong>Attest the bridge.</strong><span>Bridged runs fail preflight unless the running container uses the pinned image digest and the exact locked config mounted read-only.</span></li>
+          <li><strong>Receipt per prediction.</strong><span>The harness adapter writes its effective protocol, direct-or-bridge endpoint class and upstream host into trial metadata and the Agent root attributes.</span></li>
+          <li><strong>Reconcile identity.</strong><span>The public row is accepted only when run, candidate, task, trial, evaluation call and Agent root agree. Model routing and MCP transport remain separate.</span></li>
+        </ol>
+        <p class="route-note"><strong>Evidence labels:</strong> Runtime attested includes a matching adapter receipt. Snapshot attested proves the locked route and bridge but lacks a row-level receipt. Configured only is retained for historical runs that predate these receipts; it is never presented as packet-level proof.</p>
+      </section>
+      <div class="methods-grid">
+        <section><span class="section-number">01</span><h2>Primary outcome</h2><p>For SWE-bench, resolution is the official deterministic verifier result. Pass rate is <code>accepted repairs ÷ scored predictions</code>. Complete SWE studies require every planned, applicable prediction to reconcile and score; operational completion is reported separately.</p></section>
+        <section><span class="section-number">02</span><h2>Secondary measures</h2><p>Total cost and tokens are published only when every row is measured. Wall time is the median terminal duration. Turns and tool calls come from verified Agent spans. Recoverable errors and refusals remain counts. Missing values are unavailable, never zero.</p></section>
+        <section><span class="section-number">03</span><h2>Evidence tiers</h2><dl class="tier-list"><div><dt>Confirmed</dt><dd>Complete replicated holdout with deterministic paired bootstrap.</dd></div><div><dt>Directional</dt><dd>Complete one-attempt controlled grid; raw numerator and denominator only.</dd></div><div><dt>Baseline benchmark</dt><dd>Complete capability matrix with no intervention.</dd></div><div><dt>Contract evidence</dt><dd>Routing, tool-use or observability canary.</dd></div><div><dt>Active / blocked</dt><dd>Visible for context, never ranked and never assigned a winner.</dd></div></dl></section>
+        <section><span class="section-number">04</span><h2>Hard task lock</h2><p>The discovery partition was frozen before execution. Eligible tasks require production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.</p></section>
+        <section><span class="section-number">05</span><h2>Agent-link contract</h2><p>Every Agent prediction must reconcile to exactly one native conversation and one <code>invoke_agent</code> root. Public links are included only after Fugue verifies the evaluation relationship. They open authenticated Weave; raw content is never copied here.</p></section>
+        <section><span class="section-number">06</span><h2>No composite score</h2><p>Quality, cost, latency, retrieval and observability answer different questions. Collapsing them into one score would hide the tradeoff and let arbitrary weights determine the winner.</p></section>
+        <section><span class="section-number">07</span><h2>Paired memory lift</h2><p>For each fixed model, harness, task and trial, lift is <code>treatment pass − baseline pass</code>; the reported lift is the mean of those paired deltas. A one-attempt grid shows only its numerator, denominator and raw delta.</p></section>
+        <section><span class="section-number">08</span><h2>Replicated uncertainty</h2><p>Confirmed holdout evidence averages repeated outcomes within each comparison example, then performs 2,000 deterministic paired bootstrap resamples of examples. The atlas reports the 2.5th and 97.5th percentiles as the 95% interval.</p></section>
+        <section><span class="section-number">09</span><h2>Retrieval measures</h2><p>Recall@10 is <code>relevant evidence found in the first 10 results ÷ locked relevant evidence</code>. MRR is the reciprocal rank of the first relevant result, or zero when none is retrieved. Neither substitutes for accepted task resolution.</p></section>
+        <section><span class="section-number">10</span><h2>Ordering</h2><p>Complete experiments sort by evidence tier, then reviewed decision value. Rankings exist only inside one compatible workload and cohort. Active and blocked work receives no rank, winner or confidence language.</p></section>
+      </div>
+    </main>
+    <footer><span>Fugue Experiment Atlas</span><span>Method before claim</span></footer>
+    <script type="module" src="/src/common.js"></script>
+  </body>
+</html>

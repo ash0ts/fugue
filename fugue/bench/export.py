@@ -3349,6 +3349,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "base_commit": meta.get("base_commit"),
         "manifest_path": meta.get("manifest_path"),
         "model_provider": meta.get("model_provider"),
+        "model_transport": meta.get("model_transport"),
         "builder_model": meta.get("builder_model"),
         "judge_model": meta.get("judge_model"),
         "model": meta.get("model")

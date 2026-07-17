@@ -1,0 +1,231 @@
+{
+  "caveats": [
+    "The overall campaign remains active and unranked until compatible model cohorts complete.",
+    "The separate Kimi baseline record contains the only complete cohort currently eligible for results reporting.",
+    "Direct Anthropic cohorts use the Anthropic API and never route through W&B Inference.",
+    "Fable uses Claude Code and Codex only and is reported as a separate ceiling cohort."
+  ],
+  "cells": [],
+  "content_sha256": "91cfcc99e3bd2edd8e7a6177b2286e3ed8ad330e33edb6381e79a3e8d22069df",
+  "decision_value": 100,
+  "evidence_tier": "active",
+  "findings": [
+    "Kimi K2.7 Code completed its 32-cell cohort with 8 official resolutions and complete Agent linking.",
+    "Sonnet 5 and Opus 4.8 are blocked because Codex reproduced an Anthropic tool-history failure after unsupported web-search calls."
+  ],
+  "groups": [],
+  "hypothesis": "Harness effects will interact with model capability and efficiency; a single model or single harness will not represent the frontier.",
+  "id": "frontier-swe-v1",
+  "links": {
+    "evaluations": [],
+    "project": "https://wandb.ai/wandb/fugue-swe-frontier-v1/weave"
+  },
+  "matrix": {
+    "attempts": 1,
+    "cohorts": [
+      {
+        "expected_predictions": 32,
+        "harnesses": [
+          "hermes",
+          "openclaw",
+          "claude-code",
+          "codex"
+        ],
+        "id": "glm-5-2",
+        "label": "GLM-5.2 across four harnesses",
+        "models": [
+          "wandb/zai-org/GLM-5.2"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477",
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461",
+          "mwaskom__seaborn-3069",
+          "scikit-learn__scikit-learn-25102"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      },
+      {
+        "expected_predictions": 32,
+        "harnesses": [
+          "hermes",
+          "openclaw",
+          "claude-code",
+          "codex"
+        ],
+        "id": "kimi-k2-7-code",
+        "label": "Kimi K2.7 Code across four harnesses",
+        "models": [
+          "wandb/moonshotai/Kimi-K2.7-Code"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477",
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461",
+          "mwaskom__seaborn-3069",
+          "scikit-learn__scikit-learn-25102"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      },
+      {
+        "expected_predictions": 32,
+        "harnesses": [
+          "hermes",
+          "openclaw",
+          "claude-code",
+          "codex"
+        ],
+        "id": "claude-sonnet-5",
+        "label": "Claude Sonnet 5 across four harnesses",
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477",
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461",
+          "mwaskom__seaborn-3069",
+          "scikit-learn__scikit-learn-25102"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      },
+      {
+        "expected_predictions": 32,
+        "harnesses": [
+          "hermes",
+          "openclaw",
+          "claude-code",
+          "codex"
+        ],
+        "id": "claude-opus-4-8",
+        "label": "Claude Opus 4.8 across four harnesses",
+        "models": [
+          "anthropic/claude-opus-4-8"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477",
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461",
+          "mwaskom__seaborn-3069",
+          "scikit-learn__scikit-learn-25102"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      },
+      {
+        "expected_predictions": 16,
+        "harnesses": [
+          "claude-code",
+          "codex"
+        ],
+        "id": "claude-fable-5-ceiling",
+        "label": "Claude Fable 5 ceiling cohort",
+        "models": [
+          "anthropic/claude-fable-5"
+        ],
+        "tasks": [
+          "sympy__sympy-13031",
+          "astropy__astropy-13033",
+          "django__django-17087",
+          "django__django-11477",
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461",
+          "mwaskom__seaborn-3069",
+          "scikit-learn__scikit-learn-25102"
+        ],
+        "treatments": [
+          "baseline"
+        ]
+      }
+    ],
+    "expected_predictions": 144,
+    "experiment_id": "swe-frontier-harness",
+    "harnesses": [
+      "hermes",
+      "openclaw",
+      "claude-code",
+      "codex"
+    ],
+    "models": [
+      "wandb/zai-org/GLM-5.2",
+      "wandb/moonshotai/Kimi-K2.7-Code",
+      "anthropic/claude-sonnet-5",
+      "anthropic/claude-opus-4-8",
+      "anthropic/claude-fable-5"
+    ],
+    "tasks": [
+      "sympy__sympy-13031",
+      "astropy__astropy-13033",
+      "django__django-17087",
+      "django__django-11477",
+      "sympy__sympy-18199",
+      "sphinx-doc__sphinx-9461",
+      "mwaskom__seaborn-3069",
+      "scikit-learn__scikit-learn-25102"
+    ],
+    "treatments": [
+      "baseline"
+    ],
+    "workload_id": "hard-baseline"
+  },
+  "metrics": {
+    "agent_links": 0,
+    "completion_rate": 0.0,
+    "expected_predictions": 144,
+    "harness_errors": 0,
+    "input_tokens": null,
+    "mean_cost_usd": null,
+    "mean_mrr": null,
+    "mean_recall_at_10": null,
+    "measured_cost_predictions": 0,
+    "measured_latency_predictions": 0,
+    "measured_usage_predictions": 0,
+    "median_turns": null,
+    "median_wall_time_sec": null,
+    "output_tokens": null,
+    "paired_bootstrap": null,
+    "pass_rate": null,
+    "passed_predictions": 0,
+    "predictions": 0,
+    "provider_errors": 0,
+    "recoverable_errors": 0,
+    "refusals": 0,
+    "scored_predictions": 0,
+    "tool_calls": null,
+    "total_cost_usd": null
+  },
+  "provenance": {
+    "dataset_digest": "c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970",
+    "dataset_id": "swe-bench-hard-discovery-v2",
+    "run_ids": [],
+    "snapshot_digest": "pending",
+    "source_commit": "pending",
+    "source_url": "https://github.com/ash0ts/fugue"
+  },
+  "question": "How much of hard SWE-bench performance comes from the model, the agent harness, and their interaction before memory is added?",
+  "schema_version": 1,
+  "status": "partial_campaign",
+  "summary": "A planned capability map across fixed frontier models, four harnesses, and eight locked hard SWE-bench discovery tasks with no added context.",
+  "task_selection": "The locked discovery partition requires production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.",
+  "title": "Frontier model \u00d7 harness baseline",
+  "why_it_matters": "Memory lift is uninterpretable without a fixed no-context capability baseline. This matrix establishes that denominator and exposes cost and latency tradeoffs without combining them into a synthetic score."
+}

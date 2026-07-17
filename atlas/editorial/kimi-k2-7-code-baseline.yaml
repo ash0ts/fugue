@@ -1,0 +1,53 @@
+schema_version: 1
+id: kimi-k2-7-code-baseline
+title: Kimi K2.7 Code × harness baseline
+summary: A complete no-context capability matrix across four Agent harnesses and eight locked hard SWE-bench discovery tasks.
+question: How much does the Agent harness change Kimi K2.7 Code's ability to resolve structurally hard software repairs when model, tasks, prompt, and runtime are fixed?
+hypothesis: Harnesses will produce materially different resolution and efficiency profiles even when they share one fixed model and task set.
+why_it_matters: This is the first complete denominator for separating model capability from harness behavior before repository memory is introduced.
+task_selection: The locked discovery partition requires production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.
+evidence_tier: baseline
+decision_value: 96
+status: complete
+matrix:
+  experiment_id: swe-frontier-harness
+  workload_id: hard-baseline
+  expected_predictions: 32
+  attempts: 1
+  models: [wandb/moonshotai/Kimi-K2.7-Code]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  treatments: [baseline]
+  tasks: &frontier_tasks
+    - sympy__sympy-13031
+    - astropy__astropy-13033
+    - django__django-17087
+    - django__django-11477
+    - sympy__sympy-18199
+    - sphinx-doc__sphinx-9461
+    - mwaskom__seaborn-3069
+    - scikit-learn__scikit-learn-25102
+  cohorts:
+    - id: kimi-k2-7-code
+      label: Kimi K2.7 Code across four harnesses
+      models: [wandb/moonshotai/Kimi-K2.7-Code]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: *frontier_tasks
+      expected_predictions: 32
+provenance:
+  source_commit: c5565abfba34eb4d8a834e0136cf5da1ff5fad48
+  source_url: https://github.com/ash0ts/fugue/commit/c5565abfba34eb4d8a834e0136cf5da1ff5fad48
+  dataset_id: swe-bench-hard-discovery-v2
+  dataset_digest: c92df63d418dc9e606a8799a09f12b7185f3d54e03c34183408080ac02012970
+  snapshot_digest: 43bb37d55b18b1a41073522d3cbe2ead1e37e53848454ebf439d051dcae8cde0
+  run_ids: [20260717T074244-1f613bd948]
+links:
+  project: https://wandb.ai/wandb/fugue-swe-frontier-v1/weave
+  evaluations: []
+findings:
+  - Kimi resolved 8 of 32 tasks overall; Hermes resolved 3, Codex 2, OpenClaw 2, and Claude Code 1.
+  - The same model and task set produced distinct harness outcomes, supporting harness as an experimental factor rather than presentation state.
+caveats:
+  - This is a one-attempt baseline benchmark, not a replicated capability estimate or a memory-treatment result.
+  - Missing usage or cost remains unavailable; it is never treated as zero.
+  - Raw Agent conversations and tool content remain in authenticated Weave.

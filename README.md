@@ -223,14 +223,22 @@ names, variant IDs and labels, preset names, run names, judge/scorer state, and
 trial ordinals do not affect it. Runtime, Harbor, concurrency, and tracing
 policy instead affect a separate execution fingerprint.
 
-Model routing and tool delivery are independent for Codex. Model traffic still
-uses the selected W&B bridge route, while each native-MCP cell receives a new,
-isolated `CODEX_HOME` containing only that route and its resolved allowlisted
-servers. Fugue never reads or mutates the user's global Codex credentials,
-skills, configuration, or MCP definitions, and it never downgrades native MCP
-to portable instructions. The locked runtime contains Codex 0.143.0 and
-weave-codex 0.1.1; trial startup verifies the exact MCP inventory before the
-model turn.
+Fugue preserves each harness's native model protocol: Hermes and OpenClaw use
+Chat Completions, Claude Code uses Messages, and Codex uses Responses. A
+provider is called directly when it exposes that protocol; otherwise a local
+LiteLLM bridge translates the wire format without changing candidate identity.
+Bridged runs fail preflight unless the running container uses the pinned image
+digest and exact locked configuration. The snapshot, per-trial metadata, and
+Agent root attributes record the expected protocol, direct-or-bridge endpoint
+class, and upstream host so exported evidence can reconcile the route.
+
+Model routing and tool delivery remain independent. Each Codex native-MCP cell
+receives a new, isolated `CODEX_HOME` containing only its resolved allowlisted
+servers; MCP payloads never pass through the model bridge. Fugue never reads or
+mutates the user's global Codex credentials, skills, configuration, or MCP
+definitions, and it never downgrades native MCP to portable instructions. The
+locked runtime contains Codex 0.143.0 and weave-codex 0.1.1; trial startup
+verifies the exact MCP inventory before the model turn.
 
 ## Experiment contract
 
@@ -427,6 +435,74 @@ revision. An explicit republish creates a new active revision with a reason and
 `supersedes` link; it never merges evidence by a display label. Dashboard views
 should filter to the active revision and facet by source commit, snapshot
 digest, cohort, execution kind, harness, context system, and skill treatment.
+
+### Public Experiment Atlas
+
+The static Experiment Atlas is a reviewed evidence publication layer, not a
+browser frontend for the operator. `tools/experiment_atlas.py` reduces
+canonical normalized JSONL through an explicit allowlist, verifies the source,
+dataset, coordinates, and digest against immutable run snapshots, recomputes
+metrics, and writes versioned `PublicExperimentV1` snapshots plus an ordered
+`ExperimentIndexV1`. Editorial YAML explains the question and decision; it
+cannot supply or override results, links, or provenance.
+
+Public snapshots may contain task IDs, fixed routes, harnesses, treatments,
+outcomes, efficiency measurements, provenance, and verified Weave links. They
+reject prompts, outputs, reasoning, tool content, gold data, exceptions, local
+paths, environment values, secrets, unknown fields, and unapproved URL
+domains. GitHub Pages builds only the committed snapshots. It receives no W&B
+credential and makes no browser API call; Weave links are user-initiated and
+explicitly labeled as requiring sign-in.
+
+```bash
+uv run python tools/experiment_atlas.py \
+  --editorial-dir atlas/editorial \
+  --rows EXPERIMENT_ID=reports/RUN_ID.jsonl \
+  --run-summary EXPERIMENT_ID=.fugue/runtime/RUN_ID/run.json \
+  --snapshot EXPERIMENT_ID=.fugue/runtime/RUN_ID/input-lock.json \
+  --output atlas/public/data
+npm --prefix atlas ci
+npm --prefix atlas run build
+python tools/check_atlas_build.py atlas/dist
+```
+
+The atlas orders complete experiments by evidence tier and then explicit
+decision value. Active and blocked studies remain visible but unranked.
+One-attempt grids show raw numerators and denominators without confidence
+claims; only replicated holdout evidence receives the deterministic paired
+bootstrap used by Fugue's selection policy. Quality, cost, latency, retrieval,
+errors, and observability remain separate—there is no composite score.
+
+The no-context frontier campaign uses one fixed model per immutable run:
+
+```bash
+fugue run swe-frontier-harness --preset canary \
+  --model wandb/zai-org/GLM-5.2 --preview
+fugue run swe-frontier-harness --preset discovery \
+  --model wandb/zai-org/GLM-5.2 --preview
+fugue run swe-frontier-harness --preset frontier-ceiling \
+  --model anthropic/claude-fable-5 --preview
+```
+
+After each canary export, admit the full cohort through the ignored campaign
+ledger. The ledger prices unmeasured cells at the canary's maximum measured
+cell cost, applies a 1.5× margin to every planned cell, and refuses a cohort
+that would cross the cumulative cap:
+
+```bash
+uv run python tools/frontier_campaign.py admit \
+  --ledger reports/frontier-budget.json \
+  --canary-rows reports/GLM_CANARY.jsonl \
+  --cohort-id glm-5.2 --model wandb/zai-org/GLM-5.2 \
+  --canary-predictions 4 --cohort-predictions 32 \
+  --cap-usd 2000 --safety-margin 1.5
+```
+
+Its locked hard discovery cases require production and test changes, two to
+eight touched files, repository diversity, and either issue-path lexical
+mismatch or cross-directory production work. Model cohorts share comparison
+example identities while model and harness changes remain distinct behavioral
+candidates.
 
 The hard-memory study is encoded as separate immutable cohorts. Discovery uses
 a fixed Latin-square harness assignment; holdout and control treatments must be

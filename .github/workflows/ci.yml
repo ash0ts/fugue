@@ -48,9 +48,11 @@ jobs:
           uv run pytest
           tests/test_ai.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
           tests/test_datasets.py tests/test_demo.py tests/test_evaluations.py
+          tests/test_experiment_atlas.py tests/test_frontier_campaign.py
+          tests/test_frontier_campaign_budget.py
           tests/test_execution.py tests/test_integrations.py tests/test_library.py
           tests/test_manifest.py tests/test_model_plane.py tests/test_preflight.py
-          tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py
+          tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py tests/test_atlas_site.py
           tests/test_tool_policy.py
       - name: Test context and operator contracts
         if: matrix.suite == 'context'
@@ -151,6 +153,40 @@ jobs:
         env:
           PYTHONWARNINGS: error
         run: uv run bash tests/compat/run.sh
+
+  experiment-atlas:
+    name: Static experiment atlas
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: atlas/package-lock.json
+      - uses: astral-sh/setup-uv@v8.3.2
+      - run: uv sync --frozen --extra dev
+      - name: Install reviewed frontend dependencies
+        working-directory: atlas
+        run: npm ci
+      - name: Reject vulnerable production dependencies
+        working-directory: atlas
+        run: npm audit --audit-level=high
+      - name: Validate reviewed public snapshots
+        run: >-
+          uv run python tools/experiment_atlas.py
+          --editorial-dir atlas/editorial
+          --output atlas/public/data
+          --validate-only
+      - name: Build static atlas
+        working-directory: atlas
+        run: npm run build
+      - name: Verify static publication boundary
+        run: python tools/check_atlas_build.py atlas/dist
 
   managed-adapters:
     name: Managed adapter / ${{ matrix.adapter }} / amd64

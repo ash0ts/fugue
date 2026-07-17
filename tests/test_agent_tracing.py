@@ -329,6 +329,10 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.evaluation_scope_id",
         "fugue.model_provider",
         "fugue.model",
+        "fugue.model_wire_protocol",
+        "fugue.model_endpoint_kind",
+        "fugue.model_upstream_host",
+        "fugue.model_bridge_required",
         "fugue.tool_result_modalities",
         "weave.eval.predict_and_score_call_id",
         "weave.eval.project_id",
@@ -339,9 +343,7 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
     assert "key: str(value)" in source
     assert "self._resolved_env_vars.update(trace_environment)" in source
     assert 'env.update(self._trace_environment("hermes", self.model_route))' in source
-    assert (
-        'env.update(self._trace_environment("openclaw", self.model_route))' in source
-    )
+    assert 'env.update(self._trace_environment("openclaw", self.model_route))' in source
 
 
 def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
@@ -349,6 +351,9 @@ def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
 
     assert "self.config.resource_attributes or {}" in patch
     assert "hermes-otel tracer patch target mismatch" in patch
+    assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch
+    assert "_finalize_fugue_single_turns" in patch
+    assert "hermes-otel turn-end patch target mismatch" in patch
 
 
 def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
