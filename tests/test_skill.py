@@ -23,18 +23,30 @@ def test_fugue_dev_skill_has_valid_minimal_frontmatter() -> None:
 
 def test_fugue_dev_skill_preserves_release_semantics() -> None:
     content = Path(".codex/skills/fugue-dev/SKILL.md").read_text(encoding="utf-8")
-    normalized = " ".join(content.split())
+    normalized = " ".join(content.replace("`", "").split())
     required = (
+        "pure ResolvedRunPlan",
+        "immutable ResolvedCandidate",
+        "RunSnapshotV1",
+        "PredictionRowV1",
+        "Keep schema parsing in the experiment library",
         "Resolve one immutable candidate",
         "Candidate identity contains behavior only",
         "only to the execution fingerprint",
-        "Require authored context delivery",
+        "Comparison example identity contains dataset, workload, and logical task",
+        "required context.delivery",
         "one canonical V1",
         "do not add prerelease compatibility paths",
+        "typed immutable repository task sources",
+        "Common and variant integrations add together",
         "same pure resolved plan",
+        "setup --prepare is the only plan-resolved preparation boundary",
+        "Active trials verify prepared locks",
+        "per-cell CODEX_HOME",
+        "never inherit global Codex state",
+        "open the Weave evaluation prediction before execution",
+        "exactly one observed native conversation",
         "Nothing executes before the lock is durable",
-        "Setup is the only stateful preparation boundary",
-        "Setup may build and download locked assets",
         "architecture-qualified runtime locks",
         "Dataset verifiers use a pinned offline profile",
         "Validate base failure and gold success",
@@ -48,9 +60,12 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
         "versioned treatment-selection lock",
         "reject treatments that disagree with that lock",
         "project, prediction identity, scorer version, and revision",
+        "reviewed, allowlisted canonical evidence snapshots",
+        "record its direct-or-bridge receipt",
+        "exact locked configuration",
         "Direct diagnostics never synthesize Agent identity",
-        "require live proof from the exact release head and runtime locks",
-        "evidence from an earlier head cannot satisfy that release gate",
+        "Final-head live proof must use the exact code and runtime locks",
+        "evidence from an earlier head cannot satisfy",
         "every applicable cell is terminal",
         "Terminal unscored cells are permitted",
         "Curator output stays inside its immutable declaration allowlist",
@@ -60,3 +75,4 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
 
     assert "unscored cells block" not in content.lower()
     assert "raw public MCP configuration" in content
+    assert len(content.splitlines()) < 160
