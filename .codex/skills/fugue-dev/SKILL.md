@@ -52,6 +52,8 @@ Preserve these invariants across code, configuration, presentation, and tests.
   Confirmatory cohorts reject treatments that disagree with that lock.
 - Publish idempotently by project, prediction identity, scorer version, and
   revision. Explicit revisions name what they supersede and why.
+- Build public reports only from reviewed, allowlisted canonical evidence
+  snapshots. Never publish raw traces, Agent content, gold data, or secrets.
 - Agent cells have one native conversation and one matching `invoke_agent`
   root. Direct diagnostics never synthesize Agent identity, conversations, or
   roots. Preserve unavailable usage instead of zero.
