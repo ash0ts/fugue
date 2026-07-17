@@ -223,14 +223,22 @@ names, variant IDs and labels, preset names, run names, judge/scorer state, and
 trial ordinals do not affect it. Runtime, Harbor, concurrency, and tracing
 policy instead affect a separate execution fingerprint.
 
-Model routing and tool delivery are independent for Codex. Model traffic still
-uses the selected W&B bridge route, while each native-MCP cell receives a new,
-isolated `CODEX_HOME` containing only that route and its resolved allowlisted
-servers. Fugue never reads or mutates the user's global Codex credentials,
-skills, configuration, or MCP definitions, and it never downgrades native MCP
-to portable instructions. The locked runtime contains Codex 0.143.0 and
-weave-codex 0.1.1; trial startup verifies the exact MCP inventory before the
-model turn.
+Fugue preserves each harness's native model protocol: Hermes and OpenClaw use
+Chat Completions, Claude Code uses Messages, and Codex uses Responses. A
+provider is called directly when it exposes that protocol; otherwise a local
+LiteLLM bridge translates the wire format without changing candidate identity.
+Bridged runs fail preflight unless the running container uses the pinned image
+digest and exact locked configuration. The snapshot, per-trial metadata, and
+Agent root attributes record the expected protocol, direct-or-bridge endpoint
+class, and upstream host so exported evidence can reconcile the route.
+
+Model routing and tool delivery remain independent. Each Codex native-MCP cell
+receives a new, isolated `CODEX_HOME` containing only its resolved allowlisted
+servers; MCP payloads never pass through the model bridge. Fugue never reads or
+mutates the user's global Codex credentials, skills, configuration, or MCP
+definitions, and it never downgrades native MCP to portable instructions. The
+locked runtime contains Codex 0.143.0 and weave-codex 0.1.1; trial startup
+verifies the exact MCP inventory before the model turn.
 
 ## Experiment contract
 

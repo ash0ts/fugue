@@ -83,6 +83,13 @@ def _write_export_fixture(tmp_path: Path) -> Path:
                 "tags": ["fugue", "run:fixture-exp", "harness:hermes"],
                 "model_provider": "wandb",
                 "model": "wandb/zai-org/GLM-5.2",
+                "model_transport": {
+                    "harness": "hermes",
+                    "wire_protocol": "chat_completions",
+                    "endpoint_kind": "provider_direct",
+                    "upstream_host": "api.inference.wandb.ai",
+                    "bridge_required": False,
+                },
                 "trace_project": "test/fugue",
                 "weave_agent_name": "hermes-agent",
                 "weave_conversation_ids": ["session-1"],
@@ -144,6 +151,8 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["run_name"] == "fixture-exp"
     assert row["tags"] == ["fugue", "run:fixture-exp", "harness:hermes"]
     assert row["model_provider"] == "wandb"
+    assert row["model_transport"]["wire_protocol"] == "chat_completions"
+    assert row["model_transport"]["endpoint_kind"] == "provider_direct"
     assert row["trace_project"] == "test/fugue"
     assert row["weave_agent_name"] == "hermes-agent"
     assert row["weave_conversation_ids"] == ["session-1"]
@@ -1717,8 +1726,7 @@ def test_gateway_event_log_is_identity_checked_and_preserves_vector_evidence(
     tmp_path: Path,
 ) -> None:
     event_log = (
-        tmp_path
-        / ".fugue/runtime/run-a/gateway-evidence/job-a/context-gateway.jsonl"
+        tmp_path / ".fugue/runtime/run-a/gateway-evidence/job-a/context-gateway.jsonl"
     )
     event_log.parent.mkdir(parents=True)
     identity = {

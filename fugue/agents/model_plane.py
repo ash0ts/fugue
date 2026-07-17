@@ -49,10 +49,11 @@ from fugue.agent_tracing import (
 from fugue.artifacts import artifact_recoveries
 from fugue.codex_mcp import render_codex_mcp_toml
 from fugue.model_plane import (
-    BRIDGE_BASE_URL_CONTAINER,
     ModelRoute,
     bridge_master_key,
+    model_protocol_endpoint,
     provider_client_env,
+    resolve_harness_model_route,
     resolve_model_route,
     trace_entity_project,
 )
@@ -173,16 +174,12 @@ def _experiment_tags(
     )
 
 
-def _bridge_url_v1() -> str:
-    return f"{BRIDGE_BASE_URL_CONTAINER}/v1"
-
-
 def _bridge_key() -> str:
     return bridge_master_key(os.environ)
 
 
 def _chat_base_url(route: ModelRoute) -> str:
-    return route.chat_base_url or _bridge_url_v1()
+    return model_protocol_endpoint(route, "chat_completions")[0]
 
 
 def _chat_key_env(route: ModelRoute) -> str:
@@ -194,7 +191,7 @@ def _chat_key(route: ModelRoute) -> str:
 
 
 def _messages_base_url(route: ModelRoute) -> str:
-    return route.messages_base_url or BRIDGE_BASE_URL_CONTAINER
+    return model_protocol_endpoint(route, "messages")[0]
 
 
 def _messages_key(route: ModelRoute) -> str:
@@ -202,7 +199,7 @@ def _messages_key(route: ModelRoute) -> str:
 
 
 def _responses_base_url(route: ModelRoute) -> str:
-    return route.responses_base_url or _bridge_url_v1()
+    return model_protocol_endpoint(route, "responses")[0]
 
 
 def _responses_key(route: ModelRoute) -> str:
@@ -636,6 +633,7 @@ done
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
         tags = _experiment_tags(harness, route, self.context_system_id)
+        model_transport = resolve_harness_model_route(route, harness)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
         variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
         assigned_skills = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
@@ -667,6 +665,7 @@ done
             "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
+            "model_transport": model_transport,
             "tool_result_modalities": list(route.tool_result_modalities),
             "builder_model": os.environ.get("FUGUE_BUILDER_MODEL"),
             "judge_model": os.environ.get("FUGUE_JUDGE_MODEL"),
@@ -971,6 +970,7 @@ done
 
     def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
         trial_index = int(os.environ.get("FUGUE_TRIAL_INDEX", "1"))
+        model_transport = resolve_harness_model_route(route, harness)
         attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
             "gen_ai.conversation.id": self.trace_conversation_id,
@@ -1017,6 +1017,10 @@ done
             ),
             "fugue.model_provider": route.provider,
             "fugue.model": route.display_model,
+            "fugue.model_wire_protocol": model_transport["wire_protocol"],
+            "fugue.model_endpoint_kind": model_transport["endpoint_kind"],
+            "fugue.model_upstream_host": model_transport["upstream_host"],
+            "fugue.model_bridge_required": model_transport["bridge_required"],
             "fugue.tool_result_modalities": "|".join(route.tool_result_modalities),
             "fugue.prompt_id": os.environ.get("FUGUE_PROMPT_ID", ""),
             "fugue.skill_ids": os.environ.get("FUGUE_SKILL_IDS", "").replace(",", "|"),

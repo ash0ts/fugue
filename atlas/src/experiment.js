@@ -43,7 +43,8 @@ if (!experiment) {
       ["Treatments", experiment.matrix.treatments.join(", ")],
       ["Tasks", `${experiment.matrix.tasks.length} locked cases`],
       ["Attempts", String(experiment.matrix.attempts)],
-      ["Workload", experiment.matrix.workload_id]
+      ["Workload", experiment.matrix.workload_id],
+      ["Route proof", routingSummary(experiment.cells)]
     ])
   ]);
   const evidence = el("section", { className: "section-block evidence-block" }, [
@@ -119,13 +120,15 @@ function taskEvidence(cells) {
   details.append(el("summary", { text: `Inspect ${cells.length} task-level predictions` }));
   const table = el("table", { className: "evidence-table" });
   table.append(el("caption", { text: "Safe task-level outcomes; raw Agent content remains in Weave" }));
-  table.append(el("thead", {}, el("tr", {}, ["Task", "Model", "Harness", "Treatment", "Outcome", "Time", "Cost", "Evidence"].map((text) => el("th", { scope: "col", text })))));
+  table.append(el("thead", {}, el("tr", {}, ["Task", "Model", "Harness", "Treatment", "Wire", "Route proof", "Outcome", "Time", "Cost", "Evidence"].map((text) => el("th", { scope: "col", text })))));
   const body = el("tbody");
   for (const cell of cells) body.append(el("tr", {}, [
     el("td", { text: cell.task_id }),
     el("td", { text: cell.model }),
     el("td", { text: cell.harness }),
     el("td", { text: cell.treatment }),
+    el("td", { text: routeLabel(cell) }),
+    el("td", { text: routeEvidenceLabel(cell.route_evidence) }),
     el("td", { text: cell.pass === true ? "Resolved" : cell.pass === false ? "Not resolved" : "Unscored" }),
     el("td", { text: cell.wall_time_sec === null ? "Unavailable" : `${formatNumber(cell.wall_time_sec, { maximumFractionDigits: 0 })}s` }),
     el("td", { text: cell.cost_usd === null ? "Unavailable" : `$${formatNumber(cell.cost_usd, { maximumFractionDigits: 2 })}` }),
@@ -134,4 +137,35 @@ function taskEvidence(cells) {
   table.append(body);
   details.append(el("div", { className: "table-scroll" }, table));
   return details;
+}
+
+function routeLabel(cell) {
+  if (!cell.wire_protocol || !cell.endpoint_kind) return "Unavailable";
+  const protocol = {
+    chat_completions: "Chat Completions",
+    messages: "Messages",
+    responses: "Responses"
+  }[cell.wire_protocol] || cell.wire_protocol;
+  const endpoint = cell.endpoint_kind === "provider_direct" ? "direct" : "bridge";
+  return `${protocol} · ${endpoint}`;
+}
+
+function routeEvidenceLabel(value) {
+  return {
+    runtime_attested: "Runtime attested",
+    snapshot_attested: "Snapshot attested",
+    configured_only: "Configured only"
+  }[value] || "Unavailable";
+}
+
+function routingSummary(cells) {
+  if (!cells.length) return "Pending";
+  const counts = new Map();
+  for (const cell of cells) {
+    const label = routeEvidenceLabel(cell.route_evidence);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => `${count} ${label.toLowerCase()}`)
+    .join("; ");
 }

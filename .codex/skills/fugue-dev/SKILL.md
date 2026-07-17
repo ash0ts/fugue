@@ -57,6 +57,9 @@ Preserve these invariants across code, configuration, presentation, and tests.
 - Agent cells have one native conversation and one matching `invoke_agent`
   root. Direct diagnostics never synthesize Agent identity, conversations, or
   roots. Preserve unavailable usage instead of zero.
+- Derive each harness's native wire protocol from the resolved model route and
+  record its direct-or-bridge receipt. Bridged runs require the pinned image
+  and exact locked configuration; model routing and MCP transport stay separate.
 - Codex native MCP, reviewed skills, and Agent/evaluation links require live
   proof from the exact release head and runtime locks. Unit tests or evidence
   from an earlier head cannot satisfy that release gate.

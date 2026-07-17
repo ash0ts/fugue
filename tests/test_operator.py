@@ -36,6 +36,7 @@ from fugue.bench.reproducibility import (
     write_evaluation_asset_lock,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+from fugue.model_plane import model_route_identity
 from fugue.preflight import PreflightCheck
 
 
@@ -771,7 +772,9 @@ def test_snapshot_scopes_task_runtime_locks_to_execution_coordinates(
 def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
     experiment = service.experiment("demo")
-    request = service.request_for_experiment(experiment)
+    request = replace(
+        service.request_for_experiment(experiment), model="wandb/example/model"
+    )
     jobs = service.rendered_jobs(
         request,
         run_id="snapshot-v2",
@@ -779,6 +782,14 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     )
     cells = plan_cells(jobs, run_id="snapshot-v2", run_name="snapshot v2")
 
+    route_identity = model_route_identity(jobs[0].route)
+    bridge_runtime = {
+        "schema_version": 1,
+        "image": "ghcr.io/example/bridge@sha256:" + "b" * 64,
+        "config_sha256": "c" * 64,
+        "target_route": route_identity,
+        "resolved_image_id": "sha256:" + "e" * 64,
+    }
     snapshot = build_run_snapshot(
         repo_root=tmp_path,
         run_id="snapshot-v2",
@@ -787,6 +798,7 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
         jobs=jobs,
         cells=cells,
         env=service.env,
+        bridge_runtime=bridge_runtime,
     )
 
     assert isinstance(snapshot, RunSnapshotV1)
@@ -795,6 +807,15 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
+    [runtime] = snapshot.candidate_runtime.values()
+    assert runtime["model_transport"] == {
+        "harness": "codex",
+        "wire_protocol": "responses",
+        "endpoint_kind": "fugue_bridge",
+        "upstream_host": "api.inference.wandb.ai",
+        "bridge_required": True,
+    }
+    assert snapshot.runtime["bridge"] == bridge_runtime
     assert verify_snapshot(snapshot.to_dict())
     for unsupported in (2, 3):
         payload = {**snapshot.to_dict(), "schema_version": unsupported}

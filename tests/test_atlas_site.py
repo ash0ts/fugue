@@ -9,7 +9,8 @@ ATLAS = REPO_ROOT / "atlas"
 def test_atlas_uses_reviewed_bundled_data_without_browser_apis() -> None:
     data_source = (ATLAS / "src/data.js").read_text(encoding="utf-8")
     javascript = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted((ATLAS / "src").glob("*.js"))
+        path.read_text(encoding="utf-8")
+        for path in sorted((ATLAS / "src").glob("*.js"))
     )
 
     assert "import.meta.glob" in data_source
@@ -23,13 +24,21 @@ def test_atlas_uses_reviewed_bundled_data_without_browser_apis() -> None:
 
 
 def test_atlas_pages_are_semantic_keyboard_and_mobile_ready() -> None:
-    pages = [ATLAS / name for name in ("index.html", "experiment.html", "compare.html", "methods.html")]
+    pages = [
+        ATLAS / name
+        for name in ("index.html", "experiment.html", "compare.html", "methods.html")
+    ]
     css = (ATLAS / "src/site.css").read_text(encoding="utf-8")
 
     for path in pages:
         body = path.read_text(encoding="utf-8")
         assert '<a class="skip-link"' in body
-        assert "<header" in body and "<nav" in body and "<main" in body and "<footer" in body
+        assert (
+            "<header" in body
+            and "<nav" in body
+            and "<main" in body
+            and "<footer" in body
+        )
         assert "http://" not in body and "https://" not in body
     assert ":focus-visible" in css
     assert "prefers-reduced-motion" in css
@@ -55,3 +64,18 @@ def test_experiment_detail_exposes_safe_task_evidence_and_weave_links() -> None:
     assert "raw Agent content remains in Weave" in source
     assert "experiment.links.evaluations.map" in source
     assert "Refusals" in source
+    assert "Route proof" in source
+    assert "Runtime attested" in source
+
+
+def test_methods_explains_native_harness_routing_and_attestation() -> None:
+    body = (ATLAS / "methods.html").read_text(encoding="utf-8")
+
+    assert "The harness keeps its own wire protocol" in body
+    assert "Chat Completions" in body
+    assert "Messages" in body
+    assert "Responses" in body
+    assert "pinned image digest" in body
+    assert "exact locked config mounted read-only" in body
+    assert "Model routing and MCP transport remain separate" in body
+    assert "Configured only" in body

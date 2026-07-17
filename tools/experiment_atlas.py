@@ -12,13 +12,20 @@ import statistics
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import yaml
 
 from fugue.bench.reproducibility import verify_snapshot
 from fugue.bench.scoring import _paired_delta_interval
+from fugue.model_plane import (
+    ModelRoute,
+    Provider,
+    ToolResultModality,
+    model_route_identity,
+    resolve_harness_model_route,
+)
 
 PUBLIC_EXPERIMENT_SCHEMA_VERSION = 1
 EXPERIMENT_INDEX_SCHEMA_VERSION = 1
@@ -37,6 +44,11 @@ ALLOWED_URL_HOSTS = {
     "github.com",
     "docs.wandb.ai",
     "platform.claude.com",
+}
+ALLOWED_MODEL_UPSTREAM_HOSTS = {
+    "api.inference.wandb.ai",
+    "api.openai.com",
+    "api.anthropic.com",
 }
 EDITORIAL_FIELDS = {
     "schema_version",
@@ -99,6 +111,10 @@ PUBLIC_CELL_FIELDS = {
     "treatment",
     "provider",
     "model",
+    "wire_protocol",
+    "endpoint_kind",
+    "upstream_host",
+    "route_evidence",
     "status",
     "pass",
     "reward",
@@ -226,7 +242,9 @@ def load_editorial(path: Path) -> dict[str, Any]:
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
         if not line.strip():
             continue
         try:
@@ -365,8 +383,11 @@ def write_publication(
                     repo_root=repo_root,
                 ),
             }
+            rows = _attach_snapshot_route_receipts(rows, snapshots)
         elif snapshots:
-            raise ValueError("planned or blocked experiments cannot attach run snapshots")
+            raise ValueError(
+                "planned or blocked experiments cannot attach run snapshots"
+            )
         public = build_public_experiment(editorial, rows, summaries)
         _write_json(output / "experiments" / f"{experiment_id}.json", public.to_dict())
         experiments.append(public)
@@ -375,7 +396,9 @@ def write_publication(
     return index
 
 
-def validate_publication(editorial_paths: Sequence[Path], output: Path) -> ExperimentIndexV1:
+def validate_publication(
+    editorial_paths: Sequence[Path], output: Path
+) -> ExperimentIndexV1:
     editorials = {
         str(value["id"]): value
         for value in (load_editorial(path) for path in sorted(editorial_paths))
@@ -383,7 +406,9 @@ def validate_publication(editorial_paths: Sequence[Path], output: Path) -> Exper
     experiment_dir = output / "experiments"
     published_paths = sorted(experiment_dir.glob("*.json"))
     if {path.stem for path in published_paths} != set(editorials):
-        raise ValueError("reviewed public snapshots do not match the editorial registry")
+        raise ValueError(
+            "reviewed public snapshots do not match the editorial registry"
+        )
     experiments: list[PublicExperimentV1] = []
     for path in published_paths:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -398,7 +423,9 @@ def validate_publication(editorial_paths: Sequence[Path], output: Path) -> Exper
         raise ValueError("reviewed public index must be an object")
     validate_experiment_index(index_value)
     if _canonical_json(index_value) != _canonical_json(expected.to_dict()):
-        raise ValueError("reviewed public index does not match its experiment snapshots")
+        raise ValueError(
+            "reviewed public index does not match its experiment snapshots"
+        )
     return expected
 
 
@@ -424,10 +451,14 @@ def _validate_editorial_projection(
     )
     for field in fields:
         if _canonical_json(editorial[field]) != _canonical_json(public[field]):
-            raise ValueError(f"reviewed public snapshot does not match editorial {field}")
+            raise ValueError(
+                f"reviewed public snapshot does not match editorial {field}"
+            )
     links = _mapping(public.get("links"), "public links")
     if links.get("project") != editorial["links"]["project"]:
-        raise ValueError("reviewed public snapshot does not match editorial project link")
+        raise ValueError(
+            "reviewed public snapshot does not match editorial project link"
+        )
 
 
 def _validated_provenance(
@@ -438,7 +469,9 @@ def _validated_provenance(
     repo_root: Path,
 ) -> dict[str, Any]:
     if not snapshots or any(not verify_snapshot(snapshot) for snapshot in snapshots):
-        raise ValueError("complete public evidence requires valid immutable run snapshots")
+        raise ValueError(
+            "complete public evidence requires valid immutable run snapshots"
+        )
     declared = _mapping(editorial["provenance"], "provenance")
     expected_runs = set(_string_list(declared["run_ids"], "run_ids"))
     row_runs = {str(row.get("run_id") or "") for row in rows}
@@ -466,7 +499,9 @@ def _validated_provenance(
                 "snapshot Fugue source",
             )
             if source.get("kind") != "git" or source.get("dirty") is not False:
-                raise ValueError("public evidence requires a clean tracked Fugue source")
+                raise ValueError(
+                    "public evidence requires a clean tracked Fugue source"
+                )
             source_commits.add(str(source.get("commit") or ""))
         coordinates: set[tuple[str, str, int, str, str, str]] = set()
         for cell in snapshot.get("planned_matrix") or []:
@@ -489,7 +524,9 @@ def _validated_provenance(
         raise ValueError("public runs do not share one immutable Fugue source commit")
     if len(manifests) != 1 or not next(iter(manifests), ""):
         raise ValueError("public runs do not share one resolved workload manifest")
-    if experiment_ids != {str(_mapping(editorial["matrix"], "matrix")["experiment_id"])}:
+    if experiment_ids != {
+        str(_mapping(editorial["matrix"], "matrix")["experiment_id"])
+    }:
         raise ValueError("public runs do not match the editorial experiment")
     observed_agent_coordinates: set[tuple[str, str, int, str, str, str]] = set()
     for run_id in expected_runs:
@@ -514,7 +551,9 @@ def _validated_provenance(
         if coordinate[3] == "agent"
     }
     if observed_agent_coordinates != planned_agent_coordinates:
-        raise ValueError("normalized Agent rows do not cover the frozen matrix coordinates")
+        raise ValueError(
+            "normalized Agent rows do not cover the frozen matrix coordinates"
+        )
 
     manifest = next(iter(manifests))
     manifest_path = (repo_root / manifest).resolve()
@@ -542,13 +581,13 @@ def _validated_provenance(
     }
     for field in PROVENANCE_FIELDS:
         if declared.get(field) != derived[field]:
-            raise ValueError(f"editorial provenance does not match run evidence: {field}")
+            raise ValueError(
+                f"editorial provenance does not match run evidence: {field}"
+            )
     return derived
 
 
-def _resolved_workload_manifest(
-    snapshot: Mapping[str, Any], workload_id: str
-) -> str:
+def _resolved_workload_manifest(snapshot: Mapping[str, Any], workload_id: str) -> str:
     experiment = _mapping(snapshot.get("experiment"), "snapshot resolved experiment")
     matches = [
         _mapping(item, "snapshot workload")
@@ -558,6 +597,132 @@ def _resolved_workload_manifest(
     if len(matches) != 1 or not matches[0].get("manifest"):
         raise ValueError("public evidence requires one resolved workload manifest")
     return str(matches[0]["manifest"])
+
+
+def _attach_snapshot_route_receipts(
+    rows: Sequence[Mapping[str, Any]], snapshots: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    receipts: dict[tuple[str, str], tuple[dict[str, object], str, bool]] = {}
+    for snapshot in snapshots:
+        run_id = str(snapshot.get("run_id") or "")
+        candidate_runtime = _mapping(
+            snapshot.get("candidate_runtime"), "snapshot candidate runtime"
+        )
+        bridge = _mapping(snapshot.get("runtime"), "snapshot runtime").get("bridge")
+        for candidate_id, raw_runtime in candidate_runtime.items():
+            runtime = _mapping(raw_runtime, "snapshot candidate runtime record")
+            model_route = _model_route_from_snapshot(runtime.get("model_route"))
+            derived = resolve_harness_model_route(
+                model_route, str(runtime.get("harness") or "")
+            )
+            locked = runtime.get("model_transport")
+            if (
+                locked is not None
+                and _mapping(locked, "snapshot model transport") != derived
+            ):
+                raise ValueError(
+                    "snapshot model transport differs from its canonical route"
+                )
+            evidence = "snapshot_attested" if locked is not None else "configured_only"
+            bridge_locked = not derived["bridge_required"] or _bridge_attests_route(
+                bridge, model_route
+            )
+            if not bridge_locked:
+                evidence = "configured_only"
+            receipts[(run_id, str(candidate_id))] = (
+                derived,
+                evidence,
+                bridge_locked,
+            )
+
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("run_id") or ""), str(row.get("candidate_id") or ""))
+        if key not in receipts:
+            raise ValueError(
+                "normalized row has no model route in its immutable snapshot"
+            )
+        snapshot_receipt, evidence, bridge_locked = receipts[key]
+        observed = row.get("model_transport")
+        if observed is not None:
+            if _mapping(observed, "runtime model transport") != snapshot_receipt:
+                raise ValueError("runtime model transport differs from the snapshot")
+            if bridge_locked:
+                evidence = "runtime_attested"
+        enriched.append(
+            {
+                **dict(row),
+                "model_transport": {**snapshot_receipt, "evidence": evidence},
+            }
+        )
+    return enriched
+
+
+def _model_route_from_snapshot(value: Any) -> ModelRoute:
+    route = _mapping(value, "snapshot model route")
+    provider = str(route.get("provider") or "")
+    if provider not in {"wandb", "openai", "anthropic"}:
+        raise ValueError("snapshot model route has an unsupported provider")
+    model_id = str(route.get("model_id") or "")
+    display_model = str(route.get("display_model") or "")
+    api_key_env = str(route.get("api_key_env") or "")
+    litellm_model = str(route.get("litellm_model") or "")
+    modalities = tuple(route.get("tool_result_modalities") or ())
+    expected_key = {
+        "wandb": "WANDB_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }[provider]
+    if (
+        not model_id
+        or display_model != f"{provider}/{model_id}"
+        or api_key_env != expected_key
+        or not litellm_model
+        or not modalities
+        or any(item not in {"text", "image"} for item in modalities)
+    ):
+        raise ValueError("snapshot model route is incomplete or inconsistent")
+    return ModelRoute(
+        provider=cast(Provider, provider),
+        model_id=model_id,
+        display_model=display_model,
+        api_key_env=api_key_env,
+        chat_base_url=_optional_text(route.get("chat_base_url")),
+        responses_base_url=_optional_text(route.get("responses_base_url")),
+        messages_base_url=_optional_text(route.get("messages_base_url")),
+        litellm_model=litellm_model,
+        tool_result_modalities=cast(tuple[ToolResultModality, ...], modalities),
+    )
+
+
+def _bridge_attests_route(value: Any, route: ModelRoute) -> bool:
+    if value is None:
+        return False
+    bridge = _mapping(value, "snapshot bridge runtime")
+    required = {
+        "schema_version",
+        "image",
+        "config_sha256",
+        "target_route",
+        "resolved_image_id",
+    }
+    if set(bridge) != required or bridge.get("schema_version") != 1:
+        raise ValueError("snapshot bridge runtime does not match schema 1")
+    image = str(bridge.get("image") or "")
+    resolved_image = str(bridge.get("resolved_image_id") or "")
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", resolved_image
+    ):
+        raise ValueError("snapshot bridge runtime is not image-digest pinned")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(bridge.get("config_sha256") or "")):
+        raise ValueError("snapshot bridge config is not a SHA-256 digest")
+    if _mapping(
+        bridge.get("target_route"), "snapshot bridge target route"
+    ) != model_route_identity(route):
+        raise ValueError(
+            "snapshot bridge target differs from the candidate model route"
+        )
+    return True
 
 
 def _public_cell(
@@ -580,6 +745,7 @@ def _public_cell(
     if any(row.get(field) in (None, "") for field in required):
         raise ValueError("normalized row is missing canonical public identity")
     link = _verified_agent_link(row, evaluation_links)
+    transport = _mapping(row.get("model_transport") or {}, "model transport")
     cell = {
         "prediction_id": str(row["prediction_id"]),
         "run_id": str(row["run_id"]),
@@ -590,9 +756,15 @@ def _public_cell(
         "workload_id": str(row.get("workload_id") or ""),
         "task_id": str(row.get("task_id") or row.get("task_name") or ""),
         "harness": str(row["harness"]),
-        "treatment": str(row.get("variant_id") or row.get("context_system_id") or "none"),
+        "treatment": str(
+            row.get("variant_id") or row.get("context_system_id") or "none"
+        ),
         "provider": str(row.get("model_provider") or row.get("provider") or ""),
         "model": str(row["model"]),
+        "wire_protocol": _optional_text(transport.get("wire_protocol")),
+        "endpoint_kind": _optional_text(transport.get("endpoint_kind")),
+        "upstream_host": _optional_text(transport.get("upstream_host")),
+        "route_evidence": _optional_text(transport.get("evidence")),
         "status": str(row.get("status") or "unknown"),
         "pass": _optional_bool(row.get("pass")),
         "reward": _optional_number(row.get("reward")),
@@ -606,7 +778,9 @@ def _public_cell(
         "refusals": int(row.get("refusal_count") or 0),
         "provider_errors": int(row.get("provider_error_count") or 0),
         "harness_errors": int(
-            row.get("harness_error_count") or row.get("harness_adapter_error_count") or 0
+            row.get("harness_error_count")
+            or row.get("harness_adapter_error_count")
+            or 0
         ),
         "context_registered": _optional_bool(row.get("context_registered")),
         "context_invoked": _optional_bool(row.get("context_invoked")),
@@ -616,8 +790,34 @@ def _public_cell(
         "agent_link": link,
     }
     assert set(cell) == PUBLIC_CELL_FIELDS
+    _validate_public_transport(cell)
     _reject_sensitive(cell)
     return cell
+
+
+def _validate_public_transport(cell: Mapping[str, Any]) -> None:
+    fields = (
+        cell.get("wire_protocol"),
+        cell.get("endpoint_kind"),
+        cell.get("upstream_host"),
+        cell.get("route_evidence"),
+    )
+    if all(value is None for value in fields):
+        return
+    if any(value is None for value in fields):
+        raise ValueError("public model transport must be complete or unavailable")
+    if cell["wire_protocol"] not in {"chat_completions", "messages", "responses"}:
+        raise ValueError("public model transport has an unsupported wire protocol")
+    if cell["endpoint_kind"] not in {"provider_direct", "fugue_bridge"}:
+        raise ValueError("public model transport has an unsupported endpoint kind")
+    if cell["upstream_host"] not in ALLOWED_MODEL_UPSTREAM_HOSTS:
+        raise ValueError("public model transport has an unapproved upstream host")
+    if cell["route_evidence"] not in {
+        "configured_only",
+        "snapshot_attested",
+        "runtime_attested",
+    }:
+        raise ValueError("public model transport has an unsupported evidence level")
 
 
 def _verified_agent_link(
@@ -647,7 +847,11 @@ def _evaluation_links(
     expected_runs = set(_string_list(editorial["provenance"]["run_ids"], "run_ids"))
     observed_runs = {str(row.get("run_id") or "") for row in rows}
     summary_runs = {str(summary.get("run_id") or "") for summary in summaries}
-    if not observed_runs or observed_runs - expected_runs or observed_runs - summary_runs:
+    if (
+        not observed_runs
+        or observed_runs - expected_runs
+        or observed_runs - summary_runs
+    ):
         raise ValueError("public rows are not covered by declared run summaries")
     links: dict[str, str] = {}
     for summary in summaries:
@@ -691,7 +895,9 @@ def validate_public_experiment(value: Mapping[str, Any]) -> None:
     for cell in cells:
         cell_value = _mapping(cell, "public cell")
         _exact_fields(cell_value, PUBLIC_CELL_FIELDS, "public cell")
-    prediction_ids = [str(_mapping(cell, "public cell")["prediction_id"]) for cell in cells]
+    prediction_ids = [
+        str(_mapping(cell, "public cell")["prediction_id"]) for cell in cells
+    ]
     if len(prediction_ids) != len(set(prediction_ids)):
         raise ValueError("public experiment contains duplicate prediction IDs")
     matrix = _mapping(value.get("matrix"), "public matrix")
@@ -707,17 +913,25 @@ def validate_public_experiment(value: Mapping[str, Any]) -> None:
     if _canonical_json(value.get("groups")) != _canonical_json(_group_metrics(cells)):
         raise ValueError("public experiment groups do not match canonical cells")
     linked = sorted(
-        {str(_mapping(cell, "public cell")["agent_link"]) for cell in cells if cell["agent_link"]}
+        {
+            str(_mapping(cell, "public cell")["agent_link"])
+            for cell in cells
+            if cell["agent_link"]
+        }
     )
     links = _mapping(value.get("links"), "public links")
     if links.get("evaluations") != linked:
         raise ValueError("public evaluation links do not match verified Agent cells")
-    _validate_compatible_cohort(value, cells, complete=value.get("evidence_tier") in COMPLETE_TIERS)
+    _validate_compatible_cohort(
+        value, cells, complete=value.get("evidence_tier") in COMPLETE_TIERS
+    )
     for url in _all_urls(value.get("links")) | _all_urls(value.get("provenance")):
         _validate_url(url)
     _reject_sensitive(value)
     digest = str(value.get("content_sha256") or "")
-    if digest != _digest({key: nested for key, nested in value.items() if key != "content_sha256"}):
+    if digest != _digest(
+        {key: nested for key, nested in value.items() if key != "content_sha256"}
+    ):
         raise ValueError("public experiment content digest does not match")
 
 
@@ -746,7 +960,11 @@ def validate_experiment_index(value: Mapping[str, Any]) -> None:
         "content_sha256",
     }
     for experiment in experiments:
-        _exact_fields(_mapping(experiment, "experiment index entry"), expected_fields, "experiment index entry")
+        _exact_fields(
+            _mapping(experiment, "experiment index entry"),
+            expected_fields,
+            "experiment index entry",
+        )
     digest = str(value.get("content_sha256") or "")
     body = {key: nested for key, nested in value.items() if key != "content_sha256"}
     if digest != _digest(body):
@@ -757,12 +975,26 @@ def _metrics(cells: Sequence[Mapping[str, Any]], expected: int) -> dict[str, Any
     scored = [cell for cell in cells if cell["pass"] is not None]
     passed = sum(cell["pass"] is True for cell in scored)
     costs = [float(cell["cost_usd"]) for cell in cells if cell["cost_usd"] is not None]
-    input_tokens = [cell["input_tokens"] for cell in cells if cell["input_tokens"] is not None]
-    output_tokens = [cell["output_tokens"] for cell in cells if cell["output_tokens"] is not None]
-    latencies = [float(cell["wall_time_sec"]) for cell in cells if cell["wall_time_sec"] is not None]
-    tool_calls = [cell["tool_calls"] for cell in cells if cell["tool_calls"] is not None]
+    input_tokens = [
+        cell["input_tokens"] for cell in cells if cell["input_tokens"] is not None
+    ]
+    output_tokens = [
+        cell["output_tokens"] for cell in cells if cell["output_tokens"] is not None
+    ]
+    latencies = [
+        float(cell["wall_time_sec"])
+        for cell in cells
+        if cell["wall_time_sec"] is not None
+    ]
+    tool_calls = [
+        cell["tool_calls"] for cell in cells if cell["tool_calls"] is not None
+    ]
     turns = [cell["turns"] for cell in cells if cell["turns"] is not None]
-    recall = [float(cell["recall_at_10"]) for cell in cells if cell["recall_at_10"] is not None]
+    recall = [
+        float(cell["recall_at_10"])
+        for cell in cells
+        if cell["recall_at_10"] is not None
+    ]
     reciprocal_ranks = [float(cell["mrr"]) for cell in cells if cell["mrr"] is not None]
     links = [cell for cell in cells if cell["agent_link"]]
     return {
@@ -774,16 +1006,24 @@ def _metrics(cells: Sequence[Mapping[str, Any]], expected: int) -> dict[str, Any
         "pass_rate": passed / len(scored) if scored else None,
         "measured_cost_predictions": len(costs),
         "total_cost_usd": sum(costs) if len(costs) == len(cells) and cells else None,
-        "mean_cost_usd": sum(costs) / len(costs) if len(costs) == len(cells) and cells else None,
+        "mean_cost_usd": sum(costs) / len(costs)
+        if len(costs) == len(cells) and cells
+        else None,
         "measured_usage_predictions": sum(
             cell["input_tokens"] is not None and cell["output_tokens"] is not None
             for cell in cells
         ),
-        "input_tokens": sum(input_tokens) if len(input_tokens) == len(cells) and cells else None,
-        "output_tokens": sum(output_tokens) if len(output_tokens) == len(cells) and cells else None,
+        "input_tokens": sum(input_tokens)
+        if len(input_tokens) == len(cells) and cells
+        else None,
+        "output_tokens": sum(output_tokens)
+        if len(output_tokens) == len(cells) and cells
+        else None,
         "median_wall_time_sec": statistics.median(latencies) if latencies else None,
         "measured_latency_predictions": len(latencies),
-        "tool_calls": sum(tool_calls) if len(tool_calls) == len(cells) and cells else None,
+        "tool_calls": sum(tool_calls)
+        if len(tool_calls) == len(cells) and cells
+        else None,
         "median_turns": statistics.median(turns) if turns else None,
         "mean_recall_at_10": statistics.fmean(recall) if recall else None,
         "mean_mrr": statistics.fmean(reciprocal_ranks) if reciprocal_ranks else None,
@@ -817,7 +1057,11 @@ def _group_metrics(cells: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                         "reward": row["reward"],
                     }
                     for row in sorted(
-                        rows, key=lambda item: (str(item["task_id"]), int(item["trial_index"]))
+                        rows,
+                        key=lambda item: (
+                            str(item["task_id"]),
+                            int(item["trial_index"]),
+                        ),
                     )
                 ],
             }
@@ -896,7 +1140,9 @@ def _validate_compatible_cohort(
     for dimension, field in fields.items():
         observed = {str(cell[field]) for cell in cells}
         if observed - allowed[dimension]:
-            raise ValueError(f"public rows contain incompatible {dimension}: {sorted(observed)}")
+            raise ValueError(
+                f"public rows contain incompatible {dimension}: {sorted(observed)}"
+            )
     attempts = int(matrix.get("attempts") or 0)
     if attempts < 1:
         raise ValueError("matrix attempts must be positive")
@@ -922,19 +1168,20 @@ def _validate_compatible_cohort(
             cohort
             for cohort in cohorts
             if (
-            str(cell["model"]) in cohort["models"]
-            and str(cell["harness"]) in cohort["harnesses"]
-            and str(cell["treatment"]) in cohort["treatments"]
-            and str(cell["task_id"]) in cohort["tasks"]
+                str(cell["model"]) in cohort["models"]
+                and str(cell["harness"]) in cohort["harnesses"]
+                and str(cell["treatment"]) in cohort["treatments"]
+                and str(cell["task_id"]) in cohort["tasks"]
             )
         ]
         if len(matches) != 1:
-            raise ValueError("public row does not belong to a declared compatible cohort")
+            raise ValueError(
+                "public row does not belong to a declared compatible cohort"
+            )
         cohort_counts[str(matches[0]["id"])] += 1
     if complete:
         expected_counts = {
-            str(cohort["id"]): int(cohort["expected_predictions"])
-            for cohort in cohorts
+            str(cohort["id"]): int(cohort["expected_predictions"]) for cohort in cohorts
         }
         if cohort_counts != expected_counts:
             raise ValueError("public rows do not complete every declared cohort")
@@ -945,7 +1192,9 @@ def _reject_sensitive(value: Any, path: str = "root") -> None:
         for key, nested in value.items():
             key_text = str(key)
             if FORBIDDEN_KEY.search(key_text):
-                raise ValueError(f"public evidence contains forbidden field at {path}.{key_text}")
+                raise ValueError(
+                    f"public evidence contains forbidden field at {path}.{key_text}"
+                )
             _reject_sensitive(nested, f"{path}.{key_text}")
     elif isinstance(value, (list, tuple)):
         for index, nested in enumerate(value):
@@ -953,9 +1202,9 @@ def _reject_sensitive(value: Any, path: str = "root") -> None:
     elif isinstance(value, str):
         if SECRET_VALUE.search(value):
             raise ValueError(f"public evidence contains a secret-like value at {path}")
-        if value.startswith(("/Users/", "/private/", "/home/", "~/", "file://")) or re.match(
-            r"^[A-Za-z]:[\\/]", value
-        ):
+        if value.startswith(
+            ("/Users/", "/private/", "/home/", "~/", "file://")
+        ) or re.match(r"^[A-Za-z]:[\\/]", value):
             raise ValueError(f"public evidence contains a local path at {path}")
 
 
@@ -964,7 +1213,9 @@ def _validate_url(url: str) -> None:
     if parsed.scheme != "https" or parsed.hostname not in ALLOWED_URL_HOSTS:
         raise ValueError(f"public evidence URL is not approved: {url}")
     if parsed.username or parsed.password or parsed.query:
-        raise ValueError("public evidence URLs cannot contain credentials or query strings")
+        raise ValueError(
+            "public evidence URLs cannot contain credentials or query strings"
+        )
 
 
 def _all_urls(value: Any) -> set[str]:
@@ -1010,6 +1261,14 @@ def _optional_number(value: Any) -> float | None:
     if not math.isfinite(result):
         raise ValueError("public metric must be finite")
     return result
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("public text must be a non-empty string or null")
+    return value
 
 
 def _public_cost(row: Mapping[str, Any]) -> float | None:
@@ -1085,7 +1344,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.rows or args.run_summary or args.snapshot:
             parser.error("--validate-only does not accept private evidence inputs")
         index = validate_publication(paths, args.output)
-        print(json.dumps({"experiments": len(index.experiments), "digest": index.content_sha256}))
+        print(
+            json.dumps(
+                {"experiments": len(index.experiments), "digest": index.content_sha256}
+            )
+        )
         return 0
     parsed_rows = _parse_paths(args.rows, "--rows")
     duplicate_rows = [key for key, values in parsed_rows.items() if len(values) != 1]
@@ -1099,7 +1362,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output,
         repo_root=args.repo_root.resolve(),
     )
-    print(json.dumps({"experiments": len(index.experiments), "digest": index.content_sha256}))
+    print(
+        json.dumps(
+            {"experiments": len(index.experiments), "digest": index.content_sha256}
+        )
+    )
     return 0
 
 

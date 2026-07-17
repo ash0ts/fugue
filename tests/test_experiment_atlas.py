@@ -143,6 +143,27 @@ def _run_summary(rows):
 
 
 def _snapshot(rows):
+    model_route = {
+        "provider": "wandb",
+        "model_id": "example/model",
+        "display_model": "wandb/example/model",
+        "api_key_env": "WANDB_API_KEY",
+        "chat_base_url": "https://api.inference.wandb.ai/v1",
+        "responses_base_url": None,
+        "messages_base_url": None,
+        "litellm_model": "nebius/*",
+        "tool_result_modalities": ["text", "image"],
+    }
+    model_transport = {
+        "harness": "codex",
+        "wire_protocol": "responses",
+        "endpoint_kind": "fugue_bridge",
+        "upstream_host": "api.inference.wandb.ai",
+        "bridge_required": True,
+    }
+    route_identity = {
+        key: value for key, value in model_route.items() if key != "api_key_env"
+    }
     value = {
         "schema_version": 1,
         "snapshot_sha256": "",
@@ -151,11 +172,16 @@ def _snapshot(rows):
         "request": {"experiment_id": "demo", "manifest": None},
         "experiment": {
             "manifest": "datasets/pilot.yaml",
-            "workloads": [
-                {"id": "coding", "manifest": "datasets/locked-v1.yaml"}
-            ],
+            "workloads": [{"id": "coding", "manifest": "datasets/locked-v1.yaml"}],
         },
         "runtime": {
+            "bridge": {
+                "schema_version": 1,
+                "image": f"ghcr.io/example/bridge@sha256:{'b' * 64}",
+                "config_sha256": "c" * 64,
+                "target_route": route_identity,
+                "resolved_image_id": f"sha256:{'e' * 64}",
+            },
             "executions": {
                 "execution-1": {
                     "fugue_source": {
@@ -164,7 +190,18 @@ def _snapshot(rows):
                         "dirty": False,
                     }
                 }
+            },
+        },
+        "candidate_runtime": {
+            row["candidate_id"]: {
+                "candidate_id": row["candidate_id"],
+                "harness": row["harness"],
+                "model_provider": "wandb",
+                "model": row["model"],
+                "model_route": model_route,
+                "model_transport": model_transport,
             }
+            for row in rows
         },
         "planned_prediction_count": len(rows),
         "planned_matrix": [
@@ -193,7 +230,10 @@ def _build(editorial, rows):
 def test_public_experiment_recomputes_metrics_and_orders_index() -> None:
     directional = _build(
         _editorial(),
-        [_row(1, treatment="none", passed=False), _row(2, treatment="rag-dense", passed=True)],
+        [
+            _row(1, treatment="none", passed=False),
+            _row(2, treatment="rag-dense", passed=True),
+        ],
     )
     contract = _build(
         _editorial(
@@ -201,14 +241,19 @@ def test_public_experiment_recomputes_metrics_and_orders_index() -> None:
             evidence_tier="contract",
             decision_value=99,
         ),
-        [_row(3, treatment="none", passed=True), _row(4, treatment="rag-dense", passed=True)],
+        [
+            _row(3, treatment="none", passed=True),
+            _row(4, treatment="rag-dense", passed=True),
+        ],
     )
 
     assert directional.metrics["passed_predictions"] == 1
     assert directional.metrics["pass_rate"] == 0.5
     assert directional.metrics["total_cost_usd"] == pytest.approx(0.2)
     assert directional.metrics["paired_bootstrap"] is None
-    assert [item["id"] for item in build_index([contract, directional]).experiments] == [
+    assert [
+        item["id"] for item in build_index([contract, directional]).experiments
+    ] == [
         "controlled-grid",
         "contract",
     ]
@@ -392,7 +437,10 @@ def test_confirmed_evidence_requires_replication_and_uses_paired_bootstrap() -> 
     with pytest.raises(ValueError, match="replicated"):
         _build(
             _editorial(evidence_tier="confirmed"),
-            [_row(1, treatment="none", passed=False), _row(2, treatment="rag-dense", passed=True)],
+            [
+                _row(1, treatment="none", passed=False),
+                _row(2, treatment="rag-dense", passed=True),
+            ],
         )
 
     editorial = _editorial(
@@ -448,20 +496,14 @@ def test_public_generation_is_reproducible(tmp_path: Path) -> None:
     )
     rows_path = tmp_path / "rows.jsonl"
     rows_path.write_text(
-        "\n".join(
-            json.dumps(row, sort_keys=True)
-            for row in rows
-        )
-        + "\n",
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
         encoding="utf-8",
     )
     first = tmp_path / "first"
     second = tmp_path / "second"
     summary_path = tmp_path / "run.json"
     summary_path.write_text(
-        json.dumps(
-            _run_summary(rows)
-        ),
+        json.dumps(_run_summary(rows)),
         encoding="utf-8",
     )
     snapshot_path = tmp_path / "input-lock.json"
@@ -486,12 +528,40 @@ def test_public_generation_is_reproducible(tmp_path: Path) -> None:
 
     assert left == right
     assert (first / "index.json").read_bytes() == (second / "index.json").read_bytes()
-    assert (
-        first / "experiments" / "controlled-grid.json"
-    ).read_bytes() == (
+    assert (first / "experiments" / "controlled-grid.json").read_bytes() == (
         second / "experiments" / "controlled-grid.json"
     ).read_bytes()
     assert validate_publication(list(editorial_dir.glob("*.yaml")), first) == left
+    [cell] = [
+        cell
+        for cell in json.loads(
+            (first / "experiments" / "controlled-grid.json").read_text()
+        )["cells"]
+        if cell["treatment"] == "none"
+    ]
+    assert cell["wire_protocol"] == "responses"
+    assert cell["endpoint_kind"] == "fugue_bridge"
+    assert cell["upstream_host"] == "api.inference.wandb.ai"
+    assert cell["route_evidence"] == "snapshot_attested"
+
+    bad_rows = [dict(row) for row in rows]
+    bad_rows[0]["model_transport"] = {
+        **snapshot["candidate_runtime"][bad_rows[0]["candidate_id"]]["model_transport"],
+        "wire_protocol": "messages",
+    }
+    rows_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in bad_rows) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="runtime model transport differs"):
+        write_publication(
+            list(editorial_dir.glob("*.yaml")),
+            {"controlled-grid": rows_path},
+            {"controlled-grid": [summary_path]},
+            {"controlled-grid": [snapshot_path]},
+            tmp_path / "bad-route",
+            repo_root=tmp_path,
+        )
 
     changed = yaml.safe_load((editorial_dir / "controlled-grid.yaml").read_text())
     changed["title"] = "Changed without rebuilding"

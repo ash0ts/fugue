@@ -81,8 +81,7 @@ def test_preflight_reports_the_resolved_provider_endpoint(
 
     route = next(check for check in checks if check.name == "model route")
     assert route.detail == (
-        "anthropic/claude-haiku-4-5-20251001 via anthropic "
-        "at https://api.anthropic.com"
+        "anthropic/claude-haiku-4-5-20251001 via anthropic at https://api.anthropic.com"
     )
 
 
@@ -132,6 +131,60 @@ def test_live_preflight_is_read_only(
 
     assert next(check for check in checks if check.name == "bridge health").ok is False
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_preflight_skips_bridge_when_selected_harnesses_are_provider_direct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+
+    def unexpected_bridge_status(**kwargs):
+        raise AssertionError(f"bridge status must not run: {kwargs}")
+
+    monkeypatch.setattr("fugue.preflight.bridge_status", unexpected_bridge_status)
+
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={},
+        live=True,
+        harnesses=("hermes", "openclaw"),
+    )
+
+    bridge = next(check for check in checks if check.name == "bridge health")
+    assert bridge.ok is True
+    assert bridge.detail.startswith("not required")
+
+
+def test_preflight_attests_bridge_for_selected_native_protocol(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    captured = {}
+
+    def fake_bridge_status(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "runtime_lock": {"image": "bridge@example"},
+            "resolved_image_id": "sha256:resolved",
+        }
+
+    monkeypatch.setattr("fugue.preflight.bridge_status", fake_bridge_status)
+
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={},
+        live=True,
+        harnesses=("codex",),
+    )
+
+    bridge = next(check for check in checks if check.name == "bridge health")
+    assert bridge.ok is True
+    assert bridge.detail == "locked bridge@example as sha256:resolved"
+    assert captured["repo_root"] == tmp_path
+    assert captured["route"].display_model == "wandb/zai-org/GLM-5.2"
 
 
 def test_wandb_preflight_attributes_inference_to_trace_project(

@@ -9,6 +9,16 @@ import pytest
 from fugue.bench import agent_runtime
 
 
+def test_agent_endpoint_helpers_consume_the_canonical_harness_routes() -> None:
+    source = Path("fugue/agents/model_plane.py").read_text(encoding="utf-8")
+
+    for protocol in ("chat_completions", "messages", "responses"):
+        assert f'model_protocol_endpoint(route, "{protocol}")[0]' in source
+    assert '"api": _chat_base_url(self.model_route)' in source
+    assert 'os.environ["ANTHROPIC_BASE_URL"] = _messages_base_url' in source
+    assert "f'base_url = \"{_responses_base_url(self.model_route)}\"\\n'" in source
+
+
 def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> None:
     spec = agent_runtime.RUNTIMES["codex"]
     assert spec.version == (
@@ -27,9 +37,7 @@ def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> Non
     assert "libcrypto.so.3" in spec.dockerfile
     assert "codex-wrapper.sh" in spec.dockerfile
     source = (Path("fugue/agents/model_plane.py")).read_text()
-    codex_install = source[
-        source.index("class FugueCodex") :
-    ]
+    codex_install = source[source.index("class FugueCodex") :]
     assert "npm install" not in codex_install
     assert "apt-get" not in codex_install
     assert "curl " not in codex_install
@@ -48,9 +56,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         "claude-code": source[
             source.index("class FugueClaudeCode") : source.index("class FugueCodex")
         ],
-        "codex": source[
-            source.index("class FugueCodex") :
-        ],
+        "codex": source[source.index("class FugueCodex") :],
     }
     assert set(ranges) == set(agent_runtime.RUNTIMES)
     for harness, adapter in ranges.items():
@@ -65,13 +71,12 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         hermes_runtime.dockerfile
     )
     assert (
-        "COPY --from=node-runtime /usr/local/bin/node "
-        "/opt/fugue-agent-runtime/bin/node"
+        "COPY --from=node-runtime /usr/local/bin/node /opt/fugue-agent-runtime/bin/node"
     ) in hermes_runtime.dockerfile
     assert "/opt/fugue-agent-runtime/lib/node_modules/npm" in (
         hermes_runtime.dockerfile
     )
-    assert "npm --version | grep -F \"10.9.8\"" in hermes_runtime.dockerfile
+    assert 'npm --version | grep -F "10.9.8"' in hermes_runtime.dockerfile
     assert (
         "PATH=/opt/fugue-agent-runtime/bin:$PATH bash /tmp/hermes-install.sh"
         in hermes_runtime.dockerfile
@@ -106,9 +111,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         "weave-otel2.1+fugue-load-path.1+fugue-single-turn.1"
     )
     assert "npm ci --ignore-scripts" in openclaw_runtime.dockerfile
-    assert "weave-openclaw/openclaw.plugin.json" in " ".join(
-        openclaw_runtime.probe
-    )
+    assert "weave-openclaw/openclaw.plugin.json" in " ".join(openclaw_runtime.probe)
     openclaw_adapter = ranges["openclaw"]
     assert 'plugins.setdefault("load", {})' in openclaw_adapter
     assert 'prov_cfg["api"] = "openai-completions"' in openclaw_adapter
@@ -118,8 +121,8 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert openclaw_adapter.index("_verify_mcp_config_command()") < (
         openclaw_adapter.index("_start_gateway_command()")
     )
-    assert r'plugin.status!==\"loaded\"' in openclaw_adapter
-    assert r'plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"' in openclaw_adapter
+    assert r"plugin.status!==\"loaded\"" in openclaw_adapter
+    assert r"plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"" in openclaw_adapter
     assert '"FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id' in (
         openclaw_adapter
     )
@@ -142,8 +145,8 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     assert "marketplace.json" in " ".join(claude_runtime.probe)
     assert '"NPM_CONFIG_PREFIX": "/opt/fugue-agent-runtime"' in ranges["claude-code"]
-    assert "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime" in (
-        ranges["claude-code"]
+    assert (
+        "export NPM_CONFIG_PREFIX=/opt/fugue-agent-runtime" in (ranges["claude-code"])
     )
     assert 'hook_event_name:"SessionEnd"' in ranges["claude-code"]
     assert "fugue_trial_finalized" in ranges["claude-code"]
@@ -174,7 +177,7 @@ def test_trial_mutator_lock_covers_task_image_conda_environments() -> None:
     assert "/opt/conda/envs/*/bin" in guard
     for executable in ("pip", "pip3", "conda", "mamba", "micromamba"):
         assert executable in guard
-    assert 'for module in pip ensurepip' in guard
+    assert "for module in pip ensurepip" in guard
     assert "Fugue trial policy blocks package installation" in guard
     assert "mutator-modes" in guard
     assert "_restore_verifier_runtime(environment)" in source
@@ -220,7 +223,9 @@ def test_agent_runtime_lock_rejects_contract_drift(tmp_path: Path) -> None:
     assert agent_runtime.read_runtime_lock("codex", tmp_path) is None
 
 
-def test_agent_runtime_lock_requires_architecture_qualified_name(tmp_path: Path) -> None:
+def test_agent_runtime_lock_requires_architecture_qualified_name(
+    tmp_path: Path,
+) -> None:
     spec = agent_runtime.RUNTIMES["codex"]
     root = tmp_path / agent_runtime.AGENT_RUNTIME_ROOT / "codex"
     root.mkdir(parents=True)

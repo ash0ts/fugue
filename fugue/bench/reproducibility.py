@@ -17,6 +17,7 @@ from fugue.bench.context import (
 from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
+from fugue.model_plane import resolve_harness_model_route
 
 if TYPE_CHECKING:
     from fugue.bench.execution import PlannedCell
@@ -87,6 +88,7 @@ def build_run_snapshot(
     jobs: list[RenderedJob],
     cells: list[PlannedCell],
     env: Mapping[str, str],
+    bridge_runtime: Mapping[str, Any] | None = None,
     evaluation_asset_lock_sha256: str = "",
     treatment_selection_sha256: str = "",
 ) -> RunSnapshotV1:
@@ -207,6 +209,7 @@ def build_run_snapshot(
             "model_provider": job.route.provider,
             "model": job.route.display_model,
             "model_route": asdict(job.route),
+            "model_transport": resolve_harness_model_route(job.route, job.harness),
             "context": {
                 **context_behavior_definition(context),
                 "serve_deliveries": sorted(context.serve_deliveries),
@@ -337,6 +340,7 @@ def build_run_snapshot(
             ),
             "executions": executions,
             "fugue_source": fugue_source,
+            "bridge": dict(bridge_runtime) if bridge_runtime is not None else None,
         },
         required_env=tuple(sorted(name for name in required_env if name)),
         preset=preset,

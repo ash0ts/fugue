@@ -106,6 +106,14 @@ p { line-height: 1.55; }
 .section-number { color: var(--blue); }
 .tier-list div { border-top: 1px solid var(--line); padding: 0.7rem 0; }
 .tier-list dd { margin: 0.35rem 0 0; color: var(--slate); }
+.route-method { padding-top: 0; }
+.routing-table td:nth-child(n+3) { font-family: "IBM Plex Mono", monospace; font-size: 0.76rem; }
+.proof-chain { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; padding: 0; margin: 3rem 0 0; list-style: none; background: var(--line); border: 1px solid var(--line); counter-reset: route-proof; }
+.proof-chain li { min-height: 13rem; padding: 1.5rem; background: var(--paper); counter-increment: route-proof; }
+.proof-chain li::before { content: "0" counter(route-proof); display: block; margin-bottom: 2.5rem; color: var(--blue); font: 0.7rem/1.4 "IBM Plex Mono", monospace; letter-spacing: 0.09em; }
+.proof-chain strong { display: block; margin-bottom: 0.75rem; font: 1.3rem/1 "IBM Plex Sans Condensed", sans-serif; }
+.proof-chain span, .route-note { color: var(--slate); line-height: 1.5; }
+.route-note { max-width: 900px; margin: 2rem 0 0; }
 
 .compare-controls { display: grid; grid-template-columns: auto minmax(220px, 1fr) auto minmax(220px, 1fr); align-items: center; gap: 1rem; padding: 2rem 0; border-bottom: 1px solid var(--line); font-family: "IBM Plex Mono", monospace; text-transform: uppercase; font-size: 0.72rem; }
 select { max-width: 520px; width: 100%; padding: 0.8rem 2.5rem 0.8rem 0.9rem; border: 1px solid var(--ink); border-radius: 0; background: var(--paper); color: var(--ink); font: inherit; }
@@ -145,7 +153,9 @@ select { max-width: 520px; width: 100%; padding: 0.8rem 2.5rem 0.8rem 0.9rem; bo
   .metric:nth-child(2) { border-right: 0; }
   .metric:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .definition-grid { grid-template-columns: repeat(2, 1fr); }
-  .notes-grid, .methods-grid { grid-template-columns: 1fr; }
+  .notes-grid, .methods-grid, .proof-chain { grid-template-columns: 1fr; }
+  .proof-chain li { min-height: 0; }
+  .proof-chain li::before { margin-bottom: 1rem; }
   .ribbon-legend { margin-left: 0; }
   .compare-controls { grid-template-columns: 1fr; }
 }

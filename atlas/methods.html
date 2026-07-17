@@ -14,6 +14,28 @@
     </header>
     <main id="main">
       <section class="page-intro ruled"><p class="eyebrow">Rules before results</p><h1>How evidence enters the atlas.</h1><p class="lede">The public layer recomputes metrics from canonical normalized rows. Editorial text explains decisions; it cannot change arithmetic.</p></section>
+      <section class="route-method section-block" aria-labelledby="routing-title">
+        <div class="section-heading"><div><p class="eyebrow">Model plane</p><h2 id="routing-title">The harness keeps its own wire protocol.</h2></div><p>Fugue freezes one provider/model route. Each adapter consumes that route through the protocol its harness actually speaks. A provider is called directly when it offers that protocol; otherwise a local, digest-pinned LiteLLM bridge translates the wire format. Candidate identity does not change.</p></div>
+        <div class="table-scroll">
+          <table class="evidence-table routing-table">
+            <caption>Effective route by harness and upstream provider</caption>
+            <thead><tr><th scope="col">Harness</th><th scope="col">Native wire</th><th scope="col">W&amp;B Inference</th><th scope="col">OpenAI</th><th scope="col">Anthropic</th></tr></thead>
+            <tbody>
+              <tr><td>Hermes</td><td>Chat Completions</td><td>Provider direct</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+              <tr><td>OpenClaw</td><td>Chat Completions</td><td>Provider direct</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+              <tr><td>Claude Code</td><td>Messages</td><td>Fugue bridge</td><td>Fugue bridge</td><td>Provider direct</td></tr>
+              <tr><td>Codex</td><td>Responses</td><td>Fugue bridge</td><td>Provider direct</td><td>Fugue bridge</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <ol class="proof-chain" aria-label="Routing proof chain">
+          <li><strong>Resolve once.</strong><span>The immutable candidate and snapshot record provider, model, endpoints, modalities, harness and expected native protocol.</span></li>
+          <li><strong>Attest the bridge.</strong><span>Bridged runs fail preflight unless the running container uses the pinned image digest and the exact locked config mounted read-only.</span></li>
+          <li><strong>Receipt per prediction.</strong><span>The harness adapter writes its effective protocol, direct-or-bridge endpoint class and upstream host into trial metadata and the Agent root attributes.</span></li>
+          <li><strong>Reconcile identity.</strong><span>The public row is accepted only when run, candidate, task, trial, evaluation call and Agent root agree. Model routing and MCP transport remain separate.</span></li>
+        </ol>
+        <p class="route-note"><strong>Evidence labels:</strong> Runtime attested includes a matching adapter receipt. Snapshot attested proves the locked route and bridge but lacks a row-level receipt. Configured only is retained for historical runs that predate these receipts; it is never presented as packet-level proof.</p>
+      </section>
       <div class="methods-grid">
         <section><span class="section-number">01</span><h2>Primary outcome</h2><p>For SWE-bench, resolution is the official deterministic verifier result. Pass rate is <code>accepted repairs ÷ scored predictions</code>. Complete SWE studies require every planned, applicable prediction to reconcile and score; operational completion is reported separately.</p></section>
         <section><span class="section-number">02</span><h2>Secondary measures</h2><p>Total cost and tokens are published only when every row is measured. Wall time is the median terminal duration. Turns and tool calls come from verified Agent spans. Recoverable errors and refusals remain counts. Missing values are unavailable, never zero.</p></section>

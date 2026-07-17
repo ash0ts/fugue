@@ -127,9 +127,15 @@ from fugue.bench.workloads import (
     load_workload_dataset,
     prepare_workload_dataset,
 )
-from fugue.bridge import BridgeFiles, bridge_status, bridge_up
+from fugue.bridge import (
+    BridgeFiles,
+    bridge_runtime_attestation,
+    bridge_status,
+    bridge_up,
+)
 from fugue.model_plane import (
     model_route_identity,
+    resolve_harness_model_route,
     resolve_model_route,
     select_model,
     trace_env_defaults,
@@ -573,6 +579,9 @@ class OperatorService:
             repo_root=self.repo_root,
             env=env,
             live=live,
+            harnesses=tuple(selected.harnesses),
+            builder_model=builder_model,
+            judge_model=judge_model,
         )
         for role, model in (("builder", builder_model), ("judge", judge_model)):
             if not model:
@@ -1952,6 +1961,13 @@ class OperatorService:
             selected_preset = plan.preset
             max_workers = plan.max_workers
             cells = list(plan.cells)
+            bridge_runtime = _resolved_bridge_runtime(
+                rendered,
+                request=request,
+                experiment=resolved,
+                repo_root=self.repo_root,
+                env=self.env,
+            )
             evaluation_assets = build_evaluation_asset_lock(run_id, cells)
             write_evaluation_asset_lock(self.repo_root, evaluation_assets)
             cells = [
@@ -1972,6 +1988,7 @@ class OperatorService:
                 jobs=rendered,
                 cells=cells,
                 env=self.env,
+                bridge_runtime=bridge_runtime,
                 evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
                 treatment_selection_sha256=treatment_selection_sha256,
             )
@@ -2821,6 +2838,45 @@ def _request_for_experiment(experiment: ExperimentSpec) -> ExperimentRequest:
         tags=tuple(experiment.tags),
         jobs_dir=experiment.jobs_dir,
         trace_content=experiment.trace_content,
+    )
+
+
+def _resolved_bridge_runtime(
+    jobs: list[RenderedJob],
+    *,
+    request: ExperimentRequest,
+    experiment: ExperimentSpec,
+    repo_root: Path,
+    env: dict[str, str],
+) -> dict[str, Any] | None:
+    bridged = [
+        job
+        for job in jobs
+        if job.applicable
+        and job.execution_kind == "agent"
+        and resolve_harness_model_route(job.route, job.harness)["bridge_required"]
+    ]
+    if not bridged:
+        return None
+    target_models = {job.route.display_model for job in bridged}
+    if len(target_models) != 1:
+        raise ValueError(
+            "one immutable run cannot share a bridge across multiple target models"
+        )
+    target_route = bridged[0].route
+    builder_model = (
+        request.builder_model
+        or experiment.builder_model
+        or env.get("FUGUE_BUILDER_MODEL")
+        or target_route.display_model
+    )
+    judge_model = request.judge_model or experiment.judge_model
+    return bridge_runtime_attestation(
+        target_route,
+        repo_root=repo_root,
+        builder_route=resolve_model_route(builder_model, env),
+        judge_route=(resolve_model_route(judge_model, env) if judge_model else None),
+        env=env,
     )
 
 
