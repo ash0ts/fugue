@@ -60,9 +60,24 @@ def validate_canary(
             "exact",
         }:
             raise ValueError("canary rows must have exact Agent links")
-        if int(row.get("weave_agent_root_count") or 0) != 1:
+        root_ids = row.get("weave_root_span_ids")
+        if (
+            not isinstance(root_ids, list)
+            or len(root_ids) != 1
+            or not isinstance(root_ids[0], str)
+            or not root_ids[0]
+            or row.get("root_span_id") != root_ids[0]
+            or int(row.get("weave_turn_count") or 0) != 1
+        ):
             raise ValueError("each canary prediction must have exactly one Agent root")
-        if int(row.get("weave_conversation_count") or 0) != 1:
+        conversation_ids = row.get("weave_conversation_ids")
+        if (
+            not isinstance(conversation_ids, list)
+            or len(conversation_ids) != 1
+            or not isinstance(conversation_ids[0], str)
+            or not conversation_ids[0]
+            or row.get("observed_conversation_id") != conversation_ids[0]
+        ):
             raise ValueError("each canary prediction must have exactly one conversation")
         cost = row.get("cost_usd")
         if cost is not None:

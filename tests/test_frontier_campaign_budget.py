@@ -14,8 +14,11 @@ def _row(index: int, *, cost: float | None = 2.0) -> dict[str, object]:
         "model": "wandb/zai-org/GLM-5.2",
         "status": "passed",
         "trace_link_status": "verified",
-        "weave_agent_root_count": 1,
-        "weave_conversation_count": 1,
+        "weave_turn_count": 1,
+        "root_span_id": f"root-{index}",
+        "weave_root_span_ids": [f"root-{index}"],
+        "observed_conversation_id": f"conversation-{index}",
+        "weave_conversation_ids": [f"conversation-{index}"],
         "cost_usd": cost,
     }
 
@@ -91,7 +94,7 @@ def test_completion_reconciles_actual_cost_without_fabricating_public_values() -
 
 def test_canary_requires_exact_agent_contract() -> None:
     row = _row(1)
-    row["weave_agent_root_count"] = 2
+    row["weave_root_span_ids"] = ["root-1", "root-2"]
     with pytest.raises(ValueError, match="exactly one Agent root"):
         validate_canary(
             [row],
