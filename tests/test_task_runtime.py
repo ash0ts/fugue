@@ -434,6 +434,41 @@ def test_swebench_setup_verification_fails_closed(
         )
 
 
+def test_swebench_setup_container_prepares_harbor_verifier_log_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+
+    def run(command: list[str], **kwargs):
+        logs_mount = next(
+            value
+            for value in command
+            if value.startswith("type=bind,source=") and value.endswith("target=/logs")
+        )
+        mount = dict(item.split("=", 1) for item in logs_mount.split(","))
+        logs = Path(mount["source"])
+        assert (logs / "verifier").is_dir()
+        (logs / "verifier" / "report.json").write_text(
+            json.dumps({"task-one": {"resolved": False}})
+        )
+        return subprocess.CompletedProcess(command, 1, "", "")
+
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+
+    assert (
+        task_runtime._run_swe_bench_verifier(
+            "task-image",
+            manifest.tasks[0],
+            source,
+            architecture="arm64",
+            logs=tmp_path / "logs",
+            gold_patch_path=None,
+            repo_root=tmp_path,
+        )
+        is False
+    )
+
+
 def test_local_task_source_does_not_import_harbor(tmp_path: Path) -> None:
     manifest, source = _fixture(tmp_path)
 

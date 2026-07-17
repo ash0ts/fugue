@@ -359,7 +359,7 @@ def _run_swe_bench_verifier(
     gold_patch_path: Path | None,
     repo_root: Path,
 ) -> bool:
-    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "verifier").mkdir(parents=True, exist_ok=True)
     command = [
         "docker",
         "run",
