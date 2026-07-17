@@ -476,6 +476,20 @@ fugue run swe-frontier-harness --preset frontier-ceiling \
   --model anthropic/claude-fable-5 --preview
 ```
 
+After each canary export, admit the full cohort through the ignored campaign
+ledger. The ledger prices unmeasured cells at the canary's maximum measured
+cell cost, applies a 1.5× margin to every planned cell, and refuses a cohort
+that would cross the cumulative cap:
+
+```bash
+uv run python tools/frontier_campaign.py admit \
+  --ledger reports/frontier-budget.json \
+  --canary-rows reports/GLM_CANARY.jsonl \
+  --cohort-id glm-5.2 --model wandb/zai-org/GLM-5.2 \
+  --canary-predictions 4 --cohort-predictions 32 \
+  --cap-usd 2000 --safety-margin 1.5
+```
+
 Its locked hard discovery cases require production and test changes, two to
 eight touched files, repository diversity, and either issue-path lexical
 mismatch or cross-directory production work. Model cohorts share comparison

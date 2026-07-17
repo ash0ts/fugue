@@ -61,7 +61,7 @@ conflicts = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["fugue*"]
+include = ["fugue*", "tools*"]
 
 [tool.ruff]
 line-length = 88
