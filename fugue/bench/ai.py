@@ -395,9 +395,7 @@ class ExperimentComposer:
                 session_id=result.session_id,
             )
         assert validation_error is not None
-        raise ValueError(
-            f"generated evaluation remained invalid: {validation_error}"
-        )
+        raise ValueError(f"generated evaluation remained invalid: {validation_error}")
 
     def save(
         self,
@@ -431,7 +429,9 @@ class ExperimentComposer:
                     "required": ["id"],
                     "additionalProperties": False,
                 },
-                lambda value: get_experiment(str(value["id"]), self.repo_root).to_dict(),
+                lambda value: get_experiment(
+                    str(value["id"]), self.repo_root
+                ).to_dict(),
             ),
             AssistantTool(
                 "show_agent_preset",
@@ -545,10 +545,10 @@ class ExperimentComposer:
                     *list_skill_source_ids(self.repo_root),
                 }
             ),
-            "integrations": [
-                item.id for item in list_integrations(self.repo_root)
+            "integrations": [item.id for item in list_integrations(self.repo_root)],
+            "context_systems": [
+                item.id for item in list_context_systems(self.repo_root)
             ],
-            "context_systems": [item.id for item in list_context_systems(self.repo_root)],
             "manifests": manifests,
             "harnesses": ["hermes", "openclaw", "claude-code", "codex"],
             "model_prefixes": ["wandb/", "openai/", "anthropic/"],
@@ -694,7 +694,9 @@ class ExperimentAnalyst:
         base_experiment = None
         if filters and filters.get("experiment_id"):
             try:
-                base_experiment = get_experiment(filters["experiment_id"], self.repo_root)
+                base_experiment = get_experiment(
+                    filters["experiment_id"], self.repo_root
+                )
             except FileNotFoundError:
                 pass
         env = self.operator.env
@@ -848,7 +850,9 @@ class ExperimentAnalyst:
                     for row in rows
                 ]
             except Exception as exc:
-                warnings.append(f"Weave enrichment unavailable; using local data: {exc}")
+                warnings.append(
+                    f"Weave enrichment unavailable; using local data: {exc}"
+                )
         snapshot = _snapshot(rows, preview.snapshot.catalog_revision)
         scope = _scope(rows, spec.metrics, warnings)
         aggregates, evidence = _aggregate(rows, spec)
@@ -1046,9 +1050,13 @@ class ExperimentAnalyst:
             except Exception as exc:
                 report_error = exc
                 if attempt == 2:
-                    raise ValueError(f"analysis report remained invalid: {exc}") from exc
+                    raise ValueError(
+                        f"analysis report remained invalid: {exc}"
+                    ) from exc
         assert run is not None
-        report_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        report_id = (
+            f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        )
         report_dir = self.repo_root / ANALYSIS_REPORTS_DIR / spec.id / report_id
         result = AnalysisResult(
             spec=spec,
@@ -1103,7 +1111,13 @@ def save_analysis(spec: AnalysisSpec, repo_root: Path | None = None) -> Path:
 
 
 def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
-    item_id = validate_id(str(raw.get("id") or _slug(str(raw.get("title") or raw.get("question") or "analysis"))), kind="analysis id")
+    item_id = validate_id(
+        str(
+            raw.get("id")
+            or _slug(str(raw.get("title") or raw.get("question") or "analysis"))
+        ),
+        kind="analysis id",
+    )
     source = str(raw.get("source") or "hybrid")
     if source not in {"local", "hybrid"}:
         raise ValueError("analysis source must be local or hybrid")
@@ -1115,7 +1129,9 @@ def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
         raise ValueError("analysis filters must be a mapping")
     unknown_filters = sorted(set(filters) - FILTER_FIELDS)
     if unknown_filters:
-        raise ValueError(f"unsupported analysis filter(s): {', '.join(unknown_filters)}")
+        raise ValueError(
+            f"unsupported analysis filter(s): {', '.join(unknown_filters)}"
+        )
     group_by = tuple(
         str(item)
         for item in raw.get("group_by")
@@ -1132,7 +1148,11 @@ def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
         question=str(raw.get("question") or "").strip(),
         filters={str(key): str(value) for key, value in filters.items()},
         group_by=group_by,
-        metrics=tuple(str(item) for item in raw.get("metrics") or AnalysisSpec.__dataclass_fields__["metrics"].default),
+        metrics=tuple(
+            str(item)
+            for item in raw.get("metrics")
+            or AnalysisSpec.__dataclass_fields__["metrics"].default
+        ),
         source=source,  # type: ignore[arg-type]
         include_artifacts=bool(raw.get("include_artifacts", True)),
         model=str(raw["model"]) if raw.get("model") else None,
@@ -1180,16 +1200,13 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
     unknown_ties = sorted(set(tie_breakers) - supported_ties)
     if unknown_ties:
         raise ValueError(
-            "unsupported analysis selection tie breaker(s): "
-            + ", ".join(unknown_ties)
+            "unsupported analysis selection tie breaker(s): " + ", ".join(unknown_ties)
         )
     improvement_values = {
         "minimum_pass_rate_improvement": float(
             raw.get("minimum_pass_rate_improvement", 0.05)
         ),
-        "minimum_cost_improvement": float(
-            raw.get("minimum_cost_improvement", 0.15)
-        ),
+        "minimum_cost_improvement": float(raw.get("minimum_cost_improvement", 0.15)),
         "minimum_latency_improvement": float(
             raw.get("minimum_latency_improvement", 0.15)
         ),
@@ -1199,9 +1216,7 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
     return SelectionPolicy(
         selection_unit=selection_unit,  # type: ignore[arg-type]
         baseline_variant_id=(
-            str(raw["baseline_variant_id"])
-            if raw.get("baseline_variant_id")
-            else None
+            str(raw["baseline_variant_id"]) if raw.get("baseline_variant_id") else None
         ),
         required_examples=(
             int(raw["required_examples"]) if raw.get("required_examples") else None
@@ -1253,7 +1268,9 @@ def _aggregate(
 ) -> tuple[list[dict[str, Any]], list[EvidenceRef]]:
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[tuple(str(row.get(key) or "unknown") for key in spec.group_by)].append(row)
+        groups[tuple(str(row.get(key) or "unknown") for key in spec.group_by)].append(
+            row
+        )
     aggregates: list[dict[str, Any]] = []
     evidence: list[EvidenceRef] = []
     for index, (key, values) in enumerate(sorted(groups.items()), start=1):
@@ -1261,6 +1278,12 @@ def _aggregate(
         rewards = _numbers(values, "reward")
         latencies = _numbers(values, "wall_time_sec")
         costs = _numbers(values, "cost_usd")
+        token_totals = [
+            int(row.get("n_input_tokens") or 0) + int(row.get("n_output_tokens") or 0)
+            for row in values
+            if row.get("n_input_tokens") is not None
+            or row.get("n_output_tokens") is not None
+        ]
         payload = {
             **dict(zip(spec.group_by, key, strict=True)),
             "trials": len(values),
@@ -1273,18 +1296,43 @@ def _aggregate(
             "average_reward": _average(rewards),
             "average_wall_time_sec": _average(latencies),
             "total_cost_usd": sum(costs) if costs else None,
-            "total_tokens": sum(
-                int(row.get("n_input_tokens") or 0) + int(row.get("n_output_tokens") or 0)
-                for row in values
-            ),
+            "total_tokens": sum(token_totals) if token_totals else None,
             "failures": sum(
                 row.get("pass") is False or bool(row.get("exception_class"))
                 for row in values
             ),
-            "tool_calls": sum(int(row.get("weave_tool_call_count") or 0) for row in values),
+            "tool_calls": sum(
+                int(row.get("weave_tool_call_count") or 0) for row in values
+            ),
             "turns": sum(int(row.get("weave_turn_count") or 0) for row in values),
             "recall_at_5": _average(_numbers(values, "recall_at_5")),
             "mrr": _average(_numbers(values, "mrr")),
+            "context_invocation_rate": _average(_numbers(values, "context_invoked")),
+            "retrieval_recall_at_5": _average(
+                _numbers(values, "retrieval_recall_at_5")
+            ),
+            "retrieval_recall_at_10": _average(
+                _numbers(values, "retrieval_recall_at_10")
+            ),
+            "retrieval_mrr": _average(_numbers(values, "retrieval_mrr")),
+            "context_result_open_rate": _average(
+                _numbers(values, "context_result_open_rate")
+            ),
+            "context_result_change_rate": _average(
+                _numbers(values, "context_result_change_rate")
+            ),
+            "relevant_retrieval_open_rate": _average(
+                _numbers(values, "relevant_retrieval_opened")
+            ),
+            "relevant_retrieval_change_rate": _average(
+                _numbers(values, "relevant_retrieval_changed")
+            ),
+            "off_target_change_only_rate": _average(
+                _numbers(values, "off_target_change_only")
+            ),
+            "premature_completion_rate": _average(
+                _numbers(values, "premature_completion")
+            ),
         }
         evidence_id = f"E{index:03d}"
         payload["evidence_id"] = evidence_id
@@ -1389,7 +1437,9 @@ def _render_report(
         ids = [str(item) for item in claim.get("evidence_ids") or []]
         if not ids or any(item not in valid for item in ids):
             raise ValueError("every analysis claim must reference valid evidence ids")
-        lines.append(f"- {str(claim['text']).strip()} {' '.join(f'[{item}]' for item in ids)}")
+        lines.append(
+            f"- {str(claim['text']).strip()} {' '.join(f'[{item}]' for item in ids)}"
+        )
     conclusion = str(payload.get("conclusion") or "").strip()
     if conclusion:
         lines.extend(("", "## Conclusion", "", conclusion))
@@ -1411,7 +1461,11 @@ def _write_analysis(result: AnalysisResult, repo_root: Path) -> None:
             {
                 "spec": result.spec.to_dict(),
                 "scope": asdict(result.scope),
-                "snapshot": {key: value for key, value in asdict(result.snapshot).items() if key != "rows"},
+                "snapshot": {
+                    key: value
+                    for key, value in asdict(result.snapshot).items()
+                    if key != "rows"
+                },
                 "aggregates": result.aggregates,
                 "selection": result.selection.to_dict() if result.selection else None,
                 "model": result.model,
@@ -1429,7 +1483,8 @@ def _write_analysis(result: AnalysisResult, repo_root: Path) -> None:
         + "\n"
     )
     (result.report_dir / "scope.json").write_text(
-        json.dumps(asdict(result.snapshot), indent=2, sort_keys=True, default=str) + "\n"
+        json.dumps(asdict(result.snapshot), indent=2, sort_keys=True, default=str)
+        + "\n"
     )
     with (result.report_dir / "evidence.jsonl").open("w") as handle:
         for item in result.evidence:
@@ -1467,7 +1522,9 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     if role is None:
         return
     variant_id = str(selected_rows[0].get("variant_id") or "")
-    variant = next((item for item in experiment.variants if item.id == variant_id), None)
+    variant = next(
+        (item for item in experiment.variants if item.id == variant_id), None
+    )
     if variant is None:
         return
     score = next(
@@ -1479,9 +1536,7 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
         (tag.split(":", 1)[1] for tag in experiment.tags if tag.startswith("suite:")),
         experiment.id,
     )
-    suite_digest, base_commit = _suite_provenance(
-        experiment, selected_rows, repo_root
-    )
+    suite_digest, base_commit = _suite_provenance(experiment, selected_rows, repo_root)
     campaign_tags = {
         str(tag)
         for row in selected_rows
@@ -1498,8 +1553,11 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
         if campaign_tag.startswith("campaign:")
         else result.snapshot.id
     )
-    output = repo_root / "reports" / "self-eval" / validate_id(
-        _slug(campaign_id), kind="campaign id"
+    output = (
+        repo_root
+        / "reports"
+        / "self-eval"
+        / validate_id(_slug(campaign_id), kind="campaign id")
     )
     output.mkdir(parents=True, exist_ok=True)
     metrics = {
@@ -2099,7 +2157,9 @@ def _unique(
     return tuple(
         sorted(
             {
-                str(row.get(key) or (row.get(fallback) if fallback else "") or "unknown")
+                str(
+                    row.get(key) or (row.get(fallback) if fallback else "") or "unknown"
+                )
                 for row in rows
             }
         )
@@ -2112,6 +2172,11 @@ def _metric_present(row: Mapping[str, Any], metric: str) -> bool:
         "tokens": "n_input_tokens",
         "failures": "pass",
         "tool_calls": "weave_tool_call_count",
+        "context_invocation_rate": "context_invoked",
+        "relevant_retrieval_open_rate": "relevant_retrieval_opened",
+        "relevant_retrieval_change_rate": "relevant_retrieval_changed",
+        "off_target_change_only_rate": "off_target_change_only",
+        "premature_completion_rate": "premature_completion",
     }
     return row.get(aliases.get(metric, metric)) is not None
 

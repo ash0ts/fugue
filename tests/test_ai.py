@@ -18,6 +18,7 @@ from fugue.bench.ai import (
     AnalysisSpec,
     ExperimentAnalyst,
     ExperimentComposer,
+    _aggregate,
     _write_analysis,
     get_analysis,
     save_analysis,
@@ -46,6 +47,63 @@ def _tool_response(name: str, arguments: dict, call_id: str = "call-1") -> dict:
         ],
         "usage": {"input_tokens": 20, "output_tokens": 10},
     }
+
+
+def test_analysis_aggregates_retrieval_to_action_funnel_without_fake_usage() -> None:
+    rows = [
+        {
+            "row_id": "row-1",
+            "variant_id": "memory-policy",
+            "pass": True,
+            "context_invoked": True,
+            "retrieval_recall_at_5": 0.5,
+            "retrieval_recall_at_10": 1.0,
+            "retrieval_mrr": 0.5,
+            "context_result_open_rate": 0.5,
+            "context_result_change_rate": 0.25,
+            "relevant_retrieval_opened": True,
+            "relevant_retrieval_changed": False,
+            "off_target_change_only": False,
+            "premature_completion": False,
+            "n_input_tokens": None,
+            "n_output_tokens": None,
+        },
+        {
+            "row_id": "row-2",
+            "variant_id": "memory-policy",
+            "pass": False,
+            "context_invoked": False,
+            "retrieval_recall_at_5": 0.0,
+            "retrieval_recall_at_10": 0.5,
+            "retrieval_mrr": 0.0,
+            "context_result_open_rate": None,
+            "context_result_change_rate": None,
+            "relevant_retrieval_opened": False,
+            "relevant_retrieval_changed": False,
+            "off_target_change_only": True,
+            "premature_completion": True,
+            "n_input_tokens": None,
+            "n_output_tokens": None,
+        },
+    ]
+    spec = AnalysisSpec(
+        id="retrieval-funnel",
+        title="Retrieval funnel",
+        question="Did retrieval become action?",
+        group_by=("variant_id",),
+    )
+
+    aggregates, _ = _aggregate(rows, spec)
+    aggregate = aggregates[0]
+
+    assert aggregate["context_invocation_rate"] == 0.5
+    assert aggregate["retrieval_recall_at_5"] == 0.25
+    assert aggregate["retrieval_recall_at_10"] == 0.75
+    assert aggregate["context_result_open_rate"] == 0.5
+    assert aggregate["relevant_retrieval_open_rate"] == 0.5
+    assert aggregate["off_target_change_only_rate"] == 0.5
+    assert aggregate["premature_completion_rate"] == 0.5
+    assert aggregate["total_tokens"] is None
 
 
 def test_composer_repairs_invalid_references_and_preview_stays_side_effect_free(
@@ -122,10 +180,10 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
             "id": "generated-demo",
             "title": "Generated demo",
             "judge_model": "openai/gpt-5-mini",
-                "evaluation_generation": {
-                    "suite_id": "generated-suite",
-                    "workload_id": "capabilities",
-                    "size": 8,
+            "evaluation_generation": {
+                "suite_id": "generated-suite",
+                "workload_id": "capabilities",
+                "size": 8,
                 "sources": [
                     {"kind": "seed", "text": "The demo skill requires focused search."}
                 ],
@@ -170,9 +228,10 @@ def test_composer_repairs_generated_evaluation_and_saves_only_after_acceptance(
         tools = {tool["name"]: tool for tool in request_body["tools"]}
         if "submit_experiment" in tools:
             experiment_attempts += 1
-            assert "evaluation" not in tools["submit_experiment"]["parameters"][
-                "properties"
-            ]
+            assert (
+                "evaluation"
+                not in tools["submit_experiment"]["parameters"]["properties"]
+            )
             return httpx.Response(
                 200,
                 json=_tool_response(
@@ -265,9 +324,7 @@ def test_composer_catalog_exposes_evidence_backed_agent_presets(tmp_path: Path):
     catalog = composer._catalog_summary(service.experiment("demo"))
 
     assert [item["id"] for item in catalog["agent_presets"]] == ["demo-maintainer"]
-    assert catalog["agent_presets"][0]["evidence"]["metrics"] == {
-        "pass_rate": 1.0
-    }
+    assert catalog["agent_presets"][0]["evidence"]["metrics"] == {"pass_rate": 1.0}
 
 
 def test_catalog_deduplicates_rows_and_blocks_secret_paths(tmp_path: Path) -> None:
@@ -413,7 +470,9 @@ def test_confirmed_self_eval_analysis_writes_review_only_promotion_bundle(
     assert preset_data["candidate"]["skills"] == []
     assert preset_data["evidence"]["suite_id"] == "demo-v1"
     assert "skill_ids" not in preset_data
-    assert not (tmp_path / "configs/fugue/agent-presets/fugue-maintainer-recommended.yaml").exists()
+    assert not (
+        tmp_path / "configs/fugue/agent-presets/fugue-maintainer-recommended.yaml"
+    ).exists()
 
 
 def test_analyst_snapshots_scope_and_requires_evidence(

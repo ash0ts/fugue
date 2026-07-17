@@ -1823,6 +1823,105 @@ def test_gateway_event_log_rejects_paths_outside_runtime(tmp_path: Path) -> None
     assert summary["context_gateway_tool_call_count"] == 0
 
 
+def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    events_path = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    events_path.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "retrieve",
+                    "layer": "portable_client",
+                    "metrics": {"result_count": 3},
+                    "hits": [
+                        {"path": "docs/distractor.rst", "score": 0.9},
+                        {"path": "src/relevant.py", "score": 0.8},
+                        {"path": "src/other.py", "score": 0.7},
+                    ],
+                },
+                {
+                    "event": "retrieve",
+                    "layer": "portable_client",
+                    "metrics": {"result_count": 2},
+                    "hits": [
+                        {"path": "src/relevant.py", "score": 0.95},
+                        {"path": "tests/test_relevant.py", "score": 0.6},
+                    ],
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+    activity = export._retrieval_to_action_activity(
+        summary["context_result_paths"],
+        ["/testbed/src/relevant.py", "tests/test_relevant.py"],
+        ["/workspace/repo/src/other.py"],
+    )
+    row = {
+        **summary,
+        **activity,
+        "inspected_paths": ["src/relevant.py", "tests/test_relevant.py"],
+        "changed_paths": ["src/other.py"],
+        "evidence_paths": ["src/relevant.py", "src/other.py"],
+        "agent_execution_status": "started",
+        "pass": False,
+    }
+    export._apply_host_evidence_scores(
+        row,
+        ("src/relevant.py", "tests/test_relevant.py"),
+        "a" * 64,
+    )
+
+    assert summary["context_result_paths"] == [
+        "docs/distractor.rst",
+        "src/relevant.py",
+        "src/other.py",
+        "tests/test_relevant.py",
+    ]
+    assert summary["context_result_path_count"] == 4
+    assert summary["context_result_count"] == 5
+    assert activity["context_result_opened_paths"] == [
+        "src/relevant.py",
+        "tests/test_relevant.py",
+    ]
+    assert activity["context_result_changed_paths"] == ["src/other.py"]
+    assert activity["context_result_open_rate"] == 0.5
+    assert activity["context_result_change_rate"] == 0.25
+    assert row["retrieval_recall_at_5"] == 1.0
+    assert row["retrieval_recall_at_10"] == 1.0
+    assert row["retrieval_mrr"] == 0.5
+    assert row["relevant_retrieval_observed"] is True
+    assert row["relevant_retrieval_opened"] is True
+    assert row["relevant_retrieval_changed"] is False
+    assert row["off_target_change_only"] is True
+    assert row["premature_completion"] is False
+
+    hidden_gold_row = {
+        "context_result_paths": ["src/other.py"],
+        "inspected_paths": ["src/other.py"],
+        "changed_paths": [],
+        "evidence_paths": ["src/other.py"],
+        "agent_execution_status": "started",
+        "pass": False,
+    }
+    export._apply_host_evidence_scores(
+        hidden_gold_row,
+        ("private/expected-solution.py",),
+        "b" * 64,
+    )
+    serialized = json.dumps(hidden_gold_row, sort_keys=True)
+    assert "private/expected-solution.py" not in serialized
+    assert hidden_gold_row["retrieval_recall_at_5"] == 0.0
+    assert hidden_gold_row["relevant_retrieval_opened"] is False
+    assert hidden_gold_row["premature_completion"] is True
+
+
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
     trace_id = "a" * 32
     root_span_id = "b" * 16

@@ -8,6 +8,7 @@ import pytest
 from fugue.bench.scoring import (
     SelectionPolicy,
     build_treatment_selection_lock,
+    factorial_difference_in_differences,
     read_treatment_selection_lock,
     select_candidate_configuration,
     write_treatment_selection_lock,
@@ -19,6 +20,7 @@ def _rows(candidate: str, *, cost: float | None, wall: float = 2.0):
         {
             "candidate_id": candidate,
             "comparison_example_id": f"example-{index}",
+            "harness": "codex",
             "trial_index": 1,
             "pass": True,
             "cost_usd": cost,
@@ -70,7 +72,9 @@ def test_duplicate_or_incomplete_candidate_grid_is_ineligible():
         seed="snapshot",
     )
 
-    broken = next(item for item in selection.candidates if item.candidate_id == "broken")
+    broken = next(
+        item for item in selection.candidates if item.candidate_id == "broken"
+    )
     assert not broken.eligible
     assert "duplicate candidate/example/trial row" in broken.reasons
     assert "incomplete comparison grid" in broken.reasons
@@ -146,9 +150,60 @@ def test_variant_selection_pairs_each_latin_square_row_to_its_baseline() -> None
     )
 
     assert selection.selected_candidate_id == "vector"
-    vector = next(item for item in selection.candidates if item.candidate_id == "vector")
+    vector = next(
+        item for item in selection.candidates if item.candidate_id == "vector"
+    )
     assert vector.paired_pass_rate_delta == 1.0
     assert selection.to_dict()["selection_unit"] == "variant"
+
+
+def test_cross_harness_factorial_contrast_uses_paired_variant_deltas() -> None:
+    rows = []
+    outcomes = {
+        "baseline": (False, False),
+        "memory-only": (True, False),
+        "policy-only": (False, True),
+        "memory-policy": (True, True),
+    }
+    for harness_index, harness in enumerate(("claude-code", "codex")):
+        for variant_id, passes in outcomes.items():
+            rows.append(
+                {
+                    "variant_id": variant_id,
+                    "comparison_example_id": "example-a",
+                    "task_name": "task-a",
+                    "harness": harness,
+                    "trial_index": 1,
+                    "pass": passes[harness_index],
+                    "trace_link_status": "linked",
+                    "cost_usd": 1.0,
+                    "wall_time_sec": 1.0,
+                }
+            )
+    selection = select_candidate_configuration(
+        rows,
+        SelectionPolicy(
+            selection_unit="variant",
+            baseline_variant_id="baseline",
+            required_examples=1,
+            required_harnesses=("claude-code", "codex"),
+            require_agent_links=True,
+            bootstrap_samples=200,
+        ),
+        seed="factorial",
+    )
+
+    contrast = factorial_difference_in_differences(
+        selection,
+        factor_a_id="memory-only",
+        factor_b_id="policy-only",
+        combined_id="memory-policy",
+    )
+
+    assert contrast["factor_a_delta"] == 0.5
+    assert contrast["factor_b_delta"] == 0.5
+    assert contrast["combined_delta"] == 1.0
+    assert contrast["interaction"] == 0.0
 
 
 def test_treatment_selection_lock_is_immutable_and_digest_verified(
