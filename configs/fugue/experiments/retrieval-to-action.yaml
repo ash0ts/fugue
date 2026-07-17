@@ -1,0 +1,57 @@
+id: retrieval-to-action
+title: Retrieval-to-action mechanism study
+description: Test whether dense repository memory helps hard SWE work only when the Agent is explicitly required to verify and act on retrieved evidence.
+model: wandb/zai-org/GLM-5.2
+run_name: retrieval-to-action
+default_preset: canary
+tags: [context-eval, hard-swe, retrieval-to-action-v1]
+harnesses: [claude-code, codex]
+workloads:
+  - id: canary
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
+    required_capabilities: [bind]
+    systems: [none, rag-dense]
+    variants: [baseline, memory-only, policy-only, memory-policy]
+  - id: primary
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-retrieval-to-action-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, rag-dense]
+    variants: [baseline, memory-only, policy-only, memory-policy]
+presets:
+  canary:
+    workloads: [canary]
+    systems: [none, rag-dense]
+    harnesses: [codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 4
+    scheduling_seed: retrieval-to-action-canary-v1
+  study:
+    workloads: [primary]
+    systems: [none, rag-dense]
+    harnesses: [claude-code, codex]
+    n_attempts: 2
+    n_tasks: 4
+    n_concurrent: 4
+    scheduling_seed: retrieval-to-action-primary-v1
+variants:
+  - id: baseline
+    label: Standard, no memory
+    context: {system_id: none, delivery: portable}
+  - id: memory-only
+    label: Dense memory, standard policy
+    context: {system_id: rag-dense, delivery: portable}
+  - id: policy-only
+    label: Evidence-use gate, no memory
+    prompt_id: repository-evidence-gate
+    context: {system_id: none, delivery: portable}
+  - id: memory-policy
+    label: Dense memory plus evidence-use gate
+    prompt_id: repository-evidence-gate
+    context: {system_id: rag-dense, delivery: portable}
+n_attempts: 1
+n_concurrent: 4
+jobs_dir: jobs/retrieval-to-action
+trace_content: full
