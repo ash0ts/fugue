@@ -1,0 +1,64 @@
+id: swe-frontier-harness
+title: Frontier model and harness baseline
+description: Compare fixed frontier models across four agent harnesses on the locked hard SWE-bench discovery partition without added context.
+model: wandb/zai-org/GLM-5.2
+run_name: swe-frontier-harness
+default_preset: canary
+tags: [frontier, swe-bench, harness, baseline]
+harnesses: [hermes, openclaw, claude-code, codex]
+workloads:
+  - id: hard-baseline
+    runner: harbor
+    manifest: datasets/repo-memory/swe-bench-hard-discovery-v2.yaml
+    required_capabilities: [bind]
+    systems: [none]
+    variants: [baseline]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  canary:
+    workloads: [hard-baseline]
+    systems: [none]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 4
+    scheduling_seed: swe-frontier-canary-v1
+  discovery:
+    workloads: [hard-baseline]
+    systems: [none]
+    harnesses: [hermes, openclaw, claude-code, codex]
+    n_attempts: 1
+    n_tasks: 8
+    n_concurrent: 4
+    scheduling_seed: swe-frontier-discovery-v1
+  frontier-ceiling-canary:
+    workloads: [hard-baseline]
+    systems: [none]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 2
+    scheduling_seed: swe-frontier-ceiling-canary-v1
+  frontier-ceiling:
+    workloads: [hard-baseline]
+    systems: [none]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 8
+    n_concurrent: 2
+    scheduling_seed: swe-frontier-ceiling-v1
+variants:
+  - id: baseline
+    label: No added context
+    context:
+      system_id: none
+      delivery: portable
+n_attempts: 1
+n_concurrent: 4
+n_tasks: 8
+jobs_dir: jobs/swe-frontier-harness
+environment:
+  type: docker
+  cpu_enforcement_policy: auto
+  memory_enforcement_policy: auto
