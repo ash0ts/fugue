@@ -349,6 +349,9 @@ def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
 
     assert "self.config.resource_attributes or {}" in patch
     assert "hermes-otel tracer patch target mismatch" in patch
+    assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch
+    assert "_finalize_fugue_single_turns" in patch
+    assert "hermes-otel turn-end patch target mismatch" in patch
 
 
 def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:

@@ -59,7 +59,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             assert forbidden not in adapter, (harness, forbidden)
 
     hermes_adapter = ranges["hermes"]
-    assert agent_runtime.RUNTIMES["hermes"].version.endswith("+single-agent.1")
+    assert agent_runtime.RUNTIMES["hermes"].version.endswith("+single-turn.2")
     hermes_runtime = agent_runtime.RUNTIMES["hermes"]
     assert "FROM " + agent_runtime._NODE_IMAGE + " AS node-runtime" in (
         hermes_runtime.dockerfile
@@ -90,6 +90,16 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         'export PATH="/opt/fugue-agent-runtime/bin:$HOME/.local/bin:$PATH"'
         in hermes_adapter
     )
+    assert '"FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id' in (
+        hermes_adapter
+    )
+    hermes_patch = next(
+        path
+        for path in agent_runtime._build_assets("hermes")
+        if path.name == "patch-plugin.py"
+    ).read_text()
+    assert "_finalize_fugue_single_turns" in hermes_patch
+    assert "Fugue trial root retained" in hermes_patch
     openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
     assert openclaw_runtime.version == (
         "openclaw@2026.7.1+weave-openclaw@0.1.1+"

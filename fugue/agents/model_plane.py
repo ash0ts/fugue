@@ -1416,6 +1416,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
             "OTEL_EXPORTER_OTLP_TRACES_HEADERS": weave_agents_otel_headers(
                 f"{entity}/{project}", trace_key
             ),
+            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
             "HARBOR_INSTRUCTION": instruction,
             # Per-span detail lands in the plugin dir's debug.log — the
             # fastest signal when validating trace delivery.

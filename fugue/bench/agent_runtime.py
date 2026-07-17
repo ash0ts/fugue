@@ -211,7 +211,7 @@ RUNTIMES = {
         harness="hermes",
         version=(
             "hermes-agent@v2026.6.5+hermes-otel@670e98f+"
-            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-agent.1"
+            "fugue-span-attrs.2+node22.23.0+npm10.9.8+single-turn.2"
         ),
         dockerfile=_hermes_dockerfile(),
         probe=(
