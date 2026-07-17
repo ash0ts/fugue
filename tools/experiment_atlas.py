@@ -396,11 +396,12 @@ def _validated_provenance(
     snapshot_digests: dict[str, str] = {}
     planned: dict[str, set[tuple[str, str, int, str, str, str]]] = {}
     experiment_ids: set[str] = set()
+    workload_id = str(_mapping(editorial["matrix"], "matrix")["workload_id"])
     for snapshot in snapshots:
         run_id = str(snapshot["run_id"])
         snapshot_digests[run_id] = str(snapshot["snapshot_sha256"])
         request = _mapping(snapshot.get("request"), "snapshot request")
-        manifests.add(str(request.get("manifest") or ""))
+        manifests.add(_resolved_workload_manifest(snapshot, workload_id))
         experiment_ids.add(str(request.get("experiment_id") or ""))
         runtime = _mapping(snapshot.get("runtime"), "snapshot runtime")
         executions = _mapping(runtime.get("executions"), "snapshot executions")
@@ -432,7 +433,7 @@ def _validated_provenance(
     if len(source_commits) != 1 or not next(iter(source_commits), ""):
         raise ValueError("public runs do not share one immutable Fugue source commit")
     if len(manifests) != 1 or not next(iter(manifests), ""):
-        raise ValueError("public runs do not share one dataset manifest")
+        raise ValueError("public runs do not share one resolved workload manifest")
     if experiment_ids != {str(_mapping(editorial["matrix"], "matrix")["experiment_id"])}:
         raise ValueError("public runs do not match the editorial experiment")
     observed_agent_coordinates: set[tuple[str, str, int, str, str, str]] = set()
@@ -490,6 +491,20 @@ def _validated_provenance(
     return derived
 
 
+def _resolved_workload_manifest(
+    snapshot: Mapping[str, Any], workload_id: str
+) -> str:
+    experiment = _mapping(snapshot.get("experiment"), "snapshot resolved experiment")
+    matches = [
+        _mapping(item, "snapshot workload")
+        for item in experiment.get("workloads") or []
+        if _mapping(item, "snapshot workload").get("id") == workload_id
+    ]
+    if len(matches) != 1 or not matches[0].get("manifest"):
+        raise ValueError("public evidence requires one resolved workload manifest")
+    return str(matches[0]["manifest"])
+
+
 def _public_cell(
     row: Mapping[str, Any], evaluation_links: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -527,7 +542,7 @@ def _public_cell(
         "pass": _optional_bool(row.get("pass")),
         "reward": _optional_number(row.get("reward")),
         "wall_time_sec": _optional_number(row.get("wall_time_sec")),
-        "cost_usd": _optional_number(row.get("cost_usd")),
+        "cost_usd": _public_cost(row),
         "input_tokens": _optional_int(row.get("n_input_tokens")),
         "output_tokens": _optional_int(row.get("n_output_tokens")),
         "tool_calls": _optional_int(row.get("weave_tool_call_count")),
@@ -940,6 +955,20 @@ def _optional_number(value: Any) -> float | None:
     if not math.isfinite(result):
         raise ValueError("public metric must be finite")
     return result
+
+
+def _public_cost(row: Mapping[str, Any]) -> float | None:
+    measured = [
+        value
+        for value in (
+            _optional_number(row.get("cost_usd")),
+            _optional_number(row.get("weave_total_cost_usd")),
+        )
+        if value is not None
+    ]
+    if any(value < 0 for value in measured):
+        raise ValueError("public cost cannot be negative")
+    return max(measured) if measured else None
 
 
 def _optional_int(value: Any) -> int | None:

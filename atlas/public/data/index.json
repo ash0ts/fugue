@@ -1,8 +1,55 @@
 {
-  "content_sha256": "014293eeb1a42a8085625ad220ed907037ff44b3711530a8a383b5ed82e3b340",
+  "content_sha256": "686c5285ae8750de123550aabcf1ac8289ac5f9c99bda9177e9e2afc46b6f809",
   "experiments": [
     {
-      "content_sha256": "e0bedbb761f44625c050103d66cf498b3f94047c02cda9819f379da5d179538f",
+      "content_sha256": "868a0012a79e2e0598447da0c418dcf2c22d794cff4259147e59258dbce73fb1",
+      "decision_value": 96,
+      "evidence_tier": "baseline",
+      "harnesses": [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex"
+      ],
+      "id": "kimi-k2-7-code-baseline",
+      "metrics": {
+        "agent_links": 32,
+        "completion_rate": 1.0,
+        "expected_predictions": 32,
+        "harness_errors": 7,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 25,
+        "measured_latency_predictions": 32,
+        "measured_usage_predictions": 16,
+        "median_turns": 1.0,
+        "median_wall_time_sec": 217.36051049999998,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": 0.25,
+        "passed_predictions": 8,
+        "predictions": 32,
+        "provider_errors": 0,
+        "recoverable_errors": 201,
+        "refusals": 0,
+        "scored_predictions": 32,
+        "tool_calls": 3654,
+        "total_cost_usd": null
+      },
+      "models": [
+        "wandb/moonshotai/Kimi-K2.7-Code"
+      ],
+      "status": "complete",
+      "summary": "A complete no-context capability matrix across four Agent harnesses and eight locked hard SWE-bench discovery tasks.",
+      "title": "Kimi K2.7 Code \u00d7 harness baseline",
+      "treatments": [
+        "baseline"
+      ]
+    },
+    {
+      "content_sha256": "91cfcc99e3bd2edd8e7a6177b2286e3ed8ad330e33edb6381e79a3e8d22069df",
       "decision_value": 100,
       "evidence_tier": "active",
       "harnesses": [
@@ -45,7 +92,7 @@
         "anthropic/claude-opus-4-8",
         "anthropic/claude-fable-5"
       ],
-      "status": "ready_for_canaries",
+      "status": "partial_campaign",
       "summary": "A planned capability map across fixed frontier models, four harnesses, and eight locked hard SWE-bench discovery tasks with no added context.",
       "title": "Frontier model \u00d7 harness baseline",
       "treatments": [

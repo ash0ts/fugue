@@ -1,14 +1,18 @@
 {
   "caveats": [
-    "Provider model-list preflights passed on July 16, 2026; every cohort still requires its own tool-use and observability canary.",
+    "The overall campaign remains active and unranked until compatible model cohorts complete.",
+    "The separate Kimi baseline record contains the only complete cohort currently eligible for results reporting.",
     "Direct Anthropic cohorts use the Anthropic API and never route through W&B Inference.",
     "Fable uses Claude Code and Codex only and is reported as a separate ceiling cohort."
   ],
   "cells": [],
-  "content_sha256": "e0bedbb761f44625c050103d66cf498b3f94047c02cda9819f379da5d179538f",
+  "content_sha256": "91cfcc99e3bd2edd8e7a6177b2286e3ed8ad330e33edb6381e79a3e8d22069df",
   "decision_value": 100,
   "evidence_tier": "active",
-  "findings": [],
+  "findings": [
+    "Kimi K2.7 Code completed its 32-cell cohort with 8 official resolutions and complete Agent linking.",
+    "Sonnet 5 and Opus 4.8 are blocked because Codex reproduced an Anthropic tool-history failure after unsupported web-search calls."
+  ],
   "groups": [],
   "hypothesis": "Harness effects will interact with model capability and efficiency; a single model or single harness will not represent the frontier.",
   "id": "frontier-swe-v1",
@@ -219,7 +223,7 @@
   },
   "question": "How much of hard SWE-bench performance comes from the model, the agent harness, and their interaction before memory is added?",
   "schema_version": 1,
-  "status": "ready_for_canaries",
+  "status": "partial_campaign",
   "summary": "A planned capability map across fixed frontier models, four harnesses, and eight locked hard SWE-bench discovery tasks with no added context.",
   "task_selection": "The locked discovery partition requires production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.",
   "title": "Frontier model \u00d7 harness baseline",

@@ -8,7 +8,7 @@ why_it_matters: Memory lift is uninterpretable without a fixed no-context capabi
 task_selection: The locked discovery partition requires production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.
 evidence_tier: active
 decision_value: 100
-status: ready_for_canaries
+status: partial_campaign
 matrix:
   experiment_id: swe-frontier-harness
   workload_id: hard-baseline
@@ -85,8 +85,11 @@ provenance:
 links:
   project: https://wandb.ai/wandb/fugue-swe-frontier-v1/weave
   evaluations: []
-findings: []
+findings:
+  - Kimi K2.7 Code completed its 32-cell cohort with 8 official resolutions and complete Agent linking.
+  - Sonnet 5 and Opus 4.8 are blocked because Codex reproduced an Anthropic tool-history failure after unsupported web-search calls.
 caveats:
-  - Provider model-list preflights passed on July 16, 2026; every cohort still requires its own tool-use and observability canary.
+  - The overall campaign remains active and unranked until compatible model cohorts complete.
+  - The separate Kimi baseline record contains the only complete cohort currently eligible for results reporting.
   - Direct Anthropic cohorts use the Anthropic API and never route through W&B Inference.
   - Fable uses Claude Code and Codex only and is reported as a separate ceiling cohort.

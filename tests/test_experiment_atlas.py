@@ -147,7 +147,13 @@ def _snapshot(rows):
         "snapshot_sha256": "",
         "lock_sha256": "",
         "run_id": "run-1",
-        "request": {"experiment_id": "demo", "manifest": "datasets/locked-v1.yaml"},
+        "request": {"experiment_id": "demo", "manifest": None},
+        "experiment": {
+            "manifest": "datasets/pilot.yaml",
+            "workloads": [
+                {"id": "coding", "manifest": "datasets/locked-v1.yaml"}
+            ],
+        },
         "runtime": {
             "executions": {
                 "execution-1": {
@@ -366,6 +372,19 @@ def test_missing_usage_remains_unavailable() -> None:
     assert public.metrics["total_cost_usd"] is None
     assert public.metrics["input_tokens"] is None
     assert public.cells[0]["cost_usd"] is None
+
+
+def test_public_cost_uses_authoritative_weave_measurement() -> None:
+    first = _row(1, treatment="none", passed=False)
+    first["cost_usd"] = 0.1
+    first["weave_total_cost_usd"] = 0.4
+    second = _row(2, treatment="rag-dense", passed=True)
+    second["weave_total_cost_usd"] = None
+
+    public = _build(_editorial(), [first, second])
+
+    assert public.cells[0]["cost_usd"] == 0.4
+    assert public.metrics["total_cost_usd"] == pytest.approx(0.5)
 
 
 def test_confirmed_evidence_requires_replication_and_uses_paired_bootstrap() -> None:
