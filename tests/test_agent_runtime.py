@@ -101,6 +101,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     openclaw_adapter = ranges["openclaw"]
     assert 'plugins.setdefault("load", {})' in openclaw_adapter
+    assert 'prov_cfg["api"] = "openai-completions"' in openclaw_adapter
     assert "plugins list --json" in openclaw_adapter
     assert "openclaw config validate --json" in openclaw_adapter
     assert "openclaw config get mcp.servers --json" in openclaw_adapter

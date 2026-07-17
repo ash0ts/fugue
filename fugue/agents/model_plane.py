@@ -1607,6 +1607,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         models_root = cfg.setdefault("models", {})
         providers = models_root.setdefault("providers", {})
         prov_cfg = providers.setdefault("openai", {})
+        prov_cfg["api"] = "openai-completions"
         raw_models = prov_cfg.get("models")
         if not isinstance(raw_models, list) or not raw_models:
             prov_cfg["models"] = [
