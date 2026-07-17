@@ -213,6 +213,37 @@ def test_failed_cohort_reconciles_spend_without_claiming_completion() -> None:
     assert reconciled["remaining_budget_usd"] == 1993.0
 
 
+def test_failed_cohort_accounts_for_unpublished_inflight_predictions() -> None:
+    canary = validate_canary(
+        [_row(1, cost=1.0)],
+        expected_predictions=1,
+        model="wandb/zai-org/GLM-5.2",
+    )
+    admitted = admit_cohort(
+        {"schema_version": 1, "cap_usd": 100.0, "cohorts": []},
+        cohort_id="partial",
+        model="wandb/zai-org/GLM-5.2",
+        canary=canary,
+        cohort_predictions=4,
+        safety_margin=1.5,
+    )
+
+    reconciled = reconcile_failed_cohort(
+        admitted,
+        cohort_id="partial",
+        rows=[_row(1, cost=3.0)],
+        unpublished_accounted_cost_usd=6.0,
+        reason="three cells were cancelled before publication",
+    )
+
+    [entry] = reconciled["cohorts"]
+    assert entry["status"] == "failed"
+    assert entry["observed_predictions"] == 1
+    assert entry["unpublished_accounted_cost_usd"] == 6.0
+    assert entry["actual_cost_usd"] == 9.0
+    assert entry["accounted_cost_usd"] == 10.0
+
+
 def test_completion_records_actual_overspend_for_future_admission() -> None:
     canary = validate_canary(
         [_row(1, cost=1.0)],

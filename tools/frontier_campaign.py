@@ -248,6 +248,7 @@ def reconcile_failed_cohort(
     cohort_id: str,
     rows: Sequence[Mapping[str, Any]],
     reason: str,
+    unpublished_accounted_cost_usd: float = 0.0,
 ) -> dict[str, Any]:
     """Record real spend without treating incomplete evidence as publishable."""
     entries = [dict(item) for item in ledger.get("cohorts", [])]
@@ -257,8 +258,11 @@ def reconcile_failed_cohort(
     entry = matching[0]
     if entry.get("status") != "admitted":
         raise ValueError("only an admitted cohort may be reconciled as failed")
-    if len(rows) != int(entry["cohort_predictions"]):
-        raise ValueError("failed cohort row count does not match its admission")
+    if not rows or len(rows) > int(entry["cohort_predictions"]):
+        raise ValueError("failed cohort must contain a non-empty partial row set")
+    unpublished = float(unpublished_accounted_cost_usd)
+    if not math.isfinite(unpublished) or unpublished < 0:
+        raise ValueError("unpublished failed-cohort cost must be finite and non-negative")
     prediction_ids: set[str] = set()
     costs: list[float | None] = []
     for row in rows:
@@ -276,9 +280,15 @@ def reconcile_failed_cohort(
     measured = [value for value in costs if value is not None]
     if not measured:
         raise ValueError("failed cohort has no measured cost")
-    actual = sum(measured) + (len(costs) - len(measured)) * max(measured)
+    actual = (
+        sum(measured)
+        + (len(costs) - len(measured)) * max(measured)
+        + unpublished
+    )
     entry["status"] = "failed"
     entry["failure_reason"] = reason.strip() or "unspecified"
+    entry["observed_predictions"] = len(rows)
+    entry["unpublished_accounted_cost_usd"] = unpublished
     entry["actual_cost_usd"] = actual
     entry["accounted_cost_usd"] = float(entry["canary_accounted_cost_usd"]) + actual
     cap = float(ledger["cap_usd"])
@@ -349,6 +359,7 @@ def _parser() -> argparse.ArgumentParser:
     failed.add_argument("--cohort-id", required=True)
     failed.add_argument("--rows", type=Path, required=True)
     failed.add_argument("--reason", required=True)
+    failed.add_argument("--unpublished-accounted-cost-usd", type=float, default=0.0)
     incident = subparsers.add_parser("record-incident")
     incident.add_argument("--ledger", type=Path, required=True)
     incident.add_argument("--incident-id", required=True)
@@ -391,6 +402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cohort_id=args.cohort_id,
             rows=load_rows(args.rows),
             reason=args.reason,
+            unpublished_accounted_cost_usd=args.unpublished_accounted_cost_usd,
         )
     else:
         raw = json.loads(args.ledger.read_text(encoding="utf-8"))
