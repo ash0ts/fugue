@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import stat
 from types import SimpleNamespace
 
@@ -82,6 +83,33 @@ def test_static_context_registration_has_a_behavioral_digest(
     )
 
     assert registration["registration_digest"].startswith("sha256:")
+
+
+def test_codex_shells_keep_runtime_context_but_exclude_secrets(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "trace-key")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+    agent = FugueCodex(logs_dir=tmp_path, model_name="wandb/test-model")
+
+    config = agent._build_model_config_toml()
+
+    assert "[shell_environment_policy]" in config
+    assert 'inherit = "all"' in config
+    assert '"*KEY*"' in config
+    assert '"*TOKEN*"' in config
+    assert '"*AUTH*"' in config
+
+
+def test_codex_consumes_staged_secrets_before_starting_agent() -> None:
+    source = inspect.getsource(FugueCodex.run)
+
+    assert source.index("rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}") < source.index(
+        '"weave-codex run -- codex exec "'
+    )
+    assert "self._fugue_secret_files.clear()" in source
 
 
 def test_codex_exec_stages_secrets_outside_process_arguments(

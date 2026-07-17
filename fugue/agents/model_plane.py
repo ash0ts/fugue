@@ -2126,6 +2126,11 @@ class FugueCodex(_TrialMetaMixin, Codex):
         return (
             f'model = "{self.model_route.model_id}"\n'
             f'model_provider = "{provider}"\n'
+            "[shell_environment_policy]\n"
+            'inherit = "all"\n'
+            "ignore_default_excludes = false\n"
+            'exclude = ["*KEY*", "*TOKEN*", "*SECRET*", "*PASSWORD*", '
+            '"*CREDENTIAL*", "*AUTH*"]\n'
             f"[model_providers.{provider}]\n"
             f'name = "Fugue {self.model_route.provider}"\n'
             f'base_url = "{_responses_base_url(self.model_route)}"\n'
@@ -2282,23 +2287,31 @@ class FugueCodex(_TrialMetaMixin, Codex):
         codex_sessions = (EnvironmentPaths.agent_dir / "sessions").as_posix()
 
         try:
-            await self.exec_as_agent(
-                environment,
-                command=(
-                    "set -o pipefail; "
-                    "weave-codex run -- codex exec "
-                    "--dangerously-bypass-approvals-and-sandbox "
-                    "--skip-git-repo-check "
-                    "--json "
-                    f"{feature_flags}"
-                    f"{hook_flags}"
-                    f"{cli_flags_arg}"
-                    "-- "
-                    f"{escaped_instruction} "
-                    f"2>&1 </dev/null | tee {codex_output}"
-                ),
-                env=env,
-            )
+            try:
+                await self.exec_as_agent(
+                    environment,
+                    command=(
+                        "set -o pipefail; "
+                        # The wrapper has already sourced the keys into Codex's
+                        # process. Remove the file before Codex can open a shell.
+                        f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}; "
+                        "weave-codex run -- codex exec "
+                        "--dangerously-bypass-approvals-and-sandbox "
+                        "--skip-git-repo-check "
+                        "--json "
+                        f"{feature_flags}"
+                        f"{hook_flags}"
+                        f"{cli_flags_arg}"
+                        "-- "
+                        f"{escaped_instruction} "
+                        f"2>&1 </dev/null | tee {codex_output}"
+                    ),
+                    env=env,
+                )
+            finally:
+                # The long-running command consumed the staged file. Later
+                # cleanup commands must stage a fresh copy instead of reusing it.
+                self._fugue_secret_files.clear()
         finally:
             try:
                 await self.exec_as_agent(
