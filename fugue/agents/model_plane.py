@@ -75,6 +75,7 @@ _SECRET_ENV_NAME = re.compile(
     re.IGNORECASE,
 )
 _CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
+_CONTAINER_TRIAL_POLICY_ROOT = PurePosixPath("/tmp/fugue-trial-policy")
 
 
 def _require_env(key_name: str, purpose: str) -> str:
@@ -242,6 +243,7 @@ class _TrialMetaMixin:
         command, public_env = await self._isolate_exec_secrets(
             environment, command, env
         )
+        public_env = self._apply_trial_policy_environment(public_env)
         return await super().exec_as_agent(
             environment,
             command=command,
@@ -261,6 +263,7 @@ class _TrialMetaMixin:
         command, public_env = await self._isolate_exec_secrets(
             environment, command, env
         )
+        public_env = self._apply_trial_policy_environment(public_env)
         return await super().exec_as_root(
             environment,
             command=command,
@@ -268,6 +271,30 @@ class _TrialMetaMixin:
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
+
+    def _apply_trial_policy_environment(
+        self, env: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        if not getattr(self, "_fugue_trial_mutators_locked", False):
+            return env
+        locked = dict(env or {})
+        existing_pythonpath = locked.get("PYTHONPATH", "").strip()
+        locked["PYTHONPATH"] = ":".join(
+            part
+            for part in (
+                _CONTAINER_TRIAL_POLICY_ROOT.as_posix(),
+                existing_pythonpath,
+            )
+            if part
+        )
+        locked.update(
+            {
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "PIP_NO_INDEX": "1",
+                "UV_OFFLINE": "1",
+            }
+        )
+        return locked
 
     async def _isolate_exec_secrets(
         self,
@@ -482,6 +509,14 @@ for name in apt apt-get apk dnf yum microdnf pip pip3 conda mamba micromamba \
     fi
   done
 done
+policy=/tmp/fugue-trial-policy
+install -d -m 0755 "$policy"
+for module in pip ensurepip; do
+  printf '%s\n' \
+    'raise SystemExit("Fugue trial policy blocks package installation")' \
+    > "$policy/$module.py"
+  chmod 0444 "$policy/$module.py"
+done
 """.strip()
         result = await self.exec_as_root(environment, command=command, timeout_sec=30)
         if result.return_code != 0:
@@ -489,6 +524,7 @@ done
                 result.stderr or result.stdout or "trial mutation policy failed"
             ).strip()
             raise RuntimeError(detail[-2_000:])
+        self._fugue_trial_mutators_locked = True
 
     async def _install_context_runtime(
         self, environment: BaseEnvironment
