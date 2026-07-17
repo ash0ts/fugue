@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -338,6 +339,99 @@ def test_task_runtime_lock_rejects_prior_execution_policy(tmp_path: Path) -> Non
         task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path)
         is None
     )
+
+
+def test_swebench_runtime_lock_requires_base_fail_gold_pass_verification(
+    tmp_path: Path,
+) -> None:
+    manifest, _source = _fixture(tmp_path)
+    manifest = replace(
+        manifest,
+        dataset=replace(
+            manifest.dataset,
+            ref="swe-bench/swe-bench-verified",
+        ),
+    )
+    root = task_runtime._lock_root(manifest, manifest.tasks[0], tmp_path)
+    dataset = root / "dataset-deadbeef"
+    dataset.mkdir(parents=True)
+    value = {
+        "schema_version": 1,
+        "contract_version": task_runtime.TASK_RUNTIME_CONTRACT_VERSION,
+        "dataset": manifest.dataset.harbor_ref,
+        "task_id": "task-one",
+        "architecture": "arm64",
+        "verifier_runtime": None,
+        "image_id": "sha256:" + "a" * 64,
+        "dataset_path": dataset.as_posix(),
+    }
+    (root / "runtime-lock-arm64.json").write_text(json.dumps(value))
+
+    assert (
+        task_runtime.read_task_runtime_lock(manifest, manifest.tasks[0], tmp_path)
+        is None
+    )
+
+
+def test_swebench_setup_verifies_base_and_gold_without_persisting_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+    calls: list[Path | None] = []
+    patch = "diff --git a/src/a.py b/src/a.py\n"
+    patch_sha256 = hashlib.sha256(patch.encode()).hexdigest()
+
+    def verify(*args, gold_patch_path=None, **kwargs) -> bool:
+        calls.append(gold_patch_path)
+        if gold_patch_path is not None:
+            assert gold_patch_path.read_text() == patch
+        return gold_patch_path is not None
+
+    monkeypatch.setattr(task_runtime, "_run_swe_bench_verifier", verify)
+    verification = task_runtime._verify_swe_bench_outcomes(
+        "task-image",
+        manifest.tasks[0],
+        source,
+        gold_patch=patch,
+        gold_patch_sha256=patch_sha256,
+        architecture="arm64",
+        repo_root=tmp_path,
+    )
+
+    assert calls[0] is None
+    assert calls[1] is not None
+    assert verification == {
+        "base_failed": True,
+        "gold_passed": True,
+        "gold_patch_sha256": patch_sha256,
+    }
+    assert patch not in json.dumps(verification)
+    assert not list((tmp_path / ".fugue/runtime").glob("fugue-task-verify-*"))
+
+
+@pytest.mark.parametrize("base_resolved,gold_resolved", [(True, True), (False, False)])
+def test_swebench_setup_verification_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    base_resolved: bool,
+    gold_resolved: bool,
+) -> None:
+    manifest, source, _script = _swebench_verifier_fixture(tmp_path)
+
+    def verify(*args, gold_patch_path=None, **kwargs) -> bool:
+        return gold_resolved if gold_patch_path is not None else base_resolved
+
+    monkeypatch.setattr(task_runtime, "_run_swe_bench_verifier", verify)
+    with pytest.raises(RuntimeError, match="base checkout|gold patch"):
+        task_runtime._verify_swe_bench_outcomes(
+            "task-image",
+            manifest.tasks[0],
+            source,
+            gold_patch="patch",
+            gold_patch_sha256=hashlib.sha256(b"patch").hexdigest(),
+            architecture="arm64",
+            repo_root=tmp_path,
+        )
 
 
 def test_local_task_source_does_not_import_harbor(tmp_path: Path) -> None:

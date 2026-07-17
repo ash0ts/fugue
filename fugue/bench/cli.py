@@ -979,10 +979,17 @@ def _setup(args: argparse.Namespace) -> int:
                     f"({runtime.image_id[:19]})"
                 )
             for runtime in prepared.task_runtimes:
+                verification = (
+                    " base-fail/gold-pass verified"
+                    if runtime.verification
+                    and runtime.verification.get("base_failed") is True
+                    and runtime.verification.get("gold_passed") is True
+                    else ""
+                )
                 CONSOLE.print(
                     f"[fugue.success]task {runtime.task_id}[/] {runtime.status}: "
                     f"{runtime.image} [{runtime.architecture}] "
-                    f"({runtime.image_id[:19]})"
+                    f"({runtime.image_id[:19]}){verification}"
                 )
             for dataset in prepared.workload_datasets:
                 CONSOLE.print(

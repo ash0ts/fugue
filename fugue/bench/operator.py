@@ -43,6 +43,7 @@ from fugue.bench.context_contracts import resolve_context_capabilities
 from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.evaluation_assets import (
     attach_evaluation_assets,
+    load_evaluation_gold_patch,
     prepare_evaluation_assets,
 )
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
@@ -357,6 +358,7 @@ class TaskRuntimePreparation:
     image: str
     image_id: str
     recipe_sha256: str
+    verification: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1098,11 +1100,13 @@ class OperatorService:
             previous_lock = read_task_runtime_lock(
                 manifest, task, self.repo_root
             )
+            gold = load_evaluation_gold_patch(manifest, task.id, self.repo_root)
             lock = prepare_task_runtime(
                 manifest,
                 task,
                 repo_root=self.repo_root,
                 rebuild=rebuild,
+                gold_patch=gold.patch if gold else None,
             )
             prepared_tasks.append(
                 TaskRuntimePreparation(
@@ -1119,6 +1123,11 @@ class OperatorService:
                     image=str(lock["image"]),
                     image_id=str(lock["image_id"]),
                     recipe_sha256=str(lock["recipe_sha256"]),
+                    verification=(
+                        dict(lock["verification"])
+                        if isinstance(lock.get("verification"), dict)
+                        else None
+                    ),
                 )
             )
 
