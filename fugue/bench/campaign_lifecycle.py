@@ -112,6 +112,7 @@ from fugue.model_plane import (
     resolve_harness_model_route,
     resolve_model_route,
 )
+from fugue.preflight import PreflightCheck
 from fugue.redaction import redact_value, secrets_from_env
 
 CAMPAIGNS_DIR = Path("configs/fugue/campaigns")
@@ -1210,8 +1211,9 @@ class CampaignService:
             secrets = secrets_from_env(self.operator.env)
             try:
                 preparation = self.operator.prepare(request, experiment=experiment)
-                checks = self.operator.preflight(
-                    request, live=True, experiment=experiment
+                checks = (
+                    *self.operator.preflight(request, live=True, experiment=experiment),
+                    *self._task_model_preflight_checks(proposal),
                 )
                 canonical = _canonical_preparation(preparation, self.repo_root)
                 _require_preparation(canonical)
@@ -1600,7 +1602,10 @@ class CampaignService:
             request = _request_from_safe(plan.request)
             proposal = experiment_proposal_from_dict(plan.proposal)
             experiment = self._proposal_experiment(proposal)
-            checks = self.operator.preflight(request, live=True, experiment=experiment)
+            checks = (
+                *self.operator.preflight(request, live=True, experiment=experiment),
+                *self._task_model_preflight_checks(proposal),
+            )
             failed_checks = [item for item in checks if not item.ok]
             if failed_checks:
                 secrets = secrets_from_env(self.operator.env)
@@ -2559,6 +2564,21 @@ class CampaignService:
             ],
         )
 
+    def _task_model_preflight_checks(
+        self, proposal: ExperimentProposalV1
+    ) -> tuple[PreflightCheck, ...]:
+        if not proposal.task_suite_digest:
+            return ()
+        lock = read_task_suite_lock(
+            self.repo_root, proposal.campaign_id, proposal.task_suite_digest
+        )
+        profiles = load_task_profiles(self.repo_root)
+        return _auxiliary_model_preflight_checks(
+            lock.component_digests,
+            profiles,
+            self.operator.env,
+        )
+
     def _request(self, proposal: ExperimentProposalV1) -> ExperimentRequest:
         task_lock = (
             read_task_suite_lock(
@@ -3352,6 +3372,48 @@ def _prepared_route_locks(
                 details={"candidate_id": candidate_id},
             )
     return tuple(locks[key] for key in sorted(locks))
+
+
+def _auxiliary_model_preflight_checks(
+    component_digests: Mapping[str, str], profiles: Any, env: Mapping[str, str]
+) -> tuple[PreflightCheck, ...]:
+    checks: list[PreflightCheck] = []
+    for kind in ("interactor", "judge"):
+        prefix = f"{kind}:"
+        for component, expected_digest in sorted(component_digests.items()):
+            if not component.startswith(prefix):
+                continue
+            profile_id = component.removeprefix(prefix)
+            profile = (
+                profiles.interactor(profile_id)
+                if kind == "interactor"
+                else profiles.judge(profile_id)
+            )
+            model = getattr(profile, "model", None)
+            if not model:
+                continue
+            if profile.profile_digest != expected_digest:
+                checks.append(
+                    PreflightCheck(
+                        f"task {kind} model",
+                        False,
+                        f"profile {profile_id} changed after the task suite was locked",
+                    )
+                )
+                continue
+            try:
+                route = resolve_model_route(str(model), env)
+                present = bool(str(env.get(route.api_key_env) or "").strip())
+                detail = (
+                    f"{route.display_model} can use {route.api_key_env}"
+                    if present
+                    else f"{route.display_model} requires {route.api_key_env}"
+                )
+            except ValueError as exc:
+                present = False
+                detail = str(exc)
+            checks.append(PreflightCheck(f"task {kind} model", present, detail))
+    return tuple(checks)
 
 
 def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:

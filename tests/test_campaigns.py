@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
     CampaignError,
     CampaignService,
@@ -39,6 +40,7 @@ from fugue.bench.operator import (
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.task_authoring import (
     scoring_revision_from_dict,
+    task_profile_catalog_from_dict,
     task_suite_draft_from_dict,
 )
 from fugue.model_plane import (
@@ -803,6 +805,80 @@ def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
     )
     assert analysis.evaluation_digest == evaluation.evaluation_digest
     assert analysis.task_results[0]["criteria_passes"] == 1
+
+
+def test_authored_auxiliary_model_routes_fail_preflight_without_keys() -> None:
+    profiles = task_profile_catalog_from_dict(
+        {
+            "schema_version": 1,
+            "environments": [
+                {
+                    "id": "artifact-v1",
+                    "title": "Artifact workspace",
+                    "kind": "artifact",
+                    "base_image": "python:3.12.10-slim-bookworm",
+                    "supported_harnesses": ["codex"],
+                    "capabilities": ["text", "artifact"],
+                    "cpus": 1,
+                    "memory_mb": 1024,
+                    "storage_mb": 2048,
+                }
+            ],
+            "resources": [],
+            "interactors": [
+                {
+                    "id": "interactor-v1",
+                    "title": "Model interactor",
+                    "kind": "model",
+                    "model": "openai/gpt-5",
+                    "directions": ["Ask one bounded follow-up."],
+                    "supported_harnesses": ["codex"],
+                    "reserve_cost_usd": 0.5,
+                }
+            ],
+            "judges": [
+                {
+                    "id": "judge-v1",
+                    "title": "Blind judge",
+                    "model": "wandb/zai-org/GLM-5.2",
+                    "prompt": "Judge only the supplied evidence.",
+                    "evidence": ["answer"],
+                    "blind_fields": [
+                        "harness",
+                        "model",
+                        "variant_id",
+                        "context_system_id",
+                        "candidate_id",
+                        "treatment",
+                    ],
+                    "reserve_cost_usd": 0.5,
+                }
+            ],
+            "scorer_runtimes": [],
+        },
+        source_sha256="a" * 64,
+    )
+    interactor = profiles.interactor("interactor-v1")
+    judge = profiles.judge("judge-v1")
+    components = {
+        "interactor:interactor-v1": interactor.profile_digest,
+        "judge:judge-v1": judge.profile_digest,
+    }
+
+    missing = _auxiliary_model_preflight_checks(components, profiles, {})
+    assert [(item.name, item.ok) for item in missing] == [
+        ("task interactor model", False),
+        ("task judge model", False),
+    ]
+    assert "OPENAI_API_KEY" in missing[0].detail
+    assert "WANDB_API_KEY" in missing[1].detail
+
+    ready = _auxiliary_model_preflight_checks(
+        components,
+        profiles,
+        {"OPENAI_API_KEY": "present", "WANDB_API_KEY": "present"},
+    )
+    assert all(item.ok for item in ready)
 
 
 def test_every_campaign_artifact_rejects_unknown_fields_and_versions(
