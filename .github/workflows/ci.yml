@@ -46,7 +46,7 @@ jobs:
           FUGUE_NO_ANIMATION: "1"
         run: >-
           uv run pytest
-          tests/test_ai.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
+          tests/test_ai.py tests/test_campaigns.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
           tests/test_datasets.py tests/test_demo.py tests/test_evaluations.py
           tests/test_experiment_atlas.py tests/test_frontier_campaign.py
           tests/test_frontier_campaign_budget.py
