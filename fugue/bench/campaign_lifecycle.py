@@ -2570,7 +2570,7 @@ class CampaignService:
         return ExperimentRequest(
             experiment_id=proposal.experiment_id,
             preset=None if task_lock else proposal.preset_id,
-            workloads=proposal.workloads,
+            workloads=() if task_lock else proposal.workloads,
             harnesses=proposal.harnesses,
             systems=proposal.context_systems,
             variants=proposal.variants,
