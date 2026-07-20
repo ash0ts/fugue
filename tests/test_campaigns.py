@@ -203,6 +203,8 @@ class FakeCampaignOperator(OperatorService):
         self.runtime_drift = False
         self.extra_runtime_lock = False
         self.evaluation_drift = False
+        self.bridge_ready = True
+        self.bridge_starts = 0
 
     def prepare(
         self,
@@ -246,7 +248,19 @@ class FakeCampaignOperator(OperatorService):
         experiment: Any = None,
     ) -> tuple[PreflightCheck, ...]:
         del request, live, experiment
+        if not self.bridge_ready:
+            return (PreflightCheck("bridge health", False, "bridge is unavailable"),)
         return (PreflightCheck("synthetic control plane", True, "ready"),)
+
+    def start_bridge(
+        self,
+        request: ExperimentRequest,
+        *,
+        experiment: Any = None,
+    ) -> None:
+        del request, experiment
+        self.bridge_starts += 1
+        self.bridge_ready = True
 
     def launch(
         self,
@@ -680,6 +694,21 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     events = service.events("demo")
     assert [event.sequence_number for event in events] == list(range(1, 6))
     assert campaign_event_from_dict(events[0].to_dict()) == events[0]
+
+
+def test_campaign_preparation_bootstraps_a_required_bridge_once(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    operator.bridge_ready = False
+    plan = service.preview(_proposal(service))
+
+    prepared = service.prepare(plan, "prepare-bridge")
+
+    assert operator.bridge_starts == 1
+    assert all(item["ok"] for item in prepared.preflight)
+    assert service.prepare(plan, "prepare-bridge") == prepared
+    assert operator.bridge_starts == 1
 
 
 def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(

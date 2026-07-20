@@ -1222,6 +1222,11 @@ class CampaignService:
                     *self.operator.preflight(request, live=True, experiment=experiment),
                     *self._task_model_preflight_checks(proposal),
                 )
+                if any(item.name == "bridge health" and not item.ok for item in checks):
+                    self.operator.start_bridge(request, experiment=experiment)
+                    checks = self.operator.preflight(
+                        request, live=True, experiment=experiment
+                    )
                 canonical = _canonical_preparation(preparation, self.repo_root)
                 _require_preparation(canonical)
                 failed_checks = [item for item in checks if not item.ok]
