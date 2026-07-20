@@ -65,14 +65,12 @@ def account_prediction_costs(
 
     if expected_cells < 1:
         raise ValueError("expected campaign cells must be positive")
-    if len(rows) > expected_cells:
-        raise ValueError("campaign has more prediction rows than admitted cells")
     reserved = _non_negative(reserved_cell_cost_usd, "reserved cell cost")
     costs = [measured_row_cost(row) for row in rows]
     measured = [value for value in costs if value is not None]
     maximum = max(measured) if measured else None
     fallback = max(reserved, maximum or 0.0)
-    missing = expected_cells - len(measured)
+    missing = max(0, expected_cells - len(measured))
     return CostAccounting(
         observed_cost_usd=sum(measured),
         accounted_cost_usd=sum(measured) + missing * fallback,

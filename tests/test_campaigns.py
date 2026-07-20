@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +14,7 @@ from fugue.bench.campaigns import (
     admission_receipt_from_dict,
     build_experiment_proposal,
     campaign_catalog_snapshot_from_dict,
+    campaign_error_from_dict,
     campaign_event_from_dict,
     campaign_spec_from_dict,
     campaign_status_from_dict,
@@ -24,15 +27,21 @@ from fugue.bench.campaigns import (
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.operator import (
+    AgentRuntimePreparation,
     CellSummary,
     ExperimentRequest,
     ExportSummary,
     OperatorService,
     RunSummary,
     SetupPreparation,
+    TaskRuntimePreparation,
 )
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
-from fugue.model_plane import resolve_harness_model_route, resolve_model_route
+from fugue.model_plane import (
+    model_route_identity,
+    resolve_harness_model_route,
+    resolve_model_route,
+)
 from fugue.preflight import PreflightCheck
 
 
@@ -136,6 +145,14 @@ class FakeCampaignOperator(OperatorService):
         super().__init__(repo_root, repo_root / ".env")
         self.launched: dict[str, Any] = {}
         self.valid_evidence = True
+        self.missing_input_lock = False
+        self.missing_rows = False
+        self.duplicate_rows = False
+        self.invalid_agent_url = False
+        self.route_drift = False
+        self.runtime_drift = False
+        self.extra_runtime_lock = False
+        self.evaluation_drift = False
 
     def prepare(
         self,
@@ -145,7 +162,30 @@ class FakeCampaignOperator(OperatorService):
         rebuild: bool = False,
     ) -> SetupPreparation:
         del request, experiment, rebuild
-        return SetupPreparation(context=(), agent_runtimes=())
+        return SetupPreparation(
+            context=(),
+            agent_runtimes=(
+                AgentRuntimePreparation(
+                    harness="codex",
+                    architecture="arm64",
+                    status="ready",
+                    image="agent:test",
+                    image_id="sha256:agent",
+                    recipe_sha256="a" * 64,
+                ),
+            ),
+            task_runtimes=(
+                TaskRuntimePreparation(
+                    task_id="task-one",
+                    architecture="arm64",
+                    status="ready",
+                    image="task:test",
+                    image_id="sha256:task",
+                    recipe_sha256="b" * 64,
+                    verification={"base_failed": True, "gold_passed": True},
+                ),
+            ),
+        )
 
     def preflight(
         self,
@@ -169,7 +209,14 @@ class FakeCampaignOperator(OperatorService):
         if run_id in self.launched:
             raise AssertionError("campaign launched the same run twice")
         plan = self.resolve_run_plan(request, run_id=run_id)
-        evaluation_lock = "e" * 64
+        evaluation_lock_payload = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "predictions": {},
+            "lock_sha256": "",
+        }
+        evaluation_lock = stable_digest(evaluation_lock_payload)
+        evaluation_lock_payload["lock_sha256"] = evaluation_lock
         planned_matrix = [
             {
                 "cell_id": cell.id,
@@ -190,13 +237,30 @@ class FakeCampaignOperator(OperatorService):
         runtime_locks: list[dict[str, Any]] = []
         for cell in plan.cells:
             route = resolve_model_route(cell.model, self.env)
-            candidate_runtime[cell.candidate_id] = {
-                "model_route": {
-                    "provider": route.provider,
-                    "model_id": route.model_id,
-                },
+            runtime = {
+                "candidate_id": cell.candidate_id,
+                "harness": cell.harness,
+                "model": cell.model,
+                "model_route": model_route_identity(route),
                 "model_transport": resolve_harness_model_route(route, cell.harness),
             }
+            candidate_runtime[cell.candidate_id] = {
+                **runtime,
+                "configuration_sha256": stable_digest(runtime),
+            }
+            if self.route_drift:
+                changed_runtime = dict(candidate_runtime[cell.candidate_id])
+                changed_route = dict(changed_runtime["model_route"])
+                changed_route["model_id"] = "different-model"
+                changed_runtime["model_route"] = changed_route
+                changed_runtime["configuration_sha256"] = stable_digest(
+                    {
+                        key: value
+                        for key, value in changed_runtime.items()
+                        if key != "configuration_sha256"
+                    }
+                )
+                candidate_runtime[cell.candidate_id] = changed_runtime
             lock = {
                 "execution_fingerprint": cell.execution_fingerprint,
                 "candidate_id": cell.candidate_id,
@@ -204,9 +268,29 @@ class FakeCampaignOperator(OperatorService):
                 "agent_runtime": {"image_id": "sha256:agent"},
                 "task_runtime": {"image_id": "sha256:task"},
             }
-            runtime_locks.append(
-                {**lock, "configuration_sha256": stable_digest(lock)}
+            runtime_locks.append({**lock, "configuration_sha256": stable_digest(lock)})
+        if self.runtime_drift and runtime_locks:
+            changed_lock = dict(runtime_locks[0])
+            changed_lock["agent_runtime"] = {"image_id": "sha256:different"}
+            changed_lock["configuration_sha256"] = stable_digest(
+                {
+                    key: value
+                    for key, value in changed_lock.items()
+                    if key != "configuration_sha256"
+                }
             )
+            runtime_locks[0] = changed_lock
+        if self.extra_runtime_lock and runtime_locks:
+            extra_lock = dict(runtime_locks[0])
+            extra_lock["execution_fingerprint"] = "f" * 64
+            extra_lock["configuration_sha256"] = stable_digest(
+                {
+                    key: value
+                    for key, value in extra_lock.items()
+                    if key != "configuration_sha256"
+                }
+            )
+            runtime_locks.append(extra_lock)
         snapshot = {
             "schema_version": 1,
             "run_id": run_id,
@@ -216,7 +300,9 @@ class FakeCampaignOperator(OperatorService):
             "candidate_runtime": candidate_runtime,
             "planned_matrix": planned_matrix,
             "runtime_locks": runtime_locks,
-            "evaluation_asset_lock_sha256": evaluation_lock,
+            "evaluation_asset_lock_sha256": (
+                "d" * 64 if self.evaluation_drift else evaluation_lock
+            ),
             "snapshot_sha256": "",
             "lock_sha256": "",
         }
@@ -224,7 +310,9 @@ class FakeCampaignOperator(OperatorService):
         snapshot["snapshot_sha256"] = digest
         snapshot["lock_sha256"] = digest
         run_dir = self.repo_root / ".fugue/runtime" / run_id
-        atomic_write_json(run_dir / "input-lock.json", snapshot)
+        if not self.missing_input_lock:
+            atomic_write_json(run_dir / "input-lock.json", snapshot)
+        atomic_write_json(run_dir / "evaluation-assets.json", evaluation_lock_payload)
         atomic_write_json(
             run_dir / "run.json",
             {
@@ -332,8 +420,20 @@ class FakeCampaignOperator(OperatorService):
                     "evaluation_asset_lock_sha256": value["evaluation_lock"],
                     "cost_usd": 1.0,
                     "tool_calls": 2,
+                    "prompt": "must never be projected",
+                    "raw_conversation": "must never be projected",
+                    "command": ["curl", "https://example.invalid"],
+                    "environment": {"OPENAI_API_KEY": "model-secret"},
+                    "expected_evidence_paths": ["private/expected.py"],
+                    "gold_paths": ["private/gold.py"],
                 }
             )
+            if self.invalid_agent_url:
+                rows[-1]["agent_url"] = "http://user:secret@example.invalid/?token=x"
+        if self.missing_rows:
+            rows = rows[:-1]
+        if self.duplicate_rows and rows:
+            rows.append(dict(rows[0]))
         destination = out or self.repo_root / "reports" / f"{run_id}.jsonl"
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
@@ -403,7 +503,9 @@ def test_campaign_contracts_are_strict_and_digest_verified(tmp_path: Path) -> No
         experiment_proposal_from_dict(tampered)
 
 
-def test_catalog_and_preview_are_pure_and_hide_execution_details(tmp_path: Path) -> None:
+def test_catalog_and_preview_are_pure_and_hide_execution_details(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     assert not (tmp_path / ".fugue").exists()
 
@@ -425,7 +527,9 @@ def test_catalog_and_preview_are_pure_and_hide_execution_details(tmp_path: Path)
     assert not (tmp_path / ".fugue").exists()
 
 
-def test_proposal_rejects_unregistered_and_over_limit_components(tmp_path: Path) -> None:
+def test_proposal_rejects_unregistered_and_over_limit_components(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     catalog = service.catalog("demo")
     proposal = build_experiment_proposal(
@@ -496,6 +600,65 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     assert campaign_event_from_dict(events[0].to_dict()) == events[0]
 
 
+def test_every_campaign_artifact_rejects_unknown_fields_and_versions(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    campaign = get_campaign("demo", tmp_path)
+    catalog = service.catalog("demo")
+    proposal = _proposal(service)
+    plan = service.preview(proposal)
+    prepared = service.prepare(plan, "prepare-strict-artifacts")
+    admission = service.admit(prepared, "admit-strict-artifacts")
+    status = service.launch(admission, "launch-strict-artifacts")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+    outcome = service.finalize(run_id, "finalize-strict-artifacts")
+    event = service.events("demo")[0]
+
+    artifacts = (
+        (campaign_spec_from_dict, campaign),
+        (campaign_catalog_snapshot_from_dict, catalog),
+        (experiment_proposal_from_dict, proposal),
+        (plan_receipt_from_dict, plan),
+        (prepared_plan_from_dict, prepared),
+        (admission_receipt_from_dict, admission),
+        (outcome_packet_from_dict, outcome),
+        (campaign_event_from_dict, event),
+        (campaign_status_from_dict, status),
+    )
+    for parser, artifact in artifacts:
+        unknown = artifact.to_dict()
+        unknown["unexpected"] = True
+        with pytest.raises(ValueError, match="unknown"):
+            parser(unknown)
+
+        unsupported = artifact.to_dict()
+        unsupported["schema_version"] = 2
+        with pytest.raises(ValueError, match="schema_version 1"):
+            parser(unsupported)
+
+
+def test_concurrent_duplicate_launch_creates_one_run(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    plan = service.preview(_proposal(service))
+    prepared = service.prepare(plan, "prepare-concurrent-launch")
+    admission = service.admit(prepared, "admit-concurrent-launch")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = tuple(
+            executor.map(
+                lambda _: service.launch(admission, "launch-concurrent"), range(2)
+            )
+        )
+
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    assert len(operator.launched) == 1
+    assert statuses[0].runs == statuses[1].runs
+
+
 def test_stage_progression_requires_eligible_parent_and_records_rationale(
     tmp_path: Path,
 ) -> None:
@@ -527,9 +690,7 @@ def test_operation_id_conflicts_fail_closed(tmp_path: Path) -> None:
     service = _service(tmp_path)
     first = service.preview(_proposal(service))
     service.prepare(first, "shared-operation")
-    changed = service.preview(
-        _proposal(service, proposal_id="different-qualification")
-    )
+    changed = service.preview(_proposal(service, proposal_id="different-qualification"))
 
     with pytest.raises(CampaignError) as exc_info:
         service.prepare(changed, "shared-operation")
@@ -554,12 +715,47 @@ def test_budget_admission_and_policy_drift_fail_closed(tmp_path: Path) -> None:
 
     clean = _service(tmp_path / "budget")
     policy_path = tmp_path / "budget/configs/fugue/campaigns/demo.yaml"
-    policy_path.write_text(policy_path.read_text().replace("total_cost_usd: 100", "total_cost_usd: 1"))
+    policy_path.write_text(
+        policy_path.read_text().replace("total_cost_usd: 100", "total_cost_usd: 1")
+    )
     budget_plan = clean.preview(_proposal(clean))
     budget_prepared = clean.prepare(budget_plan, "prepare-over-budget")
     with pytest.raises(CampaignError) as exceeded:
         clean.admit(budget_prepared, "admit-over-budget")
     assert exceeded.value.code == "budget_exceeded"
+
+
+def test_policy_revision_is_allowed_only_before_first_admission(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    first_plan = service.preview(_proposal(service))
+    first_prepared = service.prepare(first_plan, "prepare-first-policy")
+    policy_path = tmp_path / "configs/fugue/campaigns/demo.yaml"
+    policy_path.write_text(
+        policy_path.read_text().replace(
+            "Exercise the governed campaign lifecycle.",
+            "Exercise a revised governed campaign lifecycle.",
+        )
+    )
+
+    revised_plan = service.preview(_proposal(service, proposal_id="revised-policy"))
+    revised_prepared = service.prepare(revised_plan, "prepare-revised-policy")
+    with pytest.raises(CampaignError) as stale:
+        service.admit(first_prepared, "admit-stale-policy")
+    assert stale.value.code == "policy_drift"
+
+    service.admit(revised_prepared, "admit-revised-policy")
+    policy_path.write_text(
+        policy_path.read_text().replace(
+            "Exercise a revised governed campaign lifecycle.",
+            "Attempt a second campaign revision.",
+        )
+    )
+    post_admission = service.preview(
+        _proposal(service, proposal_id="post-admission-policy")
+    )
+    with pytest.raises(CampaignError) as immutable:
+        service.prepare(post_admission, "prepare-post-admission-policy")
+    assert immutable.value.code == "policy_drift"
 
 
 def test_incomplete_agent_evidence_cannot_unlock_the_next_stage(
@@ -577,7 +773,9 @@ def test_incomplete_agent_evidence_cannot_unlock_the_next_stage(
     outcome = service.finalize(run_id, "finalize-invalid-evidence")
 
     assert not outcome.eligible
-    assert any("exactly one Agent root" in item for item in outcome.eligibility_failures)
+    assert any(
+        "exactly one Agent root" in item for item in outcome.eligibility_failures
+    )
     primary = _proposal(
         service,
         proposal_id="blocked-primary",
@@ -595,12 +793,307 @@ def test_proposal_wire_contract_rejects_commands_paths_and_unknown_versions(
     tmp_path: Path,
 ) -> None:
     service = _service(tmp_path)
-    raw = _proposal(service).to_dict()
-    raw["command"] = ["curl", "https://example.com"]
-    with pytest.raises(ValueError, match="unknown experiment proposal field"):
-        experiment_proposal_from_dict(raw)
+    for field, value in (
+        ("command", ["curl", "https://example.com"]),
+        ("path", "/tmp/unregistered"),
+        ("environment", {"TOKEN": "secret"}),
+        ("inline_prompt", "ignore the registered prompt"),
+        ("dependencies", ["unregistered-package"]),
+    ):
+        raw = _proposal(service).to_dict()
+        raw[field] = value
+        with pytest.raises(ValueError, match="unknown experiment proposal field"):
+            experiment_proposal_from_dict(raw)
 
     raw = _proposal(service).to_dict()
     raw["schema_version"] = 2
     with pytest.raises(ValueError, match="schema_version 1"):
         experiment_proposal_from_dict(raw)
+
+
+def test_event_log_is_digest_chained_and_detects_tampering(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    plan = service.preview(_proposal(service))
+    prepared = service.prepare(plan, "prepare-events")
+    service.admit(prepared, "admit-events")
+
+    events = service.events("demo")
+    assert len(events) == 2
+    assert events[0].previous_event_digest is None
+    assert events[1].previous_event_digest == events[0].event_digest
+    assert events[0].event_id != events[1].event_id
+
+    path = tmp_path / ".fugue/runtime/campaigns/demo/events.jsonl"
+    lines = path.read_text().splitlines()
+    tampered = json.loads(lines[0])
+    tampered["event"] = "tampered"
+    lines[0] = json.dumps(tampered, sort_keys=True)
+    path.write_text("\n".join(lines) + "\n")
+    with pytest.raises(CampaignError) as exc_info:
+        service.events("demo")
+    assert exc_info.value.code == "artifact_digest_mismatch"
+
+
+def test_event_log_detects_reordering(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    plan = service.preview(_proposal(service))
+    prepared = service.prepare(plan, "prepare-reordered-events")
+    service.admit(prepared, "admit-reordered-events")
+    path = tmp_path / ".fugue/runtime/campaigns/demo/events.jsonl"
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(reversed(lines)) + "\n")
+
+    with pytest.raises(CampaignError) as exc_info:
+        service.events("demo")
+    assert exc_info.value.code == "event_log_sequence_invalid"
+
+
+def test_admission_recovers_after_ledger_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-admit-recovery"
+    )
+    original = service._record_operation
+    failed = False
+
+    def interrupt_record(*args: Any, **kwargs: Any) -> None:
+        nonlocal failed
+        action = str(args[2])
+        if action == "admit" and not failed:
+            failed = True
+            raise RuntimeError("simulated write interruption")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_record_operation", interrupt_record)
+    with pytest.raises(RuntimeError, match="simulated write interruption"):
+        service.admit(prepared, "admit-recovery")
+    monkeypatch.setattr(service, "_record_operation", original)
+
+    recovered = service.admit(prepared, "admit-recovery")
+    assert recovered.proposal_id == prepared.proposal_id
+    assert service.status("demo").admissions == 1
+    assert [item.event for item in service.events("demo")].count("plan_admitted") == 1
+
+
+def test_launch_recovers_after_operator_started_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-launch-recovery"
+    )
+    admission = service.admit(prepared, "admit-launch-recovery")
+    original = service._write_operation
+    failed = False
+
+    def interrupt_completed_launch(
+        campaign_id: str,
+        operation_id: str,
+        value: dict[str, Any],
+    ) -> None:
+        nonlocal failed
+        if (
+            value.get("action") == "launch"
+            and value.get("status") == "completed"
+            and not failed
+        ):
+            failed = True
+            raise RuntimeError("simulated launch journal interruption")
+        original(campaign_id, operation_id, value)
+
+    monkeypatch.setattr(service, "_write_operation", interrupt_completed_launch)
+    with pytest.raises(RuntimeError, match="simulated launch journal interruption"):
+        service.launch(admission, "launch-recovery")
+    monkeypatch.setattr(service, "_write_operation", original)
+
+    recovered = service.launch(admission, "launch-recovery")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    assert len(operator.launched) == 1
+    assert recovered.runs[0]["status"] == "passed"
+    assert [item.event for item in service.events("demo")].count("run_started") == 1
+
+
+def test_concurrent_distinct_finalizations_converge(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-finalize-convergence"
+    )
+    admission = service.admit(prepared, "admit-finalize-convergence")
+    service.launch(admission, "launch-finalize-convergence")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(
+            executor.map(
+                lambda operation_id: service.finalize(run_id, operation_id),
+                ("finalize-a", "finalize-b"),
+            )
+        )
+
+    assert outcomes[0] == outcomes[1]
+    outcome_files = list(
+        (tmp_path / ".fugue/runtime/campaigns/demo/outcomes").glob("*.json")
+    )
+    assert len(outcome_files) == 1
+
+
+def test_finalization_recovers_after_outcome_and_ledger_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-finalize-recovery"
+    )
+    admission = service.admit(prepared, "admit-finalize-recovery")
+    service.launch(admission, "launch-finalize-recovery")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+    original = service._record_operation
+    interrupted = False
+
+    def interrupt_finalize(*args: Any, **kwargs: Any) -> None:
+        nonlocal interrupted
+        if str(args[2]) == "finalize" and not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated finalization journal interruption")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_record_operation", interrupt_finalize)
+    with pytest.raises(RuntimeError, match="finalization journal interruption"):
+        service.finalize(run_id, "finalize-recovery")
+    monkeypatch.setattr(service, "_record_operation", original)
+
+    recovered = service.finalize(run_id, "finalize-recovery")
+    assert recovered.run_id == run_id
+    assert recovered.eligible
+    assert [item.event for item in service.events("demo")].count(
+        "evidence_finalized"
+    ) == 1
+
+
+def test_cancellation_recovers_without_repeating_supervisor_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-cancel-recovery"
+    )
+    admission = service.admit(prepared, "admit-cancel-recovery")
+    service.launch(admission, "launch-cancel-recovery")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+
+    calls = 0
+
+    def cancel_once(selected_run_id: str) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        assert selected_run_id == run_id
+        return SimpleNamespace(status="cancelled")
+
+    monkeypatch.setattr(operator.supervisor, "cancel", cancel_once)
+    original = service._write_ledger
+    interrupted = False
+
+    def interrupt_ledger(campaign_id: str, ledger: dict[str, Any]) -> None:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated cancellation ledger interruption")
+        original(campaign_id, ledger)
+
+    monkeypatch.setattr(service, "_write_ledger", interrupt_ledger)
+    with pytest.raises(RuntimeError, match="cancellation ledger interruption"):
+        service.cancel(run_id, "cancel-recovery", "operator request")
+    monkeypatch.setattr(service, "_write_ledger", original)
+
+    service.cancel(run_id, "cancel-recovery", "operator request")
+    assert calls == 1
+    ledger = json.loads(
+        (tmp_path / ".fugue/runtime/campaigns/demo/ledger.json").read_text()
+    )
+    assert ledger["admissions"][0]["status"] == "cancelled_unreconciled"
+    assert [item.event for item in service.events("demo")].count("run_cancelled") == 1
+
+
+@pytest.mark.parametrize(
+    ("flag", "failure"),
+    (
+        ("missing_input_lock", "run input lock is missing"),
+        ("route_drift", "model-route receipts"),
+        ("runtime_drift", "exact runtime locks"),
+        ("extra_runtime_lock", "exact runtime locks"),
+        ("evaluation_drift", "exact evaluation asset lock"),
+        ("invalid_agent_url", "invalid Agent link"),
+        ("missing_rows", "observed 0 prediction rows"),
+        ("duplicate_rows", "duplicates prediction identity"),
+    ),
+)
+def test_invalid_or_partial_evidence_is_preserved_but_ineligible(
+    tmp_path: Path, flag: str, failure: str
+) -> None:
+    root = tmp_path / flag
+    service = _service(root)
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    setattr(operator, flag, True)
+    prepared = service.prepare(service.preview(_proposal(service)), f"prepare-{flag}")
+    admission = service.admit(prepared, f"admit-{flag}")
+    service.launch(admission, f"launch-{flag}")
+    [run_id] = operator.launched
+    outcome = service.finalize(run_id, f"finalize-{flag}")
+
+    assert not outcome.eligible
+    assert any(failure in item for item in outcome.eligibility_failures)
+    assert outcome.accounted_cost_usd >= 0
+    assert service.status("demo").reserved_cost_usd == admission.reserved_cost_usd
+
+
+def test_public_outcome_projection_excludes_privileged_content(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    prepared = service.prepare(
+        service.preview(_proposal(service)), "prepare-safe-projection"
+    )
+    admission = service.admit(prepared, "admit-safe-projection")
+    service.launch(admission, "launch-safe-projection")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+    outcome = service.finalize(run_id, "finalize-safe-projection")
+
+    serialized = json.dumps(outcome.to_dict(), sort_keys=True)
+    for forbidden in (
+        "must never be projected",
+        "model-secret",
+        "trace-secret",
+        "private/expected.py",
+        "private/gold.py",
+        "raw_conversation",
+        '"command"',
+        '"environment"',
+    ):
+        assert forbidden not in serialized
+
+
+def test_campaign_errors_have_a_strict_sanitized_wire_contract() -> None:
+    error = CampaignError(
+        "stable_failure",
+        "a safe failure",
+        category="evidence",
+        retryable=True,
+        details={"exception_type": "ValueError"},
+    )
+    assert campaign_error_from_dict(error.to_dict()).to_dict() == error.to_dict()
+
+    unsafe = error.to_dict()
+    unsafe["safe_to_repeat"] = "yes"
+    unsafe["error_digest"] = stable_digest({**unsafe, "error_digest": ""})
+    with pytest.raises(ValueError, match="must be a boolean"):
+        campaign_error_from_dict(unsafe)

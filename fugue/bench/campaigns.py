@@ -5,12 +5,12 @@ import json
 import math
 import os
 import re
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from filelock import FileLock
@@ -39,9 +39,13 @@ from fugue.bench.operator import (
     RunSummary,
     SetupPreparation,
 )
-from fugue.bench.reproducibility import verify_snapshot
+from fugue.bench.reproducibility import read_evaluation_asset_lock, verify_snapshot
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
-from fugue.model_plane import model_route_identity, resolve_model_route
+from fugue.model_plane import (
+    model_route_identity,
+    resolve_harness_model_route,
+    resolve_model_route,
+)
 from fugue.redaction import redact_value, secrets_from_env
 
 CAMPAIGN_SCHEMA_VERSION = 1
@@ -59,6 +63,16 @@ _SAFE_TRACE_CONTENT = {"full", "metadata"}
 _SAFE_EVIDENCE_SCOPES = {"summary", "rows", "traces"}
 _IDEMPOTENT_ACTIONS = {"prepare", "admit", "launch", "cancel", "finalize"}
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_ERROR_CATEGORIES = {
+    "validation",
+    "policy",
+    "preparation",
+    "admission",
+    "execution",
+    "reconciliation",
+    "evidence",
+    "scope",
+}
 
 EvidenceScope = Literal["summary", "rows", "traces"]
 
@@ -76,18 +90,26 @@ class CampaignError(ValueError):
         details: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        if category not in _ERROR_CATEGORIES:
+            raise ValueError(f"unknown campaign error category: {category}")
         self.code = code
         self.category = category
         self.retryable = retryable
         self.details = dict(details or {})
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        unsigned = {
+            "schema_version": CAMPAIGN_SCHEMA_VERSION,
             "code": self.code,
             "category": self.category,
-            "retryable": self.retryable,
+            "safe_to_repeat": self.retryable,
             "message": str(self),
             "details": _json_value(self.details),
+            "error_digest": "",
+        }
+        return {
+            **unsigned,
+            "error_digest": _artifact_digest(unsigned, "error_digest"),
         }
 
 
@@ -135,7 +157,30 @@ class ResearchCampaignSpecV1:
     campaign_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return _json_value(asdict(self))
+        return _json_value(
+            {
+                "schema_version": self.schema_version,
+                "id": self.id,
+                "revision": self.revision,
+                "title": self.title,
+                "objective": self.objective,
+                "allowed": {
+                    "experiments": self.allowed_experiments,
+                    "models": self.allowed_models,
+                    "harnesses": self.allowed_harnesses,
+                    "workloads": self.allowed_workloads,
+                    "variants": self.allowed_variants,
+                    "context_systems": self.allowed_context_systems,
+                    "analyses": self.allowed_analyses,
+                    "trace_content": self.allowed_trace_content,
+                },
+                "stages": [asdict(stage) for stage in self.stages],
+                "limits": asdict(self.limits),
+                "evidence_scope": self.evidence_scope,
+                "require_clean_source": self.require_clean_source,
+                "campaign_digest": self.campaign_digest,
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -224,6 +269,8 @@ class PreparedPlanV1:
     preparation: dict[str, Any]
     preflight: tuple[dict[str, Any], ...]
     component_digests: dict[str, str]
+    route_locks: tuple[dict[str, Any], ...]
+    integration_locks: dict[str, str]
     prepared_at: str
     prepared_plan_digest: str = ""
 
@@ -306,6 +353,8 @@ class CampaignEventV1:
     artifact_type: str | None = None
     artifact_digest: str | None = None
     error: dict[str, Any] | None = None
+    previous_event_digest: str | None = None
+    event_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return _json_value(asdict(self))
@@ -339,7 +388,9 @@ def list_campaigns(repo_root: Path | None = None) -> tuple[ResearchCampaignSpecV
     root = (repo_root or Path.cwd()) / CAMPAIGNS_DIR
     if not root.is_dir():
         return ()
-    return tuple(get_campaign(path.stem, repo_root) for path in sorted(root.glob("*.yaml")))
+    return tuple(
+        get_campaign(path.stem, repo_root) for path in sorted(root.glob("*.yaml"))
+    )
 
 
 def get_campaign(
@@ -441,7 +492,9 @@ def campaign_spec_from_dict(
             limits_raw.get("max_active_runs", 1), "campaign max_active_runs"
         ),
     )
-    stages = tuple(_stage_policy(item) for item in _sequence(raw.get("stages"), "stages"))
+    stages = tuple(
+        _stage_policy(item) for item in _sequence(raw.get("stages"), "stages")
+    )
     _validate_stages(stages)
     experiments = _id_tuple(allowed.get("experiments"), "experiment")
     models = _text_tuple(allowed.get("models"), "model")
@@ -614,6 +667,30 @@ def campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
     return _campaign_event_from_dict(raw)
 
 
+def campaign_error_from_dict(raw: Mapping[str, Any]) -> CampaignError:
+    fields = {
+        "schema_version",
+        "code",
+        "category",
+        "safe_to_repeat",
+        "message",
+        "details",
+        "error_digest",
+    }
+    _reject_unknown(raw, fields, "campaign error")
+    _schema(raw, "campaign error")
+    _verify_artifact(raw, "error_digest", "campaign error")
+    return CampaignError(
+        validate_id(raw.get("code") or "", kind="campaign error code"),
+        _bounded_text(raw.get("message"), "campaign error message", 2000),
+        category=str(raw.get("category") or ""),
+        retryable=_strict_bool(
+            raw.get("safe_to_repeat"), "campaign error safe_to_repeat"
+        ),
+        details=_mapping(raw.get("details"), "campaign error details"),
+    )
+
+
 def campaign_status_from_dict(raw: Mapping[str, Any]) -> CampaignStatusV1:
     fields = {
         "schema_version",
@@ -643,7 +720,8 @@ def campaign_status_from_dict(raw: Mapping[str, Any]) -> CampaignStatusV1:
         policy_digest=_required_digest(raw.get("policy_digest"), "policy digest"),
         active_runs=_id_tuple(raw.get("active_runs"), "run", allow_empty=True),
         runs=tuple(
-            _mapping(item, "campaign run") for item in _sequence(raw.get("runs"), "runs")
+            _mapping(item, "campaign run")
+            for item in _sequence(raw.get("runs"), "runs")
         ),
         admissions=_non_negative_int(raw.get("admissions"), "admissions"),
         outcomes=_non_negative_int(raw.get("outcomes"), "outcomes"),
@@ -716,9 +794,7 @@ def _proposal_from_dict(
         measured_dimensions=_dimension_tuple(
             raw.get("measured_dimensions"), "measured"
         ),
-        experiment_id=validate_id(
-            raw.get("experiment_id") or "", kind="experiment id"
-        ),
+        experiment_id=validate_id(raw.get("experiment_id") or "", kind="experiment id"),
         preset_id=(
             validate_id(raw["preset_id"], kind="preset id")
             if raw.get("preset_id")
@@ -737,13 +813,9 @@ def _proposal_from_dict(
             if raw.get("n_tasks") is not None
             else None
         ),
-        n_concurrent=_positive_int(
-            raw.get("n_concurrent"), "proposal n_concurrent"
-        ),
+        n_concurrent=_positive_int(raw.get("n_concurrent"), "proposal n_concurrent"),
         trace_content=_bounded_text(raw.get("trace_content"), "trace content", 32),
-        analysis_ids=_id_tuple(
-            raw.get("analysis_ids"), "analysis", allow_empty=True
-        ),
+        analysis_ids=_id_tuple(raw.get("analysis_ids"), "analysis", allow_empty=True),
         parent_outcome_id=(
             validate_id(raw["parent_outcome_id"], kind="outcome id")
             if raw.get("parent_outcome_id")
@@ -792,8 +864,12 @@ class CampaignService:
                 category="validation",
                 details={"experiments": missing_experiments},
             )
-        registered_analyses = {item["id"]: item for item in list_analyses(self.repo_root)}
-        missing_analyses = sorted(set(policy.allowed_analyses) - set(registered_analyses))
+        registered_analyses = {
+            item["id"]: item for item in list_analyses(self.repo_root)
+        }
+        missing_analyses = sorted(
+            set(policy.allowed_analyses) - set(registered_analyses)
+        )
         if missing_analyses:
             raise CampaignError(
                 "unregistered_component",
@@ -801,7 +877,9 @@ class CampaignService:
                 category="validation",
                 details={"analyses": missing_analyses},
             )
-        registered_context = {item.id: item for item in list_context_systems(self.repo_root)}
+        registered_context = {
+            item.id: item for item in list_context_systems(self.repo_root)
+        }
         missing_context = sorted(
             set(policy.allowed_context_systems) - set(registered_context)
         )
@@ -824,9 +902,7 @@ class CampaignService:
             component_digests[f"experiment:{experiment_id}"] = item.sha256
             experiments.append(_safe_experiment_record(experiment, item.sha256))
             registered_harnesses.update(experiment.harnesses)
-            registered_workloads.update(
-                item.id for item in experiment.workloads
-            )
+            registered_workloads.update(item.id for item in experiment.workloads)
             if not experiment.workloads:
                 registered_workloads.add("harbor")
             registered_variants.update(item.id for item in experiment.variants)
@@ -847,7 +923,9 @@ class CampaignService:
         contexts: list[dict[str, Any]] = []
         for system_id in policy.allowed_context_systems:
             spec = registered_context[system_id]
-            path = self.repo_root / "configs/fugue/context-systems" / f"{system_id}.yaml"
+            path = (
+                self.repo_root / "configs/fugue/context-systems" / f"{system_id}.yaml"
+            )
             digest = _sha256_path(path)
             component_digests[f"context_system:{system_id}"] = digest
             contexts.append(
@@ -934,7 +1012,11 @@ class CampaignService:
                 category="validation",
             ) from exc
         self._validate_resolved_plan(policy, proposal, plan)
-        cells = tuple(_plan_cell_record(index, cell, plan) for index, cell in enumerate(plan.cells))
+        job_index = _plan_job_index(plan)
+        cells = tuple(
+            _plan_cell_record(index, cell, job_index)
+            for index, cell in enumerate(plan.cells)
+        )
         expected_predictions = sum(int(item["expected_predictions"]) for item in cells)
         stage = self._stage(policy, proposal.stage_id)
         if len(cells) > stage.max_cells:
@@ -987,12 +1069,33 @@ class CampaignService:
                 campaign_id, operation_id, "prepare", operation_input
             )
             if existing is not None:
-                return _prepared_plan_from_dict(self._read_artifact(existing))
+                receipt = _prepared_plan_from_dict(self._read_artifact(existing))
+                self._event(
+                    campaign_id,
+                    "plan_prepared",
+                    operation_id=operation_id,
+                    proposal_id=receipt.proposal_id,
+                    artifact_type="PreparedPlanV1",
+                    artifact_digest=receipt.prepared_plan_digest,
+                )
+                return receipt
             current = self._revalidate_plan(plan_receipt)
             policy = self._policy(campaign_id)
             self._initialize_campaign(policy)
+            self._write_operation(
+                campaign_id,
+                operation_id,
+                {
+                    "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                    "operation_id": operation_id,
+                    "action": "prepare",
+                    "input_digest": operation_input,
+                    "status": "preparing",
+                },
+            )
             self._write_receipt("plans", current.plan_digest, current.to_dict())
             request = _request_from_safe(current.request)
+            secrets = secrets_from_env(self.operator.env)
             try:
                 preparation = self.operator.prepare(request)
                 checks = self.operator.preflight(request, live=True)
@@ -1001,7 +1104,8 @@ class CampaignService:
                 failed_checks = [item for item in checks if not item.ok]
                 if failed_checks:
                     detail = "; ".join(
-                        f"{item.name}: {item.detail}" for item in failed_checks
+                        f"{item.name}: {_safe_diagnostic(item.detail, secrets)}"
+                        for item in failed_checks
                     )
                     raise CampaignError(
                         "preflight_failed",
@@ -1014,9 +1118,10 @@ class CampaignService:
             except Exception as exc:
                 raise CampaignError(
                     "preparation_failed",
-                    f"campaign preparation failed: {exc}",
+                    "campaign preparation failed in OperatorService",
                     category="preparation",
                     retryable=True,
+                    details={"exception_type": type(exc).__name__},
                 ) from exc
             refreshed = self._revalidate_plan(current)
             if refreshed.component_digests != current.component_digests:
@@ -1025,15 +1130,20 @@ class CampaignService:
                     "registered components changed during preparation",
                     category="preparation",
                 )
-            secrets = secrets_from_env(self.operator.env)
             preflight = tuple(
                 {
                     "name": item.name,
                     "ok": item.ok,
-                    "detail": redact_value(item.detail, secrets=secrets),
+                    "detail": _safe_diagnostic(item.detail, secrets),
                 }
                 for item in checks
             )
+            route_locks = _prepared_route_locks(current.cells, self.operator.env)
+            integration_locks = {
+                key.removeprefix("integration:"): value
+                for key, value in current.component_digests.items()
+                if key.startswith("integration:")
+            }
             unsigned = PreparedPlanV1(
                 schema_version=CAMPAIGN_SCHEMA_VERSION,
                 campaign_id=campaign_id,
@@ -1045,6 +1155,8 @@ class CampaignService:
                 preparation=canonical,
                 preflight=preflight,
                 component_digests=current.component_digests,
+                route_locks=route_locks,
+                integration_locks=integration_locks,
                 prepared_at=_now(),
             )
             receipt = replace(
@@ -1086,14 +1198,25 @@ class CampaignService:
                 "prepared_plan_digest": prepared_plan.prepared_plan_digest,
             }
         )
-        with self._operation_lock(campaign_id, operation_id), self._campaign_lock(
-            campaign_id
+        with (
+            self._operation_lock(campaign_id, operation_id),
+            self._campaign_lock(campaign_id),
         ):
             existing = self._completed_operation(
                 campaign_id, operation_id, "admit", operation_input
             )
             if existing is not None:
-                return _admission_receipt_from_dict(self._read_artifact(existing))
+                receipt = _admission_receipt_from_dict(self._read_artifact(existing))
+                self._event(
+                    campaign_id,
+                    "plan_admitted",
+                    operation_id=operation_id,
+                    proposal_id=receipt.proposal_id,
+                    admission_id=receipt.admission_id,
+                    artifact_type="AdmissionReceiptV1",
+                    artifact_digest=receipt.admission_digest,
+                )
+                return receipt
             plan = _plan_receipt_from_dict(prepared_plan.plan)
             policy = self._policy(campaign_id)
             self._require_policy_snapshot(policy)
@@ -1104,13 +1227,59 @@ class CampaignService:
                     category="policy",
                 )
             self._revalidate_plan(plan)
+            self._revalidate_prepared_bindings(prepared_plan, plan)
             proposal = experiment_proposal_from_dict(plan.proposal)
             stage = self._stage(policy, proposal.stage_id)
+            admission_id = stable_digest(
+                {
+                    "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                    "campaign_id": campaign_id,
+                    "proposal_id": proposal.proposal_id,
+                    "prepared_plan_digest": prepared_plan.prepared_plan_digest,
+                    "operation_id": operation_id,
+                }
+            )
             ledger = self._ledger(campaign_id, policy)
-            if any(
-                item.get("proposal_id") == proposal.proposal_id
+            existing_admissions = [
+                item
                 for item in ledger["admissions"]
+                if item.get("proposal_id") == proposal.proposal_id
+            ]
+            if (
+                existing_admissions
+                and existing_admissions[0].get("admission_id") == admission_id
             ):
+                receipt = _admission_receipt_from_dict(
+                    self._read_receipt(campaign_id, "admissions", admission_id)
+                )
+                relative = (
+                    (
+                        self._campaign_dir(campaign_id)
+                        / "admissions"
+                        / f"{admission_id}.json"
+                    )
+                    .relative_to(self.repo_root)
+                    .as_posix()
+                )
+                self._record_operation(
+                    campaign_id,
+                    operation_id,
+                    "admit",
+                    operation_input,
+                    relative,
+                    receipt.admission_digest,
+                )
+                self._event(
+                    campaign_id,
+                    "plan_admitted",
+                    operation_id=operation_id,
+                    proposal_id=receipt.proposal_id,
+                    admission_id=receipt.admission_id,
+                    artifact_type="AdmissionReceiptV1",
+                    artifact_digest=receipt.admission_digest,
+                )
+                return receipt
+            if existing_admissions:
                 raise CampaignError(
                     "proposal_already_admitted",
                     "a prepared proposal may be admitted only once",
@@ -1125,7 +1294,9 @@ class CampaignService:
                     "campaign stage has reached its proposal limit",
                     category="policy",
                 )
-            admitted_cells = sum(int(item["cell_count"]) for item in ledger["admissions"])
+            admitted_cells = sum(
+                int(item["cell_count"]) for item in ledger["admissions"]
+            )
             if admitted_cells + plan.cell_count > policy.limits.max_total_cells:
                 raise CampaignError(
                     "campaign_cell_limit",
@@ -1152,38 +1323,46 @@ class CampaignService:
                     f"campaign reservation ${reservation:.2f} exceeds remaining budget ${remaining:.2f}",
                     category="admission",
                 )
-            admitted_at = _now()
-            admission_id = stable_digest(
+            self._write_operation(
+                campaign_id,
+                operation_id,
                 {
                     "schema_version": CAMPAIGN_SCHEMA_VERSION,
-                    "campaign_id": campaign_id,
-                    "proposal_id": proposal.proposal_id,
-                    "prepared_plan_digest": prepared_plan.prepared_plan_digest,
                     "operation_id": operation_id,
-                }
+                    "action": "admit",
+                    "input_digest": operation_input,
+                    "status": "admitting",
+                    "admission_id": admission_id,
+                },
             )
-            unsigned = AdmissionReceiptV1(
-                schema_version=CAMPAIGN_SCHEMA_VERSION,
-                admission_id=admission_id,
-                campaign_id=campaign_id,
-                proposal_id=proposal.proposal_id,
-                stage_id=proposal.stage_id,
-                prepared_plan_digest=prepared_plan.prepared_plan_digest,
-                policy_digest=policy.campaign_digest,
-                operation_id=operation_id,
-                parent_outcome_id=proposal.parent_outcome_id,
-                cell_count=plan.cell_count,
-                reserved_cell_cost_usd=per_cell,
-                reserved_cost_usd=reservation,
-                prepared_plan=prepared_plan.to_dict(),
-                admitted_at=admitted_at,
+            receipt_path = (
+                self._campaign_dir(campaign_id) / "admissions" / f"{admission_id}.json"
             )
-            receipt = replace(
-                unsigned,
-                admission_digest=_artifact_digest(
-                    unsigned.to_dict(), "admission_digest"
-                ),
-            )
+            if receipt_path.is_file():
+                receipt = _admission_receipt_from_dict(_read_json_object(receipt_path))
+            else:
+                unsigned = AdmissionReceiptV1(
+                    schema_version=CAMPAIGN_SCHEMA_VERSION,
+                    admission_id=admission_id,
+                    campaign_id=campaign_id,
+                    proposal_id=proposal.proposal_id,
+                    stage_id=proposal.stage_id,
+                    prepared_plan_digest=prepared_plan.prepared_plan_digest,
+                    policy_digest=policy.campaign_digest,
+                    operation_id=operation_id,
+                    parent_outcome_id=proposal.parent_outcome_id,
+                    cell_count=plan.cell_count,
+                    reserved_cell_cost_usd=per_cell,
+                    reserved_cost_usd=reservation,
+                    prepared_plan=prepared_plan.to_dict(),
+                    admitted_at=_now(),
+                )
+                receipt = replace(
+                    unsigned,
+                    admission_digest=_artifact_digest(
+                        unsigned.to_dict(), "admission_digest"
+                    ),
+                )
             relative = self._write_receipt(
                 "admissions", receipt.admission_id, receipt.to_dict()
             )
@@ -1247,15 +1426,48 @@ class CampaignService:
                         category="execution",
                     )
                 try:
-                    self.operator.run_summary(run_id)
+                    recovered_run = self.operator.run_summary(run_id)
                 except FileNotFoundError:
                     if operation.get("status") == "failed":
                         raise CampaignError(
                             "launch_failed",
-                            str(operation.get("error") or "campaign launch failed"),
+                            "campaign launch failed before a trustworthy run was created",
                             category="execution",
                         ) from None
                 else:
+                    policy = self._policy(campaign_id)
+                    with self._campaign_lock(campaign_id):
+                        ledger = self._ledger(campaign_id, policy)
+                        admission = _ledger_admission(
+                            ledger, admission_receipt.admission_id
+                        )
+                        admission["status"] = (
+                            recovered_run.status
+                            if recovered_run.status in _TERMINAL_RUN_STATES
+                            else "running"
+                        )
+                        admission["run_id"] = run_id
+                        self._write_ledger(campaign_id, ledger)
+                        self._write_operation(
+                            campaign_id,
+                            operation_id,
+                            {
+                                "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                                "operation_id": operation_id,
+                                "action": "launch",
+                                "input_digest": operation_input,
+                                "status": "completed",
+                                "run_id": run_id,
+                            },
+                        )
+                        self._event(
+                            campaign_id,
+                            "run_started",
+                            operation_id=operation_id,
+                            proposal_id=admission_receipt.proposal_id,
+                            admission_id=admission_receipt.admission_id,
+                            run_id=run_id,
+                        )
                     return self.status(run_id)
 
             prepared = _prepared_plan_from_dict(admission_receipt.prepared_plan)
@@ -1269,10 +1481,12 @@ class CampaignService:
                     category="policy",
                 )
             self._revalidate_plan(plan)
+            self._revalidate_prepared_bindings(prepared, plan)
             request = _request_from_safe(plan.request)
             checks = self.operator.preflight(request, live=True)
             failed_checks = [item for item in checks if not item.ok]
             if failed_checks:
+                secrets = secrets_from_env(self.operator.env)
                 raise CampaignError(
                     "preflight_failed",
                     "campaign live preflight no longer passes",
@@ -1280,7 +1494,10 @@ class CampaignService:
                     retryable=True,
                     details={
                         "checks": [
-                            {"name": item.name, "detail": item.detail}
+                            {
+                                "name": item.name,
+                                "detail": _safe_diagnostic(item.detail, secrets),
+                            }
                             for item in failed_checks
                         ]
                     },
@@ -1297,17 +1514,21 @@ class CampaignService:
                         details={"status": admission.get("status")},
                     )
                 active = self._active_run_ids(ledger)
-                if admission.get("run_id") not in active and len(active) >= policy.limits.max_active_runs:
+                if (
+                    admission.get("run_id") not in active
+                    and len(active) >= policy.limits.max_active_runs
+                ):
                     raise CampaignError(
                         "active_run_limit",
                         "campaign already has the maximum number of active runs",
                         category="admission",
                         retryable=True,
                     )
-                run_id = str(admission.get("run_id") or new_run_id())
-                admission["run_id"] = run_id
-                admission["status"] = "launching"
-                self._write_ledger(campaign_id, ledger)
+                run_id = str(
+                    (operation or {}).get("run_id")
+                    or admission.get("run_id")
+                    or new_run_id()
+                )
                 self._write_operation(
                     campaign_id,
                     operation_id,
@@ -1320,6 +1541,9 @@ class CampaignService:
                         "run_id": run_id,
                     },
                 )
+                admission["run_id"] = run_id
+                admission["status"] = "launching"
+                self._write_ledger(campaign_id, ledger)
                 self._event(
                     campaign_id,
                     "run_launching",
@@ -1338,7 +1562,8 @@ class CampaignService:
                         ledger, admission_receipt.admission_id
                     )
                     admission["status"] = "incident"
-                    admission["incident_reason"] = f"{type(exc).__name__}: {exc}"
+                    admission["incident_code"] = "launch_failed"
+                    admission["incident_exception_type"] = type(exc).__name__
                     self._write_ledger(campaign_id, ledger)
                     self._write_operation(
                         campaign_id,
@@ -1350,7 +1575,8 @@ class CampaignService:
                             "input_digest": operation_input,
                             "status": "failed",
                             "run_id": run_id,
-                            "error": f"{type(exc).__name__}: {exc}",
+                            "error_code": "launch_failed",
+                            "exception_type": type(exc).__name__,
                         },
                     )
                     self._event(
@@ -1362,14 +1588,16 @@ class CampaignService:
                         run_id=run_id,
                         error=CampaignError(
                             "launch_failed",
-                            f"campaign launch failed: {exc}",
+                            "campaign launch failed before a trustworthy terminal state",
                             category="execution",
+                            details={"exception_type": type(exc).__name__},
                         ),
                     )
                 raise CampaignError(
                     "launch_failed",
-                    f"campaign launch failed: {exc}",
+                    "campaign launch failed before a trustworthy terminal state",
                     category="execution",
+                    details={"exception_type": type(exc).__name__},
                 ) from exc
 
             with self._campaign_lock(campaign_id):
@@ -1466,7 +1694,9 @@ class CampaignService:
             runs=tuple(runs),
             admissions=len(ledger["admissions"]),
             outcomes=sum(bool(item.get("outcome_id")) for item in ledger["admissions"]),
-            admitted_cells=sum(int(item["cell_count"]) for item in ledger["admissions"]),
+            admitted_cells=sum(
+                int(item["cell_count"]) for item in ledger["admissions"]
+            ),
             total_cost_usd=policy.limits.total_cost_usd,
             accounted_cost_usd=accounted,
             reserved_cost_usd=reserved,
@@ -1493,6 +1723,7 @@ class CampaignService:
         if not path.is_file():
             return ()
         values: list[CampaignEventV1] = []
+        previous_digest: str | None = None
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             try:
                 raw = json.loads(line)
@@ -1503,45 +1734,113 @@ class CampaignService:
                     category="evidence",
                 ) from exc
             event = _campaign_event_from_dict(raw)
+            if event.sequence_number != number:
+                raise CampaignError(
+                    "event_log_sequence_invalid",
+                    f"campaign event {number} is not contiguous",
+                    category="evidence",
+                )
+            if event.previous_event_digest != previous_digest:
+                raise CampaignError(
+                    "event_log_chain_invalid",
+                    f"campaign event {number} does not bind its predecessor",
+                    category="evidence",
+                )
+            previous_digest = event.event_digest
             if event.sequence_number > after_sequence:
                 values.append(event)
         return tuple(values)
 
-    def cancel(
-        self, run_id: str, operation_id: str, reason: str
-    ) -> CampaignStatusV1:
+    def cancel(self, run_id: str, operation_id: str, reason: str) -> CampaignStatusV1:
         operation_id = self._operation_id(operation_id)
-        reason = _bounded_text(reason, "cancellation reason", 1000)
+        reason = _safe_diagnostic(
+            _bounded_text(reason, "cancellation reason", 1000),
+            secrets_from_env(self.operator.env),
+        )
         campaign_id, _ = self._resolve_campaign_subject(run_id)
         operation_input = stable_digest(
             {"action": "cancel", "run_id": run_id, "reason": reason}
         )
-        with self._operation_lock(campaign_id, operation_id):
+        with (
+            self._operation_lock(campaign_id, operation_id),
+            self._run_lock(campaign_id, run_id),
+        ):
             existing = self._operation(campaign_id, operation_id)
+            recovered_status: str | None = None
             if existing is not None:
                 self._require_operation_match(
                     existing, "cancel", operation_input, operation_id
                 )
-                return self.status(run_id)
+                if existing.get("status") == "completed":
+                    policy = self._policy(campaign_id)
+                    admission = _run_admission(
+                        self._ledger(campaign_id, policy), run_id
+                    )
+                    self._event(
+                        campaign_id,
+                        "run_cancelled",
+                        operation_id=operation_id,
+                        proposal_id=str(admission["proposal_id"]),
+                        admission_id=str(admission["admission_id"]),
+                        run_id=run_id,
+                    )
+                    return self.status(run_id)
+                if existing.get("status") == "cancelled":
+                    recovered_status = str(existing.get("terminal_status") or "")
+                else:
+                    try:
+                        current_run = self.operator.run_summary(run_id)
+                    except (FileNotFoundError, ValueError):
+                        pass
+                    else:
+                        if current_run.status in _TERMINAL_RUN_STATES:
+                            recovered_status = current_run.status
             policy = self._policy(campaign_id)
             ledger = self._ledger(campaign_id, policy)
             admission = _run_admission(ledger, run_id)
-            try:
-                managed = self.operator.supervisor.cancel(run_id)
-            except Exception as exc:
-                raise CampaignError(
-                    "cancellation_failed",
-                    f"campaign cancellation failed: {exc}",
-                    category="execution",
-                    retryable=True,
-                ) from exc
+            self._write_operation(
+                campaign_id,
+                operation_id,
+                {
+                    "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                    "operation_id": operation_id,
+                    "action": "cancel",
+                    "input_digest": operation_input,
+                    "status": "cancelling",
+                    "run_id": run_id,
+                },
+            )
+            if recovered_status is None:
+                try:
+                    recovered_status = self.operator.supervisor.cancel(run_id).status
+                except Exception as exc:
+                    raise CampaignError(
+                        "cancellation_failed",
+                        "campaign cancellation did not reach a trustworthy terminal state",
+                        category="execution",
+                        retryable=True,
+                        details={"exception_type": type(exc).__name__},
+                    ) from exc
+                self._write_operation(
+                    campaign_id,
+                    operation_id,
+                    {
+                        "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                        "operation_id": operation_id,
+                        "action": "cancel",
+                        "input_digest": operation_input,
+                        "status": "cancelled",
+                        "run_id": run_id,
+                        "terminal_status": recovered_status,
+                    },
+                )
             with self._campaign_lock(campaign_id):
                 ledger = self._ledger(campaign_id, policy)
                 admission = _ledger_admission(ledger, str(admission["admission_id"]))
                 admission["status"] = (
                     "cancelled_unreconciled"
-                    if managed.status == "cancelled"
-                    else managed.status
+                    if recovered_status == "cancelled"
+                    else recovered_status
                 )
                 admission["cancellation_reason"] = reason
                 self._write_ledger(campaign_id, ledger)
@@ -1571,16 +1870,63 @@ class CampaignService:
         operation_id = self._operation_id(operation_id)
         campaign_id, _ = self._resolve_campaign_subject(run_id)
         operation_input = stable_digest({"action": "finalize", "run_id": run_id})
-        with self._operation_lock(campaign_id, operation_id):
+        with (
+            self._operation_lock(campaign_id, operation_id),
+            self._run_lock(campaign_id, run_id),
+        ):
             existing = self._completed_operation(
                 campaign_id, operation_id, "finalize", operation_input
             )
             if existing is not None:
-                return _outcome_packet_from_dict(self._read_artifact(existing))
+                outcome = _outcome_packet_from_dict(self._read_artifact(existing))
+                self._event(
+                    campaign_id,
+                    "evidence_finalized" if outcome.eligible else "evidence_blocked",
+                    operation_id=operation_id,
+                    proposal_id=outcome.proposal_id,
+                    admission_id=outcome.admission_id,
+                    run_id=run_id,
+                    artifact_type="OutcomePacketV1",
+                    artifact_digest=outcome.outcome_digest,
+                )
+                return outcome
             policy = self._policy(campaign_id)
             self._require_policy_snapshot(policy)
             ledger = self._ledger(campaign_id, policy)
             admission_entry = _run_admission(ledger, run_id)
+            existing_outcome_id = str(admission_entry.get("outcome_id") or "")
+            if existing_outcome_id:
+                outcome = _outcome_packet_from_dict(
+                    self._read_receipt(campaign_id, "outcomes", existing_outcome_id)
+                )
+                relative = (
+                    (
+                        self._campaign_dir(campaign_id)
+                        / "outcomes"
+                        / f"{existing_outcome_id}.json"
+                    )
+                    .relative_to(self.repo_root)
+                    .as_posix()
+                )
+                self._record_operation(
+                    campaign_id,
+                    operation_id,
+                    "finalize",
+                    operation_input,
+                    relative,
+                    outcome.outcome_digest,
+                )
+                self._event(
+                    campaign_id,
+                    "evidence_finalized" if outcome.eligible else "evidence_blocked",
+                    operation_id=operation_id,
+                    proposal_id=outcome.proposal_id,
+                    admission_id=outcome.admission_id,
+                    run_id=run_id,
+                    artifact_type="OutcomePacketV1",
+                    artifact_digest=outcome.outcome_digest,
+                )
+                return outcome
             admission = _admission_receipt_from_dict(
                 self._read_receipt(
                     campaign_id,
@@ -1600,6 +1946,18 @@ class CampaignService:
                     retryable=True,
                     details={"status": run.status},
                 )
+            self._write_operation(
+                campaign_id,
+                operation_id,
+                {
+                    "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                    "operation_id": operation_id,
+                    "action": "finalize",
+                    "input_digest": operation_input,
+                    "status": "finalizing",
+                    "run_id": run_id,
+                },
+            )
             export_path = (
                 self._campaign_dir(campaign_id) / "exports" / f"{run_id}.jsonl"
             )
@@ -1615,19 +1973,45 @@ class CampaignService:
             except Exception as exc:
                 raise CampaignError(
                     "export_failed",
-                    f"campaign evidence export failed: {exc}",
+                    "campaign evidence export could not construct trustworthy rows",
                     category="evidence",
                     retryable=True,
+                    details={"exception_type": type(exc).__name__},
                 ) from exc
             rows = _read_jsonl(exported.path)
-            input_lock_path = self.repo_root / ".fugue/runtime" / run_id / "input-lock.json"
-            input_lock = _read_json_object(input_lock_path)
+            input_lock_path = (
+                self.repo_root / ".fugue/runtime" / run_id / "input-lock.json"
+            )
+            input_lock = (
+                _read_json_object(input_lock_path)
+                if input_lock_path.is_file()
+                else None
+            )
+            evaluation_lock_path = (
+                self.repo_root / ".fugue/runtime" / run_id / "evaluation-assets.json"
+            )
+            evaluation_lock_digest: str | None = None
+            evaluation_lock_failure: str | None = None
+            try:
+                evaluation_lock = read_evaluation_asset_lock(evaluation_lock_path)
+                if evaluation_lock.run_id != run_id:
+                    evaluation_lock_failure = (
+                        "evaluation asset lock belongs to a different run"
+                    )
+                else:
+                    evaluation_lock_digest = evaluation_lock.lock_sha256
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                evaluation_lock_failure = "evaluation asset lock is missing or invalid"
             eligibility_failures = _outcome_eligibility_failures(
                 run=run,
                 rows=rows,
                 plan=plan,
+                prepared=prepared,
                 input_lock=input_lock,
+                evaluation_lock_digest=evaluation_lock_digest,
             )
+            if evaluation_lock_failure:
+                eligibility_failures.append(evaluation_lock_failure)
             analysis_results: tuple[dict[str, Any], ...] = ()
             analysis_failures: list[str] = []
             if proposal.analysis_ids:
@@ -1636,7 +2020,9 @@ class CampaignService:
                         proposal.analysis_ids, run_id
                     )
                 except Exception as exc:
-                    analysis_failures.append(f"registered analysis failed: {exc}")
+                    analysis_failures.append(
+                        f"registered analysis failed ({type(exc).__name__})"
+                    )
             eligibility_failures.extend(analysis_failures)
             accounting = account_prediction_costs(
                 rows,
@@ -1644,14 +2030,15 @@ class CampaignService:
                 reserved_cell_cost_usd=admission.reserved_cell_cost_usd,
             )
             scope = policy.evidence_scope
+            secrets = secrets_from_env(self.operator.env)
             row_refs = (
-                tuple(_safe_prediction_row(row) for row in rows)
+                tuple(_safe_prediction_row(row, secrets) for row in rows)
                 if scope in {"rows", "traces"}
                 else ()
             )
             evidence_refs = (
                 tuple(
-                    _safe_agent_evidence(row)
+                    _safe_agent_evidence(row, secrets)
                     for row in rows
                     if row.get("execution_kind") == "agent"
                 )
@@ -1662,7 +2049,11 @@ class CampaignService:
                 _sha256_path(input_lock_path) if input_lock_path.is_file() else None
             )
             snapshot_sha = (
-                str(input_lock.get("snapshot_sha256") or input_lock.get("lock_sha256") or "")
+                str(
+                    input_lock.get("snapshot_sha256")
+                    or input_lock.get("lock_sha256")
+                    or ""
+                )
                 if input_lock
                 else None
             )
@@ -1683,62 +2074,87 @@ class CampaignService:
                 limitations.append(f"run ended as {run.status}")
             if eligibility_failures:
                 limitations.append("evidence is not eligible for stage progression")
+            export_sha = _sha256_path(exported.path)
             outcome_id = stable_digest(
                 {
                     "schema_version": CAMPAIGN_SCHEMA_VERSION,
                     "campaign_id": campaign_id,
                     "admission_id": admission.admission_id,
                     "run_id": run_id,
-                    "export_sha256": _sha256_path(exported.path),
+                    "export_sha256": export_sha,
                 }
             )
-            unsigned = OutcomePacketV1(
-                schema_version=CAMPAIGN_SCHEMA_VERSION,
-                outcome_id=outcome_id,
-                campaign_id=campaign_id,
-                proposal_id=proposal.proposal_id,
-                stage_id=proposal.stage_id,
-                admission_id=admission.admission_id,
-                run_id=run_id,
-                run_status=run.status,
-                expected_predictions=plan.expected_predictions,
-                observed_predictions=len(rows),
-                passed=passed,
-                failed=failed,
-                not_applicable=not_applicable,
-                eligible=not eligibility_failures,
-                eligibility_failures=tuple(eligibility_failures),
-                limitations=tuple(limitations),
-                observed_cost_usd=accounting.observed_cost_usd,
-                accounted_cost_usd=accounting.accounted_cost_usd,
-                measured_cost_cells=accounting.measured_cells,
-                unmeasured_cost_cells=accounting.unmeasured_cells,
-                maximum_measured_cell_cost_usd=(
-                    accounting.maximum_measured_cell_cost_usd
-                ),
-                input_lock_sha256=input_lock_sha,
-                run_snapshot_sha256=snapshot_sha,
-                export_sha256=_sha256_path(exported.path),
-                export_path=exported.path.relative_to(self.repo_root).as_posix(),
-                row_refs=row_refs,
-                evidence_refs=evidence_refs,
-                analysis_results=analysis_results,
-                metrics=_outcome_metrics(rows, passed),
-                finalized_at=_now(),
+            outcome_path = (
+                self._campaign_dir(campaign_id) / "outcomes" / f"{outcome_id}.json"
             )
-            outcome = replace(
-                unsigned,
-                outcome_digest=_artifact_digest(unsigned.to_dict(), "outcome_digest"),
-            )
+            if outcome_path.is_file():
+                outcome = _outcome_packet_from_dict(_read_json_object(outcome_path))
+                if (
+                    outcome.run_id != run_id
+                    or outcome.admission_id != admission.admission_id
+                    or outcome.export_sha256 != export_sha
+                ):
+                    raise CampaignError(
+                        "outcome_conflict",
+                        "stored campaign outcome does not match the run export",
+                        category="evidence",
+                    )
+            else:
+                unsigned = OutcomePacketV1(
+                    schema_version=CAMPAIGN_SCHEMA_VERSION,
+                    outcome_id=outcome_id,
+                    campaign_id=campaign_id,
+                    proposal_id=proposal.proposal_id,
+                    stage_id=proposal.stage_id,
+                    admission_id=admission.admission_id,
+                    run_id=run_id,
+                    run_status=run.status,
+                    expected_predictions=plan.expected_predictions,
+                    observed_predictions=len(rows),
+                    passed=passed,
+                    failed=failed,
+                    not_applicable=not_applicable,
+                    eligible=not eligibility_failures,
+                    eligibility_failures=tuple(eligibility_failures),
+                    limitations=tuple(limitations),
+                    observed_cost_usd=accounting.observed_cost_usd,
+                    accounted_cost_usd=accounting.accounted_cost_usd,
+                    measured_cost_cells=accounting.measured_cells,
+                    unmeasured_cost_cells=accounting.unmeasured_cells,
+                    maximum_measured_cell_cost_usd=(
+                        accounting.maximum_measured_cell_cost_usd
+                    ),
+                    input_lock_sha256=input_lock_sha,
+                    run_snapshot_sha256=snapshot_sha,
+                    export_sha256=export_sha,
+                    export_path=exported.path.relative_to(self.repo_root).as_posix(),
+                    row_refs=row_refs,
+                    evidence_refs=evidence_refs,
+                    analysis_results=analysis_results,
+                    metrics=_outcome_metrics(rows, passed),
+                    finalized_at=_now(),
+                )
+                outcome = replace(
+                    unsigned,
+                    outcome_digest=_artifact_digest(
+                        unsigned.to_dict(), "outcome_digest"
+                    ),
+                )
             with self._campaign_lock(campaign_id):
                 ledger = self._ledger(campaign_id, policy)
                 entry = _ledger_admission(ledger, admission.admission_id)
-                if entry.get("outcome_id") and entry["outcome_id"] != outcome.outcome_id:
+                if (
+                    entry.get("outcome_id")
+                    and entry["outcome_id"] != outcome.outcome_id
+                ):
                     raise CampaignError(
                         "outcome_conflict",
                         "run was already finalized with different evidence",
                         category="evidence",
                     )
+                relative = self._write_receipt(
+                    "outcomes", outcome.outcome_id, outcome.to_dict()
+                )
                 entry["status"] = "evidence_ready" if outcome.eligible else "blocked"
                 entry["outcome_id"] = outcome.outcome_id
                 entry["actual_cost_usd"] = outcome.accounted_cost_usd
@@ -1748,9 +2164,6 @@ class CampaignService:
                     if item.get("outcome_id")
                 )
                 self._write_ledger(campaign_id, ledger)
-                relative = self._write_receipt(
-                    "outcomes", outcome.outcome_id, outcome.to_dict()
-                )
                 self._record_operation(
                     campaign_id,
                     operation_id,
@@ -1966,15 +2379,41 @@ class CampaignService:
             )
 
     def _verify_prepared_plan(self, receipt: PreparedPlanV1) -> None:
-        _verify_artifact(
-            receipt.to_dict(), "prepared_plan_digest", "prepared plan"
-        )
+        _verify_artifact(receipt.to_dict(), "prepared_plan_digest", "prepared plan")
         plan = _plan_receipt_from_dict(receipt.plan)
         if plan.plan_digest != receipt.plan_digest:
             raise CampaignError(
                 "artifact_identity_mismatch",
                 "prepared plan does not bind its plan receipt",
                 category="validation",
+            )
+        if receipt.component_digests != plan.component_digests:
+            raise CampaignError(
+                "artifact_identity_mismatch",
+                "prepared plan component locks do not match its plan receipt",
+                category="validation",
+            )
+
+    def _revalidate_prepared_bindings(
+        self, prepared: PreparedPlanV1, plan: PlanReceiptV1
+    ) -> None:
+        current_routes = _prepared_route_locks(plan.cells, self.operator.env)
+        if current_routes != prepared.route_locks:
+            raise CampaignError(
+                "route_drift",
+                "current model routes differ from the prepared route locks",
+                category="preparation",
+            )
+        integrations = {
+            key.removeprefix("integration:"): value
+            for key, value in plan.component_digests.items()
+            if key.startswith("integration:")
+        }
+        if integrations != prepared.integration_locks:
+            raise CampaignError(
+                "integration_drift",
+                "current integration locks differ from the prepared plan",
+                category="preparation",
             )
 
     def _verify_admission(self, receipt: AdmissionReceiptV1) -> None:
@@ -2006,7 +2445,9 @@ class CampaignService:
     ) -> dict[str, Any] | None:
         if not stage.require_eligible_parent:
             if proposal.parent_outcome_id:
-                return self._outcome(campaign_id=policy.id, outcome_id=proposal.parent_outcome_id)
+                return self._outcome(
+                    campaign_id=policy.id, outcome_id=proposal.parent_outcome_id
+                )
             return None
         if not proposal.parent_outcome_id:
             raise CampaignError(
@@ -2065,13 +2506,44 @@ class CampaignService:
         root.mkdir(parents=True, exist_ok=True)
         return FileLock((root / f"{operation_id}.lock").as_posix())
 
+    def _run_lock(self, campaign_id: str, run_id: str) -> FileLock:
+        run_id = validate_id(run_id, kind="run id")
+        root = self._campaign_dir(campaign_id) / "runs"
+        root.mkdir(parents=True, exist_ok=True)
+        return FileLock((root / f"{run_id}.lock").as_posix())
+
     def _initialize_campaign(self, policy: ResearchCampaignSpecV1) -> None:
         with self._campaign_lock(policy.id):
-            self._require_policy_snapshot(policy, allow_missing=True)
             path = self._campaign_dir(policy.id) / "policy.json"
-            if not path.exists():
-                atomic_write_json(path, policy.to_dict())
             ledger_path = self._campaign_dir(policy.id) / "ledger.json"
+            if path.exists():
+                stored = _read_json_object(path)
+                stored_policy = campaign_spec_from_dict(stored, item_id=policy.id)
+                if stored_policy.id != policy.id:
+                    raise CampaignError(
+                        "policy_identity_mismatch",
+                        "stored campaign policy has a different identity",
+                        category="policy",
+                    )
+                if stored_policy.campaign_digest != policy.campaign_digest:
+                    ledger = (
+                        _read_json_object(ledger_path)
+                        if ledger_path.exists()
+                        else _new_ledger(stored_policy)
+                    )
+                    _validate_ledger(ledger, stored_policy)
+                    admissions = ledger.get("admissions")
+                    assert isinstance(admissions, list)
+                    if admissions or float(ledger.get("accounted_cost_usd") or 0) != 0:
+                        raise CampaignError(
+                            "policy_drift",
+                            "checked-in campaign policy changed after first admission",
+                            category="policy",
+                        )
+                    atomic_write_json(path, policy.to_dict())
+                    self._write_ledger(policy.id, _new_ledger(policy))
+            else:
+                atomic_write_json(path, policy.to_dict())
             if not ledger_path.exists():
                 self._write_ledger(policy.id, _new_ledger(policy))
 
@@ -2088,32 +2560,10 @@ class CampaignService:
                 category="admission",
             )
         stored = _read_json_object(path)
-        expected_fields = {
-            "schema_version",
-            "id",
-            "revision",
-            "title",
-            "objective",
-            "allowed_experiments",
-            "allowed_models",
-            "allowed_harnesses",
-            "allowed_workloads",
-            "allowed_variants",
-            "allowed_context_systems",
-            "allowed_analyses",
-            "allowed_trace_content",
-            "stages",
-            "limits",
-            "evidence_scope",
-            "require_clean_source",
-            "campaign_digest",
-        }
-        _reject_unknown(stored, expected_fields, "stored campaign policy")
-        _schema(stored, "stored campaign policy")
-        _verify_artifact(stored, "campaign_digest", "stored campaign policy")
+        stored_policy = campaign_spec_from_dict(stored, item_id=policy.id)
         if (
-            stored.get("id") != policy.id
-            or stored.get("campaign_digest") != policy.campaign_digest
+            stored_policy.id != policy.id
+            or stored_policy.campaign_digest != policy.campaign_digest
         ):
             raise CampaignError(
                 "policy_drift",
@@ -2134,9 +2584,7 @@ class CampaignService:
     def _write_ledger(self, campaign_id: str, ledger: Mapping[str, Any]) -> None:
         atomic_write_json(self._campaign_dir(campaign_id) / "ledger.json", ledger)
 
-    def _write_receipt(
-        self, kind: str, identity: str, value: Mapping[str, Any]
-    ) -> str:
+    def _write_receipt(self, kind: str, identity: str, value: Mapping[str, Any]) -> str:
         campaign_id = validate_id(value.get("campaign_id") or "", kind="campaign id")
         if kind not in {"plans", "prepared", "admissions", "outcomes"}:
             raise ValueError(f"unknown campaign receipt kind: {kind}")
@@ -2210,7 +2658,10 @@ class CampaignService:
         input_digest: str,
         operation_id: str,
     ) -> None:
-        if operation.get("action") != action or operation.get("input_digest") != input_digest:
+        if (
+            operation.get("action") != action
+            or operation.get("input_digest") != input_digest
+        ):
             raise CampaignError(
                 "operation_conflict",
                 f"operation id {operation_id!r} was already used for different input",
@@ -2246,9 +2697,7 @@ class CampaignService:
         if str(value.get("action")) not in _IDEMPOTENT_ACTIONS:
             raise ValueError("unknown campaign operation action")
         atomic_write_json(
-            self._campaign_dir(campaign_id)
-            / "operations"
-            / f"{operation_id}.json",
+            self._campaign_dir(campaign_id) / "operations" / f"{operation_id}.json",
             value,
         )
 
@@ -2267,21 +2716,75 @@ class CampaignService:
     ) -> None:
         path = self._campaign_dir(campaign_id) / "events.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        error_value = error.to_dict() if error else None
+        event_id = stable_digest(
+            {
+                "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                "campaign_id": campaign_id,
+                "event": event,
+                "operation_id": operation_id,
+                "proposal_id": proposal_id,
+                "admission_id": admission_id,
+                "run_id": run_id,
+                "artifact_type": artifact_type,
+                "artifact_digest": artifact_digest,
+                "error_code": error.code if error else None,
+            }
+        )
+        index_path = path.parent / "event-index" / f"{event_id}.json"
         with FileLock((path.parent / ".events.lock").as_posix()):
+            recovering = False
+            if index_path.is_file():
+                marker = _read_json_object(index_path)
+                if marker.get("event_id") != event_id:
+                    raise CampaignError(
+                        "event_index_corrupt",
+                        "campaign event index does not match its identity",
+                        category="evidence",
+                    )
+                if marker.get("status") == "completed":
+                    return
+                if marker.get("status") != "pending":
+                    raise CampaignError(
+                        "event_index_corrupt",
+                        "campaign event index has an invalid state",
+                        category="evidence",
+                    )
+                recovering = True
+            else:
+                atomic_write_json(
+                    index_path,
+                    {"event_id": event_id, "status": "pending"},
+                )
             sequence = 1
+            previous_digest: str | None = None
             if path.is_file():
-                lines = [
-                    line
-                    for line in path.read_text(encoding="utf-8").splitlines()
-                    if line
-                ]
-                if lines:
-                    previous = json.loads(lines[-1])
-                    sequence = int(previous["sequence_number"]) + 1
-            record = CampaignEventV1(
+                previous = _read_last_json_object(path)
+                if previous is not None:
+                    previous_event = _campaign_event_from_dict(previous)
+                    if previous_event.event_id == event_id:
+                        atomic_write_json(
+                            index_path,
+                            {
+                                "event_id": event_id,
+                                "status": "completed",
+                                "sequence_number": previous_event.sequence_number,
+                                "event_digest": previous_event.event_digest,
+                            },
+                        )
+                        return
+                    if recovering and _event_id_in_log(path, event_id):
+                        atomic_write_json(
+                            index_path,
+                            {"event_id": event_id, "status": "completed"},
+                        )
+                        return
+                    sequence = previous_event.sequence_number + 1
+                    previous_digest = previous_event.event_digest
+            unsigned = CampaignEventV1(
                 schema_version=CAMPAIGN_SCHEMA_VERSION,
                 sequence_number=sequence,
-                event_id=uuid.uuid4().hex,
+                event_id=event_id,
                 campaign_id=campaign_id,
                 event=event,
                 recorded_at=_now(),
@@ -2291,13 +2794,27 @@ class CampaignService:
                 run_id=run_id,
                 artifact_type=artifact_type,
                 artifact_digest=artifact_digest,
-                error=error.to_dict() if error else None,
+                error=error_value,
+                previous_event_digest=previous_digest,
+            )
+            record = replace(
+                unsigned,
+                event_digest=_artifact_digest(unsigned.to_dict(), "event_digest"),
             ).to_dict()
             descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+            atomic_write_json(
+                index_path,
+                {
+                    "event_id": event_id,
+                    "status": "completed",
+                    "sequence_number": sequence,
+                    "event_digest": record["event_digest"],
+                },
+            )
 
     def _active_run_ids(self, ledger: Mapping[str, Any]) -> list[str]:
         active: list[str] = []
@@ -2322,7 +2839,10 @@ class CampaignService:
         if root.is_dir():
             for path in sorted(root.glob("*/ledger.json")):
                 ledger = _read_json_object(path)
-                if any(item.get("run_id") == value for item in ledger.get("admissions") or []):
+                if any(
+                    item.get("run_id") == value
+                    for item in ledger.get("admissions") or []
+                ):
                     return path.parent.name, value
         raise CampaignError(
             "campaign_subject_missing",
@@ -2357,9 +2877,7 @@ def _stage_policy(raw: Any) -> CampaignStagePolicyV1:
         predecessors=_id_tuple(
             value.get("predecessors"), "stage predecessor", allow_empty=True
         ),
-        max_proposals=_positive_int(
-            value.get("max_proposals"), "stage max_proposals"
-        ),
+        max_proposals=_positive_int(value.get("max_proposals"), "stage max_proposals"),
         max_cells=_positive_int(value.get("max_cells"), "stage max_cells"),
         require_eligible_parent=bool(value.get("require_eligible_parent", False)),
         required_evidence=evidence,
@@ -2449,24 +2967,178 @@ def _safe_experiment_record(
     }
 
 
-def _plan_cell_record(
-    position: int, cell: Any, plan: ResolvedRunPlan
-) -> dict[str, Any]:
-    job = next(
-        (
-            item
-            for item in plan.jobs
-            if item.workload_id == cell.workload_id
-            and item.task_id == cell.task_id
-            and item.harness == cell.harness
-            and item.context_system_id == cell.context_system_id
-            and item.variant_id == cell.variant_id
-            and item.trial_index == cell.trial_index
-            and item.candidate_id == cell.candidate_id
-        ),
-        None,
+def _safe_diagnostic(value: Any, secrets: Sequence[str]) -> str:
+    """Return a bounded, single-line diagnostic with known secrets removed."""
+
+    redacted = str(redact_value(str(value or ""), secrets=secrets))
+    normalized = " ".join(redacted.replace("\x00", " ").split())
+    return normalized[:1000]
+
+
+def _prepared_route_locks(
+    cells: Sequence[Mapping[str, Any]], env: Mapping[str, str]
+) -> tuple[dict[str, Any], ...]:
+    """Resolve secret-free, exact route receipts for every Agent candidate."""
+
+    locks: dict[str, dict[str, Any]] = {}
+    for cell in cells:
+        if cell.get("execution_kind") != "agent":
+            continue
+        candidate_id = str(cell.get("candidate_id") or "")
+        harness = str(cell.get("harness") or "")
+        model = str(cell.get("model") or "")
+        if not candidate_id or not harness or not model:
+            raise CampaignError(
+                "route_lock_invalid",
+                "an Agent cell is missing its candidate, harness, or model identity",
+                category="preparation",
+            )
+        try:
+            route = resolve_model_route(model, env)
+            route_identity = model_route_identity(route)
+            transport = resolve_harness_model_route(route, harness)
+        except ValueError as exc:
+            raise CampaignError(
+                "route_lock_invalid",
+                "an Agent route could not be resolved for preparation",
+                category="preparation",
+                details={
+                    "candidate_id": candidate_id,
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+        unsigned = {
+            "candidate_id": candidate_id,
+            "harness": harness,
+            "model": model,
+            "provider": route.provider,
+            "model_id": route.model_id,
+            "route_configuration_sha256": stable_digest(route_identity),
+            "transport": _json_value(transport),
+            "route_lock_sha256": "",
+        }
+        lock = {
+            **unsigned,
+            "route_lock_sha256": _artifact_digest(unsigned, "route_lock_sha256"),
+        }
+        previous = locks.setdefault(candidate_id, lock)
+        if previous != lock:
+            raise CampaignError(
+                "route_lock_conflict",
+                "one Agent candidate resolved to more than one model route",
+                category="preparation",
+                details={"candidate_id": candidate_id},
+            )
+    return tuple(locks[key] for key in sorted(locks))
+
+
+def _route_identity_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "provider",
+        "model_id",
+        "display_model",
+        "chat_base_url",
+        "responses_base_url",
+        "messages_base_url",
+        "litellm_model",
+        "tool_result_modalities",
     )
-    task_count = int((job.config.get("fugue") or {}).get("task_count") or 1) if job else 1
+    return {key: _json_value(value.get(key)) for key in fields}
+
+
+def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
+    fields = {
+        "candidate_id",
+        "harness",
+        "model",
+        "provider",
+        "model_id",
+        "route_configuration_sha256",
+        "transport",
+        "route_lock_sha256",
+    }
+    _reject_unknown(raw, fields, "route lock")
+    transport = _mapping(raw.get("transport"), "route lock transport")
+    _reject_unknown(
+        transport,
+        {
+            "harness",
+            "wire_protocol",
+            "endpoint_kind",
+            "upstream_host",
+            "bridge_required",
+        },
+        "route lock transport",
+    )
+    value = {
+        "candidate_id": _bounded_text(
+            raw.get("candidate_id"), "route lock candidate id", 200
+        ),
+        "harness": validate_id(raw.get("harness") or "", kind="route lock harness"),
+        "model": _bounded_text(raw.get("model"), "route lock model", 300),
+        "provider": validate_id(raw.get("provider") or "", kind="route lock provider"),
+        "model_id": _bounded_text(raw.get("model_id"), "route lock model id", 300),
+        "route_configuration_sha256": _required_digest(
+            raw.get("route_configuration_sha256"), "route configuration digest"
+        ),
+        "transport": {
+            "harness": validate_id(
+                transport.get("harness") or "", kind="route transport harness"
+            ),
+            "wire_protocol": _bounded_text(
+                transport.get("wire_protocol"), "route wire protocol", 100
+            ),
+            "endpoint_kind": _bounded_text(
+                transport.get("endpoint_kind"), "route endpoint kind", 100
+            ),
+            "upstream_host": _bounded_text(
+                transport.get("upstream_host"), "route upstream host", 300
+            ),
+            "bridge_required": _strict_bool(
+                transport.get("bridge_required"), "route bridge_required"
+            ),
+        },
+        "route_lock_sha256": _required_digest(
+            raw.get("route_lock_sha256"), "route lock digest"
+        ),
+    }
+    _verify_artifact(value, "route_lock_sha256", "route lock")
+    return value
+
+
+def _plan_job_key(value: Any) -> tuple[Any, ...]:
+    return (
+        value.workload_id,
+        value.task_id,
+        value.harness,
+        value.context_system_id,
+        value.variant_id,
+        value.trial_index,
+        value.candidate_id,
+    )
+
+
+def _plan_job_index(plan: ResolvedRunPlan) -> dict[tuple[Any, ...], Any]:
+    result: dict[tuple[Any, ...], Any] = {}
+    for job in plan.jobs:
+        key = _plan_job_key(job)
+        if key in result:
+            raise CampaignError(
+                "duplicate_resolved_job",
+                "resolved plan contains duplicate job coordinates",
+                category="validation",
+            )
+        result[key] = job
+    return result
+
+
+def _plan_cell_record(
+    position: int, cell: Any, job_index: Mapping[tuple[Any, ...], Any]
+) -> dict[str, Any]:
+    job = job_index.get(_plan_job_key(cell))
+    task_count = (
+        int((job.config.get("fugue") or {}).get("task_count") or 1) if job else 1
+    )
     expected = 1 if cell.execution_kind == "agent" else task_count * cell.n_attempts
     coordinate = {
         "workload_id": cell.workload_id,
@@ -2621,9 +3293,7 @@ def _canonical_preparation(
         path = Path(value)
         if not path.is_absolute():
             path = repo_root / path
-        evaluation_locks.append(
-            {"id": path.name, "sha256": _sha256_path(path)}
-        )
+        evaluation_locks.append({"id": path.name, "sha256": _sha256_path(path)})
     return {
         "context": [
             {
@@ -2702,7 +3372,10 @@ def _require_preparation(preparation: Mapping[str, Any]) -> None:
         )
     for runtime in preparation.get("task_runtimes") or []:
         verification = runtime.get("verification") or {}
-        if verification.get("base_failed") is not True or verification.get("gold_passed") is not True:
+        if (
+            verification.get("base_failed") is not True
+            or verification.get("gold_passed") is not True
+        ):
             raise CampaignError(
                 "task_runtime_unverified",
                 f"task runtime {runtime.get('task_id')} lacks base-fail/gold-pass verification",
@@ -2779,6 +3452,8 @@ def _prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
         "preparation",
         "preflight",
         "component_digests",
+        "route_locks",
+        "integration_locks",
         "prepared_at",
         "prepared_plan_digest",
     }
@@ -2798,6 +3473,13 @@ def _prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
         ),
         component_digests=_digest_mapping(
             raw.get("component_digests"), "component digests"
+        ),
+        route_locks=tuple(
+            _route_lock_from_dict(_mapping(item, "route lock"))
+            for item in _sequence(raw.get("route_locks"), "route locks")
+        ),
+        integration_locks=_digest_mapping(
+            raw.get("integration_locks"), "integration locks"
         ),
         prepared_at=_bounded_text(raw.get("prepared_at"), "prepared_at", 100),
         prepared_plan_digest=_required_digest(
@@ -2988,9 +3670,11 @@ def _campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
         "artifact_type",
         "artifact_digest",
         "error",
+        "previous_event_digest",
+        "event_digest",
     }
     _reject_unknown(raw, fields, "campaign event")
-    return CampaignEventV1(
+    value = CampaignEventV1(
         schema_version=_schema(raw, "campaign event"),
         sequence_number=_positive_int(raw.get("sequence_number"), "event sequence"),
         event_id=_bounded_text(raw.get("event_id"), "event id", 100),
@@ -3008,11 +3692,21 @@ def _campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
             else None
         ),
         error=(
-            _mapping(raw.get("error"), "campaign event error")
+            campaign_error_from_dict(
+                _mapping(raw.get("error"), "campaign event error")
+            ).to_dict()
             if raw.get("error")
             else None
         ),
+        previous_event_digest=(
+            _required_digest(raw["previous_event_digest"], "previous event digest")
+            if raw.get("previous_event_digest")
+            else None
+        ),
+        event_digest=_required_digest(raw.get("event_digest"), "event digest"),
     )
+    _verify_artifact(value.to_dict(), "event_digest", "campaign event")
+    return value
 
 
 def _outcome_eligibility_failures(
@@ -3020,7 +3714,9 @@ def _outcome_eligibility_failures(
     run: RunSummary,
     rows: Sequence[Mapping[str, Any]],
     plan: PlanReceiptV1,
+    prepared: PreparedPlanV1,
     input_lock: Mapping[str, Any] | None,
+    evaluation_lock_digest: str | None,
 ) -> list[str]:
     failures: list[str] = []
     if len(rows) != plan.expected_predictions:
@@ -3038,7 +3734,15 @@ def _outcome_eligibility_failures(
     if input_lock is None:
         failures.append("run input lock is missing")
     else:
-        failures.extend(_snapshot_eligibility_failures(input_lock, rows, plan))
+        failures.extend(
+            _snapshot_eligibility_failures(
+                input_lock,
+                rows,
+                plan,
+                prepared,
+                evaluation_lock_digest=evaluation_lock_digest,
+            )
+        )
     if run.observability_status not in {None, "passed"}:
         failures.append(f"run observability ended as {run.observability_status}")
     failures.extend(f"evaluation failure: {item}" for item in run.evaluation_failures)
@@ -3087,6 +3791,12 @@ def _row_eligibility_failures(
         failures.append(
             f"row {index} does not reconcile to exactly one Agent conversation"
         )
+    traces = row.get("weave_trace_ids")
+    if not isinstance(traces, list) or len(traces) != 1 or not traces[0]:
+        failures.append(f"row {index} does not reconcile to exactly one Agent trace")
+    agent_url = row.get("agent_url") or row.get("weave_agent_url")
+    if agent_url and _safe_immutable_url(agent_url) is None:
+        failures.append(f"row {index} has an invalid Agent link")
     if row.get("runtime_equivalence_status") != "equivalent":
         failures.append(f"row {index} lacks equivalent runtime evidence")
     if row.get("runtime_drift") is True:
@@ -3098,6 +3808,9 @@ def _snapshot_eligibility_failures(
     snapshot: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
     plan: PlanReceiptV1,
+    prepared: PreparedPlanV1,
+    *,
+    evaluation_lock_digest: str | None,
 ) -> list[str]:
     if not verify_snapshot(snapshot):
         return ["run input lock digest is invalid"]
@@ -3113,19 +3826,22 @@ def _snapshot_eligibility_failures(
     if any(source.get(key) != plan.source_provenance.get(key) for key in comparable):
         failures.append("run source provenance differs from the plan receipt")
     expected_lock = str(snapshot.get("evaluation_asset_lock_sha256") or "")
+    if not evaluation_lock_digest or expected_lock != evaluation_lock_digest:
+        failures.append("run snapshot does not bind the exact evaluation asset lock")
     if any(
         row.get("execution_kind") == "agent"
         and (
-            not expected_lock or row.get("evaluation_asset_lock_sha256") != expected_lock
+            not expected_lock
+            or row.get("evaluation_asset_lock_sha256") != expected_lock
         )
         for row in rows
     ):
         failures.append("prediction rows do not bind the evaluation asset lock")
     if not _snapshot_coordinates_match(snapshot, plan):
         failures.append("run snapshot coordinates differ from the plan receipt")
-    if not _route_receipts_valid(snapshot, plan):
+    if not _route_receipts_valid(snapshot, prepared):
         failures.append("run snapshot lacks valid model-route receipts")
-    if not _runtime_locks_valid(snapshot, plan):
+    if not _runtime_locks_valid(snapshot, plan, prepared):
         failures.append("run snapshot lacks exact runtime locks")
     return failures
 
@@ -3166,17 +3882,17 @@ def _snapshot_coordinates_match(
 
 
 def _route_receipts_valid(
-    snapshot: Mapping[str, Any], plan: PlanReceiptV1
+    snapshot: Mapping[str, Any], prepared: PreparedPlanV1
 ) -> bool:
-    agent_candidates = {
-        str(item.get("candidate_id") or "")
-        for item in plan.cells
-        if item.get("execution_kind") == "agent"
+    expected = {
+        str(item.get("candidate_id") or ""): item for item in prepared.route_locks
     }
+    if len(expected) != len(prepared.route_locks):
+        return False
     runtimes = snapshot.get("candidate_runtime") or {}
     if not isinstance(runtimes, dict):
         return False
-    for candidate_id in agent_candidates:
+    for candidate_id, lock in expected.items():
         runtime = runtimes.get(candidate_id)
         if not isinstance(runtime, dict):
             return False
@@ -3184,18 +3900,37 @@ def _route_receipts_valid(
         route = runtime.get("model_route")
         if not isinstance(transport, dict) or not isinstance(route, dict):
             return False
-        if not transport.get("wire_protocol") or not route.get("provider"):
+        if stable_digest(_route_identity_projection(route)) != lock.get(
+            "route_configuration_sha256"
+        ):
             return False
-        if not isinstance(transport.get("bridge_required"), bool):
+        if _json_value(transport) != lock.get("transport"):
+            return False
+        if runtime.get("candidate_id") not in {None, candidate_id}:
+            return False
+        configuration = str(runtime.get("configuration_sha256") or "")
+        if configuration:
+            unsigned = {
+                key: value
+                for key, value in runtime.items()
+                if key != "configuration_sha256"
+            }
+            if configuration != stable_digest(unsigned):
+                return False
+        elif len(runtime) > 2:
             return False
     return True
 
 
 def _runtime_locks_valid(
-    snapshot: Mapping[str, Any], plan: PlanReceiptV1
+    snapshot: Mapping[str, Any],
+    plan: PlanReceiptV1,
+    prepared: PreparedPlanV1,
 ) -> bool:
-    expected = {
-        str(item.get("execution_fingerprint") or "")
+    expected_pairs = {
+        str(item.get("execution_fingerprint") or ""): str(
+            item.get("candidate_id") or ""
+        )
         for item in plan.cells
         if item.get("applicable")
     }
@@ -3203,16 +3938,58 @@ def _runtime_locks_valid(
     if not isinstance(locks, list):
         return False
     observed: set[str] = set()
+    agent_images = {
+        str(item.get("image_id") or "")
+        for item in prepared.preparation.get("agent_runtimes") or []
+        if item.get("image_id")
+    }
+    task_images = {
+        str(item.get("image_id") or "")
+        for item in prepared.preparation.get("task_runtimes") or []
+        if item.get("image_id")
+    }
+    portable = prepared.preparation.get("portable_context_runtime") or {}
+    context_images = {str(portable.get("image_id") or "")} - {""}
+    needs_agent_runtime = any(
+        item.get("applicable") and item.get("execution_kind") == "agent"
+        for item in plan.cells
+    )
+    needs_task_runtime = any(
+        item.get("applicable")
+        and item.get("execution_kind") == "agent"
+        and item.get("workload_id") == "harbor"
+        for item in plan.cells
+    )
+    if needs_agent_runtime and not agent_images:
+        return False
+    if needs_task_runtime and not task_images:
+        return False
     for item in locks:
         if not isinstance(item, dict):
             return False
         fingerprint = str(item.get("execution_fingerprint") or "")
         digest = str(item.get("configuration_sha256") or "")
-        unsigned = {key: value for key, value in item.items() if key != "configuration_sha256"}
-        if not fingerprint or digest != stable_digest(unsigned):
+        unsigned = {
+            key: value for key, value in item.items() if key != "configuration_sha256"
+        }
+        if (
+            not fingerprint
+            or fingerprint in observed
+            or digest != stable_digest(unsigned)
+            or item.get("candidate_id") != expected_pairs.get(fingerprint)
+        ):
+            return False
+        agent_runtime = item.get("agent_runtime") or {}
+        task_runtime = item.get("task_runtime") or {}
+        context_runtime = item.get("context_runtime") or {}
+        if agent_images and agent_runtime.get("image_id") not in agent_images:
+            return False
+        if task_images and task_runtime.get("image_id") not in task_images:
+            return False
+        if context_images and context_runtime.get("image_id") not in context_images:
             return False
         observed.add(fingerprint)
-    return expected <= observed
+    return set(expected_pairs) == observed and len(locks) == len(expected_pairs)
 
 
 _SAFE_PREDICTION_FIELDS = (
@@ -3259,16 +4036,36 @@ _SAFE_PREDICTION_FIELDS = (
 )
 
 
-def _safe_prediction_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        key: _json_value(row[key])
-        for key in _SAFE_PREDICTION_FIELDS
-        if key in row
+def _safe_prediction_row(
+    row: Mapping[str, Any], secrets: Sequence[str] = ()
+) -> dict[str, Any]:
+    result = {
+        key: _json_value(row[key]) for key in _SAFE_PREDICTION_FIELDS if key in row
     }
+    return _json_value(redact_value(result, secrets=secrets))
 
 
-def _safe_agent_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
+def _safe_immutable_url(value: Any) -> str | None:
+    raw = str(value or "")
+    if not raw or len(raw) > 2000:
+        return None
+    parsed = urlparse(raw)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return raw
+
+
+def _safe_agent_evidence(
+    row: Mapping[str, Any], secrets: Sequence[str] = ()
+) -> dict[str, Any]:
+    result = {
         "prediction_id": row.get("prediction_id"),
         "trace_link_status": row.get("trace_link_status"),
         "conversation_ids": [
@@ -3280,13 +4077,14 @@ def _safe_agent_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
         "trace_ids": [
             str(value) for value in row.get("weave_trace_ids") or [] if value
         ],
-        "agent_url": row.get("agent_url") or row.get("weave_agent_url"),
+        "agent_url": _safe_immutable_url(
+            row.get("agent_url") or row.get("weave_agent_url")
+        ),
     }
+    return _json_value(redact_value(result, secrets=secrets))
 
 
-def _outcome_metrics(
-    rows: Sequence[Mapping[str, Any]], passed: int
-) -> dict[str, Any]:
+def _outcome_metrics(rows: Sequence[Mapping[str, Any]], passed: int) -> dict[str, Any]:
     total = len(rows)
     return {
         "passes": passed,
@@ -3311,9 +4109,7 @@ def _new_ledger(policy: ResearchCampaignSpecV1) -> dict[str, Any]:
     }
 
 
-def _validate_ledger(
-    ledger: Mapping[str, Any], policy: ResearchCampaignSpecV1
-) -> None:
+def _validate_ledger(ledger: Mapping[str, Any], policy: ResearchCampaignSpecV1) -> None:
     _reject_unknown(
         ledger,
         {
@@ -3352,9 +4148,7 @@ def _validate_ledger(
     _non_negative_number(ledger.get("accounted_cost_usd"), "accounted cost")
 
 
-def _ledger_admission(
-    ledger: Mapping[str, Any], admission_id: str
-) -> dict[str, Any]:
+def _ledger_admission(ledger: Mapping[str, Any], admission_id: str) -> dict[str, Any]:
     matches = [
         item
         for item in ledger.get("admissions") or []
@@ -3389,7 +4183,7 @@ def _reserved_budget(ledger: Mapping[str, Any]) -> float:
         (
             float(item.get("reserved_cost_usd") or 0.0)
             for item in ledger.get("admissions") or []
-            if item.get("outcome_id") is None
+            if item.get("outcome_id") is None or item.get("status") == "blocked"
         ),
         0.0,
     )
@@ -3436,10 +4230,70 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def _read_last_json_object(path: Path) -> dict[str, Any] | None:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell() - 1
+        while position >= 0:
+            handle.seek(position)
+            if handle.read(1) not in {b"\n", b"\r"}:
+                break
+            position -= 1
+        if position < 0:
+            return None
+        end = position + 1
+        while position >= 0:
+            handle.seek(position)
+            if handle.read(1) == b"\n":
+                position += 1
+                break
+            position -= 1
+        start = max(0, position)
+        handle.seek(start)
+        raw = handle.read(end - start).decode("utf-8")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CampaignError(
+            "event_log_corrupt",
+            "the final campaign event is invalid JSON",
+            category="evidence",
+        ) from exc
+    if not isinstance(value, dict):
+        raise CampaignError(
+            "event_log_corrupt",
+            "the final campaign event is not an object",
+            category="evidence",
+        )
+    return value
+
+
+def _event_id_in_log(path: Path, event_id: str) -> bool:
+    """Rare recovery scan used only when an append outlived its index write."""
+
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise CampaignError(
+                    "event_log_corrupt",
+                    f"campaign event {number} is invalid JSON",
+                    category="evidence",
+                ) from exc
+            if isinstance(value, dict) and value.get("event_id") == event_id:
+                return True
+    return False
+
+
 def _sha256_path(path: Path) -> str:
     if not path.is_file():
         raise FileNotFoundError(path)
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _artifact_digest(value: Mapping[str, Any], digest_field: str) -> str:
@@ -3448,9 +4302,7 @@ def _artifact_digest(value: Mapping[str, Any], digest_field: str) -> str:
     return stable_digest(unsigned)
 
 
-def _verify_artifact(
-    value: Mapping[str, Any], digest_field: str, label: str
-) -> None:
+def _verify_artifact(value: Mapping[str, Any], digest_field: str, label: str) -> None:
     expected = str(value.get(digest_field) or "")
     if not _DIGEST_RE.fullmatch(expected):
         raise CampaignError(
@@ -3473,9 +4325,17 @@ def _required_digest(value: Any, label: str) -> str:
     return result
 
 
+def _strict_bool(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be a boolean")
+    return value
+
+
 def _digest_mapping(value: Any, label: str) -> dict[str, str]:
     raw = _mapping(value, label)
-    return {str(key): _required_digest(item, f"{label} {key}") for key, item in raw.items()}
+    return {
+        str(key): _required_digest(item, f"{label} {key}") for key, item in raw.items()
+    }
 
 
 def _safe_runtime_path(value: Any) -> str:
@@ -3519,7 +4379,9 @@ def _sequence(value: Any, label: str) -> list[Any]:
     return list(value)
 
 
-def _text_tuple(value: Any, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+def _text_tuple(
+    value: Any, label: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
     result = tuple(_bounded_text(item, label, 1000) for item in _sequence(value, label))
     if not allow_empty and not result:
         raise ValueError(f"{label} must contain at least one value")
