@@ -19,6 +19,12 @@ class CostAccounting:
 def measured_row_cost(row: Mapping[str, Any]) -> float | None:
     """Return the conservative measured cost without inventing a public value."""
 
+    interaction = row.get("task_interaction")
+    if isinstance(interaction, Mapping) and int(
+        interaction.get("unmeasured_paid_calls") or 0
+    ):
+        return None
+
     values: list[float] = []
     for field in ("cost_usd", "weave_total_cost_usd"):
         raw = row.get(field)
@@ -28,6 +34,17 @@ def measured_row_cost(row: Mapping[str, Any]) -> float | None:
         if not math.isfinite(value) or value < 0:
             raise ValueError("measured campaign costs must be finite and non-negative")
         values.append(value)
+    if (
+        values
+        and isinstance(interaction, Mapping)
+        and row.get("agent_cost_usd") is None
+        and isinstance(interaction.get("observed_interactor_cost_usd"), (int, float))
+    ):
+        interactor_cost = _non_negative(
+            float(interaction["observed_interactor_cost_usd"]),
+            "observed interactor cost",
+        )
+        values = [value + interactor_cost for value in values]
     return max(values) if values else None
 
 

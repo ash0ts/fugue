@@ -742,6 +742,10 @@ def _evaluation_cases(
     repo_root: Path,
     overlay: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
+    if manifest.dataset.materializer == (
+        "fugue.bench.task_authoring:AuthoredTaskMaterializer"
+    ):
+        return {}
     source_path = str(manifest.dataset.source.get("path") or "")
     if not source_path:
         return {}

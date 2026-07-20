@@ -37,6 +37,10 @@ from fugue.bench.operator import (
     TaskRuntimePreparation,
 )
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.task_authoring import (
+    scoring_revision_from_dict,
+    task_suite_draft_from_dict,
+)
 from fugue.model_plane import (
     model_route_identity,
     resolve_harness_model_route,
@@ -49,6 +53,7 @@ def _campaign_repo(tmp_path: Path) -> None:
     (tmp_path / "configs/fugue/experiments").mkdir(parents=True)
     (tmp_path / "configs/fugue/context-systems").mkdir(parents=True)
     (tmp_path / "configs/fugue/campaigns").mkdir(parents=True)
+    (tmp_path / "configs/fugue/task-authoring").mkdir(parents=True)
     (tmp_path / "datasets").mkdir()
     (tmp_path / "configs/fugue/context-systems/none.yaml").write_text(
         """
@@ -128,8 +133,51 @@ limits:
   max_attempts_per_cell: 1
   max_concurrent: 1
   max_active_runs: 1
+task_authoring:
+  enabled_stages: [qualification]
+  allowed_partitions: [qualification]
+  allowed_environment_profiles: [artifact-v1]
+  allowed_resource_profiles: []
+  allowed_interactor_profiles: []
+  allowed_judge_profiles: []
+  allowed_scorer_runtimes: []
+  allowed_prompt_parts: [text]
+  adaptive_discovery: false
+  limits:
+    max_tasks: 1
+    max_scenarios: 1
+    max_prompt_bytes: 4096
+    max_authored_asset_bytes: 4096
+    max_user_turns: 1
+    max_agent_turns: 1
+    max_interactor_calls: 0
+    max_judge_calls: 0
+    scorer_timeout_sec: 10
+    scorer_memory_mb: 128
+    scorer_cpus: 0.5
+    scorer_output_bytes: 4096
 evidence_scope: traces
 require_clean_source: false
+"""
+    )
+    (tmp_path / "configs/fugue/task-authoring/profiles.yaml").write_text(
+        """
+schema_version: 1
+environments:
+  - id: artifact-v1
+    title: Locked artifact workspace
+    kind: artifact
+    base_image: python:3.12.10-slim-bookworm
+    supported_harnesses: [codex]
+    capabilities: [text, artifact]
+    allowed_integration_ids: []
+    cpus: 1
+    memory_mb: 1024
+    storage_mb: 2048
+resources: []
+interactors: []
+judges: []
+scorer_runtimes: []
 """
     )
     (tmp_path / ".env").write_text(
@@ -204,11 +252,10 @@ class FakeCampaignOperator(OperatorService):
         experiment: Any = None,
         run_id: str | None = None,
     ) -> RunSummary:
-        del experiment
         assert run_id is not None
         if run_id in self.launched:
             raise AssertionError("campaign launched the same run twice")
-        plan = self.resolve_run_plan(request, run_id=run_id)
+        plan = self.resolve_run_plan(request, run_id=run_id, experiment=experiment)
         evaluation_lock_payload = {
             "schema_version": 1,
             "run_id": run_id,
@@ -527,6 +574,37 @@ def test_catalog_and_preview_are_pure_and_hide_execution_details(
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_task_authoring_catalog_registers_the_virtual_harbor_workload(
+    tmp_path: Path,
+) -> None:
+    _campaign_repo(tmp_path)
+    (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
+        """
+id: demo
+title: Demo
+model: openai/gpt-5
+harnesses: [codex]
+workloads:
+  - id: registered-baseline
+    runner: harbor
+    manifest: datasets/demo.yaml
+    systems: [none]
+    variants: [baseline]
+variants:
+  - {id: baseline, label: Baseline, context: {system_id: none, delivery: portable}}
+n_attempts: 1
+n_concurrent: 1
+jobs_dir: jobs/demo
+trace_content: full
+"""
+    )
+
+    catalog = CampaignService(
+        tmp_path, operator=FakeCampaignOperator(tmp_path)
+    ).catalog("demo")
+
+    assert catalog.task_authoring is not None
+
 def test_proposal_rejects_unregistered_and_over_limit_components(
     tmp_path: Path,
 ) -> None:
@@ -598,6 +676,130 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     events = service.events("demo")
     assert [event.sequence_number for event in events] == list(range(1, 6))
     assert campaign_event_from_dict(events[0].to_dict()) == events[0]
+
+
+def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    catalog = service.catalog("demo")
+    draft = task_suite_draft_from_dict(
+        {
+            "schema_version": 1,
+            "id": "authored-qualification",
+            "title": "Authored qualification",
+            "objective": "Exercise the governed task boundary.",
+            "stage_id": "qualification",
+            "tasks": [
+                {
+                    "id": "task-one",
+                    "title": "Explain the evidence",
+                    "prompt": [{"type": "text", "text": "Explain the evidence."}],
+                    "environment": {"profile_id": "artifact-v1"},
+                    "interaction": {
+                        "type": "single_turn",
+                        "max_user_turns": 1,
+                        "max_agent_turns": 1,
+                        "timeout_sec": 300,
+                    },
+                    "criteria_set_id": "deterministic",
+                    "tags": ["qualification"],
+                    "partition": "qualification",
+                }
+            ],
+            "scenarios": [
+                {
+                    "id": "evidence",
+                    "title": "Evidence",
+                    "tasks": [{"task_id": "task-one", "weight": 1, "must_pass": True}],
+                }
+            ],
+            "criteria_sets": [
+                {
+                    "id": "deterministic",
+                    "title": "Deterministic outcome",
+                    "pass_threshold": 1,
+                    "criteria": [
+                        {
+                            "id": "benchmark",
+                            "description": "The benchmark passes.",
+                            "evaluator": {"type": "benchmark_outcome", "config": {}},
+                            "evidence": ["benchmark"],
+                            "weight": 1,
+                            "threshold": 1,
+                            "required": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    preview = service.preview_task_suite("demo", catalog.catalog_digest, draft)
+    assert preview.eligible
+    lock = service.lock_task_suite(preview, "lock-authored-suite")
+    assert service.lock_task_suite(preview, "lock-authored-suite") == lock
+
+    proposal = build_experiment_proposal(
+        proposal_id="authored-qualification",
+        campaign_id="demo",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Can the Agent explain the evidence?",
+        hypothesis="The locked task produces a reconciled result.",
+        fixed_dimensions=("model", "task", "runtime"),
+        varied_dimensions=("harness",),
+        measured_dimensions=("benchmark", "criteria"),
+        experiment_id="demo",
+        model="openai/gpt-5",
+        n_attempts=1,
+        n_concurrent=1,
+        harnesses=("codex",),
+        context_systems=("none",),
+        variants=("baseline",),
+        n_tasks=1,
+        task_suite_digest=lock.suite_digest,
+    )
+    plan = service.preview(proposal)
+    assert plan.component_digests["task_suite"] == lock.suite_digest
+    prepared = service.prepare(plan, "prepare-authored-suite")
+    admission = service.admit(prepared, "admit-authored-suite")
+    service.launch(admission, "launch-authored-suite")
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    [run_id] = operator.launched
+    service.finalize(run_id, "finalize-authored-suite")
+
+    revision = scoring_revision_from_dict(
+        {
+            "schema_version": 1,
+            "id": "deterministic-v1",
+            "evidence_view": "answer",
+        }
+    )
+    evaluation = service.score_task_suite(
+        run_id,
+        lock.suite_digest,
+        revision,
+        "score-authored-suite",
+    )
+    assert evaluation.passed == 1
+    assert (
+        service.score_task_suite(
+            run_id,
+            lock.suite_digest,
+            revision,
+            "score-authored-suite",
+        )
+        == evaluation
+    )
+    analysis = service.analyze_task_study(
+        run_id,
+        "task-study-v1",
+        "analyze-authored-suite",
+        evaluation_digest=evaluation.evaluation_digest,
+    )
+    assert analysis.evaluation_digest == evaluation.evaluation_digest
+    assert analysis.task_results[0]["criteria_passes"] == 1
 
 
 def test_every_campaign_artifact_rejects_unknown_fields_and_versions(

@@ -19,6 +19,7 @@ import yaml
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
+from fugue.bench.integrations import load_integration
 from fugue.bench.library import validate_id
 from fugue.bench.manifest import BenchmarkManifest
 
@@ -29,7 +30,7 @@ TASK_DATASET_CACHE_ROOT = Path(".fugue/cache/authored-task-datasets")
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_PARTITIONS = frozenset({"qualification", "discovery", "holdout"})
-_SAFE_PROMPT_PARTS = frozenset({"text", "resource"})
+_SAFE_PROMPT_PARTS = frozenset({"text", "file", "image", "artifact", "resource"})
 _SAFE_ENVIRONMENT_KINDS = frozenset({"repository", "artifact", "live_service"})
 _SAFE_INTERACTION_KINDS = frozenset({"single_turn", "scripted", "model"})
 _SAFE_EVALUATORS = frozenset(
@@ -56,6 +57,9 @@ _SAFE_EVIDENCE = frozenset(
     }
 )
 _SAFE_HARNESSES = ("hermes", "openclaw", "claude-code", "codex")
+_REQUIRED_JUDGE_BLIND_FIELDS = frozenset(
+    {"harness", "model", "variant_id", "context_system_id", "candidate_id", "treatment"}
+)
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
     "openclaw": "fugue.agents:FugueOpenClaw",
@@ -107,6 +111,7 @@ class EnvironmentProfileV1:
     base_image: str
     supported_harnesses: tuple[str, ...]
     capabilities: tuple[str, ...]
+    allowed_integration_ids: tuple[str, ...]
     cpus: float
     memory_mb: int
     storage_mb: int
@@ -139,6 +144,8 @@ class InteractorProfileV1:
     model: str | None
     directions: tuple[str, ...]
     supported_harnesses: tuple[str, ...]
+    input_cost_per_million: float
+    output_cost_per_million: float
     profile_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -195,6 +202,9 @@ class TaskProfileCatalogV1:
                     "title": value.title,
                     "kind": getattr(value, "kind", "runtime"),
                     "capabilities": list(getattr(value, "capabilities", ())),
+                    "allowed_integration_ids": list(
+                        getattr(value, "allowed_integration_ids", ())
+                    ),
                     "supported_harnesses": list(
                         getattr(value, "supported_harnesses", ())
                     ),
@@ -366,6 +376,7 @@ class TaskSuitePreviewV1:
     prompt_bytes: int
     authored_asset_bytes: int
     estimated_calls: dict[str, int]
+    estimated_cost_usd: float
     capability_matrix: tuple[dict[str, Any], ...]
     component_digests: dict[str, str]
     eligible: bool
@@ -393,6 +404,7 @@ class TaskSuiteLockV1:
     task_ids: tuple[str, ...]
     scenario_ids: tuple[str, ...]
     partitions: tuple[str, ...]
+    integration_ids: tuple[str, ...]
     component_digests: dict[str, str]
     manifest_path: str
     public_cases_path: str
@@ -430,6 +442,9 @@ class TaskEvaluationV1:
     passed: int
     failed: int
     unavailable: int
+    judge_calls: int
+    scorer_calls: int
+    unmeasured_paid_calls: int
     observed_cost_usd: float
     accounted_cost_usd: float
     evaluation_digest: str = ""
@@ -449,7 +464,10 @@ class TaskStudyAnalysisV1:
     task_results: tuple[dict[str, Any], ...]
     scenario_results: tuple[dict[str, Any], ...]
     harness_results: tuple[dict[str, Any], ...]
+    attempt_results: tuple[dict[str, Any], ...]
     interaction_results: tuple[dict[str, Any], ...]
+    environment_results: tuple[dict[str, Any], ...]
+    tag_results: tuple[dict[str, Any], ...]
     contrasts: tuple[dict[str, Any], ...]
     scenario_interactions: tuple[dict[str, Any], ...]
     judge_sensitivity: tuple[dict[str, Any], ...]
@@ -614,19 +632,25 @@ def task_profile_catalog_from_dict(
         ),
         resources=tuple(
             _resource_profile(item)
-            for item in _sequence(raw.get("resources"), "resource profiles")
+            for item in _sequence(
+                raw.get("resources"), "resource profiles", allow_empty=True
+            )
         ),
         interactors=tuple(
             _interactor_profile(item)
-            for item in _sequence(raw.get("interactors"), "interactor profiles")
+            for item in _sequence(
+                raw.get("interactors"), "interactor profiles", allow_empty=True
+            )
         ),
         judges=tuple(
             _judge_profile(item)
-            for item in _sequence(raw.get("judges"), "judge profiles")
+            for item in _sequence(raw.get("judges"), "judge profiles", allow_empty=True)
         ),
         scorer_runtimes=tuple(
             _scorer_runtime_profile(item)
-            for item in _sequence(raw.get("scorer_runtimes"), "scorer runtimes")
+            for item in _sequence(
+                raw.get("scorer_runtimes"), "scorer runtimes", allow_empty=True
+            )
         ),
         source_sha256=_required_digest(source_digest, "profile source sha256"),
     )
@@ -725,6 +749,9 @@ def task_suite_preview_from_dict(raw: Mapping[str, Any]) -> TaskSuitePreviewV1:
                 raw.get("estimated_calls"), "estimated calls"
             ).items()
         },
+        estimated_cost_usd=_non_negative_number(
+            raw.get("estimated_cost_usd"), "estimated cost"
+        ),
         capability_matrix=tuple(
             _mapping(item, "capability coordinate")
             for item in _sequence(raw.get("capability_matrix"), "capability matrix")
@@ -766,6 +793,9 @@ def task_suite_lock_from_dict(raw: Mapping[str, Any]) -> TaskSuiteLockV1:
         task_ids=_id_tuple(raw.get("task_ids"), "task"),
         scenario_ids=_id_tuple(raw.get("scenario_ids"), "scenario"),
         partitions=_text_tuple(raw.get("partitions"), "partition"),
+        integration_ids=_id_tuple(
+            raw.get("integration_ids"), "integration", allow_empty=True
+        ),
         component_digests=_digest_mapping(
             raw.get("component_digests"), "component digests"
         ),
@@ -846,6 +876,11 @@ def task_evaluation_from_dict(raw: Mapping[str, Any]) -> TaskEvaluationV1:
         passed=_non_negative_int(raw.get("passed"), "passed"),
         failed=_non_negative_int(raw.get("failed"), "failed"),
         unavailable=_non_negative_int(raw.get("unavailable"), "unavailable"),
+        judge_calls=_non_negative_int(raw.get("judge_calls"), "judge calls"),
+        scorer_calls=_non_negative_int(raw.get("scorer_calls"), "scorer calls"),
+        unmeasured_paid_calls=_non_negative_int(
+            raw.get("unmeasured_paid_calls"), "unmeasured paid calls"
+        ),
         observed_cost_usd=_non_negative_number(
             raw.get("observed_cost_usd"), "observed cost"
         ),
@@ -880,9 +915,14 @@ def task_study_analysis_from_dict(raw: Mapping[str, Any]) -> TaskStudyAnalysisV1
             raw.get("scenario_results"), "scenario results"
         ),
         harness_results=_mapping_tuple(raw.get("harness_results"), "harness results"),
+        attempt_results=_mapping_tuple(raw.get("attempt_results"), "attempt results"),
         interaction_results=_mapping_tuple(
             raw.get("interaction_results"), "interaction results"
         ),
+        environment_results=_mapping_tuple(
+            raw.get("environment_results"), "environment results"
+        ),
+        tag_results=_mapping_tuple(raw.get("tag_results"), "tag results"),
         contrasts=_mapping_tuple(raw.get("contrasts"), "contrasts"),
         scenario_interactions=_mapping_tuple(
             raw.get("scenario_interactions"), "scenario interactions"
@@ -907,6 +947,7 @@ def preview_task_suite(
     profiles: TaskProfileCatalogV1,
     harnesses: Sequence[str],
     repo_root: Path,
+    paid_call_reserve_usd: float = 0.0,
 ) -> TaskSuitePreviewV1:
     failures: list[str] = []
     if draft.stage_id not in policy.enabled_stages:
@@ -919,13 +960,25 @@ def preview_task_suite(
         failures.append("adaptive task suites require a decision rationale")
     if draft.parent_outcome_id and not policy.adaptive_discovery:
         failures.append("campaign policy does not allow adaptive task authoring")
+    if draft.parent_outcome_id and any(
+        task.partition != "discovery" for task in draft.tasks
+    ):
+        failures.append(
+            "adaptive task suites may contain discovery tasks only; holdout and "
+            "qualification tasks must be locked before observing an outcome"
+        )
 
     profile_components: dict[str, str] = {"task_profiles": profiles.catalog_digest}
     prompt_bytes = 0
     asset_bytes = 0
-    estimated = {"agent": len(draft.tasks), "interactor": 0, "judge": 0, "scorer": 0}
+    estimated = {"agent": 0, "interactor": 0, "judge": 0, "scorer": 0}
     capability_matrix: list[dict[str, Any]] = []
     criteria = {item.id: item for item in draft.criteria_sets}
+    integration_sets = {task.environment.integration_ids for task in draft.tasks}
+    if len(integration_sets) > 1:
+        failures.append(
+            "all tasks in one authored suite must use the same typed integrations"
+        )
 
     for task in draft.tasks:
         result = _preview_task(
@@ -964,6 +1017,8 @@ def preview_task_suite(
         prompt_bytes=prompt_bytes,
         authored_asset_bytes=asset_bytes,
         estimated_calls=estimated,
+        estimated_cost_usd=(estimated["interactor"] + estimated["judge"])
+        * _non_negative_number(paid_call_reserve_usd, "paid call reserve"),
         capability_matrix=tuple(capability_matrix),
         component_digests=dict(sorted(profile_components.items())),
         eligible=not failures,
@@ -1066,6 +1121,15 @@ def materialize_task_suite_lock(
         task_ids=tuple(task.id for task in draft.tasks),
         scenario_ids=tuple(item.id for item in draft.scenarios),
         partitions=tuple(sorted({task.partition for task in draft.tasks})),
+        integration_ids=tuple(
+            sorted(
+                {
+                    integration_id
+                    for task in draft.tasks
+                    for integration_id in task.environment.integration_ids
+                }
+            )
+        ),
         component_digests=dict(sorted(component_digests.items())),
         manifest_path=manifest_path,
         public_cases_path=public_path,
@@ -1177,8 +1241,9 @@ def evaluate_task_rows(
     profiles: TaskProfileCatalogV1,
     repo_root: Path,
     env: Mapping[str, str],
-    judge_request: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None = None,
+    judge_request: Callable[..., tuple[Any, ...]] | None = None,
     inline_runner: Callable[..., dict[str, Any]] | None = None,
+    unmeasured_call_reserve_usd: float = 0.0,
 ) -> TaskEvaluationV1:
     verify_task_suite_lock(repo_root, lock)
     private = json.loads((repo_root / lock.private_evaluation_path).read_text())
@@ -1190,16 +1255,28 @@ def evaluate_task_rows(
     }
     task_criteria = dict(private.get("task_criteria") or {})
     scenarios = _task_scenario_map(private.get("scenarios") or [])
+    public_tasks = {
+        str(value["id"]): value
+        for value in (
+            json.loads(line)
+            for line in (repo_root / lock.public_cases_path).read_text().splitlines()
+            if line.strip()
+        )
+    }
     results: list[dict[str, Any]] = []
     observed_cost = 0.0
     unavailable = 0
     passed = 0
     failed = 0
+    judge_calls = 0
+    scorer_calls = 0
+    unmeasured_paid_calls = 0
     for row in rows:
         task_id = str(row.get("task_name") or row.get("task_id") or "")
         if task_id not in task_criteria:
             raise ValueError(f"prediction references unknown authored task: {task_id}")
         criterion_set = criteria_sets[str(task_criteria[task_id])]
+        public_task = public_tasks[task_id]
         criterion_results: list[dict[str, Any]] = []
         for criterion in criterion_set.criteria:
             result = _evaluate_criterion(
@@ -1214,6 +1291,15 @@ def evaluate_task_rows(
                 inline_runner=inline_runner,
             )
             criterion_results.append(result)
+            if criterion.evaluator.type == "judge" and result["status"] == "scored":
+                judge_calls += 1
+                if result.get("cost_usd") is None:
+                    unmeasured_paid_calls += 1
+            if (
+                criterion.evaluator.type == "inline_python"
+                and result["status"] == "scored"
+            ):
+                scorer_calls += 1
             if result.get("cost_usd") is not None:
                 observed_cost += float(result["cost_usd"])
         status, score, task_pass = _criteria_outcome(criterion_set, criterion_results)
@@ -1235,6 +1321,10 @@ def evaluate_task_rows(
                     if isinstance(row.get("task_interaction"), dict)
                     else row.get("interaction_type") or "single_turn"
                 ),
+                "environment_profile_id": str(
+                    (public_task.get("environment") or {}).get("profile_id") or ""
+                ),
+                "tags": list(public_task.get("tags") or []),
                 "benchmark_status": row.get("status"),
                 "benchmark_pass": row.get("pass"),
                 "criteria_set_id": criterion_set.id,
@@ -1242,12 +1332,29 @@ def evaluate_task_rows(
                 "criteria_score": score,
                 "criteria_pass": task_pass,
                 "criteria": criterion_results,
-                "tool_calls": row.get("tool_calls"),
-                "latency_ms": row.get("latency_ms"),
+                "tool_calls": (
+                    row.get("weave_tool_call_count")
+                    if row.get("weave_tool_call_count") is not None
+                    else row.get("tool_calls")
+                ),
+                "latency_ms": (
+                    row.get("latency_ms")
+                    if row.get("latency_ms") is not None
+                    else (
+                        float(row["wall_time_sec"]) * 1000
+                        if row.get("wall_time_sec") is not None
+                        else None
+                    )
+                ),
+                "n_input_tokens": row.get("n_input_tokens"),
+                "n_output_tokens": row.get("n_output_tokens"),
+                "failure": row.get("exception_class") or row.get("error"),
                 "cost_usd": row.get("cost_usd"),
             }
         )
-    accounted_cost = observed_cost
+    accounted_cost = observed_cost + unmeasured_paid_calls * _non_negative_number(
+        unmeasured_call_reserve_usd, "unmeasured call reserve"
+    )
     evaluation_id = validate_id(f"{run_id}-{revision.id}", kind="task evaluation id")
     unsigned = TaskEvaluationV1(
         schema_version=TASK_AUTHORING_SCHEMA_VERSION,
@@ -1262,6 +1369,9 @@ def evaluate_task_rows(
         passed=passed,
         failed=failed,
         unavailable=unavailable,
+        judge_calls=judge_calls,
+        scorer_calls=scorer_calls,
+        unmeasured_paid_calls=unmeasured_paid_calls,
         observed_cost_usd=observed_cost,
         accounted_cost_usd=accounted_cost,
     )
@@ -1269,6 +1379,37 @@ def evaluate_task_rows(
         unsigned,
         evaluation_digest=_artifact_digest(unsigned.to_dict(), "evaluation_digest"),
     )
+
+
+def task_evaluation_call_estimate(
+    lock: TaskSuiteLockV1, rows: Sequence[Mapping[str, Any]], repo_root: Path
+) -> dict[str, int]:
+    """Count paid judge calls before evaluation mutates external state."""
+
+    verify_task_suite_lock(repo_root, lock)
+    private = json.loads((repo_root / lock.private_evaluation_path).read_text())
+    criteria_sets = {
+        item.id: item
+        for item in (
+            _criteria_set(value) for value in private.get("criteria_sets") or []
+        )
+    }
+    task_criteria = dict(private.get("task_criteria") or {})
+    judge_calls = 0
+    scorer_calls = 0
+    for row in rows:
+        task_id = str(row.get("task_name") or row.get("task_id") or "")
+        if task_id not in task_criteria:
+            raise ValueError(f"prediction references unknown authored task: {task_id}")
+        criterion_set = criteria_sets[str(task_criteria[task_id])]
+        judge_calls += sum(
+            criterion.evaluator.type == "judge" for criterion in criterion_set.criteria
+        )
+        scorer_calls += sum(
+            criterion.evaluator.type == "inline_python"
+            for criterion in criterion_set.criteria
+        )
+    return {"judge": judge_calls, "scorer": scorer_calls}
 
 
 def analyze_task_evaluation(
@@ -1287,7 +1428,13 @@ def analyze_task_evaluation(
     rows = list(evaluation.prediction_results)
     task_results = _group_results(rows, ("task_id",))
     harness_results = _group_results(rows, ("harness",))
+    attempt_results = _group_results(rows, ("trial_index",))
     interaction_results = _group_results(rows, ("interaction_type",))
+    environment_results = _group_results(rows, ("environment_profile_id",))
+    tag_rows = [
+        {**row, "tag": tag} for row in rows for tag in (row.get("tags") or ["untagged"])
+    ]
+    tag_results = _group_results(tag_rows, ("tag",))
     scenario_results = _scenario_results(rows, scenarios)
     contrasts = _aligned_contrasts(
         rows, bootstrap_samples, evaluation.evaluation_digest
@@ -1313,7 +1460,10 @@ def analyze_task_evaluation(
         task_results=tuple(task_results),
         scenario_results=tuple(scenario_results),
         harness_results=tuple(harness_results),
+        attempt_results=tuple(attempt_results),
         interaction_results=tuple(interaction_results),
+        environment_results=tuple(environment_results),
+        tag_results=tuple(tag_results),
         contrasts=tuple(contrasts),
         scenario_interactions=tuple(interactions),
         judge_sensitivity=tuple(judges),
@@ -1400,6 +1550,7 @@ def _environment_profile(raw: Any) -> EnvironmentProfileV1:
             "base_image",
             "supported_harnesses",
             "capabilities",
+            "allowed_integration_ids",
             "cpus",
             "memory_mb",
             "storage_mb",
@@ -1421,6 +1572,11 @@ def _environment_profile(raw: Any) -> EnvironmentProfileV1:
         supported_harnesses=_harness_tuple(value.get("supported_harnesses")),
         capabilities=_id_tuple(
             value.get("capabilities"), "environment capability", allow_empty=True
+        ),
+        allowed_integration_ids=_id_tuple(
+            value.get("allowed_integration_ids"),
+            "allowed integration",
+            allow_empty=True,
         ),
         cpus=_positive_number(value.get("cpus", 2), "environment cpus"),
         memory_mb=_positive_int(value.get("memory_mb", 4096), "environment memory"),
@@ -1470,6 +1626,8 @@ def _interactor_profile(raw: Any) -> InteractorProfileV1:
             "model",
             "directions",
             "supported_harnesses",
+            "input_cost_per_million",
+            "output_cost_per_million",
             "profile_digest",
         },
         "interactor profile",
@@ -1489,6 +1647,12 @@ def _interactor_profile(raw: Any) -> InteractorProfileV1:
             value.get("directions"), "interactor direction", allow_empty=True
         ),
         supported_harnesses=_harness_tuple(value.get("supported_harnesses")),
+        input_cost_per_million=_non_negative_number(
+            value.get("input_cost_per_million", 0), "interactor input cost"
+        ),
+        output_cost_per_million=_non_negative_number(
+            value.get("output_cost_per_million", 0), "interactor output cost"
+        ),
         profile_digest=str(value.get("profile_digest") or ""),
     )
     return _with_profile_digest(profile, value)
@@ -1515,15 +1679,21 @@ def _judge_profile(raw: Any) -> JudgeProfileV1:
     unknown = sorted(set(evidence) - _SAFE_EVIDENCE)
     if unknown:
         raise ValueError("unknown judge evidence field(s): " + ", ".join(unknown))
+    blind_fields = _id_tuple(
+        value.get("blind_fields"), "judge blind field", allow_empty=True
+    )
+    missing_blind = sorted(_REQUIRED_JUDGE_BLIND_FIELDS - set(blind_fields))
+    if missing_blind:
+        raise ValueError(
+            "judge profile must blind field(s): " + ", ".join(missing_blind)
+        )
     profile = JudgeProfileV1(
         id=validate_id(value.get("id") or "", kind="judge profile id"),
         title=_bounded_text(value.get("title"), "judge title", 200),
         model=_bounded_text(value.get("model"), "judge model", 300),
         prompt=_bounded_text(value.get("prompt"), "judge prompt", 4000),
         evidence=evidence,
-        blind_fields=_id_tuple(
-            value.get("blind_fields"), "judge blind field", allow_empty=True
-        ),
+        blind_fields=blind_fields,
         input_cost_per_million=_non_negative_number(
             value.get("input_cost_per_million", 0), "judge input cost"
         ),
@@ -1603,8 +1773,8 @@ def _prompt_part(raw: Any) -> PromptPartV1:
     resource = str(value.get("resource_profile_id") or "").strip() or None
     if part_type == "text" and (not text or resource):
         raise ValueError("text prompt parts require only text")
-    if part_type == "resource" and (not resource or text):
-        raise ValueError("resource prompt parts require only resource_profile_id")
+    if part_type != "text" and (not resource or text):
+        raise ValueError(f"{part_type} prompt parts require only resource_profile_id")
     if text and len(text) > _MAX_TEXT:
         raise ValueError(f"prompt text exceeds {_MAX_TEXT} characters")
     return PromptPartV1(
@@ -1855,7 +2025,13 @@ def _preview_task(
     components: dict[str, str] = {}
     if environment is not None:
         components[f"environment:{environment.id}"] = environment.profile_digest
-        _validate_environment(task, environment, failures)
+        _validate_environment(
+            task,
+            environment,
+            repo_root=repo_root,
+            components=components,
+            failures=failures,
+        )
     prompt_bytes, asset_bytes = _preview_prompt(
         task,
         policy=policy,
@@ -1872,8 +2048,6 @@ def _preview_task(
         failures=failures,
     )
     calls = {"agent": 0, "interactor": 0, "judge": 0, "scorer": 0}
-    if task.interaction.type == "model":
-        calls["interactor"] = task.interaction.max_user_turns
     _preview_criteria(
         criterion_set,
         policy=policy,
@@ -1895,6 +2069,12 @@ def _preview_task(
                 "reason": reason,
             }
         )
+    applicable_harnesses = sum(bool(item["applicable"]) for item in capability_matrix)
+    calls["agent"] = applicable_harnesses
+    calls["judge"] *= applicable_harnesses
+    calls["scorer"] *= applicable_harnesses
+    if task.interaction.type == "model":
+        calls["interactor"] = task.interaction.max_user_turns * applicable_harnesses
     return {
         "prompt_bytes": prompt_bytes,
         "asset_bytes": asset_bytes,
@@ -1931,6 +2111,11 @@ def _preview_prompt(
         )
         if resource is None:
             continue
+        if part.type != "resource" and resource.kind != part.type:
+            failures.append(
+                f"task {task.id} prompt part {part.type} does not match resource "
+                f"profile {resource.id} kind {resource.kind}"
+            )
         components[f"resource:{resource.id}"] = resource.profile_digest
         path = repo_root / resource.path
         if not path.is_file():
@@ -1998,12 +2183,31 @@ def _preview_criteria(
             )
             if runtime is not None:
                 components[f"scorer_runtime:{runtime.id}"] = runtime.profile_digest
+            try:
+                requested = _inline_limits(evaluator.config)
+            except ValueError as exc:
+                failures.append(f"criterion {criterion.id}: {exc}")
+            else:
+                campaign_limits = policy.limits
+                if (
+                    requested.scorer_timeout_sec > campaign_limits.scorer_timeout_sec
+                    or requested.scorer_memory_mb > campaign_limits.scorer_memory_mb
+                    or requested.scorer_cpus > campaign_limits.scorer_cpus
+                    or requested.scorer_output_bytes
+                    > campaign_limits.scorer_output_bytes
+                ):
+                    failures.append(
+                        f"criterion {criterion.id} scorer limits exceed campaign policy"
+                    )
             calls["scorer"] += 1
 
 
 def _validate_environment(
     task: AuthoredTaskV1,
     profile: EnvironmentProfileV1,
+    *,
+    repo_root: Path,
+    components: dict[str, str],
     failures: list[str],
 ) -> None:
     if profile.kind == "repository" and not task.environment.repository:
@@ -2018,6 +2222,27 @@ def _validate_environment(
         failures.append(
             f"task {task.id} integrations require a live-service environment"
         )
+    missing_capabilities = sorted(
+        {part.type for part in task.prompt} - set(profile.capabilities)
+    )
+    if missing_capabilities:
+        failures.append(
+            f"task {task.id} environment {profile.id} lacks prompt capabilities: "
+            + ", ".join(missing_capabilities)
+        )
+    for integration_id in task.environment.integration_ids:
+        if integration_id not in profile.allowed_integration_ids:
+            failures.append(
+                f"task {task.id} integration {integration_id} is not allowed by "
+                f"environment profile {profile.id}"
+            )
+            continue
+        try:
+            spec = load_integration(integration_id, repo_root)
+        except (FileNotFoundError, ValueError) as exc:
+            failures.append(f"task {task.id} integration {integration_id}: {exc}")
+            continue
+        components[f"integration:{integration_id}"] = spec.config_hash
 
 
 def _validate_interaction(
@@ -2081,6 +2306,7 @@ def _public_cases(
         for scenario in draft.scenarios
         for item in scenario.tasks
     }
+    criteria_by_id = {value.id: value for value in draft.criteria_sets}
     rows: list[dict[str, Any]] = []
     resources: dict[str, tuple[Path, Path, str]] = {}
     for index, task in enumerate(draft.tasks):
@@ -2094,6 +2320,19 @@ def _public_cases(
             harness: _task_harness_applicability(task, harness, environment, interactor)
             for harness in _SAFE_HARNESSES
         }
+        interaction_controller = _locked_interaction_controller(task, interactor)
+        criteria_profiles: dict[str, str] = {}
+        for criterion in criteria_by_id[task.criteria_set_id].criteria:
+            if criterion.evaluator.type == "judge":
+                judge = profiles.judge(str(criterion.evaluator.profile_id))
+                criteria_profiles[f"judge:{judge.id}"] = judge.profile_digest
+            elif criterion.evaluator.type == "inline_python":
+                runtime = profiles.scorer_runtime(
+                    str(criterion.evaluator.runtime_profile_id)
+                )
+                criteria_profiles[f"scorer_runtime:{runtime.id}"] = (
+                    runtime.profile_digest
+                )
         attachments: list[dict[str, Any]] = []
         prompt_lines: list[str] = []
         for part in task.prompt:
@@ -2137,7 +2376,7 @@ def _public_cases(
                     "repository": task.environment.repository,
                     "integration_ids": list(task.environment.integration_ids),
                 },
-                "interaction": task.interaction.to_dict(),
+                "interaction": interaction_controller,
                 "harness_applicability": {
                     harness: {"applicable": applicable, "reason": reason}
                     for harness, (applicable, reason) in harness_applicability.items()
@@ -2155,6 +2394,7 @@ def _public_cases(
                         ).profile_digest
                         for attachment in attachments
                     },
+                    **criteria_profiles,
                 },
                 "scenario_id": scenario_map[task.id],
                 "tags": list(task.tags),
@@ -2203,7 +2443,13 @@ def _authored_manifest(
                         "task_definition_digest": task_definition_digest,
                         "criteria_digest": criteria_digest,
                         "scenario_id": row["scenario_id"],
-                        "interaction": row["interaction"],
+                        "interaction": {
+                            "type": row["interaction"]["type"],
+                            "profile_id": row["interaction"].get("profile_id"),
+                            "max_user_turns": row["interaction"]["max_user_turns"],
+                            "max_agent_turns": row["interaction"]["max_agent_turns"],
+                        },
+                        "interaction_controller": row["interaction"],
                         "environment_profile_id": row["environment"]["profile_id"],
                         "environment_kind": row["environment"]["kind"],
                         "profile_digests": row["profile_digests"],
@@ -2259,12 +2505,6 @@ def _write_authored_harbor_task(
         shutil.copyfile(source, target)
         docker_lines.append(f"COPY {local.as_posix()} {value['target']}")
     interaction = _mapping(case.get("interaction"), "task interaction")
-    (root / "environment" / "fugue-task-interaction.json").write_text(
-        json.dumps(interaction, indent=2, sort_keys=True) + "\n"
-    )
-    docker_lines.append(
-        "COPY fugue-task-interaction.json /opt/fugue/task-interaction.json"
-    )
     (root / "environment" / "Dockerfile").write_text("\n".join(docker_lines) + "\n")
     (root / "task.toml").write_text(
         "\n".join(
@@ -2321,7 +2561,7 @@ def _evaluate_criterion(
     policy_evidence: set[str],
     repo_root: Path,
     env: Mapping[str, str],
-    judge_request: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None,
+    judge_request: Callable[..., tuple[Any, ...]] | None,
     inline_runner: Callable[..., dict[str, Any]] | None,
 ) -> dict[str, Any]:
     evaluator = criterion.evaluator
@@ -2338,9 +2578,10 @@ def _evaluate_criterion(
         "passed": None,
         "reason": "required evidence is unavailable",
         "cost_usd": None,
+        "route_receipt": None,
     }
     try:
-        score, reason, cost = _criterion_score(
+        score, reason, cost, route_receipt = _criterion_score(
             evaluator,
             evidence=evidence,
             profiles=profiles,
@@ -2360,6 +2601,31 @@ def _evaluate_criterion(
         "passed": score >= criterion.threshold,
         "reason": reason[:1000],
         "cost_usd": cost,
+        "route_receipt": route_receipt,
+    }
+
+
+def _locked_interaction_controller(
+    task: AuthoredTaskV1, profile: InteractorProfileV1 | None
+) -> dict[str, Any]:
+    interaction = task.interaction
+    return {
+        "type": interaction.type,
+        "profile_id": interaction.profile_id,
+        "profile_digest": profile.profile_digest if profile else None,
+        "model": profile.model if profile else None,
+        "scripted_turns": list(interaction.scripted_turns),
+        "directions": [
+            *(profile.directions if profile else ()),
+            *interaction.directions,
+        ],
+        "max_user_turns": interaction.max_user_turns,
+        "max_agent_turns": interaction.max_agent_turns,
+        "timeout_sec": interaction.timeout_sec,
+        "input_cost_per_million": (profile.input_cost_per_million if profile else 0.0),
+        "output_cost_per_million": (
+            profile.output_cost_per_million if profile else 0.0
+        ),
     }
 
 
@@ -2370,38 +2636,40 @@ def _criterion_score(
     profiles: TaskProfileCatalogV1,
     repo_root: Path,
     env: Mapping[str, str],
-    judge_request: Callable[..., tuple[dict[str, Any], dict[str, Any]]] | None,
+    judge_request: Callable[..., tuple[Any, ...]] | None,
     inline_runner: Callable[..., dict[str, Any]] | None,
-) -> tuple[float | None, str, float | None]:
+) -> tuple[float | None, str, float | None, dict[str, Any] | None]:
     kind = evaluator.type
     config = evaluator.config
     if kind == "benchmark_outcome":
         value = evidence.get("benchmark_pass")
         return (
-            (float(value), "deterministic benchmark outcome", None)
+            (float(value), "deterministic benchmark outcome", None, None)
             if isinstance(value, bool)
-            else (None, "benchmark outcome unavailable", None)
+            else (None, "benchmark outcome unavailable", None, None)
         )
     answer = evidence.get("answer")
     if kind == "answer_contains":
         if not isinstance(answer, str):
-            return None, "answer unavailable", None
+            return None, "answer unavailable", None, None
         values = [str(value).casefold() for value in config["values"]]
         matched = [value in answer.casefold() for value in values]
         return (
             sum(matched) / len(matched),
             f"matched {sum(matched)}/{len(matched)} required values",
             None,
+            None,
         )
     if kind == "answer_regex":
         if not isinstance(answer, str):
-            return None, "answer unavailable", None
+            return None, "answer unavailable", None, None
         matched = bool(re.search(str(config["pattern"]), answer, flags=re.MULTILINE))
         return (
             float(matched),
             "regular expression matched"
             if matched
             else "regular expression did not match",
+            None,
             None,
         )
     if kind == "artifact":
@@ -2411,47 +2679,66 @@ def _criterion_score(
             len(observed & required) / len(required),
             f"observed {len(observed & required)}/{len(required)} required artifacts",
             None,
+            None,
         )
     if kind == "tool_evidence":
         observed = _observed_tools(evidence.get("tool_calls"))
         required = set(str(value) for value in config["tools"])
         if not observed:
-            return None, "tool telemetry unavailable", None
+            return None, "tool telemetry unavailable", None, None
         return (
             len(observed & required) / len(required),
             f"observed {len(observed & required)}/{len(required)} required tools",
+            None,
             None,
         )
     if kind == "repository_diff":
         observed = set(str(value) for value in evidence.get("changed_paths") or [])
         expected = set(str(value) for value in config["paths"])
         if not observed:
-            return 0.0, "no changed paths observed", None
+            return 0.0, "no changed paths observed", None, None
         return (
             len(observed & expected) / len(expected),
             f"changed {len(observed & expected)}/{len(expected)} relevant paths",
+            None,
             None,
         )
     if kind == "judge":
         profile = profiles.judge(str(evaluator.profile_id))
         request = judge_request or _judge_request
-        payload, usage = request(profile=profile, evidence=evidence, env=env)
+        response = request(
+            profile=profile,
+            evidence=_judge_evidence(evidence, profile),
+            env=env,
+        )
+        if len(response) == 2:
+            payload, usage = response
+            route_receipt = None
+        elif len(response) == 3:
+            payload, usage, route_receipt = response
+        else:
+            raise ValueError("judge request returned an invalid response tuple")
         score = _unit_number(payload.get("score"), "judge score")
         reason = _bounded_text(payload.get("reason"), "judge reason", 1000)
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        cost = (
-            input_tokens * profile.input_cost_per_million
-            + output_tokens * profile.output_cost_per_million
-        ) / 1_000_000
-        return score, reason, cost
+        if not profile.input_cost_per_million and not profile.output_cost_per_million:
+            cost = None
+        elif not isinstance(usage.get("input_tokens"), int) or not isinstance(
+            usage.get("output_tokens"), int
+        ):
+            cost = None
+        else:
+            cost = (
+                int(usage["input_tokens"]) * profile.input_cost_per_million
+                + int(usage["output_tokens"]) * profile.output_cost_per_million
+            ) / 1_000_000
+        return score, reason, cost, route_receipt
     if kind == "inline_python":
         profile = profiles.scorer_runtime(str(evaluator.runtime_profile_id))
         runner = inline_runner or run_inline_scorer
         payload = runner(
             source=str(evaluator.source),
             evidence=evidence,
-            reference=evaluator.config,
+            reference=_mapping(evaluator.config.get("reference"), "scorer reference"),
             profile=profile,
             limits=_inline_limits(evaluator.config),
         )
@@ -2459,6 +2746,7 @@ def _criterion_score(
             float(payload["score"]),
             str(payload.get("reason") or "inline scorer"),
             0.0,
+            None,
         )
     raise AssertionError(f"unhandled evaluator: {kind}")
 
@@ -2486,6 +2774,24 @@ def _criterion_evidence(
     return result
 
 
+def _judge_evidence(
+    evidence: Mapping[str, Any], profile: JudgeProfileV1
+) -> dict[str, Any]:
+    keys_by_scope = {
+        "answer": {"answer"},
+        "artifacts": {"artifact_paths"},
+        "benchmark": {"benchmark_status", "benchmark_pass"},
+        "changed_paths": {"changed_paths"},
+        "opened_paths": {"opened_paths"},
+        "tool_calls": {"tool_calls"},
+        "trace_summary": {"trace_summary"},
+    }
+    permitted = {
+        key for scope in profile.evidence for key in keys_by_scope.get(scope, set())
+    }
+    return {key: value for key, value in evidence.items() if key in permitted}
+
+
 def _criteria_outcome(
     criterion_set: CriteriaSetV1, results: Sequence[Mapping[str, Any]]
 ) -> tuple[str, float | None, bool | None]:
@@ -2511,9 +2817,9 @@ def _criteria_outcome(
 
 def _judge_request(
     *, profile: JudgeProfileV1, evidence: Mapping[str, Any], env: Mapping[str, str]
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from fugue.bench.evaluations import _post_judge
-    from fugue.model_plane import resolve_model_route
+    from fugue.model_plane import model_route_identity, resolve_model_route
 
     route = resolve_model_route(profile.model, env)
     api_key = str(env.get(route.api_key_env) or "").strip()
@@ -2530,7 +2836,27 @@ def _judge_request(
         payload, usage = _post_judge(client, route, api_key, env, prompt)
     if not isinstance(payload, dict):
         raise ValueError("judge must return one JSON object")
-    return payload, usage
+    return (
+        payload,
+        usage,
+        {
+            "schema_version": 1,
+            "call_id": stable_digest(
+                {
+                    "profile_digest": profile.profile_digest,
+                    "evidence": evidence,
+                    "usage": usage,
+                }
+            ),
+            "role": "judge",
+            "profile_id": profile.id,
+            "profile_digest": profile.profile_digest,
+            "route": model_route_identity(route),
+            "blind_fields": list(profile.blind_fields),
+            "usage": usage,
+            "trace_scope": "separate_from_agent",
+        },
+    )
 
 
 def _group_results(
@@ -2542,6 +2868,15 @@ def _group_results(
     result: list[dict[str, Any]] = []
     for group_key, values in sorted(groups.items()):
         scored = [item for item in values if item.get("criteria_pass") is not None]
+        latencies = _numeric_values(values, "latency_ms")
+        input_tokens = _numeric_values(values, "n_input_tokens")
+        output_tokens = _numeric_values(values, "n_output_tokens")
+        costs = _numeric_values(values, "cost_usd")
+        tool_counts = [
+            count
+            for item in values
+            if (count := _tool_call_count(item.get("tool_calls"))) is not None
+        ]
         result.append(
             {
                 **dict(zip(keys, group_key, strict=True)),
@@ -2560,6 +2895,17 @@ def _group_results(
                     item.get("benchmark_pass") is True for item in values
                 ),
                 "unavailable": len(values) - len(scored),
+                "failures": sum(bool(item.get("failure")) for item in values),
+                "tool_calls": sum(tool_counts) if tool_counts else None,
+                "mean_tool_calls": (
+                    sum(tool_counts) / len(tool_counts) if tool_counts else None
+                ),
+                "mean_latency_ms": (
+                    sum(latencies) / len(latencies) if latencies else None
+                ),
+                "input_tokens": sum(input_tokens) if input_tokens else None,
+                "output_tokens": sum(output_tokens) if output_tokens else None,
+                "observed_cost_usd": sum(costs) if costs else None,
             }
         )
     return result
@@ -2600,8 +2946,10 @@ def _scenario_results(
             )
             for task in must_pass
         )
+        aggregate = _group_results(values, ("scenario_id",))[0]
         result.append(
             {
+                **aggregate,
                 "scenario_id": scenario_id,
                 "tasks": len(scenario.tasks),
                 "score": score,
@@ -2686,6 +3034,7 @@ def _scenario_interactions(
 
 def _judge_sensitivity(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[float]] = defaultdict(list)
+    aligned: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
         for criterion in row.get("criteria") or []:
             if (
@@ -2696,14 +3045,66 @@ def _judge_sensitivity(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
             groups[str(criterion.get("profile_id") or "unknown")].append(
                 float(criterion["score"])
             )
-    return [
+            aligned[str(row.get("prediction_id") or "")][
+                str(criterion.get("profile_id") or "unknown")
+            ].append(float(criterion["score"]))
+    summaries = [
         {
+            "kind": "profile",
             "judge_profile_id": profile,
             "scores": len(values),
             "mean_score": sum(values) / len(values),
         }
         for profile, values in sorted(groups.items())
     ]
+    profiles = sorted(groups)
+    for index, left in enumerate(profiles):
+        for right in profiles[index + 1 :]:
+            differences = [
+                abs(
+                    sum(values[left]) / len(values[left])
+                    - sum(values[right]) / len(values[right])
+                )
+                for values in aligned.values()
+                if left in values and right in values
+            ]
+            summaries.append(
+                {
+                    "kind": "pairwise_disagreement",
+                    "left_profile_id": left,
+                    "right_profile_id": right,
+                    "aligned_scores": len(differences),
+                    "mean_absolute_difference": (
+                        sum(differences) / len(differences) if differences else None
+                    ),
+                }
+            )
+    return summaries
+
+
+def _numeric_values(rows: Sequence[Mapping[str, Any]], field: str) -> list[float]:
+    result: list[float] = []
+    for row in rows:
+        value = row.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        number = float(value)
+        if math.isfinite(number) and number >= 0:
+            result.append(number)
+    return result
+
+
+def _tool_call_count(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(float(value)) and value >= 0 else None
+    if isinstance(value, Mapping):
+        values = [item for item in value.values() if isinstance(item, (int, float))]
+        return float(sum(values)) if values else None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return float(len(value))
+    return None
 
 
 def _cluster_mean(values: Mapping[str, Sequence[float]]) -> float | None:
@@ -2752,13 +3153,12 @@ def _validate_evaluator_config(
         "tool_evidence": {"tools"},
         "repository_diff": {"paths"},
         "judge": set(),
-        "inline_python": set(config),
+        "inline_python": {"reference", "limits"},
     }
-    if kind != "inline_python":
-        _reject_unknown(config, expected[kind], f"{kind} evaluator config")
-        if set(config) != expected[kind]:
-            missing = sorted(expected[kind] - set(config))
-            raise ValueError(f"{kind} evaluator config missing: {', '.join(missing)}")
+    _reject_unknown(config, expected[kind], f"{kind} evaluator config")
+    if set(config) != expected[kind]:
+        missing = sorted(expected[kind] - set(config))
+        raise ValueError(f"{kind} evaluator config missing: {', '.join(missing)}")
     if kind in {"answer_contains", "artifact", "tool_evidence", "repository_diff"}:
         key = next(iter(expected[kind]))
         values = config.get(key)
@@ -2779,6 +3179,8 @@ def _validate_evaluator_config(
             )
         if len(source) > _MAX_CODE:
             raise ValueError(f"inline scorer source exceeds {_MAX_CODE} characters")
+        _mapping(config.get("reference"), "inline scorer reference")
+        _inline_limits(config)
     if kind not in {"judge", "inline_python"} and (profile_id or runtime_id or source):
         raise ValueError(f"{kind} evaluator does not accept profiles or source")
 
@@ -2880,8 +3282,8 @@ def _mapping(value: Any, label: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _sequence(value: Any, label: str) -> list[Any]:
-    if not isinstance(value, (list, tuple)) or not value:
+def _sequence(value: Any, label: str, *, allow_empty: bool = False) -> list[Any]:
+    if not isinstance(value, (list, tuple)) or (not value and not allow_empty):
         raise ValueError(f"{label} must be a non-empty list")
     return list(value)
 

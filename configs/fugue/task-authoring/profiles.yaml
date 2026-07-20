@@ -5,7 +5,8 @@ environments:
     kind: repository
     base_image: python:3.12.10-slim-bookworm
     supported_harnesses: [hermes, openclaw, claude-code, codex]
-    capabilities: [text, resource, repository, artifact]
+    capabilities: [text, file, image, resource, repository, artifact]
+    allowed_integration_ids: []
     cpus: 2
     memory_mb: 4096
     storage_mb: 10240
@@ -14,7 +15,8 @@ environments:
     kind: artifact
     base_image: python:3.12.10-slim-bookworm
     supported_harnesses: [hermes, openclaw, claude-code, codex]
-    capabilities: [text, resource, artifact]
+    capabilities: [text, file, image, resource, artifact]
+    allowed_integration_ids: []
     cpus: 2
     memory_mb: 4096
     storage_mb: 10240
@@ -23,7 +25,8 @@ environments:
     kind: live_service
     base_image: python:3.12.10-slim-bookworm
     supported_harnesses: [hermes, openclaw, claude-code, codex]
-    capabilities: [text, resource, artifact, typed_integration]
+    capabilities: [text, file, image, resource, artifact, typed_integration]
+    allowed_integration_ids: []
     cpus: 2
     memory_mb: 4096
     storage_mb: 10240
@@ -32,7 +35,7 @@ resources:
     title: Fugue campaign contract
     kind: markdown
     path: docs/campaigns.md
-    sha256: d054b28898fd2310cd995f97e37b93b5c32cbd4ffa4d49a02297899e4e84255b
+    sha256: e26b1fd8d6d6a7464bb46109cef79c85961b3c3c8ec743c3d7f0a8bd0a20c5b3
     media_type: text/markdown
     target: /workspace/resources/campaigns.md
 interactors:
@@ -41,6 +44,8 @@ interactors:
     kind: scripted
     directions: []
     supported_harnesses: [hermes, openclaw, claude-code, codex]
+    input_cost_per_million: 0
+    output_cost_per_million: 0
   - id: evidence-clarifier-v1
     title: Evidence-seeking evaluation user
     kind: model
@@ -49,13 +54,15 @@ interactors:
       - Ask only for evidence needed to resolve the declared task.
       - Do not reveal criteria, expected answers, or private references.
     supported_harnesses: [hermes, openclaw, claude-code, codex]
+    input_cost_per_million: 0
+    output_cost_per_million: 0
 judges:
   - id: grounded-analysis-v1
     title: Blind grounded analysis judge
     model: openai/gpt-5
     prompt: Judge whether the response satisfies the criterion using only the supplied evidence. Do not infer the harness, model, treatment, or expected answer.
     evidence: [answer, artifacts, benchmark, changed_paths, opened_paths, tool_calls, trace_summary]
-    blind_fields: [harness, model, variant_id, context_system_id, candidate_id]
+    blind_fields: [harness, model, variant_id, context_system_id, candidate_id, treatment]
     input_cost_per_million: 0
     output_cost_per_million: 0
 scorer_runtimes:

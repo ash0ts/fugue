@@ -3294,6 +3294,18 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     agent_result = trial.get("agent_result") or {}
     local_usage = _local_usage(agent_result)
+    task_interaction = meta.get(
+        "task_interaction", {"status": "unavailable", "type": "single_turn"}
+    )
+    if not isinstance(task_interaction, dict):
+        task_interaction = {"status": "unavailable", "type": "single_turn"}
+    agent_cost = local_usage.get("cost_usd")
+    interactor_cost = task_interaction.get("observed_interactor_cost_usd")
+    if isinstance(agent_cost, (int, float)) and isinstance(
+        interactor_cost, (int, float)
+    ):
+        local_usage["agent_cost_usd"] = float(agent_cost)
+        local_usage["cost_usd"] = float(agent_cost) + float(interactor_cost)
     verifier_result = trial.get("verifier_result") or {}
     exception = trial.get("exception_info") or {}
     reward = (verifier_result.get("rewards") or {}).get("reward")
@@ -3457,6 +3469,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         or meta.get("weave_conversation_id"),
         "weave_conversation_ids": meta.get("weave_conversation_ids", []),
         "native_session_ids": meta.get("native_session_ids", []),
+        "task_interaction": task_interaction,
         "trace_content": meta.get("trace_content", "full"),
         "agent_response": (
             agent_response if meta.get("trace_content", "full") == "full" else None

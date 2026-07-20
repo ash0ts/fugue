@@ -697,7 +697,8 @@ uv build
 
 Core and context suites support Python 3.12 and 3.13. Serving and protocol
 compatibility run on Python 3.13. See `docs/campaigns.md` for the governed
-outer-loop contract, `docs/extension-guide.md` for context and
+outer-loop contract, `docs/task-authoring.md` for flexible tasks, scenarios,
+judges, and meta-analysis, `docs/extension-guide.md` for context and
 integration definitions, `docs/releases/0.1.md` for the base release, and
 `docs/releases/0.1.1.md` for the stacked hardening scope and evidence rules.
 

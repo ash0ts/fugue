@@ -1,0 +1,70 @@
+schema_version: 1
+id: harness-meta-analysis-v1
+revision: v1
+title: Governed harness meta-analysis
+objective: Author controlled task suites that identify task- and interaction-specific harness effects without producing a universal harness ranking.
+allowed:
+  experiments: [swe-frontier-harness]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  workloads: [harbor]
+  variants: [baseline]
+  context_systems: [none]
+  analyses: []
+  trace_content: [full, metadata]
+stages:
+  - id: qualification
+    predecessors: []
+    max_proposals: 4
+    max_cells: 16
+    require_eligible_parent: false
+  - id: discovery
+    predecessors: [qualification]
+    max_proposals: 4
+    max_cells: 96
+    require_eligible_parent: true
+  - id: interaction
+    predecessors: [qualification]
+    max_proposals: 2
+    max_cells: 96
+    require_eligible_parent: true
+  - id: holdout
+    predecessors: [discovery]
+    max_proposals: 2
+    max_cells: 96
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 10000
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 96
+  max_total_cells: 400
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+task_authoring:
+  enabled_stages: [qualification, discovery, interaction, holdout]
+  allowed_partitions: [qualification, discovery, holdout]
+  allowed_environment_profiles:
+    [repository-python-v1, artifact-python-v1, typed-service-python-v1]
+  allowed_resource_profiles: [campaign-contract-v1]
+  allowed_interactor_profiles: [scripted-reviewer-v1, evidence-clarifier-v1]
+  allowed_judge_profiles: [grounded-analysis-v1]
+  allowed_scorer_runtimes: [python312-sandbox-v1]
+  allowed_prompt_parts: [text, file, image, artifact, resource]
+  adaptive_discovery: true
+  limits:
+    max_tasks: 24
+    max_scenarios: 8
+    max_prompt_bytes: 262144
+    max_authored_asset_bytes: 16777216
+    max_user_turns: 3
+    max_agent_turns: 4
+    max_interactor_calls: 72
+    max_judge_calls: 384
+    scorer_timeout_sec: 60
+    scorer_memory_mb: 512
+    scorer_cpus: 1
+    scorer_output_bytes: 65536
+evidence_scope: traces
+require_clean_source: true

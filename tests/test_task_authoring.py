@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from fugue.bench.manifest import load_manifest
 from fugue.bench.task_authoring import (
+    AuthoredTaskMaterializer,
     analyze_task_evaluation,
     evaluate_task_rows,
     materialize_task_suite_lock,
     preview_task_suite,
+    run_inline_scorer,
     scoring_revision_from_dict,
     task_authoring_policy_from_dict,
     task_evaluation_from_dict,
@@ -112,7 +116,14 @@ def _profiles(tmp_path: Path):
                     "model": "openai/gpt-5",
                     "prompt": "Judge only the supplied evidence.",
                     "evidence": ["answer"],
-                    "blind_fields": ["harness", "model", "variant_id"],
+                    "blind_fields": [
+                        "harness",
+                        "model",
+                        "variant_id",
+                        "context_system_id",
+                        "candidate_id",
+                        "treatment",
+                    ],
                     "input_cost_per_million": 1,
                     "output_cost_per_million": 2,
                 }
@@ -335,6 +346,25 @@ def test_rescoring_is_immutable_and_keeps_benchmark_outcome_separate(
         True,
         False,
     ]
+    richer_revision = scoring_revision_from_dict(
+        {
+            "schema_version": 1,
+            "id": "answer-artifacts-v1",
+            "evidence_view": "answer_artifacts_tools",
+        }
+    )
+    rescored = evaluate_task_rows(
+        campaign_id="campaign-one",
+        run_id="run-one",
+        lock=lock,
+        revision=richer_revision,
+        rows=rows,
+        profiles=profiles,
+        repo_root=tmp_path,
+        env={},
+    )
+    assert rescored.task_suite_digest == evaluation.task_suite_digest
+    assert rescored.evaluation_digest != evaluation.evaluation_digest
     analysis = analyze_task_evaluation(
         analysis_id="task-shape-v1",
         lock=lock,
@@ -387,3 +417,282 @@ def test_required_broken_evaluator_is_unavailable_not_agent_failure(
     assert evaluation.unavailable == 1
     assert evaluation.failed == 0
     assert evaluation.prediction_results[0]["criteria_status"] == "unavailable"
+
+
+def test_future_scripted_turns_are_not_mounted_in_the_agent_environment(
+    tmp_path: Path,
+) -> None:
+    profiles, preview = _preview(tmp_path, interaction="scripted")
+    destination = tmp_path / ".fugue/runtime/campaigns/campaign-one/assets"
+    lock = materialize_task_suite_lock(
+        preview,
+        profiles=profiles,
+        repo_root=tmp_path,
+        destination=destination,
+        harnesses=("codex",),
+    )
+    task_root = tmp_path / "materialized"
+    AuthoredTaskMaterializer().materialize(
+        load_manifest(tmp_path / lock.manifest_path),
+        task_root,
+        tmp_path / lock.public_cases_path,
+        repo_root=tmp_path,
+    )
+
+    environment = task_root / "task-one/environment"
+    assert not (environment / "fugue-task-interaction.json").exists()
+    rendered = "\n".join(
+        path.read_text(errors="ignore")
+        for path in (task_root / "task-one").rglob("*")
+        if path.is_file()
+    )
+    assert "Show the evidence behind that conclusion." not in rendered
+
+
+def test_every_task_artifact_rejects_unknown_fields_and_versions(
+    tmp_path: Path,
+) -> None:
+    profiles, preview = _preview(tmp_path)
+    lock = materialize_task_suite_lock(
+        preview,
+        profiles=profiles,
+        repo_root=tmp_path,
+        destination=tmp_path / ".fugue/runtime/campaigns/campaign-one/assets",
+        harnesses=("codex",),
+    )
+    revision = scoring_revision_from_dict(
+        {"schema_version": 1, "id": "answer-v1", "evidence_view": "answer"}
+    )
+    evaluation = evaluate_task_rows(
+        campaign_id="campaign-one",
+        run_id="run-one",
+        lock=lock,
+        revision=revision,
+        rows=[
+            {
+                "prediction_id": "prediction-one",
+                "task_name": "task-one",
+                "harness": "codex",
+                "status": "passed",
+                "pass": True,
+            }
+        ],
+        profiles=profiles,
+        repo_root=tmp_path,
+        env={},
+    )
+    analysis = analyze_task_evaluation(
+        analysis_id="analysis-v1",
+        lock=lock,
+        evaluation=evaluation,
+        repo_root=tmp_path,
+    )
+    artifacts = (
+        (task_suite_preview_from_dict, preview),
+        (task_suite_lock_from_dict, lock),
+        (task_evaluation_from_dict, evaluation),
+        (task_study_analysis_from_dict, analysis),
+    )
+    for parser, artifact in artifacts:
+        unknown = artifact.to_dict()
+        unknown["unexpected"] = True
+        with pytest.raises(ValueError, match="unknown"):
+            parser(unknown)
+
+        unsupported = artifact.to_dict()
+        unsupported["schema_version"] = 2
+        with pytest.raises(ValueError, match="schema_version 1"):
+            parser(unsupported)
+
+
+def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profiles = _profiles(tmp_path)
+    profile = profiles.scorer_runtime("scorer-v1")
+    limits = _policy().limits
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"score": 1, "reason": "passed"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("fugue.bench.task_authoring.subprocess.run", fake_run)
+    payload = run_inline_scorer(
+        source="print('{}')",
+        evidence={"answer": "safe"},
+        reference={"expected": "private"},
+        profile=profile,
+        limits=limits,
+    )
+
+    assert payload["score"] == 1
+    command = observed["command"]
+    assert isinstance(command, list)
+    for expected in (
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "no-new-privileges",
+        "--pids-limit",
+    ):
+        assert expected in command
+    kwargs = observed["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert set(kwargs["env"]) == {"PATH"}
+    assert kwargs["timeout"] == limits.scorer_timeout_sec
+
+
+def test_adaptive_task_preview_rejects_non_discovery_partitions(
+    tmp_path: Path,
+) -> None:
+    profiles = _profiles(tmp_path)
+    raw = _draft().to_dict()
+    raw.pop("draft_digest")
+    raw["parent_outcome_id"] = "earlier-outcome"
+    raw["decision_rationale"] = "Target a failure observed in discovery."
+    preview = preview_task_suite(
+        campaign_id="campaign-one",
+        catalog_digest="c" * 64,
+        policy_digest="d" * 64,
+        draft=task_suite_draft_from_dict(raw),
+        policy=_policy(),
+        profiles=profiles,
+        harnesses=("codex",),
+        repo_root=tmp_path,
+    )
+
+    assert not preview.eligible
+    assert any("discovery tasks only" in failure for failure in preview.failures)
+
+
+def test_blind_judge_has_a_separate_receipt_and_accounted_cost(
+    tmp_path: Path,
+) -> None:
+    profiles = _profiles(tmp_path)
+    raw = _draft().to_dict()
+    raw.pop("draft_digest")
+    raw["criteria_sets"][0] = {
+        "id": "grounded",
+        "title": "Grounded answer",
+        "pass_threshold": 0.5,
+        "criteria": [
+            {
+                "id": "blind-judge",
+                "description": "The answer is grounded.",
+                "evaluator": {
+                    "type": "judge",
+                    "profile_id": "judge-v1",
+                    "config": {},
+                },
+                "evidence": ["answer"],
+                "weight": 1,
+                "threshold": 0.5,
+                "required": True,
+            }
+        ],
+    }
+    preview = preview_task_suite(
+        campaign_id="campaign-one",
+        catalog_digest="c" * 64,
+        policy_digest="d" * 64,
+        draft=task_suite_draft_from_dict(raw),
+        policy=_policy(),
+        profiles=profiles,
+        harnesses=("codex",),
+        repo_root=tmp_path,
+        paid_call_reserve_usd=2,
+    )
+    assert preview.estimated_calls["judge"] == 1
+    assert preview.estimated_cost_usd == 2
+    lock = materialize_task_suite_lock(
+        preview,
+        profiles=profiles,
+        repo_root=tmp_path,
+        destination=tmp_path / ".fugue/runtime/campaigns/campaign-one/judge-assets",
+        harnesses=("codex",),
+    )
+    observed: dict[str, object] = {}
+
+    def judge_request(*, profile, evidence, env):
+        del profile, env
+        observed["evidence"] = evidence
+        return (
+            {"score": 0.75, "reason": "Grounded."},
+            {"input_tokens": 10, "output_tokens": 5},
+            {"role": "judge", "trace_scope": "separate_from_agent"},
+        )
+
+    evaluation = evaluate_task_rows(
+        campaign_id="campaign-one",
+        run_id="run-one",
+        lock=lock,
+        revision=scoring_revision_from_dict(
+            {"schema_version": 1, "id": "judge-v1", "evidence_view": "answer"}
+        ),
+        rows=[
+            {
+                "prediction_id": "prediction-one",
+                "task_name": "task-one",
+                "harness": "codex",
+                "model": "secret-model-label",
+                "variant_id": "secret-treatment",
+                "agent_response": "Evidence-backed answer.",
+            }
+        ],
+        profiles=profiles,
+        repo_root=tmp_path,
+        env={},
+        judge_request=judge_request,
+    )
+
+    assert observed["evidence"] == {"answer": "Evidence-backed answer."}
+    assert evaluation.judge_calls == 1
+    assert evaluation.unmeasured_paid_calls == 0
+    assert evaluation.observed_cost_usd == pytest.approx(0.00002)
+    criterion = evaluation.prediction_results[0]["criteria"][0]
+    assert criterion["route_receipt"]["trace_scope"] == "separate_from_agent"
+
+
+@pytest.mark.parametrize(
+    ("completed", "error"),
+    [
+        (
+            subprocess.CompletedProcess(["docker"], 0, stdout="not-json", stderr=""),
+            json.JSONDecodeError,
+        ),
+        (
+            subprocess.CompletedProcess(["docker"], 0, stdout="[]", stderr=""),
+            ValueError,
+        ),
+    ],
+)
+def test_inline_scorer_rejects_malformed_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    completed: subprocess.CompletedProcess[str],
+    error: type[Exception],
+) -> None:
+    profile = _profiles(tmp_path).scorer_runtime("scorer-v1")
+    monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.subprocess.run", lambda *args, **kwargs: completed
+    )
+    with pytest.raises(error):
+        run_inline_scorer(
+            source="print('{}')",
+            evidence={},
+            reference={},
+            profile=profile,
+            limits=_policy().limits,
+        )

@@ -68,6 +68,7 @@ from fugue.bench.context import list_context_systems
 from fugue.bench.execution import new_run_id
 from fugue.bench.library import (
     ExperimentSpec,
+    IntegrationSelection,
     get_experiment,
     get_prompt,
     get_skill,
@@ -98,6 +99,7 @@ from fugue.bench.task_authoring import (
     read_task_suite_lock,
     scoring_revision_from_dict,
     task_authoring_policy_from_dict,
+    task_evaluation_call_estimate,
     task_evaluation_from_dict,
     task_study_analysis_from_dict,
     task_suite_draft_from_dict,
@@ -678,6 +680,8 @@ class CampaignService:
             if not experiment.workloads:
                 registered_workloads.add("harbor")
             registered_variants.update(item.id for item in experiment.variants)
+        if policy.task_authoring is not None:
+            registered_workloads.add("harbor")
         for kind, allowed_values, registered_values in (
             ("harness", policy.allowed_harnesses, registered_harnesses),
             ("workload", policy.allowed_workloads, registered_workloads),
@@ -813,6 +817,7 @@ class CampaignService:
             profiles=profiles,
             harnesses=policy.allowed_harnesses,
             repo_root=self.repo_root,
+            paid_call_reserve_usd=policy.limits.initial_cell_reserve_usd,
         )
 
     def lock_task_suite(
@@ -926,6 +931,15 @@ class CampaignService:
             )
             if existing is not None:
                 return task_evaluation_from_dict(self._read_artifact(existing))
+            in_progress = self._operation(campaign_id, operation_id)
+            if in_progress is not None:
+                raise CampaignError(
+                    "operation_incomplete",
+                    "task scoring previously started but did not commit an artifact; "
+                    "the operation is blocked to prevent repeating paid judge calls",
+                    category="evidence",
+                    details={"operation_id": operation_id},
+                )
             policy = self._policy(campaign_id)
             lock = read_task_suite_lock(self.repo_root, campaign_id, task_suite_digest)
             self._require_run_task_suite(campaign_id, run_id, lock)
@@ -949,13 +963,42 @@ class CampaignService:
                 to_weave=False,
             )
             rows = _read_jsonl(exported.path)
+            profiles = load_task_profiles(self.repo_root)
+            call_estimate = task_evaluation_call_estimate(
+                lock, rows, self.repo_root, profiles
+            )
+            paid_call_reserve = float(call_estimate["reserve_usd"])
+            if paid_call_reserve > self._remaining_task_budget(campaign_id, policy):
+                raise CampaignError(
+                    "budget_exceeded",
+                    "task evaluation paid-call reserve exceeds the remaining "
+                    "campaign budget",
+                    category="admission",
+                    details={
+                        "judge_calls": call_estimate["judge"],
+                        "reserve_usd": paid_call_reserve,
+                    },
+                )
+            self._write_operation(
+                campaign_id,
+                operation_id,
+                {
+                    "schema_version": CAMPAIGN_SCHEMA_VERSION,
+                    "operation_id": operation_id,
+                    "action": "score_task_suite",
+                    "input_digest": operation_input,
+                    "status": "scoring",
+                    "judge_calls": call_estimate["judge"],
+                    "paid_call_reserve_usd": paid_call_reserve,
+                },
+            )
             evaluation = evaluate_task_rows(
                 campaign_id=campaign_id,
                 run_id=run_id,
                 lock=lock,
                 revision=revision,
                 rows=rows,
-                profiles=load_task_profiles(self.repo_root),
+                profiles=profiles,
                 repo_root=self.repo_root,
                 env=self.operator.env,
             )
@@ -1382,12 +1425,13 @@ class CampaignService:
                 and parent.get("maximum_measured_cell_cost_usd") is not None
                 else None
             )
-            reservation, per_cell = reserve_campaign_cost(
+            reservation, _ = reserve_campaign_cost(
                 cell_count=plan.cell_count,
                 initial_cell_reserve_usd=policy.limits.initial_cell_reserve_usd,
                 safety_margin=policy.limits.safety_margin,
                 prior_maximum_cell_cost_usd=prior_maximum,
             )
+            per_cell = reservation / plan.cell_count
             remaining = _remaining_budget(ledger, policy)
             if reservation > remaining + 1e-9:
                 raise CampaignError(
@@ -2510,6 +2554,10 @@ class CampaignService:
             presets=[],
             default_preset=None,
             evaluation_generation=None,
+            integrations=[
+                IntegrationSelection(id=integration_id)
+                for integration_id in lock.integration_ids
+            ],
         )
 
     def _request(self, proposal: ExperimentProposalV1) -> ExperimentRequest:

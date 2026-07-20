@@ -6,11 +6,22 @@ prepare and admit an immutable plan, launch it through `OperatorService`, and
 receive a reconciled outcome without acquiring authority to write code or
 configuration.
 
-The lifecycle is:
+The registered-experiment lifecycle is:
 
 ```text
 catalog → proposal → plan receipt → prepared plan → admission → run → outcome
 ```
+
+When the campaign policy enables governed task authoring, the same service
+extends that lifecycle without adding another executor:
+
+```text
+catalog → task draft → task preview → task lock → proposal → plan → admission
+        → run → evaluation → meta-analysis
+```
+
+See [Governed task authoring](task-authoring.md) for the strict task, scenario,
+interaction, criteria, scoring, and analysis contracts.
 
 Campaign authority is a strict, source-controlled `ResearchCampaignSpecV1` in
 `configs/fugue/campaigns`. The policy allowlists registered components and sets
@@ -26,6 +37,25 @@ prepared = service.prepare(plan, "prepare-operation")
 admission = service.admit(prepared, "admit-operation")
 status = service.launch(admission, "launch-operation")
 outcome = service.finalize(status.runs[0]["run_id"], "finalize-operation")
+```
+
+Authored suites add four methods to the same boundary:
+
+```python
+preview = service.preview_task_suite("my-campaign", catalog.catalog_digest, draft)
+suite = service.lock_task_suite(preview, "lock-suite-operation")
+
+# proposal.task_suite_digest = suite.suite_digest; then use preview/prepare/
+# admit/launch/finalize exactly as above.
+evaluation = service.score_task_suite(
+    run_id, suite.suite_digest, scoring_revision, "score-operation"
+)
+analysis = service.analyze_task_study(
+    run_id,
+    "task-study-v1",
+    "analyze-operation",
+    evaluation_digest=evaluation.evaluation_digest,
+)
 ```
 
 Every mutating call requires a caller-supplied operation ID. Repeating an ID

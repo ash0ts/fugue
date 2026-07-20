@@ -53,7 +53,7 @@ jobs:
           tests/test_execution.py tests/test_integrations.py tests/test_library.py
           tests/test_manifest.py tests/test_model_plane.py tests/test_preflight.py
           tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py tests/test_atlas_site.py
-          tests/test_tool_policy.py
+          tests/test_task_authoring.py tests/test_tool_policy.py
       - name: Test context and operator contracts
         if: matrix.suite == 'context'
         env:
@@ -67,6 +67,7 @@ jobs:
           tests/test_evaluation_assets.py tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
           tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
+          tests/test_task_interaction.py
       - name: Test development and release tooling
         if: matrix.suite == 'dev'
         env:
