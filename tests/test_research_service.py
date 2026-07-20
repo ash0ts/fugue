@@ -338,6 +338,76 @@ def test_python_client_preserves_same_artifacts(tmp_path: Path) -> None:
     assert updated.notes[-1].text == "Experiment completed."
 
 
+def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) -> None:
+    service, campaign = _service(tmp_path)
+    client = FugueResearchClient(service)
+    study = client.studies.get("study-1")
+    assert study.context().brief["question"] == "Which components matter?"
+
+    preview = study.experiments.preview(_draft())
+    started = study.experiments.start(preview, idempotency_key="start-lineage")
+    running = service.run_once("worker-before-restart")
+    assert running and running.state == "running"
+    cursor = started.events()[-1].sequence
+
+    restarted = ResearchService(
+        tmp_path,
+        campaign_service=campaign,  # type: ignore[arg-type]
+        store=StudyStore(tmp_path),
+    )
+    reconnected = FugueResearchClient(restarted)
+    handle = reconnected.experiment(started.id)
+    assert handle.events(after=cursor) == ()
+    completed = restarted.run_once("worker-after-restart")
+    assert completed and completed.state == "completed"
+    assert campaign.launches == 1
+
+    outcome = handle.result()
+    source = {
+        "kind": "outcome",
+        "ref": outcome["outcome"]["outcome_id"],
+        "digest": outcome["outcome"]["outcome_digest"],
+    }
+    resumed_study = reconnected.studies.get("study-1")
+    updated = resumed_study.record(
+        "The admitted experiment completed after reconnecting.",
+        runs=outcome["run_refs"],
+        results=[
+            {
+                "id": "result-reconnected",
+                "statement": "The locked comparison completed with reconciled evidence.",
+                "kind": "qualification",
+                "outcome": "completed",
+                "population": "two planned cells",
+                "conditions": {"attempts": 1},
+                "sample_size": 2,
+                "aggregation": "planned cells",
+                "exclusions": ["not a harness ranking"],
+                "sources": [source],
+            }
+        ],
+        expected_revision=resumed_study.revision,
+        idempotency_key="record-reconnected-result",
+    )
+    assert updated.results[-1].sources[0].digest == _D
+
+    child_values = _draft().to_dict()
+    child_values.pop("draft_digest")
+    child_values["proposal_id"] = "proposal-child"
+    child_values["question"] = "Does the observed branch replicate?"
+    child_values["parent_experiment_ids"] = [started.id]
+    child = resumed_study.experiments.preview(
+        build_experiment_draft(
+            **{
+                key: value
+                for key, value in child_values.items()
+                if key != "schema_version"
+            }
+        )
+    )
+    assert child.draft["parent_experiment_ids"] == [started.id]
+
+
 def test_prelaunch_cancellation_is_idempotent_and_input_bound(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     preview = service.preview_experiment("study-1", _draft())
