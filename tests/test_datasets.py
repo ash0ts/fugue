@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -51,8 +52,24 @@ def test_materialized_harbor_dataset_is_atomic_and_reusable(
 
     first = materialize_manifest_dataset(manifest, tmp_path)
     second = materialize_manifest_dataset(manifest, tmp_path)
+    marker = json.loads((first / DATASET_MANIFEST).read_text())
+    marker["fingerprint"] = datasets._legacy_dataset_fingerprint(
+        manifest, manifest.dataset.source
+    )
+    (first / DATASET_MANIFEST).write_text(json.dumps(marker))
+    mirrored = replace(
+        manifest,
+        dataset=replace(
+            manifest.dataset,
+            source={
+                "url": "https://mirror.example.test/data.jsonl",
+                "sha256": "a" * 64,
+            },
+        ),
+    )
+    third = materialize_manifest_dataset(mirrored, tmp_path)
 
-    assert first == second
+    assert first == second == third
     assert first is not None
     task = first / "swe-qa-pro-000-fixture"
     assert (task / "task.toml").is_file()
