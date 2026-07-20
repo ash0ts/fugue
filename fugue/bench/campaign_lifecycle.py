@@ -3634,6 +3634,7 @@ def _canonical_preparation(
                 "image": item.image,
                 "image_id": item.image_id,
                 "recipe_sha256": item.recipe_sha256,
+                "verification_required": item.verification_required,
                 "verification": _json_value(item.verification),
             }
             for item in preparation.task_runtimes
@@ -3679,6 +3680,8 @@ def _require_preparation(preparation: Mapping[str, Any]) -> None:
             details={"targets": skipped},
         )
     for runtime in preparation.get("task_runtimes") or []:
+        if runtime.get("verification_required") is not True:
+            continue
         verification = runtime.get("verification") or {}
         if (
             verification.get("base_failed") is not True

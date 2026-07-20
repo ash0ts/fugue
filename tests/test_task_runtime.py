@@ -78,6 +78,20 @@ def _swebench_verifier_fixture(tmp_path: Path, *, editable_target: str = "."):
     return load_manifest(manifest_path), dataset, script
 
 
+def test_gold_verification_requirement_is_manifest_scoped(tmp_path: Path) -> None:
+    authored_manifest, _ = _fixture(tmp_path / "authored")
+    swe_manifest = replace(
+        authored_manifest,
+        dataset=replace(
+            authored_manifest.dataset,
+            ref="swe-bench/swe-bench-verified",
+        ),
+    )
+
+    assert not task_runtime.task_runtime_requires_gold_verification(authored_manifest)
+    assert task_runtime.task_runtime_requires_gold_verification(swe_manifest)
+
+
 def test_task_preparation_locks_image_and_disables_trial_network(
     tmp_path: Path, monkeypatch
 ) -> None:

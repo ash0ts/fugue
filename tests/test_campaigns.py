@@ -230,6 +230,7 @@ class FakeCampaignOperator(OperatorService):
                     image="task:test",
                     image_id="sha256:task",
                     recipe_sha256="b" * 64,
+                    verification_required=True,
                     verification={"base_failed": True, "gold_passed": True},
                 ),
             ),
