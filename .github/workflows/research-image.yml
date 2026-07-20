@@ -34,7 +34,8 @@ jobs:
           mkdir -p .fugue/secrets .fugue/trace-data
           printf '%s\n' 'ci-research-token' > .fugue/secrets/research_api_key
           printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
-          chmod 600 .fugue/secrets/*
+          chmod 700 .fugue/secrets
+          chmod 444 .fugue/secrets/*
       - name: Build the local architecture image
         run: docker build -f Dockerfile.research -t fugue-research:ci .
       - name: Start only the control plane

@@ -383,10 +383,32 @@ def test_container_bootstrap_creates_private_idempotent_secrets(
     token_path = Path(first["research_api_key_file"])
     token = token_path.read_text(encoding="utf-8")
     assert token.strip()
-    assert token_path.stat().st_mode & 0o777 == 0o600
+    assert token_path.parent.stat().st_mode & 0o777 == 0o700
+    assert token_path.stat().st_mode & 0o777 == 0o444
     second = bootstrap_container_secrets(tmp_path)
     assert second == first
     assert token_path.read_text(encoding="utf-8") == token
+
+
+def test_container_bootstrap_repairs_secret_modes_for_non_root_compose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret_dir = tmp_path / ".fugue" / "secrets"
+    secret_dir.mkdir(parents=True)
+    secret_dir.chmod(0o755)
+    for name in ("research_api_key", "wandb_api_key"):
+        path = secret_dir / name
+        path.write_text(f"{name}-fixture\n", encoding="utf-8")
+        path.chmod(0o600)
+
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    bootstrap_container_secrets(tmp_path)
+
+    assert secret_dir.stat().st_mode & 0o777 == 0o700
+    assert all(
+        (secret_dir / name).stat().st_mode & 0o777 == 0o444
+        for name in ("research_api_key", "wandb_api_key")
+    )
 
 
 def test_mcp_has_prompts_but_no_approval_tool(tmp_path: Path) -> None:

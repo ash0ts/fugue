@@ -27,6 +27,11 @@ WANDB_API_KEY=... fugue research bootstrap --repo-root .
 docker compose -f compose.research.yaml up --build -d
 ```
 
+The bootstrap command keeps `.fugue/secrets` accessible only to the host user
+and makes the files inside it read-only. This is required because local Compose
+implements file-backed secrets as bind mounts and the control service runs as a
+non-root user. Run bootstrap again to repair permissions on an older setup.
+
 The control endpoint is `http://127.0.0.1:8787`. Configure an MCP-capable Agent
 with:
 

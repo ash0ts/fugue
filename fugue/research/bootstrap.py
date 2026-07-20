@@ -13,11 +13,14 @@ def bootstrap_container_secrets(
     root = repo_root.resolve()
     secret_dir = root / ".fugue" / "secrets"
     secret_dir.mkdir(parents=True, exist_ok=True)
+    secret_dir.chmod(0o700)
     (root / ".fugue" / "trace-data").mkdir(parents=True, exist_ok=True)
 
     agent_token = secret_dir / "research_api_key"
     if not agent_token.exists():
         _write_secret(agent_token, secrets.token_urlsafe(32))
+    else:
+        _make_compose_readable(agent_token)
 
     wandb_token = secret_dir / "wandb_api_key"
     if not wandb_token.exists():
@@ -29,6 +32,8 @@ def bootstrap_container_secrets(
                 "WANDB_API_KEY or --wandb-api-key-file is required for bootstrap"
             )
         _write_secret(wandb_token, value)
+    else:
+        _make_compose_readable(wandb_token)
 
     return {
         "research_api_key_file": str(agent_token),
@@ -38,8 +43,20 @@ def bootstrap_container_secrets(
 
 
 def _write_secret(path: Path, value: str) -> None:
-    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    # Compose implements file-backed secrets as bind mounts, so the container's
+    # non-root control process needs read permission on the mounted inode.  The
+    # containing directory remains host-private while the mounted file itself is
+    # read-only to every container user.
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o444)
     try:
         os.write(descriptor, f"{value}\n".encode())
     finally:
         os.close(descriptor)
+    path.chmod(0o444)
+
+
+def _make_compose_readable(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"container secret must be a regular file: {path}")
+    path.chmod(0o444)
