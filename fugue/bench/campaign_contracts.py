@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fugue.bench.candidates import stable_digest
+from fugue.bench.task_authoring import TaskAuthoringPolicyV1
 
 CAMPAIGN_SCHEMA_VERSION = 1
 _EVIDENCE_REQUIREMENTS = {
@@ -104,6 +105,7 @@ class ResearchCampaignSpecV1:
     allowed_trace_content: tuple[str, ...]
     stages: tuple[CampaignStagePolicyV1, ...]
     limits: CampaignLimitsV1
+    task_authoring: TaskAuthoringPolicyV1 | None = None
     evidence_scope: EvidenceScope = "rows"
     require_clean_source: bool = True
     campaign_digest: str = ""
@@ -128,6 +130,9 @@ class ResearchCampaignSpecV1:
                 },
                 "stages": [asdict(stage) for stage in self.stages],
                 "limits": asdict(self.limits),
+                "task_authoring": (
+                    self.task_authoring.to_dict() if self.task_authoring else None
+                ),
                 "evidence_scope": self.evidence_scope,
                 "require_clean_source": self.require_clean_source,
                 "campaign_digest": self.campaign_digest,
@@ -146,6 +151,7 @@ class CampaignCatalogSnapshotV1:
     harnesses: tuple[str, ...]
     context_systems: tuple[dict[str, Any], ...]
     analyses: tuple[dict[str, Any], ...]
+    task_authoring: dict[str, Any] | None
     component_digests: dict[str, str]
     catalog_digest: str = ""
 
@@ -176,6 +182,7 @@ class ExperimentProposalV1:
     n_tasks: int | None
     n_concurrent: int
     trace_content: str
+    task_suite_digest: str | None = None
     analysis_ids: tuple[str, ...] = ()
     parent_outcome_id: str | None = None
     decision_rationale: str = ""

@@ -1,0 +1,65 @@
+schema_version: 1
+environments:
+  - id: repository-python-v1
+    title: Pinned repository workspace
+    kind: repository
+    base_image: python:3.12.10-slim-bookworm
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    capabilities: [text, resource, repository, artifact]
+    cpus: 2
+    memory_mb: 4096
+    storage_mb: 10240
+  - id: artifact-python-v1
+    title: Blank artifact workspace
+    kind: artifact
+    base_image: python:3.12.10-slim-bookworm
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    capabilities: [text, resource, artifact]
+    cpus: 2
+    memory_mb: 4096
+    storage_mb: 10240
+  - id: typed-service-python-v1
+    title: Typed live-service workspace
+    kind: live_service
+    base_image: python:3.12.10-slim-bookworm
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    capabilities: [text, resource, artifact, typed_integration]
+    cpus: 2
+    memory_mb: 4096
+    storage_mb: 10240
+resources:
+  - id: campaign-contract-v1
+    title: Fugue campaign contract
+    kind: markdown
+    path: docs/campaigns.md
+    sha256: d054b28898fd2310cd995f97e37b93b5c32cbd4ffa4d49a02297899e4e84255b
+    media_type: text/markdown
+    target: /workspace/resources/campaigns.md
+interactors:
+  - id: scripted-reviewer-v1
+    title: Scripted evaluation user
+    kind: scripted
+    directions: []
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+  - id: evidence-clarifier-v1
+    title: Evidence-seeking evaluation user
+    kind: model
+    model: openai/gpt-5
+    directions:
+      - Ask only for evidence needed to resolve the declared task.
+      - Do not reveal criteria, expected answers, or private references.
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+judges:
+  - id: grounded-analysis-v1
+    title: Blind grounded analysis judge
+    model: openai/gpt-5
+    prompt: Judge whether the response satisfies the criterion using only the supplied evidence. Do not infer the harness, model, treatment, or expected answer.
+    evidence: [answer, artifacts, benchmark, changed_paths, opened_paths, tool_calls, trace_summary]
+    blind_fields: [harness, model, variant_id, context_system_id, candidate_id]
+    input_cost_per_million: 0
+    output_cost_per_million: 0
+scorer_runtimes:
+  - id: python312-sandbox-v1
+    title: Isolated Python 3.12 scorer
+    image: python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+    command: [python, /input/scorer.py, /input/input.json]

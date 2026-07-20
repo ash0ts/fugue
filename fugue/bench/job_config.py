@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -279,6 +280,9 @@ def _build_jobs(
                         continue
                 applicable = base_applicable
                 skip_reason = base_skip_reason
+                applicable, skip_reason = _authored_task_applicability(
+                    tasks[0], harness.name, applicable, skip_reason
+                )
                 job_name = _job_name(
                     run_name=selected_run_name,
                     workload_id=workload_id,
@@ -726,6 +730,7 @@ def _job_config(
         "harness_capabilities": harness_capabilities(harness.agent).to_dict(),
         "scorer_hashes": scorer_hashes,
         "expected_artifact_paths": artifact_source_paths(expected_artifacts),
+        "task_authoring": _task_authoring_metadata(tasks[0]),
     }
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
@@ -978,6 +983,9 @@ def _job_env(
             "FUGUE_HARNESS": harness.name,
             "FUGUE_JOB_NAME": job_name,
             "FUGUE_TASK_NAME": task_id,
+            "FUGUE_TASK_AUTHORING": json.dumps(
+                _task_authoring_metadata(task), sort_keys=True
+            ),
             "FUGUE_REPOSITORY": task.repo or "",
             "FUGUE_BASE_COMMIT": task.base_commit or "",
             "FUGUE_TRIAL_INDEX": str(trial_index),
@@ -1101,7 +1109,9 @@ def _context_binding(
                             / "gateway-evidence"
                             / job_name
                             / "context-gateway.jsonl"
-                        ).resolve().as_posix(),
+                        )
+                        .resolve()
+                        .as_posix(),
                     },
                     runtime_descriptor=descriptor,
                 )
@@ -1334,6 +1344,42 @@ def _task_architecture(task: TaskSpec) -> str:
             f"task {task.id} has unsupported architecture {architecture!r}"
         )
     return architecture
+
+
+def _task_authoring_metadata(task: TaskSpec) -> dict[str, Any]:
+    value = task.metadata.get("task_authoring")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"task {task.id} task_authoring metadata must be an object")
+    required_digests = {"task_definition_digest", "criteria_digest"}
+    for field in required_digests:
+        digest = str(value.get(field) or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"task {task.id} has invalid authored {field}")
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
+def _authored_task_applicability(
+    task: TaskSpec,
+    harness: str,
+    applicable: bool,
+    skip_reason: str | None,
+) -> tuple[bool, str | None]:
+    metadata = _task_authoring_metadata(task)
+    if not metadata:
+        return applicable, skip_reason
+    support = (metadata.get("harness_applicability") or {}).get(harness)
+    if not isinstance(support, dict):
+        return False, _join_skip_reasons(
+            skip_reason, "authored task has no locked harness capability record"
+        )
+    if bool(support.get("applicable")):
+        return applicable, skip_reason
+    return False, _join_skip_reasons(
+        skip_reason,
+        str(support.get("reason") or "authored task is not supported by this harness"),
+    )
 
 
 def _applicability(

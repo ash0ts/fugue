@@ -82,6 +82,29 @@ from fugue.bench.operator import (
 )
 from fugue.bench.reproducibility import read_evaluation_asset_lock
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.task_authoring import (
+    TaskAuthoringPolicyV1,
+    TaskEvaluationV1,
+    TaskScoringRevisionV1,
+    TaskStudyAnalysisV1,
+    TaskSuiteDraftV1,
+    TaskSuiteLockV1,
+    TaskSuitePreviewV1,
+    analyze_task_evaluation,
+    evaluate_task_rows,
+    load_task_profiles,
+    materialize_task_suite_lock,
+    preview_task_suite,
+    read_task_suite_lock,
+    scoring_revision_from_dict,
+    task_authoring_policy_from_dict,
+    task_evaluation_from_dict,
+    task_study_analysis_from_dict,
+    task_suite_draft_from_dict,
+    task_suite_lock_dir,
+    task_suite_lock_from_dict,
+    task_suite_preview_from_dict,
+)
 from fugue.model_plane import (
     model_route_identity,
     resolve_harness_model_route,
@@ -94,7 +117,25 @@ CAMPAIGN_RUNTIME_DIR = Path(".fugue/runtime/campaigns")
 _TERMINAL_RUN_STATES = {"passed", "failed", "cancelled", "interrupted"}
 _SAFE_TRACE_CONTENT = {"full", "metadata"}
 _SAFE_EVIDENCE_SCOPES = {"summary", "rows", "traces"}
-_IDEMPOTENT_ACTIONS = {"prepare", "admit", "launch", "cancel", "finalize"}
+_IDEMPOTENT_ACTIONS = {
+    "prepare",
+    "admit",
+    "launch",
+    "cancel",
+    "finalize",
+    "lock_task_suite",
+    "score_task_suite",
+    "analyze_task_study",
+}
+_RECEIPT_KINDS = {
+    "plans",
+    "prepared",
+    "admissions",
+    "outcomes",
+    "task-suites",
+    "task-evaluations",
+    "task-analyses",
+}
 _DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -134,6 +175,7 @@ def campaign_spec_from_dict(
             "allowed",
             "stages",
             "limits",
+            "task_authoring",
             "evidence_scope",
             "require_clean_source",
             "campaign_digest",
@@ -240,6 +282,7 @@ def campaign_spec_from_dict(
         allowed_trace_content=trace_content,
         stages=stages,
         limits=limits,
+        task_authoring=task_authoring_policy_from_dict(raw.get("task_authoring")),
         evidence_scope=evidence_scope,  # type: ignore[arg-type]
         require_clean_source=bool(raw.get("require_clean_source", True)),
     )
@@ -272,6 +315,7 @@ def build_experiment_proposal(
     variants: Sequence[str] = (),
     n_tasks: int | None = None,
     trace_content: str = "full",
+    task_suite_digest: str | None = None,
     analysis_ids: Sequence[str] = (),
     parent_outcome_id: str | None = None,
     decision_rationale: str = "",
@@ -298,6 +342,7 @@ def build_experiment_proposal(
         "n_tasks": n_tasks,
         "n_concurrent": n_concurrent,
         "trace_content": trace_content,
+        "task_suite_digest": task_suite_digest,
         "analysis_ids": list(analysis_ids),
         "parent_outcome_id": parent_outcome_id,
         "decision_rationale": decision_rationale,
@@ -326,6 +371,7 @@ def campaign_catalog_snapshot_from_dict(
         "harnesses",
         "context_systems",
         "analyses",
+        "task_authoring",
         "component_digests",
         "catalog_digest",
     }
@@ -351,6 +397,11 @@ def campaign_catalog_snapshot_from_dict(
         analyses=tuple(
             _mapping(item, "analysis catalog item")
             for item in _sequence(raw.get("analyses"), "analyses")
+        ),
+        task_authoring=(
+            _mapping(raw["task_authoring"], "task authoring catalog")
+            if raw.get("task_authoring") is not None
+            else None
         ),
         component_digests=_digest_mapping(
             raw.get("component_digests"), "component digests"
@@ -485,6 +536,7 @@ def _proposal_from_dict(
         "n_tasks",
         "n_concurrent",
         "trace_content",
+        "task_suite_digest",
         "analysis_ids",
         "parent_outcome_id",
         "decision_rationale",
@@ -529,6 +581,11 @@ def _proposal_from_dict(
         ),
         n_concurrent=_positive_int(raw.get("n_concurrent"), "proposal n_concurrent"),
         trace_content=_bounded_text(raw.get("trace_content"), "trace content", 32),
+        task_suite_digest=(
+            _required_digest(raw["task_suite_digest"], "task suite digest")
+            if raw.get("task_suite_digest")
+            else None
+        ),
         analysis_ids=_id_tuple(raw.get("analysis_ids"), "analysis", allow_empty=True),
         parent_outcome_id=(
             validate_id(raw["parent_outcome_id"], kind="outcome id")
@@ -695,6 +752,22 @@ class CampaignService:
                 }
             )
 
+        task_authoring = None
+        if policy.task_authoring is not None:
+            try:
+                task_profiles = load_task_profiles(self.repo_root)
+                _validate_task_profile_policy(policy.task_authoring, task_profiles)
+            except (FileNotFoundError, KeyError, ValueError) as exc:
+                raise CampaignError(
+                    "unregistered_component",
+                    f"campaign task authoring profiles are invalid: {exc}",
+                    category="validation",
+                ) from exc
+            component_digests["task_profiles"] = task_profiles.catalog_digest
+            task_authoring = _safe_task_profile_catalog(
+                policy.task_authoring, task_profiles
+            )
+
         unsigned = CampaignCatalogSnapshotV1(
             schema_version=CAMPAIGN_SCHEMA_VERSION,
             campaign_id=policy.id,
@@ -705,6 +778,7 @@ class CampaignService:
             harnesses=policy.allowed_harnesses,
             context_systems=tuple(contexts),
             analyses=tuple(analyses),
+            task_authoring=task_authoring,
             component_digests=dict(sorted(component_digests.items())),
         )
         return replace(
@@ -712,14 +786,279 @@ class CampaignService:
             catalog_digest=_artifact_digest(unsigned.to_dict(), "catalog_digest"),
         )
 
+    def preview_task_suite(
+        self,
+        campaign_id: str,
+        catalog_digest: str,
+        draft: TaskSuiteDraftV1,
+    ) -> TaskSuitePreviewV1:
+        policy = self._policy(campaign_id)
+        catalog = self.catalog(campaign_id)
+        if catalog.catalog_digest != catalog_digest:
+            raise CampaignError(
+                "catalog_drift",
+                "task draft catalog digest does not match the current catalog",
+                category="validation",
+            )
+        authoring = self._task_authoring_policy(policy)
+        self._stage(policy, draft.stage_id)
+        normalized = task_suite_draft_from_dict(draft.to_dict(), require_digest=True)
+        profiles = load_task_profiles(self.repo_root)
+        return preview_task_suite(
+            campaign_id=campaign_id,
+            catalog_digest=catalog_digest,
+            policy_digest=policy.campaign_digest,
+            draft=normalized,
+            policy=authoring,
+            profiles=profiles,
+            harnesses=policy.allowed_harnesses,
+            repo_root=self.repo_root,
+        )
+
+    def lock_task_suite(
+        self, preview: TaskSuitePreviewV1, operation_id: str
+    ) -> TaskSuiteLockV1:
+        operation_id = self._operation_id(operation_id)
+        preview = task_suite_preview_from_dict(preview.to_dict())
+        campaign_id = preview.campaign_id
+        operation_input = stable_digest(
+            {"action": "lock_task_suite", "preview_digest": preview.preview_digest}
+        )
+        with self._operation_lock(campaign_id, operation_id):
+            existing = self._completed_operation(
+                campaign_id, operation_id, "lock_task_suite", operation_input
+            )
+            if existing is not None:
+                return task_suite_lock_from_dict(self._read_artifact(existing))
+            policy = self._policy(campaign_id)
+            catalog = self.catalog(campaign_id)
+            if preview.policy_digest != policy.campaign_digest:
+                raise CampaignError(
+                    "policy_drift",
+                    "task suite preview is bound to a different campaign policy",
+                    category="policy",
+                )
+            if preview.catalog_digest != catalog.catalog_digest:
+                raise CampaignError(
+                    "catalog_drift",
+                    "task suite preview is bound to a different catalog",
+                    category="validation",
+                )
+            if not preview.eligible:
+                raise CampaignError(
+                    "task_suite_ineligible",
+                    "task suite preview contains policy or capability failures",
+                    category="policy",
+                    details={"failures": list(preview.failures)},
+                )
+            self._task_authoring_policy(policy)
+            self._initialize_campaign(policy)
+            destination = task_suite_lock_dir(
+                self.repo_root, campaign_id, preview.preview_digest
+            )
+            profiles = load_task_profiles(self.repo_root)
+            if destination.is_dir():
+                lock = task_suite_lock_from_dict(
+                    _read_json_object(destination / "task-suite-lock.json")
+                )
+                if lock.preview_digest != preview.preview_digest:
+                    raise CampaignError(
+                        "artifact_conflict",
+                        "task suite asset directory belongs to another preview",
+                        category="evidence",
+                    )
+            else:
+                try:
+                    lock = materialize_task_suite_lock(
+                        preview,
+                        profiles=profiles,
+                        repo_root=self.repo_root,
+                        destination=destination,
+                        harnesses=policy.allowed_harnesses,
+                    )
+                except Exception:
+                    if destination.exists():
+                        import shutil
+
+                        shutil.rmtree(destination)
+                    raise
+            relative = self._write_receipt(
+                "task-suites", lock.suite_digest, lock.to_dict()
+            )
+            self._record_operation(
+                campaign_id,
+                operation_id,
+                "lock_task_suite",
+                operation_input,
+                relative,
+                lock.suite_digest,
+            )
+            self._event(
+                campaign_id,
+                "task_suite_locked",
+                operation_id=operation_id,
+                artifact_type="TaskSuiteLockV1",
+                artifact_digest=lock.suite_digest,
+            )
+            return lock
+
+    def score_task_suite(
+        self,
+        run_id: str,
+        task_suite_digest: str,
+        scoring_revision: TaskScoringRevisionV1,
+        operation_id: str,
+    ) -> TaskEvaluationV1:
+        operation_id = self._operation_id(operation_id)
+        campaign_id, _ = self._resolve_campaign_subject(run_id)
+        revision = scoring_revision_from_dict(scoring_revision.to_dict())
+        operation_input = stable_digest(
+            {
+                "action": "score_task_suite",
+                "run_id": run_id,
+                "task_suite_digest": task_suite_digest,
+                "revision_digest": revision.revision_digest,
+            }
+        )
+        with self._operation_lock(campaign_id, operation_id):
+            existing = self._completed_operation(
+                campaign_id, operation_id, "score_task_suite", operation_input
+            )
+            if existing is not None:
+                return task_evaluation_from_dict(self._read_artifact(existing))
+            policy = self._policy(campaign_id)
+            lock = read_task_suite_lock(self.repo_root, campaign_id, task_suite_digest)
+            self._require_run_task_suite(campaign_id, run_id, lock)
+            run = self.operator.run_summary(run_id)
+            if run.status not in _TERMINAL_RUN_STATES:
+                raise CampaignError(
+                    "run_not_terminal",
+                    "task scoring requires a terminal run",
+                    category="evidence",
+                    retryable=True,
+                )
+            export_path = (
+                self._campaign_dir(campaign_id)
+                / "task-evaluation-exports"
+                / f"{run_id}.jsonl"
+            )
+            exported = self.operator.export_run(
+                run_id,
+                out=export_path,
+                fetch_weave=True,
+                to_weave=False,
+            )
+            rows = _read_jsonl(exported.path)
+            evaluation = evaluate_task_rows(
+                campaign_id=campaign_id,
+                run_id=run_id,
+                lock=lock,
+                revision=revision,
+                rows=rows,
+                profiles=load_task_profiles(self.repo_root),
+                repo_root=self.repo_root,
+                env=self.operator.env,
+            )
+            if evaluation.accounted_cost_usd > self._remaining_task_budget(
+                campaign_id, policy
+            ):
+                raise CampaignError(
+                    "budget_exceeded",
+                    "task evaluation cost exceeds the remaining campaign budget",
+                    category="admission",
+                )
+            relative = self._write_receipt(
+                "task-evaluations",
+                evaluation.evaluation_digest,
+                evaluation.to_dict(),
+            )
+            self._account_task_evaluation(campaign_id, policy, run_id, evaluation)
+            self._record_operation(
+                campaign_id,
+                operation_id,
+                "score_task_suite",
+                operation_input,
+                relative,
+                evaluation.evaluation_digest,
+            )
+            self._event(
+                campaign_id,
+                "task_evaluation_scored",
+                operation_id=operation_id,
+                run_id=run_id,
+                artifact_type="TaskEvaluationV1",
+                artifact_digest=evaluation.evaluation_digest,
+            )
+            return evaluation
+
+    def analyze_task_study(
+        self,
+        run_id: str,
+        analysis_id: str,
+        operation_id: str,
+        *,
+        evaluation_digest: str | None = None,
+    ) -> TaskStudyAnalysisV1:
+        operation_id = self._operation_id(operation_id)
+        campaign_id, _ = self._resolve_campaign_subject(run_id)
+        operation_input = stable_digest(
+            {
+                "action": "analyze_task_study",
+                "run_id": run_id,
+                "analysis_id": analysis_id,
+                "evaluation_digest": evaluation_digest,
+            }
+        )
+        with self._operation_lock(campaign_id, operation_id):
+            existing = self._completed_operation(
+                campaign_id, operation_id, "analyze_task_study", operation_input
+            )
+            if existing is not None:
+                return task_study_analysis_from_dict(self._read_artifact(existing))
+            evaluation = self._task_evaluation(campaign_id, run_id, evaluation_digest)
+            lock = read_task_suite_lock(
+                self.repo_root, campaign_id, evaluation.task_suite_digest
+            )
+            analysis = analyze_task_evaluation(
+                analysis_id=analysis_id,
+                lock=lock,
+                evaluation=evaluation,
+                repo_root=self.repo_root,
+            )
+            relative = self._write_receipt(
+                "task-analyses", analysis.analysis_digest, analysis.to_dict()
+            )
+            self._record_operation(
+                campaign_id,
+                operation_id,
+                "analyze_task_study",
+                operation_input,
+                relative,
+                analysis.analysis_digest,
+            )
+            self._event(
+                campaign_id,
+                "task_study_analyzed",
+                operation_id=operation_id,
+                run_id=run_id,
+                artifact_type="TaskStudyAnalysisV1",
+                artifact_digest=analysis.analysis_digest,
+            )
+            return analysis
+
     def preview(self, proposal: ExperimentProposalV1) -> PlanReceiptV1:
         _verify_artifact(proposal.to_dict(), "proposal_digest", "experiment proposal")
         policy = self._policy(proposal.campaign_id)
         catalog = self.catalog(policy.id)
         self._validate_proposal(policy, catalog, proposal)
         request = self._request(proposal)
+        experiment = self._proposal_experiment(proposal)
         try:
-            plan = self.operator.resolve_run_plan(request, run_id="campaign-preview")
+            plan = self.operator.resolve_run_plan(
+                request,
+                run_id="campaign-preview",
+                experiment=experiment,
+            )
         except Exception as exc:
             raise CampaignError(
                 "plan_resolution_failed",
@@ -749,6 +1088,20 @@ class CampaignService:
         components = _plan_component_digests(
             self.repo_root, proposal, plan, catalog.component_digests
         )
+        if proposal.task_suite_digest:
+            lock = read_task_suite_lock(
+                self.repo_root, proposal.campaign_id, proposal.task_suite_digest
+            )
+            components = {
+                **components,
+                "task_suite": lock.suite_digest,
+                "task_definition": lock.task_definition_digest,
+                "task_criteria": lock.criteria_digest,
+                **{
+                    f"task_component:{key}": value
+                    for key, value in lock.component_digests.items()
+                },
+            }
         unsigned = PlanReceiptV1(
             schema_version=CAMPAIGN_SCHEMA_VERSION,
             campaign_id=policy.id,
@@ -810,10 +1163,14 @@ class CampaignService:
             )
             self._write_receipt("plans", current.plan_digest, current.to_dict())
             request = _request_from_safe(current.request)
+            proposal = experiment_proposal_from_dict(current.proposal)
+            experiment = self._proposal_experiment(proposal)
             secrets = secrets_from_env(self.operator.env)
             try:
-                preparation = self.operator.prepare(request)
-                checks = self.operator.preflight(request, live=True)
+                preparation = self.operator.prepare(request, experiment=experiment)
+                checks = self.operator.preflight(
+                    request, live=True, experiment=experiment
+                )
                 canonical = _canonical_preparation(preparation, self.repo_root)
                 _require_preparation(canonical)
                 failed_checks = [item for item in checks if not item.ok]
@@ -1198,7 +1555,9 @@ class CampaignService:
             self._revalidate_plan(plan)
             self._revalidate_prepared_bindings(prepared, plan)
             request = _request_from_safe(plan.request)
-            checks = self.operator.preflight(request, live=True)
+            proposal = experiment_proposal_from_dict(plan.proposal)
+            experiment = self._proposal_experiment(proposal)
+            checks = self.operator.preflight(request, live=True, experiment=experiment)
             failed_checks = [item for item in checks if not item.ok]
             if failed_checks:
                 secrets = secrets_from_env(self.operator.env)
@@ -1269,7 +1628,7 @@ class CampaignService:
                 )
 
             try:
-                self.operator.launch(request, run_id=run_id)
+                self.operator.launch(request, experiment=experiment, run_id=run_id)
             except Exception as exc:
                 with self._campaign_lock(campaign_id):
                     ledger = self._ledger(campaign_id, policy)
@@ -2012,6 +2371,66 @@ class CampaignService:
                 "adaptive proposals must explain why the next experiment was selected",
                 category="validation",
             )
+        if proposal.task_suite_digest:
+            authoring = self._task_authoring_policy(policy)
+            lock = read_task_suite_lock(
+                self.repo_root, policy.id, proposal.task_suite_digest
+            )
+            if lock.policy_digest != policy.campaign_digest:
+                raise CampaignError(
+                    "task_suite_policy_drift",
+                    "task suite lock is bound to a different campaign policy",
+                    category="policy",
+                )
+            if lock.catalog_digest != catalog.catalog_digest:
+                raise CampaignError(
+                    "task_suite_catalog_drift",
+                    "task suite lock is bound to a different campaign catalog",
+                    category="validation",
+                )
+            if lock.stage_id != proposal.stage_id:
+                raise CampaignError(
+                    "task_suite_stage_mismatch",
+                    "task suite lock and proposal use different campaign stages",
+                    category="policy",
+                )
+            if proposal.n_tasks not in {None, lock.task_count}:
+                raise CampaignError(
+                    "task_suite_truncation",
+                    "authored task suites must run their exact locked task set",
+                    category="validation",
+                )
+            if proposal.preset_id is not None:
+                raise CampaignError(
+                    "task_suite_preset_unsupported",
+                    "authored task suites cannot inherit a registered preset",
+                    category="validation",
+                )
+            if proposal.workloads not in {(), ("harbor",)}:
+                raise CampaignError(
+                    "task_suite_workload_unsupported",
+                    "authored task suites execute through the Harbor workload",
+                    category="validation",
+                )
+            if lock.parent_outcome_id != proposal.parent_outcome_id:
+                if lock.parent_outcome_id is not None:
+                    raise CampaignError(
+                        "task_suite_parent_mismatch",
+                        "adaptive task suite and experiment proposal have different parents",
+                        category="policy",
+                    )
+            if "holdout" in lock.partitions and lock.parent_outcome_id is not None:
+                raise CampaignError(
+                    "adaptive_holdout_forbidden",
+                    "holdout tasks must be locked before observing a parent outcome",
+                    category="policy",
+                )
+            if lock.parent_outcome_id and not authoring.adaptive_discovery:
+                raise CampaignError(
+                    "adaptive_task_authoring_forbidden",
+                    "campaign policy does not allow adaptive discovery tasks",
+                    category="policy",
+                )
 
     def _validate_resolved_plan(
         self,
@@ -2060,18 +2479,57 @@ class CampaignService:
                 "campaign proposal resolved no cells",
                 category="validation",
             )
+        if proposal.task_suite_digest:
+            lock = read_task_suite_lock(
+                self.repo_root, policy.id, proposal.task_suite_digest
+            )
+            observed_tasks = {cell.task_id for cell in plan.cells}
+            if observed_tasks != set(lock.task_ids):
+                raise CampaignError(
+                    "task_suite_coordinate_drift",
+                    "resolved plan tasks differ from the locked task suite",
+                    category="validation",
+                )
+
+    def _proposal_experiment(
+        self, proposal: ExperimentProposalV1
+    ) -> ExperimentSpec | None:
+        if not proposal.task_suite_digest:
+            return None
+        lock = read_task_suite_lock(
+            self.repo_root, proposal.campaign_id, proposal.task_suite_digest
+        )
+        base = get_experiment(proposal.experiment_id, self.repo_root)
+        return replace(
+            base,
+            manifest=Path(lock.manifest_path),
+            run_name=f"{proposal.campaign_id}-{proposal.proposal_id}",
+            tags=[*base.tags, f"task-suite:{lock.suite_digest}"],
+            n_tasks=lock.task_count,
+            workloads=[],
+            presets=[],
+            default_preset=None,
+            evaluation_generation=None,
+        )
 
     def _request(self, proposal: ExperimentProposalV1) -> ExperimentRequest:
+        task_lock = (
+            read_task_suite_lock(
+                self.repo_root, proposal.campaign_id, proposal.task_suite_digest
+            )
+            if proposal.task_suite_digest
+            else None
+        )
         return ExperimentRequest(
             experiment_id=proposal.experiment_id,
-            preset=proposal.preset_id,
+            preset=None if task_lock else proposal.preset_id,
             workloads=proposal.workloads,
             harnesses=proposal.harnesses,
             systems=proposal.context_systems,
             variants=proposal.variants,
             model=proposal.model,
             n_attempts=proposal.n_attempts,
-            n_tasks=proposal.n_tasks,
+            n_tasks=task_lock.task_count if task_lock else proposal.n_tasks,
             n_concurrent=proposal.n_concurrent,
             run_name=f"{proposal.campaign_id}-{proposal.proposal_id}",
             tags=(
@@ -2082,6 +2540,120 @@ class CampaignService:
             trace_content=proposal.trace_content,
             cohort_id=f"{proposal.campaign_id}:{proposal.proposal_id}",
         )
+
+    def _task_authoring_policy(
+        self, policy: ResearchCampaignSpecV1
+    ) -> TaskAuthoringPolicyV1:
+        if policy.task_authoring is None:
+            raise CampaignError(
+                "task_authoring_disabled",
+                "campaign policy does not enable authored tasks",
+                category="policy",
+            )
+        return policy.task_authoring
+
+    def _require_run_task_suite(
+        self,
+        campaign_id: str,
+        run_id: str,
+        lock: TaskSuiteLockV1,
+    ) -> None:
+        policy = self._policy(campaign_id)
+        ledger = self._ledger(campaign_id, policy)
+        admission_entry = _run_admission(ledger, run_id)
+        admission = _admission_receipt_from_dict(
+            self._read_receipt(
+                campaign_id,
+                "admissions",
+                str(admission_entry["admission_id"]),
+            )
+        )
+        prepared = _prepared_plan_from_dict(admission.prepared_plan)
+        plan = _plan_receipt_from_dict(prepared.plan)
+        proposal = experiment_proposal_from_dict(plan.proposal)
+        if proposal.task_suite_digest != lock.suite_digest:
+            raise CampaignError(
+                "task_suite_run_mismatch",
+                "run was not planned from the requested task suite lock",
+                category="evidence",
+            )
+
+    def _task_evaluation(
+        self,
+        campaign_id: str,
+        run_id: str,
+        evaluation_digest: str | None,
+    ) -> TaskEvaluationV1:
+        root = self._campaign_dir(campaign_id) / "task-evaluations"
+        if evaluation_digest:
+            return task_evaluation_from_dict(
+                self._read_receipt(campaign_id, "task-evaluations", evaluation_digest)
+            )
+        matches: list[TaskEvaluationV1] = []
+        if root.is_dir():
+            for path in sorted(root.glob("*.json")):
+                value = task_evaluation_from_dict(_read_json_object(path))
+                if value.run_id == run_id:
+                    matches.append(value)
+        if len(matches) != 1:
+            raise CampaignError(
+                "task_evaluation_ambiguous",
+                "specify an evaluation digest when a run has zero or multiple scoring revisions",
+                category="validation",
+            )
+        return matches[0]
+
+    def _remaining_task_budget(
+        self, campaign_id: str, policy: ResearchCampaignSpecV1
+    ) -> float:
+        with self._campaign_lock(campaign_id):
+            return _remaining_budget(self._ledger(campaign_id, policy), policy)
+
+    def _account_task_evaluation(
+        self,
+        campaign_id: str,
+        policy: ResearchCampaignSpecV1,
+        run_id: str,
+        evaluation: TaskEvaluationV1,
+    ) -> None:
+        with self._campaign_lock(campaign_id):
+            ledger = self._ledger(campaign_id, policy)
+            admission = _run_admission(ledger, run_id)
+            evaluations = admission.setdefault("task_evaluations", [])
+            if not isinstance(evaluations, list):
+                raise CampaignError(
+                    "ledger_corrupt",
+                    "campaign task evaluations must be a list",
+                    category="evidence",
+                )
+            existing = next(
+                (
+                    item
+                    for item in evaluations
+                    if item.get("evaluation_digest") == evaluation.evaluation_digest
+                ),
+                None,
+            )
+            if existing is None:
+                evaluations.append(
+                    {
+                        "evaluation_digest": evaluation.evaluation_digest,
+                        "accounted_cost_usd": evaluation.accounted_cost_usd,
+                    }
+                )
+            agent_cost = sum(
+                float(item.get("actual_cost_usd") or 0.0)
+                for item in ledger["admissions"]
+                if item.get("outcome_id")
+            )
+            evaluation_cost = sum(
+                float(result.get("accounted_cost_usd") or 0.0)
+                for item in ledger["admissions"]
+                for result in item.get("task_evaluations") or []
+                if isinstance(result, dict)
+            )
+            ledger["accounted_cost_usd"] = agent_cost + evaluation_cost
+            self._write_ledger(campaign_id, ledger)
 
     def _verify_plan_receipt(self, receipt: PlanReceiptV1) -> None:
         _verify_artifact(receipt.to_dict(), "plan_digest", "plan receipt")
@@ -2293,7 +2865,7 @@ class CampaignService:
 
     def _write_receipt(self, kind: str, identity: str, value: Mapping[str, Any]) -> str:
         campaign_id = validate_id(value.get("campaign_id") or "", kind="campaign id")
-        if kind not in {"plans", "prepared", "admissions", "outcomes"}:
+        if kind not in _RECEIPT_KINDS:
             raise ValueError(f"unknown campaign receipt kind: {kind}")
         if not _DIGEST_RE.fullmatch(identity):
             raise ValueError(f"invalid campaign receipt identity: {identity}")
@@ -2313,7 +2885,7 @@ class CampaignService:
     def _read_receipt(
         self, campaign_id: str, kind: str, identity: str
     ) -> dict[str, Any]:
-        if kind not in {"plans", "prepared", "admissions", "outcomes"}:
+        if kind not in _RECEIPT_KINDS:
             raise ValueError(f"unknown campaign receipt kind: {kind}")
         if not _DIGEST_RE.fullmatch(identity):
             raise ValueError(f"invalid campaign receipt identity: {identity}")
@@ -3537,6 +4109,51 @@ def _required_digest(value: Any, label: str) -> str:
     if not _DIGEST_RE.fullmatch(result):
         raise ValueError(f"{label} must be a SHA-256 digest")
     return result
+
+
+def _validate_task_profile_policy(policy: TaskAuthoringPolicyV1, profiles: Any) -> None:
+    declared = {
+        "environment": (
+            {item.id for item in profiles.environments},
+            policy.allowed_environment_profiles,
+        ),
+        "resource": (
+            {item.id for item in profiles.resources},
+            policy.allowed_resource_profiles,
+        ),
+        "interactor": (
+            {item.id for item in profiles.interactors},
+            policy.allowed_interactor_profiles,
+        ),
+        "judge": ({item.id for item in profiles.judges}, policy.allowed_judge_profiles),
+        "scorer runtime": (
+            {item.id for item in profiles.scorer_runtimes},
+            policy.allowed_scorer_runtimes,
+        ),
+    }
+    for label, (available, allowed) in declared.items():
+        missing = sorted(set(allowed) - available)
+        if missing:
+            raise ValueError(
+                f"campaign allows unregistered {label} profile(s): {', '.join(missing)}"
+            )
+
+
+def _safe_task_profile_catalog(
+    policy: TaskAuthoringPolicyV1, profiles: Any
+) -> dict[str, Any]:
+    safe = profiles.safe_dict()
+    allowed = {
+        "environments": set(policy.allowed_environment_profiles),
+        "resources": set(policy.allowed_resource_profiles),
+        "interactors": set(policy.allowed_interactor_profiles),
+        "judges": set(policy.allowed_judge_profiles),
+        "scorer_runtimes": set(policy.allowed_scorer_runtimes),
+    }
+    for key, ids in allowed.items():
+        safe[key] = [item for item in safe[key] if item["id"] in ids]
+    safe["policy"] = policy.to_dict()
+    return safe
 
 
 def _strict_bool(value: Any, label: str) -> bool:
