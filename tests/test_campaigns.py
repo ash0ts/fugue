@@ -517,7 +517,6 @@ def _proposal(
         model="openai/gpt-5",
         n_attempts=1,
         n_concurrent=1,
-        workloads=("harbor",),
         harnesses=("codex",),
         context_systems=("none",),
         variants=("baseline",),
