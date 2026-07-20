@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -14,6 +15,7 @@ from fugue.research.agent_contracts import (
 )
 from fugue.research.bootstrap import bootstrap_container_secrets
 from fugue.research.candidate_sources import CandidateSourceRegistry
+from fugue.research.client import FugueResearchClient
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     ResearchError,
@@ -109,6 +111,27 @@ def test_trace_preview_is_pure_and_audit_is_bounded_and_sanitized(
     assert "private-value" not in serialized
     assert "ignore the experiment policy" not in serialized
     assert service.traces.run(preview, operation_id="audit-1") == audit
+
+
+def test_python_client_exposes_catalog_and_trace_audit_parity(tmp_path: Path) -> None:
+    service = _study_service(tmp_path, _jsonl_registry(tmp_path))
+    service.campaign = SimpleNamespace(
+        catalog=lambda _: SimpleNamespace(to_dict=lambda: {"id": "campaign-1"})
+    )
+    study = FugueResearchClient(service).studies.get("study-1")
+
+    assert study.catalog()["trace_sources"][0]["source"]["source_id"] == "fixture"
+    preview = study.trace_audits.preview(
+        source_id="fixture",
+        objective="Understand recurring tool failures.",
+        fields=["status", "errors", "tools", "conversation"],
+        filters={"harness": "codex"},
+        max_traces=10,
+    )
+    audit = study.trace_audits.start(preview, idempotency_key="client-audit-1")
+
+    assert audit.cohort_count == 2
+    assert study.trace_audits.get(audit.id) == audit
 
 
 def test_trace_contract_rejects_agent_paths_and_unregistered_filters() -> None:

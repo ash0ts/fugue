@@ -6,6 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from fugue.bench.candidates import stable_digest
+from fugue.research.agent_contracts import (
+    TraceAuditDraftV1,
+    TraceAuditPreviewV1,
+    TraceAuditV1,
+    build_trace_audit_draft,
+    trace_audit_draft_from_dict,
+)
 from fugue.research.contracts import (
     AttributionV1,
     EvidenceRefV1,
@@ -111,6 +118,7 @@ class StudyHandle:
         self.client = client
         self.id = study_id
         self.experiments = Experiments(self)
+        self.trace_audits = TraceAudits(self)
 
     @property
     def revision(self) -> int:
@@ -118,6 +126,9 @@ class StudyHandle:
 
     def get(self) -> StudyV1:
         return self.client.service.store.get_study(self.id)
+
+    def catalog(self) -> dict[str, Any]:
+        return self.client.service.catalog(self.id)
 
     def context(
         self,
@@ -185,6 +196,51 @@ class StudyHandle:
             operation_id=operation_id,
             expected_revision=expected_revision,
         )
+
+
+class TraceAudits:
+    def __init__(self, study: StudyHandle) -> None:
+        self.study = study
+
+    def preview(
+        self,
+        draft: TraceAuditDraftV1 | Mapping[str, Any] | None = None,
+        **values: Any,
+    ) -> TraceAuditPreviewV1:
+        if draft is None:
+            values.setdefault("study_id", self.study.id)
+            draft_value = build_trace_audit_draft(**values)
+        elif isinstance(draft, TraceAuditDraftV1):
+            if values:
+                raise ValueError("pass a trace audit draft or keyword fields, not both")
+            draft_value = draft
+        else:
+            if values:
+                raise ValueError("pass a trace audit draft or keyword fields, not both")
+            raw = dict(draft)
+            raw.setdefault("schema_version", 1)
+            raw.setdefault("study_id", self.study.id)
+            draft_value = trace_audit_draft_from_dict(raw, require_digest=False)
+        return self.study.client.service.traces.preview(self.study.id, draft_value)
+
+    def start(
+        self,
+        preview: TraceAuditPreviewV1,
+        *,
+        idempotency_key: str,
+        approval_digest: str | None = None,
+    ) -> TraceAuditV1:
+        return self.study.client.service.traces.run(
+            preview,
+            operation_id=idempotency_key,
+            approval_digest=approval_digest,
+        )
+
+    def get(self, audit_id: str) -> TraceAuditV1:
+        audit = self.study.client.service.traces.store.get(audit_id)
+        if audit.study_id != self.study.id:
+            raise ValueError("trace audit belongs to another Study")
+        return audit
 
 
 class Experiments:
