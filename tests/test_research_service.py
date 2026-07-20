@@ -83,8 +83,19 @@ class FakeCampaignService:
                 "scenario_count": 1,
                 "prompt_bytes": 20,
                 "authored_asset_bytes": 0,
-                "estimated_calls": {"agent": 1},
-                "capability_matrix": [],
+                "estimated_calls": {"agent": 2},
+                "capability_matrix": [
+                    {
+                        "task_id": "task-one",
+                        "harness": "codex",
+                        "applicable": True,
+                    },
+                    {
+                        "task_id": "task-one",
+                        "harness": "claude-code",
+                        "applicable": True,
+                    },
+                ],
                 "component_digests": {},
                 "eligible": True,
                 "failures": (),
@@ -273,6 +284,22 @@ def test_inline_task_preview_counts_selected_coordinates_without_locking(
     assert preview.estimated_cells == 4
     assert preview.estimated_calls == {"agent": 4}
     assert not (tmp_path / ".fugue/runtime").exists()
+
+
+def test_inline_task_preview_budgets_only_selected_harnesses(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path)
+    values = _draft().to_dict()
+    values.pop("draft_digest")
+    values["task_suite_draft"] = _task_suite()
+    values["harnesses"] = ["codex"]
+    preview = service.preview_experiment(
+        "study-1",
+        build_experiment_draft(
+            **{k: v for k, v in values.items() if k != "schema_version"}
+        ),
+    )
+    assert preview.estimated_cells == 1
+    assert preview.estimated_calls == {"agent": 1}
 
 
 def test_worker_completes_canonical_lifecycle_without_duplicate_launch(

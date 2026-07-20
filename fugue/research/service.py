@@ -86,12 +86,13 @@ class ResearchService:
                     draft.campaign_id, catalog.catalog_digest, task_draft
                 )
                 blockers.extend(task_preview.failures)
-                multiplier = self._inline_coordinate_multiplier(catalog, draft)
-                estimated_cells = task_preview.task_count * multiplier
-                estimated_calls = {
-                    key: value * multiplier
-                    for key, value in task_preview.estimated_calls.items()
-                }
+                coordinate_count, estimated_calls = self._inline_coordinate_estimate(
+                    catalog,
+                    draft,
+                    task_draft,
+                    task_preview,
+                )
+                estimated_cells = task_preview.task_count * coordinate_count
             else:
                 proposal = self._proposal(draft, catalog.catalog_digest)
                 plan = self.campaign.preview(proposal)
@@ -649,7 +650,13 @@ class ResearchService:
                 )
 
     @staticmethod
-    def _inline_coordinate_multiplier(catalog: Any, draft: ExperimentDraftV1) -> int:
+    def _inline_coordinate_estimate(
+        catalog: Any,
+        draft: ExperimentDraftV1,
+        task_draft: Any,
+        task_preview: Any,
+    ) -> tuple[int, dict[str, int]]:
+        """Estimate calls for selected coordinates, not every policy harness."""
         experiment = next(
             item
             for item in catalog.experiments
@@ -671,7 +678,46 @@ class ResearchService:
                 "empty_plan",
                 "the selected authored-task coordinates contain no harness or variant",
             )
-        return len(harnesses) * len(variants) * draft.n_attempts
+        coordinate_count = len(harnesses) * len(variants) * draft.n_attempts
+        execution_multiplier = len(variants) * draft.n_attempts
+        applicability = {
+            (str(item.get("task_id")), str(item.get("harness"))): bool(
+                item.get("applicable")
+            )
+            for item in task_preview.capability_matrix
+        }
+        criteria = {item.id: item for item in task_draft.criteria_sets}
+        selected_calls = {key: 0 for key in task_preview.estimated_calls}
+        for task in task_draft.tasks:
+            criterion_set = criteria[task.criteria_set_id]
+            judge_calls = sum(
+                item.evaluator.type == "judge" for item in criterion_set.criteria
+            )
+            scorer_calls = sum(
+                item.evaluator.type == "inline_python"
+                for item in criterion_set.criteria
+            )
+            for harness in harnesses:
+                key = (task.id, harness)
+                if key not in applicability:
+                    raise ResearchError(
+                        "invalid_task_preview",
+                        "task preview does not cover selected coordinate "
+                        f"{task.id} × {harness}",
+                    )
+                if not applicability[key]:
+                    continue
+                if "agent" in selected_calls:
+                    selected_calls["agent"] += execution_multiplier
+                if "interactor" in selected_calls and task.interaction.type == "model":
+                    selected_calls["interactor"] += (
+                        task.interaction.max_user_turns * execution_multiplier
+                    )
+                if "judge" in selected_calls:
+                    selected_calls["judge"] += judge_calls * execution_multiplier
+                if "scorer" in selected_calls:
+                    selected_calls["scorer"] += scorer_calls * execution_multiplier
+        return coordinate_count, selected_calls
 
     @staticmethod
     def _record_id(study_id: str, proposal_id: str) -> str:
