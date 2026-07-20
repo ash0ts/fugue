@@ -754,6 +754,7 @@ def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
         model="openai/gpt-5",
         n_attempts=1,
         n_concurrent=1,
+        workloads=("harbor",),
         harnesses=("codex",),
         context_systems=("none",),
         variants=("baseline",),
