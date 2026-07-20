@@ -32,8 +32,8 @@ task_authoring:
   allowed_partitions: [qualification]
   allowed_environment_profiles: [artifact-python-v1]
   allowed_resource_profiles: []
-  allowed_interactor_profiles: [evidence-clarifier-v1]
-  allowed_judge_profiles: [grounded-analysis-v1]
+  allowed_interactor_profiles: [evidence-clarifier-glm52-v1]
+  allowed_judge_profiles: [grounded-analysis-glm52-v1]
   allowed_scorer_runtimes: []
   allowed_prompt_parts: [text]
   adaptive_discovery: false

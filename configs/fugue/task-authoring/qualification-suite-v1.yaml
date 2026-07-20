@@ -16,7 +16,7 @@ tasks:
     environment: {profile_id: artifact-python-v1}
     interaction:
       type: model
-      profile_id: evidence-clarifier-v1
+      profile_id: evidence-clarifier-glm52-v1
       directions:
         - Ask for one concrete piece of evidence supporting the diagnosis.
       max_user_turns: 1
@@ -37,7 +37,7 @@ tasks:
     environment: {profile_id: artifact-python-v1}
     interaction:
       type: model
-      profile_id: evidence-clarifier-v1
+      profile_id: evidence-clarifier-glm52-v1
       directions:
         - Ask the Agent to connect its recommendation to the sample sizes.
       max_user_turns: 1
@@ -69,7 +69,7 @@ criteria_sets:
         required: true
       - id: blind-grounding
         description: The answer identifies relevant evidence and explains its use.
-        evaluator: {type: judge, profile_id: grounded-analysis-v1, config: {}}
+        evaluator: {type: judge, profile_id: grounded-analysis-glm52-v1, config: {}}
         evidence: [answer, artifacts, tool_calls]
         weight: 0.5
         threshold: 0.5
