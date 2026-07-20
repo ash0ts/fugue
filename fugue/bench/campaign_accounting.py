@@ -20,8 +20,10 @@ def measured_row_cost(row: Mapping[str, Any]) -> float | None:
     """Return the conservative measured cost without inventing a public value."""
 
     interaction = row.get("task_interaction")
-    if isinstance(interaction, Mapping) and int(
-        interaction.get("unmeasured_paid_calls") or 0
+    if (
+        isinstance(interaction, Mapping)
+        and int(interaction.get("unmeasured_paid_calls") or 0)
+        and interaction.get("accounted_interactor_cost_usd") is None
     ):
         return None
 
@@ -38,11 +40,11 @@ def measured_row_cost(row: Mapping[str, Any]) -> float | None:
         values
         and isinstance(interaction, Mapping)
         and row.get("agent_cost_usd") is None
-        and isinstance(interaction.get("observed_interactor_cost_usd"), (int, float))
+        and isinstance(interaction.get("accounted_interactor_cost_usd"), (int, float))
     ):
         interactor_cost = _non_negative(
-            float(interaction["observed_interactor_cost_usd"]),
-            "observed interactor cost",
+            float(interaction["accounted_interactor_cost_usd"]),
+            "accounted interactor cost",
         )
         values = [value + interactor_cost for value in values]
     return max(values) if values else None

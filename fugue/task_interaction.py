@@ -31,6 +31,7 @@ class InteractionPlan:
     timeout_sec: int
     input_cost_per_million: float
     output_cost_per_million: float
+    reserve_cost_usd: float
 
     @property
     def follow_up_count(self) -> int:
@@ -142,6 +143,8 @@ class TaskInteractionController:
             ),
             "observed_interactor_cost_usd": self._observed_cost_usd,
             "unmeasured_paid_calls": self._unmeasured_calls,
+            "accounted_interactor_cost_usd": self._observed_cost_usd
+            + self._unmeasured_calls * self.plan.reserve_cost_usd,
             "evidence_path": evidence.name if evidence.is_file() else None,
             "route_receipts_path": receipts.name if receipts.is_file() else None,
         }
@@ -235,6 +238,7 @@ def _interaction_plan(raw: Mapping[str, Any]) -> InteractionPlan:
         "timeout_sec",
         "input_cost_per_million",
         "output_cost_per_million",
+        "reserve_cost_usd",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -280,6 +284,9 @@ def _interaction_plan(raw: Mapping[str, Any]) -> InteractionPlan:
         ),
         output_cost_per_million=_non_negative_number(
             raw.get("output_cost_per_million", 0), "output cost"
+        ),
+        reserve_cost_usd=_non_negative_number(
+            raw.get("reserve_cost_usd", 0), "reserve cost"
         ),
     )
 

@@ -1,0 +1,76 @@
+schema_version: 1
+id: task-authoring-qualification-v1
+title: Multi-turn adapter qualification
+objective: Verify native session continuation and reconciled evidence on two small analytical tasks.
+stage_id: qualification
+tasks:
+  - id: diagnose-contradiction
+    title: Diagnose a contradictory incident report
+    prompt:
+      - type: text
+        text: |
+          An incident report says a deployment both completed at 10:02 and was
+          cancelled at 10:01. Identify the minimum evidence needed to resolve
+          the contradiction. Write your final answer to
+          /logs/artifacts/fugue-answer.md.
+    environment: {profile_id: artifact-python-v1}
+    interaction:
+      type: model
+      profile_id: evidence-clarifier-v1
+      directions:
+        - Ask for one concrete piece of evidence supporting the diagnosis.
+      max_user_turns: 1
+      max_agent_turns: 2
+      timeout_sec: 900
+    criteria_set_id: grounded-answer
+    tags: [diagnosis, multi-turn]
+    partition: qualification
+  - id: compare-evidence
+    title: Compare two conflicting measurements
+    prompt:
+      - type: text
+        text: |
+          Metric A reports 99% success from 100 requests. Metric B reports 90%
+          success from 10,000 requests. Explain why the percentages alone are
+          insufficient for a deployment decision and name the next check. Write
+          your final answer to /logs/artifacts/fugue-answer.md.
+    environment: {profile_id: artifact-python-v1}
+    interaction:
+      type: model
+      profile_id: evidence-clarifier-v1
+      directions:
+        - Ask the Agent to connect its recommendation to the sample sizes.
+      max_user_turns: 1
+      max_agent_turns: 2
+      timeout_sec: 900
+    criteria_set_id: grounded-answer
+    tags: [evidence-comparison, multi-turn]
+    partition: qualification
+scenarios:
+  - id: diagnosis
+    title: Diagnosis
+    tasks:
+      - {task_id: diagnose-contradiction, weight: 1, must_pass: false}
+  - id: evidence-comparison
+    title: Evidence comparison
+    tasks:
+      - {task_id: compare-evidence, weight: 1, must_pass: false}
+criteria_sets:
+  - id: grounded-answer
+    title: Grounded answer
+    pass_threshold: 0.5
+    criteria:
+      - id: artifact-completion
+        description: The Agent produced a non-empty final artifact.
+        evaluator: {type: benchmark_outcome, config: {}}
+        evidence: [benchmark]
+        weight: 0.5
+        threshold: 1
+        required: true
+      - id: blind-grounding
+        description: The answer identifies relevant evidence and explains its use.
+        evaluator: {type: judge, profile_id: grounded-analysis-v1, config: {}}
+        evidence: [answer, artifacts, tool_calls]
+        weight: 0.5
+        threshold: 0.5
+        required: true

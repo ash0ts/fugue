@@ -817,7 +817,6 @@ class CampaignService:
             profiles=profiles,
             harnesses=policy.allowed_harnesses,
             repo_root=self.repo_root,
-            paid_call_reserve_usd=policy.limits.initial_cell_reserve_usd,
         )
 
     def lock_task_suite(

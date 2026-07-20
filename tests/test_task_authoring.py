@@ -5,7 +5,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
+from fugue.bench.campaigns import get_campaign
 from fugue.bench.manifest import load_manifest
 from fugue.bench.task_authoring import (
     AuthoredTaskMaterializer,
@@ -126,6 +128,7 @@ def _profiles(tmp_path: Path):
                     ],
                     "input_cost_per_million": 1,
                     "output_cost_per_million": 2,
+                    "reserve_cost_usd": 0.5,
                 }
             ],
             "scorer_runtimes": [
@@ -611,10 +614,9 @@ def test_blind_judge_has_a_separate_receipt_and_accounted_cost(
         profiles=profiles,
         harnesses=("codex",),
         repo_root=tmp_path,
-        paid_call_reserve_usd=2,
     )
     assert preview.estimated_calls["judge"] == 1
-    assert preview.estimated_cost_usd == 2
+    assert preview.estimated_cost_usd == 0.5
     lock = materialize_task_suite_lock(
         preview,
         profiles=profiles,
@@ -696,3 +698,36 @@ def test_inline_scorer_rejects_malformed_output(
             profile=profile,
             limits=_policy().limits,
         )
+
+
+def test_checked_in_multiturn_qualification_is_exactly_eight_cells() -> None:
+    campaign = get_campaign("task-authoring-qualification-v1")
+    assert campaign.task_authoring is not None
+    raw = yaml.safe_load(
+        Path("configs/fugue/task-authoring/qualification-suite-v1.yaml").read_text()
+    )
+    draft = task_suite_draft_from_dict(raw)
+    from fugue.bench.task_authoring import load_task_profiles
+
+    preview = preview_task_suite(
+        campaign_id=campaign.id,
+        catalog_digest="c" * 64,
+        policy_digest=campaign.campaign_digest,
+        draft=draft,
+        policy=campaign.task_authoring,
+        profiles=load_task_profiles(),
+        harnesses=campaign.allowed_harnesses,
+        repo_root=Path.cwd(),
+    )
+
+    assert preview.eligible
+    assert preview.task_count == 2
+    assert preview.estimated_calls == {
+        "agent": 8,
+        "interactor": 8,
+        "judge": 8,
+        "scorer": 0,
+    }
+    assert preview.estimated_cost_usd == 8
+    assert campaign.limits.total_cost_usd == 200
+    assert campaign.limits.initial_cell_reserve_usd == 25

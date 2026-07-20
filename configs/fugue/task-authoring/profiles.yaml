@@ -46,6 +46,7 @@ interactors:
     supported_harnesses: [hermes, openclaw, claude-code, codex]
     input_cost_per_million: 0
     output_cost_per_million: 0
+    reserve_cost_usd: 0
   - id: evidence-clarifier-v1
     title: Evidence-seeking evaluation user
     kind: model
@@ -56,6 +57,7 @@ interactors:
     supported_harnesses: [hermes, openclaw, claude-code, codex]
     input_cost_per_million: 0
     output_cost_per_million: 0
+    reserve_cost_usd: 0.5
 judges:
   - id: grounded-analysis-v1
     title: Blind grounded analysis judge
@@ -65,6 +67,7 @@ judges:
     blind_fields: [harness, model, variant_id, context_system_id, candidate_id, treatment]
     input_cost_per_million: 0
     output_cost_per_million: 0
+    reserve_cost_usd: 0.5
 scorer_runtimes:
   - id: python312-sandbox-v1
     title: Isolated Python 3.12 scorer

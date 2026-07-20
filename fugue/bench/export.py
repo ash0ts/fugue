@@ -3300,7 +3300,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     if not isinstance(task_interaction, dict):
         task_interaction = {"status": "unavailable", "type": "single_turn"}
     agent_cost = local_usage.get("cost_usd")
-    interactor_cost = task_interaction.get("observed_interactor_cost_usd")
+    interactor_cost = task_interaction.get("accounted_interactor_cost_usd")
     if isinstance(agent_cost, (int, float)) and isinstance(
         interactor_cost, (int, float)
     ):

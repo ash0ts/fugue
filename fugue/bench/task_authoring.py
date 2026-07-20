@@ -146,6 +146,7 @@ class InteractorProfileV1:
     supported_harnesses: tuple[str, ...]
     input_cost_per_million: float
     output_cost_per_million: float
+    reserve_cost_usd: float
     profile_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -162,6 +163,7 @@ class JudgeProfileV1:
     blind_fields: tuple[str, ...]
     input_cost_per_million: float
     output_cost_per_million: float
+    reserve_cost_usd: float
     profile_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -947,7 +949,6 @@ def preview_task_suite(
     profiles: TaskProfileCatalogV1,
     harnesses: Sequence[str],
     repo_root: Path,
-    paid_call_reserve_usd: float = 0.0,
 ) -> TaskSuitePreviewV1:
     failures: list[str] = []
     if draft.stage_id not in policy.enabled_stages:
@@ -972,6 +973,7 @@ def preview_task_suite(
     prompt_bytes = 0
     asset_bytes = 0
     estimated = {"agent": 0, "interactor": 0, "judge": 0, "scorer": 0}
+    estimated_cost_usd = 0.0
     capability_matrix: list[dict[str, Any]] = []
     criteria = {item.id: item for item in draft.criteria_sets}
     integration_sets = {task.environment.integration_ids for task in draft.tasks}
@@ -994,6 +996,7 @@ def preview_task_suite(
         asset_bytes += result["asset_bytes"]
         for key in estimated:
             estimated[key] += result["estimated_calls"].get(key, 0)
+        estimated_cost_usd += float(result["estimated_cost_usd"])
         profile_components.update(result["component_digests"])
         capability_matrix.extend(result["capability_matrix"])
 
@@ -1017,8 +1020,7 @@ def preview_task_suite(
         prompt_bytes=prompt_bytes,
         authored_asset_bytes=asset_bytes,
         estimated_calls=estimated,
-        estimated_cost_usd=(estimated["interactor"] + estimated["judge"])
-        * _non_negative_number(paid_call_reserve_usd, "paid call reserve"),
+        estimated_cost_usd=estimated_cost_usd,
         capability_matrix=tuple(capability_matrix),
         component_digests=dict(sorted(profile_components.items())),
         eligible=not failures,
@@ -1352,8 +1354,18 @@ def evaluate_task_rows(
                 "cost_usd": row.get("cost_usd"),
             }
         )
-    accounted_cost = observed_cost + unmeasured_paid_calls * _non_negative_number(
-        unmeasured_call_reserve_usd, "unmeasured call reserve"
+    accounted_cost = observed_cost + sum(
+        max(
+            float(result.get("reserve_cost_usd") or 0.0),
+            _non_negative_number(
+                unmeasured_call_reserve_usd, "unmeasured call reserve"
+            ),
+        )
+        for prediction in results
+        for result in prediction["criteria"]
+        if result.get("evaluator_type") == "judge"
+        and result.get("status") == "scored"
+        and result.get("cost_usd") is None
     )
     evaluation_id = validate_id(f"{run_id}-{revision.id}", kind="task evaluation id")
     unsigned = TaskEvaluationV1(
@@ -1382,8 +1394,11 @@ def evaluate_task_rows(
 
 
 def task_evaluation_call_estimate(
-    lock: TaskSuiteLockV1, rows: Sequence[Mapping[str, Any]], repo_root: Path
-) -> dict[str, int]:
+    lock: TaskSuiteLockV1,
+    rows: Sequence[Mapping[str, Any]],
+    repo_root: Path,
+    profiles: TaskProfileCatalogV1,
+) -> dict[str, int | float]:
     """Count paid judge calls before evaluation mutates external state."""
 
     verify_task_suite_lock(repo_root, lock)
@@ -1397,6 +1412,7 @@ def task_evaluation_call_estimate(
     task_criteria = dict(private.get("task_criteria") or {})
     judge_calls = 0
     scorer_calls = 0
+    reserve_usd = 0.0
     for row in rows:
         task_id = str(row.get("task_name") or row.get("task_id") or "")
         if task_id not in task_criteria:
@@ -1405,11 +1421,20 @@ def task_evaluation_call_estimate(
         judge_calls += sum(
             criterion.evaluator.type == "judge" for criterion in criterion_set.criteria
         )
+        reserve_usd += sum(
+            profiles.judge(str(criterion.evaluator.profile_id)).reserve_cost_usd
+            for criterion in criterion_set.criteria
+            if criterion.evaluator.type == "judge"
+        )
         scorer_calls += sum(
             criterion.evaluator.type == "inline_python"
             for criterion in criterion_set.criteria
         )
-    return {"judge": judge_calls, "scorer": scorer_calls}
+    return {
+        "judge": judge_calls,
+        "scorer": scorer_calls,
+        "reserve_usd": reserve_usd,
+    }
 
 
 def analyze_task_evaluation(
@@ -1628,6 +1653,7 @@ def _interactor_profile(raw: Any) -> InteractorProfileV1:
             "supported_harnesses",
             "input_cost_per_million",
             "output_cost_per_million",
+            "reserve_cost_usd",
             "profile_digest",
         },
         "interactor profile",
@@ -1653,8 +1679,13 @@ def _interactor_profile(raw: Any) -> InteractorProfileV1:
         output_cost_per_million=_non_negative_number(
             value.get("output_cost_per_million", 0), "interactor output cost"
         ),
+        reserve_cost_usd=_non_negative_number(
+            value.get("reserve_cost_usd", 0), "interactor reserve cost"
+        ),
         profile_digest=str(value.get("profile_digest") or ""),
     )
+    if kind == "model" and profile.reserve_cost_usd <= 0:
+        raise ValueError("model interactor profile requires a positive cost reserve")
     return _with_profile_digest(profile, value)
 
 
@@ -1671,6 +1702,7 @@ def _judge_profile(raw: Any) -> JudgeProfileV1:
             "blind_fields",
             "input_cost_per_million",
             "output_cost_per_million",
+            "reserve_cost_usd",
             "profile_digest",
         },
         "judge profile",
@@ -1700,8 +1732,13 @@ def _judge_profile(raw: Any) -> JudgeProfileV1:
         output_cost_per_million=_non_negative_number(
             value.get("output_cost_per_million", 0), "judge output cost"
         ),
+        reserve_cost_usd=_non_negative_number(
+            value.get("reserve_cost_usd", 0), "judge reserve cost"
+        ),
         profile_digest=str(value.get("profile_digest") or ""),
     )
+    if profile.reserve_cost_usd <= 0:
+        raise ValueError("judge profile requires a positive cost reserve")
     return _with_profile_digest(profile, value)
 
 
@@ -2075,10 +2112,18 @@ def _preview_task(
     calls["scorer"] *= applicable_harnesses
     if task.interaction.type == "model":
         calls["interactor"] = task.interaction.max_user_turns * applicable_harnesses
+    estimated_cost_usd = calls["interactor"] * (
+        interactor.reserve_cost_usd if interactor else 0.0
+    ) + applicable_harnesses * sum(
+        profiles.judge(str(criterion.evaluator.profile_id)).reserve_cost_usd
+        for criterion in criterion_set.criteria
+        if criterion.evaluator.type == "judge"
+    )
     return {
         "prompt_bytes": prompt_bytes,
         "asset_bytes": asset_bytes,
         "estimated_calls": calls,
+        "estimated_cost_usd": estimated_cost_usd,
         "component_digests": components,
         "capability_matrix": capability_matrix,
     }
@@ -2579,6 +2624,11 @@ def _evaluate_criterion(
         "reason": "required evidence is unavailable",
         "cost_usd": None,
         "route_receipt": None,
+        "reserve_cost_usd": (
+            profiles.judge(str(evaluator.profile_id)).reserve_cost_usd
+            if evaluator.type == "judge"
+            else 0.0
+        ),
     }
     try:
         score, reason, cost, route_receipt = _criterion_score(
@@ -2626,6 +2676,7 @@ def _locked_interaction_controller(
         "output_cost_per_million": (
             profile.output_cost_per_million if profile else 0.0
         ),
+        "reserve_cost_usd": profile.reserve_cost_usd if profile else 0.0,
     }
 
 
