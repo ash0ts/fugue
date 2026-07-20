@@ -1035,6 +1035,38 @@ def test_budget_admission_and_policy_drift_fail_closed(tmp_path: Path) -> None:
     assert exceeded.value.code == "budget_exceeded"
 
 
+def test_operator_cost_limit_fails_before_admission_is_recorded(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    plan = service.preview(_proposal(service))
+    prepared = service.prepare(plan, "prepare-approval-limit")
+
+    with pytest.raises(CampaignError) as rejected:
+        service.admit(
+            prepared,
+            "admit-approval-limit",
+            maximum_cost_usd=1.0,
+        )
+
+    assert rejected.value.code == "approval_cost_limit"
+    assert service.status("demo").reserved_cost_usd == 0.0
+    assert not (
+        tmp_path / ".fugue/runtime/campaigns/demo/operations/admit-approval-limit.json"
+    ).exists()
+
+
+def test_reservation_estimate_is_pure_and_includes_paid_calls(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+
+    estimate = service.estimate_reservation(
+        "demo",
+        cell_count=2,
+        additional_paid_calls=3,
+    )
+
+    assert estimate == 10.0
+    assert not (tmp_path / ".fugue").exists()
+
+
 def test_policy_revision_is_allowed_only_before_first_admission(tmp_path: Path) -> None:
     service = _service(tmp_path)
     first_plan = service.preview(_proposal(service))

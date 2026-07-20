@@ -39,7 +39,7 @@ jobs:
       - name: Install development tooling
         if: matrix.suite == 'dev'
         run: uv sync --frozen --extra dev
-      - name: Install research SDK
+      - name: Install research service
         if: matrix.suite == 'research'
         run: uv sync --frozen --extra dev --extra research
       - name: Test core contracts
@@ -80,7 +80,7 @@ jobs:
           uv run pytest
           tests/test_curation.py tests/test_deployment.py tests/test_self_eval.py
           tests/test_reachability.py tests/test_skill.py tests/test_tui.py
-      - name: Test governed research SDK
+      - name: Test task authoring and research interfaces
         if: matrix.suite == 'research'
         env:
           PYTHONWARNINGS: error
@@ -89,6 +89,7 @@ jobs:
           uv run pytest
           tests/test_task_authoring.py tests/test_research_store.py
           tests/test_research_service.py tests/test_research_transports.py
+          tests/test_research_agent_interface.py
 
   quality:
     name: Quality, build, and command smoke

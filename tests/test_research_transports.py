@@ -69,6 +69,7 @@ def _terminal_experiment(service: ResearchService) -> None:
             plan_receipt={"plan_digest": _A},
             estimated_cells=1,
             estimated_calls={},
+            estimated_cost_usd=0.0,
             eligible=True,
             blockers=(),
         )
@@ -83,6 +84,7 @@ def _terminal_experiment(service: ResearchService) -> None:
             state="queued",
             draft=draft.to_dict(),
             preview=preview.to_dict(),
+            approval=None,
             parent_experiment_ids=(),
             proposal=None,
             plan=preview.plan_receipt,
@@ -139,19 +141,21 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
 
 def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None:
     server = create_mcp_server(tmp_path, service=_service(tmp_path))
-    try:
-        tools = asyncio.run(server.list_tools())
-        names = {tool.name for tool in tools}
-        assert names == {
-            "create_study",
-            "read_study_context",
-            "record_study_update",
-            "preview_experiment",
-            "start_experiment",
-            "inspect_experiment",
-            "cancel_experiment",
-        }
-        templates = asyncio.run(server.list_resource_templates())
-        assert len(templates) == 3
-    finally:
-        server._fugue_worker.stop()
+    tools = asyncio.run(server.list_tools())
+    names = {tool.name for tool in tools}
+    assert names == {
+        "fugue_catalog",
+        "fugue_study_create",
+        "fugue_study_context",
+        "fugue_study_record",
+        "fugue_trace_audit_preview",
+        "fugue_trace_audit_start",
+        "fugue_experiment_preview",
+        "fugue_experiment_start",
+        "fugue_experiment_get",
+        "fugue_experiment_watch",
+        "fugue_experiment_cancel",
+        "fugue_result_record",
+    }
+    templates = asyncio.run(server.list_resource_templates())
+    assert len(templates) == 4

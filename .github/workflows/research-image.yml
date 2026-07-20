@@ -1,0 +1,79 @@
+name: Research image
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile.research
+      - compose.research.yaml
+      - pyproject.toml
+      - uv.lock
+      - fugue/research/**
+      - fugue/resources/agent-skills/optimize-agent-with-fugue/**
+      - .github/workflows/research-image.yml
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: research-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  health:
+    name: Control container health and isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create CI-only Docker secrets
+        run: |
+          mkdir -p .fugue/secrets .fugue/trace-data
+          printf '%s\n' 'ci-research-token' > .fugue/secrets/research_api_key
+          printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
+          chmod 600 .fugue/secrets/*
+      - name: Build the local architecture image
+        run: docker build -f Dockerfile.research -t fugue-research:ci .
+      - name: Start only the control plane
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: docker compose -f compose.research.yaml up --no-build -d fugue-control
+      - name: Probe readiness and privilege boundary
+        run: |
+          curl --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:8787/readyz
+          CONTROL_ID="$(docker compose -f compose.research.yaml ps -q fugue-control)"
+          test -n "$CONTROL_ID"
+          test -z "$(docker inspect "$CONTROL_ID" --format '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}{{.Source}}{{end}}{{end}}')"
+      - name: Show container logs
+        if: failure()
+        run: docker compose -f compose.research.yaml logs --no-color
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f compose.research.yaml down --volumes
+
+  multiarch:
+    name: Multi-architecture OCI build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.research
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/${{ github.repository_owner }}/fugue-research:${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'validation' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

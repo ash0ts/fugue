@@ -791,6 +791,53 @@ class CampaignService:
             catalog_digest=_artifact_digest(unsigned.to_dict(), "catalog_digest"),
         )
 
+    def estimate_reservation(
+        self,
+        campaign_id: str,
+        *,
+        cell_count: int,
+        additional_paid_calls: int = 0,
+        parent_outcome_id: str | None = None,
+    ) -> float:
+        """Purely estimate the conservative reservation for a proposed run."""
+
+        if (
+            isinstance(cell_count, bool)
+            or not isinstance(cell_count, int)
+            or cell_count < 1
+        ):
+            raise CampaignError(
+                "invalid_cell_count",
+                "reservation estimate requires at least one cell",
+                category="validation",
+            )
+        if (
+            isinstance(additional_paid_calls, bool)
+            or not isinstance(additional_paid_calls, int)
+            or additional_paid_calls < 0
+        ):
+            raise CampaignError(
+                "invalid_paid_call_count",
+                "additional paid calls must be a non-negative integer",
+                category="validation",
+            )
+        policy = self._policy(campaign_id)
+        prior_maximum = None
+        if parent_outcome_id is not None:
+            parent = self._outcome(
+                campaign_id=campaign_id,
+                outcome_id=parent_outcome_id,
+            )
+            if parent.get("maximum_measured_cell_cost_usd") is not None:
+                prior_maximum = float(parent["maximum_measured_cell_cost_usd"])
+        reservation, _ = reserve_campaign_cost(
+            cell_count=cell_count + additional_paid_calls,
+            initial_cell_reserve_usd=policy.limits.initial_cell_reserve_usd,
+            safety_margin=policy.limits.safety_margin,
+            prior_maximum_cell_cost_usd=prior_maximum,
+        )
+        return reservation
+
     def preview_task_suite(
         self,
         campaign_id: str,
@@ -913,8 +960,18 @@ class CampaignService:
         task_suite_digest: str,
         scoring_revision: TaskScoringRevisionV1,
         operation_id: str,
+        *,
+        maximum_cost_usd: float | None = None,
     ) -> TaskEvaluationV1:
         operation_id = self._operation_id(operation_id)
+        if maximum_cost_usd is not None and (
+            not math.isfinite(maximum_cost_usd) or maximum_cost_usd < 0
+        ):
+            raise CampaignError(
+                "invalid_cost_limit",
+                "task-evaluation cost limit must be finite and non-negative",
+                category="validation",
+            )
         campaign_id, _ = self._resolve_campaign_subject(run_id)
         revision = scoring_revision_from_dict(scoring_revision.to_dict())
         operation_input = stable_digest(
@@ -923,6 +980,7 @@ class CampaignService:
                 "run_id": run_id,
                 "task_suite_digest": task_suite_digest,
                 "revision_digest": revision.revision_digest,
+                "maximum_cost_usd": maximum_cost_usd,
             }
         )
         with self._operation_lock(campaign_id, operation_id):
@@ -979,6 +1037,19 @@ class CampaignService:
                         "reserve_usd": paid_call_reserve,
                     },
                 )
+            if (
+                maximum_cost_usd is not None
+                and paid_call_reserve > maximum_cost_usd + 1e-9
+            ):
+                raise CampaignError(
+                    "approval_cost_limit",
+                    "task-evaluation reserve exceeds the remaining operator approval",
+                    category="admission",
+                    details={
+                        "approved_cost_usd": maximum_cost_usd,
+                        "reserved_cost_usd": paid_call_reserve,
+                    },
+                )
             self._write_operation(
                 campaign_id,
                 operation_id,
@@ -1008,6 +1079,15 @@ class CampaignService:
                 raise CampaignError(
                     "budget_exceeded",
                     "task evaluation cost exceeds the remaining campaign budget",
+                    category="admission",
+                )
+            if (
+                maximum_cost_usd is not None
+                and evaluation.accounted_cost_usd > maximum_cost_usd + 1e-9
+            ):
+                raise CampaignError(
+                    "approval_cost_limit",
+                    "task-evaluation cost exceeds the remaining operator approval",
                     category="admission",
                 )
             relative = self._write_receipt(
@@ -1315,15 +1395,28 @@ class CampaignService:
             return receipt
 
     def admit(
-        self, prepared_plan: PreparedPlanV1, operation_id: str
+        self,
+        prepared_plan: PreparedPlanV1,
+        operation_id: str,
+        *,
+        maximum_cost_usd: float | None = None,
     ) -> AdmissionReceiptV1:
         operation_id = self._operation_id(operation_id)
         self._verify_prepared_plan(prepared_plan)
+        if maximum_cost_usd is not None and (
+            not math.isfinite(maximum_cost_usd) or maximum_cost_usd < 0
+        ):
+            raise CampaignError(
+                "invalid_cost_limit",
+                "admission cost limit must be finite and non-negative",
+                category="validation",
+            )
         campaign_id = prepared_plan.campaign_id
         operation_input = stable_digest(
             {
                 "action": "admit",
                 "prepared_plan_digest": prepared_plan.prepared_plan_digest,
+                "maximum_cost_usd": maximum_cost_usd,
             }
         )
         with (
@@ -1451,6 +1544,16 @@ class CampaignService:
                     "budget_exceeded",
                     f"campaign reservation ${reservation:.2f} exceeds remaining budget ${remaining:.2f}",
                     category="admission",
+                )
+            if maximum_cost_usd is not None and reservation > maximum_cost_usd + 1e-9:
+                raise CampaignError(
+                    "approval_cost_limit",
+                    "campaign reservation exceeds the operator-approved cost limit",
+                    category="admission",
+                    details={
+                        "approved_cost_usd": maximum_cost_usd,
+                        "reserved_cost_usd": reservation,
+                    },
                 )
             self._write_operation(
                 campaign_id,

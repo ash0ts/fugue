@@ -2,20 +2,26 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
-    "python_full_version >= '3.14' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
-    "python_full_version == '3.13.*' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
     "python_full_version < '3.13' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
-    "python_full_version >= '3.14' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version == '3.13.*' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version < '3.13' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
+    "python_full_version < '3.13' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
     "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
     "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version < '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version < '3.13' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
 ]
 conflicts = [[
     { package = "fugue", extra = "context" },
     { package = "fugue", extra = "serve" },
+], [
+    { package = "fugue", extra = "context" },
+    { package = "fugue", extra = "research-worker" },
 ]]
 
 [[package]]
@@ -186,7 +192,7 @@ version = "4.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
@@ -234,7 +240,7 @@ name = "cffi"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/57/5f/ff100cae70ebe9d8df1c01a00e510e45d9adb5c1fdda84791b199141de97/cffi-2.1.0.tar.gz", hash = "sha256:efc1cdd798b1aaf39b4610bba7aad28c9bea9b910f25c784ccf9ec1fa719d1f9", size = 531036, upload-time = "2026-07-06T21:34:30.382Z" }
 wheels = [
@@ -420,7 +426,7 @@ name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/d4/81420972a676e8ffea40450d8c8c92943e7218a78fe9b64359836cc9876b/click-8.4.2.tar.gz", hash = "sha256:9a6cea6e60b17ebe0a44c5cc636d94f09bd66142c1cd7d8b4cd731c4917a15f6", size = 338000, upload-time = "2026-06-24T17:45:15.148Z" }
 wheels = [
@@ -441,7 +447,7 @@ name = "cryptography"
 version = "49.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1f/99/d1c90d6041656cc6ee229dc99cd67fd0cd5aec3c5f7d72fffc27cc750054/cryptography-49.0.0.tar.gz", hash = "sha256:f89660a348f4f78a92366240a61404e337586ef7f5909a2fef59ca88ef505493", size = 854345, upload-time = "2026-06-12T20:02:30.512Z" }
 wheels = [
@@ -491,7 +497,7 @@ name = "deprecation"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "packaging" },
+    { name = "packaging", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5a/d3/8ae2869247df154b64c1884d7346d412fed0c49df84db635aab2d1c40e62/deprecation-2.1.0.tar.gz", hash = "sha256:72b3bde64e5d778694b0cf68178aed03d15e15477116add3fb773e581f9518ff", size = 173788, upload-time = "2020-04-20T14:23:38.738Z" }
 wheels = [
@@ -504,10 +510,10 @@ version = "0.25.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "packaging" },
     { name = "requirements-parser" },
-    { name = "tomli", marker = "python_full_version < '3.15' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "tomli", marker = "python_full_version < '3.15' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b8/b2/50ccc99362ae7757342978b7ecb3b98e47fade721fd617d74db1948ec3a1/deptry-0.25.1.tar.gz", hash = "sha256:45c8cd982c85cd4faae573ddff6920de7eec735336db6973f26a765ae7950f7d", size = 509748, upload-time = "2026-03-18T23:22:18.139Z" }
 wheels = [
@@ -572,16 +578,16 @@ name = "fastembed"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
-    { name = "loguru" },
-    { name = "mmh3" },
+    { name = "huggingface-hub", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "loguru", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "mmh3", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
     { name = "numpy" },
-    { name = "onnxruntime" },
-    { name = "pillow" },
-    { name = "py-rust-stemmers" },
-    { name = "requests" },
-    { name = "tokenizers" },
-    { name = "tqdm" },
+    { name = "onnxruntime", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "pillow", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "py-rust-stemmers", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "requests", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "tokenizers", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "tqdm", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/26/25/58865e36b6e8a9a0d0ff905b5601aa30db97956327c0df42ec4ed6accc21/fastembed-0.8.0.tar.gz", hash = "sha256:75966edfa8b006ee78514c726bd7f6a50721dadc89305279052be9db72fd53e8", size = 75115, upload-time = "2026-03-23T16:34:41.699Z" }
 wheels = [
@@ -791,6 +797,13 @@ research = [
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
+research-worker = [
+    { name = "fastapi" },
+    { name = "harbor", marker = "python_full_version >= '3.13'" },
+    { name = "mcp" },
+    { name = "pydantic" },
+    { name = "uvicorn" },
+]
 serve = [
     { name = "ag-ui-protocol" },
     { name = "fastapi" },
@@ -806,21 +819,25 @@ requires-dist = [
     { name = "ag-ui-protocol", marker = "extra == 'serve'", specifier = "==0.1.19" },
     { name = "deptry", marker = "extra == 'dev'", specifier = "==0.25.1" },
     { name = "fastapi", marker = "extra == 'research'", specifier = ">=0.115,<1" },
+    { name = "fastapi", marker = "extra == 'research-worker'", specifier = ">=0.115,<1" },
     { name = "fastapi", marker = "extra == 'serve'", specifier = ">=0.115,<1" },
     { name = "fastembed", marker = "extra == 'context'", specifier = "==0.8.0" },
     { name = "fastembed", marker = "extra == 'serve'", specifier = "==0.8.0" },
     { name = "filelock", specifier = "==3.29.7" },
     { name = "graphiti-core", marker = "extra == 'context'", specifier = "==0.29.2" },
+    { name = "harbor", marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.18.0" },
     { name = "harbor", marker = "python_full_version >= '3.13' and extra == 'serve'", specifier = "==0.18.0" },
     { name = "httpx" },
     { name = "lancedb", marker = "extra == 'context'", specifier = "==0.34.0" },
     { name = "lancedb", marker = "extra == 'serve'", specifier = "==0.34.0" },
     { name = "mcp", marker = "extra == 'context'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'research'", specifier = "==1.28.1" },
+    { name = "mcp", marker = "extra == 'research-worker'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'serve'", specifier = "==1.28.1" },
     { name = "mem0ai", marker = "extra == 'context'", specifier = "==0.1.118" },
     { name = "pyarrow", marker = "extra == 'context'", specifier = "==25.0.0" },
     { name = "pydantic", marker = "extra == 'research'", specifier = ">=2.10,<3" },
+    { name = "pydantic", marker = "extra == 'research-worker'", specifier = ">=2.10,<3" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pyyaml" },
     { name = "qdrant-client", marker = "extra == 'context'", specifier = "==1.18.0" },
@@ -831,11 +848,12 @@ requires-dist = [
     { name = "textual", specifier = "==8.2.8" },
     { name = "toml", specifier = "==0.10.2" },
     { name = "uvicorn", marker = "extra == 'research'", specifier = ">=0.34,<1" },
+    { name = "uvicorn", marker = "extra == 'research-worker'", specifier = ">=0.34,<1" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.34,<1" },
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
     { name = "weave", specifier = "==0.53.1" },
 ]
-provides-extras = ["dev", "context", "serve", "research"]
+provides-extras = ["dev", "context", "serve", "research", "research-worker"]
 
 [[package]]
 name = "googleapis-common-protos"
@@ -843,7 +861,7 @@ version = "1.75.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-research-worker' or extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b5/c8/f439cffde755cffa462bfbb156278fa6f9d09119719af9814b858fd4f81f/googleapis_common_protos-1.75.0.tar.gz", hash = "sha256:53a062ff3c32552fbd62c11fe23768b78e4ddf0494d5e5fd97d3f4689c75fbbd", size = 151035, upload-time = "2026-05-07T08:04:49.423Z" }
 wheels = [
@@ -1028,8 +1046,8 @@ name = "h2"
 version = "4.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "hpack", marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or extra == 'extra-5-fugue-context'" },
-    { name = "hyperframe", marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or extra == 'extra-5-fugue-context'" },
+    { name = "hpack", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
+    { name = "hyperframe", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1d/17/afa56379f94ad0fe8defd37d6eb3f89a25404ffc71d4d848893d270325fc/h2-4.3.0.tar.gz", hash = "sha256:6c59efe4323fa18b47a632221a1888bd7fde6249819beda254aeca909f221bf1", size = 2152026, upload-time = "2025-08-23T18:12:19.778Z" }
 wheels = [
@@ -1139,7 +1157,7 @@ wheels = [
 
 [package.optional-dependencies]
 http2 = [
-    { name = "h2", marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or extra == 'extra-5-fugue-context'" },
+    { name = "h2", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
 ]
 
 [[package]]
@@ -1156,15 +1174,15 @@ name = "huggingface-hub"
 version = "1.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click" },
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
-    { name = "httpx" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
+    { name = "click", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "filelock", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "fsspec", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "hf-xet", marker = "(python_full_version >= '3.13' and platform_machine == 'AMD64') or (python_full_version >= '3.13' and platform_machine == 'aarch64') or (python_full_version >= '3.13' and platform_machine == 'amd64') or (python_full_version >= '3.13' and platform_machine == 'arm64') or (python_full_version >= '3.13' and platform_machine == 'x86_64') or (platform_machine != 'AMD64' and platform_machine != 'aarch64' and platform_machine != 'amd64' and platform_machine != 'arm64' and platform_machine != 'x86_64' and extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (platform_machine != 'AMD64' and platform_machine != 'aarch64' and platform_machine != 'amd64' and platform_machine != 'arm64' and platform_machine != 'x86_64' and extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve') or (platform_machine == 'AMD64' and extra == 'extra-5-fugue-context') or (platform_machine == 'AMD64' and extra == 'extra-5-fugue-serve') or (platform_machine == 'aarch64' and extra == 'extra-5-fugue-context') or (platform_machine == 'aarch64' and extra == 'extra-5-fugue-serve') or (platform_machine == 'amd64' and extra == 'extra-5-fugue-context') or (platform_machine == 'amd64' and extra == 'extra-5-fugue-serve') or (platform_machine == 'arm64' and extra == 'extra-5-fugue-context') or (platform_machine == 'arm64' and extra == 'extra-5-fugue-serve') or (platform_machine == 'x86_64' and extra == 'extra-5-fugue-context') or (platform_machine == 'x86_64' and extra == 'extra-5-fugue-serve')" },
+    { name = "httpx", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "packaging", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "pyyaml", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "tqdm", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1a/8f/999e4dda11c6187c78f090eac00895a47e11a0049308f07579bcb7aa3aa2/huggingface_hub-1.23.0.tar.gz", hash = "sha256:c04997fb8bbdace1e57b7703d30ed7678af51f70d00d241819ff411b92ae9a88", size = 919163, upload-time = "2026-07-09T14:49:32.315Z" }
 wheels = [
@@ -1343,7 +1361,7 @@ name = "lance-namespace"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "lance-namespace-urllib3-client" },
+    { name = "lance-namespace-urllib3-client", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/00/81/4cf8d0412e1f37b2bfa70d0aeb9c7ae4ab73607534e44d60b55efb485306/lance_namespace-0.9.0.tar.gz", hash = "sha256:f738b641cc615b17323baa4eb47900f184688739ee3d2ea9fe39396b9588e53d", size = 11637, upload-time = "2026-07-01T07:42:41.78Z" }
 wheels = [
@@ -1355,10 +1373,10 @@ name = "lance-namespace-urllib3-client"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
-    { name = "python-dateutil" },
-    { name = "typing-extensions" },
-    { name = "urllib3" },
+    { name = "pydantic", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "python-dateutil", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "typing-extensions", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "urllib3", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d3/c3/32d0e2618549ace857c80a457e5915ef3e1145661baff876c8a5ec27be5b/lance_namespace_urllib3_client-0.9.0.tar.gz", hash = "sha256:cf796fa5307fa4dde91fe4bec2af28b90ba79191852d4394e8fe44276538e40f", size = 235805, upload-time = "2026-07-01T07:42:42.563Z" }
 wheels = [
@@ -1370,13 +1388,13 @@ name = "lancedb"
 version = "0.34.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "deprecation" },
-    { name = "lance-namespace" },
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "tqdm" },
+    { name = "deprecation", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "lance-namespace", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "numpy", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "packaging", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "pyarrow", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "pydantic", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "tqdm", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/f7/5262b9aa593f790757163c0165ab0da1dda054758901bea7e4f02c9cb633/lancedb-0.34.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:c462f2e6f933cad659fd0179394eaab578acbc9151fe2ef41bc29b36ecca5058", size = 52654213, upload-time = "2026-07-02T17:13:31.102Z" },
@@ -1428,8 +1446,8 @@ name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "(sys_platform == 'win32' and extra == 'extra-5-fugue-context') or (sys_platform == 'win32' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "win32-setctime", marker = "(sys_platform == 'win32' and extra == 'extra-5-fugue-context') or (sys_platform == 'win32' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
@@ -1529,12 +1547,12 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-multipart" },
-    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "sse-starlette" },
     { name = "starlette" },
     { name = "typing-extensions" },
     { name = "typing-inspection" },
-    { name = "uvicorn", marker = "sys_platform != 'emscripten' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "uvicorn", marker = "sys_platform != 'emscripten' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6e/77/9450b8f251a13affb6281997d0523c4615f8a8b35d0b21ff30db3a5aac9d/mcp-1.28.1.tar.gz", hash = "sha256:d51e36a5f5644faea4f85ea649bfffa6bc6c26770d42798ad6a3de3d2ba69683", size = 638501, upload-time = "2026-06-26T12:57:29.093Z" }
 wheels = [
@@ -1838,11 +1856,11 @@ name = "onnxruntime"
 version = "1.27.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "flatbuffers" },
-    { name = "numpy" },
-    { name = "packaging" },
+    { name = "flatbuffers", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "numpy", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
+    { name = "packaging", marker = "extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
     { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-serve'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra != 'extra-5-fugue-research-worker' and extra == 'extra-5-fugue-serve') or (extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/b7/dd3a524ed93a820dff1af902d0412957ab12499953333e9daa01af5bc480/onnxruntime-1.27.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:a14c2ce45312def86b77aea651f46565e45960cf5f0721bfdff449165086ab76", size = 18433506, upload-time = "2026-06-15T22:43:47.026Z" },
@@ -1895,8 +1913,10 @@ name = "openai"
 version = "2.45.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version == '3.13.*'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32'",
 ]
 dependencies = [
     { name = "anyio", marker = "python_full_version >= '3.13'" },
@@ -1961,7 +1981,7 @@ version = "1.43.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-research-worker' or extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e0/b9/d357faefb40bda1d4799913e6af611171ff22a2dedcb93576bc92242d056/opentelemetry_proto-1.43.0.tar.gz", hash = "sha256:224778df17e1f3fafeaaa21d874236ca5f6ffc2f86e0899298ec7351aac27924", size = 46481, upload-time = "2026-06-24T15:20:07.625Z" }
 wheels = [
@@ -2132,7 +2152,7 @@ dependencies = [
     { name = "networkx" },
     { name = "pdfminer-six" },
     { name = "pillow" },
-    { name = "pyreadline3", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "pyreadline3", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "pyyaml" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/70/55/e5400762e3884f743d59291e71eaaa9c52dd7e144b75a11911e74ec1bac9/polyfile_weave-0.5.9.tar.gz", hash = "sha256:12341fab03e06ede1bfebbd3627dd24015fde5353ea74ece2da186321b818bdb", size = 6024974, upload-time = "2026-01-22T22:08:48.081Z" }
@@ -2158,7 +2178,7 @@ version = "2.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "deprecation", marker = "python_full_version >= '3.13'" },
-    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "pydantic", marker = "python_full_version >= '3.13'" },
     { name = "yarl", marker = "python_full_version >= '3.13'" },
 ]
@@ -2300,13 +2320,11 @@ name = "protobuf"
 version = "7.35.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
-    "python_full_version == '3.13.*' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
-    "python_full_version < '3.13' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
-    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version < '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
-    "python_full_version < '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32'",
+    "python_full_version < '3.13'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/01/9ef0afd7999eb9badb3a768b4aedd78c86d4c65cfaf1958ab276199e76b4/protobuf-7.35.1.tar.gz", hash = "sha256:ce115a26fe0c39a2c29973d914d327e516a6455464489fe3cd1e51a1b354f81a", size = 458717, upload-time = "2026-06-11T21:55:40.257Z" }
 wheels = [
@@ -2543,7 +2561,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2697,7 +2715,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -3109,7 +3127,7 @@ version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/e3/7c1dc7381d9f8ab7d854328ebfa884e62cb3f3d8549ddfd37c7814f42afa/starlette-1.3.1.tar.gz", hash = "sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0", size = 2703240, upload-time = "2026-06-12T09:23:11.602Z" }
 wheels = [
@@ -3122,7 +3140,7 @@ version = "2.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "deprecation", marker = "python_full_version >= '3.13'" },
-    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "pydantic", marker = "python_full_version >= '3.13'" },
     { name = "yarl", marker = "python_full_version >= '3.13'" },
 ]
@@ -3175,9 +3193,9 @@ name = "supabase-auth"
 version = "2.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "pydantic", marker = "python_full_version >= '3.13'" },
-    { name = "pyjwt", extra = ["crypto"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "pyjwt", extra = ["crypto"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/8a/408689cf39820f0d46d2731d6747ff94dbefc87ae977b4b5c4066da5b070/supabase_auth-2.31.0.tar.gz", hash = "sha256:0945b33fa96239c76dc8eaf96d7d2c94991950d24b4cfe4a5c2da9aa5e909663", size = 39151, upload-time = "2026-06-04T13:37:27.375Z" }
 wheels = [
@@ -3189,7 +3207,7 @@ name = "supabase-functions"
 version = "2.31.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "httpx", extra = ["http2"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "strenum", marker = "python_full_version >= '3.13'" },
     { name = "yarl", marker = "python_full_version >= '3.13'" },
 ]
@@ -3276,7 +3294,7 @@ name = "tokenizers"
 version = "0.23.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context' or extra == 'extra-5-fugue-serve'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c1/60/21f715d9faba5f5407ff759472ade058ec4a507ad62bcea47cb847239a73/tokenizers-0.23.1.tar.gz", hash = "sha256:1feeeadf865a7915adc25445dea30e9933e593c31bb96c277cee36de227c8bfa", size = 365748, upload-time = "2026-04-27T14:43:25.606Z" }
 wheels = [
@@ -3357,7 +3375,7 @@ name = "tqdm"
 version = "4.68.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "(python_full_version >= '3.13' and sys_platform == 'win32') or (sys_platform == 'win32' and extra == 'extra-5-fugue-context') or (sys_platform == 'win32' and extra == 'extra-5-fugue-serve') or (sys_platform != 'win32' and extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (sys_platform != 'win32' and extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ae/5f/57ff8b434839e70dab45601284ea413e947a63799891b7553e5960a793a8/tqdm-4.68.4.tar.gz", hash = "sha256:19829c9673638f2a0b8617da4cdcb927e831cd88bcfcb6e78d42a4d1af131520", size = 792418, upload-time = "2026-07-07T09:58:18.369Z" }
 wheels = [
@@ -3467,7 +3485,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "sentry-sdk" },
     { name = "tenacity" },
-    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a3/34/c9ddb250e27708b581f52fd75f94ca04edbe7ed287560fe13995e042521d/weave-0.53.1.tar.gz", hash = "sha256:623c1918394e8493a3344fb89ffc71b3e1e96c3bd247a77309aa2b6e78475cb9", size = 1113042, upload-time = "2026-07-02T21:17:45.087Z" }
 wheels = [

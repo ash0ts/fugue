@@ -18,6 +18,8 @@ from fugue.bench.task_authoring import (
     task_suite_draft_from_dict,
     task_suite_preview_from_dict,
 )
+from fugue.research.approvals import ApprovalLedger
+from fugue.research.candidate_sources import CandidateSourceRegistry
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     TERMINAL_EXPERIMENT_STATES,
@@ -32,6 +34,7 @@ from fugue.research.contracts import (
     sign_record,
 )
 from fugue.research.store import StudyStore
+from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 
 _RUN_TERMINAL = frozenset({"passed", "failed", "cancelled", "interrupted"})
 
@@ -46,10 +49,37 @@ class ResearchService:
         *,
         campaign_service: CampaignService | None = None,
         store: StudyStore | None = None,
+        approval_ledger: ApprovalLedger | None = None,
+        trace_registry: TraceSourceRegistry | None = None,
+        candidate_sources: CandidateSourceRegistry | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.campaign = campaign_service or CampaignService(self.repo_root, env_file)
         self.store = store or StudyStore(self.repo_root)
+        self.approvals = approval_ledger or ApprovalLedger(self.store.path)
+        self.trace_registry = trace_registry or TraceSourceRegistry.from_file(
+            _optional_config(
+                self.repo_root / "configs/fugue/research/trace-sources.yaml"
+            )
+        )
+        self.candidate_sources = candidate_sources or CandidateSourceRegistry.from_file(
+            _optional_config(
+                self.repo_root / "configs/fugue/research/candidate-sources.yaml"
+            )
+        )
+        self.traces = TraceAuditService(
+            self.store,
+            self.trace_registry,
+            self.approvals,
+        )
+
+    def catalog(self, study_id: str) -> dict[str, Any]:
+        study = self.store.get_study(study_id)
+        return {
+            "campaign": self.campaign.catalog(study.campaign_id).to_dict(),
+            "trace_sources": list(self.trace_registry.catalog()),
+            "candidate_sources": list(self.candidate_sources.catalog()),
+        }
 
     def preview_experiment(
         self, study_id: str, draft: ExperimentDraftV1
@@ -58,6 +88,7 @@ class ResearchService:
         try:
             study = self.store.get_study(study_id)
             draft = experiment_draft_from_dict(draft.to_dict())
+            self.candidate_sources.validate_draft(draft)
             if draft.study_id != study.id or draft.campaign_id != study.campaign_id:
                 raise ResearchError(
                     "study_mismatch",
@@ -97,6 +128,12 @@ class ResearchService:
                 proposal = self._proposal(draft, catalog.catalog_digest)
                 plan = self.campaign.preview(proposal)
                 estimated_cells = plan.cell_count
+            estimated_cost_usd = self._estimate_preview_cost(
+                draft.campaign_id,
+                estimated_cells,
+                estimated_calls,
+                parent_outcome_id=draft.parent_outcome_id,
+            )
         except CampaignError as exc:
             raise self._research_error(exc) from exc
         record_id = self._record_id(study.id, draft.proposal_id)
@@ -112,6 +149,7 @@ class ResearchService:
             plan_receipt=plan.to_dict() if plan else None,
             estimated_cells=estimated_cells,
             estimated_calls=estimated_calls,
+            estimated_cost_usd=estimated_cost_usd,
             eligible=not blockers,
             blockers=tuple(blockers),
         )
@@ -122,6 +160,7 @@ class ResearchService:
         preview: ExperimentPreviewV1,
         *,
         idempotency_key: str,
+        approval_digest: str | None = None,
     ) -> ExperimentRecordV1:
         """Accept an exact preview at the explicit spend boundary."""
         preview = experiment_preview_from_dict(preview.to_dict())
@@ -132,8 +171,15 @@ class ResearchService:
                 category="policy",
                 details={"blockers": list(preview.blockers)},
             )
+        if not approval_digest:
+            raise ResearchError(
+                "approval_required",
+                "starting an experiment requires operator approval of the exact preview",
+                category="policy",
+            )
         study = self.store.get_study(preview.study_id)
         draft = experiment_draft_from_dict(preview.draft)
+        self.candidate_sources.validate_draft(draft)
         if study.campaign_id != preview.campaign_id:
             raise ResearchError(
                 "study_mismatch", "preview campaign does not match Study"
@@ -152,6 +198,14 @@ class ResearchService:
                 category="policy",
             )
         timestamp = now()
+        approval = self.approvals.claim(
+            approval_digest=approval_digest,
+            subject_kind="experiment",
+            preview_digest=preview.preview_digest,
+            subject_id=preview.experiment_id,
+            estimated_cells=preview.estimated_cells,
+            estimated_cost_usd=preview.estimated_cost_usd,
+        )
         record = sign_record(
             ExperimentRecordV1(
                 schema_version=RESEARCH_SCHEMA_VERSION,
@@ -161,6 +215,7 @@ class ResearchService:
                 state="queued",
                 draft=draft.to_dict(),
                 preview=preview.to_dict(),
+                approval=approval.to_dict(),
                 parent_experiment_ids=draft.parent_experiment_ids,
                 proposal=None,
                 plan=preview.plan_receipt,
@@ -264,6 +319,7 @@ class ResearchService:
         self, record: ExperimentRecordV1, worker_id: str
     ) -> ExperimentRecordV1:
         draft = experiment_draft_from_dict(record.draft)
+        self.candidate_sources.validate_draft(draft)
         preview = experiment_preview_from_dict(record.preview)
         if record.state == "cancelling":
             return self._reconcile_run(record, worker_id, cancelled=True)
@@ -367,8 +423,12 @@ class ResearchService:
             prepared = prepared_plan_from_dict(record.prepared_plan)
 
         if record.admission is None:
+            approval_digest = str((record.approval or {}).get("approval_digest") or "")
+            approval = self.approvals.get(approval_digest)
             admission = self.campaign.admit(
-                prepared, self._operation(record.id, "admit")
+                prepared,
+                self._operation(record.id, "admit"),
+                maximum_cost_usd=approval.maximum_cost_usd,
             )
             record = self._save(
                 record,
@@ -464,11 +524,18 @@ class ResearchService:
                     "authored scoring requires a locked task suite",
                 )
             revision = scoring_revision_from_dict(draft.scoring_revision)
+            approval = self.approvals.get(
+                str((record.approval or {}).get("approval_digest") or "")
+            )
+            admitted_reserve = float(
+                (record.admission or {}).get("reserved_cost_usd") or 0.0
+            )
             evaluation = self.campaign.score_task_suite(
                 record.run_id,
                 task_digest,
                 revision,
                 self._operation(record.id, "score"),
+                maximum_cost_usd=max(0.0, approval.maximum_cost_usd - admitted_reserve),
             )
             record = self._save(
                 record,
@@ -723,6 +790,29 @@ class ResearchService:
     def _record_id(study_id: str, proposal_id: str) -> str:
         return f"{study_id}.{proposal_id}"
 
+    def _estimate_preview_cost(
+        self,
+        campaign_id: str,
+        cell_count: int,
+        estimated_calls: dict[str, int],
+        *,
+        parent_outcome_id: str | None,
+    ) -> float:
+        # The campaign remains the final admission authority. This conservative
+        # quote gives the human approval boundary a stable amount before any
+        # preparation or execution begins.
+        estimator = getattr(self.campaign, "estimate_reservation", None)
+        if estimator is None:
+            return 0.0
+        return float(
+            estimator(
+                campaign_id,
+                cell_count=cell_count,
+                additional_paid_calls=sum(estimated_calls.values()),
+                parent_outcome_id=parent_outcome_id,
+            )
+        )
+
     @staticmethod
     def _operation(experiment_id: str, stage: str) -> str:
         return f"research-{experiment_id}-{stage}"
@@ -762,6 +852,10 @@ class ResearchService:
             retryable=error.retryable,
             details=error.details,
         )
+
+
+def _optional_config(path: Path) -> Path | None:
+    return path if path.is_file() else None
 
 
 class ResearchWorker:

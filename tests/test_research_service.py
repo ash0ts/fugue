@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from fugue.bench.campaigns import CampaignError
 from fugue.research.client import FugueResearchClient
 from fugue.research.contracts import ResearchError, build_experiment_draft
 from fugue.research.service import ResearchService
@@ -109,6 +110,17 @@ class FakeCampaignService:
     def validate_proposal(self, _: Any) -> None:
         return None
 
+    def estimate_reservation(
+        self,
+        _: str,
+        *,
+        cell_count: int,
+        additional_paid_calls: int = 0,
+        parent_outcome_id: str | None = None,
+    ) -> float:
+        del parent_outcome_id
+        return float((cell_count + additional_paid_calls) * 2)
+
     def prepare(self, _: Any, operation_id: str) -> Artifact:
         return Artifact(
             {
@@ -118,12 +130,25 @@ class FakeCampaignService:
             }
         )
 
-    def admit(self, _: Any, operation_id: str) -> Artifact:
+    def admit(
+        self,
+        _: Any,
+        operation_id: str,
+        *,
+        maximum_cost_usd: float | None = None,
+    ) -> Artifact:
+        if maximum_cost_usd is not None and maximum_cost_usd < 10.0:
+            raise CampaignError(
+                "approval_cost_limit",
+                "campaign reservation exceeds the operator-approved cost limit",
+                category="admission",
+            )
         return Artifact(
             {
                 "schema_version": 1,
                 "operation_id": operation_id,
                 "admission_digest": _C,
+                "reserved_cost_usd": 10.0,
             }
         )
 
@@ -255,15 +280,33 @@ def _task_suite() -> dict[str, Any]:
     }
 
 
+def _approval(service: ResearchService, preview: Any, operation: str) -> str:
+    return service.approvals.approve(
+        subject_kind="experiment",
+        preview_digest=preview.preview_digest,
+        maximum_cost_usd=25.0,
+        maximum_cells=preview.estimated_cells,
+        approved_by="test-operator",
+        operation_id=operation,
+    ).approval_digest
+
+
 def test_preview_is_pure_and_start_is_explicit_boundary(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     before = service.store.get_study("study-1")
     preview = service.preview_experiment("study-1", _draft())
     after = service.store.get_study("study-1")
     assert preview.estimated_cells == 2
+    assert preview.estimated_cost_usd == 4.0
     assert before == after
     assert service.store.list_experiments("study-1") == ()
-    record = service.start_experiment(preview, idempotency_key="start-1")
+    with pytest.raises(ResearchError, match="operator approval"):
+        service.start_experiment(preview, idempotency_key="start-unapproved")
+    record = service.start_experiment(
+        preview,
+        approval_digest=_approval(service, preview, "approve-1"),
+        idempotency_key="start-1",
+    )
     assert record.state == "queued"
 
 
@@ -307,7 +350,11 @@ def test_worker_completes_canonical_lifecycle_without_duplicate_launch(
 ) -> None:
     service, fake = _service(tmp_path)
     preview = service.preview_experiment("study-1", _draft())
-    service.start_experiment(preview, idempotency_key="start-1")
+    service.start_experiment(
+        preview,
+        approval_digest=_approval(service, preview, "approve-worker"),
+        idempotency_key="start-1",
+    )
     first = service.run_once("worker-1")
     assert first and first.state == "running"
     final = service.run_once("worker-1")
@@ -324,7 +371,11 @@ def test_python_client_preserves_same_artifacts(tmp_path: Path) -> None:
     client = FugueResearchClient(service)
     study = client.studies.get("study-1")
     preview = study.experiments.preview(_draft())
-    handle = study.experiments.start(preview, idempotency_key="start-client")
+    handle = study.experiments.start(
+        preview,
+        approval_digest=_approval(service, preview, "approve-client"),
+        idempotency_key="start-client",
+    )
     service.run_once("worker-client")
     service.run_once("worker-client")
     result = handle.result()
@@ -345,7 +396,11 @@ def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) ->
     assert study.context().brief["question"] == "Which components matter?"
 
     preview = study.experiments.preview(_draft())
-    started = study.experiments.start(preview, idempotency_key="start-lineage")
+    started = study.experiments.start(
+        preview,
+        approval_digest=_approval(service, preview, "approve-lineage"),
+        idempotency_key="start-lineage",
+    )
     running = service.run_once("worker-before-restart")
     assert running and running.state == "running"
     cursor = started.events()[-1].sequence
@@ -411,7 +466,11 @@ def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) ->
 def test_prelaunch_cancellation_is_idempotent_and_input_bound(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     preview = service.preview_experiment("study-1", _draft())
-    record = service.start_experiment(preview, idempotency_key="start-cancel")
+    record = service.start_experiment(
+        preview,
+        approval_digest=_approval(service, preview, "approve-cancel"),
+        idempotency_key="start-cancel",
+    )
     cancelled = service.cancel_experiment(
         record.id, idempotency_key="cancel-1", reason="operator request"
     )

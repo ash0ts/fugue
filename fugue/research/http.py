@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -11,12 +13,20 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from fugue.research.agent_contracts import (
+    trace_audit_draft_from_dict,
+    trace_audit_preview_from_dict,
+)
+from fugue.research.candidate_sources import CandidateSourceRegistry
 from fugue.research.contracts import (
     ResearchError,
+    experiment_draft_from_dict,
     experiment_preview_from_dict,
     study_update_from_dict,
 )
-from fugue.research.service import ExperimentHandle, ResearchService, ResearchWorker
+from fugue.research.mcp import create_mcp_server
+from fugue.research.service import ExperimentHandle, ResearchService
+from fugue.research.traces import TraceSourceRegistry
 
 
 class StrictBody(BaseModel):
@@ -29,7 +39,7 @@ class CreateStudyBody(StrictBody):
     campaign_id: str
     question: str
     background: str = ""
-    parent_study_ids: list[str] = Field(default_factory=list)
+    parent_study_ids: tuple[str, ...] = ()
     attribution: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str
 
@@ -40,12 +50,23 @@ class UpdateStudyBody(StrictBody):
     idempotency_key: str
 
 
+class PreviewAuditBody(StrictBody):
+    draft: dict[str, Any]
+
+
+class StartAuditBody(StrictBody):
+    preview: dict[str, Any]
+    approval_digest: str | None = None
+    idempotency_key: str
+
+
 class PreviewExperimentBody(StrictBody):
     draft: dict[str, Any]
 
 
 class StartExperimentBody(StrictBody):
     preview: dict[str, Any]
+    approval_digest: str
     idempotency_key: str
 
 
@@ -61,22 +82,29 @@ def create_app(  # noqa: C901
     api_key: str | None = None,
     max_request_bytes: int = 1_048_576,
     service: ResearchService | None = None,
+    mount_mcp: bool = True,
 ) -> FastAPI:
     research = service or ResearchService(
-        Path(repo_root), Path(env_file) if env_file is not None else None
+        Path(repo_root),
+        Path(env_file) if env_file is not None else None,
     )
-    worker = ResearchWorker(research, poll_interval=0.5)
-    expected_key = (
-        api_key if api_key is not None else os.getenv("FUGUE_RESEARCH_API_KEY")
-    )
+    expected_key = api_key if api_key is not None else _secret("FUGUE_RESEARCH_API_KEY")
+    mcp_app = None
+    if mount_mcp:
+        mcp = create_mcp_server(
+            repo_root,
+            service=research,
+            streamable_http_path="/",
+        )
+        mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager
-    async def lifespan(_: Any) -> Any:
-        worker.start()
-        try:
+    async def lifespan(_: Any) -> AsyncIterator[None]:
+        if mcp_app is None:
             yield
-        finally:
-            worker.stop()
+            return
+        async with mcp_app.router.lifespan_context(mcp_app):
+            yield
 
     app = FastAPI(
         title="Fugue Research API",
@@ -99,12 +127,14 @@ def create_app(  # noqa: C901
                     status_code=413,
                     content={"error": {"code": "request_too_large"}},
                 )
-        if expected_key:
+        if request.url.path not in {"/healthz", "/readyz"}:
             supplied = request.headers.get("authorization", "")
-            if supplied != f"Bearer {expected_key}":
+            expected = f"Bearer {expected_key}"
+            if not expected_key or not hmac.compare_digest(supplied, expected):
                 return JSONResponse(
                     status_code=401,
                     content={"error": {"code": "unauthorized"}},
+                    headers={"WWW-Authenticate": "Bearer"},
                 )
         return await call_next(request)
 
@@ -122,6 +152,20 @@ def create_app(  # noqa: C901
     async def validation_error_handler(_: Request, exc: ValueError) -> JSONResponse:
         error = ResearchError("invalid_request", str(exc))
         return JSONResponse(status_code=422, content={"error": error.to_dict()})
+
+    @app.get("/healthz")
+    def health() -> dict[str, str]:
+        return {"status": "ok", "service": "fugue-research-control"}
+
+    @app.get("/readyz")
+    def ready() -> dict[str, Any]:
+        with research.store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        return {
+            "status": "ready",
+            "worker_embedded": False,
+            "trace_source_count": len(research.trace_registry.catalog()),
+        }
 
     @app.post("/v1/studies")
     def create_study(body: CreateStudyBody) -> dict[str, Any]:
@@ -141,6 +185,10 @@ def create_app(  # noqa: C901
     @app.get("/v1/studies/{study_id}")
     def get_study(study_id: str) -> dict[str, Any]:
         return research.store.get_study(study_id).to_dict()
+
+    @app.get("/v1/studies/{study_id}/catalog")
+    def get_catalog(study_id: str) -> dict[str, Any]:
+        return research.catalog(study_id)
 
     @app.get("/v1/studies/{study_id}/context")
     def get_study_context(
@@ -167,12 +215,32 @@ def create_app(  # noqa: C901
             expected_revision=body.expected_revision,
         ).to_dict()
 
+    @app.post("/v1/studies/{study_id}/trace-audits:preview")
+    def preview_trace_audit(study_id: str, body: PreviewAuditBody) -> dict[str, Any]:
+        return research.traces.preview(
+            study_id,
+            trace_audit_draft_from_dict(body.draft, require_digest=False),
+        ).to_dict()
+
+    @app.post("/v1/studies/{study_id}/trace-audits", status_code=201)
+    def start_trace_audit(study_id: str, body: StartAuditBody) -> dict[str, Any]:
+        preview = trace_audit_preview_from_dict(body.preview)
+        if preview.study_id != study_id:
+            raise ResearchError("study_mismatch", "audit belongs to another Study")
+        return research.traces.run(
+            preview,
+            operation_id=body.idempotency_key,
+            approval_digest=body.approval_digest,
+        ).to_dict()
+
+    @app.get("/v1/trace-audits/{audit_id}")
+    def get_trace_audit(audit_id: str) -> dict[str, Any]:
+        return research.traces.store.get(audit_id).to_dict()
+
     @app.post("/v1/studies/{study_id}/experiments:preview")
     def preview_experiment(
         study_id: str, body: PreviewExperimentBody
     ) -> dict[str, Any]:
-        from fugue.research.contracts import experiment_draft_from_dict
-
         return research.preview_experiment(
             study_id,
             experiment_draft_from_dict(body.draft, require_digest=False),
@@ -184,7 +252,9 @@ def create_app(  # noqa: C901
         if preview.study_id != study_id:
             raise ResearchError("study_mismatch", "preview belongs to another Study")
         return research.start_experiment(
-            preview, idempotency_key=body.idempotency_key
+            preview,
+            approval_digest=body.approval_digest,
+            idempotency_key=body.idempotency_key,
         ).to_dict()
 
     @app.get("/v1/experiments/{experiment_id}")
@@ -200,7 +270,7 @@ def create_app(  # noqa: C901
     ) -> StreamingResponse:
         cursor = max(after, int(last_event_id or 0))
 
-        async def stream() -> Any:
+        async def stream() -> AsyncIterator[str]:
             nonlocal cursor
             while not await request.is_disconnected():
                 events = research.store.events(experiment_id, after=cursor)
@@ -236,8 +306,11 @@ def create_app(  # noqa: C901
                 raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
             raise
 
+    if mcp_app is not None:
+        app.mount("/mcp", mcp_app)
     app.state.research_service = research
-    app.state.research_worker = worker
+    app.state.research_worker_embedded = False
+    app.state.mcp_app = mcp_app
     return app
 
 
@@ -245,21 +318,44 @@ def serve(
     repo_root: str | Path,
     *,
     host: str = "127.0.0.1",
-    port: int = 8765,
+    port: int = 8787,
     api_key: str | None = None,
     env_file: str | Path | None = None,
+    trace_sources: Path | None = None,
+    candidate_sources: Path | None = None,
 ) -> None:
     try:
         import uvicorn
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install fugue[research] to serve the research API") from exc
-    resolved_key = (
-        api_key if api_key is not None else os.getenv("FUGUE_RESEARCH_API_KEY")
+    root = Path(repo_root)
+    resolved_key = api_key if api_key is not None else _secret("FUGUE_RESEARCH_API_KEY")
+    if not resolved_key:
+        raise RuntimeError("a research API key is required")
+    configured_sources = trace_sources
+    if configured_sources is None and os.getenv("FUGUE_RESEARCH_TRACE_SOURCES"):
+        configured_sources = Path(os.environ["FUGUE_RESEARCH_TRACE_SOURCES"])
+    registry = TraceSourceRegistry.from_file(configured_sources, env=os.environ)
+    configured_candidates = candidate_sources
+    if configured_candidates is None and os.getenv("FUGUE_RESEARCH_CANDIDATE_SOURCES"):
+        configured_candidates = Path(os.environ["FUGUE_RESEARCH_CANDIDATE_SOURCES"])
+    candidates = CandidateSourceRegistry.from_file(configured_candidates)
+    service = ResearchService(
+        root,
+        Path(env_file) if env_file is not None else None,
+        trace_registry=registry,
+        candidate_sources=candidates,
     )
-    if host not in {"127.0.0.1", "localhost", "::1"} and not resolved_key:
-        raise RuntimeError("a research API key is required on a non-loopback host")
     uvicorn.run(
-        create_app(repo_root, env_file=env_file, api_key=resolved_key),
+        create_app(root, api_key=resolved_key, service=service),
         host=host,
         port=port,
+        access_log=False,
     )
+
+
+def _secret(name: str) -> str:
+    file_value = os.getenv(f"{name}_FILE", "").strip()
+    if file_value:
+        return Path(file_value).read_text(encoding="utf-8").strip()
+    return os.getenv(name, "").strip()

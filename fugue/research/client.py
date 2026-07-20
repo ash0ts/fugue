@@ -243,10 +243,16 @@ class Experiments:
         return self.study.client.service.preview_experiment(study.id, draft_value)
 
     def start(
-        self, preview: ExperimentPreviewV1, *, idempotency_key: str
+        self,
+        preview: ExperimentPreviewV1,
+        *,
+        approval_digest: str,
+        idempotency_key: str,
     ) -> ExperimentHandle:
         record = self.study.client.service.start_experiment(
-            preview, idempotency_key=idempotency_key
+            preview,
+            approval_digest=approval_digest,
+            idempotency_key=idempotency_key,
         )
         return ExperimentHandle(self.study.client.service, record.id)
 

@@ -25,11 +25,13 @@ Install the transport dependencies when needed:
 pip install 'fugue[research]'
 ```
 
-The local client starts a recoverable background worker. `preview()` is pure;
-`start()` is the explicit spend boundary and accepts only the exact signed
-preview.
+The local client can start a recoverable background worker. `preview()` is
+pure. A human operator must approve its exact digest outside the Agent-facing
+client before `start()` can queue work.
 
 ```python
+import os
+
 from fugue.research import FugueResearchClient
 
 with FugueResearchClient.local(repo_root, env_file=credentials_file) as fugue:
@@ -58,8 +60,11 @@ with FugueResearchClient.local(repo_root, env_file=credentials_file) as fugue:
         },
     )
 
+    print(preview.preview_digest, preview.estimated_cost_usd)
+    # A human runs `fugue research approve ...` in a separate operator shell.
     experiment = study.experiments.start(
         preview,
+        approval_digest=os.environ["FUGUE_APPROVAL_DIGEST"],
         idempotency_key="retrieval-study-001",
     )
     for event in experiment.watch():
@@ -98,16 +103,17 @@ of private trace data.
 
 ## HTTP and MCP
 
-Run the typed HTTP API and resumable SSE event stream:
+Run the typed HTTP API, authenticated Streamable HTTP MCP endpoint, and
+resumable SSE event stream:
 
 ```bash
 FUGUE_RESEARCH_API_KEY=... fugue research serve --repo-root .
 ```
 
-The API is versioned under `/v1`. Reconnect to
+REST is versioned under `/v1`; MCP is mounted at `/mcp/`. Both require the same
+bearer token. Reconnect to
 `GET /v1/experiments/{id}/events` with `Last-Event-ID` to resume from an event
-cursor. Authentication uses a bearer token when `FUGUE_RESEARCH_API_KEY` is
-set, and request bodies are bounded.
+cursor. Request bodies are bounded.
 
 Run the MCP adapter over the same client and database:
 
@@ -119,3 +125,17 @@ MCP exposes only high-level Study and Experiment operations plus bounded Study
 context, experiment status, and outcome resources. It does not expose the
 operator, raw environment, shell commands, credentials, or experimental MCP
 Tasks.
+
+Approvals are deliberately absent from REST and MCP. After reviewing a preview,
+the operator approves its exact digest and a hard spend cap from a trusted shell:
+
+```bash
+fugue research approve PREVIEW_DIGEST --max-usd 200 --max-cells 8
+```
+
+The worker checks the exact campaign reservation against this cap inside the
+admission transaction. A stale preview, changed plan, expired approval, or cost
+above the cap fails before an admission is recorded.
+
+For the isolated control/worker deployment and portable Agent Skill, see
+[`research-container.md`](research-container.md).

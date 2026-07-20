@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import webbrowser
@@ -298,22 +299,75 @@ def _parser() -> FugueArgumentParser:
     research_actions = research.add_subparsers(
         dest="research_action", metavar="ACTION", required=True
     )
+    bootstrap = research_actions.add_parser(
+        "bootstrap", help="Create local container state and secret files"
+    )
+    bootstrap.add_argument("--repo-root", type=Path, default=Path.cwd())
+    bootstrap.add_argument("--wandb-api-key-file", type=Path)
+    bootstrap.set_defaults(handler=_research)
     serve = research_actions.add_parser("serve", help="Run the typed HTTP and SSE API")
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--port", type=int, default=8787)
     serve.add_argument("--api-key")
     serve.add_argument("--env-file", type=Path, default=Path(".env"))
+    serve.add_argument("--trace-sources", type=Path)
+    serve.add_argument("--candidate-sources", type=Path)
     serve.add_argument("--repo-root", type=Path, default=Path.cwd())
     serve.set_defaults(handler=_research)
     mcp = research_actions.add_parser("mcp", help="Run the high-level MCP adapter")
     mcp.add_argument("--env-file", type=Path, default=Path(".env"))
+    mcp.add_argument("--trace-sources", type=Path)
+    mcp.add_argument("--candidate-sources", type=Path)
     mcp.add_argument("--repo-root", type=Path, default=Path.cwd())
     mcp.set_defaults(handler=_research)
+    worker = research_actions.add_parser(
+        "worker", help="Run the durable Harbor research worker"
+    )
+    worker.add_argument("--repo-root", type=Path, default=Path.cwd())
+    worker.add_argument("--env-file", type=Path, default=Path(".env"))
+    worker.add_argument("--candidate-sources", type=Path)
+    worker.add_argument("--poll-interval", type=float, default=1.0)
+    worker.add_argument("--once", action="store_true")
+    worker.set_defaults(handler=_research)
+    approve = research_actions.add_parser(
+        "approve", help="Approve one exact preview outside the Agent interface"
+    )
+    approve.add_argument("preview_digest")
+    approve.add_argument(
+        "--subject-kind", choices=("experiment", "trace_audit"), default="experiment"
+    )
+    approve.add_argument("--max-usd", type=float, required=True)
+    approve.add_argument("--max-cells", type=int)
+    approve.add_argument("--approved-by", default="operator")
+    approve.add_argument("--expires-in", type=int, default=3600)
+    approve.add_argument("--operation-id")
+    approve.add_argument("--repo-root", type=Path, default=Path.cwd())
+    approve.set_defaults(handler=_research)
+    skill = research_actions.add_parser(
+        "skill", help="Export the portable external-Agent skill"
+    )
+    skill_actions = skill.add_subparsers(
+        dest="skill_action", metavar="ACTION", required=True
+    )
+    export_skill = skill_actions.add_parser("export", help="Export the packaged skill")
+    export_skill.add_argument("--destination", type=Path, required=True)
+    export_skill.set_defaults(handler=_research)
     return parser
 
 
 def _research(args: argparse.Namespace) -> int:
-    if args.research_action == "serve":
+    from fugue.research.runtime import load_secret_file_environment
+
+    load_secret_file_environment()
+    if args.research_action == "bootstrap":
+        from fugue.research.bootstrap import bootstrap_container_secrets
+
+        values = bootstrap_container_secrets(
+            args.repo_root,
+            wandb_api_key_file=args.wandb_api_key_file,
+        )
+        print(json.dumps(values, indent=2, sort_keys=True))
+    elif args.research_action == "serve":
         from fugue.research.http import serve
 
         serve(
@@ -322,11 +376,67 @@ def _research(args: argparse.Namespace) -> int:
             port=args.port,
             api_key=args.api_key,
             env_file=args.env_file,
+            trace_sources=args.trace_sources,
+            candidate_sources=args.candidate_sources,
         )
-    else:
-        from fugue.research.mcp import run
+    elif args.research_action == "mcp":
+        from fugue.research.candidate_sources import CandidateSourceRegistry
+        from fugue.research.mcp import create_mcp_server
+        from fugue.research.service import ResearchService
+        from fugue.research.traces import TraceSourceRegistry
 
-        run(args.repo_root, env_file=args.env_file)
+        registry = TraceSourceRegistry.from_file(args.trace_sources)
+        candidates = CandidateSourceRegistry.from_file(args.candidate_sources)
+        service = ResearchService(
+            args.repo_root,
+            args.env_file,
+            trace_registry=registry,
+            candidate_sources=candidates,
+        )
+        create_mcp_server(args.repo_root, service=service).run()
+    elif args.research_action == "worker":
+        from fugue.research.candidate_sources import CandidateSourceRegistry
+        from fugue.research.service import ResearchService, ResearchWorker
+
+        configured_candidates = args.candidate_sources
+        if configured_candidates is None and os.getenv(
+            "FUGUE_RESEARCH_CANDIDATE_SOURCES"
+        ):
+            configured_candidates = Path(os.environ["FUGUE_RESEARCH_CANDIDATE_SOURCES"])
+        service = ResearchService(
+            args.repo_root,
+            args.env_file,
+            candidate_sources=CandidateSourceRegistry.from_file(configured_candidates),
+        )
+        worker = ResearchWorker(service, poll_interval=args.poll_interval)
+        if args.once:
+            service.run_until_idle(worker.worker_id)
+        else:
+            try:
+                worker.run_forever()
+            except KeyboardInterrupt:
+                pass
+    elif args.research_action == "approve":
+        from fugue.research.approvals import ApprovalLedger
+        from fugue.research.store import StudyStore
+
+        store = StudyStore(args.repo_root)
+        operation_id = args.operation_id or f"approve-{args.preview_digest[:20]}"
+        approval = ApprovalLedger(store.path).approve(
+            subject_kind=args.subject_kind,
+            preview_digest=args.preview_digest,
+            maximum_cost_usd=args.max_usd,
+            maximum_cells=args.max_cells,
+            approved_by=args.approved_by,
+            operation_id=operation_id,
+            expires_in_seconds=args.expires_in,
+        )
+        print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
+    else:
+        from fugue.research.skills import export_skill
+
+        path = export_skill(args.destination)
+        print(path)
     return 0
 
 
@@ -656,9 +766,7 @@ def _print_context_preparation(records: Any) -> None:
         table.add_row(
             record.system_id,
             " / ".join(
-                value
-                for value in (record.variant_id, record.retrieval_mode)
-                if value
+                value for value in (record.variant_id, record.retrieval_mode) if value
             )
             or "—",
             record.task_id,
@@ -1480,15 +1588,15 @@ def _context_evaluate(args: argparse.Namespace) -> int:
     if workload is None or not workload.dataset:
         raise ValueError(f"unknown direct workload: {args.workload}")
     dataset = load_workload_dataset(_resolve(args.repo_root, Path(workload.dataset)))
-    variant = next((item for item in experiment.variants if item.id == args.variant), None)
+    variant = next(
+        (item for item in experiment.variants if item.id == args.variant), None
+    )
     if variant is None or variant.context.system_id != args.system:
         raise ValueError(
             f"variant {args.variant!r} does not select context system {args.system!r}"
         )
     runtime_env = load_env(args.env_file)
-    runtime_env["FUGUE_CONTEXT_DELIVERY"] = (
-        variant.context.delivery
-    )
+    runtime_env["FUGUE_CONTEXT_DELIVERY"] = variant.context.delivery
     runtime_env["FUGUE_VARIANT_ID"] = variant.id
     runtime = ContextRuntime(
         repo_root=args.repo_root,

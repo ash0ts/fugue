@@ -308,6 +308,7 @@ class ExperimentDraftV1:
     decision_rationale: str = ""
     task_suite_digest: str | None = None
     task_suite_draft: dict[str, Any] | None = None
+    candidate_refs: tuple[dict[str, Any], ...] = ()
     scoring_revision: dict[str, Any] | None = None
     task_analysis_id: str | None = None
     draft_digest: str = ""
@@ -329,6 +330,7 @@ class ExperimentPreviewV1:
     plan_receipt: dict[str, Any] | None
     estimated_cells: int
     estimated_calls: dict[str, int]
+    estimated_cost_usd: float
     eligible: bool
     blockers: tuple[str, ...]
     preview_digest: str = ""
@@ -346,6 +348,7 @@ class ExperimentRecordV1:
     state: str
     draft: dict[str, Any]
     preview: dict[str, Any]
+    approval: dict[str, Any] | None
     parent_experiment_ids: tuple[str, ...]
     proposal: dict[str, Any] | None
     plan: dict[str, Any] | None
@@ -795,6 +798,10 @@ def experiment_draft_from_dict(
             if raw.get("task_suite_draft") is not None
             else None
         ),
+        candidate_refs=tuple(
+            _mapping(item, "candidate reference")
+            for item in _mappings(raw.get("candidate_refs"), "candidate references")
+        ),
         scoring_revision=(
             _mapping(raw["scoring_revision"], "scoring revision")
             if raw.get("scoring_revision") is not None
@@ -848,6 +855,9 @@ def experiment_preview_from_dict(raw: Mapping[str, Any]) -> ExperimentPreviewV1:
                 raw.get("estimated_calls") or {}, "estimated calls"
             ).items()
         },
+        estimated_cost_usd=_non_negative_number(
+            raw.get("estimated_cost_usd"), "estimated cost"
+        ),
         eligible=_strict_bool(raw.get("eligible"), "preview eligible"),
         blockers=_texts(raw.get("blockers"), "preview blocker", allow_empty=True),
         preview_digest=_required_digest(raw.get("preview_digest"), "preview digest"),
@@ -868,6 +878,7 @@ def experiment_record_from_dict(raw: Mapping[str, Any]) -> ExperimentRecordV1:
         state=_text(raw.get("state"), "experiment state", 100),
         draft=_mapping(raw.get("draft"), "experiment draft"),
         preview=_mapping(raw.get("preview"), "experiment preview"),
+        approval=_optional_mapping(raw.get("approval"), "execution approval"),
         parent_experiment_ids=_ids(
             raw.get("parent_experiment_ids"), "parent experiment", allow_empty=True
         ),
@@ -1026,6 +1037,13 @@ def _finite_optional(value: Any, label: str) -> float | None:
     result = float(value)
     if not math.isfinite(result):
         raise ValueError(f"{label} must be finite")
+    return result
+
+
+def _non_negative_number(value: Any, label: str) -> float:
+    result = _finite_optional(value, label)
+    if result is None or result < 0:
+        raise ValueError(f"{label} must be a non-negative finite number")
     return result
 
 

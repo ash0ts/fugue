@@ -1,0 +1,106 @@
+name: fugue-research
+
+x-fugue-image: &fugue-image
+  image: ${FUGUE_RESEARCH_IMAGE:-fugue-research:local}
+  build:
+    context: .
+    dockerfile: Dockerfile.research
+
+x-fugue-runtime: &fugue-runtime
+  environment:
+    FUGUE_RESEARCH_API_KEY_FILE: /run/secrets/research_api_key
+    FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
+    FUGUE_RESEARCH_TRACE_SOURCES: /etc/fugue/trace-sources.yaml
+    WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
+  secrets:
+    - research_api_key
+    - wandb_api_key
+  volumes:
+    - ./:/workspace:ro
+    - fugue-state:/workspace/.fugue
+    - ${FUGUE_TRACE_SOURCES_FILE:-./configs/fugue/research/trace-sources.yaml}:/etc/fugue/trace-sources.yaml:ro
+    - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
+    - ${FUGUE_TRACE_DATA_DIR:-./.fugue/trace-data}:/data/traces:ro
+
+services:
+  fugue-init:
+    <<: *fugue-image
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 10001:10001 /workspace/.fugue"]
+    volumes:
+      - fugue-state:/workspace/.fugue
+    restart: "no"
+
+  fugue-control:
+    <<: [*fugue-image, *fugue-runtime]
+    user: "10001:10001"
+    command:
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --repo-root
+      - /workspace
+      - --trace-sources
+      - /etc/fugue/trace-sources.yaml
+      - --candidate-sources
+      - /etc/fugue/candidate-sources.yaml
+    depends_on:
+      fugue-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8787:8787"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/readyz', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  fugue-worker:
+    <<: [*fugue-image, *fugue-runtime]
+    user: "0:0"
+    command:
+      - worker
+      - --repo-root
+      - /workspace
+      - --poll-interval
+      - "1"
+      - --candidate-sources
+      - /etc/fugue/candidate-sources.yaml
+    depends_on:
+      fugue-init:
+        condition: service_completed_successfully
+      fugue-control:
+        condition: service_healthy
+    volumes:
+      - ./:/workspace:ro
+      - fugue-state:/workspace/.fugue
+      - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  fugue-state:
+
+secrets:
+  research_api_key:
+    file: ${FUGUE_RESEARCH_API_KEY_FILE:-./.fugue/secrets/research_api_key}
+  wandb_api_key:
+    file: ${WANDB_API_KEY_FILE:-./.fugue/secrets/wandb_api_key}
