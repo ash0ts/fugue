@@ -1,0 +1,265 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from fugue.research.contracts import (
+    ResearchError,
+    experiment_preview_from_dict,
+    study_update_from_dict,
+)
+from fugue.research.service import ExperimentHandle, ResearchService, ResearchWorker
+
+
+class StrictBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateStudyBody(StrictBody):
+    study_id: str
+    title: str
+    campaign_id: str
+    question: str
+    background: str = ""
+    parent_study_ids: list[str] = Field(default_factory=list)
+    attribution: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str
+
+
+class UpdateStudyBody(StrictBody):
+    update: dict[str, Any]
+    expected_revision: int | None = None
+    idempotency_key: str
+
+
+class PreviewExperimentBody(StrictBody):
+    draft: dict[str, Any]
+
+
+class StartExperimentBody(StrictBody):
+    preview: dict[str, Any]
+    idempotency_key: str
+
+
+class CancelExperimentBody(StrictBody):
+    idempotency_key: str
+    reason: str
+
+
+def create_app(  # noqa: C901
+    repo_root: str | Path,
+    *,
+    env_file: str | Path | None = None,
+    api_key: str | None = None,
+    max_request_bytes: int = 1_048_576,
+    service: ResearchService | None = None,
+) -> FastAPI:
+    research = service or ResearchService(
+        Path(repo_root), Path(env_file) if env_file is not None else None
+    )
+    worker = ResearchWorker(research, poll_interval=0.5)
+    expected_key = (
+        api_key if api_key is not None else os.getenv("FUGUE_RESEARCH_API_KEY")
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: Any) -> Any:
+        worker.start()
+        try:
+            yield
+        finally:
+            worker.stop()
+
+    app = FastAPI(
+        title="Fugue Research API",
+        version="1.0.0",
+        lifespan=lifespan,
+    )
+
+    @app.middleware("http")
+    async def guard(request: Request, call_next: Any) -> Any:
+        length = request.headers.get("content-length")
+        if length and (not length.isdigit() or int(length) > max_request_bytes):
+            return JSONResponse(
+                status_code=413,
+                content={"error": {"code": "request_too_large"}},
+            )
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            body = await request.body()
+            if len(body) > max_request_bytes:
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": {"code": "request_too_large"}},
+                )
+        if expected_key:
+            supplied = request.headers.get("authorization", "")
+            if supplied != f"Bearer {expected_key}":
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": {"code": "unauthorized"}},
+                )
+        return await call_next(request)
+
+    @app.exception_handler(ResearchError)
+    async def research_error_handler(_: Request, exc: ResearchError) -> JSONResponse:
+        status = {
+            "conflict": 409,
+            "policy": 422,
+            "admission": 422,
+            "evidence": 409,
+        }.get(exc.category, 400)
+        return JSONResponse(status_code=status, content={"error": exc.to_dict()})
+
+    @app.exception_handler(ValueError)
+    async def validation_error_handler(_: Request, exc: ValueError) -> JSONResponse:
+        error = ResearchError("invalid_request", str(exc))
+        return JSONResponse(status_code=422, content={"error": error.to_dict()})
+
+    @app.post("/v1/studies")
+    def create_study(body: CreateStudyBody) -> dict[str, Any]:
+        from fugue.research.contracts import attribution_from_dict
+
+        return research.store.create_study(
+            study_id=body.study_id,
+            title=body.title,
+            campaign_id=body.campaign_id,
+            question=body.question,
+            background=body.background,
+            parent_study_ids=body.parent_study_ids,
+            attribution=attribution_from_dict(body.attribution),
+            operation_id=body.idempotency_key,
+        ).to_dict()
+
+    @app.get("/v1/studies/{study_id}")
+    def get_study(study_id: str) -> dict[str, Any]:
+        return research.store.get_study(study_id).to_dict()
+
+    @app.get("/v1/studies/{study_id}/context")
+    def get_study_context(
+        study_id: str,
+        max_experiments: int = 20,
+        max_results: int = 20,
+        max_notes: int = 20,
+        max_chars: int = 32000,
+    ) -> dict[str, Any]:
+        return research.store.context(
+            study_id,
+            max_experiments=max_experiments,
+            max_results=max_results,
+            max_notes=max_notes,
+            max_chars=max_chars,
+        ).to_dict()
+
+    @app.post("/v1/studies/{study_id}/updates")
+    def update_study(study_id: str, body: UpdateStudyBody) -> dict[str, Any]:
+        return research.store.update_study(
+            study_id,
+            study_update_from_dict(body.update),
+            operation_id=body.idempotency_key,
+            expected_revision=body.expected_revision,
+        ).to_dict()
+
+    @app.post("/v1/studies/{study_id}/experiments:preview")
+    def preview_experiment(
+        study_id: str, body: PreviewExperimentBody
+    ) -> dict[str, Any]:
+        from fugue.research.contracts import experiment_draft_from_dict
+
+        return research.preview_experiment(
+            study_id,
+            experiment_draft_from_dict(body.draft, require_digest=False),
+        ).to_dict()
+
+    @app.post("/v1/studies/{study_id}/experiments", status_code=202)
+    def start_experiment(study_id: str, body: StartExperimentBody) -> dict[str, Any]:
+        preview = experiment_preview_from_dict(body.preview)
+        if preview.study_id != study_id:
+            raise ResearchError("study_mismatch", "preview belongs to another Study")
+        return research.start_experiment(
+            preview, idempotency_key=body.idempotency_key
+        ).to_dict()
+
+    @app.get("/v1/experiments/{experiment_id}")
+    def get_experiment(experiment_id: str) -> dict[str, Any]:
+        return research.store.get_experiment(experiment_id).to_dict()
+
+    @app.get("/v1/experiments/{experiment_id}/events")
+    async def experiment_events(
+        experiment_id: str,
+        request: Request,
+        after: int = 0,
+        last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        cursor = max(after, int(last_event_id or 0))
+
+        async def stream() -> Any:
+            nonlocal cursor
+            while not await request.is_disconnected():
+                events = research.store.events(experiment_id, after=cursor)
+                for event in events:
+                    cursor = event.sequence
+                    payload = json.dumps(event.to_dict(), separators=(",", ":"))
+                    yield f"id: {cursor}\nevent: {event.event_type}\ndata: {payload}\n\n"
+                record = research.store.get_experiment(experiment_id)
+                if record.state in {"completed", "blocked", "cancelled", "interrupted"}:
+                    return
+                if not events:
+                    yield ": keep-alive\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/v1/experiments/{experiment_id}:cancel")
+    def cancel_experiment(
+        experiment_id: str, body: CancelExperimentBody
+    ) -> dict[str, Any]:
+        return research.cancel_experiment(
+            experiment_id,
+            idempotency_key=body.idempotency_key,
+            reason=body.reason,
+        ).to_dict()
+
+    @app.get("/v1/experiments/{experiment_id}/outcome")
+    def get_outcome(experiment_id: str) -> dict[str, Any]:
+        try:
+            return ExperimentHandle(research, experiment_id).result()
+        except ResearchError as exc:
+            if exc.code in {"experiment_not_terminal", "outcome_unavailable"}:
+                raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+            raise
+
+    app.state.research_service = research
+    app.state.research_worker = worker
+    return app
+
+
+def serve(
+    repo_root: str | Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    api_key: str | None = None,
+    env_file: str | Path | None = None,
+) -> None:
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("install fugue[research] to serve the research API") from exc
+    resolved_key = (
+        api_key if api_key is not None else os.getenv("FUGUE_RESEARCH_API_KEY")
+    )
+    if host not in {"127.0.0.1", "localhost", "::1"} and not resolved_key:
+        raise RuntimeError("a research API key is required on a non-loopback host")
+    uvicorn.run(
+        create_app(repo_root, env_file=env_file, api_key=resolved_key),
+        host=host,
+        port=port,
+    )

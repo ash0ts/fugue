@@ -291,7 +291,43 @@ def _parser() -> FugueArgumentParser:
     )
     tui.add_argument("--experiment", default="pilot")
     tui.set_defaults(handler=_tui)
+
+    research = subparsers.add_parser(
+        "research", help="Expose Fugue as a governed research substrate"
+    )
+    research_actions = research.add_subparsers(
+        dest="research_action", metavar="ACTION", required=True
+    )
+    serve = research_actions.add_parser("serve", help="Run the typed HTTP and SSE API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--api-key")
+    serve.add_argument("--env-file", type=Path, default=Path(".env"))
+    serve.add_argument("--repo-root", type=Path, default=Path.cwd())
+    serve.set_defaults(handler=_research)
+    mcp = research_actions.add_parser("mcp", help="Run the high-level MCP adapter")
+    mcp.add_argument("--env-file", type=Path, default=Path(".env"))
+    mcp.add_argument("--repo-root", type=Path, default=Path.cwd())
+    mcp.set_defaults(handler=_research)
     return parser
+
+
+def _research(args: argparse.Namespace) -> int:
+    if args.research_action == "serve":
+        from fugue.research.http import serve
+
+        serve(
+            args.repo_root,
+            host=args.host,
+            port=args.port,
+            api_key=args.api_key,
+            env_file=args.env_file,
+        )
+    else:
+        from fugue.research.mcp import run
+
+        run(args.repo_root, env_file=args.env_file)
+    return 0
 
 
 def _normalize_runs_argv(argv: list[str]) -> list[str]:

@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
-        suite: [core, context, dev]
+        suite: [core, context, dev, research]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -39,6 +39,9 @@ jobs:
       - name: Install development tooling
         if: matrix.suite == 'dev'
         run: uv sync --frozen --extra dev
+      - name: Install research SDK
+        if: matrix.suite == 'research'
+        run: uv sync --frozen --extra dev --extra research
       - name: Test core contracts
         if: matrix.suite == 'core'
         env:
@@ -77,6 +80,15 @@ jobs:
           uv run pytest
           tests/test_curation.py tests/test_deployment.py tests/test_self_eval.py
           tests/test_reachability.py tests/test_skill.py tests/test_tui.py
+      - name: Test governed research SDK
+        if: matrix.suite == 'research'
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_task_authoring.py tests/test_research_store.py
+          tests/test_research_service.py tests/test_research_transports.py
 
   quality:
     name: Quality, build, and command smoke
@@ -115,6 +127,7 @@ jobs:
           uv run fugue --help
           uv run fugue run pilot --preview --json
           uv run fugue runs --json
+          uv run fugue research --help
       - name: Render README Mermaid diagrams
         run: >-
           npx --yes -p @mermaid-js/mermaid-cli@11.16.0

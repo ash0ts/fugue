@@ -74,6 +74,7 @@ Outcome packets contain only policy-scoped structured rows and immutable trace
 identities. They never copy raw conversations, commands, environment values,
 expected paths, or gold data. Campaigns cannot publish to the public Atlas.
 
-Transport adapters, authentication, SDK packaging, MCP tools, and hosted
-orchestration are intentionally separate. Those surfaces should wrap
-`CampaignService` and its V1 artifacts rather than calling operator internals.
+`fugue.research` packages this lifecycle as the higher-level
+`Study → Experiment → Run → Result` interface for outer loops. Its Python,
+HTTP/SSE, and MCP surfaces all wrap `CampaignService`; none calls operator
+internals or introduces another executor. See `docs/research.md`.

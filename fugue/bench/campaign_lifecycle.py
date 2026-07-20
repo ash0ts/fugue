@@ -1168,6 +1168,13 @@ class CampaignService:
             plan_digest=_artifact_digest(unsigned.to_dict(), "plan_digest"),
         )
 
+    def validate_proposal(self, proposal: ExperimentProposalV1) -> None:
+        """Purely validate proposal policy and catalog membership without planning."""
+        _verify_artifact(proposal.to_dict(), "proposal_digest", "experiment proposal")
+        policy = self._policy(proposal.campaign_id)
+        catalog = self.catalog(policy.id)
+        self._validate_proposal(policy, catalog, proposal)
+
     def prepare(self, plan_receipt: PlanReceiptV1, operation_id: str) -> PreparedPlanV1:
         operation_id = self._operation_id(operation_id)
         self._verify_plan_receipt(plan_receipt)

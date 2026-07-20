@@ -49,6 +49,12 @@ serve = [
     "mcp==1.28.1",
     "uvicorn>=0.34,<1",
 ]
+research = [
+    "fastapi>=0.115,<1",
+    "mcp==1.28.1",
+    "pydantic>=2.10,<3",
+    "uvicorn>=0.34,<1",
+]
 
 [tool.uv]
 # The full context lab contains mem0's older OpenAI client constraint. Candidate

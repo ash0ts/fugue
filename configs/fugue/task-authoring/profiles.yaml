@@ -35,7 +35,7 @@ resources:
     title: Fugue campaign contract
     kind: markdown
     path: docs/campaigns.md
-    sha256: e26b1fd8d6d6a7464bb46109cef79c85961b3c3c8ec743c3d7f0a8bd0a20c5b3
+    sha256: 6be407b88a9a0cddee976bac91b561aa966bda631fc88d4deba7f2309aaeb761
     media_type: text/markdown
     target: /workspace/resources/campaigns.md
 interactors:
