@@ -190,6 +190,13 @@ jobs:
           uv run python -c
           'from pathlib import Path; from fugue.bench.agent_runtime import runtime_ready;
           ready, reason = runtime_ready("wba-responses", Path.cwd()); assert ready, reason'
+      - name: Exercise the pinned inline clients without network access
+        run: |
+          WBA_IMAGE="$(uv run python -c 'from pathlib import Path; from fugue.bench.agent_runtime import read_runtime_lock; print(read_runtime_lock("wba-responses", Path.cwd())["image"])')"
+          docker run --rm --network none --platform linux/amd64 \
+            --env PYTHONPATH=/opt/fugue-agent-runtime/lib \
+            --volume "$PWD/tests/wba_runtime_probe.py:/tmp/wba-runtime-probe.py:ro" \
+            "$WBA_IMAGE" python /tmp/wba-runtime-probe.py
       - name: Run the offline transport conformance suite
         env:
           PYTHONWARNINGS: error

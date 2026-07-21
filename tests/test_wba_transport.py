@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -255,6 +256,30 @@ def test_chat_stream_reconciles_fragmented_tool_arguments(
     assert result.tool_calls[0].arguments == {"command": "python -V"}
     assert result.input_tokens == 12
     assert result.output_tokens == 8
+
+
+def test_inline_profiles_pass_an_owned_openai_client_to_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+
+    async def exercise() -> tuple[Any, Any, bool]:
+        client = _client("chat-inline")
+        common = client._common()
+        inline = client._inline_openai
+        try:
+            return common["client"], inline, hasattr(inline, "chat")
+        finally:
+            await client.close()
+
+    passed, owned, supports_chat = asyncio.run(exercise())
+
+    assert passed is owned
+    assert supports_chat is True
+
+
+def test_litellm_remote_cost_map_is_disabled_in_locked_runtime() -> None:
+    assert os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] == "true"
 
 
 def test_responses_parser_preserves_reasoning_and_multiple_call_ids() -> None:
@@ -702,17 +727,17 @@ def test_inline_client_lifecycle_closes_once() -> None:
         def __init__(self) -> None:
             self.closed = 0
 
-        async def aclose(self) -> None:
+        async def close(self) -> None:
             self.closed += 1
 
     model_client = _client("responses-inline")
     inline_client = Client()
-    model_client._inline_http = inline_client
+    model_client._inline_openai = inline_client
 
     asyncio.run(model_client.close())
 
     assert inline_client.closed == 1
-    assert model_client._inline_http is None
+    assert model_client._inline_openai is None
 
 
 def test_wba_registered_experiment_resolves_exact_locked_matrices() -> None:
@@ -829,9 +854,10 @@ def test_wba_campaign_exposes_an_exact_queryable_canary(
         "chat-inline",
     }
     route_locks = campaign_lifecycle._prepared_route_locks(preview.cells, {})
-    assert tuple(
-        campaign_lifecycle._route_lock_from_dict(lock) for lock in route_locks
-    ) == route_locks
+    assert (
+        tuple(campaign_lifecycle._route_lock_from_dict(lock) for lock in route_locks)
+        == route_locks
+    )
 
 
 def test_wba_offline_tasks_materialize_and_verify_reference_output(

@@ -75,7 +75,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
     """Task-neutral WBA-style loop with locked transport-profile ablations."""
 
     TRACE_HARNESS = "wba-responses"
-    _VERSION = "0.1.0"
+    _VERSION = "0.1.1"
 
     @staticmethod
     @override
@@ -184,10 +184,14 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
             "conversation_name": self.job_name,
             "weave_project": f"{entity}/{project}",
             "trace_content": self.trace_content,
-            "trace_attributes": self._trace_attributes(
-                "wba-responses",
-                self.model_route,
-            ),
+            "trace_attributes": {
+                key: value
+                for key, value in self._trace_attributes(
+                    "wba-responses",
+                    self.model_route,
+                ).items()
+                if value not in (None, "")
+            },
             "workspace": workspace,
             "events_path": events_path.as_posix(),
             "summary_path": summary_path.as_posix(),

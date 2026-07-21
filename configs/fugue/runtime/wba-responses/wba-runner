@@ -20,7 +20,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.0"
+# Runtime cells must never fetch LiteLLM's mutable remote cost map.  Set this
+# before the first lazy LiteLLM import so the pinned package uses its bundled
+# snapshot instead.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+
+VERSION = "0.1.1"
 PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
 MAX_STEPS = 20
 REQUEST_TIMEOUT_SEC = 300
@@ -225,7 +230,7 @@ class ModelClient:
         self.trace = trace
         self.profile = str(config["profile"])
         self._openai: Any = None
-        self._inline_http: Any = None
+        self._inline_openai: Any = None
         self.retries = 0
         self.transport_errors = 0
         self.normalization_errors = 0
@@ -235,9 +240,9 @@ class ModelClient:
         if self._openai is not None:
             await self._openai.close()
             self._openai = None
-        if self._inline_http is not None:
-            await self._inline_http.aclose()
-            self._inline_http = None
+        if self._inline_openai is not None:
+            await self._inline_openai.close()
+            self._inline_openai = None
 
     async def stream(self, groups: list[list[dict[str, Any]]]) -> ModelTurn:
         return await self._retry(
@@ -336,14 +341,19 @@ class ModelClient:
         return await self._chat_inline(groups, stream=False, tools=False)
 
     def _common(self) -> dict[str, Any]:
-        if self._inline_http is None:
+        if self._inline_openai is None:
             import httpx
+            from openai import AsyncOpenAI
 
-            self._inline_http = httpx.AsyncClient(
+            self._inline_openai = AsyncOpenAI(
+                api_key=os.environ[str(self.config["provider_key_env"])],
+                base_url=str(self.config["provider_base_url"]),
+                default_headers=dict(self.config.get("provider_headers") or {}),
                 timeout=httpx.Timeout(
                     HTTP_TIMEOUT_SEC,
                     connect=CONNECT_TIMEOUT_SEC,
-                )
+                ),
+                max_retries=0,
             )
         return {
             "api_key": os.environ[str(self.config["provider_key_env"])],
@@ -351,7 +361,10 @@ class ModelClient:
             "extra_headers": dict(self.config.get("provider_headers") or {}),
             "timeout": HTTP_TIMEOUT_SEC,
             "num_retries": 0,
-            "client": self._inline_http,
+            # LiteLLM's `client` contract requires an OpenAI-compatible client,
+            # not the underlying httpx transport.  We own and close this client
+            # explicitly at the end of the native WBA session.
+            "client": self._inline_openai,
         }
 
     async def _responses_proxy(
