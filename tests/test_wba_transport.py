@@ -776,6 +776,141 @@ def test_openai_client_lifecycle_closes_once() -> None:
     assert model_client._openai is None
 
 
+def test_proxy_codec_normalizes_litellm_reasoning_index_reuse() -> None:
+    completed = {
+        "id": "resp-mock",
+        "status": "completed",
+        "usage": {"input_tokens": 9, "output_tokens": 5},
+        "output": [
+            {"id": "reason-1", "type": "reasoning", "summary": []},
+            {
+                "id": "message-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "mock ok"}],
+            },
+            {
+                "id": "call-1",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "shell",
+                "arguments": '{"command":"pwd"}',
+            },
+        ],
+    }
+    events = [
+        {"type": "response.created", "sequence_number": 0},
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {"id": "reason-1", "type": "reasoning"},
+        },
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {"id": "reason-1", "type": "reasoning"},
+        },
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 3,
+            "output_index": 1,
+            "item": {
+                "id": "call-1",
+                "call_id": "call-1",
+                "type": "function_call",
+                "name": "shell",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 4,
+            "output_index": 1,
+            "delta": '{"command":',
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 5,
+            "output_index": 1,
+            "delta": '"pwd"}',
+        },
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 6,
+            "output_index": 1,
+            "item": completed["output"][2],
+        },
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "mock ok",
+        },
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": completed["output"][1],
+        },
+        {"type": "response.completed", "response": completed},
+    ]
+
+    class RawResponse:
+        async def iter_lines(self) -> Any:
+            for event in events:
+                yield "data: " + json.dumps(event)
+                yield ""
+            yield "data: [DONE]"
+            yield ""
+
+    class Context:
+        async def __aenter__(self) -> RawResponse:
+            return RawResponse()
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+    def create(**kwargs: Any) -> Context:
+        assert kwargs["stream"] is True
+        return Context()
+
+    proxy = SimpleNamespace(
+        responses=SimpleNamespace(
+            with_streaming_response=SimpleNamespace(create=create)
+        )
+    )
+    model_client = _client("responses-proxy")
+    model_client._openai = proxy
+
+    result = asyncio.run(
+        model_client._responses_proxy(
+            [[{"role": "user", "content": "use shell"}]],
+            stream=True,
+        )
+    )
+
+    assert result.text == "mock ok"
+    assert result.input_tokens == 9
+    assert result.output_tokens == 5
+    assert [
+        (call.call_id, call.name, call.arguments) for call in result.tool_calls
+    ] == [("call-1", "shell", {"command": "pwd"})]
+    assert model_client.stream_events == len(events)
+    assert model_client.normalization_errors >= 4
+    assert any(
+        event == "stream_normalized" and value["codec"].endswith("-v2")
+        for event, value in model_client.events.rows
+    )
+
+
+def test_proxy_codec_rejects_malformed_sse_json() -> None:
+    with pytest.raises(ValueError, match="malformed SSE JSON"):
+        RUNNER["_append_sse_event"]([], ["not-json"])
+
+
 def test_inline_client_lifecycle_closes_once() -> None:
     class Client:
         def __init__(self) -> None:

@@ -71,13 +71,12 @@ def test_wba_transport_receipts_lock_three_distinct_topologies() -> None:
         "chat_completions"
     }
     assert {value["model_provider"] for value in receipts.values()} == {"wandb"}
-    assert {value["model_id"] for value in receipts.values()} == {
-        "zai-org/GLM-5.2"
-    }
+    assert {value["model_id"] for value in receipts.values()} == {"zai-org/GLM-5.2"}
     assert {value["provider_endpoint"] for value in receipts.values()} == {
         "https://api.inference.wandb.ai/v1"
     }
     assert receipts["responses-proxy"]["bridge_required"] is True
+    assert receipts["responses-proxy"]["codec"] == "fugue-litellm-responses-proxy-v2"
     assert receipts["responses-inline"]["bridge_required"] is False
     assert receipts["chat-inline"]["bridge_required"] is False
     assert {value["sampling_policy"]["temperature"] for value in receipts.values()} == {
@@ -212,7 +211,9 @@ def test_harness_model_route_is_explicit_and_provider_aware(
     assert receipt["wire_protocol"] == protocol
     assert receipt["endpoint_kind"] == endpoint_kind
     assert (
-        "host.docker.internal" if receipt["bridge_required"] else receipt["upstream_host"]
+        "host.docker.internal"
+        if receipt["bridge_required"]
+        else receipt["upstream_host"]
     ) == endpoint_host
     assert receipt["bridge_required"] is (endpoint_kind == "fugue_bridge")
 

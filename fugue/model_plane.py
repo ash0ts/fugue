@@ -86,7 +86,7 @@ _WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
         "agent_wire_protocol": "responses",
         "provider_wire_protocol": "chat_completions",
         "client": "openai-responses",
-        "codec": "fugue-litellm-responses-proxy-v1",
+        "codec": "fugue-litellm-responses-proxy-v2",
         "conversion_location": "external_proxy",
         "bridge_required": True,
     },
@@ -313,9 +313,10 @@ def wba_transport_receipt_from_dict(
         raise ValueError(
             "unknown WBA transport receipt field(s): " + ", ".join(unknown)
         )
-    if isinstance(raw.get("schema_version"), bool) or raw.get(
-        "schema_version"
-    ) != WBA_TRANSPORT_CONTRACT_VERSION:
+    if (
+        isinstance(raw.get("schema_version"), bool)
+        or raw.get("schema_version") != WBA_TRANSPORT_CONTRACT_VERSION
+    ):
         raise ValueError("WBA transport receipt must use schema_version 1")
     if raw.get("harness") != "wba-responses":
         raise ValueError("WBA transport receipt has the wrong harness")

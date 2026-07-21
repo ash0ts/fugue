@@ -25,7 +25,7 @@ from typing import Any
 # snapshot instead.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
 MAX_STEPS = 20
 REQUEST_TIMEOUT_SEC = 300
@@ -403,15 +403,20 @@ class ModelClient:
         if not stream:
             response = await self._openai.responses.create(**kwargs)
             return _parse_responses(response)
-        items: list[Any] = []
-        final: Any = None
-        async with self._openai.responses.stream(**kwargs) as response_stream:
-            async for event in response_stream:
-                self.stream_events += 1
-                if getattr(event, "type", "") == "response.output_item.done":
-                    items.append(getattr(event, "item", None))
-            final = await response_stream.get_final_response()
-        return _parse_responses(final, items=items)
+        final, normalization_errors = await _read_proxy_responses_stream(
+            self._openai,
+            kwargs,
+        )
+        self.stream_events += int(final.pop("_fugue_stream_event_count"))
+        if normalization_errors:
+            self.normalization_errors += normalization_errors
+            self.events.emit(
+                "stream_normalized",
+                profile=self.profile,
+                normalization_errors=normalization_errors,
+                codec="fugue-litellm-responses-proxy-v2",
+            )
+        return _parse_responses(final)
 
     async def _responses_inline(
         self,
@@ -942,6 +947,138 @@ def _visible_content(value: Any) -> str:
         for item in value
         if _value(item, "type") in {"input_text", "output_text", "text"}
     )
+
+
+async def _read_proxy_responses_stream(
+    client: Any,
+    kwargs: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Read and validate LiteLLM's Responses SSE without trusting SDK state.
+
+    LiteLLM 1.93 can reuse an output index when it converts a reasoning Chat
+    completion with a function call into Responses events.  OpenAI's typed
+    stream accumulator correctly rejects that sequence.  The terminal
+    ``response.completed`` object is still complete, so this codec consumes the
+    raw stream through the OpenAI client, records every malformed relationship,
+    and parses only that terminal object.  No partial output is invented.
+    """
+    events: list[dict[str, Any]] = []
+    data_lines: list[str] = []
+    async with client.responses.with_streaming_response.create(
+        **kwargs,
+        stream=True,
+    ) as response:
+        async for line in response.iter_lines():
+            if not line:
+                _append_sse_event(events, data_lines)
+                data_lines = []
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+        _append_sse_event(events, data_lines)
+
+    completed: dict[str, Any] | None = None
+    announced: dict[int, str] = {}
+    announced_calls: dict[int, tuple[str, str]] = {}
+    argument_fragments: dict[int, list[str]] = {}
+    normalization_errors = 0
+    previous_sequence: int | None = None
+    for event in events:
+        event_type = str(event.get("type") or "")
+        sequence = event.get("sequence_number")
+        if not isinstance(sequence, int):
+            normalization_errors += 1
+        elif previous_sequence is not None and sequence <= previous_sequence:
+            normalization_errors += 1
+        else:
+            previous_sequence = sequence
+
+        output_index = event.get("output_index")
+        if event_type == "response.output_item.added" and isinstance(output_index, int):
+            item = event.get("item") or {}
+            item_type = str(_value(item, "type") or "")
+            prior = announced.get(output_index)
+            if prior is not None and prior != item_type:
+                normalization_errors += 1
+            announced[output_index] = item_type
+            if item_type == "function_call":
+                announced_calls[output_index] = (
+                    str(_value(item, "call_id") or _value(item, "id") or ""),
+                    str(_value(item, "name") or ""),
+                )
+        expected_type = _proxy_event_output_type(event_type)
+        if expected_type and isinstance(output_index, int):
+            observed_type = announced.get(output_index)
+            if observed_type != expected_type:
+                normalization_errors += 1
+        if event_type == "response.function_call_arguments.delta":
+            if isinstance(output_index, int):
+                argument_fragments.setdefault(output_index, []).append(
+                    str(event.get("delta") or "")
+                )
+            else:
+                normalization_errors += 1
+        if event_type == "response.output_item.done" and isinstance(output_index, int):
+            done_item = event.get("item") or {}
+            done_type = str(_value(done_item, "type") or "")
+            observed_type = announced.get(output_index)
+            if observed_type is not None and observed_type != done_type:
+                normalization_errors += 1
+            if done_type == "function_call":
+                observed_call = announced_calls.get(output_index)
+                done_call = (
+                    str(_value(done_item, "call_id") or _value(done_item, "id") or ""),
+                    str(_value(done_item, "name") or ""),
+                )
+                if observed_call is not None and observed_call != done_call:
+                    normalization_errors += 1
+                fragments = "".join(argument_fragments.get(output_index, []))
+                done_arguments = str(_value(done_item, "arguments") or "")
+                if fragments and fragments != done_arguments:
+                    normalization_errors += 1
+        elif event_type == "response.completed":
+            value = event.get("response")
+            if isinstance(value, dict):
+                completed = dict(value)
+        elif event_type == "error":
+            error = event.get("error") or {}
+            code = str(_value(error, "code") or _value(error, "type") or "unknown")
+            raise RuntimeError(f"Responses proxy stream failed with {code}")
+
+    if completed is None:
+        raise RuntimeError("Responses proxy stream ended without response.completed")
+    if str(completed.get("status") or "") != "completed":
+        raise RuntimeError("Responses proxy stream did not complete successfully")
+    if not isinstance(completed.get("output"), list):
+        raise RuntimeError("Responses proxy completion is missing output items")
+    completed["_fugue_stream_event_count"] = len(events)
+    return completed, normalization_errors
+
+
+def _append_sse_event(events: list[dict[str, Any]], lines: list[str]) -> None:
+    if not lines:
+        return
+    payload = "\n".join(lines)
+    if payload == "[DONE]":
+        return
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Responses proxy emitted malformed SSE JSON") from exc
+    if not isinstance(event, dict):
+        raise ValueError("Responses proxy emitted a non-object SSE event")
+    events.append(event)
+
+
+def _proxy_event_output_type(event_type: str) -> str | None:
+    if event_type.startswith("response.output_text.") or event_type.startswith(
+        "response.content_part."
+    ):
+        return "message"
+    if event_type.startswith("response.function_call_arguments."):
+        return "function_call"
+    if event_type.startswith("response.reasoning_summary"):
+        return "reasoning"
+    return None
 
 
 def _parse_responses(raw: Any, *, items: list[Any] | None = None) -> ModelTurn:
