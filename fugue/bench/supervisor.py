@@ -208,9 +208,14 @@ class RunSupervisor:
         return self.get(run_id, recover=False)
 
     def read_log(
-        self, run_id: str, *, cell_id: str | None = None, tail_bytes: int = 64_000
+        self,
+        run_id: str,
+        *,
+        cell_id: str | None = None,
+        tail_bytes: int = 64_000,
+        recover: bool = True,
     ) -> str:
-        run = self.get(run_id)
+        run = self.get(run_id, recover=recover)
         path = self._log_path(run, cell_id)
         try:
             with path.open("rb") as handle:
@@ -228,10 +233,11 @@ class RunSupervisor:
         cell_id: str | None = None,
         offset: int = 0,
         max_bytes: int = 64_000,
+        recover: bool = True,
     ) -> tuple[str, int]:
         if offset < 0 or max_bytes < 1:
             raise ValueError("log offset must be non-negative and max_bytes positive")
-        run = self.get(run_id)
+        run = self.get(run_id, recover=recover)
         path = self._log_path(run, cell_id)
         try:
             with path.open("rb") as handle:
@@ -249,8 +255,9 @@ class RunSupervisor:
         *,
         cell_id: str | None = None,
         poll_sec: float = 0.25,
+        recover: bool = True,
     ) -> Iterator[str]:
-        run = self.get(run_id)
+        run = self.get(run_id, recover=recover)
         path = self._log_path(run, cell_id)
         position = 0
         while True:
@@ -263,7 +270,7 @@ class RunSupervisor:
                 chunk = ""
             if chunk:
                 yield chunk
-            current = self.get(run_id)
+            current = self.get(run_id, recover=recover)
             if current.status not in {"starting", "running"}:
                 if not chunk:
                     break

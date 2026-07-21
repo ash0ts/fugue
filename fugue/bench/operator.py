@@ -2269,8 +2269,11 @@ class OperatorService:
         args.extend(["--env-file", self.env_file.as_posix()])
         return args
 
-    def runs(self) -> list[RunSummary]:
-        return [self._summarize_run(run) for run in self.supervisor.list()]
+    def runs(self, *, recover: bool = True) -> list[RunSummary]:
+        return [
+            self._summarize_run(run)
+            for run in self.supervisor.list(recover=recover)
+        ]
 
     def run_summary(self, run_id: str, *, recover: bool = True) -> RunSummary:
         return self._summarize_run(self.supervisor.get(run_id, recover=recover))
@@ -2325,7 +2328,7 @@ class OperatorService:
     def run_trace_refs(
         self, run_id: str, *, cell_id: str | None = None
     ) -> tuple[AgentTraceRef, ...]:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         sources = _run_job_paths(self.repo_root, run)
         rows = [
             row
@@ -2356,7 +2359,7 @@ class OperatorService:
         republish: bool = False,
         republish_reason: str | None = None,
     ) -> ExportSummary:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
         job_paths = _run_job_paths(self.repo_root, run)
         bundle = compile_export(
@@ -2497,14 +2500,14 @@ class OperatorService:
         )
 
     def run_links(self, run_id: str) -> DeepLinks:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         project = str(run.metadata.get("trace_project") or "").strip() or None
         return self.deep_links(project=project)
 
     def run_evaluation(
         self, run_id: str, *, cell_id: str | None = None
     ) -> PublishedEvaluation | None:
-        run = self.run_summary(run_id)
+        run = self.run_summary(run_id, recover=False)
         candidate_id = None
         if cell_id:
             cell = next((item for item in run.cells if item.cell_id == cell_id), None)

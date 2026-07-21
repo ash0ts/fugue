@@ -565,7 +565,7 @@ def _command_center(parser: FugueArgumentParser) -> int:
 
 def _print_home(service: OperatorService) -> None:
     status = service.status()
-    runs = service.runs()
+    runs = service.runs(recover=False)
     latest = runs[0] if runs else None
     title = Text("FUGUE", style="bold fugue.gold")
     title.append("  AGENT EXPERIMENT OPERATOR", style="fugue.muted")
@@ -1235,7 +1235,7 @@ def _runs(args: argparse.Namespace) -> int:
     }
     if handler := handlers.get(args.runs_action):
         return handler(args, service, as_json)
-    run = service.run_summary(args.run_id)
+    run = service.run_summary(args.run_id, recover=False)
     if args.json:
         print(as_json(run))
     else:
@@ -1246,7 +1246,7 @@ def _runs(args: argparse.Namespace) -> int:
 
 
 def _runs_list(args: argparse.Namespace, service: Any, as_json: Any) -> int:
-    runs = service.runs()[: args.limit]
+    runs = service.runs(recover=False)[: args.limit]
     if args.json:
         print(as_json(runs))
         return 0
@@ -1282,10 +1282,21 @@ def _runs_list(args: argparse.Namespace, service: Any, as_json: Any) -> int:
 
 def _runs_logs(args: argparse.Namespace, service: Any, _: Any) -> int:
     if not args.follow:
-        print(service.supervisor.read_log(args.run_id, cell_id=args.cell), end="")
+        print(
+            service.supervisor.read_log(
+                args.run_id,
+                cell_id=args.cell,
+                recover=False,
+            ),
+            end="",
+        )
         return 0
     try:
-        for chunk in service.supervisor.follow_log(args.run_id, cell_id=args.cell):
+        for chunk in service.supervisor.follow_log(
+            args.run_id,
+            cell_id=args.cell,
+            recover=False,
+        ):
             print(chunk, end="", flush=True)
     except KeyboardInterrupt:
         return 130

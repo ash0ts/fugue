@@ -160,6 +160,24 @@ def test_orphaned_run_is_marked_interrupted(tmp_path: Path) -> None:
     assert "terminal state" in str(run.metadata["error"])
 
 
+def test_observational_read_does_not_recover_foreign_run(tmp_path: Path) -> None:
+    write_run_manifest(
+        tmp_path,
+        "run-foreign",
+        {
+            "status": "running",
+            "pid": 99_999_999,
+            "run_name": "Foreign worker",
+            "experiment_id": "demo",
+        },
+    )
+
+    run = RunSupervisor(tmp_path).get("run-foreign", recover=False)
+
+    assert run.status == "running"
+    assert "error" not in run.metadata
+
+
 def test_permission_error_does_not_mark_live_run_interrupted(
     tmp_path: Path, monkeypatch
 ) -> None:
