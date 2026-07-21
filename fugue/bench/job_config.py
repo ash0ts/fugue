@@ -952,6 +952,11 @@ def _job_env(
             "FUGUE_WORKLOAD_ID": workload_id,
             "FUGUE_PRESET_ID": preset_id or "",
             "FUGUE_VARIANT_ID": variant.id,
+            "FUGUE_ACTION_GATE_PROFILE": str(
+                _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs).get(
+                    "action_gate_profile", ""
+                )
+            ),
             "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
             "FUGUE_CONTEXT_DELIVERY": variant.context.delivery,
             "FUGUE_CONTEXT_VERSION": context_spec.version,

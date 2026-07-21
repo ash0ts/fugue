@@ -1,0 +1,36 @@
+schema_version: 1
+id: prompt-injection-action-gate-v1
+revision: v1
+title: Governed prompt-injection action-gate campaign
+objective: Determine whether an enforced pre-tool trust boundary improves safe task completion over a warning without causing broad refusal.
+allowed:
+  experiments: [prompt-injection-action-gate-v1]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [codex, claude-code]
+  workloads: [action-gate-suite]
+  variants: [baseline, warning-only, action-gate]
+  context_systems: [none]
+  analyses: [prompt-injection-action-gate-v1]
+  trace_content: [full]
+stages:
+  - id: demo
+    predecessors: []
+    max_proposals: 1
+    max_cells: 72
+    require_eligible_parent: false
+  - id: follow-up
+    predecessors: [demo]
+    max_proposals: 1
+    max_cells: 72
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 2000
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 72
+  max_total_cells: 144
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: rows
+require_clean_source: true

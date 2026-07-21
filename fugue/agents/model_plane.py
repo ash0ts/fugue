@@ -65,6 +65,9 @@ from fugue.registration import (
 from fugue.task_interaction import TaskInteractionController
 from fugue.tool_policy import (
     HarnessToolPolicy,
+    action_gate_cli_flags,
+    action_gate_install_command,
+    normalize_action_gate_profile,
     tool_result_guard_cli_flags,
     tool_result_guard_install_command,
 )
@@ -436,6 +439,22 @@ class _TrialMetaMixin:
             ).strip()
             raise RuntimeError(detail[-2_000:])
 
+    async def _install_action_gate(
+        self,
+        environment: BaseEnvironment,
+        harness: HarnessToolPolicy,
+        config_path: PurePosixPath,
+    ) -> None:
+        command = action_gate_install_command(
+            getattr(self, "action_gate_profile", None), harness, config_path
+        )
+        if command is None:
+            return
+        result = await self.exec_as_agent(environment, command=command, timeout_sec=30)
+        if result.return_code != 0:
+            detail = (result.stderr or result.stdout or "action gate failed").strip()
+            raise RuntimeError(detail[-2_000:])
+
     async def _begin_trial(
         self, harness: str, route: ModelRoute, environment: BaseEnvironment
     ) -> None:
@@ -675,6 +694,7 @@ done
             "workload_id": os.environ.get("FUGUE_WORKLOAD_ID"),
             "preset_id": os.environ.get("FUGUE_PRESET_ID"),
             "variant_id": variant_id,
+            "action_gate_profile": os.environ.get("FUGUE_ACTION_GATE_PROFILE") or None,
             "context_system_id": self.context_system_id,
             "context_delivery": os.environ.get("FUGUE_CONTEXT_DELIVERY", "portable"),
             "context_version": os.environ.get("FUGUE_CONTEXT_VERSION"),
@@ -2011,7 +2031,14 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     def name() -> str:
         return "fugue-claude-code"
 
-    def __init__(self, *args, model_name: str | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        model_name: str | None = None,
+        action_gate_profile: str | None = None,
+        **kwargs,
+    ):
+        self.action_gate_profile = normalize_action_gate_profile(action_gate_profile)
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
         _require_trace_key()
@@ -2156,6 +2183,11 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         try:
             await self._install_weave_plugin(environment)
             await self._install_tool_result_guard(
+                environment,
+                "claude-code",
+                PurePosixPath(self._CLAUDE_CONFIG_DIR) / "settings.json",
+            )
+            await self._install_action_gate(
                 environment,
                 "claude-code",
                 PurePosixPath(self._CLAUDE_CONFIG_DIR) / "settings.json",
@@ -2309,7 +2341,14 @@ class FugueCodex(_TrialMetaMixin, Codex):
     def name() -> str:
         return "fugue-codex"
 
-    def __init__(self, *args, model_name: str | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        model_name: str | None = None,
+        action_gate_profile: str | None = None,
+        **kwargs,
+    ):
+        self.action_gate_profile = normalize_action_gate_profile(action_gate_profile)
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
         _require_trace_key()
@@ -2395,7 +2434,12 @@ class FugueCodex(_TrialMetaMixin, Codex):
         )
         hook_flags = "".join(
             f"{flag} "
-            for flag in tool_result_guard_cli_flags(self.model_route, "codex")
+            for flag in dict.fromkeys(
+                [
+                    *tool_result_guard_cli_flags(self.model_route, "codex"),
+                    *action_gate_cli_flags(self.action_gate_profile, "codex"),
+                ]
+            )
         )
 
         codex_home = self._codex_home()
@@ -2495,6 +2539,11 @@ class FugueCodex(_TrialMetaMixin, Codex):
             f"{remote_codex_home}/home/.agents/skills",
         )
         await self._install_tool_result_guard(
+            environment,
+            "codex",
+            codex_home / "hooks.json",
+        )
+        await self._install_action_gate(
             environment,
             "codex",
             codex_home / "hooks.json",

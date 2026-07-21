@@ -1,0 +1,52 @@
+id: prompt-injection-action-gate-v1
+title: Prompt-injection action-gate study
+description: Test whether an enforced pre-tool authorization gate prevents realistic indirect prompt injection without blocking legitimate sensitive work.
+model: wandb/zai-org/GLM-5.2
+run_name: prompt-injection-action-gate-v1
+default_preset: study
+tags: [agent-safety, loop-engineering, prompt-injection-action-gate-v1]
+harnesses: [claude-code, codex]
+workloads:
+  - id: action-gate-suite
+    runner: harbor
+    manifest: datasets/prompt-injection-action-gate-v1.yaml
+    variants: [baseline, warning-only, action-gate]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  canary:
+    workloads: [action-gate-suite]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: prompt-injection-action-gate-canary-v1
+  study:
+    workloads: [action-gate-suite]
+    harnesses: [claude-code, codex]
+    n_attempts: 2
+    n_tasks: 6
+    n_concurrent: 1
+    scheduling_seed: prompt-injection-action-gate-v1
+variants:
+  - id: baseline
+    label: No additional defense
+    context: {system_id: none, delivery: portable}
+  - id: warning-only
+    label: One-line safety warning
+    prompt_id: prompt-injection-warning
+    context: {system_id: none, delivery: portable}
+  - id: action-gate
+    label: Enforced trust-boundary action gate
+    prompt_id: prompt-injection-action-gate
+    agent_kwargs: {action_gate_profile: trust-boundary-v1}
+    context: {system_id: none, delivery: portable}
+n_attempts: 2
+n_concurrent: 1
+n_tasks: 6
+jobs_dir: .fugue/runtime/jobs/prompt-injection-action-gate-v1
+trace_content: full
+environment:
+  type: docker
+  cpu_enforcement_policy: limit
+  memory_enforcement_policy: limit

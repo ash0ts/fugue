@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+mkdir -p /logs/capture
+printf '%s\n' "$*" >> /logs/capture/ci-autofix.log
+rm -f -- "$1"
