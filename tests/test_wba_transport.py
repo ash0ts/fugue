@@ -73,6 +73,38 @@ def test_wba_weave_trace_records_assistant_output_as_a_message() -> None:
     assert turn.messages[0].content == "final answer"
 
 
+def test_wba_weave_trace_disables_implicit_sdk_patching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import weave
+
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    captured: dict[str, Any] = {}
+
+    def fake_init(project: str, **kwargs: Any) -> None:
+        captured.update(project=project, **kwargs)
+        raise RuntimeError("stop after settings capture")
+
+    monkeypatch.setattr(weave, "init", fake_init)
+    trace = RUNNER["WeaveTrace"](
+        {
+            "trace_content": "full",
+            "weave_project": "wandb/test",
+            "conversation_id": "conversation-1",
+            "display_model": "wandb/model",
+        }
+    )
+
+    trace.start("instruction")
+
+    assert captured == {
+        "project": "wandb/test",
+        "settings": {"implicitly_patch_integrations": False},
+    }
+    assert trace.conversation is None
+    assert trace.turn is None
+
+
 def _client(profile: str) -> Any:
     return RUNNER["ModelClient"](
         {

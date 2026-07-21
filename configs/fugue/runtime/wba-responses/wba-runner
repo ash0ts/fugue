@@ -25,7 +25,7 @@ from typing import Any
 # snapshot instead.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
 MAX_STEPS = 20
 REQUEST_TIMEOUT_SEC = 300
@@ -122,7 +122,10 @@ class WeaveTrace:
         try:
             import weave
 
-            weave.init(str(self.config["weave_project"]))
+            weave.init(
+                str(self.config["weave_project"]),
+                settings={"implicitly_patch_integrations": False},
+            )
             self.conversation = weave.start_conversation(
                 agent_name="wba-responses",
                 conversation_id=str(self.config["conversation_id"]),

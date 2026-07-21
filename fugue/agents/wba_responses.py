@@ -76,7 +76,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
     """Task-neutral WBA-style loop with locked transport-profile ablations."""
 
     TRACE_HARNESS = "wba-responses"
-    _VERSION = "0.1.2"
+    _VERSION = "0.1.3"
 
     @staticmethod
     @override

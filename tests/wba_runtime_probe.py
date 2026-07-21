@@ -124,6 +124,37 @@ async def _main() -> None:
         ("assistant", "final answer")
     ]
 
+    import weave
+
+    captured: dict[str, Any] = {}
+    original_init = weave.init
+
+    def fake_init(project: str, **kwargs: Any) -> None:
+        captured.update(project=project, **kwargs)
+        raise RuntimeError("stop after settings capture")
+
+    weave.init = fake_init
+    try:
+        init_trace = RUNNER["WeaveTrace"](
+            {
+                "trace_content": "full",
+                "weave_project": "wandb/test",
+                "conversation_id": "conversation-1",
+                "display_model": "wandb/model",
+            }
+        )
+        init_trace.start("instruction")
+    finally:
+        weave.init = original_init
+    assert captured == {
+        "project": "wandb/test",
+        "settings": {"implicitly_patch_integrations": False},
+    }
+    original_init(
+        "wandb/test",
+        settings={"disabled": True, "implicitly_patch_integrations": False},
+    )
+
 
 asyncio.run(_main())
 print("networkless WBA inline transport probe passed")
