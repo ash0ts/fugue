@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 _PROFILES = ("responses-proxy", "responses-inline", "chat-inline")
@@ -96,6 +96,11 @@ def analyze_wba_transport_rows(
                 for row in selected
                 if row.get("transport_profile") == profile
             ),
+            "stream_anomaly_kinds": _sum_stream_anomaly_kinds(
+                row
+                for row in selected
+                if row.get("transport_profile") == profile
+            ),
         }
         for profile in _PROFILES
     }
@@ -127,6 +132,18 @@ def analyze_wba_transport_rows(
             "Task failures are observations; evidence and infrastructure failures invalidate progression.",
         ],
     }
+
+
+def _sum_stream_anomaly_kinds(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, int]:
+    totals: defaultdict[str, int] = defaultdict(int)
+    for row in rows:
+        values = row.get("transport_stream_anomaly_kinds") or {}
+        if isinstance(values, Mapping):
+            for kind, count in values.items():
+                totals[str(kind)] += int(count or 0)
+    return dict(sorted(totals.items()))
 
 
 def _contrast(

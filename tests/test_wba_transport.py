@@ -901,6 +901,9 @@ def test_proxy_codec_normalizes_litellm_reasoning_index_reuse() -> None:
     assert model_client.stream_events == len(events)
     assert model_client.normalization_errors == 0
     assert model_client.stream_anomalies >= 4
+    assert sum(model_client.stream_anomaly_kinds.values()) == (
+        model_client.stream_anomalies
+    )
     assert any(
         event == "stream_normalized"
         and value["codec"].endswith("-v3")
@@ -1129,6 +1132,7 @@ def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
                         "pass": passed,
                         "transport_normalization_errors": 0,
                         "transport_stream_anomalies": 0,
+                        "transport_stream_anomaly_kinds": {},
                         "transport_orphan_tool_outputs": 0,
                     }
                 )
@@ -1172,6 +1176,7 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
         "orphan_tool_outputs": 0,
         "normalization_errors": 0,
         "stream_anomalies": 0,
+        "stream_anomaly_kinds": {},
         "stream_events": 9,
         "retries": 0,
         "transport_errors": 0,
@@ -1193,13 +1198,30 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
     assert safe["wba_transport"]["tool_calls"] == 2
     assert safe["transport_errors"] == 0
     assert safe["transport_stream_anomalies"] == 0
-    normalized_summary = {**summary, "stream_anomalies": 17}
+    normalized_summary = {
+        **summary,
+        "stream_anomalies": 17,
+        "stream_anomaly_kinds": {"reused_output_index": 17},
+    }
     (agent / "wba-responses-summary.json").write_text(
         json.dumps(normalized_summary)
     )
     normalized_evidence = _wba_transport_evidence(trial, meta)
     assert normalized_evidence["wba_transport_status"] == "valid"
     assert normalized_evidence["transport_stream_anomalies"] == 17
+    assert normalized_evidence["transport_stream_anomaly_kinds"] == {
+        "reused_output_index": 17
+    }
+    recovered_summary = {
+        **summary,
+        "normalization_errors": 1,
+        "transport_errors": 1,
+        "retries": 1,
+    }
+    (agent / "wba-responses-summary.json").write_text(
+        json.dumps(recovered_summary)
+    )
+    assert _wba_transport_evidence(trial, meta)["wba_transport_status"] == "valid"
     failed_summary = {
         **summary,
         "transport_errors": 1,

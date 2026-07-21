@@ -354,6 +354,7 @@ _SAFE_PREDICTION_FIELDS = (
     "transport_orphan_tool_outputs",
     "transport_normalization_errors",
     "transport_stream_anomalies",
+    "transport_stream_anomaly_kinds",
     "transport_stop_reason",
 )
 

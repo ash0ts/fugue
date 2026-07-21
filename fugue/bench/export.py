@@ -1209,6 +1209,7 @@ _LOCAL_RESULT_FIELDS = {
     "transport_orphan_tool_outputs",
     "transport_normalization_errors",
     "transport_stream_anomalies",
+    "transport_stream_anomaly_kinds",
     "transport_stop_reason",
 }
 
@@ -3546,6 +3547,7 @@ def _wba_transport_evidence(
             "orphan_tool_outputs",
             "normalization_errors",
             "stream_anomalies",
+            "stream_anomaly_kinds",
             "stream_events",
             "retries",
             "transport_errors",
@@ -3563,9 +3565,18 @@ def _wba_transport_evidence(
         and bool(summary.get("session_id"))
         and str(summary.get("session_id")) in native_sessions
         and summary.get("orphan_tool_outputs") == 0
-        and summary.get("normalization_errors") == 0
         and isinstance(summary.get("stream_anomalies"), int)
         and summary["stream_anomalies"] >= 0
+        and isinstance(summary.get("stream_anomaly_kinds"), dict)
+        and all(
+            isinstance(kind, str)
+            and kind
+            and isinstance(count, int)
+            and count >= 0
+            for kind, count in summary["stream_anomaly_kinds"].items()
+        )
+        and sum(summary["stream_anomaly_kinds"].values())
+        == summary["stream_anomalies"]
         and summary.get("stop_reason") == "completed"
     )
     return {
@@ -3580,6 +3591,7 @@ def _wba_transport_evidence(
         "transport_orphan_tool_outputs": selected.get("orphan_tool_outputs"),
         "transport_normalization_errors": selected.get("normalization_errors"),
         "transport_stream_anomalies": selected.get("stream_anomalies"),
+        "transport_stream_anomaly_kinds": selected.get("stream_anomaly_kinds"),
         "transport_stop_reason": selected.get("stop_reason"),
     }
 

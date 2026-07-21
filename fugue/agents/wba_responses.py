@@ -285,6 +285,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
                 "orphan_tool_outputs": summary.get("orphan_tool_outputs"),
                 "normalization_errors": summary.get("normalization_errors"),
                 "stream_anomalies": summary.get("stream_anomalies"),
+                "stream_anomaly_kinds": summary.get("stream_anomaly_kinds"),
                 "stream_events": summary.get("stream_events"),
                 "retries": summary.get("retries"),
                 "transport_errors": summary.get("transport_errors"),

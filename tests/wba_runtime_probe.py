@@ -199,6 +199,7 @@ async def _probe(profile: str) -> None:
         ]
         assert client.normalization_errors == 0
         assert client.stream_anomalies > 0
+        assert sum(client.stream_anomaly_kinds.values()) == client.stream_anomalies
     expected_stop = "stop" if profile == "chat-inline" else "completed"
     assert result.finish_reason == expected_stop
 

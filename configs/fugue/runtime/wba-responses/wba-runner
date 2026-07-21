@@ -242,6 +242,7 @@ class ModelClient:
         self.transport_errors = 0
         self.normalization_errors = 0
         self.stream_anomalies = 0
+        self.stream_anomaly_kinds: dict[str, int] = {}
         self.stream_events = 0
 
     async def close(self) -> None:
@@ -412,6 +413,10 @@ class ModelClient:
         stream_anomalies = sum(anomaly_kinds.values())
         if stream_anomalies:
             self.stream_anomalies += stream_anomalies
+            for kind, count in anomaly_kinds.items():
+                self.stream_anomaly_kinds[kind] = (
+                    self.stream_anomaly_kinds.get(kind, 0) + count
+                )
             self.events.emit(
                 "stream_normalized",
                 profile=self.profile,
@@ -612,6 +617,7 @@ async def run(config: dict[str, Any]) -> int:
             "orphan_tool_outputs": orphan_tool_outputs,
             "normalization_errors": client.normalization_errors,
             "stream_anomalies": client.stream_anomalies,
+            "stream_anomaly_kinds": client.stream_anomaly_kinds,
             "stream_events": client.stream_events,
             "retries": client.retries,
             "transport_errors": client.transport_errors,
@@ -649,6 +655,7 @@ async def run(config: dict[str, Any]) -> int:
             "orphan_tool_outputs": orphan_tool_outputs,
             "normalization_errors": client.normalization_errors,
             "stream_anomalies": client.stream_anomalies,
+            "stream_anomaly_kinds": client.stream_anomaly_kinds,
             "stream_events": client.stream_events,
             "retries": client.retries,
             "transport_errors": client.transport_errors,
