@@ -899,9 +899,13 @@ def test_proxy_codec_normalizes_litellm_reasoning_index_reuse() -> None:
         (call.call_id, call.name, call.arguments) for call in result.tool_calls
     ] == [("call-1", "shell", {"command": "pwd"})]
     assert model_client.stream_events == len(events)
-    assert model_client.normalization_errors >= 4
+    assert model_client.normalization_errors == 0
+    assert model_client.stream_anomalies >= 4
     assert any(
-        event == "stream_normalized" and value["codec"].endswith("-v2")
+        event == "stream_normalized"
+        and value["codec"].endswith("-v3")
+        and value["stream_anomalies"] >= 4
+        and value["anomaly_kinds"]
         for event, value in model_client.events.rows
     )
 
@@ -1124,6 +1128,7 @@ def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
                         "transport_profile": profile,
                         "pass": passed,
                         "transport_normalization_errors": 0,
+                        "transport_stream_anomalies": 0,
                         "transport_orphan_tool_outputs": 0,
                     }
                 )
@@ -1166,6 +1171,7 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
         "tool_errors": 0,
         "orphan_tool_outputs": 0,
         "normalization_errors": 0,
+        "stream_anomalies": 0,
         "stream_events": 9,
         "retries": 0,
         "transport_errors": 0,
@@ -1186,6 +1192,14 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
     assert safe["transport_profile"] == "responses-inline"
     assert safe["wba_transport"]["tool_calls"] == 2
     assert safe["transport_errors"] == 0
+    assert safe["transport_stream_anomalies"] == 0
+    normalized_summary = {**summary, "stream_anomalies": 17}
+    (agent / "wba-responses-summary.json").write_text(
+        json.dumps(normalized_summary)
+    )
+    normalized_evidence = _wba_transport_evidence(trial, meta)
+    assert normalized_evidence["wba_transport_status"] == "valid"
+    assert normalized_evidence["transport_stream_anomalies"] == 17
     failed_summary = {
         **summary,
         "transport_errors": 1,

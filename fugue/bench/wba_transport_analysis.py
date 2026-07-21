@@ -91,6 +91,11 @@ def analyze_wba_transport_rows(
                 for row in selected
                 if row.get("transport_profile") == profile
             ),
+            "stream_anomalies": sum(
+                int(row.get("transport_stream_anomalies") or 0)
+                for row in selected
+                if row.get("transport_profile") == profile
+            ),
         }
         for profile in _PROFILES
     }

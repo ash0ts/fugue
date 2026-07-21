@@ -86,7 +86,7 @@ _WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
         "agent_wire_protocol": "responses",
         "provider_wire_protocol": "chat_completions",
         "client": "openai-responses",
-        "codec": "fugue-litellm-responses-proxy-v2",
+        "codec": "fugue-litellm-responses-proxy-v3",
         "conversion_location": "external_proxy",
         "bridge_required": True,
     },

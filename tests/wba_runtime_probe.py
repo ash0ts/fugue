@@ -197,7 +197,8 @@ async def _probe(profile: str) -> None:
         assert [(call.call_id, call.name) for call in result.tool_calls] == [
             ("call-1", "shell")
         ]
-        assert client.normalization_errors > 0
+        assert client.normalization_errors == 0
+        assert client.stream_anomalies > 0
     expected_stop = "stop" if profile == "chat-inline" else "completed"
     assert result.finish_reason == expected_stop
 

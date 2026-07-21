@@ -76,7 +76,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
     """Task-neutral WBA-style loop with locked transport-profile ablations."""
 
     TRACE_HARNESS = "wba-responses"
-    _VERSION = "0.1.4"
+    _VERSION = "0.1.5"
 
     @staticmethod
     @override
@@ -284,6 +284,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
                 "tool_errors": summary.get("tool_errors"),
                 "orphan_tool_outputs": summary.get("orphan_tool_outputs"),
                 "normalization_errors": summary.get("normalization_errors"),
+                "stream_anomalies": summary.get("stream_anomalies"),
                 "stream_events": summary.get("stream_events"),
                 "retries": summary.get("retries"),
                 "transport_errors": summary.get("transport_errors"),

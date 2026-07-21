@@ -1208,6 +1208,7 @@ _LOCAL_RESULT_FIELDS = {
     "transport_tool_errors",
     "transport_orphan_tool_outputs",
     "transport_normalization_errors",
+    "transport_stream_anomalies",
     "transport_stop_reason",
 }
 
@@ -3544,6 +3545,7 @@ def _wba_transport_evidence(
             "tool_errors",
             "orphan_tool_outputs",
             "normalization_errors",
+            "stream_anomalies",
             "stream_events",
             "retries",
             "transport_errors",
@@ -3562,6 +3564,8 @@ def _wba_transport_evidence(
         and str(summary.get("session_id")) in native_sessions
         and summary.get("orphan_tool_outputs") == 0
         and summary.get("normalization_errors") == 0
+        and isinstance(summary.get("stream_anomalies"), int)
+        and summary["stream_anomalies"] >= 0
         and summary.get("stop_reason") == "completed"
     )
     return {
@@ -3575,6 +3579,7 @@ def _wba_transport_evidence(
         "transport_tool_errors": selected.get("tool_errors"),
         "transport_orphan_tool_outputs": selected.get("orphan_tool_outputs"),
         "transport_normalization_errors": selected.get("normalization_errors"),
+        "transport_stream_anomalies": selected.get("stream_anomalies"),
         "transport_stop_reason": selected.get("stop_reason"),
     }
 
