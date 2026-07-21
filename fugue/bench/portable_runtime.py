@@ -34,6 +34,17 @@ def recipe_sha256(repo_root: Path) -> str:
     return digest.hexdigest()
 
 
+def runtime_identity(repo_root: Path) -> dict[str, Any]:
+    """Return the immutable build recipe without requiring a prepared image."""
+    recipe = recipe_sha256(repo_root)
+    return {
+        "schema_version": 1,
+        "kind": "portable_context",
+        "recipe_sha256": recipe,
+        "image": f"fugue-context-runtime:{recipe[:12]}",
+    }
+
+
 def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]:
     if shutil.which("docker") is None:
         raise RuntimeError("docker is required to prepare portable context runtime")
@@ -49,8 +60,8 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
             else:
                 if inspected.get("Id") == existing.get("image_id"):
                     return existing
-        recipe = recipe_sha256(repo_root)
-        image = f"fugue-context-runtime:{recipe[:12]}"
+        identity = runtime_identity(repo_root)
+        image = str(identity["image"])
         subprocess.run(
             docker_build_command(
                 "--pull",
@@ -66,10 +77,7 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
         )
         inspected = _inspect_image(image)
         lock = {
-            "schema_version": 1,
-            "kind": "portable_context",
-            "recipe_sha256": recipe,
-            "image": image,
+            **identity,
             "image_id": inspected["Id"],
             "architecture": inspected.get("Architecture"),
             "os": inspected.get("Os"),

@@ -14,6 +14,7 @@ import yaml
 
 from fugue.artifacts import artifact_source_paths, harbor_artifacts
 from fugue.bench.agent_runtime import read_runtime_lock as read_agent_runtime_lock
+from fugue.bench.agent_runtime import runtime_identity as agent_runtime_identity
 from fugue.bench.agent_runtime import runtime_mount as agent_runtime_mount
 from fugue.bench.agent_runtime import runtime_spec as agent_runtime_spec
 from fugue.bench.candidates import (
@@ -55,6 +56,7 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
+from fugue.bench.portable_runtime import runtime_identity as portable_runtime_identity
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.services import (
@@ -357,7 +359,7 @@ def _build_jobs(
                     resolved_skills,
                     integration_binding,
                 )
-                context_runtime = _portable_context_runtime_descriptor(
+                context_runtime = _portable_context_runtime_identity(
                     binding,
                     variant.context.delivery,
                     repo_root,
@@ -373,9 +375,8 @@ def _build_jobs(
                     repo_root=repo_root,
                 )
                 task_architecture = _task_architecture(tasks[0])
-                agent_runtime = read_agent_runtime_lock(
+                agent_runtime = agent_runtime_identity(
                     harness.name,
-                    repo_root,
                     task_architecture,
                 )
                 task_runtime_identity = task_runtime_identities.get(tasks[0].id)
@@ -1323,6 +1324,35 @@ def _portable_context_runtime_descriptor(
         "portable_port": 8001,
         "query_url": "http://127.0.0.1:8001",
     }
+
+
+def _portable_context_runtime_identity(
+    binding: ContextBinding,
+    delivery: str,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    if binding.managed_runtime == "pinned_mcp" and delivery == "native_mcp":
+        return binding.runtime_descriptor
+    if binding.managed_runtime != "fugue_context" or delivery != "portable":
+        return None
+    try:
+        identity = portable_runtime_identity(repo_root)
+    except FileNotFoundError:
+        # Minimal synthetic repositories used by callers may model the
+        # binding contract without carrying Fugue's runtime build inputs.
+        identity = {"image": CONTEXT_RUNTIME_IMAGE}
+    return _drop_empty({
+        "schema_version": PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION,
+        "kind": "compose_service",
+        "image": identity["image"],
+        "recipe_sha256": identity.get("recipe_sha256"),
+        "service": CONTEXT_RUNTIME_SERVICE,
+        "network": "shared_main_namespace",
+        "bridge_url": "http://host.docker.internal:4000",
+        "mcp_port": 8000,
+        "portable_port": 8001,
+        "query_url": "http://127.0.0.1:8001",
+    })
 
 
 def _reserved_context_ports(binding: ContextBinding) -> dict[int, str]:

@@ -280,6 +280,10 @@ def test_prepare_agent_runtime_records_image_identity(
         lambda *args: ["docker", "build", "--provenance=false", *args],
     )
     lock = agent_runtime.prepare_runtime("codex", repo_root=tmp_path)
+    identity = agent_runtime.runtime_identity("codex")
+    assert identity is not None
+    assert {key: lock[key] for key in identity} == identity
+    assert "image_id" not in identity
     assert lock["image_id"] == "sha256:" + "a" * 64
     assert commands[0][:6] == [
         "docker",
@@ -355,3 +359,16 @@ def test_agent_runtime_selects_native_arm64_lock(tmp_path: Path) -> None:
         agent_runtime.runtime_mount("codex", tmp_path, "arm64")["source"]
         == (lock["image_id"])
     )
+
+
+def test_agent_runtime_identity_does_not_require_a_prepared_lock(
+    tmp_path: Path,
+) -> None:
+    identity = agent_runtime.runtime_identity("wba-responses", "amd64")
+
+    assert identity is not None
+    assert identity["harness"] == "wba-responses"
+    assert identity["architecture"] == "amd64"
+    assert len(identity["recipe_sha256"]) == 64
+    assert "image_id" not in identity
+    assert agent_runtime.read_runtime_lock("wba-responses", tmp_path) is None

@@ -997,6 +997,7 @@ def test_wba_plan_identity_is_stable_across_task_runtime_preparation(
         experiment_id="wba-transport-ablation-v1",
         preset="primary",
     )
+    monkeypatch.setattr(job_config, "read_agent_runtime_lock", lambda *args: None)
     monkeypatch.setattr(job_config, "read_task_runtime_lock", lambda *args: None)
     before = service.resolve_run_plan(request, run_id="task-preparation")
 
@@ -1012,6 +1013,15 @@ def test_wba_plan_identity_is_stable_across_task_runtime_preparation(
         }
 
     monkeypatch.setattr(job_config, "read_task_runtime_lock", prepared_lock)
+    monkeypatch.setattr(
+        job_config,
+        "read_agent_runtime_lock",
+        lambda *args: {
+            **(job_config.agent_runtime_identity("wba-responses", "amd64") or {}),
+            "image_id": "sha256:" + "c" * 64,
+            "os": "linux",
+        },
+    )
     after = service.resolve_run_plan(request, run_id="task-preparation")
 
     assert [job.candidate_id for job in before.jobs] == [

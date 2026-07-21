@@ -882,6 +882,15 @@ def test_portable_context_binding_uses_pinned_sidecar_and_command(
             "recipe_sha256": "2" * 64,
         },
     )
+    monkeypatch.setattr(
+        "fugue.bench.job_config.portable_runtime_identity",
+        lambda root: {
+            "schema_version": 1,
+            "kind": "portable_context",
+            "image": "fugue-context-runtime:recipe",
+            "recipe_sha256": "2" * 64,
+        },
+    )
     manifest_path = tmp_path / "pilot.yaml"
     manifest_path.write_text(
         """
@@ -933,13 +942,11 @@ tasks:
     descriptor = job.resolved_candidate.execution_definition["context_runtime"]
     assert descriptor == {
         "bridge_url": "http://host.docker.internal:4000",
-        "image": "sha256:" + "1" * 64,
-        "image_id": "sha256:" + "1" * 64,
+        "image": "fugue-context-runtime:recipe",
         "kind": "compose_service",
         "mcp_port": 8000,
         "network": "shared_main_namespace",
         "portable_port": 8001,
-        "prepared": True,
         "query_url": "http://127.0.0.1:8001",
         "recipe_sha256": "2" * 64,
         "schema_version": 1,
@@ -949,7 +956,7 @@ tasks:
     assert "secret" not in compose_text
     compose = yaml.safe_load(compose_text)
     service = compose["services"]["fugue-context"]
-    assert service["image"] == descriptor["image"]
+    assert service["image"] == "sha256:" + "1" * 64
     assert "build" not in service
     assert service["pull_policy"] == "never"
     assert service["read_only"] is True

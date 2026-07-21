@@ -306,6 +306,29 @@ def runtime_spec(harness: str) -> AgentRuntimeSpec | None:
     return RUNTIMES.get(harness)
 
 
+def runtime_identity(
+    harness: str,
+    architecture: str = "amd64",
+) -> dict[str, Any] | None:
+    """Return the immutable build recipe without requiring a prepared image."""
+    spec = RUNTIMES.get(harness)
+    if spec is None:
+        return None
+    if architecture not in spec.architectures:
+        raise ValueError(
+            f"agent runtime {harness} does not support architecture {architecture}"
+        )
+    return {
+        "schema_version": 1,
+        "harness": harness,
+        "version": spec.version,
+        "recipe_sha256": spec.recipe_sha256,
+        "image": spec.image_for(architecture),
+        "architecture": architecture,
+        "probe": list(spec.probe),
+    }
+
+
 def prepare_runtime(
     harness: str,
     *,
@@ -356,16 +379,12 @@ def prepare_runtime(
                     f"agent runtime {harness} does not support "
                     f"{observed_architecture or 'unknown'}"
                 )
+            identity = runtime_identity(harness, architecture)
+            assert identity is not None
             lock = {
-                "schema_version": 1,
-                "harness": harness,
-                "version": spec.version,
-                "recipe_sha256": spec.recipe_sha256,
-                "image": spec.image_for(architecture),
+                **identity,
                 "image_id": inspected["Id"],
-                "architecture": architecture,
                 "os": inspected.get("Os"),
-                "probe": list(spec.probe),
             }
             atomic_write_json(root / f"runtime-lock-{architecture}.json", lock)
             return lock

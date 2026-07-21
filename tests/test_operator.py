@@ -944,7 +944,18 @@ def test_operator_resolves_source_provenance_once_per_plan(
     )
 
 
-def test_snapshot_locks_generated_context_runtime_per_cell(tmp_path: Path) -> None:
+def test_snapshot_locks_generated_context_runtime_per_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.job_config.portable_runtime_identity",
+        lambda root: {
+            "schema_version": 1,
+            "kind": "portable_context",
+            "image": "fugue-context-runtime:recipe",
+            "recipe_sha256": "2" * 64,
+        },
+    )
     service = make_operator_repo(tmp_path)
     (tmp_path / "configs/fugue/context-systems/rag-bm25.yaml").write_text(
         """
