@@ -40,5 +40,5 @@ jobs_dir: jobs/prompt-injection-loop-v1
 trace_content: full
 environment:
   type: docker
-  cpu_enforcement_policy: guarantee
-  memory_enforcement_policy: guarantee
+  cpu_enforcement_policy: limit
+  memory_enforcement_policy: limit

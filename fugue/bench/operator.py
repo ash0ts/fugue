@@ -865,7 +865,9 @@ class OperatorService:
             )
         )
         if _plan_coordinates(cells) != _plan_coordinates(plan.cells):
-            raise RuntimeError("materialized run coordinates differ from the resolved plan")
+            raise RuntimeError(
+                "materialized run coordinates differ from the resolved plan"
+            )
         return replace(plan, jobs=jobs, cells=cells)
 
     def prepare_context(
@@ -1021,8 +1023,7 @@ class OperatorService:
                     path=prepared.path,
                     variant_id=target.variant_id,
                     config_digest=target.config_digest,
-                    retrieval_mode=str(spec.config.get("retrieval_mode") or "")
-                    or None,
+                    retrieval_mode=str(spec.config.get("retrieval_mode") or "") or None,
                 )
             )
         return tuple(records)
@@ -1099,9 +1100,7 @@ class OperatorService:
             if key in seen_tasks:
                 continue
             seen_tasks.add(key)
-            previous_lock = read_task_runtime_lock(
-                manifest, task, self.repo_root
-            )
+            previous_lock = read_task_runtime_lock(manifest, task, self.repo_root)
             gold = load_evaluation_gold_patch(manifest, task.id, self.repo_root)
             lock = prepare_task_runtime(
                 manifest,
@@ -1136,9 +1135,7 @@ class OperatorService:
                 )
             )
 
-        architectures = {
-            task_architecture(task) for _manifest, task in selected_tasks
-        }
+        architectures = {task_architecture(task) for _manifest, task in selected_tasks}
         prepared_agents: list[AgentRuntimePreparation] = []
         for harness in dict.fromkeys(harnesses):
             runtime = agent_runtime_spec(harness)
@@ -1178,9 +1175,7 @@ class OperatorService:
             portable = AgentRuntimePreparation(
                 harness="portable-context",
                 architecture=str(lock.get("architecture") or "unknown"),
-                status=(
-                    "cached" if portable_was_ready and not rebuild else "built"
-                ),
+                status=("cached" if portable_was_ready and not rebuild else "built"),
                 image=str(lock["image"]),
                 image_id=str(lock["image_id"]),
                 recipe_sha256=str(lock["recipe_sha256"]),
@@ -1521,9 +1516,7 @@ class OperatorService:
             )
         rendered: list[RenderedJob] = []
         requested_systems = list(request.systems) or (
-            _request_variant_system_ids(selected, request)
-            if request.variants
-            else None
+            _request_variant_system_ids(selected, request) if request.variants else None
         )
         source_provenance = resolve_fugue_source_provenance(self.repo_root)
         for workload in workloads:
@@ -1567,7 +1560,9 @@ class OperatorService:
                             preset,
                             requested_systems,
                         ),
-                        variant_names=(list(request.variants) or workload.variants or None),
+                        variant_names=(
+                            list(request.variants) or workload.variants or None
+                        ),
                         harness_assignment=workload.harness_assignment,
                         n_tasks=(
                             request.n_tasks
@@ -2117,9 +2112,7 @@ class OperatorService:
                 self.repo_root,
                 run_id,
                 run_dir=run_dir,
-                status=(
-                    "cancelled" if cancelled else "failed" if failed else "passed"
-                ),
+                status=("cancelled" if cancelled else "failed" if failed else "passed"),
                 error="Run cancelled by the operator." if cancelled else None,
                 running=running,
                 values={
@@ -2279,8 +2272,8 @@ class OperatorService:
     def runs(self) -> list[RunSummary]:
         return [self._summarize_run(run) for run in self.supervisor.list()]
 
-    def run_summary(self, run_id: str) -> RunSummary:
-        return self._summarize_run(self.supervisor.get(run_id))
+    def run_summary(self, run_id: str, *, recover: bool = True) -> RunSummary:
+        return self._summarize_run(self.supervisor.get(run_id, recover=recover))
 
     def package_candidate(
         self,
@@ -2812,9 +2805,7 @@ def _selected_request_system_ids(
         )
     ]
     requested = list(request.systems) or (
-        _request_variant_system_ids(experiment, request)
-        if request.variants
-        else None
+        _request_variant_system_ids(experiment, request) if request.variants else None
     )
     values: list[str] = []
     for workload in workloads:
@@ -2916,13 +2907,10 @@ def _verify_rendered_setup(jobs: list[RenderedJob]) -> None:
                 f"{job.job_name}: managed runtime {job.context_system_id} is missing"
             )
         context_runtime = fugue.get("context_runtime") or {}
-        if (
-            fugue.get("context_runtime_required") is True
-            and not context_runtime.get("image_id")
+        if fugue.get("context_runtime_required") is True and not context_runtime.get(
+            "image_id"
         ):
-            missing.append(
-                f"{job.job_name}: portable context runtime image is missing"
-            )
+            missing.append(f"{job.job_name}: portable context runtime image is missing")
         if agent_runtime_spec(job.harness) is not None and not fugue.get(
             "agent_runtime"
         ):
@@ -2952,9 +2940,7 @@ def _preparation_targets(
     requested_variants: list[str] | None = None,
     requested_n_tasks: int | None = None,
 ) -> list[ContextPreparationTarget]:
-    targets: dict[
-        tuple[str, str, str, str, str], ContextPreparationTarget
-    ] = {}
+    targets: dict[tuple[str, str, str, str, str], ContextPreparationTarget] = {}
     selected = workloads or [
         WorkloadSpec(
             id="harbor",
