@@ -35,8 +35,8 @@ class _Events:
 
 
 class _Trace:
-    def start_llm(self, kind: str) -> None:
-        del kind
+    def start_llm(self, kind: str, groups: list[list[dict[str, Any]]]) -> None:
+        del kind, groups
         return None
 
     def finish_llm(self, span: Any, result: Any, error: Any) -> None:
@@ -303,6 +303,37 @@ def test_responses_parser_preserves_text_only_output() -> None:
 
     assert result.text == "done"
     assert result.tool_calls == []
+
+
+def test_weave_chat_payload_preserves_visible_history_without_reasoning() -> None:
+    messages = RUNNER["_trace_messages"](
+        [
+            [{"role": "user", "content": "inspect the fixture"}],
+            [
+                {"type": "reasoning", "summary": [{"text": "hidden"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-a",
+                    "name": "shell",
+                    "arguments": '{"command":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-a",
+                    "output": "/workspace",
+                },
+            ],
+        ]
+    )
+
+    assert "hidden" not in json.dumps(messages)
+    assert messages[0] == {"role": "user", "content": "inspect the fixture"}
+    assert messages[1]["tool_calls"][0]["id"] == "call-a"
+    assert messages[2] == {
+        "role": "tool",
+        "tool_call_id": "call-a",
+        "content": "/workspace",
+    }
 
 
 @pytest.mark.parametrize(
