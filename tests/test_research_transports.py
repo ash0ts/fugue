@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -19,7 +20,7 @@ from fugue.research.http import create_app
 from fugue.research.mcp import create_mcp_server
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
-from fugue.research.watch import _recommended_check_seconds
+from fugue.research.watch import _cell_counts, _recommended_check_seconds
 
 _A = "a" * 64
 _B = "b" * 64
@@ -198,6 +199,29 @@ def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
         )
         assert controlled_study.status_code == 200
         assert controlled_study.json() == legacy_study.json()
+
+
+def test_watch_reads_active_worker_progress_without_supervisor_recovery() -> None:
+    class Operator:
+        def run_summary(self, run_id: str, *, recover: bool = True) -> object:
+            assert run_id == "run-1"
+            assert recover is False
+            return SimpleNamespace(
+                cells=(
+                    SimpleNamespace(status="pending"),
+                    SimpleNamespace(status="running"),
+                    SimpleNamespace(status="failed"),
+                )
+            )
+
+    service = SimpleNamespace(campaign=SimpleNamespace(operator=Operator()))
+    record = SimpleNamespace(
+        preview={"estimated_cells": 3},
+        run_id="run-1",
+        state="running",
+    )
+
+    assert _cell_counts(service, record) == (3, 1, 1, 1)
 
 
 def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None:

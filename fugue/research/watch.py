@@ -91,7 +91,7 @@ def _cell_counts(service: ResearchService, record: object) -> tuple[int, int, in
         terminal = getattr(record, "state", "") in TERMINAL_EXPERIMENT_STATES
         return planned, 0 if terminal else planned, 0, planned if terminal else 0
     try:
-        cells = service.campaign.operator.run_summary(str(run_id)).cells
+        cells = service.campaign.operator.run_summary(str(run_id), recover=False).cells
     except (FileNotFoundError, RuntimeError, ValueError):
         return planned, planned, 0, 0
     running = sum(cell.status == "running" for cell in cells)

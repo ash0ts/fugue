@@ -50,6 +50,13 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
     identities = {(job.harness, job.variant_id): job.candidate_id for job in jobs}
     assert len(identities) == 6
     assert len(set(identities.values())) == 6
+    assert {
+        (
+            job.config["environment"]["cpu_enforcement_policy"],
+            job.config["environment"]["memory_enforcement_policy"],
+        )
+        for job in jobs
+    } == {("limit", "limit")}
 
 
 def test_prompt_injection_fixtures_are_synthetic_local_and_unavoidable() -> None:
