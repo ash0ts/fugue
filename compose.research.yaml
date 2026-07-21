@@ -90,6 +90,7 @@ services:
       - "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
     environment:
       HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+      FUGUE_BRIDGE_HEALTH_TRANSPORT: docker-exec
       FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
       WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
     secrets:

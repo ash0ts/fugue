@@ -26,6 +26,9 @@ BRIDGE_RUNTIME_DIR = Path(".fugue") / "bridge"
 BRIDGE_CONFIG_NAME = "litellm.config.yaml"
 BRIDGE_COMPOSE_NAME = "docker-compose.yaml"
 BRIDGE_LOCK_NAME = "runtime-lock.json"
+BRIDGE_CONTAINER_NAME = "fugue-litellm-bridge"
+BRIDGE_HEALTH_TRANSPORT_ENV = "FUGUE_BRIDGE_HEALTH_TRANSPORT"
+BRIDGE_HEALTH_TRANSPORT_DOCKER_EXEC = "docker-exec"
 LITELLM_IMAGE = (
     "ghcr.io/berriai/litellm@"
     "sha256:66a108711edea25ef531a74764f001d0c1934cc8abb422f5a3bd17a2860e4035"
@@ -113,7 +116,7 @@ def docker_compose_for_route(
         "services": {
             "bridge": {
                 "image": LITELLM_IMAGE,
-                "container_name": "fugue-litellm-bridge",
+                "container_name": BRIDGE_CONTAINER_NAME,
                 "ports": [f"127.0.0.1:{BRIDGE_PORT}:4000"],
                 "volumes": [f"./{BRIDGE_CONFIG_NAME}:/app/config.yaml:ro"],
                 "environment": {
@@ -247,6 +250,38 @@ def bridge_status(
     judge_route: ModelRoute | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    selected_env = env if env is not None else {}
+    if (
+        selected_env.get(BRIDGE_HEALTH_TRANSPORT_ENV)
+        == BRIDGE_HEALTH_TRANSPORT_DOCKER_EXEC
+    ):
+        status = _bridge_status_via_docker(timeout_sec)
+    else:
+        status = _bridge_status_via_http(timeout_sec)
+    if not status["ok"] or route is None:
+        return status
+    try:
+        status.update(
+            _verify_bridge_runtime(
+                route,
+                repo_root=repo_root,
+                builder_route=builder_route,
+                judge_route=judge_route,
+                env=env,
+            )
+        )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        subprocess.SubprocessError,
+        yaml.YAMLError,
+    ) as exc:
+        return {**status, "ok": False, "error": str(exc)}
+    return status
+
+
+def _bridge_status_via_http(timeout_sec: float) -> dict[str, Any]:
     url = f"http://127.0.0.1:{BRIDGE_PORT}/health/liveliness"
     try:
         response = httpx.get(url, timeout=timeout_sec)
@@ -263,21 +298,40 @@ def bridge_status(
         "status_code": response.status_code,
         "body": body,
     }
-    if not ok or route is None:
-        return status
-    try:
-        status.update(
-            _verify_bridge_runtime(
-                route,
-                repo_root=repo_root,
-                builder_route=builder_route,
-                judge_route=judge_route,
-                env=env,
-            )
-        )
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, yaml.YAMLError) as exc:
-        return {**status, "ok": False, "error": str(exc)}
     return status
+
+
+def _bridge_status_via_docker(timeout_sec: float) -> dict[str, Any]:
+    url = f"docker-exec://{BRIDGE_CONTAINER_NAME}/health/liveliness"
+    script = (
+        "import urllib.request; "
+        f"response=urllib.request.urlopen('http://127.0.0.1:{BRIDGE_PORT}/health/liveliness', "
+        f"timeout={timeout_sec!r}); print(response.status)"
+    )
+    try:
+        result = subprocess.run(
+            ["docker", "exec", BRIDGE_CONTAINER_NAME, "python", "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(timeout_sec, 1),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "url": url,
+            "error": (
+                result.stderr or result.stdout or "bridge health probe failed"
+            ).strip(),
+        }
+    return {
+        "ok": True,
+        "url": url,
+        "status_code": 200,
+        "body": result.stdout.strip(),
+    }
 
 
 def bridge_runtime_attestation(
