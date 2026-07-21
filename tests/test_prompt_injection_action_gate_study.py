@@ -80,6 +80,7 @@ def test_action_gate_campaign_allows_only_the_registered_study() -> None:
     )
     assert campaign.limits.max_concurrent == 1
     assert campaign.limits.max_cells_per_proposal == 72
+    assert campaign.limits.initial_cell_reserve_usd == 5
     assert campaign.stages[0].max_cells == 72
 
 
