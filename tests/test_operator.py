@@ -416,6 +416,22 @@ def test_request_for_experiment_keeps_inherited_scale_out_of_overrides(
     assert request.n_concurrent is None
 
 
+def test_request_tags_extend_authored_experiment_tags(tmp_path: Path) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = replace(service.experiment("demo"), tags=["authored-treatment"])
+    request = replace(
+        service.request_for_experiment(experiment),
+        tags=("campaign:demo", "authored-treatment"),
+    )
+
+    selected = operator_module._experiment_with_request_overrides(
+        experiment,
+        request,
+    )
+
+    assert selected.tags == ["authored-treatment", "campaign:demo"]
+
+
 def test_operator_applies_agent_preset_without_saving(tmp_path: Path) -> None:
     service = make_operator_repo(tmp_path)
 

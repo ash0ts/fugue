@@ -3088,7 +3088,11 @@ def _experiment_with_request_overrides(
         model=request.model,
         builder_model=request.builder_model,
         judge_model=request.judge_model,
-        tags=list(request.tags),
+        # Request tags describe the execution context (for example campaign,
+        # proposal, and stage). They must extend rather than replace the
+        # experiment's authored semantic tags because saved analyses may use
+        # those tags to select the exact registered treatment family.
+        tags=list(dict.fromkeys([*experiment.tags, *request.tags])),
         harnesses=list(request.harnesses),
         n_tasks=request.n_tasks,
         n_attempts=request.n_attempts,
