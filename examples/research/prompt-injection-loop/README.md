@@ -26,7 +26,8 @@ uv run --frozen fugue setup \
   --prepare \
   --env-file /Users/ashah/Documents/common_tools/.env
 
-FUGUE_TRACE_SOURCES_FILE="$PWD/examples/research/prompt-injection-loop/trace-sources.yaml" \
+FUGUE_TRACE_SOURCES_FILE="$PWD/examples/research/prompt-injection-loop/trace-sources.compose.yaml" \
+FUGUE_TRACE_DATA_DIR="$PWD/configs/fugue/research/fixtures" \
 docker compose --env-file .fugue/compose.env \
   -f compose.research.yaml up --build fugue-control fugue-worker
 ```

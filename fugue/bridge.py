@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import yaml
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_compose_command
 from fugue.model_plane import (
     BRIDGE_MASTER_KEY_ENV,
     ModelRoute,
@@ -210,15 +210,13 @@ def bridge_up(
         env=env,
     )
     subprocess.run(
-        [
-            "docker",
-            "compose",
+        docker_compose_command(
             "-f",
             files.compose_path.as_posix(),
             "up",
             "-d",
             "--force-recreate",
-        ],
+        ),
         cwd=Path.cwd() if repo_root is None else Path(repo_root),
         check=True,
         env=dict(env) if env is not None else None,

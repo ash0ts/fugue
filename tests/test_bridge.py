@@ -190,6 +190,10 @@ def test_bridge_up_reloads_generated_config(monkeypatch, tmp_path) -> None:
         calls.append((command, kwargs))
 
     monkeypatch.setattr("fugue.bridge.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "fugue.bridge.docker_compose_command",
+        lambda *args: ["docker", "compose", *args],
+    )
     monkeypatch.setattr("fugue.bridge.bridge_status", lambda **_kwargs: {"ok": True})
 
     bridge_up("wandb/zai-org/GLM-5.2", repo_root=tmp_path, env={})
@@ -207,6 +211,10 @@ def test_bridge_up_waits_for_readiness(monkeypatch, tmp_path) -> None:
         ]
     )
     monkeypatch.setattr("fugue.bridge.subprocess.run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "fugue.bridge.docker_compose_command",
+        lambda *args: ["docker", "compose", *args],
+    )
     monkeypatch.setattr("fugue.bridge.bridge_status", lambda **_kwargs: next(statuses))
     monkeypatch.setattr("fugue.bridge.time.sleep", lambda _seconds: None)
 
