@@ -193,11 +193,15 @@ def _verifier_script(
     artifact_path: str,
     expected_artifact: dict[str, Any],
 ) -> str:
+    terms_json = repr(json.dumps(expected_terms, separators=(",", ":")))
+    artifact_json = repr(
+        json.dumps(expected_artifact, sort_keys=True, separators=(",", ":"))
+    )
     return (
         "#!/bin/sh\nset -eu\nmkdir -p /logs/verifier\npython - <<'PY'\n"
         "import json\nfrom pathlib import Path\n"
-        f"terms={json.dumps(expected_terms)}\n"
-        f"expected={json.dumps(expected_artifact, sort_keys=True)}\n"
+        f"terms=json.loads({terms_json})\n"
+        f"expected=json.loads({artifact_json})\n"
         "answer_path=Path('/logs/artifacts/fugue-answer.md')\n"
         f"artifact_path=Path('/logs/artifacts/{artifact_path}')\n"
         "answer=answer_path.read_text().casefold() if answer_path.is_file() else ''\n"

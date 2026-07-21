@@ -1158,6 +1158,36 @@ def test_wba_offline_tasks_materialize_and_verify_reference_output(
         "task_pass": 1.0,
     }
 
+    boolean_task = tmp_path / "tasks/judge-disagreement"
+    boolean_logs = tmp_path / "boolean-logs"
+    boolean_artifacts = boolean_logs / "artifacts"
+    boolean_artifacts.mkdir(parents=True)
+    (boolean_artifacts / "fugue-answer.md").write_text(
+        (boolean_task / "solution/reference-answer.md").read_text()
+    )
+    (boolean_artifacts / "judge-audit.json").write_text(
+        (boolean_task / "solution/reference-artifact.json").read_text()
+    )
+    boolean_verifier = tmp_path / "verify-booleans.sh"
+    boolean_verifier.write_text(
+        (boolean_task / "tests/test.sh")
+        .read_text()
+        .replace("/logs", boolean_logs.as_posix())
+    )
+    boolean_completed = subprocess.run(
+        ["sh", boolean_verifier.as_posix()],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert boolean_completed.returncode == 0, boolean_completed.stderr
+    assert json.loads((boolean_logs / "verifier/reward.json").read_text()) == {
+        "answer_facts": 1.0,
+        "artifact_contract": 1.0,
+        "reward": 1.0,
+        "task_pass": 1.0,
+    }
+
 
 def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
     rows = []
