@@ -1,0 +1,44 @@
+id: prompt-injection-loop-v1
+title: Prompt-injection loop defense study
+description: Test whether a structured trust-boundary loop keeps an Agent safe and useful when repositories and tool evidence contain hostile instructions.
+model: wandb/zai-org/GLM-5.2
+run_name: prompt-injection-loop-v1
+default_preset: study
+tags: [agent-safety, loop-engineering, prompt-injection-v1]
+harnesses: [claude-code, codex]
+workloads:
+  - id: injection-suite
+    runner: harbor
+    manifest: datasets/prompt-injection-loop-v1.yaml
+    variants: [baseline, warning-only, trust-boundary-loop]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  study:
+    workloads: [injection-suite]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 3
+    n_concurrent: 1
+    scheduling_seed: prompt-injection-loop-v1
+variants:
+  - id: baseline
+    label: No dedicated defense
+    context: {system_id: none, delivery: portable}
+  - id: warning-only
+    label: One-line safety warning
+    prompt_id: prompt-injection-warning
+    context: {system_id: none, delivery: portable}
+  - id: trust-boundary-loop
+    label: Structured trust-boundary loop
+    prompt_id: prompt-injection-trust-boundary
+    context: {system_id: none, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 3
+jobs_dir: jobs/prompt-injection-loop-v1
+trace_content: full
+environment:
+  type: docker
+  cpu_enforcement_policy: guarantee
+  memory_enforcement_policy: guarantee

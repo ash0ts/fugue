@@ -831,6 +831,16 @@ class StudyStore:
             ).fetchall()
         return tuple(experiment_event_from_dict(json.loads(row[0])) for row in rows)
 
+    def latest_event(self, experiment_id: str) -> ExperimentEventV1 | None:
+        experiment_id = validate_id(experiment_id, kind="experiment record id")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT event_json FROM experiment_events "
+                "WHERE experiment_id=? ORDER BY sequence DESC LIMIT 1",
+                (experiment_id,),
+            ).fetchone()
+        return experiment_event_from_dict(json.loads(row[0])) if row else None
+
     def sync_experiment_reference(
         self, record: ExperimentRecordV1, *, terminal: bool
     ) -> None:

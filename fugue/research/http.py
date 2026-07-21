@@ -27,6 +27,7 @@ from fugue.research.contracts import (
 from fugue.research.mcp import create_mcp_server
 from fugue.research.service import ExperimentHandle, ResearchService
 from fugue.research.traces import TraceSourceRegistry
+from fugue.research.watch import watch_experiment_page
 
 
 class StrictBody(BaseModel):
@@ -66,7 +67,7 @@ class PreviewExperimentBody(StrictBody):
 
 class StartExperimentBody(StrictBody):
     preview: dict[str, Any]
-    approval_digest: str
+    approval_digest: str | None = None
     idempotency_key: str
 
 
@@ -286,6 +287,21 @@ def create_app(  # noqa: C901
                 await asyncio.sleep(0.5)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/v1/experiments/{experiment_id}/events:watch")
+    def watch_experiment_events(
+        experiment_id: str,
+        after: int = 0,
+        wait_seconds: float = 0.0,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        return watch_experiment_page(
+            research,
+            experiment_id,
+            after=after,
+            wait_seconds=wait_seconds,
+            limit=limit,
+        ).to_dict()
 
     @app.post("/v1/experiments/{experiment_id}:cancel")
     def cancel_experiment(

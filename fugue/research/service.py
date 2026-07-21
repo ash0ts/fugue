@@ -245,11 +245,19 @@ class ResearchService:
                 details={"blockers": list(preview.blockers)},
             )
         if not approval_digest:
-            raise ResearchError(
-                "approval_required",
-                "starting an experiment requires operator approval of the exact preview",
-                category="policy",
-            )
+            try:
+                approval_digest = self.approvals.get_for_preview(
+                    subject_kind="experiment",
+                    preview_digest=preview.preview_digest,
+                ).approval_digest
+            except ResearchError as exc:
+                if exc.code != "approval_not_found":
+                    raise
+                raise ResearchError(
+                    "approval_required",
+                    "starting an experiment requires operator approval of the exact preview",
+                    category="policy",
+                ) from exc
         study = self.store.get_study(preview.study_id)
         draft = experiment_draft_from_dict(preview.draft)
         self.candidate_sources.validate_draft(draft)
@@ -348,9 +356,7 @@ class ResearchService:
     def run_once(self, worker_id: str | None = None) -> ExperimentRecordV1 | None:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
         claim_id = f"{worker_id}.claim-{uuid.uuid4().hex[:12]}"
-        record = self.store.claim_experiment(
-            claim_id, lease_seconds=self.lease_seconds
-        )
+        record = self.store.claim_experiment(claim_id, lease_seconds=self.lease_seconds)
         if record is None:
             return None
         with _LeaseHeartbeat(
