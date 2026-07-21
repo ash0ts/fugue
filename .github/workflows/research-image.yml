@@ -8,6 +8,7 @@ on:
       - pyproject.toml
       - uv.lock
       - fugue/research/**
+      - fugue/bench/**
       - fugue/resources/agent-skills/optimize-agent-with-fugue/**
       - .github/workflows/research-image.yml
   workflow_dispatch:
@@ -81,6 +82,18 @@ jobs:
                 -v "$probe_dir:/probe:ro" fugue-research:ci \
                 -c "grep -qx ready /probe/ready"
             '
+      - name: Verify worker Docker-build compatibility
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: >-
+          docker compose --env-file .fugue/compose.env
+          -f compose.research.yaml run --rm --no-deps
+          --entrypoint python fugue-worker -c
+          'import subprocess;
+          from fugue.bench.files import docker_build_command;
+          command = docker_build_command("--help");
+          subprocess.run(command, check=True, stdout=subprocess.DEVNULL);
+          print(command)'
       - name: Export the portable skill through the socket-free operator
         env:
           FUGUE_RESEARCH_IMAGE: fugue-research:ci

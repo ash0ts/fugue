@@ -53,7 +53,7 @@ jobs:
           tests/test_datasets.py tests/test_demo.py tests/test_evaluations.py
           tests/test_experiment_atlas.py tests/test_frontier_campaign.py
           tests/test_frontier_campaign_budget.py
-          tests/test_execution.py tests/test_integrations.py tests/test_library.py
+          tests/test_execution.py tests/test_files.py tests/test_integrations.py tests/test_library.py
           tests/test_manifest.py tests/test_model_plane.py tests/test_preflight.py
           tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py tests/test_atlas_site.py
           tests/test_task_authoring.py tests/test_tool_policy.py

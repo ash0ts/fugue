@@ -9,10 +9,34 @@ from fugue.bench.files import (
     as_list,
     as_mapping,
     atomic_write_json,
+    docker_build_command,
     latest_jsonl_records,
     require_unique,
     store_consistent,
 )
+
+
+@pytest.mark.parametrize(
+    ("help_text", "expected"),
+    [
+        ("Usage: docker build\n", ["docker", "build", "--pull"]),
+        (
+            "      --provenance string   Shorthand for --attest=type=provenance\n",
+            ["docker", "build", "--provenance=false", "--pull"],
+        ),
+    ],
+)
+def test_docker_build_command_adapts_to_client_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    help_text: str,
+    expected: list[str],
+) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.files.subprocess.check_output",
+        lambda *args, **kwargs: help_text,
+    )
+
+    assert docker_build_command("--pull") == expected
 
 
 def test_atomic_json_is_private_complete_and_replaceable(tmp_path: Path) -> None:

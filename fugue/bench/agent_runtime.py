@@ -11,7 +11,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 
 AGENT_RUNTIME_ROOT = Path(".fugue/runtime/agent-runtimes")
@@ -307,17 +307,14 @@ def prepare_runtime(
             for asset in _build_assets(harness):
                 shutil.copy2(asset, build / asset.name)
             subprocess.run(
-                [
-                    "docker",
-                    "build",
-                    "--provenance=false",
+                docker_build_command(
                     "--platform",
                     f"linux/{architecture}",
                     "--pull",
                     "-t",
                     spec.image_for(architecture),
                     build.as_posix(),
-                ],
+                ),
                 cwd=repo_root,
                 check=True,
                 timeout=1800,

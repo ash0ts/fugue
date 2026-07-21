@@ -120,6 +120,11 @@ def test_task_preparation_locks_image_and_disables_trial_network(
     monkeypatch.setattr(task_runtime.shutil, "which", lambda name: "/docker")
     monkeypatch.setattr(task_runtime, "_resolve_task_source", lambda *args: source)
     monkeypatch.setattr(task_runtime.subprocess, "run", run)
+    monkeypatch.setattr(
+        task_runtime,
+        "docker_build_command",
+        lambda *args: ["docker", "build", "--provenance=false", *args],
+    )
     lock = task_runtime.prepare_task_runtime(
         manifest, manifest.tasks[0], repo_root=tmp_path
     )

@@ -15,7 +15,7 @@ from typing import Any
 import toml
 from filelock import FileLock
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 from fugue.bench.manifest import (
     BenchmarkManifest,
@@ -89,17 +89,14 @@ def prepare_task_runtime(
             shutil.copytree(source / "environment", build, symlinks=True)
             _extend_task_image(build / "Dockerfile", verifier_runtime)
             subprocess.run(
-                [
-                    "docker",
-                    "build",
-                    "--provenance=false",
+                docker_build_command(
                     "--platform",
                     f"linux/{architecture}",
                     "--pull",
                     "-t",
                     image,
                     build.as_posix(),
-                ],
+                ),
                 cwd=repo_root,
                 check=True,
                 timeout=3600,

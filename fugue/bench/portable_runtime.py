@@ -9,7 +9,7 @@ from typing import Any
 
 from filelock import FileLock
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 
 RUNTIME_ROOT = Path(".fugue/runtime/portable-context-runtime")
@@ -52,17 +52,14 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
         recipe = recipe_sha256(repo_root)
         image = f"fugue-context-runtime:{recipe[:12]}"
         subprocess.run(
-            [
-                "docker",
-                "build",
-                "--provenance=false",
+            docker_build_command(
                 "--pull",
                 "-f",
                 "Dockerfile.context",
                 "-t",
                 image,
                 ".",
-            ],
+            ),
             cwd=repo_root,
             check=True,
             timeout=1800,
