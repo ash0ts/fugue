@@ -158,3 +158,7 @@ def test_demo_trace_source_is_bounded_and_checked_in() -> None:
         "latency",
         "conversation",
     ]
+    compose_registry = TraceSourceRegistry.from_file(
+        REPO_ROOT / "examples/research/prompt-injection-loop/trace-sources.compose.yaml"
+    )
+    assert compose_registry.catalog() == registry.catalog()

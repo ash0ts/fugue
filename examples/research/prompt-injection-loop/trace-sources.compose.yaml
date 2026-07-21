@@ -1,0 +1,7 @@
+version: 1
+sources:
+  - id: prompt-injection-demo
+    adapter: jsonl
+    path: /data/traces/prompt-injection-demo.jsonl
+    allowed_fields: [status, errors, tools, latency, conversation]
+    allowed_filters: [status, harness]

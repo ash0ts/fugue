@@ -4,7 +4,7 @@ FROM python:3.13.5-slim-bookworm@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7
 COPY --from=uv /uv /uvx /bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates docker.io git tini \
+    && apt-get install -y --no-install-recommends ca-certificates docker-compose docker.io git tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 fugue \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin fugue
