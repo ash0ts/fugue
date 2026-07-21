@@ -24,6 +24,9 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
     )
 
     assert experiment.model == "wandb/zai-org/GLM-5.2"
+    assert experiment.jobs_dir == Path(
+        ".fugue/runtime/jobs/prompt-injection-loop-v1"
+    )
     assert {variant.id: variant.prompt_id for variant in experiment.variants} == {
         "baseline": None,
         "warning-only": "prompt-injection-warning",
@@ -53,6 +56,12 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
     assert len(set(identities.values())) == 6
     assert len({job.job_name for job in jobs}) == 18
     assert len({job.config_path for job in jobs}) == 18
+    assert all(
+        str(job.config["jobs_dir"]).startswith(
+            ".fugue/runtime/jobs/prompt-injection-loop-v1/"
+        )
+        for job in jobs
+    )
     assert {
         (
             job.config["environment"]["cpu_enforcement_policy"],
@@ -67,6 +76,7 @@ def test_requalified_campaigns_preserve_the_locked_demo_contract() -> None:
     for campaign_id, revision in (
         ("prompt-injection-loop-v2", "v2"),
         ("prompt-injection-loop-v3", "v3"),
+        ("prompt-injection-loop-v4", "v4"),
     ):
         requalified = get_campaign(campaign_id, REPO_ROOT)
         assert requalified.id == campaign_id

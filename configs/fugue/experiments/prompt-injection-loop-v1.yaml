@@ -36,7 +36,7 @@ variants:
 n_attempts: 1
 n_concurrent: 1
 n_tasks: 3
-jobs_dir: jobs/prompt-injection-loop-v1
+jobs_dir: .fugue/runtime/jobs/prompt-injection-loop-v1
 trace_content: full
 environment:
   type: docker
