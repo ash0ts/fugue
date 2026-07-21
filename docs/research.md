@@ -126,6 +126,12 @@ context, experiment status, and outcome resources. It does not expose the
 operator, raw environment, shell commands, credentials, or experimental MCP
 Tasks.
 
+Use the `advance_research_cycle` MCP prompt for autoresearch-style handoffs. One
+cycle may reconcile a terminal parent, record a sourced Result, and produce one
+lineage-bound child preview. It always stops before approving or starting that
+child, which keeps adaptive research useful without turning it into an unbounded
+spend loop.
+
 Approvals are deliberately absent from REST and MCP. After reviewing a preview,
 the operator approves its exact digest and a hard spend cap from a trusted shell:
 

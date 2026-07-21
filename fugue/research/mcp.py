@@ -275,6 +275,24 @@ def create_mcp_server(  # noqa: C901
             + f"\n\nInterpret experiment `{experiment_id}` from its exact outcome evidence."
         )
 
+    @mcp.prompt()
+    def advance_research_cycle(study_id: str, objective: str) -> str:
+        """Advance one evidence-to-result-to-next-preview research cycle."""
+
+        return (
+            _skill_instructions()
+            + "\n\nAdvance exactly one bounded research cycle. Start from the Study's "
+            "existing evidence or a registered trace source; do not invent an "
+            "observation. If an experiment is already terminal, reconcile and "
+            "record its scoped Result before designing anything else. Propose at "
+            "most one child experiment, bind it to parent_experiment_ids, "
+            "parent_outcome_id, and decision_rationale, and stop after returning "
+            "the next eligible preview. Never approve or start that child in the "
+            "same cycle. If evidence, policy, or eligibility is insufficient, "
+            "record the blocker and stop without a preview."
+            + f"\n\nStudy: `{study_id}`\nObjective: {objective}"
+        )
+
     return mcp
 
 

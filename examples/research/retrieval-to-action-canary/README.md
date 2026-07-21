@@ -13,6 +13,11 @@ The run is serial, has no retries, and requires a separate operator approval
 bound to the exact preview digest. Repair pass count is an observation; the
 qualification gate is trustworthy execution and evidence.
 
+This is the smallest execution qualification, not the full research story. To
+demonstrate a fresh Agent reading trace evidence, recording a parent Result, and
+handing one lineage-bound child preview to another Agent, continue with the
+[`autoresearch-loop` example](../autoresearch-loop/README.md).
+
 ## Start Fugue
 
 From a clean Fugue checkout:

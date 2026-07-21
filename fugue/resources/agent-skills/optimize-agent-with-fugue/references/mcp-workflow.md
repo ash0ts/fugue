@@ -48,3 +48,11 @@ existing experiment first.
 
 Use evidence references returned by Fugue. Do not paste private trace bodies into the
 Study.
+
+## Continue one cycle
+
+The `advance_research_cycle` MCP prompt is the preferred handoff between Agents. It
+reads the durable Study rather than relying on chat history, records a terminal
+parent Result first, and may produce one lineage-bound child preview. The child must
+pause for a new operator approval. A fresh Agent can resume from the Study ID and
+durable experiment IDs without inheriting the previous Agent's context window.

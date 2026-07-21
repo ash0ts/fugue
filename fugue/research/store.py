@@ -356,6 +356,9 @@ class StudyStore:
         experiments = (
             list(study.experiments[-max_experiments:]) if max_experiments else []
         )
+        experiment_context = tuple(
+            self._experiment_context(item) for item in experiments
+        )
         cited_resources = {
             ref.ref
             for refs in study.brief.provenance.values()
@@ -385,7 +388,7 @@ class StudyStore:
                 ),
                 "references": [item.to_dict() for item in study.baseline_refs],
             },
-            experiments=tuple(item.to_dict() for item in experiments),
+            experiments=experiment_context,
             results=tuple(item.to_dict() for item in visible_results),
             notes=tuple(item.to_dict() for item in selected_notes),
             resources=tuple(item.to_dict() for item in resources),
@@ -439,6 +442,23 @@ class StudyStore:
                     "the current Study brief exceeds the context character limit",
                 )
         return sign_context(context)
+
+    def _experiment_context(self, item: StudyExperimentRefV1) -> dict[str, Any]:
+        """Project enough experiment meaning for an outer loop to follow lineage."""
+        values = item.to_dict()
+        record = self.get_experiment(item.experiment_id)
+        draft = record.draft
+        for key in (
+            "stage_id",
+            "question",
+            "hypothesis",
+            "decision_rationale",
+            "parent_outcome_id",
+        ):
+            value = draft.get(key)
+            if value not in (None, "", [], {}):
+                values[key] = value
+        return values
 
     def study_events(self, study_id: str) -> tuple[dict[str, Any], ...]:
         study_id = validate_id(study_id, kind="study id")

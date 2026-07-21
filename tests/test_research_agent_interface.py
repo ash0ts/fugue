@@ -106,6 +106,15 @@ def test_trace_preview_is_pure_and_audit_is_bounded_and_sanitized(
     audit = service.traces.run(preview, operation_id="audit-1")
     assert audit.cohort_count == 2
     assert audit.clusters[0]["label"] == "ToolFailure"
+    assert [sample["evidence_role"] for sample in audit.evidence_samples] == [
+        "failure",
+        "comparison",
+    ]
+    assert audit.evidence_samples[0]["errors"] == {
+        "type": "ToolFailure",
+        "message": "[REDACTED]",
+    }
+    assert all(sample["untrusted"] is True for sample in audit.evidence_samples)
     assert audit.suggested_tasks[0]["status"] == "candidate"
     serialized = str(audit.to_dict())
     assert "private-value" not in serialized
@@ -157,7 +166,40 @@ def test_weave_adapter_uses_registered_project_and_bounded_payload(
 
     def fetch(payload: dict[str, object]) -> list[dict[str, object]]:
         payloads.append(payload)
-        return [{"id": "call-1", "status": "error", "error_type": "Timeout"}]
+        return [
+            {
+                "id": "call-1",
+                "trace_id": "trace-1",
+                "op_name": "agent.invoke",
+                "started_at": "2026-07-19T12:00:00Z",
+                "inputs": {
+                    "model": "provider/model-1",
+                    "messages": [
+                        {"role": "user", "content": "private prompt"},
+                        {"role": "assistant", "content": "private response"},
+                        {"role": "tool", "content": "private result"},
+                    ],
+                },
+                "summary": {
+                    "weave": {
+                        "status": "success",
+                        "latency_ms": 1250,
+                        "costs": {
+                            "provider/model-1": {
+                                "prompt_tokens_total_cost": 0.012,
+                                "completion_tokens_total_cost": 0.008,
+                            }
+                        },
+                    },
+                    "usage": {
+                        "provider/model-1": {
+                            "prompt_tokens": 120,
+                            "completion_tokens": 30,
+                        }
+                    },
+                },
+            }
+        ]
 
     registry = TraceSourceRegistry.from_mapping(
         {
@@ -167,7 +209,14 @@ def test_weave_adapter_uses_registered_project_and_bounded_payload(
                     "id": "production-weave",
                     "adapter": "weave",
                     "project": "entity/project",
-                    "allowed_fields": ["status", "errors"],
+                    "allowed_fields": [
+                        "status",
+                        "operation",
+                        "latency",
+                        "tokens",
+                        "cost",
+                        "conversation",
+                    ],
                     "allowed_filters": ["status"],
                 }
             ],
@@ -181,22 +230,67 @@ def test_weave_adapter_uses_registered_project_and_bounded_payload(
         build_trace_audit_draft(
             study_id="study-1",
             source_id="production-weave",
-            objective="Inspect timeouts.",
-            fields=["status", "errors"],
-            filters={"status": "error"},
+            objective="Inspect successful Agent roots.",
+            fields=[
+                "status",
+                "operation",
+                "latency",
+                "tokens",
+                "cost",
+                "conversation",
+            ],
+            filters={"status": "success"},
             max_traces=3,
+            started_after="2026-07-19T00:00:00Z",
+            started_before="2026-07-20T00:00:00Z",
         ),
     )
     assert payloads == []
     audit = service.traces.run(preview, operation_id="weave-audit")
     assert audit.cohort_count == 1
-    assert payloads == [
-        {
-            "project_id": "entity/project",
-            "filter": {"trace_roots_only": True},
-            "limit": 3,
+    assert payloads[0]["project_id"] == "entity/project"
+    assert payloads[0]["filter"] == {"trace_roots_only": True}
+    assert payloads[0]["limit"] == 3
+    assert payloads[0]["sort_by"] == [{"field": "started_at", "direction": "desc"}]
+    assert payloads[0]["include_costs"] is True
+    assert payloads[0]["include_feedback"] is False
+    assert payloads[0]["query"] == {
+        "$expr": {
+            "$and": [
+                {
+                    "$eq": [
+                        {"$getField": "summary.weave.status"},
+                        {"$literal": "success"},
+                    ]
+                },
+                {
+                    "$gte": [
+                        {"$getField": "started_at"},
+                        {"$literal": "2026-07-19T00:00:00Z"},
+                    ]
+                },
+                {
+                    "$lt": [
+                        {"$getField": "started_at"},
+                        {"$literal": "2026-07-20T00:00:00Z"},
+                    ]
+                },
+            ]
         }
-    ]
+    }
+    [sample] = audit.evidence_samples
+    assert sample["status"] == "success"
+    assert sample["operation"] == "agent.invoke"
+    assert sample["model"] == "provider/model-1"
+    assert sample["latency"] == 1250
+    assert sample["tokens"] == {"input": 120, "output": 30}
+    assert sample["cost"] == pytest.approx(0.02)
+    assert sample["conversation"] == {
+        "message_count": 3,
+        "roles": {"assistant": 1, "tool": 1, "user": 1},
+        "tool_message_count": 1,
+    }
+    assert "private prompt" not in str(audit.to_dict())
     assert "project" not in str(registry.catalog())
 
 
@@ -359,6 +453,7 @@ def test_control_app_mounts_authenticated_mcp_without_embedded_worker(
 def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     exported = export_skill(tmp_path / "skill")
     assert (exported / "SKILL.md").is_file()
+    assert (exported / "references/north-star-cases.md").is_file()
     with pytest.raises(FileExistsError, match="non-empty"):
         export_skill(exported)
 
@@ -500,7 +595,21 @@ def test_mcp_has_prompts_but_no_approval_tool(tmp_path: Path) -> None:
     prompts = {item.name for item in asyncio.run(server.list_prompts())}
     assert not any("approve" in name for name in tools)
     assert prompts == {
+        "advance_research_cycle",
         "optimize_agent_use_case",
         "design_controlled_experiment",
         "interpret_experiment",
     }
+    rendered = asyncio.run(
+        server.get_prompt(
+            "advance_research_cycle",
+            {
+                "study_id": "study-1",
+                "objective": "Reduce recurring tool failures.",
+            },
+        )
+    )
+    text = rendered.messages[0].content.text
+    assert "exactly one bounded research cycle" in text
+    assert "parent_experiment_ids" in text
+    assert "Never approve or start that child in the same cycle" in text

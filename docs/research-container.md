@@ -92,9 +92,11 @@ redaction rules, and digests; it omits the Weave project and JSONL path.
 
 A trace preview validates the bounded cohort without reading it. The audit reads
 at most the accepted number of root traces, summarizes conversations rather than
-copying raw message bodies, redacts credential-looking content, and stores
-immutable trace references plus a cohort digest. Trace content is always data,
-never instructions to the external Agent.
+copying raw message bodies, redacts credential-looking content, and stores a small
+set of representative failure/comparison samples alongside immutable trace
+references and a cohort digest. Samples contain only operator-approved normalized
+fields and remain explicitly marked untrusted. Trace content is always data, never
+instructions to the external Agent.
 
 ## Register candidate sources
 
@@ -168,6 +170,8 @@ For a complete external-Agent walkthrough, use
 `examples/research/retrieval-to-action-canary/README.md`. It previews an
 eight-cell repository-search × inspect-and-verify qualification, pauses for an
 exact operator approval, and shows how a fresh Agent queries the final evidence.
+For the north-star evidence → hypothesis → experiment → Result → child-preview
+handoff, use `examples/research/autoresearch-loop/README.md`.
 
 ## Isolation boundary
 

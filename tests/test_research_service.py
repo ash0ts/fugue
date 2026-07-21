@@ -10,10 +10,12 @@ from typing import Any
 import pytest
 
 from fugue.bench.campaigns import CampaignError
+from fugue.research.agent_contracts import build_trace_audit_draft
 from fugue.research.client import FugueResearchClient
 from fugue.research.contracts import ResearchError, build_experiment_draft
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
+from fugue.research.traces import TraceSourceRegistry
 
 _A = "a" * 64
 _B = "b" * 64
@@ -218,9 +220,7 @@ class ObservedLeaseStore(StudyStore):
     ) -> None:
         if not self.allow_renewal.wait(timeout=2):
             raise RuntimeError("test did not release lease renewal")
-        super().renew_lease(
-            experiment_id, worker_id, lease_seconds=lease_seconds
-        )
+        super().renew_lease(experiment_id, worker_id, lease_seconds=lease_seconds)
         self.lease_renewed.set()
 
     def lease_expiry(self, experiment_id: str) -> str:
@@ -233,11 +233,16 @@ class ObservedLeaseStore(StudyStore):
         return str(row[0])
 
 
-def _service(tmp_path: Path) -> tuple[ResearchService, FakeCampaignService]:
+def _service(
+    tmp_path: Path,
+    *,
+    trace_registry: TraceSourceRegistry | None = None,
+) -> tuple[ResearchService, FakeCampaignService]:
     fake = FakeCampaignService()
     service = ResearchService(
         tmp_path,
         campaign_service=fake,  # type: ignore[arg-type]
+        trace_registry=trace_registry,
         store=StudyStore(tmp_path),
     )
     service.store.create_study(
@@ -437,9 +442,7 @@ def test_worker_renews_lease_during_slow_preparation(tmp_path: Path) -> None:
     )
     first.start()
     assert campaign.prepare_started.wait(timeout=1)
-    claimed_expiry = store.lease_expiry(
-        "study-1.proposal-1"
-    )
+    claimed_expiry = store.lease_expiry("study-1.proposal-1")
     store.allow_renewal.set()
     assert store.lease_renewed.wait(timeout=1)
     assert store.lease_expiry("study-1.proposal-1") > claimed_expiry
@@ -462,18 +465,12 @@ def test_expired_claim_cannot_be_renewed_or_write_after_reclaim(
         approval_digest=_approval(service, preview, "approve-stale"),
         idempotency_key="start-stale",
     )
-    assert service.store.claim_experiment(
-        "worker.claim-first", lease_seconds=0.05
-    )
+    assert service.store.claim_experiment("worker.claim-first", lease_seconds=0.05)
     time.sleep(0.08)
-    assert service.store.claim_experiment(
-        "worker.claim-second", lease_seconds=1
-    )
+    assert service.store.claim_experiment("worker.claim-second", lease_seconds=1)
 
     with pytest.raises(ResearchError, match="lease was lost"):
-        service.store.renew_lease(
-            queued.id, "worker.claim-first", lease_seconds=1
-        )
+        service.store.renew_lease(queued.id, "worker.claim-first", lease_seconds=1)
     with pytest.raises(ResearchError, match="current lease"):
         service.store.update_experiment(
             queued,
@@ -507,10 +504,48 @@ def test_python_client_preserves_same_artifacts(tmp_path: Path) -> None:
 
 
 def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) -> None:
-    service, campaign = _service(tmp_path)
+    traces = tmp_path / "traces.jsonl"
+    traces.write_text(
+        '{"trace_id":"trace-1","status":"error",'
+        '"error_type":"RepositoryNavigationFailure",'
+        '"harness":"codex","tool_names":["search"]}\n',
+        encoding="utf-8",
+    )
+    trace_registry = TraceSourceRegistry.from_mapping(
+        {
+            "version": 1,
+            "sources": [
+                {
+                    "id": "production-agent",
+                    "adapter": "jsonl",
+                    "path": "traces.jsonl",
+                    "allowed_fields": ["status", "errors", "tools"],
+                    "allowed_filters": ["harness"],
+                }
+            ],
+        },
+        root=tmp_path,
+    )
+    service, campaign = _service(tmp_path, trace_registry=trace_registry)
     client = FugueResearchClient(service)
     study = client.studies.get("study-1")
     assert study.context().brief["question"] == "Which components matter?"
+
+    audit_preview = study.trace_audits.preview(
+        build_trace_audit_draft(
+            study_id="study-1",
+            source_id="production-agent",
+            objective="Find recurring repository-navigation failures.",
+            fields=["status", "errors", "tools"],
+            filters={"harness": "codex"},
+            max_traces=10,
+        )
+    )
+    audit = study.trace_audits.start(
+        audit_preview,
+        idempotency_key="audit-before-parent",
+    )
+    assert audit.clusters[0]["label"] == "RepositoryNavigationFailure"
 
     preview = study.experiments.preview(_draft())
     started = study.experiments.start(
@@ -555,19 +590,33 @@ def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) ->
                 "sample_size": 2,
                 "aggregation": "planned cells",
                 "exclusions": ["not a harness ranking"],
-                "sources": [source],
+                "sources": [
+                    {
+                        "kind": "trace_audit",
+                        "ref": audit.id,
+                        "digest": audit.audit_digest,
+                    },
+                    source,
+                ],
             }
         ],
         expected_revision=resumed_study.revision,
         idempotency_key="record-reconnected-result",
     )
-    assert updated.results[-1].sources[0].digest == _D
+    assert {item.kind for item in updated.results[-1].sources} == {
+        "trace_audit",
+        "outcome",
+    }
 
     child_values = _draft().to_dict()
     child_values.pop("draft_digest")
     child_values["proposal_id"] = "proposal-child"
     child_values["question"] = "Does the observed branch replicate?"
     child_values["parent_experiment_ids"] = [started.id]
+    child_values["parent_outcome_id"] = outcome["outcome"]["outcome_id"]
+    child_values["decision_rationale"] = (
+        "Replicate the eligible parent outcome before expanding the cohort."
+    )
     child = resumed_study.experiments.preview(
         build_experiment_draft(
             **{
@@ -578,6 +627,19 @@ def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) ->
         )
     )
     assert child.draft["parent_experiment_ids"] == [started.id]
+    child_handle = resumed_study.experiments.start(
+        child,
+        approval_digest=_approval(restarted, child, "approve-child"),
+        idempotency_key="start-child",
+    )
+    context = reconnected.studies.get("study-1").context()
+    child_context = next(
+        item for item in context.experiments if item["experiment_id"] == child_handle.id
+    )
+    assert child_context["question"] == "Does the observed branch replicate?"
+    assert child_context["parent_experiment_ids"] == [started.id]
+    assert child_context["parent_outcome_id"] == "outcome-1"
+    assert child_context["decision_rationale"].startswith("Replicate the eligible")
 
 
 def test_prelaunch_cancellation_is_idempotent_and_input_bound(tmp_path: Path) -> None:

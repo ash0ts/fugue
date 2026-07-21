@@ -105,6 +105,7 @@ class TraceAuditV1:
     coverage: dict[str, JsonValue]
     clusters: tuple[dict[str, JsonValue], ...]
     trace_refs: tuple[dict[str, JsonValue], ...]
+    evidence_samples: tuple[dict[str, JsonValue], ...]
     suggested_tasks: tuple[dict[str, JsonValue], ...]
     redactions: tuple[str, ...]
     warnings: tuple[str, ...]
@@ -266,6 +267,12 @@ def trace_audit_from_dict(raw: Mapping[str, Any]) -> TraceAuditV1:
         trace_refs=tuple(
             _json(_mapping(value, "trace reference"))
             for value in _sequence(raw.get("trace_refs"), "trace references")
+        ),
+        evidence_samples=tuple(
+            _json(_mapping(value, "trace evidence sample"))
+            for value in _sequence(
+                raw.get("evidence_samples"), "trace evidence samples"
+            )
         ),
         suggested_tasks=tuple(
             _json(_mapping(value, "suggested task"))
