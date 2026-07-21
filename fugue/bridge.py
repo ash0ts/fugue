@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 from collections.abc import Mapping
@@ -22,6 +23,7 @@ from fugue.model_plane import (
 )
 
 BRIDGE_PORT = 4000
+BRIDGE_PORT_ENV = "FUGUE_BRIDGE_PORT"
 BRIDGE_RUNTIME_DIR = Path(".fugue") / "bridge"
 BRIDGE_CONFIG_NAME = "litellm.config.yaml"
 BRIDGE_COMPOSE_NAME = "docker-compose.yaml"
@@ -106,15 +108,17 @@ def docker_compose_for_route(
     *,
     builder_route: ModelRoute | None = None,
     judge_route: ModelRoute | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     routes = (route, builder_route or route, judge_route or route)
     provider_env = {item.api_key_env: f"${{{item.api_key_env}}}" for item in routes}
+    host_port = bridge_port(env)
     return {
         "services": {
             "bridge": {
                 "image": LITELLM_IMAGE,
-                "container_name": "fugue-litellm-bridge",
-                "ports": [f"127.0.0.1:{BRIDGE_PORT}:4000"],
+                "container_name": bridge_container_name(env),
+                "ports": [f"127.0.0.1:{host_port}:4000"],
                 "volumes": [f"./{BRIDGE_CONFIG_NAME}:/app/config.yaml:ro"],
                 "environment": {
                     **provider_env,
@@ -151,6 +155,9 @@ def bridge_runtime_lock_for_route(
         "schema_version": 1,
         "image": LITELLM_IMAGE,
         "config_sha256": _json_digest(config),
+        "container_name": bridge_container_name(env),
+        "host_port": bridge_port(env),
+        "project_name": bridge_project_name(env),
         "target_route": model_route_identity(route),
     }
 
@@ -173,7 +180,7 @@ def write_bridge_files(
         route, builder_route=builder_route, judge_route=judge_route, env=env
     )
     compose = docker_compose_for_route(
-        route, builder_route=builder_route, judge_route=judge_route
+        route, builder_route=builder_route, judge_route=judge_route, env=env
     )
     for path, value in ((config_path, config), (compose_path, compose)):
         path.write_text(yaml.safe_dump(value, sort_keys=False))
@@ -213,6 +220,8 @@ def bridge_up(
         [
             "docker",
             "compose",
+            "--project-name",
+            bridge_project_name(env),
             "-f",
             files.compose_path.as_posix(),
             "up",
@@ -249,7 +258,7 @@ def bridge_status(
     judge_route: ModelRoute | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    url = f"http://127.0.0.1:{BRIDGE_PORT}/health/liveliness"
+    url = f"http://127.0.0.1:{bridge_port(env)}/health/liveliness"
     try:
         response = httpx.get(url, timeout=timeout_sec)
     except httpx.HTTPError as exc:
@@ -333,7 +342,7 @@ def _verify_bridge_runtime(
         raise RuntimeError("bridge config differs from its runtime lock")
 
     result = subprocess.run(
-        ["docker", "inspect", "fugue-litellm-bridge"],
+        ["docker", "inspect", str(actual["container_name"])],
         capture_output=True,
         text=True,
         timeout=10,
@@ -347,7 +356,7 @@ def _verify_bridge_runtime(
             f"bridge image differs: expected {LITELLM_IMAGE}, found {configured_image}"
         )
     expected_command = docker_compose_for_route(
-        route, builder_route=builder_route, judge_route=judge_route
+        route, builder_route=builder_route, judge_route=judge_route, env=env
     )["services"]["bridge"]["command"]
     if (container.get("Config") or {}).get("Cmd") != expected_command:
         raise RuntimeError(
@@ -367,10 +376,51 @@ def _verify_bridge_runtime(
         or bool(mounted.get("RW"))
     ):
         raise RuntimeError("bridge container is not using the locked read-only config")
+    bindings = ((container.get("NetworkSettings") or {}).get("Ports") or {}).get(
+        "4000/tcp"
+    )
+    expected_port = str(actual["host_port"])
+    if (
+        not isinstance(bindings, list)
+        or len(bindings) != 1
+        or str(bindings[0].get("HostIp") or "") != "127.0.0.1"
+        or str(bindings[0].get("HostPort") or "") != expected_port
+    ):
+        raise RuntimeError("bridge container port differs from its runtime lock")
     image_id = str(container.get("Image") or "")
     if not image_id.startswith("sha256:"):
         raise RuntimeError("bridge container has no immutable image id")
     return {"runtime_lock": actual, "resolved_image_id": image_id}
+
+
+def bridge_port(env: Mapping[str, str] | None = None) -> int:
+    values = os.environ if env is None else env
+    raw = str(values.get(BRIDGE_PORT_ENV) or "").strip()
+    if not raw:
+        return BRIDGE_PORT
+    if not raw.isascii() or not raw.isdigit():
+        raise ValueError(f"{BRIDGE_PORT_ENV} must be an integer port")
+    value = int(raw)
+    if not 1024 <= value <= 65535:
+        raise ValueError(f"{BRIDGE_PORT_ENV} must be between 1024 and 65535")
+    return value
+
+
+def bridge_container_name(env: Mapping[str, str] | None = None) -> str:
+    port = bridge_port(env)
+    return (
+        "fugue-litellm-bridge"
+        if port == BRIDGE_PORT
+        else f"fugue-litellm-bridge-{port}"
+    )
+
+
+def bridge_project_name(env: Mapping[str, str] | None = None) -> str:
+    return f"fugue-bridge-{bridge_port(env)}"
+
+
+def bridge_container_base_url(env: Mapping[str, str] | None = None) -> str:
+    return f"http://host.docker.internal:{bridge_port(env)}"
 
 
 def _json_digest(value: Mapping[str, Any]) -> str:

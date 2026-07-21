@@ -6,7 +6,12 @@ import subprocess
 import yaml
 
 from fugue.bridge import (
+    BRIDGE_PORT_ENV,
     LITELLM_IMAGE,
+    bridge_container_base_url,
+    bridge_container_name,
+    bridge_port,
+    bridge_project_name,
     bridge_runtime_lock_for_route,
     bridge_status,
     bridge_up,
@@ -82,6 +87,34 @@ def test_bridge_uses_distinct_role_aliases_and_pinned_image() -> None:
     assert "@sha256:" in LITELLM_IMAGE
 
 
+def test_bridge_operator_port_is_strict_and_container_scoped() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {BRIDGE_PORT_ENV: "14017"}
+    compose = docker_compose_for_route(route, env=env)
+    lock = bridge_runtime_lock_for_route(route, env=env)
+
+    assert bridge_port(env) == 14017
+    assert bridge_container_name(env) == "fugue-litellm-bridge-14017"
+    assert bridge_project_name(env) == "fugue-bridge-14017"
+    assert bridge_container_base_url(env) == "http://host.docker.internal:14017"
+    assert compose["services"]["bridge"]["container_name"] == (
+        "fugue-litellm-bridge-14017"
+    )
+    assert compose["services"]["bridge"]["ports"] == ["127.0.0.1:14017:4000"]
+    assert lock["host_port"] == 14017
+    assert lock["container_name"] == "fugue-litellm-bridge-14017"
+    assert lock["project_name"] == "fugue-bridge-14017"
+
+
+def test_bridge_operator_port_rejects_non_loopback_indirection() -> None:
+    for raw in ("https://example.com", "0", "70000", " 4000/tcp "):
+        try:
+            bridge_port({BRIDGE_PORT_ENV: raw})
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted unsafe bridge port {raw!r}")
+
+
 def test_bridge_files_include_a_secret_free_route_and_image_lock(tmp_path) -> None:
     route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
     env = {
@@ -153,6 +186,9 @@ def test_bridge_status_attests_running_image_command_and_mount(
     container = {
         "Config": {"Image": LITELLM_IMAGE, "Cmd": command},
         "Image": "sha256:" + "f" * 64,
+        "NetworkSettings": {
+            "Ports": {"4000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "4000"}]}
+        },
         "Mounts": [
             {
                 "Destination": "/app/config.yaml",
@@ -196,6 +232,7 @@ def test_bridge_up_reloads_generated_config(monkeypatch, tmp_path) -> None:
 
     command, kwargs = calls[0]
     assert command[-3:] == ["up", "-d", "--force-recreate"]
+    assert command[2:4] == ["--project-name", "fugue-bridge-4000"]
     assert kwargs["check"] is True
 
 

@@ -20,6 +20,7 @@ from fugue.agents.model_plane import (
     _weave_entity_project,
     _weave_project_slug,
 )
+from fugue.bridge import bridge_container_base_url
 from fugue.model_plane import (
     normalize_wba_transport_profile,
     provider_client_env,
@@ -171,7 +172,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
             ),
             "provider": self.model_route.provider,
             "provider_base_url": _chat_base_url(self.model_route),
-            "bridge_base_url": "http://host.docker.internal:4000/v1",
+            "bridge_base_url": f"{bridge_container_base_url(os.environ)}/v1",
             "provider_key_env": self.model_route.api_key_env,
             "bridge_key_env": "LITELLM_MASTER_KEY",
             "provider_headers": provider_request_headers(
