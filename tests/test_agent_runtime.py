@@ -46,6 +46,7 @@ def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> Non
 
 def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     source = Path("fugue/agents/model_plane.py").read_text()
+    wba_source = Path("fugue/agents/wba_responses.py").read_text()
     ranges = {
         "hermes": source[
             source.index("class FugueHermes") : source.index("class FugueOpenClaw")
@@ -57,6 +58,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             source.index("class FugueClaudeCode") : source.index("class FugueCodex")
         ],
         "codex": source[source.index("class FugueCodex") :],
+        "wba-responses": wba_source[wba_source.index("class FugueWBAResponses") :],
     }
     assert set(ranges) == set(agent_runtime.RUNTIMES)
     for harness, adapter in ranges.items():

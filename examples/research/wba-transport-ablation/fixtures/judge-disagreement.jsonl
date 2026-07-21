@@ -1,0 +1,4 @@
+{"example_id":"example-01","benchmark_pass":true,"judge_a":0.92,"judge_b":0.87}
+{"example_id":"example-02","benchmark_pass":false,"judge_a":0.18,"judge_b":0.22}
+{"example_id":"example-03","benchmark_pass":true,"judge_a":0.88,"judge_b":0.18}
+{"example_id":"example-04","benchmark_pass":false,"judge_a":0.31,"judge_b":0.28}

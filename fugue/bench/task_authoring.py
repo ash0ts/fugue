@@ -56,7 +56,13 @@ _SAFE_EVIDENCE = frozenset(
         "trace_summary",
     }
 )
-_SAFE_HARNESSES = ("hermes", "openclaw", "claude-code", "codex")
+_SAFE_HARNESSES = (
+    "hermes",
+    "openclaw",
+    "claude-code",
+    "codex",
+    "wba-responses",
+)
 _REQUIRED_JUDGE_BLIND_FIELDS = frozenset(
     {"harness", "model", "variant_id", "context_system_id", "candidate_id", "treatment"}
 )
@@ -65,6 +71,7 @@ _HARNESS_AGENTS = {
     "openclaw": "fugue.agents:FugueOpenClaw",
     "claude-code": "fugue.agents:FugueClaudeCode",
     "codex": "fugue.agents:FugueCodex",
+    "wba-responses": "fugue.agents:FugueWBAResponses",
 }
 _MAX_TEXT = 16_000
 _MAX_CODE = 32_000

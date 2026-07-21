@@ -635,7 +635,7 @@ done
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
         entity, project = _weave_entity_project()
         tags = _experiment_tags(harness, route, self.context_system_id)
-        model_transport = resolve_harness_model_route(route, harness)
+        model_transport = self._model_transport(harness, route)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
         variant_id = os.environ.get("FUGUE_VARIANT_ID") or "baseline"
         assigned_skills = _split_tags(os.environ.get("FUGUE_SKILL_IDS"))
@@ -993,7 +993,7 @@ done
 
     def _trace_attributes(self, harness: str, route: ModelRoute) -> dict[str, Any]:
         trial_index = int(os.environ.get("FUGUE_TRIAL_INDEX", "1"))
-        model_transport = resolve_harness_model_route(route, harness)
+        model_transport = self._model_transport(harness, route)
         attributes = {
             "gen_ai.agent.name": stable_agent_name(harness),
             "gen_ai.conversation.id": self.trace_conversation_id,
@@ -1057,6 +1057,33 @@ done
             {
                 key: value
                 for key, value in {
+                    "fugue.transport_profile": model_transport.get("profile"),
+                    "fugue.transport_codec": model_transport.get("codec"),
+                    "fugue.transport_client": model_transport.get("client"),
+                    "fugue.transport_conversion_location": model_transport.get(
+                        "conversion_location"
+                    ),
+                    "fugue.transport_route_digest": model_transport.get("route_digest"),
+                    "fugue.transport_retry_policy_digest": model_transport.get(
+                        "retry_policy_digest"
+                    ),
+                    "fugue.transport_timeout_policy_digest": model_transport.get(
+                        "timeout_policy_digest"
+                    ),
+                    "fugue.transport_compaction_policy_digest": model_transport.get(
+                        "compaction_policy_digest"
+                    ),
+                    "fugue.transport_sampling_policy_digest": model_transport.get(
+                        "sampling_policy_digest"
+                    ),
+                }.items()
+                if value not in (None, "")
+            }
+        )
+        attributes.update(
+            {
+                key: value
+                for key, value in {
                     "weave.eval.predict_and_score_call_id": os.environ.get(
                         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
                     ),
@@ -1071,6 +1098,24 @@ done
             }
         )
         return attributes
+
+    def _model_transport(
+        self,
+        harness: str,
+        route: ModelRoute,
+    ) -> dict[str, object]:
+        transport_profile = getattr(self, "transport_profile", None)
+        resolved = resolve_harness_model_route(
+            route,
+            harness,
+            transport_profile=(str(transport_profile) if transport_profile else None),
+        )
+        locked = _json_env("FUGUE_MODEL_TRANSPORT_JSON")
+        if locked and locked != resolved:
+            raise RuntimeError(
+                "resolved model transport drifted from the locked run receipt"
+            )
+        return resolved
 
     def _otel_resource_attributes(self, harness: str, route: ModelRoute) -> str:
         values = self._trace_attributes(harness, route)

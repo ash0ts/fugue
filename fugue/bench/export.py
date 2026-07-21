@@ -129,6 +129,7 @@ class LiveEvaluationCoordinator:
         summary_fetcher: Callable[..., dict[str, dict[str, Any]]] | None = None,
         trace_timeout_sec: float | None = None,
         cancellation_event: threading.Event | None = None,
+        cancel_on_evidence_failure: bool = False,
     ) -> None:
         if not env.get("WANDB_API_KEY", "").strip():
             raise RuntimeError("WANDB_API_KEY is required for live evaluations")
@@ -145,6 +146,7 @@ class LiveEvaluationCoordinator:
         self._prediction_lock = threading.Lock()
         self._terminal_cells: set[str] = set()
         self._cancellation_event = cancellation_event or threading.Event()
+        self._cancel_on_evidence_failure = cancel_on_evidence_failure
         self._summary_fetcher = summary_fetcher or fetch_weave_summaries
         configured_timeout = self.env.get("FUGUE_WEAVE_LINK_TIMEOUT_SEC")
         self.trace_timeout_sec = (
@@ -333,6 +335,8 @@ class LiveEvaluationCoordinator:
                 reason="Run cancelled by the operator.",
             )
         except Exception as exc:
+            if self._cancel_on_evidence_failure:
+                self._cancellation_event.set()
             if not owns_prediction and not self._pop_prediction(cell.id, active):
                 return
             row["trace_link_status"] = "failed"
@@ -1194,6 +1198,16 @@ _LOCAL_RESULT_FIELDS = {
     "inspected_paths",
     "local_error_events",
     "runtime_fingerprints",
+    "wba_transport",
+    "wba_transport_status",
+    "transport_profile",
+    "transport_stream_events",
+    "transport_retries",
+    "transport_compactions",
+    "transport_tool_errors",
+    "transport_orphan_tool_outputs",
+    "transport_normalization_errors",
+    "transport_stop_reason",
 }
 
 
@@ -3354,6 +3368,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
             context_events["context_telemetry_available"]
             or meta.get("context_artifact")
         )
+    wba_transport = _wba_transport_evidence(trial_dir, meta)
     return {
         "schema_version": 1,
         "record_type": "trial",
@@ -3415,6 +3430,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "manifest_path": meta.get("manifest_path"),
         "model_provider": meta.get("model_provider"),
         "model_transport": meta.get("model_transport"),
+        **wba_transport,
         "builder_model": meta.get("builder_model"),
         "judge_model": meta.get("judge_model"),
         "model": meta.get("model")
@@ -3500,6 +3516,64 @@ def _agent_response(trial_dir: Path) -> str | None:
         if isinstance(message, str) and message.strip():
             return message.strip()
     return None
+
+
+def _wba_transport_evidence(
+    trial_dir: Path,
+    meta: Mapping[str, Any],
+) -> dict[str, Any]:
+    if meta.get("harness") != "wba-responses":
+        return {}
+    path = trial_dir / "agent" / "wba-responses-summary.json"
+    try:
+        summary = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"wba_transport_status": "missing", "wba_transport": {}}
+    if not isinstance(summary, dict):
+        return {"wba_transport_status": "invalid", "wba_transport": {}}
+    selected = {
+        key: summary.get(key)
+        for key in (
+            "schema_version",
+            "session_id",
+            "profile",
+            "input_tokens",
+            "output_tokens",
+            "tool_calls",
+            "tool_errors",
+            "orphan_tool_outputs",
+            "normalization_errors",
+            "stream_events",
+            "retries",
+            "compactions",
+            "stop_reason",
+        )
+    }
+    receipt = meta.get("model_transport") or {}
+    native_sessions = {
+        str(value) for value in meta.get("native_session_ids") or [] if value
+    }
+    valid = (
+        summary.get("schema_version") == 1
+        and summary.get("profile") == receipt.get("profile")
+        and bool(summary.get("session_id"))
+        and str(summary.get("session_id")) in native_sessions
+        and summary.get("orphan_tool_outputs") == 0
+        and summary.get("normalization_errors") == 0
+        and summary.get("stop_reason") == "completed"
+    )
+    return {
+        "wba_transport_status": "valid" if valid else "invalid",
+        "wba_transport": selected,
+        "transport_profile": selected.get("profile"),
+        "transport_stream_events": selected.get("stream_events"),
+        "transport_retries": selected.get("retries"),
+        "transport_compactions": selected.get("compactions"),
+        "transport_tool_errors": selected.get("tool_errors"),
+        "transport_orphan_tool_outputs": selected.get("orphan_tool_outputs"),
+        "transport_normalization_errors": selected.get("normalization_errors"),
+        "transport_stop_reason": selected.get("stop_reason"),
+    }
 
 
 def _runtime_fingerprints(trial_dir: Path, meta: dict[str, Any]) -> dict[str, Any]:

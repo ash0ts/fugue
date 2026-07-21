@@ -1,0 +1,962 @@
+#!/usr/bin/env python3
+"""Public, task-neutral WBA-style loop used by Fugue Harbor cells.
+
+This is an independent implementation.  It intentionally contains no W&B
+Copilot prompt, private Core code, or Core runtime dependency.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import signal
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+VERSION = "0.1.0"
+PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
+MAX_STEPS = 20
+REQUEST_TIMEOUT_SEC = 300
+HTTP_TIMEOUT_SEC = 120
+CONNECT_TIMEOUT_SEC = 30
+MAX_RETRIES = 5
+COMPACTION_TRIGGER = 0.8
+DEFAULT_CONTEXT_WINDOW = 131_072
+SHELL_OUTPUT_LIMIT = 100_000
+TEMPERATURE = 0.0
+SECRET_NAME = re.compile(
+    r"(?:^|_)(?:api_?key|key|token|secret|password|credential|auth)(?:$|_)",
+    re.IGNORECASE,
+)
+
+SYSTEM_PROMPT = """\
+You are a software-analysis Agent working inside a locked, isolated workspace.
+Use the shell tool to inspect the supplied files and repository before making
+claims. Ground conclusions in concrete evidence, keep commands narrowly scoped,
+and create requested artifacts at their exact paths. You cannot install packages,
+download files, start services, or access the host. When the task is complete,
+return a concise answer explaining the evidence you used.
+"""
+
+SKILL_PROMPT = """\
+Assigned portable skills are available under {skills_dir}. Before using one,
+read its SKILL.md and follow its instructions. Do not modify skill files.
+"""
+
+SHELL_TOOL = {
+    "name": "shell",
+    "description": "Run one shell command in the locked task workspace.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 180},
+        },
+        "required": ["command"],
+        "additionalProperties": False,
+    },
+}
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ModelTurn:
+    text: str = ""
+    reasoning: dict[str, Any] | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    finish_reason: str | None = None
+    response_id: str | None = None
+
+
+class EventLog:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(self, event: str, **values: Any) -> None:
+        row = {
+            "schema_version": 1,
+            "event": event,
+            "timestamp": time.time(),
+            **values,
+        }
+        line = json.dumps(row, sort_keys=True, default=str)
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+        print(line, flush=True)
+
+
+class WeaveTrace:
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        self.conversation: Any = None
+        self.turn: Any = None
+        self.include_content = config.get("trace_content") == "full"
+
+    def start(self, instruction: str) -> None:
+        if (
+            not os.environ.get("WANDB_API_KEY")
+            or os.environ.get("FUGUE_DISABLE_WEAVE") == "1"
+        ):
+            return
+        try:
+            import weave
+
+            weave.init(str(self.config["weave_project"]))
+            self.conversation = weave.start_conversation(
+                agent_name="wba-responses",
+                conversation_id=str(self.config["conversation_id"]),
+                conversation_name=str(
+                    self.config.get("conversation_name") or "WBA transport study"
+                ),
+                model=str(self.config["display_model"]),
+                include_content=self.include_content,
+                attributes=dict(self.config.get("trace_attributes") or {}),
+            )
+            self.conversation.__enter__()
+            self.turn = self.conversation.start_turn(
+                user_message=instruction if self.include_content else "",
+                agent_name="wba-responses",
+                model=str(self.config["display_model"]),
+            )
+            self.turn.__enter__()
+        except Exception:
+            self.conversation = None
+            self.turn = None
+
+    def start_llm(self, kind: str) -> Any:
+        if self.turn is None:
+            return None
+        try:
+            import weave
+
+            span = weave.start_llm(
+                model=str(self.config["model_id"]),
+                provider_name=str(self.config["provider"]),
+            )
+            span.__enter__()
+            span.fugue_transport_profile = self.config["profile"]
+            span.fugue_call_kind = kind
+            return span
+        except Exception:
+            return None
+
+    def finish_llm(
+        self, span: Any, result: ModelTurn | None, error: BaseException | None
+    ) -> None:
+        if span is None:
+            return
+        if result is not None:
+            usage = getattr(span, "usage", None)
+            if usage is not None:
+                if result.input_tokens is not None:
+                    usage.input_tokens = result.input_tokens
+                if result.output_tokens is not None:
+                    usage.output_tokens = result.output_tokens
+        span.__exit__(
+            type(error), error, error.__traceback__
+        ) if error else span.__exit__(None, None, None)
+
+    def start_tool(self, call: ToolCall) -> Any:
+        if self.turn is None:
+            return None
+        try:
+            import weave
+
+            span = weave.start_tool(
+                name=call.name,
+                arguments=json.dumps(call.arguments) if self.include_content else "{}",
+                tool_call_id=call.call_id,
+            )
+            span.__enter__()
+            return span
+        except Exception:
+            return None
+
+    def finish_tool(self, span: Any, output: str, error: BaseException | None) -> None:
+        if span is None:
+            return
+        if self.include_content and error is None:
+            span.result = output
+        span.__exit__(
+            type(error), error, error.__traceback__
+        ) if error else span.__exit__(None, None, None)
+
+    def finish(self, output: str, error: BaseException | None = None) -> None:
+        if self.turn is not None:
+            if self.include_content and error is None:
+                self.turn.output = output
+            self.turn.__exit__(
+                type(error), error, error.__traceback__
+            ) if error else self.turn.__exit__(None, None, None)
+            self.turn = None
+        if self.conversation is not None:
+            self.conversation.__exit__(
+                type(error), error, error.__traceback__
+            ) if error else self.conversation.__exit__(None, None, None)
+            self.conversation = None
+
+
+class ModelClient:
+    def __init__(
+        self, config: dict[str, Any], events: EventLog, trace: WeaveTrace
+    ) -> None:
+        self.config = config
+        self.events = events
+        self.trace = trace
+        self.profile = str(config["profile"])
+        self._openai: Any = None
+        self._inline_http: Any = None
+        self.retries = 0
+        self.normalization_errors = 0
+        self.stream_events = 0
+
+    async def close(self) -> None:
+        if self._openai is not None:
+            await self._openai.close()
+            self._openai = None
+        if self._inline_http is not None:
+            await self._inline_http.aclose()
+            self._inline_http = None
+
+    async def stream(self, groups: list[list[dict[str, Any]]]) -> ModelTurn:
+        return await self._retry(lambda: self._stream_once(groups), "agent")
+
+    async def summarize(self, text: str) -> str:
+        result = await self._retry(lambda: self._summarize_once(text), "compaction")
+        return result.text.strip()
+
+    async def _retry(
+        self,
+        operation: Callable[[], Awaitable[ModelTurn]],
+        kind: str,
+    ) -> ModelTurn:
+        last_error: BaseException | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            span = self.trace.start_llm(kind)
+            result: ModelTurn | None = None
+            error: BaseException | None = None
+            try:
+                result = await asyncio.wait_for(
+                    operation(), timeout=REQUEST_TIMEOUT_SEC
+                )
+                return result
+            except asyncio.CancelledError:
+                error = sys.exception()
+                raise
+            except Exception as exc:
+                error = exc
+                last_error = exc
+                if attempt >= MAX_RETRIES or not _retryable(exc):
+                    raise
+                self.retries += 1
+                self.events.emit(
+                    "model_retry",
+                    call_kind=kind,
+                    attempt=attempt,
+                    error_type=type(exc).__name__,
+                )
+                await asyncio.sleep(min(2 ** (attempt - 1), 8))
+            finally:
+                self.trace.finish_llm(span, result, error)
+        assert last_error is not None
+        raise last_error
+
+    async def _stream_once(self, groups: list[list[dict[str, Any]]]) -> ModelTurn:
+        if self.profile == "responses-proxy":
+            return await self._responses_proxy(groups, stream=True)
+        if self.profile == "responses-inline":
+            return await self._responses_inline(groups, stream=True)
+        return await self._chat_inline(groups, stream=True)
+
+    async def _summarize_once(self, text: str) -> ModelTurn:
+        groups = [
+            [
+                _user_message(
+                    self.profile,
+                    "Summarize this prior work while preserving decisions, evidence, file paths, and unresolved issues:\n\n"
+                    + text,
+                )
+            ]
+        ]
+        if self.profile == "responses-proxy":
+            return await self._responses_proxy(groups, stream=False, tools=False)
+        if self.profile == "responses-inline":
+            return await self._responses_inline(groups, stream=False, tools=False)
+        return await self._chat_inline(groups, stream=False, tools=False)
+
+    def _common(self) -> dict[str, Any]:
+        if self._inline_http is None:
+            import httpx
+
+            self._inline_http = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    HTTP_TIMEOUT_SEC,
+                    connect=CONNECT_TIMEOUT_SEC,
+                )
+            )
+        return {
+            "api_key": os.environ[str(self.config["provider_key_env"])],
+            "api_base": str(self.config["provider_base_url"]),
+            "extra_headers": dict(self.config.get("provider_headers") or {}),
+            "timeout": HTTP_TIMEOUT_SEC,
+            "num_retries": 0,
+            "client": self._inline_http,
+        }
+
+    async def _responses_proxy(
+        self,
+        groups: list[list[dict[str, Any]]],
+        *,
+        stream: bool,
+        tools: bool = True,
+    ) -> ModelTurn:
+        from openai import AsyncOpenAI
+
+        if self._openai is None:
+            import httpx
+
+            self._openai = AsyncOpenAI(
+                api_key=os.environ[str(self.config["bridge_key_env"])],
+                base_url=str(self.config["bridge_base_url"]),
+                timeout=httpx.Timeout(HTTP_TIMEOUT_SEC, connect=CONNECT_TIMEOUT_SEC),
+                max_retries=0,
+            )
+        kwargs = {
+            "model": str(self.config["model_id"]),
+            "instructions": str(self.config["system_prompt"]),
+            "input": _flatten(groups),
+            "tools": [_responses_tool()] if tools else [],
+            "truncation": "auto",
+            "temperature": TEMPERATURE,
+        }
+        if not stream:
+            response = await self._openai.responses.create(**kwargs)
+            return _parse_responses(response)
+        items: list[Any] = []
+        final: Any = None
+        async with self._openai.responses.stream(**kwargs) as response_stream:
+            async for event in response_stream:
+                self.stream_events += 1
+                if getattr(event, "type", "") == "response.output_item.done":
+                    items.append(getattr(event, "item", None))
+            final = await response_stream.get_final_response()
+        return _parse_responses(final, items=items)
+
+    async def _responses_inline(
+        self,
+        groups: list[list[dict[str, Any]]],
+        *,
+        stream: bool,
+        tools: bool = True,
+    ) -> ModelTurn:
+        import litellm
+
+        kwargs = {
+            **self._common(),
+            "model": str(self.config["litellm_model"]),
+            "instructions": str(self.config["system_prompt"]),
+            "input": _flatten(groups),
+            "tools": [_responses_tool()] if tools else [],
+            "truncation": "auto",
+            "use_chat_completions_api": True,
+            "temperature": TEMPERATURE,
+        }
+        if not stream:
+            return _parse_responses(await litellm.aresponses(**kwargs))
+        iterator = await litellm.aresponses(**kwargs, stream=True)
+        items: list[Any] = []
+        completed: Any = None
+        async for event in iterator:
+            self.stream_events += 1
+            event_type = _value(event, "type")
+            if event_type == "response.output_item.done":
+                items.append(_value(event, "item"))
+            elif event_type == "response.completed":
+                completed = _value(event, "response")
+        if completed is None:
+            wrapper = getattr(iterator, "completed_response", None)
+            completed = getattr(wrapper, "response", None)
+        if completed is None and not items:
+            raise RuntimeError(
+                "Responses stream ended without output items or completion"
+            )
+        return _parse_responses(completed, items=items)
+
+    async def _chat_inline(
+        self,
+        groups: list[list[dict[str, Any]]],
+        *,
+        stream: bool,
+        tools: bool = True,
+    ) -> ModelTurn:
+        import litellm
+
+        kwargs = {
+            **self._common(),
+            "model": str(self.config["litellm_model"]),
+            "messages": [
+                {"role": "system", "content": str(self.config["system_prompt"])},
+                *_flatten(groups),
+            ],
+            "tools": [_chat_tool()] if tools else [],
+            "temperature": TEMPERATURE,
+        }
+        if not stream:
+            return _parse_chat(await litellm.acompletion(**kwargs))
+        iterator = await litellm.acompletion(
+            **kwargs, stream=True, stream_options={"include_usage": True}
+        )
+        text: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        usage: Any = None
+        finish_reason: str | None = None
+        response_id: str | None = None
+        async for chunk in iterator:
+            self.stream_events += 1
+            response_id = str(_value(chunk, "id") or response_id or "") or None
+            usage = _value(chunk, "usage") or usage
+            choices = _value(chunk, "choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            finish_reason = (
+                str(_value(choice, "finish_reason") or finish_reason or "") or None
+            )
+            delta = _value(choice, "delta") or {}
+            content = _value(delta, "content")
+            if content:
+                text.append(str(content))
+            reason = _value(delta, "reasoning_content")
+            if reason:
+                reasoning.append(str(reason))
+            for tool_delta in _value(delta, "tool_calls") or []:
+                index = int(_value(tool_delta, "index") or 0)
+                target = calls.setdefault(
+                    index, {"id": "", "name": "", "arguments": ""}
+                )
+                target["id"] += str(_value(tool_delta, "id") or "")
+                function = _value(tool_delta, "function") or {}
+                target["name"] += str(_value(function, "name") or "")
+                target["arguments"] += str(_value(function, "arguments") or "")
+        parsed_calls = [_tool_call(value) for _, value in sorted(calls.items())]
+        return ModelTurn(
+            text="".join(text),
+            reasoning={"text": "".join(reasoning)} if reasoning else None,
+            tool_calls=parsed_calls,
+            input_tokens=_usage(usage, "prompt_tokens", "input_tokens"),
+            output_tokens=_usage(usage, "completion_tokens", "output_tokens"),
+            finish_reason=finish_reason,
+            response_id=response_id,
+        )
+
+
+async def run(config: dict[str, Any]) -> int:
+    profile = str(config.get("profile") or "")
+    if profile not in PROFILES:
+        raise ValueError(f"unsupported transport profile: {profile}")
+    turns = config.get("turns")
+    if (
+        not isinstance(turns, list)
+        or not turns
+        or not all(isinstance(item, str) and item.strip() for item in turns)
+    ):
+        raise ValueError("turns must contain at least one non-empty user instruction")
+    config["system_prompt"] = str(config.get("system_prompt") or SYSTEM_PROMPT)
+    skills_dir = str(config.get("skills_dir") or "").strip()
+    if skills_dir:
+        config["system_prompt"] += "\n" + SKILL_PROMPT.format(skills_dir=skills_dir)
+    config["workspace"] = str(Path(config.get("workspace") or "/workspace").resolve())
+    events = EventLog(Path(str(config["events_path"])))
+    trace = WeaveTrace(config)
+    client = ModelClient(config, events, trace)
+    groups: list[list[dict[str, Any]]] = []
+    outputs: list[str] = []
+    input_tokens = 0
+    output_tokens = 0
+    tool_calls = 0
+    tool_errors = 0
+    orphan_tool_outputs = 0
+    compactions = 0
+    trace.start(turns[0])
+    error: BaseException | None = None
+    events.emit("session_start", session_id=config["session_id"], profile=profile)
+    try:
+        for turn_index, user_text in enumerate(turns, start=1):
+            groups.append([_user_message(profile, user_text)])
+            final_text = ""
+            for step in range(1, int(config.get("max_steps") or MAX_STEPS) + 1):
+                groups, compacted = await _compact_if_needed(
+                    groups, client, config, events
+                )
+                compactions += int(compacted)
+                result = await client.stream(groups)
+                input_tokens += result.input_tokens or 0
+                output_tokens += result.output_tokens or 0
+                events.emit(
+                    "model_turn",
+                    turn=turn_index,
+                    step=step,
+                    response_id=result.response_id,
+                    finish_reason=result.finish_reason,
+                    tool_call_ids=[call.call_id for call in result.tool_calls],
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                )
+                if not result.tool_calls:
+                    final_text = result.text
+                    groups.append(_assistant_group(profile, result, []))
+                    break
+                tool_calls += len(result.tool_calls)
+                tool_results = await asyncio.gather(
+                    *[
+                        _execute_tool(call, config, events, trace)
+                        for call in result.tool_calls
+                    ]
+                )
+                tool_errors += sum(bool(item[1]) for item in tool_results)
+                groups.append(_assistant_group(profile, result, tool_results))
+            else:
+                raise RuntimeError("agent exhausted the locked max-step budget")
+            outputs.append(final_text)
+            events.emit("agent_turn_complete", turn=turn_index, output=final_text)
+        summary = {
+            "schema_version": 1,
+            "event": "session_complete",
+            "session_id": config["session_id"],
+            "profile": profile,
+            "outputs": outputs,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tool_calls": tool_calls,
+            "tool_errors": tool_errors,
+            "orphan_tool_outputs": orphan_tool_outputs,
+            "normalization_errors": client.normalization_errors,
+            "stream_events": client.stream_events,
+            "retries": client.retries,
+            "compactions": compactions,
+            "stop_reason": "completed",
+        }
+        events.emit(
+            "session_summary",
+            **{
+                key: value
+                for key, value in summary.items()
+                if key not in {"schema_version", "event"}
+            },
+        )
+        Path(str(config["summary_path"])).write_text(
+            json.dumps(summary, indent=2) + "\n"
+        )
+        trace.finish(outputs[-1])
+        return 0
+    except BaseException as exc:
+        error = exc
+        events.emit(
+            "session_error", error_type=type(exc).__name__, error=str(exc)[:2000]
+        )
+        trace.finish("", error=exc)
+        raise
+    finally:
+        await client.close()
+        if error is None:
+            events.emit("client_closed")
+
+
+async def _compact_if_needed(
+    groups: list[list[dict[str, Any]]],
+    client: ModelClient,
+    config: dict[str, Any],
+    events: EventLog,
+) -> tuple[list[list[dict[str, Any]]], bool]:
+    context_window = int(config.get("context_window") or DEFAULT_CONTEXT_WINDOW)
+    estimated = (
+        len(str(config["system_prompt"])) + len(json.dumps(groups, default=str))
+    ) // 4
+    if estimated <= int(context_window * COMPACTION_TRIGGER) or len(groups) <= 5:
+        return groups, False
+    head = groups[:1]
+    tail = groups[-3:]
+    middle = groups[1:-3]
+    text = json.dumps(middle, sort_keys=True, default=str)[:120_000]
+    try:
+        summary = await client.summarize(text)
+    except Exception as exc:
+        events.emit(
+            "compaction_fallback",
+            error_type=type(exc).__name__,
+        )
+        summary = ""
+    if not summary:
+        summary = (
+            "Prior work was compacted; inspect the current workspace before proceeding."
+        )
+    summary_group = [
+        _assistant_message(client.profile, "Compacted prior work:\n" + summary)
+    ]
+    events.emit("compaction", estimated_tokens=estimated, summarized_groups=len(middle))
+    return [*head, summary_group, *tail], True
+
+
+async def _execute_tool(
+    call: ToolCall,
+    config: dict[str, Any],
+    events: EventLog,
+    trace: WeaveTrace,
+) -> tuple[str, bool]:
+    if call.name != "shell":
+        output = f"Tool execution failed: unknown tool {call.name!r}"
+        events.emit(
+            "tool_result",
+            call_id=call.call_id,
+            name=call.name,
+            is_error=True,
+            output=output,
+        )
+        return output, True
+    command = call.arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        output = "Tool execution failed: shell.command must be a non-empty string"
+        events.emit(
+            "tool_result",
+            call_id=call.call_id,
+            name=call.name,
+            is_error=True,
+            output=output,
+        )
+        return output, True
+    timeout = min(max(int(call.arguments.get("timeout_sec") or 120), 1), 180)
+    span = trace.start_tool(call)
+    environment = {
+        key: value for key, value in os.environ.items() if not SECRET_NAME.search(key)
+    }
+    process = await asyncio.create_subprocess_shell(
+        command,
+        cwd=str(config["workspace"]),
+        env=environment,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.CancelledError as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = await process.communicate()
+        rendered = _bounded_output(
+            stdout.decode(errors="replace"), stderr.decode(errors="replace")
+        )
+        trace.finish_tool(span, rendered, exc)
+        events.emit(
+            "tool_cancelled",
+            call_id=call.call_id,
+            name=call.name,
+            output=rendered,
+        )
+        raise
+    except TimeoutError:
+        timed_out = True
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = await process.communicate()
+    rendered = _bounded_output(
+        stdout.decode(errors="replace"), stderr.decode(errors="replace")
+    )
+    is_error = timed_out or process.returncode != 0
+    if timed_out:
+        rendered = f"Command timed out after {timeout}s.\n{rendered}"
+    elif process.returncode != 0:
+        rendered = f"Command exited with status {process.returncode}.\n{rendered}"
+    trace.finish_tool(span, rendered, None)
+    events.emit(
+        "tool_result",
+        call_id=call.call_id,
+        name=call.name,
+        is_error=is_error,
+        timed_out=timed_out,
+        return_code=process.returncode,
+        output=rendered,
+    )
+    return rendered, is_error
+
+
+def _responses_tool() -> dict[str, Any]:
+    return {"type": "function", **SHELL_TOOL}
+
+
+def _chat_tool() -> dict[str, Any]:
+    return {"type": "function", "function": SHELL_TOOL}
+
+
+def _user_message(profile: str, content: str) -> dict[str, Any]:
+    if profile == "chat-inline":
+        return {"role": "user", "content": content}
+    return {"role": "user", "content": content}
+
+
+def _assistant_message(profile: str, content: str) -> dict[str, Any]:
+    if profile == "chat-inline":
+        return {"role": "assistant", "content": content}
+    return {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": content}],
+    }
+
+
+def _assistant_group(
+    profile: str,
+    result: ModelTurn,
+    tool_results: list[tuple[str, bool]],
+) -> list[dict[str, Any]]:
+    if profile == "chat-inline":
+        message: dict[str, Any] = {"role": "assistant", "content": result.text or None}
+        if result.reasoning and result.reasoning.get("text"):
+            message["reasoning_content"] = str(result.reasoning["text"])
+        if result.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments),
+                    },
+                }
+                for call in result.tool_calls
+            ]
+        rows = [message]
+        rows.extend(
+            {
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "content": output,
+            }
+            for call, (output, _is_error) in zip(
+                result.tool_calls, tool_results, strict=True
+            )
+        )
+        return rows
+    rows: list[dict[str, Any]] = []
+    if result.reasoning:
+        rows.append(result.reasoning)
+    if result.text:
+        rows.append(_assistant_message(profile, result.text))
+    for call in result.tool_calls:
+        rows.append(
+            {
+                "type": "function_call",
+                "call_id": call.call_id,
+                "name": call.name,
+                "arguments": json.dumps(call.arguments),
+            }
+        )
+    rows.extend(
+        {"type": "function_call_output", "call_id": call.call_id, "output": output}
+        for call, (output, _is_error) in zip(
+            result.tool_calls, tool_results, strict=True
+        )
+    )
+    return rows
+
+
+def _parse_responses(raw: Any, *, items: list[Any] | None = None) -> ModelTurn:
+    values = [
+        item for item in (items or _value(raw, "output") or []) if item is not None
+    ]
+    texts: list[str] = []
+    calls: list[ToolCall] = []
+    reasoning: dict[str, Any] | None = None
+    for item in values:
+        item_type = _value(item, "type")
+        if item_type == "function_call":
+            calls.append(
+                _tool_call(
+                    {
+                        "id": _value(item, "call_id") or _value(item, "id"),
+                        "name": _value(item, "name"),
+                        "arguments": _value(item, "arguments"),
+                    }
+                )
+            )
+        elif item_type == "reasoning":
+            reasoning = _dump(item)
+        elif item_type == "message":
+            for content in _value(item, "content") or []:
+                if _value(content, "type") in {"output_text", "text"}:
+                    texts.append(str(_value(content, "text") or ""))
+    usage = _value(raw, "usage") or {}
+    return ModelTurn(
+        text="\n".join(part for part in texts if part),
+        reasoning=reasoning,
+        tool_calls=calls,
+        input_tokens=_usage(usage, "input_tokens", "prompt_tokens"),
+        output_tokens=_usage(usage, "output_tokens", "completion_tokens"),
+        finish_reason=str(_value(raw, "status") or "") or None,
+        response_id=str(_value(raw, "id") or "") or None,
+    )
+
+
+def _parse_chat(raw: Any) -> ModelTurn:
+    choices = _value(raw, "choices") or []
+    if not choices:
+        raise RuntimeError("Chat completion returned no choices")
+    choice = choices[0]
+    message = _value(choice, "message") or {}
+    calls = []
+    for item in _value(message, "tool_calls") or []:
+        function = _value(item, "function") or {}
+        calls.append(
+            _tool_call(
+                {
+                    "id": _value(item, "id"),
+                    "name": _value(function, "name"),
+                    "arguments": _value(function, "arguments"),
+                }
+            )
+        )
+    usage = _value(raw, "usage") or {}
+    reason = _value(message, "reasoning_content")
+    return ModelTurn(
+        text=str(_value(message, "content") or ""),
+        reasoning={"text": str(reason)} if reason else None,
+        tool_calls=calls,
+        input_tokens=_usage(usage, "prompt_tokens", "input_tokens"),
+        output_tokens=_usage(usage, "completion_tokens", "output_tokens"),
+        finish_reason=str(_value(choice, "finish_reason") or "") or None,
+        response_id=str(_value(raw, "id") or "") or None,
+    )
+
+
+def _tool_call(raw: dict[str, Any]) -> ToolCall:
+    arguments = raw.get("arguments") or "{}"
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"model returned malformed tool arguments: {exc}") from exc
+    if not isinstance(arguments, dict):
+        raise ValueError("model tool arguments must be an object")
+    call_id = str(raw.get("id") or "").strip()
+    if not call_id:
+        raise ValueError("model tool call is missing a durable call id")
+    return ToolCall(call_id, str(raw.get("name") or ""), arguments)
+
+
+def _usage(value: Any, *names: str) -> int | None:
+    for name in names:
+        item = _value(value, name)
+        if isinstance(item, int):
+            return item
+    return None
+
+
+def _flatten(groups: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    return [item for group in groups for item in group]
+
+
+def _value(value: Any, name: str) -> Any:
+    return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+
+def _dump(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    return model_dump(exclude_none=True) if model_dump else {"type": "reasoning"}
+
+
+def _bounded_output(stdout: str, stderr: str) -> str:
+    combined = "\n".join(part for part in (stdout, stderr) if part).strip()
+    if len(combined.encode()) <= SHELL_OUTPUT_LIMIT:
+        return combined or "(empty)"
+    data = combined.encode()
+    half = SHELL_OUTPUT_LIMIT // 2
+    return (
+        data[:half].decode(errors="replace")
+        + "\n\n...[truncated middle output]...\n\n"
+        + data[-half:].decode(errors="replace")
+    )
+
+
+def _retryable(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError)) or type(
+        exc
+    ).__name__ in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+    }
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError("runner config must contain one JSON object")
+    allowed = {
+        "profile",
+        "model_id",
+        "display_model",
+        "litellm_model",
+        "provider",
+        "provider_base_url",
+        "bridge_base_url",
+        "provider_key_env",
+        "bridge_key_env",
+        "provider_headers",
+        "system_prompt",
+        "turns",
+        "session_id",
+        "conversation_id",
+        "conversation_name",
+        "weave_project",
+        "trace_content",
+        "trace_attributes",
+        "workspace",
+        "events_path",
+        "summary_path",
+        "skills_dir",
+        "max_steps",
+        "context_window",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError("unknown runner config field(s): " + ", ".join(unknown))
+    return value
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--config", type=Path)
+    args = parser.parse_args()
+    if args.version:
+        print(f"wba-runner {VERSION}")
+        return 0
+    if args.config is None:
+        parser.error("--config is required")
+    config = _load_config(args.config)
+    args.config.unlink(missing_ok=True)
+    return asyncio.run(run(config))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

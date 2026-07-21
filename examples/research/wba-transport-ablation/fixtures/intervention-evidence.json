@@ -1,0 +1,10 @@
+{
+  "incident_id": "incident-42",
+  "observations": [
+    {"evidence_id": "ev-17", "fact": "Five retries were attempted after a provider 429."},
+    {"evidence_id": "ev-21", "fact": "The fourth retry began after 94 seconds."},
+    {"evidence_id": "ev-25", "fact": "No successful cell in the cohort needed more than two retries."}
+  ],
+  "constraints": {"maximum_timeout_sec": 90, "maximum_tool_retries": 2},
+  "requested_artifact": "/logs/artifacts/intervention.json"
+}

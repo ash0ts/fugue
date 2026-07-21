@@ -1,0 +1,857 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import runpy
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+import fugue.bench.campaign_lifecycle as campaign_lifecycle
+from fugue.agents import FugueWBAResponses
+from fugue.bench.campaign_evidence import safe_prediction_row
+from fugue.bench.campaigns import CampaignService, build_experiment_proposal
+from fugue.bench.export import _wba_transport_evidence
+from fugue.bench.manifest import load_manifest
+from fugue.bench.operator import ExperimentRequest, OperatorService
+from fugue.bench.wba_transport_analysis import analyze_wba_transport_rows
+from fugue.bench.wba_transport_tasks import WBATransportTaskMaterializer
+from fugue.task_interaction import TaskInteractionController
+
+RUNNER_PATH = Path("configs/fugue/runtime/wba-responses/wba-runner")
+RUNNER = runpy.run_path(RUNNER_PATH.as_posix())
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, dict[str, Any]]] = []
+
+    def emit(self, event: str, **values: Any) -> None:
+        self.rows.append((event, values))
+
+
+class _Trace:
+    def start_llm(self, kind: str) -> None:
+        del kind
+        return None
+
+    def finish_llm(self, span: Any, result: Any, error: Any) -> None:
+        del span, result, error
+
+    def start_tool(self, call: Any) -> None:
+        del call
+        return None
+
+    def finish_tool(self, span: Any, output: str, error: Any) -> None:
+        del span, output, error
+
+
+def _client(profile: str) -> Any:
+    return RUNNER["ModelClient"](
+        {
+            "profile": profile,
+            "model_id": "zai-org/GLM-5.2",
+            "litellm_model": "nebius/zai-org/GLM-5.2",
+            "provider_key_env": "WANDB_API_KEY",
+            "provider_base_url": "https://api.inference.wandb.ai/v1",
+            "provider_headers": {"OpenAI-Project": "wandb/fugue-test"},
+            "system_prompt": "fixed",
+        },
+        _Events(),
+        _Trace(),
+    )
+
+
+def test_wba_adapter_rejects_unknown_transport_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+
+    with pytest.raises(ValueError, match="unsupported WBA transport profile"):
+        FugueWBAResponses(
+            logs_dir=tmp_path,
+            model_name="wandb/zai-org/GLM-5.2",
+            transport_profile="arbitrary-provider",
+        )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"provider": "unregistered"},
+        {"base_url": "https://arbitrary.example/v1"},
+        {"dependency_override": "litellm==latest"},
+    ],
+)
+def test_wba_adapter_rejects_unregistered_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: dict[str, str],
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+
+    with pytest.raises(ValueError, match="unknown WBA agent configuration"):
+        FugueWBAResponses(
+            logs_dir=tmp_path,
+            model_name="wandb/zai-org/GLM-5.2",
+            **extra,
+        )
+
+
+def test_wba_adapter_explicitly_rejects_native_mcp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+
+    with pytest.raises(ValueError, match="does not support native MCP"):
+        FugueWBAResponses(
+            logs_dir=tmp_path,
+            model_name="wandb/zai-org/GLM-5.2",
+            mcp_servers=[SimpleNamespace(name="unsafe")],
+        )
+
+
+def test_wba_adapter_exposes_the_locked_transport_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+    agent = FugueWBAResponses(
+        logs_dir=tmp_path,
+        model_name="wandb/zai-org/GLM-5.2",
+        transport_profile="chat-inline",
+    )
+
+    assert agent.transport_receipt["profile"] == "chat-inline"
+    assert agent.transport_receipt["bridge_required"] is False
+    assert agent.transport_receipt["codec"] == "chat-completions-native-v1"
+    assert len(str(agent.transport_receipt["retry_policy_digest"])) == 64
+    assert len(str(agent.transport_receipt["timeout_policy_digest"])) == 64
+    assert len(str(agent.transport_receipt["compaction_policy_digest"])) == 64
+
+
+def test_wba_adapter_executes_through_the_harbor_agent_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+    monkeypatch.setenv("WANDB_ENTITY", "wandb")
+    monkeypatch.setenv("WANDB_PROJECT", "fugue-test")
+    agent = FugueWBAResponses(
+        logs_dir=tmp_path,
+        model_name="wandb/zai-org/GLM-5.2",
+        transport_profile="chat-inline",
+    )
+
+    class Environment:
+        default_user = "agent-user"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def exec(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    environment = Environment()
+    asyncio.run(
+        agent.exec_as_agent(
+            environment,
+            command="pwd",
+            env={"SAFE_VALUE": "one"},
+            timeout_sec=10,
+        )
+    )
+
+    assert environment.calls == [
+        {
+            "command": "pwd",
+            "env": {"SAFE_VALUE": "one"},
+            "cwd": None,
+            "timeout_sec": 10,
+            "user": "agent-user",
+        }
+    ]
+
+
+def test_chat_stream_reconciles_fragmented_tool_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def completion(**kwargs: Any) -> Any:
+        del kwargs
+
+        async def chunks():
+            yield {
+                "id": "response-a",
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "inspect ",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_",
+                                    "function": {
+                                        "name": "she",
+                                        "arguments": '{"command":"py',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+            }
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_content": "evidence",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "1",
+                                    "function": {
+                                        "name": "ll",
+                                        "arguments": 'thon -V"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8},
+            }
+
+        return chunks()
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=completion))
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+
+    async def exercise() -> Any:
+        client = _client("chat-inline")
+        try:
+            return await client._chat_inline([], stream=True)
+        finally:
+            await client.close()
+
+    result = asyncio.run(exercise())
+
+    assert result.reasoning == {"text": "inspect evidence"}
+    assert result.tool_calls[0].call_id == "call_1"
+    assert result.tool_calls[0].name == "shell"
+    assert result.tool_calls[0].arguments == {"command": "python -V"}
+    assert result.input_tokens == 12
+    assert result.output_tokens == 8
+
+
+def test_responses_parser_preserves_reasoning_and_multiple_call_ids() -> None:
+    result = RUNNER["_parse_responses"](
+        {
+            "id": "response-a",
+            "status": "completed",
+            "usage": {"input_tokens": 5, "output_tokens": 7},
+            "output": [
+                {"type": "reasoning", "summary": [{"text": "inspect"}]},
+                {
+                    "type": "function_call",
+                    "call_id": "call-a",
+                    "name": "shell",
+                    "arguments": '{"command":"ls"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-b",
+                    "name": "shell",
+                    "arguments": '{"command":"pwd"}',
+                },
+            ],
+        }
+    )
+
+    assert result.reasoning["type"] == "reasoning"
+    assert [call.call_id for call in result.tool_calls] == ["call-a", "call-b"]
+    assert result.finish_reason == "completed"
+
+
+def test_responses_parser_preserves_text_only_output() -> None:
+    result = RUNNER["_parse_responses"](
+        {
+            "id": "response-text",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}],
+                }
+            ],
+        }
+    )
+
+    assert result.text == "done"
+    assert result.tool_calls == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ({"id": "", "name": "shell", "arguments": "{}"}, "durable call id"),
+        (
+            {"id": "call-a", "name": "shell", "arguments": "{bad"},
+            "malformed tool arguments",
+        ),
+    ],
+)
+def test_tool_call_parser_fails_closed(raw: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        RUNNER["_tool_call"](raw)
+
+
+def test_history_builder_rejects_missing_tool_outputs() -> None:
+    turn = RUNNER["ModelTurn"](
+        tool_calls=[RUNNER["ToolCall"]("call-a", "shell", {"command": "pwd"})]
+    )
+
+    with pytest.raises(ValueError, match=r"zip\(\) argument 2 is shorter"):
+        RUNNER["_assistant_group"]("chat-inline", turn, [])
+
+
+def test_shell_tool_error_is_recoverable_and_bounded(tmp_path: Path) -> None:
+    events = _Events()
+    call = RUNNER["ToolCall"](
+        "call-a",
+        "shell",
+        {"command": "printf failure >&2; exit 7"},
+    )
+
+    output, is_error = asyncio.run(
+        RUNNER["_execute_tool"](
+            call,
+            {"workspace": tmp_path.as_posix()},
+            events,
+            _Trace(),
+        )
+    )
+
+    assert is_error is True
+    assert "status 7" in output
+    assert "failure" in output
+    assert events.rows[-1][1]["call_id"] == "call-a"
+
+
+def test_shell_tool_cancellation_kills_the_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 4242
+        returncode = -9
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                await asyncio.Future()
+            return b"", b"cancelled"
+
+    process = Process()
+    signals: list[tuple[int, int]] = []
+
+    async def create_subprocess(*args: Any, **kwargs: Any) -> Process:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(RUNNER["asyncio"], "create_subprocess_shell", create_subprocess)
+    monkeypatch.setattr(
+        RUNNER["os"],
+        "killpg",
+        lambda pid, signal_number: signals.append((pid, signal_number)),
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            RUNNER["_execute_tool"](
+                RUNNER["ToolCall"]("call-a", "shell", {"command": "sleep 60"}),
+                {"workspace": tmp_path.as_posix()},
+                _Events(),
+                _Trace(),
+            )
+        )
+        await process.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert signals == [(4242, RUNNER["signal"].SIGKILL)]
+
+
+def test_shell_tool_timeout_is_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 4343
+        returncode = -9
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError
+            return b"partial output", b""
+
+    process = Process()
+    signals: list[tuple[int, int]] = []
+
+    async def create_subprocess(*args: Any, **kwargs: Any) -> Process:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(RUNNER["asyncio"], "create_subprocess_shell", create_subprocess)
+    monkeypatch.setattr(
+        RUNNER["os"],
+        "killpg",
+        lambda pid, signal_number: signals.append((pid, signal_number)),
+    )
+
+    output, is_error = asyncio.run(
+        RUNNER["_execute_tool"](
+            RUNNER["ToolCall"]("call-a", "shell", {"command": "slow"}),
+            {"workspace": tmp_path.as_posix()},
+            _Events(),
+            _Trace(),
+        )
+    )
+
+    assert is_error is True
+    assert "timed out" in output
+    assert signals == [(4343, RUNNER["signal"].SIGKILL)]
+
+
+def test_retry_policy_records_recoverable_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client("chat-inline")
+    attempts = 0
+
+    async def operation() -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("temporary")
+        return RUNNER["ModelTurn"](text="recovered")
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(RUNNER["asyncio"], "sleep", no_sleep)
+    result = asyncio.run(client._retry(operation, "agent"))
+
+    assert result.text == "recovered"
+    assert client.retries == 1
+    assert client.events.rows[0][0] == "model_retry"
+
+
+def test_responses_stream_fails_closed_when_completion_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyIterator:
+        def __aiter__(self) -> EmptyIterator:
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+    async def responses(**kwargs: Any) -> EmptyIterator:
+        assert kwargs["stream"] is True
+        return EmptyIterator()
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(aresponses=responses))
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+
+    async def exercise() -> None:
+        client = _client("responses-inline")
+        try:
+            with pytest.raises(RuntimeError, match="ended without output"):
+                await client._responses_inline([], stream=True)
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+
+
+def test_compaction_preserves_head_and_tail_groups() -> None:
+    class Client:
+        profile = "chat-inline"
+
+        async def summarize(self, text: str) -> str:
+            assert "middle" in text
+            return "locked summary"
+
+    groups = [[{"role": "user", "content": f"middle-{index}"}] for index in range(7)]
+    compacted, changed = asyncio.run(
+        RUNNER["_compact_if_needed"](
+            groups,
+            Client(),
+            {"system_prompt": "fixed", "context_window": 20},
+            _Events(),
+        )
+    )
+
+    assert changed is True
+    assert compacted[0] == groups[0]
+    assert compacted[-3:] == groups[-3:]
+    assert "locked summary" in compacted[1][0]["content"]
+
+
+def test_compaction_falls_back_without_losing_the_locked_history() -> None:
+    class Client:
+        profile = "responses-inline"
+
+        async def summarize(self, text: str) -> str:
+            del text
+            raise ConnectionError("summary unavailable")
+
+    events = _Events()
+    groups = [[{"role": "user", "content": f"middle-{index}"}] for index in range(7)]
+
+    compacted, changed = asyncio.run(
+        RUNNER["_compact_if_needed"](
+            groups,
+            Client(),
+            {"system_prompt": "fixed", "context_window": 20},
+            events,
+        )
+    )
+
+    assert changed is True
+    assert compacted[0] == groups[0]
+    assert compacted[-3:] == groups[-3:]
+    assert "inspect the current workspace" in json.dumps(compacted[1])
+    assert any(event == "compaction_fallback" for event, _value in events.rows)
+
+
+def test_runner_config_rejects_unknown_fields(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"profile": "chat-inline", "arbitrary_url": "x"}))
+
+    with pytest.raises(ValueError, match="unknown runner config"):
+        RUNNER["_load_config"](path)
+
+
+def test_openai_client_lifecycle_closes_once() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    model_client = _client("responses-proxy")
+    openai_client = Client()
+    model_client._openai = openai_client
+
+    asyncio.run(model_client.close())
+
+    assert openai_client.closed == 1
+    assert model_client._openai is None
+
+
+def test_inline_client_lifecycle_closes_once() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        async def aclose(self) -> None:
+            self.closed += 1
+
+    model_client = _client("responses-inline")
+    inline_client = Client()
+    model_client._inline_http = inline_client
+
+    asyncio.run(model_client.close())
+
+    assert inline_client.closed == 1
+    assert model_client._inline_http is None
+
+
+def test_wba_registered_experiment_resolves_exact_locked_matrices() -> None:
+    service = OperatorService(Path(__file__).parents[1])
+
+    canary = service.resolve_run_plan(
+        ExperimentRequest(
+            experiment_id="wba-transport-ablation-v1",
+            preset="canary",
+        ),
+        run_id="wba-canary-test",
+    )
+    primary = service.resolve_run_plan(
+        ExperimentRequest(
+            experiment_id="wba-transport-ablation-v1",
+            preset="primary",
+        ),
+        run_id="wba-primary-test",
+    )
+
+    assert (len(canary.cells), canary.max_workers) == (3, 1)
+    assert (len(primary.cells), primary.max_workers) == (48, 1)
+    assert len({job.candidate_id for job in canary.jobs}) == 3
+    assert {job.model_transport["profile"] for job in canary.jobs} == {
+        "responses-proxy",
+        "responses-inline",
+        "chat-inline",
+    }
+    assert {job.model_transport["upstream_host"] for job in canary.jobs} == {
+        "api.inference.wandb.ai"
+    }
+    assert {job.model_transport["provider_wire_protocol"] for job in canary.jobs} == {
+        "chat_completions"
+    }
+    assert {
+        job.model_transport["profile"]: job.model_transport["bridge_required"]
+        for job in canary.jobs
+    } == {
+        "responses-proxy": True,
+        "responses-inline": False,
+        "chat-inline": False,
+    }
+    assert {job.task_id for job in primary.jobs} == {
+        "trace-auth-diagnosis",
+        "tool-call-reconciliation",
+        "evaluation-regression",
+        "judge-disagreement",
+        "latency-anomaly",
+        "retry-cost-anomaly",
+        "evidence-intervention",
+        "evaluation-plan-artifact",
+    }
+
+
+def test_wba_campaign_exposes_an_exact_queryable_canary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).parents[1]
+    source = campaign_lifecycle.resolve_fugue_source_provenance(repo_root)
+    monkeypatch.setattr(
+        campaign_lifecycle,
+        "resolve_fugue_source_provenance",
+        lambda _: {**source, "dirty": False},
+    )
+    service = CampaignService(repo_root)
+    catalog = service.catalog("wba-transport-ablation-v1")
+    proposal = build_experiment_proposal(
+        proposal_id="wba-transport-qualification-001",
+        campaign_id="wba-transport-ablation-v1",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Does transport topology change outcomes?",
+        hypothesis="Responses conversion may alter protocol integrity.",
+        fixed_dimensions=(
+            "model",
+            "endpoint",
+            "task",
+            "system prompt",
+            "tool",
+            "loop policy",
+            "runtime",
+            "attempt",
+        ),
+        varied_dimensions=("transport profile",),
+        measured_dimensions=(
+            "task pass",
+            "artifact pass",
+            "protocol integrity",
+            "latency",
+            "tokens",
+            "cost",
+        ),
+        experiment_id="wba-transport-ablation-v1",
+        model="wandb/zai-org/GLM-5.2",
+        n_attempts=1,
+        n_concurrent=1,
+        workloads=("transport",),
+        harnesses=("wba-responses",),
+        context_systems=("none",),
+        variants=("responses-proxy", "responses-inline", "chat-inline"),
+        n_tasks=1,
+        trace_content="full",
+    )
+
+    preview = service.preview(proposal)
+
+    assert preview.cell_count == 3
+    assert preview.applicable_cells == 3
+    assert preview.expected_predictions == 3
+    assert preview.max_concurrent == 1
+    assert {cell["model_transport"]["profile"] for cell in preview.cells} == {
+        "responses-proxy",
+        "responses-inline",
+        "chat-inline",
+    }
+
+
+def test_wba_offline_tasks_materialize_and_verify_reference_output(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).parents[1]
+    manifest = load_manifest(repo_root / "datasets/wba-transport-ablation-v1.yaml")
+    source_path = repo_root / "datasets/wba-transport-ablation-v1.jsonl"
+    result = WBATransportTaskMaterializer().materialize(
+        manifest,
+        tmp_path / "tasks",
+        source_path,
+        repo_root=repo_root,
+    )
+
+    assert result == {"tasks": 8, "offline": True, "scenarios": 4}
+    task = tmp_path / "tasks/trace-auth-diagnosis"
+    instruction = (task / "instruction.md").read_text()
+    assert "/workspace/resources/trace-auth-failure.jsonl" in instruction
+    assert "expired service token" not in instruction.casefold()
+    interaction = TaskInteractionController.from_environment(
+        logs_dir=tmp_path / "interaction",
+        initial_instruction=instruction,
+        env={
+            "FUGUE_TASK_INTERACTION": json.dumps(
+                manifest.tasks[0].metadata["interaction_controller"]
+            )
+        },
+    )
+    assert interaction.plan.profile_id == "scripted-reviewer-v1"
+    assert interaction.plan.follow_up_count == 1
+
+    logs = tmp_path / "logs"
+    artifact = logs / "artifacts"
+    artifact.mkdir(parents=True)
+    (artifact / "fugue-answer.md").write_text(
+        (task / "solution/reference-answer.md").read_text()
+    )
+    (artifact / "root-cause.json").write_text(
+        (task / "solution/reference-artifact.json").read_text()
+    )
+    verifier = tmp_path / "verify.sh"
+    verifier.write_text(
+        (task / "tests/test.sh").read_text().replace("/logs", logs.as_posix())
+    )
+    completed = subprocess.run(
+        ["sh", verifier.as_posix()],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((logs / "verifier/reward.json").read_text()) == {
+        "answer_facts": 1.0,
+        "artifact_contract": 1.0,
+        "task_pass": 1.0,
+    }
+
+
+def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
+    rows = []
+    for task in ("task-a", "task-b"):
+        for attempt in (1, 2):
+            outcomes = {
+                "responses-proxy": False,
+                "responses-inline": task == "task-a",
+                "chat-inline": task == "task-a" or attempt == 2,
+            }
+            for profile, passed in outcomes.items():
+                rows.append(
+                    {
+                        "harness": "wba-responses",
+                        "task_name": task,
+                        "trial_index": attempt,
+                        "transport_profile": profile,
+                        "pass": passed,
+                        "transport_normalization_errors": 0,
+                        "transport_orphan_tool_outputs": 0,
+                    }
+                )
+
+    result = analyze_wba_transport_rows(rows, bootstrap_samples=2_000)
+
+    assert result["complete_grid"] is True
+    assert result["aligned_coordinates"] == 4
+    assert {
+        profile: (value["passes"], value["trials"])
+        for profile, value in result["arm_totals"].items()
+    } == {
+        "responses-proxy": (0, 4),
+        "responses-inline": (2, 4),
+        "chat-inline": (3, 4),
+    }
+    assert result["contrasts"][0]["id"] == "refactor_topology"
+    assert result["contrasts"][0]["pass_rate_delta"] == 0.5
+    assert result["contrasts"][1]["id"] == "responses_stack_gap"
+    assert result["contrasts"][1]["discordance"] == {
+        "treatment_only_pass": 1,
+        "reference_only_pass": 0,
+        "same_outcome": 3,
+    }
+
+
+def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    agent = trial / "agent"
+    agent.mkdir(parents=True)
+    summary = {
+        "schema_version": 1,
+        "session_id": "session-a",
+        "profile": "responses-inline",
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "tool_calls": 2,
+        "tool_errors": 0,
+        "orphan_tool_outputs": 0,
+        "normalization_errors": 0,
+        "stream_events": 9,
+        "retries": 0,
+        "compactions": 0,
+        "stop_reason": "completed",
+    }
+    (agent / "wba-responses-summary.json").write_text(json.dumps(summary))
+    meta = {
+        "harness": "wba-responses",
+        "model_transport": {"profile": "responses-inline"},
+        "native_session_ids": ["session-a"],
+    }
+
+    evidence = _wba_transport_evidence(trial, meta)
+    safe = safe_prediction_row({"harness": "wba-responses", **evidence})
+
+    assert evidence["wba_transport_status"] == "valid"
+    assert safe["transport_profile"] == "responses-inline"
+    assert safe["wba_transport"]["tool_calls"] == 2
+    assert (
+        _wba_transport_evidence(
+            trial,
+            {**meta, "native_session_ids": ["different-session"]},
+        )["wba_transport_status"]
+        == "invalid"
+    )
+    (agent / "wba-responses-summary.json").unlink()
+    assert _wba_transport_evidence(trial, meta)["wba_transport_status"] == "missing"

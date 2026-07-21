@@ -23,6 +23,27 @@ def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
         get_experiment(path.stem)
 
 
+def test_experiment_cell_failure_cancellation_policy_is_strict() -> None:
+    experiment = experiment_from_data(
+        {
+            "id": "fail-fast",
+            "title": "Fail fast",
+            "cancel_on_cell_failure": True,
+        }
+    )
+
+    assert experiment.cancel_on_cell_failure is True
+    assert experiment.to_dict()["cancel_on_cell_failure"] is True
+    with pytest.raises(ValueError, match="must be a boolean"):
+        experiment_from_data(
+            {
+                "id": "not-strict",
+                "title": "Not strict",
+                "cancel_on_cell_failure": "yes",
+            }
+        )
+
+
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
     prompt = tmp_path / "configs/fugue/prompts/fugue-maintainer.md"
     prompt.parent.mkdir(parents=True)
@@ -201,11 +222,11 @@ def test_workload_rejects_unknown_variant_and_assignment() -> None:
         experiment_from_data(
             {
                 **common,
-                "workloads": [
-                    {"id": "study", "harness_assignment": "random"}
-                ],
+                "workloads": [{"id": "study", "harness_assignment": "random"}],
             }
         )
+
+
 def test_experiment_defaults_to_baseline_variant(tmp_path):
     save_experiment(
         "experiment-b",

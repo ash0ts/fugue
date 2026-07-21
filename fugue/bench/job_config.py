@@ -66,6 +66,7 @@ from fugue.bench.task_runtime import read_task_runtime_lock
 from fugue.model_plane import (
     ModelRoute,
     model_route_identity,
+    resolve_harness_model_route,
     resolve_model_route,
     select_model,
 )
@@ -97,6 +98,7 @@ class RenderedJob:
     variant_label: str
     agent_config_hash: str
     route: ModelRoute
+    model_transport: dict[str, Any]
     workload_id: str
     preset_id: str | None
     run_id: str
@@ -377,6 +379,12 @@ def _build_jobs(
                     tasks[0],
                     repo_root,
                 )
+                model_transport = _model_transport(
+                    route,
+                    harness.name,
+                    experiment,
+                    variant,
+                )
                 resolved_candidate = resolve_candidate(
                     harness=harness.name,
                     harness_version=(
@@ -384,7 +392,11 @@ def _build_jobs(
                         if agent_runtime_spec(harness.name) is not None
                         else harness.agent
                     ),
-                    model_route=_candidate_model_route(route),
+                    model_route=_candidate_model_route(
+                        route,
+                        harness.name,
+                        model_transport,
+                    ),
                     prompt_digest=next(iter(content_hashes["prompts"].values()), None),
                     skills=[item.provenance() for item in resolved_skills],
                     context={
@@ -467,6 +479,7 @@ def _build_jobs(
                     collect_evidence=bool(required_capabilities),
                     workload_artifacts=workload_artifacts or [],
                     scorer_hashes=scorer_hashes,
+                    model_transport=model_transport,
                 )
                 config_path = config_dir / f"{job_name}.json"
                 if write_configs:
@@ -505,6 +518,7 @@ def _build_jobs(
                     expected_artifact_paths=config.get("fugue", {}).get(
                         "expected_artifact_paths", []
                     ),
+                    model_transport=model_transport,
                 )
                 rendered.append(
                     RenderedJob(
@@ -526,6 +540,7 @@ def _build_jobs(
                         variant_label=variant.label,
                         agent_config_hash=agent_config_hash,
                         route=route,
+                        model_transport=model_transport,
                         workload_id=workload_id,
                         preset_id=preset_id,
                         run_id=run_id,
@@ -592,6 +607,7 @@ def _job_config(
     collect_evidence: bool,
     workload_artifacts: list[Any],
     scorer_hashes: dict[str, str],
+    model_transport: dict[str, Any],
 ) -> dict[str, Any]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     task_architecture = _task_architecture(tasks[0])
@@ -726,6 +742,7 @@ def _job_config(
         ),
         "model_provider": route.provider,
         "model": route.display_model,
+        "model_transport": model_transport,
         "trace_content": experiment.trace_content,
         "harness_capabilities": harness_capabilities(harness.agent).to_dict(),
         "scorer_hashes": scorer_hashes,
@@ -742,9 +759,10 @@ def _evaluation_cases(
     repo_root: Path,
     overlay: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
-    if manifest.dataset.materializer == (
-        "fugue.bench.task_authoring:AuthoredTaskMaterializer"
-    ):
+    if manifest.dataset.materializer in {
+        "fugue.bench.task_authoring:AuthoredTaskMaterializer",
+        "fugue.bench.wba_transport_tasks:WBATransportTaskMaterializer",
+    }:
         return {}
     source_path = str(manifest.dataset.source.get("path") or "")
     if not source_path:
@@ -910,6 +928,7 @@ def _job_env(
     candidate_id: str,
     execution_fingerprint: str,
     expected_artifact_paths: list[str],
+    model_transport: dict[str, Any],
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = _content_hashes(
@@ -990,6 +1009,9 @@ def _job_env(
             "FUGUE_TASK_AUTHORING": json.dumps(
                 _task_authoring_metadata(task), sort_keys=True
             ),
+            "FUGUE_TASK_INTERACTION": json.dumps(
+                _task_interaction_metadata(task), sort_keys=True
+            ),
             "FUGUE_REPOSITORY": task.repo or "",
             "FUGUE_BASE_COMMIT": task.base_commit or "",
             "FUGUE_TRIAL_INDEX": str(trial_index),
@@ -1000,6 +1022,7 @@ def _job_env(
             "FUGUE_IDENTITY_SCHEMA_VERSION": str(CANDIDATE_IDENTITY_SCHEMA_VERSION),
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
+            "FUGUE_MODEL_TRANSPORT_JSON": json.dumps(model_transport, sort_keys=True),
             "FUGUE_TRACE_CONTENT": experiment.trace_content,
             "PYTHONPATH": _prepend_path(repo_root, base_env.get("PYTHONPATH")),
         }
@@ -1364,6 +1387,15 @@ def _task_authoring_metadata(task: TaskSpec) -> dict[str, Any]:
     return json.loads(json.dumps(value, sort_keys=True))
 
 
+def _task_interaction_metadata(task: TaskSpec) -> dict[str, Any]:
+    value = task.metadata.get("interaction_controller")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"task {task.id} interaction_controller must be an object")
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
 def _authored_task_applicability(
     task: TaskSpec,
     harness: str,
@@ -1499,8 +1531,47 @@ def _identity_configuration(value: Any) -> Any:
     return value
 
 
-def _candidate_model_route(route: ModelRoute) -> dict[str, Any]:
-    return model_route_identity(route)
+def _candidate_model_route(
+    route: ModelRoute,
+    harness: str,
+    model_transport: dict[str, Any],
+) -> dict[str, Any]:
+    identity = model_route_identity(route)
+    if harness.removeprefix("fugue-") == "wba-responses":
+        identity["transport"] = model_transport
+    return identity
+
+
+def _model_transport(
+    route: ModelRoute,
+    harness: str,
+    experiment: ExperimentSpec,
+    variant: FeatureVariant,
+) -> dict[str, Any]:
+    agent_kwargs = _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs)
+    profile = agent_kwargs.get("transport_profile")
+    normalized_harness = harness.removeprefix("fugue-")
+    if normalized_harness == "wba-responses":
+        return dict(
+            resolve_harness_model_route(
+                route,
+                harness,
+                transport_profile=(str(profile) if profile is not None else None),
+            )
+        )
+    try:
+        return dict(
+            resolve_harness_model_route(
+                route,
+                harness,
+                transport_profile=(str(profile) if profile is not None else None),
+            )
+        )
+    except ValueError:
+        # Custom Harbor agents retain the pre-existing extension path. They do
+        # not receive a Fugue-owned transport receipt until explicitly
+        # registered and reviewed.
+        return {}
 
 
 def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -> str:

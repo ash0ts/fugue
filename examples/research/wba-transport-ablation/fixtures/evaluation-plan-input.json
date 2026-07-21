@@ -1,0 +1,9 @@
+{
+  "objective": "Detect transport-induced task regressions without promoting a universal winner.",
+  "locked_dimensions": ["model", "tasks", "prompt", "tools", "runtime", "sampling", "attempt"],
+  "transport_profiles": ["responses-proxy", "responses-inline", "chat-inline"],
+  "primary_metric": "task_pass",
+  "guardrail": "provider_error_rate",
+  "attempts": 2,
+  "requested_artifact": "/logs/artifacts/eval-plan.json"
+}

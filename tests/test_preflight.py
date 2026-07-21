@@ -187,6 +187,49 @@ def test_preflight_attests_bridge_for_selected_native_protocol(
     assert captured["route"].display_model == "wandb/zai-org/GLM-5.2"
 
 
+def test_wba_preflight_only_requires_bridge_for_proxy_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+
+    def unexpected_bridge_status(**kwargs):
+        raise AssertionError(f"bridge status must not run: {kwargs}")
+
+    monkeypatch.setattr("fugue.preflight.bridge_status", unexpected_bridge_status)
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={},
+        live=True,
+        harnesses=("wba-responses",),
+        wba_transport_profiles=("responses-inline", "chat-inline"),
+    )
+    assert next(check for check in checks if check.name == "bridge health").ok
+
+
+def test_wba_proxy_profile_attests_bridge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.preflight.bridge_status",
+        lambda **kwargs: {
+            "ok": True,
+            "runtime_lock": {"image": "bridge@example"},
+            "resolved_image_id": "sha256:resolved",
+        },
+    )
+    checks = run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={},
+        live=True,
+        harnesses=("wba-responses",),
+        wba_transport_profiles=("responses-proxy", "responses-inline"),
+    )
+    assert next(check for check in checks if check.name == "bridge health").ok
+
+
 def test_wandb_preflight_attributes_inference_to_trace_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

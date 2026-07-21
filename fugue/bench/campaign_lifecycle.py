@@ -107,6 +107,7 @@ from fugue.bench.task_authoring import (
     task_suite_lock_from_dict,
     task_suite_preview_from_dict,
 )
+from fugue.bench.wba_transport_analysis import analyze_wba_transport_rows
 from fugue.model_plane import (
     model_route_identity,
     resolve_harness_model_route,
@@ -2428,6 +2429,16 @@ class CampaignService:
                         if preview.selection is not None
                         else None
                     ),
+                    **(
+                        {
+                            "transport_analysis": analyze_wba_transport_rows(
+                                preview.snapshot.rows,
+                                seed=preview.snapshot.digest,
+                            )
+                        }
+                        if analysis_id == "wba-transport-ablation-v1"
+                        else {}
+                    ),
                 }
             )
         return tuple(results)
@@ -3433,7 +3444,22 @@ def _prepared_route_locks(
         try:
             route = resolve_model_route(model, env)
             route_identity = model_route_identity(route)
-            transport = resolve_harness_model_route(route, harness)
+            locked_transport = cell.get("model_transport")
+            profile = (
+                str(locked_transport.get("profile"))
+                if isinstance(locked_transport, Mapping)
+                and locked_transport.get("profile")
+                else None
+            )
+            transport = resolve_harness_model_route(
+                route,
+                harness,
+                transport_profile=profile,
+            )
+            if locked_transport and _json_value(locked_transport) != _json_value(
+                transport
+            ):
+                raise ValueError("locked transport receipt drifted")
         except ValueError as exc:
             raise CampaignError(
                 "route_lock_invalid",
@@ -3614,6 +3640,7 @@ def _plan_cell_record(
         "variant_id": cell.variant_id,
         "model_provider": cell.model_provider,
         "model": cell.model,
+        "model_transport": job.model_transport if job else {},
         "trial_index": cell.trial_index,
         "comparison_example_id": cell.comparison_example_id,
         "candidate_id": cell.candidate_id,

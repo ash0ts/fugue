@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import urlparse
 
 Provider = Literal["wandb", "openai", "anthropic"]
 ToolResultModality = Literal["text", "image"]
 ModelWireProtocol = Literal["chat_completions", "messages", "responses"]
+WBATransportProfile = Literal[
+    "responses-proxy",
+    "responses-inline",
+    "chat-inline",
+]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
@@ -32,6 +39,73 @@ _HARNESS_PROTOCOLS: dict[str, ModelWireProtocol] = {
     "openclaw": "chat_completions",
     "claude-code": "messages",
     "codex": "responses",
+    "wba-responses": "responses",
+}
+
+WBA_TRANSPORT_CONTRACT_VERSION = 1
+WBA_DEFAULT_TRANSPORT_PROFILE: WBATransportProfile = "responses-inline"
+WBA_CORE_COMPATIBILITY_REFERENCE = "wandb/core@05115fffae784aef09bc0d4167ce19a587caf839"
+WBA_RUNTIME_DEPENDENCIES = {
+    "python": "3.13.5",
+    "litellm": "1.93.0",
+    "openai": "2.24.0",
+    "pydantic": "2.12.5",
+    "tenacity": "9.1.4",
+    "tiktoken": "0.12.0",
+    "weave": "0.53.0",
+}
+WBA_RETRY_POLICY = {
+    "attempts": 5,
+    "backoff": "exponential-capped-8s-v1",
+    "client_retries": 0,
+}
+WBA_TIMEOUT_POLICY = {
+    "request_timeout_sec": 300,
+    "http_timeout_sec": 120,
+    "connect_timeout_sec": 30,
+    "shell_timeout_sec": 120,
+    "shell_timeout_max_sec": 180,
+}
+WBA_COMPACTION_POLICY = {
+    "strategy": "summarize-middle-v1",
+    "trigger_ratio": 0.8,
+    "keep_head_turns": 1,
+    "keep_tail_turns": 3,
+}
+WBA_LOOP_POLICY = {
+    "max_steps_per_turn": 20,
+    "tool_names": ["shell"],
+    "shell_output_limit_bytes": 100_000,
+}
+WBA_SAMPLING_POLICY = {
+    "temperature": 0.0,
+}
+
+_WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
+    "responses-proxy": {
+        "agent_wire_protocol": "responses",
+        "provider_wire_protocol": "chat_completions",
+        "client": "openai-responses",
+        "codec": "fugue-litellm-responses-proxy-v1",
+        "conversion_location": "external_proxy",
+        "bridge_required": True,
+    },
+    "responses-inline": {
+        "agent_wire_protocol": "responses",
+        "provider_wire_protocol": "chat_completions",
+        "client": "litellm-responses",
+        "codec": "litellm-responses-to-chat-v1",
+        "conversion_location": "in_process",
+        "bridge_required": False,
+    },
+    "chat-inline": {
+        "agent_wire_protocol": "chat_completions",
+        "provider_wire_protocol": "chat_completions",
+        "client": "litellm-chat",
+        "codec": "chat-completions-native-v1",
+        "conversion_location": "none",
+        "bridge_required": False,
+    },
 }
 
 
@@ -144,8 +218,75 @@ def model_route_identity(route: ModelRoute) -> dict[str, object]:
     }
 
 
-def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, object]:
+def normalize_wba_transport_profile(
+    value: str | None,
+) -> WBATransportProfile:
+    selected = str(value or WBA_DEFAULT_TRANSPORT_PROFILE).strip().lower()
+    if selected not in _WBA_TRANSPORT_PROFILES:
+        expected = ", ".join(sorted(_WBA_TRANSPORT_PROFILES))
+        raise ValueError(
+            f"unsupported WBA transport profile {value!r}; expected one of {expected}"
+        )
+    return cast(WBATransportProfile, selected)
+
+
+def resolve_wba_transport_receipt(
+    route: ModelRoute,
+    profile: str | None,
+) -> dict[str, object]:
+    selected = normalize_wba_transport_profile(profile)
+    profile_spec = _WBA_TRANSPORT_PROFILES[selected]
+    bridge_required = bool(profile_spec["bridge_required"])
+    receipt: dict[str, object] = {
+        "schema_version": WBA_TRANSPORT_CONTRACT_VERSION,
+        "harness": "wba-responses",
+        "profile": selected,
+        "wire_protocol": profile_spec["agent_wire_protocol"],
+        "agent_wire_protocol": profile_spec["agent_wire_protocol"],
+        "provider_wire_protocol": profile_spec["provider_wire_protocol"],
+        "client": profile_spec["client"],
+        "codec": profile_spec["codec"],
+        "conversion_location": profile_spec["conversion_location"],
+        "endpoint_kind": "fugue_bridge" if bridge_required else "provider_direct",
+        "model_provider": route.provider,
+        "model_id": route.model_id,
+        "provider_endpoint": route.chat_base_url,
+        "upstream_host": _provider_host(route),
+        "bridge_required": bridge_required,
+        "runtime_dependencies": dict(WBA_RUNTIME_DEPENDENCIES),
+        "compatibility_reference": WBA_CORE_COMPATIBILITY_REFERENCE,
+        "retry_policy": dict(WBA_RETRY_POLICY),
+        "retry_policy_digest": _wba_policy_digest(WBA_RETRY_POLICY),
+        "timeout_policy": dict(WBA_TIMEOUT_POLICY),
+        "timeout_policy_digest": _wba_policy_digest(WBA_TIMEOUT_POLICY),
+        "compaction_policy": dict(WBA_COMPACTION_POLICY),
+        "compaction_policy_digest": _wba_policy_digest(WBA_COMPACTION_POLICY),
+        "loop_policy": dict(WBA_LOOP_POLICY),
+        "loop_policy_digest": _wba_policy_digest(WBA_LOOP_POLICY),
+        "sampling_policy": dict(WBA_SAMPLING_POLICY),
+        "sampling_policy_digest": _wba_policy_digest(WBA_SAMPLING_POLICY),
+    }
+    receipt["route_digest"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return receipt
+
+
+def _wba_policy_digest(value: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def resolve_harness_model_route(
+    route: ModelRoute,
+    harness: str,
+    *,
+    transport_profile: str | None = None,
+) -> dict[str, object]:
     normalized = harness.removeprefix("fugue-").strip().lower()
+    if normalized == "wba-responses":
+        return resolve_wba_transport_receipt(route, transport_profile)
     try:
         protocol = _HARNESS_PROTOCOLS[normalized]
     except KeyError as exc:

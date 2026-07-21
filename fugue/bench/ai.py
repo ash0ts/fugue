@@ -1771,7 +1771,13 @@ def _validate_experiment_references(
     overlay: Mapping[str, str] | None = None,
 ) -> None:
     asset_ids = {(item.kind, item.id) for item in assets}
-    allowed_harnesses = {"hermes", "openclaw", "claude-code", "codex"}
+    allowed_harnesses = {
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex",
+        "wba-responses",
+    }
     unknown_harnesses = sorted(set(experiment.harnesses) - allowed_harnesses)
     if unknown_harnesses:
         raise ValueError(f"unknown harnesses: {', '.join(unknown_harnesses)}")

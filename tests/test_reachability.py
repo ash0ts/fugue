@@ -15,6 +15,7 @@ SUPPORTED_AGENTS = {
     "fugue.agents:FugueOpenClaw",
     "fugue.agents:FugueClaudeCode",
     "fugue.agents:FugueCodex",
+    "fugue.agents:FugueWBAResponses",
 }
 
 

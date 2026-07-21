@@ -13,6 +13,7 @@ from fugue.model_plane import (
     provider_request_headers,
     resolve_harness_model_route,
     resolve_model_route,
+    resolve_wba_transport_receipt,
     select_model,
     structured_assistant_options,
     trace_entity_project,
@@ -48,6 +49,51 @@ def test_resolve_model_route_for_supported_providers() -> None:
     assert anthropic.api_key_env == "ANTHROPIC_API_KEY"
     assert anthropic.chat_base_url is None
     assert anthropic.messages_base_url == "https://api.anthropic.com"
+
+
+def test_wba_transport_receipts_lock_three_distinct_topologies() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    receipts = {
+        profile: resolve_wba_transport_receipt(route, profile)
+        for profile in (
+            "responses-proxy",
+            "responses-inline",
+            "chat-inline",
+        )
+    }
+
+    assert len({value["route_digest"] for value in receipts.values()}) == 3
+    assert {value["upstream_host"] for value in receipts.values()} == {
+        "api.inference.wandb.ai"
+    }
+    assert {value["provider_wire_protocol"] for value in receipts.values()} == {
+        "chat_completions"
+    }
+    assert {value["model_provider"] for value in receipts.values()} == {"wandb"}
+    assert {value["model_id"] for value in receipts.values()} == {
+        "zai-org/GLM-5.2"
+    }
+    assert {value["provider_endpoint"] for value in receipts.values()} == {
+        "https://api.inference.wandb.ai/v1"
+    }
+    assert receipts["responses-proxy"]["bridge_required"] is True
+    assert receipts["responses-inline"]["bridge_required"] is False
+    assert receipts["chat-inline"]["bridge_required"] is False
+    assert {value["sampling_policy"]["temperature"] for value in receipts.values()} == {
+        0.0
+    }
+    assert len({value["sampling_policy_digest"] for value in receipts.values()}) == 1
+
+
+def test_wba_transport_profile_rejects_unregistered_overrides() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+
+    with pytest.raises(ValueError, match="unsupported WBA transport profile"):
+        resolve_harness_model_route(
+            route,
+            "wba-responses",
+            transport_profile="https://arbitrary.example/v1",
+        )
 
 
 @pytest.mark.parametrize(

@@ -48,6 +48,7 @@ from fugue.bench.evaluation_assets import (
 )
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
 from fugue.bench.execution import (
+    CellOutcome,
     PlannedCell,
     execute_cells,
     latest_cell_records,
@@ -137,7 +138,6 @@ from fugue.bridge import (
 )
 from fugue.model_plane import (
     model_route_identity,
-    resolve_harness_model_route,
     resolve_model_route,
     select_model,
     trace_env_defaults,
@@ -584,6 +584,20 @@ class OperatorService:
             env=env,
             live=live,
             harnesses=tuple(selected.harnesses),
+            wba_transport_profiles=tuple(
+                str(
+                    {
+                        **selected.agent_kwargs,
+                        **variant.agent_kwargs,
+                    }.get("transport_profile")
+                )
+                for variant in selected.variants
+                if variant.enabled
+                and {
+                    **selected.agent_kwargs,
+                    **variant.agent_kwargs,
+                }.get("transport_profile")
+            ),
             builder_model=builder_model,
             judge_model=judge_model,
         )
@@ -1853,6 +1867,7 @@ class OperatorService:
                     variant_label=variant.label,
                     agent_config_hash="",
                     route=route,
+                    model_transport={},
                     workload_id=workload.id,
                     preset_id=preset.id,
                     run_id=run_id,
@@ -2070,9 +2085,12 @@ class OperatorService:
                         project=trace_project_slug(run_env),
                         env=run_env,
                         cancellation_event=cancel_event,
+                        cancel_on_evidence_failure=resolved.cancel_on_cell_failure,
                     )
                 except Exception as exc:
                     observability_error = f"{type(exc).__name__}: {exc}"
+                    if resolved.cancel_on_cell_failure:
+                        cancel_event.set()
             local = (
                 GeneratedEvaluationCoordinator(
                     cells, repo_root=self.repo_root, env=run_env
@@ -2081,19 +2099,33 @@ class OperatorService:
                 and any(cell.evaluation_case is not None for cell in cells)
                 else None
             )
+            delegate_finished = (
+                live.finish_cell
+                if live is not None
+                else local.finish_cell
+                if local is not None
+                else None
+            )
+
+            def finish_cell(cell: PlannedCell, outcome: CellOutcome) -> None:
+                try:
+                    if delegate_finished is not None:
+                        delegate_finished(cell, outcome)
+                except Exception:
+                    if resolved.cancel_on_cell_failure:
+                        cancel_event.set()
+                    raise
+                finally:
+                    if resolved.cancel_on_cell_failure and outcome.status == "failed":
+                        cancel_event.set()
+
             outcomes = execute_cells(
                 cells,
                 repo_root=self.repo_root,
                 max_workers=max_workers,
                 runner=cell_runner,
                 cell_started=live.begin_cell if live is not None else None,
-                cell_finished=(
-                    live.finish_cell
-                    if live is not None
-                    else local.finish_cell
-                    if local is not None
-                    else None
-                ),
+                cell_finished=finish_cell,
                 cancellation_event=cancel_event,
             )
             cancelled = cancel_event.is_set() or any(
@@ -2871,7 +2903,7 @@ def _resolved_bridge_runtime(
         for job in jobs
         if job.applicable
         and job.execution_kind == "agent"
-        and resolve_harness_model_route(job.route, job.harness)["bridge_required"]
+        and bool(job.model_transport.get("bridge_required"))
     ]
     if not bridged:
         return None

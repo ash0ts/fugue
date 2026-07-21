@@ -1,0 +1,80 @@
+dataset:
+  path: .fugue/cache/datasets/wba-transport-ablation-v1-2587494f
+  materializer: fugue.bench.wba_transport_tasks:WBATransportTaskMaterializer
+  source:
+    path: datasets/wba-transport-ablation-v1.jsonl
+    sha256: 2587494f692b6b81356990a92bb87a75d58364f6a7a67352b224b50fc237f7a5
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 1
+jobs_dir: jobs/wba-transport-ablation
+harnesses:
+  - name: wba-responses
+    agent: fugue.agents:FugueWBAResponses
+tasks:
+  - id: trace-auth-diagnosis
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/root-cause.json]
+    metadata:
+      source_index: 0
+      scenario: trace-failure-diagnosis
+      partition: qualification
+      interaction_controller:
+        type: scripted
+        profile_id: scripted-reviewer-v1
+        profile_digest: 0874d0c2b1e8cf719bc20991675dc4a0389cfab58c8f42927d606aa0689d5bb9
+        scripted_turns:
+          - Re-open the failing child span and make the causal chain explicit before finalizing.
+        max_user_turns: 1
+        max_agent_turns: 2
+        timeout_sec: 900
+  - id: tool-call-reconciliation
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/tool-integrity.json]
+    metadata:
+      source_index: 1
+      scenario: trace-failure-diagnosis
+      partition: holdout
+      interaction_controller:
+        type: scripted
+        profile_id: scripted-reviewer-v1
+        profile_digest: 0874d0c2b1e8cf719bc20991675dc4a0389cfab58c8f42927d606aa0689d5bb9
+        scripted_turns:
+          - Verify that every completed tool call has exactly one matching output, then finalize.
+        max_user_turns: 1
+        max_agent_turns: 2
+        timeout_sec: 900
+  - id: evaluation-regression
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/regression-summary.json]
+    metadata:
+      source_index: 2
+      scenario: evaluation-regression-comparison
+      partition: holdout
+  - id: judge-disagreement
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/judge-audit.json]
+    metadata:
+      source_index: 3
+      scenario: evaluation-regression-comparison
+      partition: holdout
+  - id: latency-anomaly
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/latency-audit.json]
+    metadata:
+      source_index: 4
+      scenario: latency-cost-investigation
+      partition: holdout
+  - id: retry-cost-anomaly
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/cost-audit.json]
+    metadata:
+      source_index: 5
+      scenario: latency-cost-investigation
+      partition: holdout
+  - id: evidence-intervention
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/intervention.json]
+    metadata:
+      source_index: 6
+      scenario: intervention-artifact-production
+      partition: holdout
+  - id: evaluation-plan-artifact
+    artifacts: [/logs/artifacts/fugue-answer.md, /logs/artifacts/eval-plan.json]
+    metadata:
+      source_index: 7
+      scenario: intervention-artifact-production
+      partition: holdout

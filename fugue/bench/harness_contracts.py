@@ -22,6 +22,7 @@ _BUILTIN_CAPABILITIES = {
     "fugue.agents:FugueOpenClaw": HarnessCapabilities(True, True, True),
     "fugue.agents:FugueClaudeCode": HarnessCapabilities(True, True, True),
     "fugue.agents:FugueCodex": HarnessCapabilities(True, True, True),
+    "fugue.agents:FugueWBAResponses": HarnessCapabilities(False, True, True),
 }
 
 

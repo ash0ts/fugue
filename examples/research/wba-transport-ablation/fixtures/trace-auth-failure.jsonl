@@ -1,0 +1,6 @@
+{"trace_id":"trace-17","span_id":"root-17","parent_id":null,"kind":"agent","status":"error","latency_ms":842,"error":null}
+{"trace_id":"trace-17","span_id":"llm-18","parent_id":"root-17","kind":"llm","status":"error","latency_ms":801,"error":"401 Unauthorized: missing WANDB_API_KEY"}
+{"trace_id":"trace-17","span_id":"tool-19","parent_id":"root-17","kind":"tool","status":"not_started","latency_ms":0,"error":null}
+{"trace_id":"trace-22","span_id":"root-22","parent_id":null,"kind":"agent","status":"ok","latency_ms":1310,"error":null}
+{"trace_id":"trace-22","span_id":"llm-23","parent_id":"root-22","kind":"llm","status":"ok","latency_ms":901,"error":null}
+{"trace_id":"trace-22","span_id":"tool-24","parent_id":"root-22","kind":"tool","status":"ok","latency_ms":312,"error":null}

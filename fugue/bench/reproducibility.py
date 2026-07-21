@@ -17,7 +17,6 @@ from fugue.bench.context import (
 from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
-from fugue.model_plane import resolve_harness_model_route
 
 if TYPE_CHECKING:
     from fugue.bench.execution import PlannedCell
@@ -209,7 +208,7 @@ def build_run_snapshot(
             "model_provider": job.route.provider,
             "model": job.route.display_model,
             "model_route": asdict(job.route),
-            "model_transport": resolve_harness_model_route(job.route, job.harness),
+            "model_transport": job.model_transport,
             "context": {
                 **context_behavior_definition(context),
                 "serve_deliveries": sorted(context.serve_deliveries),

@@ -300,6 +300,7 @@ class ExperimentSpec:
     presets: list[PresetSpec] = field(default_factory=list)
     default_preset: str | None = None
     trace_content: str = "full"
+    cancel_on_cell_failure: bool = False
     debug: bool = False
     quiet: bool = False
 
@@ -411,7 +412,13 @@ def get_agent_preset(item_id: str, repo_root: Path | None = None) -> AgentPreset
     _reject_unknown(candidate_raw, AgentCandidateSpec, kind="agent preset candidate")
     _reject_unknown(evidence_raw, AgentPresetEvidence, kind="agent preset evidence")
     harness = str(candidate_raw.get("harness") or "")
-    if harness not in {"hermes", "openclaw", "claude-code", "codex"}:
+    if harness not in {
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex",
+        "wba-responses",
+    }:
         raise ValueError(f"unknown agent preset harness: {harness or '<empty>'}")
     model = str(candidate_raw.get("model") or "").strip()
     if not model:
@@ -520,6 +527,9 @@ def experiment_from_data(
     raw: dict[str, Any], *, item_id: str | None = None
 ) -> ExperimentSpec:
     _reject_unknown(raw, ExperimentSpec, kind="experiment")
+    cancel_on_cell_failure = raw.get("cancel_on_cell_failure", False)
+    if not isinstance(cancel_on_cell_failure, bool):
+        raise ValueError("experiment cancel_on_cell_failure must be a boolean")
     experiment_id = validate_id(
         raw.get("id") or item_id or "experiment", kind="experiment id"
     )
@@ -583,6 +593,7 @@ def experiment_from_data(
         presets=presets,
         default_preset=default_preset,
         trace_content=_trace_content(raw.get("trace_content")),
+        cancel_on_cell_failure=cancel_on_cell_failure,
         debug=bool(raw.get("debug", False)),
         quiet=bool(raw.get("quiet", False)),
     )

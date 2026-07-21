@@ -63,11 +63,16 @@ class TaskInteractionController:
         env: Mapping[str, str] | None = None,
     ) -> TaskInteractionController:
         selected_env = env or os.environ
-        raw = str(selected_env.get("FUGUE_TASK_AUTHORING") or "").strip()
-        metadata = json.loads(raw) if raw else {}
+        authored_raw = str(selected_env.get("FUGUE_TASK_AUTHORING") or "").strip()
+        interaction_raw = str(selected_env.get("FUGUE_TASK_INTERACTION") or "").strip()
+        metadata = json.loads(authored_raw) if authored_raw else {}
         if not isinstance(metadata, dict):
             raise ValueError("FUGUE_TASK_AUTHORING must contain one JSON object")
-        controller = metadata.get("interaction_controller") or {
+        controller = (
+            json.loads(interaction_raw)
+            if interaction_raw
+            else metadata.get("interaction_controller")
+        ) or {
             "type": "single_turn",
             "max_user_turns": 1,
             "max_agent_turns": 1,

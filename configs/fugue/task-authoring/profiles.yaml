@@ -4,7 +4,7 @@ environments:
     title: Pinned repository workspace
     kind: repository
     base_image: python:3.12.10-slim-bookworm
-    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    supported_harnesses: [hermes, openclaw, claude-code, codex, wba-responses]
     capabilities: [text, file, image, resource, repository, artifact]
     allowed_integration_ids: []
     cpus: 2
@@ -14,7 +14,7 @@ environments:
     title: Blank artifact workspace
     kind: artifact
     base_image: python:3.12.10-slim-bookworm
-    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    supported_harnesses: [hermes, openclaw, claude-code, codex, wba-responses]
     capabilities: [text, file, image, resource, artifact]
     allowed_integration_ids: []
     cpus: 2
@@ -24,7 +24,7 @@ environments:
     title: Typed live-service workspace
     kind: live_service
     base_image: python:3.12.10-slim-bookworm
-    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    supported_harnesses: [hermes, openclaw, claude-code, codex, wba-responses]
     capabilities: [text, file, image, resource, artifact, typed_integration]
     allowed_integration_ids: []
     cpus: 2
@@ -38,12 +38,68 @@ resources:
     sha256: 6be407b88a9a0cddee976bac91b561aa966bda631fc88d4deba7f2309aaeb761
     media_type: text/markdown
     target: /workspace/resources/campaigns.md
+  - id: wba-trace-auth-failure-v1
+    title: Locked trace authentication failure fixture
+    kind: jsonl
+    path: examples/research/wba-transport-ablation/fixtures/trace-auth-failure.jsonl
+    sha256: c7aa80ada0956cb4e72aa1e7068bf640f6f91910c8c87aaeb28d0b1257082550
+    media_type: application/x-ndjson
+    target: /workspace/resources/trace-auth-failure.jsonl
+  - id: wba-tool-call-integrity-v1
+    title: Locked tool-call stream fixture
+    kind: jsonl
+    path: examples/research/wba-transport-ablation/fixtures/tool-call-integrity.jsonl
+    sha256: 4dde5c7d5ff861fc1d2e9a9b5bff50ea76f477b2fe8250001135c392c9e78706
+    media_type: application/x-ndjson
+    target: /workspace/resources/tool-call-integrity.jsonl
+  - id: wba-evaluation-regression-v1
+    title: Locked evaluation regression fixture
+    kind: csv
+    path: examples/research/wba-transport-ablation/fixtures/evaluation-regression.csv
+    sha256: 99748e1cd26aece802885d7eac2e33a2250a86478cdf7dba31b701b556f58fbc
+    media_type: text/csv
+    target: /workspace/resources/evaluation-regression.csv
+  - id: wba-judge-disagreement-v1
+    title: Locked judge disagreement fixture
+    kind: jsonl
+    path: examples/research/wba-transport-ablation/fixtures/judge-disagreement.jsonl
+    sha256: 8bb2c0df559128fa6f2f6a7b46c02ebb4c62ec741063691f3bc20d60de32ce68
+    media_type: application/x-ndjson
+    target: /workspace/resources/judge-disagreement.jsonl
+  - id: wba-latency-anomaly-v1
+    title: Locked latency anomaly fixture
+    kind: csv
+    path: examples/research/wba-transport-ablation/fixtures/latency-anomaly.csv
+    sha256: 89f40d9f9b7325d8fe79dcef6ebd6389f64e75bd6e606c9e159a941d62afc792
+    media_type: text/csv
+    target: /workspace/resources/latency-anomaly.csv
+  - id: wba-retry-cost-anomaly-v1
+    title: Locked retry and cost anomaly fixture
+    kind: csv
+    path: examples/research/wba-transport-ablation/fixtures/retry-cost-anomaly.csv
+    sha256: 8a3ccb058a8a57896d32c2cb62886e3e22cbe47fa732b51be17f0dd8f843e313
+    media_type: text/csv
+    target: /workspace/resources/retry-cost-anomaly.csv
+  - id: wba-intervention-evidence-v1
+    title: Locked intervention evidence fixture
+    kind: json
+    path: examples/research/wba-transport-ablation/fixtures/intervention-evidence.json
+    sha256: 85710ed46b2280db6919ea0bdaf9c8ff193fe347e07299af2aa418f460427001
+    media_type: application/json
+    target: /workspace/resources/intervention-evidence.json
+  - id: wba-evaluation-plan-input-v1
+    title: Locked evaluation plan fixture
+    kind: json
+    path: examples/research/wba-transport-ablation/fixtures/evaluation-plan-input.json
+    sha256: 309ce7eead7fc5be31ca7656749fa63675230854da7b9928c736c6f1a499007c
+    media_type: application/json
+    target: /workspace/resources/evaluation-plan-input.json
 interactors:
   - id: scripted-reviewer-v1
     title: Scripted evaluation user
     kind: scripted
     directions: []
-    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    supported_harnesses: [hermes, openclaw, claude-code, codex, wba-responses]
     input_cost_per_million: 0
     output_cost_per_million: 0
     reserve_cost_usd: 0

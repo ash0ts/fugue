@@ -109,6 +109,10 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv lock --check
       - run: uv run ruff check .
+      - name: Validate the extensionless WBA runner
+        run: |
+          uv run ruff check --isolated --stdin-filename wba-runner - < configs/fugue/runtime/wba-responses/wba-runner
+          uv run python -m py_compile configs/fugue/runtime/wba-responses/wba-runner
       - name: Reject high-confidence dead production code
         run: uv run vulture fugue --min-confidence 80
       - name: Report advisory dead-code candidates
@@ -164,6 +168,32 @@ jobs:
         env:
           PYTHONWARNINGS: error
         run: uv run bash tests/compat/run.sh
+
+  wba-runtime:
+    name: WBA Responses runtime / amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v8.3.2
+      - run: uv sync --frozen --extra dev --extra research-worker
+      - name: Build and lock the pinned WBA runtime
+        run: >-
+          uv run python -c
+          'from pathlib import Path; from fugue.bench.agent_runtime import prepare_runtime;
+          prepare_runtime("wba-responses", repo_root=Path.cwd())'
+      - name: Probe the prepared WBA executable
+        run: >-
+          uv run python -c
+          'from pathlib import Path; from fugue.bench.agent_runtime import runtime_ready;
+          ready, reason = runtime_ready("wba-responses", Path.cwd()); assert ready, reason'
+      - name: Run the offline transport conformance suite
+        env:
+          PYTHONWARNINGS: error
+        run: uv run pytest -q tests/test_wba_transport.py
 
   experiment-atlas:
     name: Static experiment atlas

@@ -24,6 +24,10 @@ _PYTHON_IMAGE = (
     "python:3.12.11-slim-bookworm@"
     "sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7"
 )
+_PYTHON_313_IMAGE = (
+    "python:3.13.5-slim-bookworm@"
+    "sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419"
+)
 _RUST_IMAGE = (
     "rust:1.95.0-bookworm@"
     "sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1"
@@ -206,6 +210,18 @@ RUN ln -s ../home/.local/bin/hermes bin/hermes && \
 """
 
 
+def _wba_responses_dockerfile() -> str:
+    return f"""FROM {_PYTHON_313_IMAGE}
+WORKDIR {AGENT_RUNTIME_MOUNT}
+COPY requirements.txt requirements.lock ./
+RUN python -m pip install --no-cache-dir --require-hashes \
+      --requirement requirements.lock --target lib
+COPY wba-runner bin/wba-runner
+RUN chmod 0755 bin/wba-runner && \
+    PYTHONPATH={AGENT_RUNTIME_MOUNT}/lib bin/wba-runner --version | grep -F {json.dumps("0.1.0")}
+"""
+
+
 RUNTIMES = {
     "hermes": AgentRuntimeSpec(
         harness="hermes",
@@ -267,6 +283,20 @@ RUNTIMES = {
             "-c",
             f"PATH={AGENT_RUNTIME_MOUNT}/bin:$PATH codex --version && "
             "weave-codex --help >/dev/null",
+        ),
+    ),
+    "wba-responses": AgentRuntimeSpec(
+        harness="wba-responses",
+        version=(
+            "wba-compatible-loop@0.1.0+python3.13.5+litellm1.93.0+"
+            "openai2.24.0+weave0.53.0"
+        ),
+        dockerfile=_wba_responses_dockerfile(),
+        probe=(
+            "/bin/sh",
+            "-c",
+            f"PYTHONPATH={AGENT_RUNTIME_MOUNT}/lib "
+            f"{AGENT_RUNTIME_MOUNT}/bin/wba-runner --version | grep -F 0.1.0",
         ),
     ),
 }

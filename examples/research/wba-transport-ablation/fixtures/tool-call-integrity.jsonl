@@ -1,0 +1,5 @@
+{"sequence":1,"event":"tool_call.delta","call_id":"call-a","name_fragment":"she","arguments_fragment":"{\"command\":\"py"}
+{"sequence":2,"event":"tool_call.delta","call_id":"call-a","name_fragment":"ll","arguments_fragment":"thon -V\"}"}
+{"sequence":3,"event":"tool_call.done","call_id":"call-a","name":"shell","arguments":"{\"command\":\"python -V\"}"}
+{"sequence":4,"event":"tool_output","call_id":"call-b","output":"orphan output"}
+{"sequence":5,"event":"response.done","call_id":null,"finish_reason":"tool_calls"}

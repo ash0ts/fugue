@@ -11,6 +11,7 @@ AGENT_NAMES = {
     "openclaw": "openclaw",
     "claude-code": "claude-code",
     "codex": "codex",
+    "wba-responses": "wba-responses",
 }
 CONVERSATION_NAMESPACE = uuid.UUID("218f38ca-7fe1-4db2-96e0-30f9b62c20eb")
 

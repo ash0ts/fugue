@@ -105,6 +105,11 @@ def _row_eligibility_failures(
         failures.append(f"row {index} lacks equivalent runtime evidence")
     if row.get("runtime_drift") is True:
         failures.append(f"row {index} reports runtime drift")
+    if (
+        row.get("harness") == "wba-responses"
+        and row.get("wba_transport_status") != "valid"
+    ):
+        failures.append(f"row {index} lacks valid WBA transport evidence")
     return failures
 
 
@@ -316,6 +321,7 @@ _SAFE_PREDICTION_FIELDS = (
     "context_delivery",
     "model_provider",
     "model",
+    "model_transport",
     "cost_usd",
     "weave_total_cost_usd",
     "input_tokens",
@@ -337,6 +343,16 @@ _SAFE_PREDICTION_FIELDS = (
     "premature_completion",
     "run_snapshot_sha256",
     "evaluation_asset_lock_sha256",
+    "wba_transport",
+    "wba_transport_status",
+    "transport_profile",
+    "transport_stream_events",
+    "transport_retries",
+    "transport_compactions",
+    "transport_tool_errors",
+    "transport_orphan_tool_outputs",
+    "transport_normalization_errors",
+    "transport_stop_reason",
 )
 
 

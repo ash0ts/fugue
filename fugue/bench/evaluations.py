@@ -1149,6 +1149,7 @@ def _generated_manifest(
         "openclaw": "fugue.agents:FugueOpenClaw",
         "claude-code": "fugue.agents:FugueClaudeCode",
         "codex": "fugue.agents:FugueCodex",
+        "wba-responses": "fugue.agents:FugueWBAResponses",
     }
     unknown = sorted(set(harness_names) - set(agents))
     if unknown:

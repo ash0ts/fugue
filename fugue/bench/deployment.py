@@ -39,7 +39,9 @@ SERVE_PROTOCOL_VERSIONS = {
     "chat-completions": "openai-compatible",
     "ag-ui": "0.1.19",
 }
-SERVE_HARNESSES = frozenset({"hermes", "openclaw", "claude-code", "codex"})
+SERVE_HARNESSES = frozenset(
+    {"hermes", "openclaw", "claude-code", "codex", "wba-responses"}
+)
 DEFAULT_ALLOWED_HOSTS = (
     "api.openai.com",
     "api.anthropic.com",

@@ -59,6 +59,7 @@ def run_preflight(
     env: Mapping[str, str] | None = None,
     live: bool = True,
     harnesses: tuple[str, ...] | None = None,
+    wba_transport_profiles: tuple[str, ...] = (),
     builder_model: str | None = None,
     judge_model: str | None = None,
 ) -> list[PreflightCheck]:
@@ -90,7 +91,19 @@ def run_preflight(
         checks.append(_check_weave_endpoint(values))
 
     bridge_required = harnesses is None or any(
-        resolve_harness_model_route(route, harness)["bridge_required"]
+        (
+            any(
+                resolve_harness_model_route(
+                    route,
+                    harness,
+                    transport_profile=profile,
+                )["bridge_required"]
+                for profile in wba_transport_profiles
+            )
+            if harness.removeprefix("fugue-") == "wba-responses"
+            and wba_transport_profiles
+            else resolve_harness_model_route(route, harness)["bridge_required"]
+        )
         for harness in harnesses
     )
     if not bridge_required:
