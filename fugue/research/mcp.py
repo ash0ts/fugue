@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,7 @@ from fugue.research.contracts import (
     study_update_from_dict,
 )
 from fugue.research.service import ExperimentHandle, ResearchService
+from fugue.research.watch import watch_experiment_page
 
 
 def create_mcp_server(  # noqa: C901
@@ -253,33 +253,17 @@ def create_mcp_server(  # noqa: C901
         experiment_id: str,
         after: int = 0,
         wait_seconds: float = 0.0,
+        limit: int = 100,
     ) -> dict[str, Any]:
         """Read ordered events after a resumable cursor, with bounded long polling."""
 
-        if after < 0 or wait_seconds < 0 or wait_seconds > 30:
-            raise ValueError("after must be non-negative and wait_seconds at most 30")
-        deadline = time.monotonic() + wait_seconds
-        while True:
-            events = research.store.events(experiment_id, after=after)
-            record = research.store.get_experiment(experiment_id)
-            if events or record.state in {
-                "completed",
-                "blocked",
-                "cancelled",
-                "interrupted",
-            }:
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-        return {
-            "experiment_id": experiment_id,
-            "events": [item.to_dict() for item in events],
-            "next_cursor": events[-1].sequence if events else after,
-            "state": record.state,
-            "terminal": record.state
-            in {"completed", "blocked", "cancelled", "interrupted"},
-        }
+        return watch_experiment_page(
+            research,
+            experiment_id,
+            after=after,
+            wait_seconds=wait_seconds,
+            limit=limit,
+        ).to_dict()
 
     @mcp.tool()
     def fugue_study_watch(

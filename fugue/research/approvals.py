@@ -156,6 +156,24 @@ class ApprovalLedger:
             )
         return execution_approval_from_dict(json.loads(row[0]))
 
+    def get_for_preview(
+        self, *, subject_kind: str, preview_digest: str
+    ) -> ExecutionApprovalV1:
+        """Resolve operator approval without exposing its receipt to the Agent."""
+        with connect_database(self.path) as conn:
+            row = conn.execute(
+                "SELECT receipt_json FROM execution_approvals "
+                "WHERE subject_kind=? AND preview_digest=?",
+                (subject_kind, preview_digest),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "approval_not_found",
+                "operator approval for the exact preview was not found",
+                category="policy",
+            )
+        return execution_approval_from_dict(json.loads(row[0]))
+
     def claim(
         self,
         *,
@@ -229,6 +247,7 @@ class ApprovalLedger:
                 )
             conn.commit()
         return approval
+
 
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)

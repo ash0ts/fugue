@@ -19,6 +19,7 @@ from fugue.research.http import create_app
 from fugue.research.mcp import create_mcp_server
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
+from fugue.research.watch import _recommended_check_seconds
 
 _A = "a" * 64
 _B = "b" * 64
@@ -137,6 +138,47 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
         assert events.status_code == 200
         assert "id: 2" in events.text
         assert "id: 1" not in events.text
+
+        page = client.get(
+            "/v1/experiments/study-1.proposal-1/events:watch",
+            headers=headers,
+            params={"after": 0, "wait_seconds": 0, "limit": 1},
+        )
+        assert page.status_code == 200
+        assert page.json()["next_cursor"] == 1
+        assert page.json()["has_more"] is True
+        assert page.json()["planned_cells"] == 1
+        assert page.json()["terminal_cells"] == 1
+        assert page.json()["terminal"] is True
+        assert page.json()["recommended_check_seconds"] == 0
+        assert page.json()["next_check_at"].endswith("+00:00")
+
+
+def test_watch_page_validates_bounded_cursor_wait_and_limit(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _terminal_experiment(service)
+    app = create_app(tmp_path, api_key="secret", service=service)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        for params in (
+            {"after": -1},
+            {"wait_seconds": 31},
+            {"limit": 0},
+            {"limit": 201},
+        ):
+            response = client.get(
+                "/v1/experiments/study-1.proposal-1/events:watch",
+                headers=headers,
+                params=params,
+            )
+            assert response.status_code == 422
+
+
+def test_watch_recommendation_drains_pages_then_backs_off() -> None:
+    assert _recommended_check_seconds("running", False, True) == 0
+    assert _recommended_check_seconds("running", False, False) == 30
+    assert _recommended_check_seconds("preparing", False, False) == 10
+    assert _recommended_check_seconds("completed", True, False) == 0
 
 
 def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:

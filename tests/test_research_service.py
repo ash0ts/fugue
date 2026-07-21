@@ -356,6 +356,23 @@ def test_preview_is_pure_and_start_is_explicit_boundary(tmp_path: Path) -> None:
     assert record.state == "queued"
 
 
+def test_start_resolves_prior_operator_approval_without_exposing_receipt(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    preview = service.preview_experiment("study-1", _draft())
+    _approval(service, preview, "approve-resumable")
+
+    record = service.start_experiment(
+        preview,
+        idempotency_key="start-after-approval",
+    )
+
+    assert record.state == "queued"
+    assert record.preview["preview_digest"] == preview.preview_digest
+    assert record.approval is not None
+
+
 def test_inline_task_preview_counts_selected_coordinates_without_locking(
     tmp_path: Path,
 ) -> None:
