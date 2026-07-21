@@ -221,3 +221,30 @@ def test_bridge_up_waits_for_readiness(monkeypatch, tmp_path) -> None:
     files = bridge_up("wandb/zai-org/GLM-5.2", repo_root=tmp_path, env={})
 
     assert files.config_path.is_file()
+
+
+def test_bridge_status_uses_docker_exec_inside_research_worker(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": "200\n", "stderr": ""})()
+
+    monkeypatch.setattr("fugue.bridge.subprocess.run", fake_run)
+
+    status = bridge_status(
+        env={"FUGUE_BRIDGE_HEALTH_TRANSPORT": "docker-exec"},
+    )
+
+    assert status == {
+        "ok": True,
+        "url": "docker-exec://fugue-litellm-bridge/health/liveliness",
+        "status_code": 200,
+        "body": "200",
+    }
+    assert calls[0][0][:4] == [
+        "docker",
+        "exec",
+        "fugue-litellm-bridge",
+        "python",
+    ]
