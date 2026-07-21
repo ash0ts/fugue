@@ -106,6 +106,24 @@ async def _main() -> None:
     await _probe("chat-inline")
     await _probe("responses-inline")
 
+    class _Turn:
+        def __init__(self) -> None:
+            self.messages: list[Any] = []
+            self.exited = False
+
+        def __exit__(self, *args: Any) -> None:
+            del args
+            self.exited = True
+
+    trace = RUNNER["WeaveTrace"]({"trace_content": "full"})
+    turn = _Turn()
+    trace.turn = turn
+    trace.finish("final answer")
+    assert turn.exited is True
+    assert [(message.role, message.content) for message in turn.messages] == [
+        ("assistant", "final answer")
+    ]
+
 
 asyncio.run(_main())
 print("networkless WBA inline transport probe passed")

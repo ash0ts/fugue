@@ -218,7 +218,7 @@ RUN python -m pip install --no-cache-dir --require-hashes \
       --requirement requirements.lock --target lib
 COPY wba-runner bin/wba-runner
 RUN chmod 0755 bin/wba-runner && \
-    PYTHONPATH={AGENT_RUNTIME_MOUNT}/lib bin/wba-runner --version | grep -F {json.dumps("0.1.1")}
+    PYTHONPATH={AGENT_RUNTIME_MOUNT}/lib bin/wba-runner --version | grep -F {json.dumps("0.1.2")}
 """
 
 
@@ -288,7 +288,7 @@ RUNTIMES = {
     "wba-responses": AgentRuntimeSpec(
         harness="wba-responses",
         version=(
-            "wba-compatible-loop@0.1.1+python3.13.5+litellm1.93.0+"
+            "wba-compatible-loop@0.1.2+python3.13.5+litellm1.93.0+"
             "openai2.24.0+weave0.53.0"
         ),
         dockerfile=_wba_responses_dockerfile(),
@@ -296,7 +296,7 @@ RUNTIMES = {
             "/bin/sh",
             "-c",
             f"PYTHONPATH={AGENT_RUNTIME_MOUNT}/lib "
-            f"{AGENT_RUNTIME_MOUNT}/bin/wba-runner --version | grep -F 0.1.1",
+            f"{AGENT_RUNTIME_MOUNT}/bin/wba-runner --version | grep -F 0.1.2",
         ),
     ),
 }

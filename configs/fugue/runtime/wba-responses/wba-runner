@@ -25,7 +25,7 @@ from typing import Any
 # snapshot instead.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
 MAX_STEPS = 20
 REQUEST_TIMEOUT_SEC = 300
@@ -209,7 +209,11 @@ class WeaveTrace:
     def finish(self, output: str, error: BaseException | None = None) -> None:
         if self.turn is not None:
             if self.include_content and error is None:
-                self.turn.output = output
+                import weave
+
+                self.turn.messages.append(
+                    weave.Message(role="assistant", content=output)
+                )
             self.turn.__exit__(
                 type(error), error, error.__traceback__
             ) if error else self.turn.__exit__(None, None, None)

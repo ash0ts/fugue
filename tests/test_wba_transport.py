@@ -51,6 +51,28 @@ class _Trace:
         del span, output, error
 
 
+def test_wba_weave_trace_records_assistant_output_as_a_message() -> None:
+    class _Turn:
+        def __init__(self) -> None:
+            self.messages: list[Any] = []
+            self.exited = False
+
+        def __exit__(self, *args: Any) -> None:
+            del args
+            self.exited = True
+
+    trace = RUNNER["WeaveTrace"]({"trace_content": "full"})
+    turn = _Turn()
+    trace.turn = turn
+
+    trace.finish("final answer")
+
+    assert turn.exited is True
+    assert len(turn.messages) == 1
+    assert turn.messages[0].role == "assistant"
+    assert turn.messages[0].content == "final answer"
+
+
 def _client(profile: str) -> Any:
     return RUNNER["ModelClient"](
         {
