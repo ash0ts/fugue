@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -590,6 +591,61 @@ def test_catalog_and_preview_are_pure_and_hide_execution_details(
     assert "jobs_dir" not in serialized
     assert "expected_evidence_paths" not in serialized
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_campaign_preview_validates_expanded_agent_attempts(tmp_path: Path) -> None:
+    _campaign_repo(tmp_path)
+    campaign_path = tmp_path / "configs/fugue/campaigns/demo.yaml"
+    campaign_path.write_text(
+        campaign_path.read_text()
+        .replace("max_cells: 1", "max_cells: 2")
+        .replace("max_cells_per_proposal: 1", "max_cells_per_proposal: 2")
+        .replace("max_total_cells: 2", "max_total_cells: 4")
+        .replace("max_attempts_per_cell: 1", "max_attempts_per_cell: 2")
+    )
+    service = CampaignService(tmp_path, operator=FakeCampaignOperator(tmp_path))
+    catalog = service.catalog("demo")
+    proposal = build_experiment_proposal(
+        proposal_id="two-attempt-qualification",
+        campaign_id="demo",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Does the result repeat?",
+        hypothesis="The result may vary between attempts.",
+        fixed_dimensions=("model", "task", "runtime"),
+        varied_dimensions=("attempt",),
+        measured_dimensions=("repair outcome",),
+        experiment_id="demo",
+        model="openai/gpt-5",
+        n_attempts=2,
+        n_concurrent=1,
+        harnesses=("codex",),
+        context_systems=("none",),
+        variants=("baseline",),
+        n_tasks=1,
+        trace_content="full",
+    )
+
+    plan = service.preview(proposal)
+
+    assert plan.cell_count == 2
+    assert [cell["trial_index"] for cell in plan.cells] == [1, 2]
+    assert all(cell["expected_predictions"] == 1 for cell in plan.cells)
+
+    request = service._request(proposal)
+    experiment = service._proposal_experiment(proposal)
+    resolved = service.operator.resolve_run_plan(
+        request,
+        run_id="campaign-preview",
+        experiment=experiment,
+    )
+    with pytest.raises(CampaignError, match="trial coverage") as exc_info:
+        service._validate_resolved_plan(
+            get_campaign("demo", tmp_path),
+            proposal,
+            replace(resolved, cells=resolved.cells[:1]),
+        )
+    assert exc_info.value.code == "attempt_drift"
 
 
 def test_task_authoring_catalog_registers_the_virtual_harbor_workload(

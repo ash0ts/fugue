@@ -2622,16 +2622,48 @@ class CampaignService:
                 "resolved concurrency differs from the proposal",
                 category="validation",
             )
-        if any(cell.n_attempts != proposal.n_attempts for cell in plan.cells):
-            raise CampaignError(
-                "attempt_drift",
-                "resolved attempts differ from the proposal",
-                category="validation",
-            )
         if not plan.cells:
             raise CampaignError(
                 "empty_plan",
                 "campaign proposal resolved no cells",
+                category="validation",
+            )
+        agent_attempts: dict[tuple[Any, ...], list[int]] = {}
+        for cell in plan.cells:
+            if cell.execution_kind != "agent":
+                if cell.n_attempts != proposal.n_attempts:
+                    raise CampaignError(
+                        "attempt_drift",
+                        "resolved attempts differ from the proposal",
+                        category="validation",
+                    )
+                continue
+            if cell.n_attempts != 1:
+                raise CampaignError(
+                    "attempt_drift",
+                    "resolved Agent trials must execute one attempt per cell",
+                    category="validation",
+                )
+            coordinate = (
+                cell.workload_id,
+                cell.task_id,
+                cell.harness,
+                cell.context_system_id,
+                cell.variant_id,
+                cell.model_provider,
+                cell.model,
+                cell.comparison_example_id,
+                cell.candidate_id,
+                cell.execution_fingerprint,
+                cell.applicable,
+                cell.skip_reason,
+            )
+            agent_attempts.setdefault(coordinate, []).append(cell.trial_index)
+        expected_trials = list(range(1, proposal.n_attempts + 1))
+        if any(sorted(indices) != expected_trials for indices in agent_attempts.values()):
+            raise CampaignError(
+                "attempt_drift",
+                "resolved Agent trial coverage differs from the proposal",
                 category="validation",
             )
         if proposal.task_suite_digest:
