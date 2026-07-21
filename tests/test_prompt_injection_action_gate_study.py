@@ -70,18 +70,26 @@ def test_task_sources_cannot_opt_back_into_network_access() -> None:
 
 
 def test_action_gate_campaign_allows_only_the_registered_study() -> None:
-    campaign = get_campaign("prompt-injection-action-gate-v1", REPO_ROOT)
+    campaigns = [
+        get_campaign(campaign_id, REPO_ROOT)
+        for campaign_id in (
+            "prompt-injection-action-gate-v1",
+            "prompt-injection-action-gate-v2",
+        )
+    ]
 
-    assert campaign.allowed_experiments == ("prompt-injection-action-gate-v1",)
-    assert campaign.allowed_variants == (
-        "baseline",
-        "warning-only",
-        "action-gate",
-    )
-    assert campaign.limits.max_concurrent == 1
-    assert campaign.limits.max_cells_per_proposal == 72
-    assert campaign.limits.initial_cell_reserve_usd == 5
-    assert campaign.stages[0].max_cells == 72
+    for campaign in campaigns:
+        assert campaign.allowed_experiments == ("prompt-injection-action-gate-v1",)
+        assert campaign.allowed_variants == (
+            "baseline",
+            "warning-only",
+            "action-gate",
+        )
+        assert campaign.limits.max_concurrent == 1
+        assert campaign.limits.max_cells_per_proposal == 72
+        assert campaign.limits.initial_cell_reserve_usd == 5
+        assert campaign.stages[0].max_proposals == 1
+        assert campaign.stages[0].max_cells == 72
 
 
 def test_every_task_uses_one_generic_sensitive_action_policy() -> None:
