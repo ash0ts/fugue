@@ -765,7 +765,55 @@ def test_snapshot_scopes_task_runtime_locks_to_execution_coordinates(
     assert {
         (item.get("task_runtime") or {}).get("task_id")
         for item in snapshot["runtime_locks"]
-    } == {None, "task-two"}
+    } == {"task-one", "task-two"}
+    assert verify_snapshot(snapshot)
+
+
+def test_snapshot_separates_task_runtime_recipe_from_prepared_image(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    [job] = service.rendered_jobs(
+        request,
+        run_id="prepared-task-runtime",
+        experiment=experiment,
+    )
+    identity = job.resolved_candidate.execution_definition["task_runtime"]
+    prepared = {
+        **identity,
+        "image_id": f"sha256:{'c' * 64}",
+        "dataset_path": ".fugue/runtime/task-images/task-one/dataset-prepared",
+        "prepared_source_sha256": "d" * 64,
+    }
+    configured = replace(
+        job,
+        config={
+            **job.config,
+            "fugue": {**job.config["fugue"], "task_runtime": prepared},
+        },
+    )
+    cells = plan_cells(
+        [configured], run_id="prepared-task-runtime", run_name="prepared runtime"
+    )
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="prepared-task-runtime",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=[configured],
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    execution = snapshot["runtime"]["executions"][
+        job.resolved_candidate.execution_fingerprint
+    ]
+    assert execution["task_runtime"] == identity
+    assert "image_id" not in execution["task_runtime"]
+    assert snapshot["runtime_locks"][0]["task_runtime"] == prepared
     assert verify_snapshot(snapshot)
 
 

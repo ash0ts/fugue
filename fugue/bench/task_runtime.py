@@ -30,6 +30,76 @@ TASK_RUNTIME_CONTRACT_VERSION = 9
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 
 
+def resolve_task_runtime_identity(
+    manifest: BenchmarkManifest,
+    task: TaskSpec,
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Resolve a task identity that is stable across pure preview and preparation."""
+    if manifest.dataset.path is not None and manifest.dataset.materializer is None:
+        gold_patch_sha256: str | None = None
+        if _requires_gold_verification(manifest):
+            # Import lazily to keep evaluation-asset loading out of the
+            # task-runtime module's import path. Static local datasets may bind
+            # the exact pinned gold digest without performing writes.
+            from fugue.bench.evaluation_assets import load_evaluation_gold_patch
+
+            gold = load_evaluation_gold_patch(manifest, task.id, repo_root)
+            if gold is None:
+                raise RuntimeError(
+                    f"task {task.id} requires a pinned gold patch for runtime identity"
+                )
+            gold_patch_sha256 = gold.patch_sha256
+        identity, _, _ = _task_runtime_recipe(
+            manifest,
+            task,
+            repo_root=repo_root,
+            gold_patch_sha256=gold_patch_sha256,
+        )
+        return identity
+
+    # Pure preview must not ask Harbor to resolve or download a remote task.
+    # Bind the immutable selector that preparation will materialize instead.
+    # The prepared plan and run snapshot separately bind the resulting source
+    # digest and image ID, while this selector remains stable across that step.
+    architecture = task_architecture(task)
+    verifier_runtime = _verifier_runtime(manifest, task)
+    trial_policy = _trial_policy()
+    selection = {
+        "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
+        "dataset": {
+            "ref": manifest.dataset.ref,
+            "version": manifest.dataset.version,
+            "materializer": manifest.dataset.materializer,
+            "source": manifest.dataset.source,
+        },
+        "task_id": task.id,
+        "architecture": architecture,
+        "repository": task.repository.to_dict() if task.repository else None,
+        "expected_paths": list(task.expected_paths),
+        "artifacts": list(task.artifacts),
+        "metadata": task.metadata,
+        "verifier_runtime": (
+            verifier_runtime.to_dict() if verifier_runtime else None
+        ),
+        "trial_policy": trial_policy,
+    }
+    return {
+        "schema_version": 1,
+        "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
+        "dataset": manifest.dataset.harbor_ref,
+        "task_id": task.id,
+        "architecture": architecture,
+        "selection_sha256": _digest(selection),
+        "repository": task.repository.to_dict() if task.repository else None,
+        "verifier_runtime": (
+            verifier_runtime.to_dict() if verifier_runtime else None
+        ),
+        "trial_policy": trial_policy,
+    }
+
+
 def prepare_task_runtime(
     manifest: BenchmarkManifest,
     task: TaskSpec,
@@ -50,40 +120,26 @@ def prepare_task_runtime(
         hashlib.sha256(gold_patch.encode()).hexdigest() if gold_patch else None
     )
     architecture = task_architecture(task)
-    verifier_runtime = _verifier_runtime(manifest, task)
     root = _lock_root(manifest, task, repo_root)
     root.mkdir(parents=True, exist_ok=True)
     with FileLock(root / f".prepare-{architecture}.lock", timeout=3600):
-        source = _resolve_task_source(manifest, task, repo_root)
-        source_digest = _tree_digest(source)
+        identity, source, verifier_runtime = _task_runtime_recipe(
+            manifest,
+            task,
+            repo_root=repo_root,
+            gold_patch_sha256=gold_patch_sha256,
+        )
         dockerfile = source / "environment" / "Dockerfile"
         if not dockerfile.is_file():
             raise RuntimeError(f"task {task.id} has no environment/Dockerfile")
-        recipe_sha256 = _digest(
-            {
-                "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
-                "dataset": manifest.dataset.harbor_ref,
-                "task_id": task.id,
-                "architecture": architecture,
-                "source_sha256": source_digest,
-                "verifier_runtime": (
-                    verifier_runtime.to_dict() if verifier_runtime else None
-                ),
-                "gold_patch_sha256": gold_patch_sha256,
-                "trial_policy": {
-                    "network_mode": "no-network",
-                    "allowed_hosts": [],
-                    "image_pull_policy": "never",
-                },
-            }
-        )
+        recipe_sha256 = str(identity["recipe_sha256"])
         existing = read_task_runtime_lock(manifest, task, repo_root)
         if not rebuild and existing and existing.get("recipe_sha256") == recipe_sha256:
             ready, _ = task_runtime_ready(manifest, task, repo_root)
             if ready:
                 return existing
 
-        image = f"fugue-task-{_slug(task.id)}-{architecture}:{recipe_sha256[:12]}"
+        image = str(identity["image"])
         with tempfile.TemporaryDirectory(prefix="fugue-task-build-") as temporary_build:
             build = Path(temporary_build) / "environment"
             shutil.copytree(source / "environment", build, symlinks=True)
@@ -142,21 +198,11 @@ def prepare_task_runtime(
         os.replace(temporary, dataset_root)
 
         lock = {
-            "schema_version": 1,
-            "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
-            "dataset": manifest.dataset.harbor_ref,
-            "task_id": task.id,
-            "architecture": architecture,
-            "source_sha256": source_digest,
+            **identity,
             "prepared_source_sha256": prepared_source_sha256,
-            "recipe_sha256": recipe_sha256,
-            "image": image,
             "image_id": str(inspected["Id"]),
             "os": str(inspected.get("Os") or "linux"),
             "dataset_path": dataset_root.as_posix(),
-            "verifier_runtime": (
-                verifier_runtime.to_dict() if verifier_runtime else None
-            ),
             "verifier_script": verifier_script,
             "verification": verification,
         }
@@ -234,6 +280,64 @@ def task_architecture(task: TaskSpec) -> str:
 def task_runtime_requires_gold_verification(manifest: BenchmarkManifest) -> bool:
     """Return whether the manifest's runtime contract requires SWE gold verification."""
     return _requires_gold_verification(manifest)
+
+
+def _task_runtime_recipe(
+    manifest: BenchmarkManifest,
+    task: TaskSpec,
+    *,
+    repo_root: Path,
+    gold_patch_sha256: str | None,
+) -> tuple[dict[str, Any], Path, VerifierRuntime | None]:
+    architecture = task_architecture(task)
+    verifier_runtime = _verifier_runtime(manifest, task)
+    source = _resolve_task_source(manifest, task, repo_root)
+    source_digest = _tree_digest(source)
+    trial_policy = _trial_policy()
+    recipe_sha256 = _digest(
+        {
+            "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
+            "dataset": manifest.dataset.harbor_ref,
+            "task_id": task.id,
+            "architecture": architecture,
+            "source_sha256": source_digest,
+            "verifier_runtime": (
+                verifier_runtime.to_dict() if verifier_runtime else None
+            ),
+            "gold_patch_sha256": gold_patch_sha256,
+            "trial_policy": trial_policy,
+        }
+    )
+    return (
+        {
+            "schema_version": 1,
+            "contract_version": TASK_RUNTIME_CONTRACT_VERSION,
+            "dataset": manifest.dataset.harbor_ref,
+            "task_id": task.id,
+            "architecture": architecture,
+            "source_sha256": source_digest,
+            "recipe_sha256": recipe_sha256,
+            "image": (
+                f"fugue-task-{_slug(task.id)}-{architecture}:"
+                f"{recipe_sha256[:12]}"
+            ),
+            "verifier_runtime": (
+                verifier_runtime.to_dict() if verifier_runtime else None
+            ),
+            "gold_patch_sha256": gold_patch_sha256,
+            "trial_policy": trial_policy,
+        },
+        source,
+        verifier_runtime,
+    )
+
+
+def _trial_policy() -> dict[str, Any]:
+    return {
+        "network_mode": "no-network",
+        "allowed_hosts": [],
+        "image_pull_policy": "never",
+    }
 
 
 def _extend_task_image(dockerfile: Path, runtime: VerifierRuntime | None) -> None:

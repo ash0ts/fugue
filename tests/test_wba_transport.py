@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
+import fugue.bench.job_config as job_config
 from fugue.agents import FugueWBAResponses
 from fugue.bench.campaign_evidence import safe_prediction_row
 from fugue.bench.campaigns import CampaignService, build_experiment_proposal
@@ -986,6 +987,40 @@ def test_wba_registered_experiment_resolves_exact_locked_matrices() -> None:
         "evidence-intervention",
         "evaluation-plan-artifact",
     }
+
+
+def test_wba_plan_identity_is_stable_across_task_runtime_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = OperatorService(Path(__file__).parents[1])
+    request = ExperimentRequest(
+        experiment_id="wba-transport-ablation-v1",
+        preset="primary",
+    )
+    monkeypatch.setattr(job_config, "read_task_runtime_lock", lambda *args: None)
+    before = service.resolve_run_plan(request, run_id="task-preparation")
+
+    def prepared_lock(manifest: Any, task: Any, repo_root: Path) -> dict[str, Any]:
+        del manifest, repo_root
+        return {
+            "schema_version": 1,
+            "task_id": task.id,
+            "recipe_sha256": "a" * 64,
+            "image": f"fugue-task-{task.id}:prepared",
+            "image_id": "sha256:" + "b" * 64,
+            "dataset_path": f".fugue/runtime/task-images/{task.id}/dataset",
+        }
+
+    monkeypatch.setattr(job_config, "read_task_runtime_lock", prepared_lock)
+    after = service.resolve_run_plan(request, run_id="task-preparation")
+
+    assert [job.candidate_id for job in before.jobs] == [
+        job.candidate_id for job in after.jobs
+    ]
+    assert [job.resolved_candidate.execution_fingerprint for job in before.jobs] == [
+        job.resolved_candidate.execution_fingerprint for job in after.jobs
+    ]
+    assert [cell.id for cell in before.cells] == [cell.id for cell in after.cells]
 
 
 def test_wba_campaign_exposes_an_exact_queryable_canary(

@@ -144,6 +144,92 @@ def test_task_preparation_locks_image_and_disables_trial_network(
     ]
 
 
+def test_task_runtime_identity_is_stable_before_and_after_build(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest, source = _fixture(tmp_path)
+
+    def run(command: list[str], **kwargs):
+        if command[1:3] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Id": "sha256:" + "a" * 64,
+                            "Architecture": "arm64",
+                            "Os": "linux",
+                        }
+                    ]
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(task_runtime.shutil, "which", lambda name: "/docker")
+    monkeypatch.setattr(task_runtime, "_resolve_task_source", lambda *args: source)
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+
+    before = task_runtime.resolve_task_runtime_identity(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+    lock = task_runtime.prepare_task_runtime(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+    after = task_runtime.resolve_task_runtime_identity(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+
+    assert before == after
+    assert before["recipe_sha256"] == lock["recipe_sha256"]
+    assert before["image"] == lock["image"]
+    assert "image_id" not in before
+    assert "dataset_path" not in before
+    assert lock["image_id"] == "sha256:" + "a" * 64
+    assert Path(lock["dataset_path"]).is_dir()
+
+
+def test_remote_task_runtime_identity_is_pure_and_binds_the_selector(
+    tmp_path: Path, monkeypatch
+) -> None:
+    local_manifest, _ = _fixture(tmp_path)
+    manifest = replace(
+        local_manifest,
+        dataset=replace(
+            local_manifest.dataset,
+            path=None,
+            ref="demo/tasks",
+            version="locked-v1",
+            source={"sha256": "a" * 64},
+        ),
+    )
+    monkeypatch.setattr(
+        task_runtime,
+        "_resolve_task_source",
+        lambda *args: pytest.fail("preview attempted to resolve a remote task"),
+    )
+
+    identity = task_runtime.resolve_task_runtime_identity(
+        manifest, manifest.tasks[0], repo_root=tmp_path
+    )
+    changed = task_runtime.resolve_task_runtime_identity(
+        replace(
+            manifest,
+            dataset=replace(manifest.dataset, version="locked-v2"),
+        ),
+        manifest.tasks[0],
+        repo_root=tmp_path,
+    )
+
+    assert identity["dataset"] == "demo/tasks@locked-v1"
+    assert identity["task_id"] == "task-one"
+    assert len(identity["selection_sha256"]) == 64
+    assert "image_id" not in identity
+    assert "dataset_path" not in identity
+    assert changed["selection_sha256"] != identity["selection_sha256"]
+
+
 def test_task_preparation_locks_verifier_dependencies_before_the_trial(
     tmp_path: Path, monkeypatch
 ) -> None:

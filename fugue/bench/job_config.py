@@ -62,7 +62,10 @@ from fugue.bench.services import (
     without_managed_service_environment,
 )
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
-from fugue.bench.task_runtime import read_task_runtime_lock
+from fugue.bench.task_runtime import (
+    read_task_runtime_lock,
+    resolve_task_runtime_identity,
+)
 from fugue.model_plane import (
     ModelRoute,
     model_route_identity,
@@ -241,6 +244,7 @@ def _build_jobs(
         repo_root,
         overlay=asset_overlay,
     )
+    task_runtime_identities: dict[str, dict[str, Any]] = {}
 
     rendered: list[RenderedJob] = []
     for harness in harnesses:
@@ -374,11 +378,14 @@ def _build_jobs(
                     repo_root,
                     task_architecture,
                 )
-                task_runtime = read_task_runtime_lock(
-                    manifest,
-                    tasks[0],
-                    repo_root,
-                )
+                task_runtime_identity = task_runtime_identities.get(tasks[0].id)
+                if task_runtime_identity is None:
+                    task_runtime_identity = resolve_task_runtime_identity(
+                        manifest,
+                        tasks[0],
+                        repo_root=repo_root,
+                    )
+                    task_runtime_identities[tasks[0].id] = task_runtime_identity
                 model_transport = _model_transport(
                     route,
                     harness.name,
@@ -431,11 +438,7 @@ def _build_jobs(
                             if agent_runtime is not None
                             else {}
                         ),
-                        **(
-                            {"task_runtime": task_runtime}
-                            if task_runtime is not None
-                            else {}
-                        ),
+                        "task_runtime": task_runtime_identity,
                     },
                 )
                 candidate_id = resolved_candidate.candidate_id

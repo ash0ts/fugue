@@ -100,6 +100,7 @@ def build_run_snapshot(
     candidates: dict[str, dict[str, Any]] = {}
     runtimes: dict[str, dict[str, Any]] = {}
     executions: dict[str, dict[str, Any]] = {}
+    prepared_executions: dict[str, dict[str, Any]] = {}
     assets: dict[str, dict[str, Any]] = {}
     generated_runtime_assets_by_config: dict[str, tuple[str, ...]] = {}
     fugue_source: dict[str, Any] | None = None
@@ -117,6 +118,21 @@ def build_run_snapshot(
             resolved.execution_definition,
             error=(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
+            ),
+        )
+        prepared_execution = dict(resolved.execution_definition)
+        fugue_config = dict(job.config.get("fugue") or {})
+        for runtime_key in ("context_runtime", "agent_runtime", "task_runtime"):
+            prepared_runtime = fugue_config.get(runtime_key)
+            if prepared_runtime is not None:
+                prepared_execution[runtime_key] = prepared_runtime
+        store_consistent(
+            prepared_executions,
+            resolved.execution_fingerprint,
+            prepared_execution,
+            error=(
+                f"prepared execution {resolved.execution_fingerprint} "
+                "resolved inconsistently"
             ),
         )
         selected_fugue_source = resolved.execution_definition.get("fugue_source")
@@ -325,7 +341,7 @@ def build_run_snapshot(
         sorted(
             (
                 _execution_runtime_lock(fingerprint, execution)
-                for fingerprint, execution in executions.items()
+                for fingerprint, execution in prepared_executions.items()
             ),
             key=lambda item: item["execution_fingerprint"],
         )
