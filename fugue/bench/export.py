@@ -1203,6 +1203,7 @@ _LOCAL_RESULT_FIELDS = {
     "transport_profile",
     "transport_stream_events",
     "transport_retries",
+    "transport_errors",
     "transport_compactions",
     "transport_tool_errors",
     "transport_orphan_tool_outputs",
@@ -3545,6 +3546,7 @@ def _wba_transport_evidence(
             "normalization_errors",
             "stream_events",
             "retries",
+            "transport_errors",
             "compactions",
             "stop_reason",
         )
@@ -3568,6 +3570,7 @@ def _wba_transport_evidence(
         "transport_profile": selected.get("profile"),
         "transport_stream_events": selected.get("stream_events"),
         "transport_retries": selected.get("retries"),
+        "transport_errors": selected.get("transport_errors"),
         "transport_compactions": selected.get("compactions"),
         "transport_tool_errors": selected.get("tool_errors"),
         "transport_orphan_tool_outputs": selected.get("orphan_tool_outputs"),

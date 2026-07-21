@@ -348,6 +348,7 @@ _SAFE_PREDICTION_FIELDS = (
     "transport_profile",
     "transport_stream_events",
     "transport_retries",
+    "transport_errors",
     "transport_compactions",
     "transport_tool_errors",
     "transport_orphan_tool_outputs",

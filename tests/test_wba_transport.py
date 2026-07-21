@@ -501,7 +501,13 @@ def test_retry_policy_records_recoverable_failures(
 
     assert result.text == "recovered"
     assert client.retries == 1
-    assert client.events.rows[0][0] == "model_retry"
+    assert client.transport_errors == 1
+    assert client.normalization_errors == 0
+    assert [event for event, _ in client.events.rows] == [
+        "model_error",
+        "model_retry",
+    ]
+    assert client.events.rows[0][1]["will_retry"] is True
 
 
 def test_responses_stream_fails_closed_when_completion_is_missing(
@@ -521,15 +527,56 @@ def test_responses_stream_fails_closed_when_completion_is_missing(
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(aresponses=responses))
     monkeypatch.setenv("WANDB_API_KEY", "test-only")
 
-    async def exercise() -> None:
+    async def exercise() -> tuple[int, int]:
         client = _client("responses-inline")
         try:
             with pytest.raises(RuntimeError, match="ended without output"):
-                await client._responses_inline([], stream=True)
+                await client.stream([])
+            return client.transport_errors, client.normalization_errors
         finally:
             await client.close()
 
-    asyncio.run(exercise())
+    assert asyncio.run(exercise()) == (1, 1)
+
+
+def test_failed_session_writes_terminal_transport_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def malformed_stream(client: Any, groups: Any) -> Any:
+        del client, groups
+        raise RuntimeError("Responses stream ended without output")
+
+    monkeypatch.setattr(RUNNER["ModelClient"], "_stream_once", malformed_stream)
+    monkeypatch.setenv("FUGUE_DISABLE_WEAVE", "1")
+    events_path = tmp_path / "events.jsonl"
+    summary_path = tmp_path / "summary.json"
+    config = {
+        "profile": "responses-inline",
+        "session_id": "session-failed",
+        "turns": ["Inspect the locked fixture."],
+        "events_path": events_path.as_posix(),
+        "summary_path": summary_path.as_posix(),
+        "workspace": tmp_path.as_posix(),
+        "system_prompt": "fixed",
+        "model_id": "zai-org/GLM-5.2",
+        "litellm_model": "nebius/zai-org/GLM-5.2",
+        "provider_key_env": "WANDB_API_KEY",
+        "provider_base_url": "https://api.inference.wandb.ai/v1",
+        "provider_headers": {},
+    }
+
+    with pytest.raises(RuntimeError, match="ended without output"):
+        asyncio.run(RUNNER["run"](config))
+
+    summary = json.loads(summary_path.read_text())
+    assert summary["event"] == "session_error"
+    assert summary["stop_reason"] == "transport_error"
+    assert summary["transport_errors"] == 1
+    assert summary["normalization_errors"] == 1
+    event_rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert event_rows[-1]["event"] == "session_summary"
+    assert event_rows[-1]["stop_reason"] == "transport_error"
 
 
 def test_compaction_preserves_head_and_tail_groups() -> None:
@@ -861,6 +908,7 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
         "normalization_errors": 0,
         "stream_events": 9,
         "retries": 0,
+        "transport_errors": 0,
         "compactions": 0,
         "stop_reason": "completed",
     }
@@ -877,6 +925,18 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
     assert evidence["wba_transport_status"] == "valid"
     assert safe["transport_profile"] == "responses-inline"
     assert safe["wba_transport"]["tool_calls"] == 2
+    assert safe["transport_errors"] == 0
+    failed_summary = {
+        **summary,
+        "transport_errors": 1,
+        "normalization_errors": 1,
+        "stop_reason": "transport_error",
+    }
+    (agent / "wba-responses-summary.json").write_text(json.dumps(failed_summary))
+    failed_evidence = _wba_transport_evidence(trial, meta)
+    assert failed_evidence["wba_transport_status"] == "invalid"
+    assert failed_evidence["transport_errors"] == 1
+    (agent / "wba-responses-summary.json").write_text(json.dumps(summary))
     assert (
         _wba_transport_evidence(
             trial,

@@ -71,6 +71,11 @@ def analyze_wba_transport_rows(
                 for row in selected
                 if row.get("transport_profile") == profile
             ),
+            "transport_errors": sum(
+                int(row.get("transport_errors") or 0)
+                for row in selected
+                if row.get("transport_profile") == profile
+            ),
             "compactions": sum(
                 int(row.get("transport_compactions") or 0)
                 for row in selected
