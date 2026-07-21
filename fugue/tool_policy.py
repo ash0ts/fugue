@@ -56,8 +56,8 @@ _MATCHERS: dict[HarnessToolPolicy, str] = {
 }
 
 _ACTION_GATE_MATCHERS: dict[HarnessToolPolicy, str] = {
-    "claude-code": "^(Bash|Read|Write|Edit|MultiEdit)$",
-    "codex": "^(shell_command|view_image)$",
+    "claude-code": "^(Bash|Read)$",
+    "codex": "^Bash$",
 }
 
 _ACTION_GATE_SCRIPT = textwrap.dedent(
@@ -72,20 +72,9 @@ _ACTION_GATE_SCRIPT = textwrap.dedent(
     POLICY_PATH = pathlib.Path({str(ACTION_GATE_POLICY_PATH)!r})
     EVENTS_PATH = pathlib.Path({str(ACTION_GATE_EVENTS_PATH)!r})
 
-    def strings(value):
-        if isinstance(value, str):
-            return [value]
-        if isinstance(value, list):
-            out = []
-            for item in value:
-                out.extend(strings(item))
-            return out
-        if isinstance(value, dict):
-            out = []
-            for item in value.values():
-                out.extend(strings(item))
-            return out
-        return []
+    if len(sys.argv) != 2 or sys.argv[1] not in {{"claude-code", "codex"}}:
+        raise ValueError("action gate requires an explicit harness")
+    harness = sys.argv[1]
 
     event = json.load(sys.stdin)
     policy = json.loads(POLICY_PATH.read_text())
@@ -94,11 +83,19 @@ _ACTION_GATE_SCRIPT = textwrap.dedent(
     tool_name = str(event.get("tool_name") or "")
     tool_input = event.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {{}}
-    haystack = "\\n".join(strings(tool_input)).lower()
+    # Match only action-bearing fields. Repository or artifact prose may quote
+    # an attack without proposing the action, and must not trip the gate.
+    if tool_name == "Bash":
+        action = str(tool_input.get("command") or "")
+    elif tool_name == "Read":
+        action = str(tool_input.get("file_path") or tool_input.get("path") or "")
+    else:
+        action = ""
+    haystack = action.lower()
     sensitive = [str(item).lower() for item in policy.get("sensitive_patterns", [])]
     authorized = [str(item).lower() for item in policy.get("authorized_patterns", [])]
     matched_sensitive = next((item for item in sensitive if item in haystack), None)
-    matched_authorized = next((item for item in authorized if item in haystack), None)
+    matched_authorized = matched_sensitive if matched_sensitive in authorized else None
     if matched_sensitive is not None:
         decision = "allow" if matched_authorized is not None else "deny"
         row = {{
@@ -129,6 +126,11 @@ _ACTION_GATE_SCRIPT = textwrap.dedent(
                     "permissionDecisionReason": reason,
                 }}
             }}, separators=(",", ":")))
+            if harness == "claude-code":
+                # Claude Code treats exit 2 as a blocking hook error even when
+                # normal permissions are bypassed for headless Harbor runs.
+                print(reason, file=sys.stderr)
+                raise SystemExit(2)
     """
 )
 
@@ -161,7 +163,7 @@ def action_gate_config(
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {ACTION_GATE_PATH}",
+                            "command": f"python3 {ACTION_GATE_PATH} {harness}",
                             "timeout": 5,
                         }
                     ],
