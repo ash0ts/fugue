@@ -57,8 +57,11 @@ research = [
 ]
 research-worker = [
     "fastapi>=0.115,<1",
+    "fastembed==0.8.0",
     "harbor==0.18.0; python_version >= '3.13'",
+    "lancedb==0.34.0",
     "mcp==1.28.1",
+    "pyarrow==25.0.0",
     "pydantic>=2.10,<3",
     "uvicorn>=0.34,<1",
 ]

@@ -369,10 +369,60 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     )
     control = compose["services"]["fugue-control"]
     worker = compose["services"]["fugue-worker"]
-    assert control["user"] == "10001:10001"
+    operator = compose["services"]["fugue-operator"]
+    expected_user = (
+        "${FUGUE_HOST_UID:?run fugue research bootstrap first}:"
+        "${FUGUE_HOST_GID:?run fugue research bootstrap first}"
+    )
+    expected_home = (
+        "${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home"
+    )
+    assert control["user"] == expected_user
+    assert control["environment"]["HOME"] == expected_home
     assert all("docker.sock" not in value for value in control["volumes"])
     assert any("docker.sock" in value for value in worker["volumes"])
+    assert worker["group_add"] == [
+        "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
+    ]
     assert "ports" not in worker
+    assert "research_api_key" not in worker.get("secrets", [])
+    assert "FUGUE_RESEARCH_API_KEY_FILE" not in worker.get("environment", {})
+    assert operator["user"] == expected_user
+    assert worker["environment"]["HOME"] == expected_home
+    assert operator["environment"]["HOME"] == expected_home
+    assert operator["working_dir"] == (
+        "${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}"
+    )
+    assert "ports" not in operator and "secrets" not in operator
+    assert all("docker.sock" not in value for value in operator["volumes"])
+
+
+def test_compose_preserves_host_checkout_path_for_harbor_bind_mounts() -> None:
+    compose = yaml.safe_load(
+        (Path(__file__).parents[1] / "compose.research.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    root = "${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}"
+    git_common = "${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}"
+    for service_id in ("fugue-control", "fugue-worker", "fugue-operator"):
+        service = compose["services"][service_id]
+        assert f"{root}:{root}:ro" in service["volumes"]
+        assert f"{git_common}:{git_common}:ro" in service["volumes"]
+        assert f"fugue-state:{root}/.fugue" in service["volumes"]
+    assert compose["services"]["fugue-operator"]["working_dir"] == root
+    assert compose["services"]["fugue-control"]["working_dir"] == root
+    assert compose["services"]["fugue-worker"]["working_dir"] == root
+    for service_id in ("fugue-control", "fugue-worker"):
+        command = compose["services"][service_id]["command"]
+        assert command[command.index("--repo-root") + 1] == root
+
+    control_mounts = compose["services"]["fugue-control"]["volumes"]
+    worker_mounts = compose["services"]["fugue-worker"]["volumes"]
+    for path in ("runtime", "cache"):
+        host_path = f"{root}/.fugue/{path}"
+        assert f"{host_path}:{host_path}:ro" in control_mounts
+        assert f"{host_path}:{host_path}" in worker_mounts
 
 
 def test_container_bootstrap_creates_private_idempotent_secrets(
@@ -385,6 +435,17 @@ def test_container_bootstrap_creates_private_idempotent_secrets(
     assert token.strip()
     assert token_path.parent.stat().st_mode & 0o777 == 0o700
     assert token_path.stat().st_mode & 0o777 == 0o444
+    compose_environment = Path(first["compose_environment_file"])
+    assert compose_environment.stat().st_mode & 0o777 == 0o600
+    compose_values = compose_environment.read_text(encoding="utf-8")
+    assert "FUGUE_HOST_REPO_ROOT=" in compose_values
+    assert "FUGUE_HOST_UID=" in compose_values
+    assert "FUGUE_HOST_GID=" in compose_values
+    assert "FUGUE_DOCKER_GID=" in compose_values
+    assert "FUGUE_GIT_COMMON_DIR=" in compose_values
+    assert "wandb-fixture" not in compose_values
+    assert (tmp_path / ".fugue" / "runtime").is_dir()
+    assert (tmp_path / ".fugue" / "cache").is_dir()
     second = bootstrap_container_secrets(tmp_path)
     assert second == first
     assert token_path.read_text(encoding="utf-8") == token
@@ -409,6 +470,25 @@ def test_container_bootstrap_repairs_secret_modes_for_non_root_compose(
         (secret_dir / name).stat().st_mode & 0o777 == 0o444
         for name in ("research_api_key", "wandb_api_key")
     )
+
+
+def test_container_bootstrap_reads_only_allowlisted_dotenv_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credentials = tmp_path / "credentials.env"
+    credentials.write_text(
+        "ANTHROPIC_API_KEY=must-not-copy\n"
+        "export WANDB_API_KEY='wandb-from-dotenv'\n"
+        "WANDB_PROJECT=must-not-copy\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    values = bootstrap_container_secrets(tmp_path / "repo", env_file=credentials)
+
+    secret = Path(values["wandb_api_key_file"]).read_text(encoding="utf-8")
+    assert secret.strip() == "wandb-from-dotenv"
+    assert "must-not-copy" not in secret
 
 
 def test_mcp_has_prompts_but_no_approval_tool(tmp_path: Path) -> None:

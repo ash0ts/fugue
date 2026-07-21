@@ -9,7 +9,8 @@ External research Agents can use Fugue through a separate, bearer-authenticated
 Research service. It exposes high-level Study, trace-audit, experiment, and
 Result operations over MCP, REST, and Python while a private worker keeps Harbor
 execution behind an exact human approval and spend cap. See
-[`docs/research-container.md`](docs/research-container.md).
+[`docs/research-container.md`](docs/research-container.md), or run the complete
+[`retrieval-to-action` external-Agent example](examples/research/retrieval-to-action-canary/README.md).
 
 The core workflow is deliberately small:
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,6 +194,45 @@ class FakeCampaignService:
         )
 
 
+class SlowPrepareCampaignService(FakeCampaignService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_started = threading.Event()
+        self.release_prepare = threading.Event()
+
+    def prepare(self, plan: Any, operation_id: str) -> Artifact:
+        self.prepare_started.set()
+        if not self.release_prepare.wait(timeout=2):
+            raise RuntimeError("test did not release preparation")
+        return super().prepare(plan, operation_id)
+
+
+class ObservedLeaseStore(StudyStore):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(repo_root)
+        self.allow_renewal = threading.Event()
+        self.lease_renewed = threading.Event()
+
+    def renew_lease(
+        self, experiment_id: str, worker_id: str, *, lease_seconds: float = 30
+    ) -> None:
+        if not self.allow_renewal.wait(timeout=2):
+            raise RuntimeError("test did not release lease renewal")
+        super().renew_lease(
+            experiment_id, worker_id, lease_seconds=lease_seconds
+        )
+        self.lease_renewed.set()
+
+    def lease_expiry(self, experiment_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT lease_expires_at FROM experiments WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+        assert row is not None and row[0]
+        return str(row[0])
+
+
 def _service(tmp_path: Path) -> tuple[ResearchService, FakeCampaignService]:
     fake = FakeCampaignService()
     service = ResearchService(
@@ -364,6 +405,82 @@ def test_worker_completes_canonical_lifecycle_without_duplicate_launch(
     study = service.store.get_study("study-1")
     assert study.experiments[-1].run_id == "run-1"
     assert {item.kind for item in study.run_refs} == {"run", "outcome"}
+
+
+def test_worker_renews_lease_during_slow_preparation(tmp_path: Path) -> None:
+    campaign = SlowPrepareCampaignService()
+    store = ObservedLeaseStore(tmp_path)
+    service = ResearchService(
+        tmp_path,
+        campaign_service=campaign,  # type: ignore[arg-type]
+        store=store,
+        lease_seconds=2,
+        lease_heartbeat_interval=0.05,
+    )
+    service.store.create_study(
+        study_id="study-1",
+        title="Loop components",
+        campaign_id="campaign-1",
+        question="Which components matter?",
+        operation_id="create-study",
+    )
+    preview = service.preview_experiment("study-1", _draft())
+    service.start_experiment(
+        preview,
+        approval_digest=_approval(service, preview, "approve-slow"),
+        idempotency_key="start-slow",
+    )
+
+    result: list[Any] = []
+    first = threading.Thread(
+        target=lambda: result.append(service.run_once("worker-slow")), daemon=True
+    )
+    first.start()
+    assert campaign.prepare_started.wait(timeout=1)
+    claimed_expiry = store.lease_expiry(
+        "study-1.proposal-1"
+    )
+    store.allow_renewal.set()
+    assert store.lease_renewed.wait(timeout=1)
+    assert store.lease_expiry("study-1.proposal-1") > claimed_expiry
+
+    assert service.run_once("worker-racing") is None
+    campaign.release_prepare.set()
+    first.join(timeout=2)
+
+    assert result and result[0].state == "running"
+    assert campaign.launches == 1
+
+
+def test_expired_claim_cannot_be_renewed_or_write_after_reclaim(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    preview = service.preview_experiment("study-1", _draft())
+    queued = service.start_experiment(
+        preview,
+        approval_digest=_approval(service, preview, "approve-stale"),
+        idempotency_key="start-stale",
+    )
+    assert service.store.claim_experiment(
+        "worker.claim-first", lease_seconds=0.05
+    )
+    time.sleep(0.08)
+    assert service.store.claim_experiment(
+        "worker.claim-second", lease_seconds=1
+    )
+
+    with pytest.raises(ResearchError, match="lease was lost"):
+        service.store.renew_lease(
+            queued.id, "worker.claim-first", lease_seconds=1
+        )
+    with pytest.raises(ResearchError, match="current lease"):
+        service.store.update_experiment(
+            queued,
+            worker_id="worker.claim-first",
+            event_type="stale_write",
+            message="A stale worker must not write.",
+        )
 
 
 def test_python_client_preserves_same_artifacts(tmp_path: Path) -> None:

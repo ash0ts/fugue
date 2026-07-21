@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,6 +12,7 @@ from fugue.research.agent_contracts import (
     sign_execution_approval,
 )
 from fugue.research.contracts import RESEARCH_SCHEMA_VERSION, ResearchError, now
+from fugue.research.database import connect_database
 
 
 class ApprovalLedger:
@@ -26,7 +24,7 @@ class ApprovalLedger:
         self._initialize()
 
     def _initialize(self) -> None:
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS execution_approvals (
@@ -92,7 +90,7 @@ class ApprovalLedger:
                 "expires_in_seconds": expires_in_seconds,
             }
         )
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             prior = conn.execute(
                 "SELECT input_digest, approval_digest FROM approval_operations "
@@ -145,7 +143,7 @@ class ApprovalLedger:
         return approval
 
     def get(self, approval_digest: str) -> ExecutionApprovalV1:
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             row = conn.execute(
                 "SELECT receipt_json FROM execution_approvals WHERE approval_digest=?",
                 (approval_digest,),
@@ -169,7 +167,7 @@ class ApprovalLedger:
         estimated_cost_usd: float = 0.0,
     ) -> ExecutionApprovalV1:
         subject_id = validate_id(subject_id, kind="approved subject id")
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT receipt_json, consumed_by FROM execution_approvals "
@@ -231,31 +229,6 @@ class ApprovalLedger:
                 )
             conn.commit()
         return approval
-
-    def require_cost(self, approval_digest: str, reserved_cost_usd: float) -> None:
-        approval = self.get(approval_digest)
-        if reserved_cost_usd > approval.maximum_cost_usd + 1e-9:
-            raise ResearchError(
-                "approval_cost_limit",
-                "campaign reservation exceeds the operator-approved cost limit",
-                category="admission",
-                details={
-                    "approved_cost_usd": approval.maximum_cost_usd,
-                    "reserved_cost_usd": reserved_cost_usd,
-                },
-            )
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        try:
-            yield conn
-        finally:
-            conn.close()
-
 
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)

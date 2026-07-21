@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,6 +38,7 @@ from fugue.research.contracts import (
     sign_study,
     study_from_dict,
 )
+from fugue.research.database import connect_database
 
 
 class StudyStore:
@@ -118,17 +118,8 @@ class StudyStore:
             elif int(version[0]) != RESEARCH_SCHEMA_VERSION:
                 raise RuntimeError("unsupported Fugue research database schema")
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        try:
-            yield conn
-        finally:
-            conn.close()
+    def _connect(self) -> Any:
+        return connect_database(self.path)
 
     def create_study(
         self,
@@ -593,21 +584,26 @@ class StudyStore:
         artifact_type: str | None = None,
         artifact_digest: str | None = None,
         release: bool = False,
+        lease_seconds: float = 30,
     ) -> ExperimentRecordV1:
+        self._validate_lease_seconds(lease_seconds)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT lease_owner FROM experiments WHERE experiment_id=?",
+                "SELECT lease_owner, lease_expires_at FROM experiments "
+                "WHERE experiment_id=?",
                 (record.id,),
             ).fetchone()
             if row is None:
                 raise ResearchError(
                     "experiment_not_found", f"experiment not found: {record.id}"
                 )
-            if worker_id and row[0] != worker_id:
+            if worker_id and (
+                row[0] != worker_id or not self._lease_is_current(row[1])
+            ):
                 raise ResearchError(
                     "lease_lost",
-                    "experiment worker no longer owns its lease",
+                    "experiment worker no longer owns a current lease",
                     category="conflict",
                     retryable=True,
                 )
@@ -619,7 +615,7 @@ class StudyStore:
                     self._json(record.to_dict()),
                     record.updated_at,
                     None if release else row[0],
-                    None if release else self._lease_expiry(),
+                    None if release else self._lease_expiry(lease_seconds),
                     record.id,
                 ),
             )
@@ -712,9 +708,10 @@ class StudyStore:
         return updated
 
     def claim_experiment(
-        self, worker_id: str, *, lease_seconds: int = 30
+        self, worker_id: str, *, lease_seconds: float = 30
     ) -> ExperimentRecordV1 | None:
         worker_id = validate_id(worker_id, kind="worker id")
+        self._validate_lease_seconds(lease_seconds)
         cutoff = now()
         terminal = tuple(TERMINAL_EXPERIMENT_STATES)
         placeholders = ",".join("?" for _ in terminal)
@@ -744,8 +741,10 @@ class StudyStore:
         return experiment_record_from_dict(json.loads(row[1]))
 
     def renew_lease(
-        self, experiment_id: str, worker_id: str, *, lease_seconds: int = 30
+        self, experiment_id: str, worker_id: str, *, lease_seconds: float = 30
     ) -> None:
+        self._validate_lease_seconds(lease_seconds)
+        cutoff = now()
         expiry = (
             (datetime.now(UTC) + timedelta(seconds=lease_seconds))
             .isoformat()
@@ -754,11 +753,32 @@ class StudyStore:
         with self._connect() as conn:
             changed = conn.execute(
                 "UPDATE experiments SET lease_expires_at=? "
-                "WHERE experiment_id=? AND lease_owner=?",
-                (expiry, experiment_id, worker_id),
+                "WHERE experiment_id=? AND lease_owner=? AND lease_expires_at>=?",
+                (expiry, experiment_id, worker_id, cutoff),
             ).rowcount
         if changed != 1:
-            raise ResearchError("lease_lost", "experiment worker lease was lost")
+            raise ResearchError(
+                "lease_lost",
+                "experiment worker lease was lost",
+                category="conflict",
+                retryable=True,
+            )
+
+    def assert_lease(self, experiment_id: str, worker_id: str) -> None:
+        cutoff = now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM experiments WHERE experiment_id=? "
+                "AND lease_owner=? AND lease_expires_at>=?",
+                (experiment_id, worker_id, cutoff),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "lease_lost",
+                "experiment worker lease was lost",
+                category="conflict",
+                retryable=True,
+            )
 
     def release_lease(self, experiment_id: str, worker_id: str) -> None:
         with self._connect() as conn:
@@ -768,7 +788,12 @@ class StudyStore:
                 (experiment_id, worker_id),
             ).rowcount
         if changed != 1:
-            raise ResearchError("lease_lost", "experiment worker lease was lost")
+            raise ResearchError(
+                "lease_lost",
+                "experiment worker lease was lost",
+                category="conflict",
+                retryable=True,
+            )
 
     def events(
         self, experiment_id: str, *, after: int = 0, limit: int = 1000
@@ -1163,12 +1188,21 @@ class StudyStore:
         destination = self.repo_root / ".fugue" / "studies" / study.id / "study.json"
         atomic_write_json(destination, study.to_dict())
 
-    def _lease_expiry(self, seconds: int = 30) -> str:
+    def _lease_expiry(self, seconds: float = 30) -> str:
         return (
             (datetime.now(UTC) + timedelta(seconds=seconds))
             .isoformat()
             .replace("+00:00", "Z")
         )
+
+    @staticmethod
+    def _validate_lease_seconds(seconds: float) -> None:
+        if not 0 < seconds <= 3600:
+            raise ValueError("lease duration must be between 0 and 3600 seconds")
+
+    @staticmethod
+    def _lease_is_current(expires_at: str | None) -> bool:
+        return bool(expires_at and expires_at >= now())
 
     @staticmethod
     def _json(value: Mapping[str, Any]) -> str:

@@ -23,14 +23,22 @@ receipts and content-addressed assets through the `fugue-state` volume.
 Bootstrap private secret files, then build and start the two services:
 
 ```bash
-WANDB_API_KEY=... fugue research bootstrap --repo-root .
-docker compose -f compose.research.yaml up --build -d
+uv run --frozen fugue research bootstrap \
+  --repo-root . \
+  --env-file /path/to/operator-credentials.env
+docker compose --env-file .fugue/compose.env \
+  -f compose.research.yaml up --build -d
 ```
 
-The bootstrap command keeps `.fugue/secrets` accessible only to the host user
+The bootstrap command reads only the allowlisted `WANDB_API_KEY`; it never
+sources the dotenv file or copies unrelated credentials. It keeps
+`.fugue/secrets` accessible only to the host user
 and makes the files inside it read-only. This is required because local Compose
 implements file-backed secrets as bind mounts and the control service runs as a
-non-root user. Run bootstrap again to repair permissions on an older setup.
+non-root user. Bootstrap also writes a private `.fugue/compose.env` with the
+checkout path, linked-worktree Git directory, host UID/GID, and Docker socket
+GID. It contains no credentials. Always pass that file to Compose; run bootstrap
+again to repair permissions or refresh host-specific settings on an older setup.
 
 The control endpoint is `http://127.0.0.1:8787`. Configure an MCP-capable Agent
 with:
@@ -45,7 +53,12 @@ The Agent can create drafts and pure previews but cannot issue an approval.
 To export the portable workflow skill into an Agent's skill directory:
 
 ```bash
-fugue research skill export --destination /path/to/skills/optimize-agent-with-fugue
+docker compose --env-file .fugue/compose.env \
+  -f compose.research.yaml run --rm --no-deps \
+  --user "$(id -u):$(id -g)" \
+  -v /path/to/skills:/export \
+  fugue-operator skill export \
+  --destination /export/optimize-agent-with-fugue
 ```
 
 The packaged MCP prompt is generated from the same `SKILL.md`, so clients that
@@ -121,7 +134,9 @@ The intended sequence is:
 5. The operator approves that exact preview from a trusted shell:
 
    ```bash
-   fugue research approve PREVIEW_DIGEST \
+   docker compose --env-file .fugue/compose.env \
+     -f compose.research.yaml run --rm --no-deps \
+     fugue-operator approve PREVIEW_DIGEST \
      --max-usd 200 \
      --max-cells 8 \
      --approved-by OPERATOR_ID
@@ -139,11 +154,26 @@ otherwise Fugue writes no admission and launches no cells. Lost responses are
 recovered through idempotency keys and durable handles, never by silently
 relaunching trials.
 
+The operator service shares only the durable state and read-only checkout. It
+has no public port, Agent API credential, model credential, or Docker socket.
+Compose mounts the checkout at the same absolute path inside the control and
+worker containers. The Study database remains in the named volume, while
+`.fugue/runtime` and `.fugue/cache` are exact-path host bind mounts. This is
+required because Harbor bind mounts are interpreted by the host Docker daemon;
+container-only prepared tasks and evidence would otherwise be unreachable when
+a trial starts. Bootstrap resolves the Git common directory automatically for
+both normal clones and linked worktrees.
+
+For a complete external-Agent walkthrough, use
+`examples/research/retrieval-to-action-canary/README.md`. It previews an
+eight-cell repository-search × inspect-and-verify qualification, pauses for an
+exact operator approval, and shows how a fresh Agent queries the final evidence.
+
 ## Isolation boundary
 
 - The repository and registered configuration are mounted read-only.
-- `fugue-control` runs as UID 10001, drops Linux capabilities, uses a read-only
-  root filesystem, and has no Docker socket.
+- `fugue-control` runs as the bootstrap-recorded host UID/GID, drops Linux
+  capabilities, uses a read-only root filesystem, and has no Docker socket.
 - `fugue-worker` has the Docker socket only to operate Harbor. It has no port.
 - Active Harbor cells retain Fugue's existing prohibition on install, download,
   build, service startup, host-path access, and Docker access.
@@ -155,7 +185,8 @@ relaunching trials.
 Stop the deployment with:
 
 ```bash
-docker compose -f compose.research.yaml down
+docker compose --env-file .fugue/compose.env \
+  -f compose.research.yaml down
 ```
 
 The named state volume remains. Remove it only as an explicit data-deletion

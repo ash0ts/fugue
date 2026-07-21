@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 import time
 import uuid
@@ -39,6 +40,66 @@ from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 _RUN_TERMINAL = frozenset({"passed", "failed", "cancelled", "interrupted"})
 
 
+class _LeaseHeartbeat:
+    """Keep one uniquely claimed experiment fenced while a worker advances it."""
+
+    def __init__(
+        self,
+        store: StudyStore,
+        experiment_id: str,
+        claim_id: str,
+        *,
+        lease_seconds: float,
+        interval: float,
+    ) -> None:
+        self.store = store
+        self.experiment_id = experiment_id
+        self.claim_id = claim_id
+        self.lease_seconds = lease_seconds
+        self.interval = interval
+        self._stop = threading.Event()
+        self._lost: ResearchError | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"fugue-lease-{experiment_id}",
+            daemon=True,
+        )
+
+    def __enter__(self) -> _LeaseHeartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self._stop.set()
+        self._thread.join(timeout=max(1.0, self.interval * 2))
+
+    def check(self) -> None:
+        if self._lost is not None:
+            raise self._lost
+        self.store.assert_lease(self.experiment_id, self.claim_id)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.store.renew_lease(
+                    self.experiment_id,
+                    self.claim_id,
+                    lease_seconds=self.lease_seconds,
+                )
+            except ResearchError as exc:
+                self._lost = exc
+                return
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                self._lost = ResearchError(
+                    "lease_heartbeat_failed",
+                    "experiment lease heartbeat failed",
+                    category="execution",
+                    retryable=True,
+                    details={"exception_type": type(exc).__name__},
+                )
+                return
+
+
 class ResearchService:
     """Governed Study and Experiment façade over Fugue's campaign lifecycle."""
 
@@ -52,6 +113,8 @@ class ResearchService:
         approval_ledger: ApprovalLedger | None = None,
         trace_registry: TraceSourceRegistry | None = None,
         candidate_sources: CandidateSourceRegistry | None = None,
+        lease_seconds: float = 30,
+        lease_heartbeat_interval: float | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.campaign = campaign_service or CampaignService(self.repo_root, env_file)
@@ -72,6 +135,16 @@ class ResearchService:
             self.trace_registry,
             self.approvals,
         )
+        self.lease_seconds = float(lease_seconds)
+        self.lease_heartbeat_interval = float(
+            lease_heartbeat_interval
+            if lease_heartbeat_interval is not None
+            else max(0.05, self.lease_seconds / 3)
+        )
+        if self.lease_seconds <= 0:
+            raise ValueError("lease duration must be positive")
+        if not 0 < self.lease_heartbeat_interval < self.lease_seconds:
+            raise ValueError("lease heartbeat interval must be shorter than the lease")
 
     def catalog(self, study_id: str) -> dict[str, Any]:
         study = self.store.get_study(study_id)
@@ -274,32 +347,35 @@ class ResearchService:
 
     def run_once(self, worker_id: str | None = None) -> ExperimentRecordV1 | None:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
-        record = self.store.claim_experiment(worker_id)
+        claim_id = f"{worker_id}.claim-{uuid.uuid4().hex[:12]}"
+        record = self.store.claim_experiment(
+            claim_id, lease_seconds=self.lease_seconds
+        )
         if record is None:
             return None
-        try:
-            return self._advance(record, worker_id)
-        except CampaignError as exc:
-            current = self.store.get_experiment(record.id)
-            if current.state in TERMINAL_EXPERIMENT_STATES:
-                return current
-            return self._fail(current, worker_id, self._research_error(exc))
-        except ResearchError as exc:
-            current = self.store.get_experiment(record.id)
-            if current.state in TERMINAL_EXPERIMENT_STATES:
-                return current
-            return self._fail(current, worker_id, exc)
-        except (OSError, RuntimeError, ValueError) as exc:
-            error = ResearchError(
-                "research_worker_failed",
-                str(exc) or type(exc).__name__,
-                category="execution",
-                details={"exception_type": type(exc).__name__},
-            )
-            current = self.store.get_experiment(record.id)
-            if current.state in TERMINAL_EXPERIMENT_STATES:
-                return current
-            return self._fail(current, worker_id, error)
+        with _LeaseHeartbeat(
+            self.store,
+            record.id,
+            claim_id,
+            lease_seconds=self.lease_seconds,
+            interval=self.lease_heartbeat_interval,
+        ) as lease:
+            try:
+                return self._advance(record, claim_id, lease)
+            except CampaignError as exc:
+                return self._fail_if_owned(
+                    record.id, claim_id, lease, self._research_error(exc)
+                )
+            except ResearchError as exc:
+                return self._fail_if_owned(record.id, claim_id, lease, exc)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                error = ResearchError(
+                    "research_worker_failed",
+                    str(exc) or type(exc).__name__,
+                    category="execution",
+                    details={"exception_type": type(exc).__name__},
+                )
+                return self._fail_if_owned(record.id, claim_id, lease, error)
 
     def run_until_idle(
         self, worker_id: str | None = None, *, max_steps: int = 1000
@@ -316,21 +392,25 @@ class ResearchService:
         return tuple(changed)
 
     def _advance(
-        self, record: ExperimentRecordV1, worker_id: str
+        self,
+        record: ExperimentRecordV1,
+        worker_id: str,
+        lease: _LeaseHeartbeat,
     ) -> ExperimentRecordV1:
         draft = experiment_draft_from_dict(record.draft)
         self.candidate_sources.validate_draft(draft)
         preview = experiment_preview_from_dict(record.preview)
         if record.state == "cancelling":
-            return self._reconcile_run(record, worker_id, cancelled=True)
+            return self._reconcile_run(record, worker_id, lease, cancelled=True)
         if record.run_id and record.outcome is None:
-            return self._reconcile_run(record, worker_id)
+            return self._reconcile_run(record, worker_id, lease)
 
         task_suite_digest = draft.task_suite_digest
         if draft.task_suite_draft is not None and record.task_suite_lock is None:
             task_preview = task_suite_preview_from_dict(
                 preview.task_suite_preview or {}
             )
+            lease.check()
             lock = self.campaign.lock_task_suite(
                 task_preview, self._operation(record.id, "lock-task-suite")
             )
@@ -404,6 +484,7 @@ class ResearchService:
                 )
 
         if record.prepared_plan is None:
+            lease.check()
             prepared = self.campaign.prepare(
                 plan, self._operation(record.id, "prepare")
             )
@@ -425,6 +506,7 @@ class ResearchService:
         if record.admission is None:
             approval_digest = str((record.approval or {}).get("approval_digest") or "")
             approval = self.approvals.get(approval_digest)
+            lease.check()
             admission = self.campaign.admit(
                 prepared,
                 self._operation(record.id, "admit"),
@@ -445,6 +527,7 @@ class ResearchService:
 
             admission = admission_receipt_from_dict(record.admission)
 
+        lease.check()
         status = self.campaign.launch(admission, self._operation(record.id, "launch"))
         run_id = self._run_id(status.to_dict(), draft.proposal_id)
         return self._save(
@@ -461,6 +544,7 @@ class ResearchService:
         self,
         record: ExperimentRecordV1,
         worker_id: str,
+        lease: _LeaseHeartbeat,
         *,
         cancelled: bool = False,
     ) -> ExperimentRecordV1:
@@ -468,8 +552,10 @@ class ResearchService:
         status = self.campaign.status(record.run_id).to_dict()
         run_state = self._run_state(status, record.run_id)
         if run_state not in _RUN_TERMINAL:
+            lease.check()
             self.store.release_lease(record.id, worker_id)
             return record
+        lease.check()
         outcome = self.campaign.finalize(
             record.run_id, self._operation(record.id, "finalize")
         )
@@ -530,6 +616,7 @@ class ResearchService:
             admitted_reserve = float(
                 (record.admission or {}).get("reserved_cost_usd") or 0.0
             )
+            lease.check()
             evaluation = self.campaign.score_task_suite(
                 record.run_id,
                 task_digest,
@@ -548,6 +635,7 @@ class ResearchService:
                 artifact_digest=evaluation.evaluation_digest,
             )
         if draft.task_analysis_id:
+            lease.check()
             analysis = self.campaign.analyze_task_study(
                 record.run_id,
                 draft.task_analysis_id,
@@ -638,6 +726,7 @@ class ResearchService:
             artifact_type=artifact_type,
             artifact_digest=artifact_digest,
             release=release,
+            lease_seconds=self.lease_seconds,
         )
 
     def _fail(
@@ -655,6 +744,24 @@ class ResearchService:
             message=str(error),
             release=True,
         )
+
+    def _fail_if_owned(
+        self,
+        experiment_id: str,
+        worker_id: str,
+        lease: _LeaseHeartbeat,
+        error: ResearchError,
+    ) -> ExperimentRecordV1:
+        current = self.store.get_experiment(experiment_id)
+        if current.state in TERMINAL_EXPERIMENT_STATES:
+            return current
+        if error.code == "lease_lost":
+            return current
+        try:
+            lease.check()
+        except ResearchError:
+            return current
+        return self._fail(current, worker_id, error)
 
     def _validate_parent_refs(self, study_id: str, draft: ExperimentDraftV1) -> None:
         if self._record_id(study_id, draft.proposal_id) in draft.parent_experiment_ids:

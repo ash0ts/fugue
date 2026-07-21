@@ -415,26 +415,6 @@ def campaign_catalog_snapshot_from_dict(
     return value
 
 
-def plan_receipt_from_dict(raw: Mapping[str, Any]) -> PlanReceiptV1:
-    return _plan_receipt_from_dict(raw)
-
-
-def prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
-    return _prepared_plan_from_dict(raw)
-
-
-def admission_receipt_from_dict(raw: Mapping[str, Any]) -> AdmissionReceiptV1:
-    return _admission_receipt_from_dict(raw)
-
-
-def outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
-    return _outcome_packet_from_dict(raw)
-
-
-def campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
-    return _campaign_event_from_dict(raw)
-
-
 def campaign_error_from_dict(raw: Mapping[str, Any]) -> CampaignError:
     fields = {
         "schema_version",
@@ -1267,7 +1247,7 @@ class CampaignService:
                 campaign_id, operation_id, "prepare", operation_input
             )
             if existing is not None:
-                receipt = _prepared_plan_from_dict(self._read_artifact(existing))
+                receipt = prepared_plan_from_dict(self._read_artifact(existing))
                 self._event(
                     campaign_id,
                     "plan_prepared",
@@ -1427,7 +1407,7 @@ class CampaignService:
                 campaign_id, operation_id, "admit", operation_input
             )
             if existing is not None:
-                receipt = _admission_receipt_from_dict(self._read_artifact(existing))
+                receipt = admission_receipt_from_dict(self._read_artifact(existing))
                 self._event(
                     campaign_id,
                     "plan_admitted",
@@ -1438,7 +1418,7 @@ class CampaignService:
                     artifact_digest=receipt.admission_digest,
                 )
                 return receipt
-            plan = _plan_receipt_from_dict(prepared_plan.plan)
+            plan = plan_receipt_from_dict(prepared_plan.plan)
             policy = self._policy(campaign_id)
             self._require_policy_snapshot(policy)
             if prepared_plan.policy_digest != policy.campaign_digest:
@@ -1470,7 +1450,7 @@ class CampaignService:
                 existing_admissions
                 and existing_admissions[0].get("admission_id") == admission_id
             ):
-                receipt = _admission_receipt_from_dict(
+                receipt = admission_receipt_from_dict(
                     self._read_receipt(campaign_id, "admissions", admission_id)
                 )
                 relative = (
@@ -1571,7 +1551,7 @@ class CampaignService:
                 self._campaign_dir(campaign_id) / "admissions" / f"{admission_id}.json"
             )
             if receipt_path.is_file():
-                receipt = _admission_receipt_from_dict(_read_json_object(receipt_path))
+                receipt = admission_receipt_from_dict(_read_json_object(receipt_path))
             else:
                 unsigned = AdmissionReceiptV1(
                     schema_version=CAMPAIGN_SCHEMA_VERSION,
@@ -1702,8 +1682,8 @@ class CampaignService:
                         )
                     return self.status(run_id)
 
-            prepared = _prepared_plan_from_dict(admission_receipt.prepared_plan)
-            plan = _plan_receipt_from_dict(prepared.plan)
+            prepared = prepared_plan_from_dict(admission_receipt.prepared_plan)
+            plan = plan_receipt_from_dict(prepared.plan)
             policy = self._policy(campaign_id)
             self._require_policy_snapshot(policy)
             if admission_receipt.policy_digest != policy.campaign_digest:
@@ -1970,7 +1950,7 @@ class CampaignService:
                     f"campaign event {number} is invalid JSON",
                     category="evidence",
                 ) from exc
-            event = _campaign_event_from_dict(raw)
+            event = campaign_event_from_dict(raw)
             if event.sequence_number != number:
                 raise CampaignError(
                     "event_log_sequence_invalid",
@@ -2115,7 +2095,7 @@ class CampaignService:
                 campaign_id, operation_id, "finalize", operation_input
             )
             if existing is not None:
-                outcome = _outcome_packet_from_dict(self._read_artifact(existing))
+                outcome = outcome_packet_from_dict(self._read_artifact(existing))
                 self._event(
                     campaign_id,
                     "evidence_finalized" if outcome.eligible else "evidence_blocked",
@@ -2133,7 +2113,7 @@ class CampaignService:
             admission_entry = _run_admission(ledger, run_id)
             existing_outcome_id = str(admission_entry.get("outcome_id") or "")
             if existing_outcome_id:
-                outcome = _outcome_packet_from_dict(
+                outcome = outcome_packet_from_dict(
                     self._read_receipt(campaign_id, "outcomes", existing_outcome_id)
                 )
                 relative = (
@@ -2164,15 +2144,15 @@ class CampaignService:
                     artifact_digest=outcome.outcome_digest,
                 )
                 return outcome
-            admission = _admission_receipt_from_dict(
+            admission = admission_receipt_from_dict(
                 self._read_receipt(
                     campaign_id,
                     "admissions",
                     str(admission_entry["admission_id"]),
                 )
             )
-            prepared = _prepared_plan_from_dict(admission.prepared_plan)
-            plan = _plan_receipt_from_dict(prepared.plan)
+            prepared = prepared_plan_from_dict(admission.prepared_plan)
+            plan = plan_receipt_from_dict(prepared.plan)
             proposal = experiment_proposal_from_dict(plan.proposal)
             run = self.operator.run_summary(run_id)
             if run.status not in _TERMINAL_RUN_STATES:
@@ -2325,7 +2305,7 @@ class CampaignService:
                 self._campaign_dir(campaign_id) / "outcomes" / f"{outcome_id}.json"
             )
             if outcome_path.is_file():
-                outcome = _outcome_packet_from_dict(_read_json_object(outcome_path))
+                outcome = outcome_packet_from_dict(_read_json_object(outcome_path))
                 if (
                     outcome.run_id != run_id
                     or outcome.admission_id != admission.admission_id
@@ -2743,15 +2723,15 @@ class CampaignService:
         policy = self._policy(campaign_id)
         ledger = self._ledger(campaign_id, policy)
         admission_entry = _run_admission(ledger, run_id)
-        admission = _admission_receipt_from_dict(
+        admission = admission_receipt_from_dict(
             self._read_receipt(
                 campaign_id,
                 "admissions",
                 str(admission_entry["admission_id"]),
             )
         )
-        prepared = _prepared_plan_from_dict(admission.prepared_plan)
-        plan = _plan_receipt_from_dict(prepared.plan)
+        prepared = prepared_plan_from_dict(admission.prepared_plan)
+        plan = plan_receipt_from_dict(prepared.plan)
         proposal = experiment_proposal_from_dict(plan.proposal)
         if proposal.task_suite_digest != lock.suite_digest:
             raise CampaignError(
@@ -2849,7 +2829,7 @@ class CampaignService:
 
     def _verify_prepared_plan(self, receipt: PreparedPlanV1) -> None:
         _verify_artifact(receipt.to_dict(), "prepared_plan_digest", "prepared plan")
-        plan = _plan_receipt_from_dict(receipt.plan)
+        plan = plan_receipt_from_dict(receipt.plan)
         if plan.plan_digest != receipt.plan_digest:
             raise CampaignError(
                 "artifact_identity_mismatch",
@@ -2887,7 +2867,7 @@ class CampaignService:
 
     def _verify_admission(self, receipt: AdmissionReceiptV1) -> None:
         _verify_artifact(receipt.to_dict(), "admission_digest", "admission receipt")
-        prepared = _prepared_plan_from_dict(receipt.prepared_plan)
+        prepared = prepared_plan_from_dict(receipt.prepared_plan)
         if prepared.prepared_plan_digest != receipt.prepared_plan_digest:
             raise CampaignError(
                 "artifact_identity_mismatch",
@@ -2950,7 +2930,7 @@ class CampaignService:
                 f"campaign outcome not found: {outcome_id}",
                 category="admission",
             ) from exc
-        _outcome_packet_from_dict(value)
+        outcome_packet_from_dict(value)
         return value
 
     def _operation_id(self, value: str) -> str:
@@ -3222,7 +3202,7 @@ class CampaignService:
             if path.is_file():
                 previous = _read_last_json_object(path)
                 if previous is not None:
-                    previous_event = _campaign_event_from_dict(previous)
+                    previous_event = campaign_event_from_dict(previous)
                     if previous_event.event_id == event_id:
                         self._store.write_json(
                             index_path,
@@ -3871,7 +3851,7 @@ def _require_preparation(preparation: Mapping[str, Any]) -> None:
             )
 
 
-def _plan_receipt_from_dict(raw: Mapping[str, Any]) -> PlanReceiptV1:
+def plan_receipt_from_dict(raw: Mapping[str, Any]) -> PlanReceiptV1:
     fields = {
         "schema_version",
         "campaign_id",
@@ -3928,7 +3908,7 @@ def _plan_receipt_from_dict(raw: Mapping[str, Any]) -> PlanReceiptV1:
     return receipt
 
 
-def _prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
+def prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
     fields = {
         "schema_version",
         "campaign_id",
@@ -3975,11 +3955,11 @@ def _prepared_plan_from_dict(raw: Mapping[str, Any]) -> PreparedPlanV1:
         ),
     )
     _verify_artifact(receipt.to_dict(), "prepared_plan_digest", "prepared plan")
-    _plan_receipt_from_dict(receipt.plan)
+    plan_receipt_from_dict(receipt.plan)
     return receipt
 
 
-def _admission_receipt_from_dict(raw: Mapping[str, Any]) -> AdmissionReceiptV1:
+def admission_receipt_from_dict(raw: Mapping[str, Any]) -> AdmissionReceiptV1:
     fields = {
         "schema_version",
         "admission_id",
@@ -4028,11 +4008,11 @@ def _admission_receipt_from_dict(raw: Mapping[str, Any]) -> AdmissionReceiptV1:
         ),
     )
     _verify_artifact(receipt.to_dict(), "admission_digest", "admission receipt")
-    _prepared_plan_from_dict(receipt.prepared_plan)
+    prepared_plan_from_dict(receipt.prepared_plan)
     return receipt
 
 
-def _outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
+def outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
     fields = {
         "schema_version",
         "outcome_id",
@@ -4143,7 +4123,7 @@ def _outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
     return outcome
 
 
-def _campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
+def campaign_event_from_dict(raw: Mapping[str, Any]) -> CampaignEventV1:
     fields = {
         "schema_version",
         "sequence_number",

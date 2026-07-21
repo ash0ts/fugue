@@ -1,6 +1,6 @@
 id: retrieval-to-action
 title: Retrieval-to-action mechanism study
-description: Test whether dense repository memory helps hard SWE work only when the Agent is explicitly required to verify and act on retrieved evidence.
+description: Test whether repository search helps hard SWE work, and whether its value depends on requiring the Agent to inspect and verify retrieved code.
 model: wandb/zai-org/GLM-5.2
 run_name: retrieval-to-action
 default_preset: canary
@@ -38,17 +38,17 @@ presets:
     scheduling_seed: retrieval-to-action-primary-v1
 variants:
   - id: baseline
-    label: Standard, no memory
+    label: Standard instructions, no repository search
     context: {system_id: none, delivery: portable}
   - id: memory-only
-    label: Dense memory, standard policy
+    label: Repository search only
     context: {system_id: rag-dense, delivery: portable}
   - id: policy-only
-    label: Evidence-use gate, no memory
+    label: Inspect and verify only
     prompt_id: repository-evidence-gate
     context: {system_id: none, delivery: portable}
   - id: memory-policy
-    label: Dense memory plus evidence-use gate
+    label: Repository search plus inspect and verify
     prompt_id: repository-evidence-gate
     context: {system_id: rag-dense, delivery: portable}
 n_attempts: 1

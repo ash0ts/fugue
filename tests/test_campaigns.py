@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import fugue.bench.campaign_lifecycle as campaign_lifecycle
 from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
     CampaignError,
@@ -650,6 +651,62 @@ def test_proposal_rejects_unregistered_and_over_limit_components(
     with pytest.raises(CampaignError, match="does not allow harness") as exc_info:
         service.preview(proposal)
     assert exc_info.value.code == "component_not_allowed"
+
+
+def test_retrieval_to_action_agent_example_resolves_exact_serial_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).parents[1]
+    source = campaign_lifecycle.resolve_fugue_source_provenance(repo_root)
+    monkeypatch.setattr(
+        campaign_lifecycle,
+        "resolve_fugue_source_provenance",
+        lambda _: {**source, "dirty": False},
+    )
+    service = CampaignService(repo_root)
+    catalog = service.catalog("retrieval-to-action-v1")
+    experiment = next(
+        item for item in catalog.experiments if item["id"] == "retrieval-to-action"
+    )
+    assert {item["id"]: item["label"] for item in experiment["variants"]} == {
+        "baseline": "Standard instructions, no repository search",
+        "memory-only": "Repository search only",
+        "policy-only": "Inspect and verify only",
+        "memory-policy": "Repository search plus inspect and verify",
+    }
+    proposal = build_experiment_proposal(
+        proposal_id="retrieval-to-action-qualification-001",
+        campaign_id="retrieval-to-action-v1",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Does repository search actually help?",
+        hypothesis="Search may help when Agents inspect and verify results.",
+        fixed_dimensions=("model", "task", "prompt base", "runtime", "attempt"),
+        varied_dimensions=("repository search", "inspect and verify", "harness"),
+        measured_dimensions=("repair pass", "evidence use", "latency", "cost"),
+        experiment_id="retrieval-to-action",
+        model="wandb/zai-org/GLM-5.2",
+        n_attempts=1,
+        n_concurrent=1,
+        workloads=("canary",),
+        harnesses=("codex", "claude-code"),
+        context_systems=("none", "rag-dense"),
+        variants=("baseline", "memory-only", "policy-only", "memory-policy"),
+        n_tasks=1,
+        trace_content="full",
+    )
+
+    plan = service.preview(proposal)
+
+    assert plan.cell_count == 8
+    assert plan.applicable_cells == 8
+    assert plan.expected_predictions == 8
+    assert plan.max_concurrent == 1
+    assert {(item["harness"], item["variant_id"]) for item in plan.cells} == {
+        (harness, variant)
+        for harness in ("codex", "claude-code")
+        for variant in ("baseline", "memory-only", "policy-only", "memory-policy")
+    }
 
 
 def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) -> None:

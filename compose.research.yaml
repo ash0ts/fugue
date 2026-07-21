@@ -6,35 +6,46 @@ x-fugue-image: &fugue-image
     context: .
     dockerfile: Dockerfile.research
 
-x-fugue-runtime: &fugue-runtime
-  environment:
-    FUGUE_RESEARCH_API_KEY_FILE: /run/secrets/research_api_key
-    FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
-    FUGUE_RESEARCH_TRACE_SOURCES: /etc/fugue/trace-sources.yaml
-    WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
-  secrets:
-    - research_api_key
-    - wandb_api_key
-  volumes:
-    - ./:/workspace:ro
-    - fugue-state:/workspace/.fugue
-    - ${FUGUE_TRACE_SOURCES_FILE:-./configs/fugue/research/trace-sources.yaml}:/etc/fugue/trace-sources.yaml:ro
-    - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
-    - ${FUGUE_TRACE_DATA_DIR:-./.fugue/trace-data}:/data/traces:ro
-
 services:
   fugue-init:
     <<: *fugue-image
     user: "0:0"
     entrypoint: ["/bin/sh", "-c"]
-    command: ["chown -R 10001:10001 /workspace/.fugue"]
+    command:
+      - >-
+        mkdir -p ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home &&
+        chown -R ${FUGUE_HOST_UID:?run fugue research bootstrap first}:${FUGUE_HOST_GID:?run fugue research bootstrap first}
+        ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue
     volumes:
-      - fugue-state:/workspace/.fugue
+      - fugue-state:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue
     restart: "no"
 
   fugue-control:
-    <<: [*fugue-image, *fugue-runtime]
-    user: "10001:10001"
+    <<: *fugue-image
+    user: "${FUGUE_HOST_UID:?run fugue research bootstrap first}:${FUGUE_HOST_GID:?run fugue research bootstrap first}"
+    working_dir: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
+    environment:
+      HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+      FUGUE_RESEARCH_API_KEY_FILE: /run/secrets/research_api_key
+      FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
+      FUGUE_RESEARCH_TRACE_SOURCES: /etc/fugue/trace-sources.yaml
+      WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
+    secrets:
+      - research_api_key
+      - wandb_api_key
+    volumes:
+      # The worker talks to the host Docker daemon. Keeping the checkout at the
+      # same absolute path on both sides makes generated Harbor bind mounts
+      # resolvable by that daemon instead of leaking container-only /workspace
+      # paths into trial configurations.
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:ro
+      - ${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:ro
+      - fugue-state:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime:ro
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache:ro
+      - ${FUGUE_TRACE_SOURCES_FILE:-./configs/fugue/research/trace-sources.yaml}:/etc/fugue/trace-sources.yaml:ro
+      - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
+      - ${FUGUE_TRACE_DATA_DIR:-./.fugue/trace-data}:/data/traces:ro
     command:
       - serve
       - --host
@@ -42,7 +53,7 @@ services:
       - --port
       - "8787"
       - --repo-root
-      - /workspace
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
       - --trace-sources
       - /etc/fugue/trace-sources.yaml
       - --candidate-sources
@@ -72,12 +83,21 @@ services:
     restart: unless-stopped
 
   fugue-worker:
-    <<: [*fugue-image, *fugue-runtime]
-    user: "0:0"
+    <<: *fugue-image
+    user: "${FUGUE_HOST_UID:?run fugue research bootstrap first}:${FUGUE_HOST_GID:?run fugue research bootstrap first}"
+    working_dir: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
+    group_add:
+      - "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
+    environment:
+      HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+      FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
+      WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
+    secrets:
+      - wandb_api_key
     command:
       - worker
       - --repo-root
-      - /workspace
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
       - --poll-interval
       - "1"
       - --candidate-sources
@@ -88,13 +108,42 @@ services:
       fugue-control:
         condition: service_healthy
     volumes:
-      - ./:/workspace:ro
-      - fugue-state:/workspace/.fugue
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:ro
+      - ${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:ro
+      - fugue-state:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache
       - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+  fugue-operator:
+    <<: *fugue-image
+    profiles: [operator]
+    user: "${FUGUE_HOST_UID:?run fugue research bootstrap first}:${FUGUE_HOST_GID:?run fugue research bootstrap first}"
+    working_dir: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
+    environment:
+      HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+    command: ["--help"]
+    depends_on:
+      fugue-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}:ro
+      - ${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:${FUGUE_GIT_COMMON_DIR:?run fugue research bootstrap first}:ro
+      - fugue-state:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
 
 volumes:
   fugue-state:

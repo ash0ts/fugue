@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -29,6 +27,7 @@ from fugue.research.agent_contracts import (
 )
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.contracts import RESEARCH_SCHEMA_VERSION, ResearchError, now
+from fugue.research.database import connect_database
 from fugue.research.store import StudyStore
 from fugue.weave_support import resolved_weave_trace_server_url
 
@@ -334,7 +333,7 @@ class TraceAuditStore:
         self._initialize()
 
     def _initialize(self) -> None:
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS trace_audits (
@@ -357,7 +356,7 @@ class TraceAuditStore:
         self, audit: TraceAuditV1, *, operation_id: str, input_digest: str
     ) -> TraceAuditV1:
         operation_id = validate_id(operation_id, kind="trace audit operation id")
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
             prior = conn.execute(
                 "SELECT input_digest, audit_id FROM trace_audit_operations "
@@ -398,25 +397,13 @@ class TraceAuditStore:
 
     def get(self, audit_id: str) -> TraceAuditV1:
         audit_id = validate_id(audit_id, kind="trace audit id")
-        with self._connect() as conn:
+        with connect_database(self.path) as conn:
             row = conn.execute(
                 "SELECT audit_json FROM trace_audits WHERE audit_id=?", (audit_id,)
             ).fetchone()
         if row is None:
             raise ResearchError("trace_audit_not_found", "trace audit was not found")
         return trace_audit_from_dict(json.loads(row[0]))
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        try:
-            yield conn
-        finally:
-            conn.close()
-
 
 class TraceAuditService:
     def __init__(
