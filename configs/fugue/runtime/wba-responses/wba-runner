@@ -277,6 +277,7 @@ class ModelClient:
                 result = await asyncio.wait_for(
                     operation(), timeout=REQUEST_TIMEOUT_SEC
                 )
+                _validate_model_turn(result)
                 return result
             except asyncio.CancelledError:
                 error = sys.exception()
@@ -1006,6 +1007,14 @@ def _tool_call(raw: dict[str, Any]) -> ToolCall:
     return ToolCall(call_id, str(raw.get("name") or ""), arguments)
 
 
+def _validate_model_turn(result: ModelTurn) -> None:
+    if not result.text.strip() and not result.tool_calls:
+        raise RuntimeError("Model response contained no text or tool calls")
+    call_ids = [call.call_id for call in result.tool_calls]
+    if len(call_ids) != len(set(call_ids)):
+        raise ValueError("Model response contained duplicate tool-call IDs")
+
+
 def _usage(value: Any, *names: str) -> int | None:
     for name in names:
         item = _value(value, name)
@@ -1067,6 +1076,7 @@ def _normalization_error(exc: BaseException) -> bool:
                 "stream ended",
                 "completion returned no choices",
                 "without output",
+                "no text or tool calls",
             )
         )
     )

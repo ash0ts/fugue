@@ -539,6 +539,47 @@ def test_responses_stream_fails_closed_when_completion_is_missing(
     assert asyncio.run(exercise()) == (1, 1)
 
 
+def test_chat_stream_fails_closed_when_text_and_tools_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyIterator:
+        def __aiter__(self) -> EmptyIterator:
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+    async def completion(**kwargs: Any) -> EmptyIterator:
+        assert kwargs["stream"] is True
+        return EmptyIterator()
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=completion))
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+
+    async def exercise() -> tuple[int, int]:
+        client = _client("chat-inline")
+        try:
+            with pytest.raises(RuntimeError, match="no text or tool calls"):
+                await client.stream([])
+            return client.transport_errors, client.normalization_errors
+        finally:
+            await client.close()
+
+    assert asyncio.run(exercise()) == (1, 1)
+
+
+def test_model_turn_rejects_duplicate_tool_call_ids() -> None:
+    duplicate = RUNNER["ModelTurn"](
+        tool_calls=[
+            RUNNER["ToolCall"]("call-1", "shell", {"command": "pwd"}),
+            RUNNER["ToolCall"]("call-1", "shell", {"command": "ls"}),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="duplicate tool-call IDs"):
+        RUNNER["_validate_model_turn"](duplicate)
+
+
 def test_failed_session_writes_terminal_transport_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
