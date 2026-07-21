@@ -91,7 +91,10 @@ def account_prediction_costs(
     fallback = max(reserved, maximum or 0.0)
     missing = max(0, expected_cells - len(measured))
     return CostAccounting(
-        observed_cost_usd=sum(measured),
+        # ``sum([])`` returns the integer ``0``.  Preserve the declared float
+        # contract so a zero-cost outcome has the same canonical JSON before
+        # and after strict artifact parsing (``0.0`` rather than ``0``).
+        observed_cost_usd=float(sum(measured)),
         accounted_cost_usd=sum(measured) + missing * fallback,
         measured_cells=len(measured),
         unmeasured_cells=missing,

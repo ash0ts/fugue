@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
+from fugue.bench.campaign_accounting import account_prediction_costs
 from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
     CampaignError,
@@ -207,6 +208,7 @@ class FakeCampaignOperator(OperatorService):
         self.evaluation_drift = False
         self.bridge_ready = True
         self.bridge_starts = 0
+        self.unmetered_costs = False
 
     def prepare(
         self,
@@ -484,7 +486,7 @@ class FakeCampaignOperator(OperatorService):
                     "runtime_drift": False,
                     "run_snapshot_sha256": snapshot["snapshot_sha256"],
                     "evaluation_asset_lock_sha256": value["evaluation_lock"],
-                    "cost_usd": 1.0,
+                    "cost_usd": None if self.unmetered_costs else 1.0,
                     "tool_calls": 2,
                     "prompt": "must never be projected",
                     "raw_conversation": "must never be projected",
@@ -807,6 +809,48 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     events = service.events("demo")
     assert [event.sequence_number for event in events] == list(range(1, 6))
     assert campaign_event_from_dict(events[0].to_dict()) == events[0]
+
+
+def test_unmetered_cost_accounting_is_canonical_float() -> None:
+    accounting = account_prediction_costs(
+        ({"cost_usd": None, "weave_total_cost_usd": None},),
+        expected_cells=1,
+        reserved_cell_cost_usd=25.0,
+    )
+
+    assert accounting.observed_cost_usd == 0.0
+    assert isinstance(accounting.observed_cost_usd, float)
+    assert accounting.accounted_cost_usd == 25.0
+
+
+def test_unmetered_outcome_round_trips_and_can_parent_primary(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    operator = service.operator
+    assert isinstance(operator, FakeCampaignOperator)
+    operator.unmetered_costs = True
+    plan = service.preview(_proposal(service))
+    prepared = service.prepare(plan, "prepare-unmetered")
+    admission = service.admit(prepared, "admit-unmetered")
+    service.launch(admission, "launch-unmetered")
+    [run_id] = operator.launched
+
+    outcome = service.finalize(run_id, "finalize-unmetered")
+
+    assert outcome.observed_cost_usd == 0.0
+    assert isinstance(outcome.observed_cost_usd, float)
+    assert outcome_packet_from_dict(json.loads(json.dumps(outcome.to_dict()))) == outcome
+    assert service.finalize(run_id, "finalize-unmetered") == outcome
+    primary = service.preview(
+        _proposal(
+            service,
+            proposal_id="primary-after-unmetered",
+            stage_id="primary",
+            parent_outcome_id=outcome.outcome_id,
+        )
+    )
+    assert primary.cell_count == 1
 
 
 def test_campaign_preparation_bootstraps_a_required_bridge_once(tmp_path: Path) -> None:
