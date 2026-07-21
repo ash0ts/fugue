@@ -209,7 +209,7 @@ def _verifier_script(
         "artifact_ok=all(artifact.get(key)==value for key,value in expected.items())\n"
         "score=float(answer_ok and artifact_ok)\n"
         "Path('/logs/verifier/reward.json').write_text(json.dumps({"
-        "'task_pass':score,'answer_facts':float(answer_ok),"
+        "'reward':score,'task_pass':score,'answer_facts':float(answer_ok),"
         "'artifact_contract':float(artifact_ok)}))\n"
         "raise SystemExit(0 if score else 1)\nPY\n"
     )

@@ -1109,6 +1109,7 @@ def test_wba_offline_tasks_materialize_and_verify_reference_output(
     assert json.loads((logs / "verifier/reward.json").read_text()) == {
         "answer_facts": 1.0,
         "artifact_contract": 1.0,
+        "reward": 1.0,
         "task_pass": 1.0,
     }
 
