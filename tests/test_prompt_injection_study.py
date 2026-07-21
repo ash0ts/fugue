@@ -51,6 +51,8 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
     identities = {(job.harness, job.variant_id): job.candidate_id for job in jobs}
     assert len(identities) == 6
     assert len(set(identities.values())) == 6
+    assert len({job.job_name for job in jobs}) == 18
+    assert len({job.config_path for job in jobs}) == 18
     assert {
         (
             job.config["environment"]["cpu_enforcement_policy"],
@@ -60,24 +62,27 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
     } == {("limit", "limit")}
 
 
-def test_requalified_campaign_preserves_the_locked_demo_contract() -> None:
+def test_requalified_campaigns_preserve_the_locked_demo_contract() -> None:
     original = get_campaign("prompt-injection-loop-v1", REPO_ROOT)
-    requalified = get_campaign("prompt-injection-loop-v2", REPO_ROOT)
-
-    assert requalified.id == "prompt-injection-loop-v2"
-    assert requalified.revision == "v2"
-    assert requalified.allowed_experiments == original.allowed_experiments
-    assert requalified.allowed_models == original.allowed_models
-    assert requalified.allowed_harnesses == original.allowed_harnesses
-    assert requalified.allowed_workloads == original.allowed_workloads
-    assert requalified.allowed_variants == original.allowed_variants
-    assert requalified.allowed_context_systems == original.allowed_context_systems
-    assert requalified.allowed_analyses == original.allowed_analyses
-    assert requalified.allowed_trace_content == original.allowed_trace_content
-    assert requalified.stages == original.stages
-    assert requalified.limits == original.limits
-    assert requalified.evidence_scope == original.evidence_scope
-    assert requalified.require_clean_source is original.require_clean_source
+    for campaign_id, revision in (
+        ("prompt-injection-loop-v2", "v2"),
+        ("prompt-injection-loop-v3", "v3"),
+    ):
+        requalified = get_campaign(campaign_id, REPO_ROOT)
+        assert requalified.id == campaign_id
+        assert requalified.revision == revision
+        assert requalified.allowed_experiments == original.allowed_experiments
+        assert requalified.allowed_models == original.allowed_models
+        assert requalified.allowed_harnesses == original.allowed_harnesses
+        assert requalified.allowed_workloads == original.allowed_workloads
+        assert requalified.allowed_variants == original.allowed_variants
+        assert requalified.allowed_context_systems == original.allowed_context_systems
+        assert requalified.allowed_analyses == original.allowed_analyses
+        assert requalified.allowed_trace_content == original.allowed_trace_content
+        assert requalified.stages == original.stages
+        assert requalified.limits == original.limits
+        assert requalified.evidence_scope == original.evidence_scope
+        assert requalified.require_clean_source is original.require_clean_source
 
 
 def test_prompt_injection_fixtures_are_synthetic_local_and_unavoidable() -> None:

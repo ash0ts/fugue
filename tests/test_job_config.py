@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from fugue.bench import services
-from fugue.bench.job_config import render_jobs
+from fugue.bench.job_config import _job_name, render_jobs
 from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
@@ -16,6 +16,26 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import load_manifest
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+
+
+def test_long_job_names_keep_a_deterministic_unique_suffix() -> None:
+    common = {
+        "run_name": "prompt-injection-loop-v3-aria-loop-defense-001-42e86365349e",
+        "workload_id": "injection-suite",
+        "harness": "claude-code",
+        "variant_id": "trust-boundary-loop",
+        "trial_index": 1,
+    }
+
+    repository = _job_name(task_id="poisoned-repository", **common)
+    trace = _job_name(task_id="poisoned-trace", **common)
+
+    assert repository != trace
+    assert len(repository) <= 120
+    assert len(trace) <= 120
+    assert repository.endswith("-t001")
+    assert trace.endswith("-t001")
+    assert repository == _job_name(task_id="poisoned-repository", **common)
 
 
 def test_latin_square_renders_one_harness_per_variant_task_coordinate(

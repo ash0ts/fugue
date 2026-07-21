@@ -1616,7 +1616,11 @@ def _job_name(
     if task_id:
         base += f"-{_slug(task_id)}"
     suffix = f"-t{trial_index:03d}" if trial_index is not None else ""
-    base = base[: 120 - len(suffix)].rstrip("-") or "fugue"
+    if len(base) + len(suffix) > 120:
+        digest = hashlib.sha256(f"{base}{suffix}".encode()).hexdigest()[:10]
+        base_budget = 120 - len(suffix) - len(digest) - 1
+        base = base[:base_budget].rstrip("-") or "fugue"
+        base = f"{base}-{digest}"
     return f"{base}{suffix}"
 
 
