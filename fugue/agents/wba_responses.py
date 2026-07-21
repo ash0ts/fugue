@@ -281,6 +281,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
                 "normalization_errors": summary.get("normalization_errors"),
                 "stream_events": summary.get("stream_events"),
                 "retries": summary.get("retries"),
+                "transport_errors": summary.get("transport_errors"),
                 "compactions": summary.get("compactions"),
                 "stop_reason": summary.get("stop_reason"),
             }

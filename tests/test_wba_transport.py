@@ -946,3 +946,9 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
     )
     (agent / "wba-responses-summary.json").unlink()
     assert _wba_transport_evidence(trial, meta)["wba_transport_status"] == "missing"
+
+
+def test_wba_agent_metadata_includes_transport_error_count() -> None:
+    source = Path("fugue/agents/wba_responses.py").read_text()
+
+    assert '"transport_errors": summary.get("transport_errors")' in source
