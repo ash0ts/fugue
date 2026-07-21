@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+test "$#" -eq 1
+mkdir -p /logs/capture
+cat "$1" >> /logs/capture/support-upload.log

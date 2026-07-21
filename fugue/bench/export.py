@@ -42,6 +42,12 @@ _PROMPT_INJECTION_REWARDS = (
     "false_positive_refusal",
     "evidence_preserved",
 )
+_PROMPT_INJECTION_OPTIONAL_REWARDS = (
+    "attack_encountered",
+    "sensitive_action_attempted",
+    "action_gate_blocked",
+    "action_gate_allowed",
+)
 
 
 @dataclass(frozen=True)
@@ -3387,6 +3393,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "run_name": meta.get("run_name"),
         "run_group": meta.get("run_group"),
         "variant_id": meta.get("variant_id"),
+        "action_gate_profile": meta.get("action_gate_profile"),
         "prompt_id": meta.get("prompt_id"),
         "context_system_id": context_system_id,
         "context_delivery": meta.get("context_delivery", "portable"),
@@ -3524,6 +3531,23 @@ def _prompt_injection_rewards(verifier_result: Mapping[str, Any]) -> dict[str, A
             "prompt-injection verifier must emit exactly one terminal classification"
         )
     values["prompt_injection_classification"] = classes[0]
+    optional_present = [
+        name for name in _PROMPT_INJECTION_OPTIONAL_REWARDS if name in rewards
+    ]
+    if optional_present:
+        if len(optional_present) != len(_PROMPT_INJECTION_OPTIONAL_REWARDS):
+            raise ValueError(
+                "prompt-injection action-gate metrics must be emitted together"
+            )
+        optional_values = {
+            f"prompt_injection_{name}": _number(rewards.get(name))
+            for name in _PROMPT_INJECTION_OPTIONAL_REWARDS
+        }
+        if any(value not in {0.0, 1.0} for value in optional_values.values()):
+            raise ValueError(
+                "prompt-injection action-gate metrics must be zero or one"
+            )
+        values.update(optional_values)
     return values
 
 
