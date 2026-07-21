@@ -272,6 +272,81 @@ def resolve_wba_transport_receipt(
     return receipt
 
 
+def wba_transport_receipt_from_dict(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """Strictly reconstruct one immutable V1 WBA transport receipt."""
+
+    raw = {str(key): item for key, item in value.items()}
+    fields = {
+        "schema_version",
+        "harness",
+        "profile",
+        "wire_protocol",
+        "agent_wire_protocol",
+        "provider_wire_protocol",
+        "client",
+        "codec",
+        "conversion_location",
+        "endpoint_kind",
+        "model_provider",
+        "model_id",
+        "provider_endpoint",
+        "upstream_host",
+        "bridge_required",
+        "runtime_dependencies",
+        "compatibility_reference",
+        "retry_policy",
+        "retry_policy_digest",
+        "timeout_policy",
+        "timeout_policy_digest",
+        "compaction_policy",
+        "compaction_policy_digest",
+        "loop_policy",
+        "loop_policy_digest",
+        "sampling_policy",
+        "sampling_policy_digest",
+        "route_digest",
+    }
+    unknown = sorted(set(raw) - fields)
+    if unknown:
+        raise ValueError(
+            "unknown WBA transport receipt field(s): " + ", ".join(unknown)
+        )
+    if isinstance(raw.get("schema_version"), bool) or raw.get(
+        "schema_version"
+    ) != WBA_TRANSPORT_CONTRACT_VERSION:
+        raise ValueError("WBA transport receipt must use schema_version 1")
+    if raw.get("harness") != "wba-responses":
+        raise ValueError("WBA transport receipt has the wrong harness")
+    if not isinstance(raw.get("bridge_required"), bool):
+        raise ValueError("WBA transport receipt bridge_required must be a boolean")
+    profile = normalize_wba_transport_profile(str(raw.get("profile") or ""))
+    provider = str(raw.get("model_provider") or "")
+    if provider not in {"wandb", "openai", "anthropic"}:
+        raise ValueError("WBA transport receipt has an unsupported model provider")
+    model_id = str(raw.get("model_id") or "").strip()
+    endpoint = str(raw.get("provider_endpoint") or "").strip().rstrip("/")
+    parsed = urlparse(endpoint)
+    if not model_id or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("WBA transport receipt has an invalid provider route")
+    route = ModelRoute(
+        provider=cast(Provider, provider),
+        model_id=model_id,
+        display_model=f"{provider}/{model_id}",
+        api_key_env="",
+        chat_base_url=endpoint,
+        responses_base_url=None,
+        messages_base_url=None,
+        litellm_model="",
+        tool_result_modalities=("text",),
+    )
+    expected = resolve_wba_transport_receipt(route, profile)
+    if raw != expected:
+        raise ValueError("WBA transport receipt does not match its locked profile")
+    return expected
+
+
 def _wba_policy_digest(value: Mapping[str, object]) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()

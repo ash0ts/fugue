@@ -19,6 +19,7 @@ from fugue.model_plane import (
     trace_entity_project,
     trace_env_defaults,
     trace_project_slug,
+    wba_transport_receipt_from_dict,
 )
 from fugue.weave_support import weave_agents_otel_headers
 
@@ -83,6 +84,20 @@ def test_wba_transport_receipts_lock_three_distinct_topologies() -> None:
         0.0
     }
     assert len({value["sampling_policy_digest"] for value in receipts.values()}) == 1
+    assert {
+        profile: wba_transport_receipt_from_dict(receipt)
+        for profile, receipt in receipts.items()
+    } == receipts
+
+
+def test_wba_transport_receipt_parser_rejects_drift() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    receipt = resolve_wba_transport_receipt(route, "responses-inline")
+
+    with pytest.raises(ValueError, match="unknown WBA transport receipt"):
+        wba_transport_receipt_from_dict({**receipt, "arbitrary_url": "https://x"})
+    with pytest.raises(ValueError, match="does not match its locked profile"):
+        wba_transport_receipt_from_dict({**receipt, "client": "different-client"})
 
 
 def test_wba_transport_profile_rejects_unregistered_overrides() -> None:

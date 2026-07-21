@@ -112,6 +112,7 @@ from fugue.model_plane import (
     model_route_identity,
     resolve_harness_model_route,
     resolve_model_route,
+    wba_transport_receipt_from_dict,
 )
 from fugue.preflight import PreflightCheck
 from fugue.redaction import redact_value, secrets_from_env
@@ -3549,30 +3550,30 @@ def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
         "route_lock_sha256",
     }
     _reject_unknown(raw, fields, "route lock")
+    harness = validate_id(raw.get("harness") or "", kind="route lock harness")
+    provider = validate_id(raw.get("provider") or "", kind="route lock provider")
+    model_id = _bounded_text(raw.get("model_id"), "route lock model id", 300)
     transport = _mapping(raw.get("transport"), "route lock transport")
-    _reject_unknown(
-        transport,
-        {
-            "harness",
-            "wire_protocol",
-            "endpoint_kind",
-            "upstream_host",
-            "bridge_required",
-        },
-        "route lock transport",
-    )
-    value = {
-        "candidate_id": _bounded_text(
-            raw.get("candidate_id"), "route lock candidate id", 200
-        ),
-        "harness": validate_id(raw.get("harness") or "", kind="route lock harness"),
-        "model": _bounded_text(raw.get("model"), "route lock model", 300),
-        "provider": validate_id(raw.get("provider") or "", kind="route lock provider"),
-        "model_id": _bounded_text(raw.get("model_id"), "route lock model id", 300),
-        "route_configuration_sha256": _required_digest(
-            raw.get("route_configuration_sha256"), "route configuration digest"
-        ),
-        "transport": {
+    if harness == "wba-responses":
+        parsed_transport = wba_transport_receipt_from_dict(transport)
+        if (
+            parsed_transport["model_provider"] != provider
+            or parsed_transport["model_id"] != model_id
+        ):
+            raise ValueError("WBA route lock transport does not match its model route")
+    else:
+        _reject_unknown(
+            transport,
+            {
+                "harness",
+                "wire_protocol",
+                "endpoint_kind",
+                "upstream_host",
+                "bridge_required",
+            },
+            "route lock transport",
+        )
+        parsed_transport = {
             "harness": validate_id(
                 transport.get("harness") or "", kind="route transport harness"
             ),
@@ -3588,7 +3589,19 @@ def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
             "bridge_required": _strict_bool(
                 transport.get("bridge_required"), "route bridge_required"
             ),
-        },
+        }
+    value = {
+        "candidate_id": _bounded_text(
+            raw.get("candidate_id"), "route lock candidate id", 200
+        ),
+        "harness": harness,
+        "model": _bounded_text(raw.get("model"), "route lock model", 300),
+        "provider": provider,
+        "model_id": model_id,
+        "route_configuration_sha256": _required_digest(
+            raw.get("route_configuration_sha256"), "route configuration digest"
+        ),
+        "transport": parsed_transport,
         "route_lock_sha256": _required_digest(
             raw.get("route_lock_sha256"), "route lock digest"
         ),

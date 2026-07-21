@@ -828,6 +828,10 @@ def test_wba_campaign_exposes_an_exact_queryable_canary(
         "responses-inline",
         "chat-inline",
     }
+    route_locks = campaign_lifecycle._prepared_route_locks(preview.cells, {})
+    assert tuple(
+        campaign_lifecycle._route_lock_from_dict(lock) for lock in route_locks
+    ) == route_locks
 
 
 def test_wba_offline_tasks_materialize_and_verify_reference_output(
