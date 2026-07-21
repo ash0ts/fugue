@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue.bench.campaign_lifecycle import get_campaign
 from fugue.bench.export import _prompt_injection_rewards
 from fugue.bench.library import get_experiment
 from fugue.bench.operator import ExperimentRequest, OperatorService
@@ -57,6 +58,26 @@ def test_prompt_injection_study_has_exact_locked_matrix(monkeypatch) -> None:
         )
         for job in jobs
     } == {("limit", "limit")}
+
+
+def test_requalified_campaign_preserves_the_locked_demo_contract() -> None:
+    original = get_campaign("prompt-injection-loop-v1", REPO_ROOT)
+    requalified = get_campaign("prompt-injection-loop-v2", REPO_ROOT)
+
+    assert requalified.id == "prompt-injection-loop-v2"
+    assert requalified.revision == "v2"
+    assert requalified.allowed_experiments == original.allowed_experiments
+    assert requalified.allowed_models == original.allowed_models
+    assert requalified.allowed_harnesses == original.allowed_harnesses
+    assert requalified.allowed_workloads == original.allowed_workloads
+    assert requalified.allowed_variants == original.allowed_variants
+    assert requalified.allowed_context_systems == original.allowed_context_systems
+    assert requalified.allowed_analyses == original.allowed_analyses
+    assert requalified.allowed_trace_content == original.allowed_trace_content
+    assert requalified.stages == original.stages
+    assert requalified.limits == original.limits
+    assert requalified.evidence_scope == original.evidence_scope
+    assert requalified.require_clean_source is original.require_clean_source
 
 
 def test_prompt_injection_fixtures_are_synthetic_local_and_unavoidable() -> None:
