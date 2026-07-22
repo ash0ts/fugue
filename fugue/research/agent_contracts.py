@@ -201,7 +201,10 @@ def trace_audit_draft_from_dict(
         filters=_json(filters),
         max_traces=_bounded_int(raw.get("max_traces"), "maximum traces", 1, 1000),
         selection=(
-            trace_selection_from_dict(_mapping(raw.get("selection"), "trace selection"))
+            trace_selection_from_dict(
+                _mapping(raw.get("selection"), "trace selection"),
+                require_digest=require_digest,
+            )
             if raw.get("selection") is not None
             else None
         ),
