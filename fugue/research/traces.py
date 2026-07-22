@@ -35,6 +35,7 @@ _SOURCE_FIELDS = {
     "adapter",
     "allowed_fields",
     "allowed_filters",
+    "allowed_projects",
     "id",
     "path",
     "project",
@@ -85,6 +86,7 @@ class _SourceConfig:
     redactions: tuple[str, ...]
     path: Path | None = None
     project: str | None = None
+    allowed_projects: tuple[str, ...] = ()
 
     @property
     def safe_digest(self) -> str:
@@ -96,6 +98,7 @@ class _SourceConfig:
                 "allowed_filters": list(self.allowed_filters),
                 "redactions": list(self.redactions),
                 "project": self.project,
+                "allowed_projects": list(self.allowed_projects),
             }
         )
 
@@ -174,8 +177,10 @@ class WeaveTraceSource:
         env: Mapping[str, str] | None = None,
         fetcher: Callable[[dict[str, Any]], Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
-        if not config.project or "/" not in config.project:
-            raise ValueError("weave trace source requires an entity/project")
+        if not config.project and not config.allowed_projects:
+            raise ValueError(
+                "weave trace source requires a fixed project or allowed projects"
+            )
         self.config = config
         self.env = dict(os.environ if env is None else env)
         self.fetcher = fetcher
@@ -202,8 +207,9 @@ class WeaveTraceSource:
         return self.config.redactions
 
     def read(self, draft: TraceAuditDraftV1) -> tuple[dict[str, Any], ...]:
+        project = self._selected_project(draft)
         payload = {
-            "project_id": self.config.project,
+            "project_id": project,
             "filter": {"trace_roots_only": True},
             "limit": draft.max_traces,
             "sort_by": [{"field": "started_at", "direction": "desc"}],
@@ -213,21 +219,114 @@ class WeaveTraceSource:
         query = _weave_query(draft)
         if query is not None:
             payload["query"] = {"$expr": query}
-        if self.fetcher is not None:
-            raw_records = self.fetcher(payload)
-        else:
-            raw_records = self._fetch(payload)
+        selected_call_ids: tuple[str, ...] = ()
+        selected_by_trace: dict[str, list[str]] = {}
+        if draft.selection and draft.selection.call_ids:
+            selected_call_ids = draft.selection.call_ids
+            selected_payload = {
+                **payload,
+                "filter": {"call_ids": list(selected_call_ids)},
+                "limit": len(selected_call_ids),
+            }
+            selected_records = self._read_payload(selected_payload)
+            returned_ids = {
+                str(item.get("id") or item.get("call_id") or "")
+                for item in selected_records
+            }
+            missing = sorted(set(selected_call_ids) - returned_ids)
+            if missing:
+                raise ResearchError(
+                    "trace_selection_incomplete",
+                    "selected Weave calls could not be resolved",
+                    category="evidence",
+                    details={"missing_call_ids": missing},
+                )
+            root_trace_ids = sorted(
+                {
+                    str(item.get("trace_id") or item.get("id") or "")
+                    for item in selected_records
+                    if item.get("trace_id") or item.get("id")
+                }
+            )
+            for item in selected_records:
+                trace_id = str(item.get("trace_id") or item.get("id") or "")
+                call_id = str(item.get("id") or item.get("call_id") or "")
+                if trace_id and call_id:
+                    selected_by_trace.setdefault(trace_id, []).append(call_id)
+            payload["filter"] = {
+                "trace_roots_only": True,
+                "trace_ids": root_trace_ids,
+            }
+            payload["limit"] = len(root_trace_ids)
+        raw_records = self._read_payload(payload)
         records = []
         for raw in raw_records:
             normalized = _normalize_trace(dict(raw), draft.fields)
+            if draft.selection is not None:
+                trace_id = str(raw.get("trace_id") or raw.get("id") or "")
+                root_call_id = _clean_text(
+                    raw.get("id") or raw.get("call_id") or raw.get("trace_id"), 300
+                )
+                normalized["selected_call_ids"] = (
+                    sorted(selected_by_trace.get(trace_id, []))
+                    if selected_call_ids
+                    else [root_call_id]
+                )
+                normalized["root_call_id"] = root_call_id
+                normalized["source_row_digest"] = stable_digest(dict(raw))
+                attributes = (
+                    raw.get("attributes")
+                    if isinstance(raw.get("attributes"), Mapping)
+                    else {}
+                )
+                normalized["source_markers"] = _remove_empty(
+                    {
+                        "demo.dataset": attributes.get("demo.dataset"),
+                        "demo.outcome": attributes.get("demo.outcome"),
+                        "demo.needs_review": attributes.get("demo.needs_review"),
+                        "demo.synthetic": attributes.get("demo.synthetic"),
+                    }
+                )
             if _matches(normalized, draft):
                 records.append(normalized)
             if len(records) >= draft.max_traces:
                 break
         return tuple(records)
 
+    def _selected_project(self, draft: TraceAuditDraftV1) -> str:
+        requested = draft.selection.project if draft.selection else self.config.project
+        if not requested:
+            raise ResearchError(
+                "trace_project_required",
+                "this trace source requires an explicitly selected project",
+                category="policy",
+            )
+        allowed = set(self.config.allowed_projects)
+        if self.config.project:
+            allowed.add(self.config.project)
+        if requested not in allowed:
+            raise ResearchError(
+                "trace_project_not_allowed",
+                "the selected Weave project is outside the operator allowlist",
+                category="policy",
+                details={"project": requested},
+            )
+        return requested
+
+    def _read_payload(self, payload: dict[str, Any]) -> Sequence[Mapping[str, Any]]:
+        if self.fetcher is not None:
+            return self.fetcher(payload)
+        return self._fetch(payload)
+
     def _fetch(self, payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         api_key = self.env.get("WANDB_API_KEY", "").strip()
+        if not api_key:
+            key_file = self.env.get("WANDB_API_KEY_FILE", "").strip()
+            if key_file:
+                try:
+                    api_key = Path(key_file).read_text(encoding="utf-8").strip()
+                except OSError:
+                    api_key = ""
         if not api_key:
             raise ResearchError(
                 "trace_credentials_unavailable",
@@ -291,7 +390,7 @@ class TraceSourceRegistry:
             raise ValueError("trace source config version must be 1")
         adapters: list[TraceSourceAdapter] = []
         for value in raw["sources"]:
-            config = _source_config(value, root)
+            config = _source_config(value, root, env=env)
             if config.adapter == "jsonl":
                 adapters.append(JsonlTraceSource(config))
             else:
@@ -516,6 +615,9 @@ class TraceAuditService:
                 preview_digest=preview.preview_digest,
                 source=preview.source,
                 source_snapshot_digest=snapshot_digest,
+                selection=(
+                    draft.selection.to_dict() if draft.selection is not None else None
+                ),
                 cohort_count=len(records),
                 coverage={
                     "requested": draft.max_traces,
@@ -543,7 +645,9 @@ class TraceAuditService:
         )
 
 
-def _source_config(raw: Any, root: Path) -> _SourceConfig:
+def _source_config(
+    raw: Any, root: Path, *, env: Mapping[str, str] | None = None
+) -> _SourceConfig:
     if not isinstance(raw, dict):
         raise ValueError("trace source entry must be an object")
     unknown = sorted(set(raw) - _SOURCE_FIELDS)
@@ -567,6 +671,16 @@ def _source_config(raw: Any, root: Path) -> _SourceConfig:
     project = raw.get("project")
     if project is not None and (adapter != "weave" or not isinstance(project, str)):
         raise ValueError("project is permitted only for Weave trace sources")
+    project = _expand_env(project, env) if isinstance(project, str) else None
+    configured_allowed_projects = raw.get("allowed_projects") or ()
+    if configured_allowed_projects and adapter != "weave":
+        raise ValueError("allowed_projects is permitted only for Weave trace sources")
+    allowed_projects = tuple(
+        _expand_env(item, env) for item in _string_tuple(configured_allowed_projects)
+    )
+    for candidate in tuple(item for item in (project, *allowed_projects) if item):
+        if candidate.count("/") != 1:
+            raise ValueError("Weave projects must use entity/project paths")
     return _SourceConfig(
         id=source_id,
         adapter=adapter,
@@ -575,6 +689,7 @@ def _source_config(raw: Any, root: Path) -> _SourceConfig:
         redactions=redactions,
         path=path,
         project=project,
+        allowed_projects=allowed_projects,
     )
 
 
@@ -795,6 +910,10 @@ def _trace_ref(record: Mapping[str, Any]) -> dict[str, Any]:
             "status": record.get("status"),
             "harness": record.get("harness"),
             "model": record.get("model"),
+            "selected_call_ids": record.get("selected_call_ids"),
+            "root_call_id": record.get("root_call_id"),
+            "source_row_digest": record.get("source_row_digest"),
+            "source_markers": record.get("source_markers"),
             "summary_digest": stable_digest(record),
         }
     )
@@ -961,6 +1080,19 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if any(not item for item in values) or len(values) != len(set(values)):
         raise ValueError("trace source string collections must be unique and non-empty")
     return values
+
+
+def _expand_env(value: str, env: Mapping[str, str] | None) -> str:
+    values = dict(os.environ if env is None else env)
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        replacement = values.get(name, "").strip()
+        if not replacement:
+            raise ValueError(f"trace source environment variable is unset: {name}")
+        return replacement
+
+    return re.sub(r"\$\{([A-Z][A-Z0-9_]*)\}", replace, value)
 
 
 def _clean_text(value: Any, limit: int) -> str:

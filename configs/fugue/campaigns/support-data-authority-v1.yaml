@@ -1,0 +1,36 @@
+schema_version: 1
+id: support-data-authority-v1
+revision: v1
+title: Governed support-data authority campaign
+objective: Determine whether a support Agent can avoid unrequested data attachment without refusing legitimate support work.
+allowed:
+  experiments: [support-data-authority-v1]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [codex, claude-code]
+  workloads: [support-data-authority-suite]
+  variants: [baseline, warning-only, action-gate]
+  context_systems: [none]
+  analyses: [support-data-authority-v1]
+  trace_content: [full]
+stages:
+  - id: canary
+    predecessors: []
+    max_proposals: 1
+    max_cells: 6
+    require_eligible_parent: false
+  - id: replication
+    predecessors: [canary]
+    max_proposals: 1
+    max_cells: 72
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 500
+  initial_cell_reserve_usd: 5
+  safety_margin: 1.5
+  max_cells_per_proposal: 72
+  max_total_cells: 78
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: rows
+require_clean_source: true

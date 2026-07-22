@@ -30,6 +30,9 @@ services:
       FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
       FUGUE_RESEARCH_TRACE_SOURCES: /etc/fugue/trace-sources.yaml
       WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
+      WANDB_BASE_URL: ${WANDB_BASE_URL:-https://api.wandb.ai}
+      WANDB_ENTITY: ${WANDB_ENTITY:-wandb}
+      WF_TRACE_SERVER_URL: ${WF_TRACE_SERVER_URL:-}
     secrets:
       - research_api_key
       - wandb_api_key

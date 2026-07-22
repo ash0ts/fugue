@@ -35,6 +35,7 @@ from fugue.research.contracts import (
     sign_record,
 )
 from fugue.research.store import StudyStore
+from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 
 _RUN_TERMINAL = frozenset({"passed", "failed", "cancelled", "interrupted"})
@@ -135,6 +136,7 @@ class ResearchService:
             self.trace_registry,
             self.approvals,
         )
+        self.task_recipes = TaskRecipeService(self.store, self.traces.store)
         self.lease_seconds = float(lease_seconds)
         self.lease_heartbeat_interval = float(
             lease_heartbeat_interval
@@ -168,6 +170,17 @@ class ResearchService:
                     "experiment draft does not belong to the requested Study",
                 )
             self._validate_parent_refs(study.id, draft)
+            if (
+                draft.experiment_id == "support-data-authority-v1"
+                and draft.task_recipe_preview is None
+            ):
+                raise ResearchError(
+                    "recipe_preview_required",
+                    "support-data-authority-v1 requires a signed trace-derived recipe preview",
+                    category="policy",
+                )
+            if draft.task_recipe_preview is not None:
+                validate_recipe_binding(draft.task_recipe_preview, draft)
             catalog = self.campaign.catalog(draft.campaign_id)
             task_preview = None
             plan = None

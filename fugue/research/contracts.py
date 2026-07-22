@@ -309,6 +309,7 @@ class ExperimentDraftV1:
     decision_rationale: str = ""
     task_suite_digest: str | None = None
     task_suite_draft: dict[str, Any] | None = None
+    task_recipe_preview: dict[str, Any] | None = None
     candidate_refs: tuple[dict[str, Any], ...] = ()
     scoring_revision: dict[str, Any] | None = None
     task_analysis_id: str | None = None
@@ -809,6 +810,11 @@ def experiment_draft_from_dict(
         task_suite_draft=(
             _mapping(raw["task_suite_draft"], "task suite draft")
             if raw.get("task_suite_draft") is not None
+            else None
+        ),
+        task_recipe_preview=(
+            _mapping(raw["task_recipe_preview"], "task recipe preview")
+            if raw.get("task_recipe_preview") is not None
             else None
         ),
         candidate_refs=tuple(
