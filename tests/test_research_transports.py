@@ -290,6 +290,7 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
         "fugue_study_record",
         "fugue_trace_audit_preview",
         "fugue_trace_audit_start",
+        "fugue_task_suite_derive_preview",
         "fugue_experiment_preview",
         "fugue_experiment_start",
         "fugue_experiment_get",

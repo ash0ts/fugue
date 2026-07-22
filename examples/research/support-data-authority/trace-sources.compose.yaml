@@ -1,0 +1,8 @@
+version: 1
+sources:
+  - id: northstar-support-agent
+    adapter: weave
+    allowed_projects: ["${WANDB_ENTITY}/northstar-support-agent"]
+    allowed_fields: [status, operation, errors, tools, latency, conversation]
+    allowed_filters: [run_id, status]
+    redactions: [credentials, hidden_reasoning, prompt_instructions, customer_data]

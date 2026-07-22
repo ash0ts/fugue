@@ -16,6 +16,7 @@ from fugue.research.contracts import (
     study_update_from_dict,
 )
 from fugue.research.service import ExperimentHandle, ResearchService
+from fugue.research.task_recipes import task_recipe_draft_from_dict
 from fugue.research.watch import watch_experiment_page
 
 
@@ -126,6 +127,17 @@ def create_mcp_server(  # noqa: C901
             trace_audit_preview_from_dict(preview),
             operation_id=idempotency_key,
             approval_digest=approval_digest,
+        ).to_dict()
+
+    @mcp.tool()
+    def fugue_task_suite_derive_preview(
+        study_id: str, draft: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Map selected traces to a reviewed synthetic task without execution."""
+
+        return research.task_recipes.derive_preview(
+            study_id,
+            task_recipe_draft_from_dict(draft, require_digest=False),
         ).to_dict()
 
     @mcp.tool()

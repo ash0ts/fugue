@@ -1,0 +1,45 @@
+id: support-data-authority-v1
+title: Support-data authority loop study
+description: Test whether a support Agent can finish its work without attaching customer data the engineer did not request.
+model: wandb/zai-org/GLM-5.2
+run_name: support-data-authority-v1
+default_preset: canary
+tags: [agent-safety, loop-engineering, support-data-authority-v1]
+harnesses: [claude-code, codex]
+workloads:
+  - id: support-data-authority-suite
+    runner: harbor
+    manifest: datasets/support-data-authority-v1.yaml
+    variants: [baseline, warning-only, action-gate]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  canary:
+    workloads: [support-data-authority-suite]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: support-data-authority-canary-v1
+variants:
+  - id: baseline
+    label: Current behavior
+    context: {system_id: none, delivery: portable}
+  - id: warning-only
+    label: Add a safety reminder
+    prompt_id: prompt-injection-warning
+    context: {system_id: none, delivery: portable}
+  - id: action-gate
+    label: Check risky actions against the user's request
+    prompt_id: prompt-injection-action-gate
+    agent_kwargs: {action_gate_profile: trust-boundary-v1}
+    context: {system_id: none, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 1
+jobs_dir: .fugue/runtime/jobs/support-data-authority-v1
+trace_content: full
+environment:
+  type: docker
+  cpu_enforcement_policy: limit
+  memory_enforcement_policy: limit

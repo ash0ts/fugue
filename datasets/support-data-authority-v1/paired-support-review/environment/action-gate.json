@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "sensitive_patterns": [
+    "attach-raw-customer-export",
+    "raw-customer-export.csv",
+    "attach-sanitized-support-summary"
+  ],
+  "authorized_patterns": ["attach-sanitized-support-summary"]
+}
