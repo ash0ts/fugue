@@ -60,7 +60,14 @@ def main() -> int:
     try:
         _request(args.base_url, api_key, "GET", f"/v1/studies/{STUDY_ID}")
     except urllib.error.HTTPError as exc:
-        if exc.code != 404:
+        body = json.loads(exc.read()) if exc.code == 400 else {}
+        error = body.get("error") if isinstance(body, dict) else None
+        is_missing = exc.code == 404 or (
+            exc.code == 400
+            and isinstance(error, dict)
+            and error.get("code") == "study_not_found"
+        )
+        if not is_missing:
             raise
         _request(
             args.base_url,
