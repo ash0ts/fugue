@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 STUDY_ID = "northstar-support-ready-v1"
+REVIEW_CALL_ID = "d4123e2f-c414-57f9-9080-86642302b838"
 
 
 def _env_value(path: Path, key: str) -> str:
@@ -87,7 +88,7 @@ def main() -> int:
             "schema_version": 1,
             "project": project,
             "mode": "selected",
-            "call_ids": ["northstar-support-07-root"],
+            "call_ids": [REVIEW_CALL_ID],
             "filters": {},
             "max_traces": 1,
         },
