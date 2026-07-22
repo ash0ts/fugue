@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-STUDY_ID = "northstar-support-ready-v1"
+STUDY_PREFIX = "northstar-support-ready-v1"
 REVIEW_CALL_ID = "d4123e2f-c414-57f9-9080-86642302b838"
 
 
@@ -52,13 +53,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--api-key-file", type=Path, required=True)
-    parser.add_argument("--env-file", type=Path, required=True)
+    parser.add_argument("--entity")
+    parser.add_argument("--env-file", type=Path)
     args = parser.parse_args()
     api_key = args.api_key_file.read_text(encoding="utf-8").strip()
-    entity = _env_value(args.env_file, "WANDB_ENTITY")
+    entity = str(args.entity or "").strip()
+    if not entity and args.env_file is not None:
+        entity = _env_value(args.env_file, "WANDB_ENTITY")
+    if not entity:
+        parser.error("--entity or an --env-file containing WANDB_ENTITY is required")
     project = f"{entity}/northstar-support-agent"
+    project_suffix = hashlib.sha256(project.encode()).hexdigest()[:12]
+    study_id = f"{STUDY_PREFIX}-{project_suffix}"
     try:
-        _request(args.base_url, api_key, "GET", f"/v1/studies/{STUDY_ID}")
+        _request(args.base_url, api_key, "GET", f"/v1/studies/{study_id}")
     except urllib.error.HTTPError as exc:
         body = json.loads(exc.read()) if exc.code == 400 else {}
         error = body.get("error") if isinstance(body, dict) else None
@@ -75,17 +83,17 @@ def main() -> int:
             "POST",
             "/v1/studies",
             {
-                "study_id": STUDY_ID,
+                "study_id": study_id,
                 "title": "Northstar support readiness probe",
                 "campaign_id": "support-data-authority-v1",
                 "question": "Can Fugue query the seeded synthetic support project?",
                 "background": "Read-only local-demo readiness check.",
-                "idempotency_key": "create-northstar-support-ready-v1",
+                "idempotency_key": f"create-{study_id}",
             },
         )
     draft = {
         "schema_version": 1,
-        "study_id": STUDY_ID,
+        "study_id": study_id,
         "source_id": "northstar-support-agent",
         "objective": "Verify one seeded synthetic call is queryable.",
         "fields": ["status", "operation"],
@@ -104,15 +112,15 @@ def main() -> int:
         args.base_url,
         api_key,
         "POST",
-        f"/v1/studies/{STUDY_ID}/trace-audits:preview",
+        f"/v1/studies/{study_id}/trace-audits:preview",
         {"draft": draft},
     )
     audit = _request(
         args.base_url,
         api_key,
         "POST",
-        f"/v1/studies/{STUDY_ID}/trace-audits",
-        {"preview": preview, "idempotency_key": "query-northstar-support-ready-v1"},
+        f"/v1/studies/{study_id}/trace-audits",
+        {"preview": preview, "idempotency_key": f"query-{study_id}"},
     )
     if audit.get("cohort_count") != 1:
         raise RuntimeError("Fugue did not resolve exactly one seeded support trace")

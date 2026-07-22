@@ -503,12 +503,18 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert control["user"] == expected_user
     assert control["environment"]["HOME"] == expected_home
     assert all("docker.sock" not in value for value in control["volumes"])
+    assert control["environment"]["WANDB_API_KEY_FILE"] == (
+        "/run/secrets/trace_wandb_api_key"
+    )
+    assert control["secrets"] == ["research_api_key", "trace_wandb_api_key"]
     assert any("docker.sock" in value for value in worker["volumes"])
     assert worker["group_add"] == [
         "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
     ]
     assert "ports" not in worker
     assert "research_api_key" not in worker.get("secrets", [])
+    assert worker["environment"]["WANDB_API_KEY_FILE"] == ("/run/secrets/wandb_api_key")
+    assert worker["secrets"] == ["wandb_api_key"]
     assert "FUGUE_RESEARCH_API_KEY_FILE" not in worker.get("environment", {})
     assert operator["user"] == expected_user
     assert worker["environment"]["HOME"] == expected_home

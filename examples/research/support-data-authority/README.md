@@ -9,3 +9,10 @@ The trace selection never becomes executable task content. The experiment uses
 the checked-in synthetic paired support task and binds the selection, trace-root
 snapshot, recipe, verifier, three loop designs, runtimes, and six-cell plan into
 one operator-approved preview digest.
+
+For local Core, the control service receives a dedicated
+`FUGUE_TRACE_WANDB_API_KEY_FILE` that can read the seeded `*.wandb.test`
+project. The worker retains the separately bootstrapped `WANDB_API_KEY_FILE`
+used for paid model inference. The trace credential is never reused as model
+authority, and the production inference credential is never sent to the local
+trace backend.
