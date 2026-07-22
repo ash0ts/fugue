@@ -1689,3 +1689,69 @@ def test_wba_agent_metadata_includes_transport_error_count() -> None:
     source = Path("fugue/agents/wba_responses.py").read_text()
 
     assert '"transport_errors": summary.get("transport_errors")' in source
+
+
+def test_wba_v1_shareable_results_are_aggregate_and_public_safe() -> None:
+    root = Path("examples/research/wba-transport-ablation")
+    summary_path = root / "v1-shareable-results.json"
+    report_path = root / "v1-results.md"
+    summary = json.loads(summary_path.read_text())
+    rendered = json.dumps(summary, sort_keys=True)
+    report = report_path.read_text()
+
+    assert summary["status"] == "reviewed_public_safe_aggregate"
+    assert summary["source"]["run_id"] == "20260722T150531-73a8b45a27"
+    assert summary["evidence_integrity"]["terminal_rows"] == 48
+    assert summary["official_v1_outcome"] == {
+        "task_passes": 0,
+        "cells": 48,
+        "interpretation": "non_discriminating",
+    }
+    audit = summary["exploratory_output_audit"]
+    assert audit["requested_artifact_pairs_present"] == 48
+    assert audit["literal_answer_checks_passed"] == 34
+    assert audit["scorer_compatible_top_level_artifacts"] == 2
+    assert audit["serialized_artifacts_containing_expected_scalar_text"] == 48
+    assert sum(
+        item["literal_answer_checks_passed"]
+        for item in audit["by_profile"].values()
+    ) == 34
+    assert sum(
+        item["scorer_compatible_top_level_artifacts"]
+        for item in audit["by_profile"].values()
+    ) == 2
+
+    def nested_keys(value: object) -> set[str]:
+        if isinstance(value, dict):
+            return set(value) | {
+                key for item in value.values() for key in nested_keys(item)
+            }
+        if isinstance(value, list):
+            return {key for item in value for key in nested_keys(item)}
+        return set()
+
+    forbidden_fields = {
+        "agent_response",
+        "artifact_contents",
+        "expected_terms",
+        "expected_values",
+        "raw_events",
+        "root_span_id",
+        "weave_call_id",
+    }
+    assert forbidden_fields.isdisjoint(nested_keys(summary))
+    forbidden_text = (
+        "/Users/",
+        "WANDB_API_KEY",
+    )
+    assert not any(value in rendered or value in report for value in forbidden_text)
+    assert summary["publication_review"] == {
+        "raw_agent_content_included": False,
+        "raw_trace_content_included": False,
+        "prompts_included": False,
+        "private_expected_values_included": False,
+        "local_paths_included": False,
+        "secrets_included": False,
+        "observed_cost_claimed": False,
+        "atlas_record_created": False,
+    }

@@ -36,6 +36,12 @@ reference solution passes before the task runtime can be admitted.
 The V1 score remains unchanged; its post-hoc artifact audit is recorded in
 `v1-exploratory-audit.json` as historical evidence only.
 
+The reviewed, public-safe interpretation is available in
+[`v1-results.md`](./v1-results.md), with the corresponding allowlisted
+aggregate in [`v1-shareable-results.json`](./v1-shareable-results.json). These
+artifacts distinguish the official V1 score, post-hoc output diagnostics, and
+the blocked V2 qualification without publishing raw Agent or trace content.
+
 At the time of this revision, `responses-proxy` is intentionally unsupported:
 neither the pinned LiteLLM image nor the tested signed `v1.86.2` image passes
 the required Responses event-sequence contract. Preview remains pure and

@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "report_id": "wba-transport-ablation-v1-shareable-results",
+  "status": "reviewed_public_safe_aggregate",
+  "source": {
+    "experiment_id": "wba-transport-ablation-v1",
+    "source_commit": "3a4dcb9b9980e522f7db9dcc555d60f21396a095",
+    "run_id": "20260722T150531-73a8b45a27",
+    "outcome_digest": "b11b834a5c3644d7c2df46025fc70d608f042cd6720d4af73892a82c6aa00ff8",
+    "snapshot_digest": "03a16ae99e70d6a8146843953f0a53b8ef858c82b8899e33bd16306ad27ea321",
+    "export_sha256": "0e4185d31edad87fb81f3fd9cdd2424ac9c2bbb28e6d88f0e372cf387e2f46d1"
+  },
+  "design": {
+    "model": "GLM-5.2",
+    "tasks": 8,
+    "transport_profiles": 3,
+    "attempts": 2,
+    "cells": 48,
+    "fixed": [
+      "model",
+      "provider endpoint",
+      "task resources",
+      "system prompt",
+      "shell tool",
+      "loop limits",
+      "runtime",
+      "sampling settings"
+    ],
+    "varied": [
+      "transport profile"
+    ]
+  },
+  "evidence_integrity": {
+    "terminal_rows": 48,
+    "unique_prediction_ids": 48,
+    "unique_conversation_ids": 48,
+    "unique_trace_ids": 48,
+    "unique_root_ids": 48,
+    "linked_agent_rows": 48,
+    "runtime_equivalent_rows": 48,
+    "provider_error_cells": 0,
+    "weave_model_call_cells": 0,
+    "usage_available_cells": 0,
+    "cost_available_cells": 0
+  },
+  "official_v1_outcome": {
+    "task_passes": 0,
+    "cells": 48,
+    "interpretation": "non_discriminating"
+  },
+  "exploratory_output_audit": {
+    "status": "posthoc_not_a_replacement_score",
+    "requested_artifact_pairs_present": 48,
+    "nonempty_markdown_answers": 48,
+    "parseable_json_artifacts": 48,
+    "literal_answer_checks_passed": 34,
+    "scorer_compatible_top_level_artifacts": 2,
+    "serialized_artifacts_containing_expected_scalar_text": 48,
+    "definitions": {
+      "literal_answer_checks_passed": "Every V1 expected term appeared literally, case-insensitively, in the Markdown answer.",
+      "scorer_compatible_top_level_artifacts": "Every required V1 top-level key mapped to the exact expected value; additional keys were allowed.",
+      "serialized_artifacts_containing_expected_scalar_text": "Every expected scalar had a matching text representation somewhere in the serialized JSON artifact. This does not establish correct structure, path, or semantics."
+    },
+    "by_profile": {
+      "chat-inline": {
+        "cells": 16,
+        "literal_answer_checks_passed": 12,
+        "scorer_compatible_top_level_artifacts": 1,
+        "task_passes": 0
+      },
+      "responses-inline": {
+        "cells": 16,
+        "literal_answer_checks_passed": 11,
+        "scorer_compatible_top_level_artifacts": 1,
+        "task_passes": 0
+      },
+      "responses-proxy": {
+        "cells": 16,
+        "literal_answer_checks_passed": 11,
+        "scorer_compatible_top_level_artifacts": 0,
+        "task_passes": 0
+      }
+    },
+    "by_task": {
+      "trace-auth-diagnosis": {
+        "cells": 6,
+        "literal_answer_checks_passed": 6,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "tool-call-reconciliation": {
+        "cells": 6,
+        "literal_answer_checks_passed": 6,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "evaluation-regression": {
+        "cells": 6,
+        "literal_answer_checks_passed": 1,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "judge-disagreement": {
+        "cells": 6,
+        "literal_answer_checks_passed": 6,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "latency-anomaly": {
+        "cells": 6,
+        "literal_answer_checks_passed": 6,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "retry-cost-anomaly": {
+        "cells": 6,
+        "literal_answer_checks_passed": 6,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "evidence-intervention": {
+        "cells": 6,
+        "literal_answer_checks_passed": 3,
+        "scorer_compatible_top_level_artifacts": 0
+      },
+      "evaluation-plan-artifact": {
+        "cells": 6,
+        "literal_answer_checks_passed": 0,
+        "scorer_compatible_top_level_artifacts": 2
+      }
+    }
+  },
+  "operational_descriptives": {
+    "status": "exploratory_not_transport_comparable",
+    "measurement_note": "Token counts are runner-reported usage, not Weave-joined billing usage. Cost was unavailable.",
+    "profiles": {
+      "chat-inline": {
+        "cells": 16,
+        "wall_time_mean_sec": 126.1,
+        "wall_time_median_sec": 104.8,
+        "runner_reported_tokens": 490182,
+        "tool_calls": 134,
+        "compactions": 40,
+        "retries": 0,
+        "transport_errors": 4,
+        "tool_errors": 2
+      },
+      "responses-inline": {
+        "cells": 16,
+        "wall_time_mean_sec": 162.0,
+        "wall_time_median_sec": 98.3,
+        "runner_reported_tokens": 314355,
+        "tool_calls": 151,
+        "compactions": 49,
+        "retries": 0,
+        "transport_errors": 10,
+        "tool_errors": 2
+      },
+      "responses-proxy": {
+        "cells": 16,
+        "wall_time_mean_sec": 119.0,
+        "wall_time_median_sec": 89.9,
+        "runner_reported_tokens": 506517,
+        "tool_calls": 162,
+        "compactions": 58,
+        "retries": 13,
+        "transport_errors": 13,
+        "tool_errors": 3,
+        "v1_stream_anomalies": 30006
+      }
+    },
+    "limitations": [
+      "V1 wire diagnostics were asymmetric across profiles.",
+      "V1 retry behavior depended on exception class names.",
+      "V1 did not emit queryable Weave model-call children.",
+      "Observed usage could not be joined to a locked price source.",
+      "Two attempts per task are insufficient for a stable latency, token, or reliability estimate."
+    ]
+  },
+  "v2_qualification": {
+    "source_commit": "35a2aa86e8e27348148a12d9d31e55235abacf05",
+    "status": "blocked_before_approval_or_spend",
+    "responses_proxy": "unsupported",
+    "tested_proxy_images": 2,
+    "events_per_image": 14,
+    "missing_sequence_number_events_per_image": 12,
+    "non_monotonic_sequences_per_image": 1,
+    "next_gate": "Pin a proxy image that passes the conformance suite, then run the separately approved three-cell V2 canary."
+  },
+  "claims": {
+    "supported": [
+      "The V1 execution and evidence path completed and reconciled all 48 planned cells.",
+      "The official V1 outcome was non-discriminating because the undisclosed artifact contract and literal answer matching rejected substantively populated outputs.",
+      "The tested proxy images do not satisfy the V2 Responses streaming-event conformance gate."
+    ],
+    "not_supported": [
+      "The three transport profiles are equivalent.",
+      "One transport profile is better, faster, cheaper, or more reliable.",
+      "The V1 post-hoc audit is a replacement task score.",
+      "The results apply to another Agent implementation or to wandb/core."
+    ]
+  },
+  "publication_review": {
+    "raw_agent_content_included": false,
+    "raw_trace_content_included": false,
+    "prompts_included": false,
+    "private_expected_values_included": false,
+    "local_paths_included": false,
+    "secrets_included": false,
+    "observed_cost_claimed": false,
+    "atlas_record_created": false
+  }
+}
