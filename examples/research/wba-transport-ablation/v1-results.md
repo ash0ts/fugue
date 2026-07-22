@@ -111,9 +111,9 @@ declared JSON pointers. It fixes the second with shared turn validation,
 shared Responses-event validation, call-kind-specific retry and compaction
 policies, and separate protocol, task, and operational results.
 
-There is not yet a V2 transport result. The next valid step is to pin a proxy
-image that passes conformance, then run exactly one separately approved,
-three-cell canary. Until then, the defensible statement is:
+There is not yet a V2 transport result, and no live V2 cohort is planned in
+this PR. Any future comparison should be a separate decision made only after a
+proxy image passes conformance. The defensible statement is:
 
 > The first cohort qualified the execution path and invalidated its own scorer.
 > The repaired study correctly stops because the proxy is not wire-conformant.

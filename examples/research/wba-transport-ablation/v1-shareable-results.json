@@ -174,12 +174,13 @@
   "v2_qualification": {
     "source_commit": "35a2aa86e8e27348148a12d9d31e55235abacf05",
     "status": "blocked_before_approval_or_spend",
+    "execution_decision": "do_not_run_canary_or_primary_in_this_pr",
     "responses_proxy": "unsupported",
     "tested_proxy_images": 2,
     "events_per_image": 14,
     "missing_sequence_number_events_per_image": 12,
     "non_monotonic_sequences_per_image": 1,
-    "next_gate": "Pin a proxy image that passes the conformance suite, then run the separately approved three-cell V2 canary."
+    "next_gate": "None in this PR. Any future live comparison is separately scoped after a proxy image passes conformance."
   },
   "claims": {
     "supported": [

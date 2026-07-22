@@ -1695,9 +1695,11 @@ def test_wba_v1_shareable_results_are_aggregate_and_public_safe() -> None:
     root = Path("examples/research/wba-transport-ablation")
     summary_path = root / "v1-shareable-results.json"
     report_path = root / "v1-results.md"
+    readme_path = root / "README.md"
     summary = json.loads(summary_path.read_text())
     rendered = json.dumps(summary, sort_keys=True)
     report = report_path.read_text()
+    readme = readme_path.read_text()
 
     assert summary["status"] == "reviewed_public_safe_aggregate"
     assert summary["source"]["run_id"] == "20260722T150531-73a8b45a27"
@@ -1720,6 +1722,13 @@ def test_wba_v1_shareable_results_are_aggregate_and_public_safe() -> None:
         item["scorer_compatible_top_level_artifacts"]
         for item in audit["by_profile"].values()
     ) == 2
+    assert summary["v2_qualification"]["execution_decision"] == (
+        "do_not_run_canary_or_primary_in_this_pr"
+    )
+    assert "No V2 canary or primary cohort is part of this PR" in readme
+    assert "fugue-operator approve" not in readme
+    assert not (root / "agent-prompt.md").exists()
+    assert not (root / "query-prompt.md").exists()
 
     def nested_keys(value: object) -> set[str]:
         if isinstance(value, dict):
