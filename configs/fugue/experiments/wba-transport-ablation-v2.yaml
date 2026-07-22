@@ -1,0 +1,57 @@
+id: wba-transport-ablation-v2
+title: WBA-compatible Responses transport ablation V2
+description: Separately measure wire conformance, Agent-loop behavior, and visible-schema task outcomes while holding the public WBA-style Agent loop fixed.
+model: wandb/zai-org/GLM-5.2
+run_name: wba-transport-ablation-v2
+default_preset: canary
+tags: [wba-compatible, transport-ablation, glm-5-2, offline-tasks, visible-schema]
+harnesses: [wba-responses]
+workloads:
+  - id: transport
+    runner: harbor
+    manifest: datasets/wba-transport-ablation-v2.yaml
+    required_capabilities: []
+    systems: [none]
+    variants: [responses-proxy, responses-inline, chat-inline]
+presets:
+  canary:
+    workloads: [transport]
+    systems: [none]
+    harnesses: [wba-responses]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: wba-transport-canary-v2
+  primary:
+    workloads: [transport]
+    systems: [none]
+    harnesses: [wba-responses]
+    n_attempts: 2
+    n_tasks: 8
+    n_concurrent: 1
+    scheduling_seed: wba-transport-primary-v2
+variants:
+  - id: responses-proxy
+    label: Responses client through the Fugue proxy
+    context: {system_id: none, delivery: portable}
+    agent_kwargs: {transport_profile: responses-proxy}
+  - id: responses-inline
+    label: LiteLLM Responses conversion in process
+    context: {system_id: none, delivery: portable}
+    agent_kwargs: {transport_profile: responses-inline}
+  - id: chat-inline
+    label: LiteLLM Chat Completions reference
+    context: {system_id: none, delivery: portable}
+    agent_kwargs: {transport_profile: chat-inline}
+agent_kwargs:
+  context_window: 4096
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 8
+jobs_dir: jobs/wba-transport-ablation-v2
+trace_content: full
+cancel_on_cell_failure: true
+environment:
+  type: docker
+  cpu_enforcement_policy: auto
+  memory_enforcement_policy: auto

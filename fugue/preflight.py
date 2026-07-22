@@ -19,6 +19,7 @@ from fugue.model_plane import (
     resolve_harness_model_route,
     resolve_model_route,
     trace_project_slug,
+    wba_transport_profile_qualification,
 )
 from fugue.weave_support import resolved_weave_trace_server_url
 
@@ -84,6 +85,23 @@ def run_preflight(
 
     if not live:
         return checks
+
+    if harnesses and any(
+        harness.removeprefix("fugue-") == "wba-responses" for harness in harnesses
+    ):
+        for profile in wba_transport_profiles:
+            qualification = wba_transport_profile_qualification(profile)
+            checks.append(
+                PreflightCheck(
+                    f"WBA transport {profile}",
+                    qualification.get("status") == "supported",
+                    str(
+                        qualification.get("reason")
+                        or qualification.get("contract")
+                        or qualification
+                    ),
+                )
+            )
 
     if not missing_model_env(route, values):
         checks.append(_check_provider_metadata(route, values))

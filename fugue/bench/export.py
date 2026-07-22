@@ -1081,7 +1081,7 @@ def _apply_host_evidence_scores(
     row["relevant_retrieval_changed"] = bool(relevant_returned & changed)
     row["off_target_change_only"] = bool(changed) and not bool(expected & changed)
     row["premature_completion"] = bool(
-        row.get("agent_execution_status") == "started"
+        row.get("agent_execution_status") in {"started", "completed"}
         and row.get("pass") is False
         and not changed
     )
@@ -1189,7 +1189,10 @@ def compile_export(
 
 _LOCAL_RESULT_FIELDS = {
     "agent_evidence_paths",
+    "captured_artifact_paths",
     "changed_paths",
+    "repository_change_status",
+    "task_score_components",
     "citation_correctness",
     "evaluation_scope_id",
     "evidence_paths",
@@ -1211,6 +1214,21 @@ _LOCAL_RESULT_FIELDS = {
     "transport_stream_anomalies",
     "transport_stream_anomaly_kinds",
     "transport_stop_reason",
+    "transport_agent_retries",
+    "transport_compaction_retries",
+    "transport_agent_calls",
+    "transport_compaction_calls",
+    "transport_agent_errors",
+    "transport_compaction_errors",
+    "transport_agent_timeouts",
+    "transport_compaction_timeouts",
+    "transport_compaction_fallbacks",
+    "transport_failure_categories",
+    "transport_turn_integrity_errors",
+    "transport_protocol_applicability",
+    "transport_protocol_status",
+    "transport_chat_protocol_status",
+    "transport_wire_protocol_status",
 }
 
 
@@ -1342,6 +1360,18 @@ def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
         )
     }
     row.update(summary)
+    if row.get("harness") == "wba-responses" and not (
+        (row.get("model_transport") or {}).get("price_source_digest")
+    ):
+        row.update(
+            {
+                "weave_total_cost_usd": None,
+                "weave_cost_status": "unavailable",
+                "cost_usd": None,
+                "agent_cost_usd": None,
+                "cost_source": "unavailable_without_locked_price_source",
+            }
+        )
     gateway_calls = max(
         local_gateway_calls,
         int(row.get("weave_gateway_tool_call_count") or 0),
@@ -3325,7 +3355,8 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         local_usage["cost_usd"] = float(agent_cost) + float(interactor_cost)
     verifier_result = trial.get("verifier_result") or {}
     exception = trial.get("exception_info") or {}
-    reward = (verifier_result.get("rewards") or {}).get("reward")
+    verifier_rewards = verifier_result.get("rewards") or {}
+    reward = verifier_rewards.get("reward")
     started = _parse_time(trial.get("started_at"))
     finished = _parse_time(trial.get("finished_at"))
     wall_time = (finished - started).total_seconds() if started and finished else None
@@ -3364,6 +3395,8 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         agent_execution_status = "unknown"
     elif trial.get("agent_execution") is None:
         agent_execution_status = "not_started"
+    elif trial.get("finished_at") or meta.get("ended_at"):
+        agent_execution_status = "completed"
     else:
         agent_execution_status = "started"
     if registration_status is None:
@@ -3403,6 +3436,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
         "expected_artifact_paths": meta.get("expected_artifact_paths", []),
+        "captured_artifact_paths": meta.get("captured_artifact_paths", []),
         "artifact_normalization": meta.get("artifact_normalization", []),
         "prompt_hashes": meta.get("prompt_hashes", {}),
         "skill_ids": meta.get("skill_ids", []),
@@ -3446,6 +3480,11 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         ),
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
+        "task_score_components": {
+            str(key): value
+            for key, value in verifier_rewards.items()
+            if key != "reward" and isinstance(value, (int, float))
+        },
         "wall_time_sec": wall_time,
         **local_usage,
         "exception_class": exception.get("exception_type"),
@@ -3477,6 +3516,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         **evidence,
         "inspected_paths": inspected_paths,
         "changed_paths": changed_paths,
+        "repository_change_status": meta.get("repository_change_status", "unavailable"),
         "local_error_events": [
             *trajectory_activity["error_events"],
             *([terminal_error] if terminal_error else []),
@@ -3508,6 +3548,18 @@ def _agent_response(trial_dir: Path) -> str | None:
     try:
         trajectory = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
+        trajectory = None
+    if trajectory is None:
+        summary_path = trial_dir / "agent" / "wba-responses-summary.json"
+        try:
+            summary = json.loads(summary_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        outputs = summary.get("outputs") if isinstance(summary, dict) else None
+        if isinstance(outputs, list):
+            for value in reversed(outputs):
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         return None
     steps = trajectory.get("steps", []) if isinstance(trajectory, dict) else []
     for step in reversed(steps):
@@ -3553,6 +3605,21 @@ def _wba_transport_evidence(
             "transport_errors",
             "compactions",
             "stop_reason",
+            "agent_retries",
+            "compaction_retries",
+            "agent_calls",
+            "compaction_calls",
+            "agent_errors",
+            "compaction_errors",
+            "agent_timeouts",
+            "compaction_timeouts",
+            "compaction_fallbacks",
+            "failure_categories",
+            "turn_integrity_errors",
+            "responses_protocol_applicability",
+            "responses_protocol_status",
+            "chat_protocol_status",
+            "wire_protocol_status",
         )
     }
     receipt = meta.get("model_transport") or {}
@@ -3560,7 +3627,7 @@ def _wba_transport_evidence(
         str(value) for value in meta.get("native_session_ids") or [] if value
     }
     valid = (
-        summary.get("schema_version") == 1
+        summary.get("schema_version") in {1, 2}
         and summary.get("profile") == receipt.get("profile")
         and bool(summary.get("session_id"))
         and str(summary.get("session_id")) in native_sessions
@@ -3569,14 +3636,10 @@ def _wba_transport_evidence(
         and summary["stream_anomalies"] >= 0
         and isinstance(summary.get("stream_anomaly_kinds"), dict)
         and all(
-            isinstance(kind, str)
-            and kind
-            and isinstance(count, int)
-            and count >= 0
+            isinstance(kind, str) and kind and isinstance(count, int) and count >= 0
             for kind, count in summary["stream_anomaly_kinds"].items()
         )
-        and sum(summary["stream_anomaly_kinds"].values())
-        == summary["stream_anomalies"]
+        and sum(summary["stream_anomaly_kinds"].values()) == summary["stream_anomalies"]
         and summary.get("stop_reason") == "completed"
     )
     return {
@@ -3593,6 +3656,23 @@ def _wba_transport_evidence(
         "transport_stream_anomalies": selected.get("stream_anomalies"),
         "transport_stream_anomaly_kinds": selected.get("stream_anomaly_kinds"),
         "transport_stop_reason": selected.get("stop_reason"),
+        "transport_agent_retries": selected.get("agent_retries"),
+        "transport_compaction_retries": selected.get("compaction_retries"),
+        "transport_agent_calls": selected.get("agent_calls"),
+        "transport_compaction_calls": selected.get("compaction_calls"),
+        "transport_agent_errors": selected.get("agent_errors"),
+        "transport_compaction_errors": selected.get("compaction_errors"),
+        "transport_agent_timeouts": selected.get("agent_timeouts"),
+        "transport_compaction_timeouts": selected.get("compaction_timeouts"),
+        "transport_compaction_fallbacks": selected.get("compaction_fallbacks"),
+        "transport_failure_categories": selected.get("failure_categories"),
+        "transport_turn_integrity_errors": selected.get("turn_integrity_errors"),
+        "transport_protocol_applicability": selected.get(
+            "responses_protocol_applicability"
+        ),
+        "transport_protocol_status": selected.get("responses_protocol_status"),
+        "transport_chat_protocol_status": selected.get("chat_protocol_status"),
+        "transport_wire_protocol_status": selected.get("wire_protocol_status"),
     }
 
 

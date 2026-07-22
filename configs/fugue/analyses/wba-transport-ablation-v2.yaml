@@ -1,0 +1,21 @@
+id: wba-transport-ablation-v2
+title: WBA-compatible transport ablation V2 analysis
+question: With the Agent loop, model, tools, tasks, runtime, and sampling fixed, where do proxy Responses, inline Responses, and inline Chat differ?
+filters:
+  experiment_id: wba-transport-ablation-v2
+group_by: [variant_id, model]
+metrics:
+  - pass_rate
+  - wall_time_sec
+  - tokens
+  - cost_usd
+  - tool_calls
+  - transport_protocol_status
+  - transport_turn_integrity_errors
+  - transport_agent_retries
+  - transport_agent_errors
+  - transport_compaction_errors
+  - transport_compaction_fallbacks
+  - transport_compactions
+source: hybrid
+include_artifacts: false

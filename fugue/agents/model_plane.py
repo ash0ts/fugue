@@ -737,6 +737,7 @@ done
 
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
+        repository_change_status = "unavailable"
         # Harbor runs the prepared verifier after the Agent exits. Restore the
         # immutable image's tool modes only after no Agent shell remains.
         await self._restore_verifier_runtime(environment)
@@ -755,24 +756,37 @@ done
             result = await self.exec_as_agent(
                 environment,
                 command=(
+                    "if command -v git >/dev/null 2>&1 && "
+                    f"git -C {shlex.quote(repo_root)} rev-parse --is-inside-work-tree "
+                    ">/dev/null 2>&1; then "
+                    "printf 'FUGUE_REPOSITORY_CHANGES_APPLICABLE\\n'; "
                     f"git -C {shlex.quote(repo_root)} diff --name-only --relative; "
                     f"git -C {shlex.quote(repo_root)} ls-files --others "
-                    "--exclude-standard"
+                    "--exclude-standard; else "
+                    "printf 'FUGUE_REPOSITORY_CHANGES_NOT_APPLICABLE\\n'; fi"
                 ),
                 timeout_sec=30,
             )
-            changed_paths = list(
-                dict.fromkeys(
-                    line.strip()
-                    for line in (result.stdout or "").splitlines()
-                    if line.strip()
+            lines = [line.strip() for line in (result.stdout or "").splitlines()]
+            if result.return_code == 0 and lines:
+                marker, *paths = lines
+                repository_change_status = (
+                    "applicable"
+                    if marker == "FUGUE_REPOSITORY_CHANGES_APPLICABLE"
+                    else "not_applicable"
+                    if marker == "FUGUE_REPOSITORY_CHANGES_NOT_APPLICABLE"
+                    else "unavailable"
                 )
-            )
+                if repository_change_status == "applicable":
+                    changed_paths = list(dict.fromkeys(path for path in paths if path))
         except Exception:
             pass
+        captured_artifact_paths = await self._captured_artifact_paths(environment)
         try:
             self._meta_end(
                 changed_paths=changed_paths,
+                repository_change_status=repository_change_status,
+                captured_artifact_paths=captured_artifact_paths,
                 artifact_normalization=artifact_normalization,
             )
         finally:
@@ -820,10 +834,36 @@ done
                 )
         return recovered
 
+    async def _captured_artifact_paths(self, environment: BaseEnvironment) -> list[str]:
+        expected = _json_env("FUGUE_EXPECTED_ARTIFACT_PATHS")
+        if not isinstance(expected, list):
+            return []
+        paths = [str(value) for value in expected if isinstance(value, str)]
+        if not paths:
+            return []
+        command = "; ".join(
+            f"if [ -s {shlex.quote(path)} ]; then printf '%s\\n' {shlex.quote(path)}; fi"
+            for path in paths
+        )
+        try:
+            result = await self.exec_as_agent(
+                environment,
+                command=command,
+                timeout_sec=30,
+            )
+        except Exception:
+            return []
+        if result.return_code != 0:
+            return []
+        observed = set((result.stdout or "").splitlines())
+        return [path for path in paths if path in observed]
+
     def _meta_end(
         self,
         *,
         changed_paths: list[str] | None = None,
+        repository_change_status: str = "unavailable",
+        captured_artifact_paths: list[str] | None = None,
         artifact_normalization: list[dict[str, str]] | None = None,
     ) -> None:
         try:
@@ -832,6 +872,8 @@ done
             meta = {}
         meta["ended_at"] = datetime.now(UTC).isoformat()
         meta["changed_paths"] = changed_paths or []
+        meta["repository_change_status"] = repository_change_status
+        meta["captured_artifact_paths"] = captured_artifact_paths or []
         meta["artifact_normalization"] = artifact_normalization or []
         fingerprints = getattr(self, "_runtime_fingerprints", {})
         meta["runtime_fingerprints"] = fingerprints

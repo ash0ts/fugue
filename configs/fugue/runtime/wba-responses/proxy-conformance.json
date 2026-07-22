@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "contract": "responses-stream-conformance-v2",
+  "tested_at": "2026-07-22",
+  "status": "unsupported",
+  "fixture": "fragmented shell tool-call over a mock Chat Completions provider",
+  "required": [
+    "integer sequence_number on every Responses event",
+    "strictly increasing sequence_number",
+    "output item announced before deltas",
+    "output item done before the terminal event",
+    "fragmented tool arguments reconcile to one durable call"
+  ],
+  "images": [
+    {
+      "image": "ghcr.io/berriai/litellm@sha256:66a108711edea25ef531a74764f001d0c1934cc8abb422f5a3bd17a2860e4035",
+      "source_revision": "2978a92bdb26db9676b3a265ee09078aa252e258",
+      "events": 14,
+      "conformant": false,
+      "anomaly_kinds": {
+        "missing_sequence_number": 12,
+        "non_monotonic_sequence_number": 1
+      }
+    },
+    {
+      "image": "ghcr.io/berriai/litellm@sha256:cae1ac3492d6d0bea69c26f4485381624e073eb753f3534ae7703a4204a4ce6b",
+      "release": "v1.86.2",
+      "source_revision": "72fdccb9371cf07d6a90b8a7cde99cd06be1fc1d",
+      "events": 14,
+      "conformant": false,
+      "anomaly_kinds": {
+        "missing_sequence_number": 12,
+        "non_monotonic_sequence_number": 1
+      }
+    }
+  ],
+  "reproduce": "uv run --frozen python scripts/check_wba_proxy_conformance.py IMAGE_BY_DIGEST"
+}

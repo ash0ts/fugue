@@ -42,7 +42,7 @@ _HARNESS_PROTOCOLS: dict[str, ModelWireProtocol] = {
     "wba-responses": "responses",
 }
 
-WBA_TRANSPORT_CONTRACT_VERSION = 1
+WBA_TRANSPORT_CONTRACT_VERSION = 2
 WBA_DEFAULT_TRANSPORT_PROFILE: WBATransportProfile = "responses-inline"
 WBA_CORE_COMPATIBILITY_REFERENCE = "wandb/core@05115fffae784aef09bc0d4167ce19a587caf839"
 WBA_RUNTIME_DEPENDENCIES = {
@@ -55,12 +55,15 @@ WBA_RUNTIME_DEPENDENCIES = {
     "weave": "0.53.0",
 }
 WBA_RETRY_POLICY = {
-    "attempts": 5,
+    "agent_attempts": 5,
+    "compaction_attempts": 1,
     "backoff": "exponential-capped-8s-v1",
     "client_retries": 0,
+    "failure_taxonomy": "fugue-transport-failures-v1",
 }
 WBA_TIMEOUT_POLICY = {
-    "request_timeout_sec": 300,
+    "agent_timeout_sec": 300,
+    "compaction_timeout_sec": 60,
     "http_timeout_sec": 120,
     "connect_timeout_sec": 30,
     "shell_timeout_sec": 120,
@@ -71,6 +74,7 @@ WBA_COMPACTION_POLICY = {
     "trigger_ratio": 0.8,
     "keep_head_turns": 1,
     "keep_tail_turns": 3,
+    "failure_fallback": "deterministic-visible-history-v1",
 }
 WBA_LOOP_POLICY = {
     "max_steps_per_turn": 20,
@@ -86,7 +90,7 @@ _WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
         "agent_wire_protocol": "responses",
         "provider_wire_protocol": "chat_completions",
         "client": "openai-responses",
-        "codec": "fugue-litellm-responses-proxy-v3",
+        "codec": "fugue-litellm-responses-proxy-v4",
         "conversion_location": "external_proxy",
         "bridge_required": True,
     },
@@ -94,7 +98,7 @@ _WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
         "agent_wire_protocol": "responses",
         "provider_wire_protocol": "chat_completions",
         "client": "litellm-responses",
-        "codec": "litellm-responses-to-chat-v1",
+        "codec": "litellm-responses-to-chat-v2",
         "conversion_location": "in_process",
         "bridge_required": False,
     },
@@ -102,9 +106,29 @@ _WBA_TRANSPORT_PROFILES: dict[WBATransportProfile, dict[str, object]] = {
         "agent_wire_protocol": "chat_completions",
         "provider_wire_protocol": "chat_completions",
         "client": "litellm-chat",
-        "codec": "chat-completions-native-v1",
+        "codec": "chat-completions-native-v2",
         "conversion_location": "none",
         "bridge_required": False,
+    },
+}
+
+_WBA_TRANSPORT_QUALIFICATION: dict[WBATransportProfile, dict[str, object]] = {
+    "responses-proxy": {
+        "status": "unsupported",
+        "contract": "responses-stream-conformance-v2",
+        "evidence": "configs/fugue/runtime/wba-responses/proxy-conformance.json",
+        "evidence_sha256": "947a9d1ff259eb3034833a0f2dc3b7a52070773e21377b6b4d48e97262400be2",
+        "reason": "no tested immutable LiteLLM proxy image emits a conformant Responses stream",
+    },
+    "responses-inline": {
+        "status": "supported",
+        "contract": "responses-stream-conformance-v2",
+        "evidence": "tests/test_wba_transport.py",
+    },
+    "chat-inline": {
+        "status": "supported",
+        "contract": "chat-stream-conformance-v2",
+        "evidence": "tests/test_wba_transport.py",
     },
 }
 
@@ -230,6 +254,11 @@ def normalize_wba_transport_profile(
     return cast(WBATransportProfile, selected)
 
 
+def wba_transport_profile_qualification(profile: str) -> dict[str, object]:
+    selected = normalize_wba_transport_profile(profile)
+    return dict(_WBA_TRANSPORT_QUALIFICATION[selected])
+
+
 def resolve_wba_transport_receipt(
     route: ModelRoute,
     profile: str | None,
@@ -265,6 +294,7 @@ def resolve_wba_transport_receipt(
         "loop_policy_digest": _wba_policy_digest(WBA_LOOP_POLICY),
         "sampling_policy": dict(WBA_SAMPLING_POLICY),
         "sampling_policy_digest": _wba_policy_digest(WBA_SAMPLING_POLICY),
+        "protocol_qualification": wba_transport_profile_qualification(selected),
     }
     receipt["route_digest"] = hashlib.sha256(
         json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
@@ -275,7 +305,7 @@ def resolve_wba_transport_receipt(
 def wba_transport_receipt_from_dict(
     value: Mapping[str, object],
 ) -> dict[str, object]:
-    """Strictly reconstruct one immutable V1 WBA transport receipt."""
+    """Strictly reconstruct one immutable WBA transport receipt."""
 
     raw = {str(key): item for key, item in value.items()}
     fields = {
@@ -306,6 +336,7 @@ def wba_transport_receipt_from_dict(
         "loop_policy_digest",
         "sampling_policy",
         "sampling_policy_digest",
+        "protocol_qualification",
         "route_digest",
     }
     unknown = sorted(set(raw) - fields)
@@ -317,7 +348,10 @@ def wba_transport_receipt_from_dict(
         isinstance(raw.get("schema_version"), bool)
         or raw.get("schema_version") != WBA_TRANSPORT_CONTRACT_VERSION
     ):
-        raise ValueError("WBA transport receipt must use schema_version 1")
+        raise ValueError(
+            "WBA transport receipt must use schema_version "
+            f"{WBA_TRANSPORT_CONTRACT_VERSION}"
+        )
     if raw.get("harness") != "wba-responses":
         raise ValueError("WBA transport receipt has the wrong harness")
     if not isinstance(raw.get("bridge_required"), bool):

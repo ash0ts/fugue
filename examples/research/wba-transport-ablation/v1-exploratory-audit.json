@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "audit_id": "wba-transport-ablation-v1-posthoc-artifact-audit",
+  "status": "immutable_exploratory_evidence",
+  "source": {
+    "experiment_id": "wba-transport-ablation-v1",
+    "source_commit": "3a4dcb9b9980e522f7db9dcc555d60f21396a095",
+    "run_id": "20260722T150531-73a8b45a27",
+    "outcome_digest": "b11b834a5c3644d7c2df46025fc70d608f042cd6720d4af73892a82c6aa00ff8",
+    "snapshot_digest": "03a16ae99e70d6a8146843953f0a53b8ef858c82b8899e33bd16306ad27ea321",
+    "export_sha256": "0e4185d31edad87fb81f3fd9cdd2424ac9c2bbb28e6d88f0e372cf387e2f46d1"
+  },
+  "official_v1_score": {
+    "passes": 0,
+    "trials": 48,
+    "changed": false
+  },
+  "posthoc_observations": {
+    "artifacts_produced": 48,
+    "lexical_checks_passed": 34,
+    "exact_top_level_shapes": 2,
+    "artifacts_containing_all_expected_scalar_values": 48
+  },
+  "limitations": [
+    "This audit was defined after observing V1 outputs and is not a replacement score.",
+    "V1 instructions did not disclose the scorer's required top-level artifact shape.",
+    "V1 answer scoring used literal text matching and was sensitive to equivalent Unicode and number wording."
+  ]
+}

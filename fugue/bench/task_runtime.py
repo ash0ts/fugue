@@ -25,7 +25,10 @@ from fugue.bench.manifest import (
 )
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 9
+TASK_RUNTIME_CONTRACT_VERSION = 10
+_REFERENCE_VERIFIED_MATERIALIZERS = {
+    "fugue.bench.wba_transport_tasks:WBATransportTaskMaterializerV2",
+}
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 
@@ -112,6 +115,7 @@ def prepare_task_runtime(
     if shutil.which("docker") is None:
         raise RuntimeError("docker is required to prepare task images")
     requires_gold_verification = _requires_gold_verification(manifest)
+    requires_reference_verification = _requires_reference_verification(manifest)
     if requires_gold_verification and not (gold_patch or "").strip():
         raise RuntimeError(
             f"task {task.id} requires a pinned gold patch for setup verification"
@@ -171,8 +175,9 @@ def prepare_task_runtime(
         shutil.copytree(source, task_root, symlinks=True)
         _reject_escaping_symlinks(task_root)
         verifier_script = _lock_verifier_script(task_root, task, verifier_runtime)
-        verification = (
-            _verify_swe_bench_outcomes(
+        verification = None
+        if requires_gold_verification:
+            verification = _verify_swe_bench_outcomes(
                 image,
                 task,
                 task_root,
@@ -181,9 +186,14 @@ def prepare_task_runtime(
                 architecture=architecture,
                 repo_root=repo_root,
             )
-            if requires_gold_verification
-            else None
-        )
+        elif requires_reference_verification:
+            verification = _verify_reference_task_outcomes(
+                image,
+                task,
+                task_root,
+                architecture=architecture,
+                repo_root=repo_root,
+            )
         task_toml = task_root / "task.toml"
         value = toml.loads(task_toml.read_text())
         environment = value.setdefault("environment", {})
@@ -244,6 +254,14 @@ def read_task_runtime_lock(
             and _is_sha256(str(verification.get("gold_patch_sha256") or ""))
         ):
             return None
+    if _requires_reference_verification(manifest):
+        verification = value.get("verification") or {}
+        if not (
+            verification.get("base_failed") is True
+            and verification.get("gold_passed") is True
+            and _is_sha256(str(verification.get("reference_sha256") or ""))
+        ):
+            return None
     image_id = str(value.get("image_id") or "")
     dataset_path = Path(str(value.get("dataset_path") or ""))
     if not image_id.startswith("sha256:") or not dataset_path.is_dir():
@@ -280,6 +298,14 @@ def task_architecture(task: TaskSpec) -> str:
 def task_runtime_requires_gold_verification(manifest: BenchmarkManifest) -> bool:
     """Return whether the manifest's runtime contract requires SWE gold verification."""
     return _requires_gold_verification(manifest)
+
+
+def task_runtime_requires_verification(manifest: BenchmarkManifest) -> bool:
+    """Return whether preparation must prove base-fail/reference-pass outcomes."""
+
+    return _requires_gold_verification(manifest) or _requires_reference_verification(
+        manifest
+    )
 
 
 def _task_runtime_recipe(
@@ -453,6 +479,125 @@ def _verify_swe_bench_outcomes(
         "gold_passed": True,
         "gold_patch_sha256": gold_patch_sha256,
     }
+
+
+def _verify_reference_task_outcomes(
+    image: str,
+    task: TaskSpec,
+    task_root: Path,
+    *,
+    architecture: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    solution = task_root / "solution"
+    solve_script = solution / "solve.sh"
+    if not solve_script.is_file():
+        raise RuntimeError(f"task {task.id} has no locked reference solution")
+    reference_sha256 = _tree_digest(solution)
+    runtime_root = repo_root / ".fugue" / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="fugue-task-reference-verify-", dir=runtime_root
+    ) as temporary:
+        root = Path(temporary)
+        base_passed = _run_reference_task_verifier(
+            image,
+            task,
+            task_root,
+            architecture=architecture,
+            logs=root / "base-logs",
+            apply_reference=False,
+            repo_root=repo_root,
+        )
+        if base_passed:
+            raise RuntimeError(
+                f"task {task.id} empty workspace unexpectedly passes its verifier"
+            )
+        gold_passed = _run_reference_task_verifier(
+            image,
+            task,
+            task_root,
+            architecture=architecture,
+            logs=root / "gold-logs",
+            apply_reference=True,
+            repo_root=repo_root,
+        )
+        if not gold_passed:
+            raise RuntimeError(
+                f"task {task.id} locked reference solution does not pass its verifier"
+            )
+    return {
+        "base_failed": True,
+        "gold_passed": True,
+        "reference_sha256": reference_sha256,
+    }
+
+
+def _run_reference_task_verifier(
+    image: str,
+    task: TaskSpec,
+    task_root: Path,
+    *,
+    architecture: str,
+    logs: Path,
+    apply_reference: bool,
+    repo_root: Path,
+) -> bool:
+    (logs / "verifier").mkdir(parents=True, exist_ok=True)
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--platform",
+        f"linux/{architecture}",
+        "--mount",
+        f"type=bind,source={(task_root / 'tests').resolve()},target=/tests,readonly",
+        "--mount",
+        f"type=bind,source={logs.resolve()},target=/logs",
+    ]
+    if apply_reference:
+        command.extend(
+            (
+                "--mount",
+                f"type=bind,source={(task_root / 'solution').resolve()},target=/solution,readonly",
+            )
+        )
+    command.extend(
+        (
+            image,
+            "sh",
+            "-c",
+            (
+                "sh /solution/solve.sh && sh /tests/test.sh"
+                if apply_reference
+                else "sh /tests/test.sh"
+            ),
+        )
+    )
+    result = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=3600,
+    )
+    reward_path = logs / "verifier" / "reward.json"
+    try:
+        reward = json.loads(reward_path.read_text())
+        passed = reward.get("task_pass") == 1.0
+    except (OSError, json.JSONDecodeError, AttributeError):
+        passed = None
+    expected_returncode = 0 if passed is True else 1 if passed is False else None
+    if expected_returncode is None or result.returncode != expected_returncode:
+        detail = (result.stderr or result.stdout or "verifier reward missing").strip()
+        raise RuntimeError(
+            f"task {task.id} verifier did not produce a trustworthy outcome: "
+            f"{detail[-1_000:]}"
+        )
+    return bool(passed)
 
 
 def _run_swe_bench_verifier(
@@ -745,6 +890,10 @@ def _lock_root(manifest: BenchmarkManifest, task: TaskSpec, repo_root: Path) -> 
 
 def _requires_gold_verification(manifest: BenchmarkManifest) -> bool:
     return manifest.dataset.ref == "swe-bench/swe-bench-verified"
+
+
+def _requires_reference_verification(manifest: BenchmarkManifest) -> bool:
+    return manifest.dataset.materializer in _REFERENCE_VERIFIED_MATERIALIZERS
 
 
 def _is_sha256(value: str) -> bool:

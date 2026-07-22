@@ -1,4 +1,4 @@
-# Queryable WBA transport ablation
+# Queryable WBA transport ablation V2
 
 This example lets an external research Agent preview, run, monitor, and later
 query a controlled transport experiment through Fugue. The Agent loop, model,
@@ -27,6 +27,21 @@ Both runs are serial, have no cell retries, and require separate human
 approvals bound to their exact preview digests. Task passes are observations.
 Preparation, isolation, identity, route receipts, accounting, and reconciled
 evidence determine whether the research result is usable.
+
+V2 reports three result layers separately: Responses or Chat wire conformance,
+Agent-loop operations, and deterministic task outcomes against a schema shown
+to the Agent. Private expected facts are checked at declared JSON pointers.
+Preparation proves that every empty task workspace fails and its locked
+reference solution passes before the task runtime can be admitted.
+The V1 score remains unchanged; its post-hoc artifact audit is recorded in
+`v1-exploratory-audit.json` as historical evidence only.
+
+At the time of this revision, `responses-proxy` is intentionally unsupported:
+neither the pinned LiteLLM image nor the tested signed `v1.86.2` image passes
+the required Responses event-sequence contract. Preview remains pure and
+queryable, but live preflight blocks the cohort before approval or spend until
+an immutable proxy image passes
+`scripts/check_wba_proxy_conformance.py`.
 
 This is an independently authored compatibility study. It does not import,
 execute, or make claims about `wandb/core`. A later Core-integrated
@@ -90,7 +105,7 @@ export FUGUE_CANARY_PREVIEW_DIGEST=REPLACE_WITH_CANARY_PREVIEW_DIGEST
 docker compose --env-file .fugue/compose.env \
   -f compose.research.yaml run --rm --no-deps \
   fugue-operator approve "$FUGUE_CANARY_PREVIEW_DIGEST" \
-  --max-usd 200 \
+  --max-usd 75 \
   --max-cells 3 \
   --approved-by "$USER"
 ```
@@ -111,14 +126,15 @@ export FUGUE_PRIMARY_PREVIEW_DIGEST=REPLACE_WITH_PRIMARY_PREVIEW_DIGEST
 docker compose --env-file .fugue/compose.env \
   -f compose.research.yaml run --rm --no-deps \
   fugue-operator approve "$FUGUE_PRIMARY_PREVIEW_DIGEST" \
-  --max-usd 1800 \
+  --max-usd 1200 \
   --max-cells 48 \
   --approved-by "$USER"
 ```
 
 Paste that `approval_digest` into the same Agent task. The Agent starts the
 unchanged primary, watches it to terminal, and records the sourced analysis.
-The two approvals remain within the campaign's cumulative $2,000 ceiling.
+The two approvals remain within V2's cumulative $1,275 ceiling. Including the
+historical $2,550 admission accounting, the overall ceiling is $3,825.
 
 ## Query the finished Study from a fresh Agent
 

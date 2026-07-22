@@ -25,13 +25,15 @@ from typing import Any
 # snapshot instead.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
 
-VERSION = "0.1.5"
+VERSION = "0.2.0"
 PROFILES = {"responses-proxy", "responses-inline", "chat-inline"}
 MAX_STEPS = 20
-REQUEST_TIMEOUT_SEC = 300
 HTTP_TIMEOUT_SEC = 120
 CONNECT_TIMEOUT_SEC = 30
-MAX_RETRIES = 5
+AGENT_ATTEMPTS = 5
+COMPACTION_ATTEMPTS = 1
+AGENT_TIMEOUT_SEC = 300
+COMPACTION_TIMEOUT_SEC = 60
 COMPACTION_TRIGGER = 0.8
 DEFAULT_CONTEXT_WINDOW = 131_072
 SHELL_OUTPUT_LIMIT = 100_000
@@ -160,6 +162,15 @@ class WeaveTrace:
             span.__enter__()
             span.fugue_transport_profile = self.config["profile"]
             span.fugue_call_kind = kind
+            trace_attributes = dict(self.config.get("trace_attributes") or {})
+            span.set_attributes(
+                {
+                    **trace_attributes,
+                    "fugue.call_kind": kind,
+                    "fugue.transport_profile": self.config["profile"],
+                    "fugue.conversation_id": self.config.get("conversation_id"),
+                }
+            )
             if self.include_content:
                 span.input_messages = _trace_messages(groups)
             return span
@@ -240,10 +251,26 @@ class ModelClient:
         self._inline_openai: Any = None
         self.retries = 0
         self.transport_errors = 0
+        self.retries_by_kind = {"agent": 0, "compaction": 0}
+        self.errors_by_kind = {"agent": 0, "compaction": 0}
+        self.calls_by_kind = {"agent": 0, "compaction": 0}
+        self.transport_timeouts = {"agent": 0, "compaction": 0}
+        self.failure_categories: dict[str, int] = {}
+        self.compaction_fallbacks = 0
         self.normalization_errors = 0
+        self.turn_integrity_errors = 0
         self.stream_anomalies = 0
         self.stream_anomaly_kinds: dict[str, int] = {}
         self.stream_events = 0
+        self.responses_protocol_applicability = (
+            "applicable" if self.profile.startswith("responses-") else "not_applicable"
+        )
+        self.responses_protocol_status = (
+            "conformant" if self.profile.startswith("responses-") else "not_applicable"
+        )
+        self.chat_protocol_status = (
+            "conformant" if self.profile == "chat-inline" else "not_applicable"
+        )
 
     async def close(self) -> None:
         if self._openai is not None:
@@ -283,42 +310,63 @@ class ModelClient:
         groups: list[list[dict[str, Any]]] | None = None,
     ) -> ModelTurn:
         last_error: BaseException | None = None
-        for attempt in range(1, MAX_RETRIES + 1):
+        attempts = AGENT_ATTEMPTS if kind == "agent" else COMPACTION_ATTEMPTS
+        timeout = AGENT_TIMEOUT_SEC if kind == "agent" else COMPACTION_TIMEOUT_SEC
+        for attempt in range(1, attempts + 1):
+            self.calls_by_kind[kind] += 1
             span = self.trace.start_llm(kind, groups or [])
             result: ModelTurn | None = None
             error: BaseException | None = None
             try:
-                result = await asyncio.wait_for(
-                    operation(), timeout=REQUEST_TIMEOUT_SEC
-                )
-                _validate_model_turn(result)
+                result = await asyncio.wait_for(operation(), timeout=timeout)
+                try:
+                    _validate_model_turn(result)
+                except (TypeError, ValueError, RuntimeError):
+                    self.turn_integrity_errors += 1
+                    raise
                 return result
             except asyncio.CancelledError:
                 error = sys.exception()
+                self.events.emit(
+                    "model_cancelled",
+                    call_kind=kind,
+                    attempt=attempt,
+                    failure_category="cancelled",
+                )
                 raise
             except Exception as exc:
                 error = exc
                 last_error = exc
+                failure = _transport_failure(exc)
                 self.transport_errors += 1
+                self.errors_by_kind[kind] += 1
+                self.transport_timeouts[kind] += int(failure["category"] == "timeout")
+                category = str(failure["category"])
+                self.failure_categories[category] = (
+                    self.failure_categories.get(category, 0) + 1
+                )
                 normalization_error = _normalization_error(exc)
                 self.normalization_errors += int(normalization_error)
-                will_retry = attempt < MAX_RETRIES and _retryable(exc)
+                will_retry = attempt < attempts and bool(failure["retryable"])
                 self.events.emit(
                     "model_error",
                     call_kind=kind,
                     attempt=attempt,
                     error_type=type(exc).__name__,
+                    failure_category=category,
                     normalization_error=normalization_error,
                     will_retry=will_retry,
                 )
                 if not will_retry:
                     raise
                 self.retries += 1
+                self.retries_by_kind[kind] += 1
                 self.events.emit(
                     "model_retry",
                     call_kind=kind,
                     attempt=attempt,
                     error_type=type(exc).__name__,
+                    failure_category=category,
                 )
                 await asyncio.sleep(min(2 ** (attempt - 1), 8))
             finally:
@@ -410,20 +458,7 @@ class ModelClient:
             kwargs,
         )
         self.stream_events += int(final.pop("_fugue_stream_event_count"))
-        stream_anomalies = sum(anomaly_kinds.values())
-        if stream_anomalies:
-            self.stream_anomalies += stream_anomalies
-            for kind, count in anomaly_kinds.items():
-                self.stream_anomaly_kinds[kind] = (
-                    self.stream_anomaly_kinds.get(kind, 0) + count
-                )
-            self.events.emit(
-                "stream_normalized",
-                profile=self.profile,
-                stream_anomalies=stream_anomalies,
-                anomaly_kinds=anomaly_kinds,
-                codec="fugue-litellm-responses-proxy-v3",
-            )
+        self._record_responses_protocol(anomaly_kinds)
         return _parse_responses(final)
 
     async def _responses_inline(
@@ -450,8 +485,10 @@ class ModelClient:
         iterator = await litellm.aresponses(**kwargs, stream=True)
         items: list[Any] = []
         completed: Any = None
+        inspector = ResponsesStreamInspector()
         async for event in iterator:
             self.stream_events += 1
+            inspector.observe(_dump_event(event))
             event_type = _value(event, "type")
             if event_type == "response.output_item.done":
                 items.append(_value(event, "item"))
@@ -464,6 +501,8 @@ class ModelClient:
             raise RuntimeError(
                 "Responses stream ended without output items or completion"
             )
+        inspector.finish()
+        self._record_responses_protocol(inspector.anomaly_kinds)
         return _parse_responses(completed, items=items)
 
     async def _chat_inline(
@@ -496,6 +535,8 @@ class ModelClient:
         usage: Any = None
         finish_reason: str | None = None
         response_id: str | None = None
+        chat_anomalies: dict[str, int] = {}
+        terminal_seen = False
         async for chunk in iterator:
             self.stream_events += 1
             response_id = str(_value(chunk, "id") or response_id or "") or None
@@ -503,10 +544,19 @@ class ModelClient:
             choices = _value(chunk, "choices") or []
             if not choices:
                 continue
+            if terminal_seen:
+                chat_anomalies["event_after_terminal"] = (
+                    chat_anomalies.get("event_after_terminal", 0) + 1
+                )
             choice = choices[0]
-            finish_reason = (
-                str(_value(choice, "finish_reason") or finish_reason or "") or None
-            )
+            observed_finish = str(_value(choice, "finish_reason") or "") or None
+            if observed_finish:
+                if terminal_seen:
+                    chat_anomalies["duplicate_terminal_event"] = (
+                        chat_anomalies.get("duplicate_terminal_event", 0) + 1
+                    )
+                terminal_seen = True
+                finish_reason = observed_finish
             delta = _value(choice, "delta") or {}
             content = _value(delta, "content")
             if content:
@@ -515,7 +565,13 @@ class ModelClient:
             if reason:
                 reasoning.append(str(reason))
             for tool_delta in _value(delta, "tool_calls") or []:
-                index = int(_value(tool_delta, "index") or 0)
+                raw_index = _value(tool_delta, "index")
+                if not isinstance(raw_index, int) or raw_index < 0:
+                    chat_anomalies["invalid_tool_call_index"] = (
+                        chat_anomalies.get("invalid_tool_call_index", 0) + 1
+                    )
+                    continue
+                index = raw_index
                 target = calls.setdefault(
                     index, {"id": "", "name": "", "arguments": ""}
                 )
@@ -523,7 +579,23 @@ class ModelClient:
                 function = _value(tool_delta, "function") or {}
                 target["name"] += str(_value(function, "name") or "")
                 target["arguments"] += str(_value(function, "arguments") or "")
-        parsed_calls = [_tool_call(value) for _, value in sorted(calls.items())]
+        if not terminal_seen:
+            chat_anomalies["missing_terminal_event"] = 1
+        parsed_calls: list[ToolCall] = []
+        for _, value in sorted(calls.items()):
+            try:
+                parsed_calls.append(_tool_call(value))
+            except (TypeError, ValueError):
+                chat_anomalies["invalid_tool_call"] = (
+                    chat_anomalies.get("invalid_tool_call", 0) + 1
+                )
+        if finish_reason == "tool_calls" and not parsed_calls:
+            chat_anomalies["terminal_tool_call_mismatch"] = 1
+        if parsed_calls and finish_reason != "tool_calls":
+            chat_anomalies["terminal_tool_call_mismatch"] = 1
+        if chat_anomalies:
+            self.chat_protocol_status = "nonconformant"
+            self._record_anomalies(chat_anomalies)
         return ModelTurn(
             text="".join(text),
             reasoning={"text": "".join(reasoning)} if reasoning else None,
@@ -532,6 +604,26 @@ class ModelClient:
             output_tokens=_usage(usage, "completion_tokens", "output_tokens"),
             finish_reason=finish_reason,
             response_id=response_id,
+        )
+
+    def _record_responses_protocol(self, anomaly_kinds: dict[str, int]) -> None:
+        if anomaly_kinds:
+            self.responses_protocol_status = "nonconformant"
+            self._record_anomalies(anomaly_kinds)
+
+    def _record_anomalies(self, anomaly_kinds: dict[str, int]) -> None:
+        count = sum(anomaly_kinds.values())
+        self.stream_anomalies += count
+        for kind, value in anomaly_kinds.items():
+            self.stream_anomaly_kinds[kind] = (
+                self.stream_anomaly_kinds.get(kind, 0) + value
+            )
+        self.events.emit(
+            "stream_conformance",
+            profile=self.profile,
+            status="nonconformant",
+            stream_anomalies=count,
+            anomaly_kinds=anomaly_kinds,
         )
 
 
@@ -598,6 +690,11 @@ async def run(config: dict[str, Any]) -> int:
                         for call in result.tool_calls
                     ]
                 )
+                try:
+                    _validate_tool_exchange(result, tool_results)
+                except (TypeError, ValueError, RuntimeError):
+                    client.turn_integrity_errors += 1
+                    raise
                 tool_errors += sum(bool(item[1]) for item in tool_results)
                 groups.append(_assistant_group(profile, result, tool_results))
             else:
@@ -605,7 +702,7 @@ async def run(config: dict[str, Any]) -> int:
             outputs.append(final_text)
             events.emit("agent_turn_complete", turn=turn_index, output=final_text)
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "event": "session_complete",
             "session_id": config["session_id"],
             "profile": profile,
@@ -621,6 +718,25 @@ async def run(config: dict[str, Any]) -> int:
             "stream_events": client.stream_events,
             "retries": client.retries,
             "transport_errors": client.transport_errors,
+            "agent_retries": client.retries_by_kind["agent"],
+            "compaction_retries": client.retries_by_kind["compaction"],
+            "agent_calls": client.calls_by_kind["agent"],
+            "compaction_calls": client.calls_by_kind["compaction"],
+            "agent_errors": client.errors_by_kind["agent"],
+            "compaction_errors": client.errors_by_kind["compaction"],
+            "agent_timeouts": client.transport_timeouts["agent"],
+            "compaction_timeouts": client.transport_timeouts["compaction"],
+            "compaction_fallbacks": client.compaction_fallbacks,
+            "failure_categories": client.failure_categories,
+            "turn_integrity_errors": client.turn_integrity_errors,
+            "responses_protocol_applicability": client.responses_protocol_applicability,
+            "responses_protocol_status": client.responses_protocol_status,
+            "chat_protocol_status": client.chat_protocol_status,
+            "wire_protocol_status": (
+                client.responses_protocol_status
+                if client.responses_protocol_applicability == "applicable"
+                else client.chat_protocol_status
+            ),
             "compactions": compactions,
             "stop_reason": "completed",
         }
@@ -643,7 +759,7 @@ async def run(config: dict[str, Any]) -> int:
             "session_error", error_type=type(exc).__name__, error=str(exc)[:2000]
         )
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "event": "session_error",
             "session_id": config["session_id"],
             "profile": profile,
@@ -659,6 +775,25 @@ async def run(config: dict[str, Any]) -> int:
             "stream_events": client.stream_events,
             "retries": client.retries,
             "transport_errors": client.transport_errors,
+            "agent_retries": client.retries_by_kind["agent"],
+            "compaction_retries": client.retries_by_kind["compaction"],
+            "agent_calls": client.calls_by_kind["agent"],
+            "compaction_calls": client.calls_by_kind["compaction"],
+            "agent_errors": client.errors_by_kind["agent"],
+            "compaction_errors": client.errors_by_kind["compaction"],
+            "agent_timeouts": client.transport_timeouts["agent"],
+            "compaction_timeouts": client.transport_timeouts["compaction"],
+            "compaction_fallbacks": client.compaction_fallbacks,
+            "failure_categories": client.failure_categories,
+            "turn_integrity_errors": client.turn_integrity_errors,
+            "responses_protocol_applicability": client.responses_protocol_applicability,
+            "responses_protocol_status": client.responses_protocol_status,
+            "chat_protocol_status": client.chat_protocol_status,
+            "wire_protocol_status": (
+                client.responses_protocol_status
+                if client.responses_protocol_applicability == "applicable"
+                else client.chat_protocol_status
+            ),
             "compactions": compactions,
             "stop_reason": (
                 "transport_error" if client.transport_errors else "execution_error"
@@ -703,9 +838,11 @@ async def _compact_if_needed(
     try:
         summary = await client.summarize(text)
     except Exception as exc:
+        client.compaction_fallbacks = getattr(client, "compaction_fallbacks", 0) + 1
         events.emit(
             "compaction_fallback",
             error_type=type(exc).__name__,
+            failure_category=_transport_failure(exc)["category"],
         )
         summary = ""
     if not summary:
@@ -962,16 +1099,20 @@ def _visible_content(value: Any) -> str:
 
 
 @dataclass
-class ProxyStreamInspector:
+class ResponsesStreamInspector:
     previous_sequence: int | None = None
     announced: dict[int, str] = field(default_factory=dict)
+    completed: set[int] = field(default_factory=set)
     announced_calls: dict[int, tuple[str, str]] = field(default_factory=dict)
     argument_fragments: dict[int, list[str]] = field(default_factory=dict)
     anomaly_kinds: dict[str, int] = field(default_factory=dict)
+    terminal_seen: bool = False
 
     def observe(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
         output_index = event.get("output_index")
+        if self.terminal_seen:
+            self._anomaly("event_after_terminal")
         self._observe_sequence(event.get("sequence_number"))
         if event_type == "response.output_item.added":
             self._observe_added(output_index, event.get("item") or {})
@@ -980,6 +1121,18 @@ class ProxyStreamInspector:
             self._observe_argument_delta(output_index, event.get("delta"))
         if event_type == "response.output_item.done":
             self._observe_done(output_index, event.get("item") or {})
+        if event_type in {
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        }:
+            self.terminal_seen = True
+
+    def finish(self) -> None:
+        if not self.terminal_seen:
+            self._anomaly("missing_terminal_event")
+        for _output_index in set(self.announced) - self.completed:
+            self._anomaly("missing_output_item_done")
 
     def _observe_sequence(self, sequence: Any) -> None:
         if not isinstance(sequence, int):
@@ -1019,7 +1172,9 @@ class ProxyStreamInspector:
 
     def _observe_done(self, output_index: Any, item: Any) -> None:
         if not isinstance(output_index, int):
+            self._anomaly("missing_output_index")
             return
+        self.completed.add(output_index)
         done_type = str(_value(item, "type") or "")
         observed_type = self.announced.get(output_index)
         if observed_type is not None and observed_type != done_type:
@@ -1070,7 +1225,7 @@ async def _read_proxy_responses_stream(
         _append_sse_event(events, data_lines)
 
     completed: dict[str, Any] | None = None
-    inspector = ProxyStreamInspector()
+    inspector = ResponsesStreamInspector()
     for event in events:
         event_type = str(event.get("type") or "")
         inspector.observe(event)
@@ -1083,6 +1238,7 @@ async def _read_proxy_responses_stream(
             code = str(_value(error, "code") or _value(error, "type") or "unknown")
             raise RuntimeError(f"Responses proxy stream failed with {code}")
 
+    inspector.finish()
     if completed is None:
         raise RuntimeError("Responses proxy stream ended without response.completed")
     if str(completed.get("status") or "") != "completed":
@@ -1091,6 +1247,11 @@ async def _read_proxy_responses_stream(
         raise RuntimeError("Responses proxy completion is missing output items")
     completed["_fugue_stream_event_count"] = len(events)
     return completed, inspector.anomaly_kinds
+
+
+# Kept as a runtime-test compatibility alias; V2 applies this validator to both
+# Responses profiles rather than treating it as a proxy-only diagnostic.
+ProxyStreamInspector = ResponsesStreamInspector
 
 
 def _append_sse_event(events: list[dict[str, Any]], lines: list[str]) -> None:
@@ -1211,6 +1372,18 @@ def _validate_model_turn(result: ModelTurn) -> None:
         raise ValueError("Model response contained duplicate tool-call IDs")
 
 
+def _validate_tool_exchange(
+    result: ModelTurn,
+    tool_results: list[tuple[str, bool]],
+) -> None:
+    if len(tool_results) != len(result.tool_calls):
+        raise ValueError(
+            "tool-call execution did not produce exactly one output per call"
+        )
+    if len({call.call_id for call in result.tool_calls}) != len(result.tool_calls):
+        raise ValueError("tool-call execution contains duplicate call IDs")
+
+
 def _usage(value: Any, *names: str) -> int | None:
     for name in names:
         item = _value(value, name)
@@ -1234,6 +1407,13 @@ def _dump(value: Any) -> dict[str, Any]:
     return model_dump(exclude_none=True) if model_dump else {"type": "reasoning"}
 
 
+def _dump_event(value: Any) -> dict[str, Any]:
+    rendered = _dump(value)
+    if not isinstance(rendered, dict):
+        raise TypeError("stream event must serialize to an object")
+    return rendered
+
+
 def _bounded_output(stdout: str, stderr: str) -> str:
     combined = "\n".join(part for part in (stdout, stderr) if part).strip()
     if len(combined.encode()) <= SHELL_OUTPUT_LIMIT:
@@ -1247,16 +1427,33 @@ def _bounded_output(stdout: str, stderr: str) -> str:
     )
 
 
-def _retryable(exc: BaseException) -> bool:
-    return isinstance(exc, (TimeoutError, ConnectionError, OSError)) or type(
-        exc
-    ).__name__ in {
-        "APIConnectionError",
-        "APITimeoutError",
-        "RateLimitError",
-        "InternalServerError",
-        "ServiceUnavailableError",
-    }
+def _transport_failure(exc: BaseException) -> dict[str, Any]:
+    """Normalize provider-specific exceptions before applying retry policy."""
+
+    name = type(exc).__name__
+    message = str(exc).casefold()
+    if isinstance(exc, TimeoutError) or name in {"APITimeoutError", "Timeout"}:
+        category = "timeout"
+        retryable = True
+    elif isinstance(exc, (ConnectionError, OSError)) or name == "APIConnectionError":
+        category = "connection"
+        retryable = True
+    elif name == "RateLimitError":
+        category = "rate_limit"
+        retryable = True
+    elif name in {"InternalServerError", "ServiceUnavailableError"}:
+        category = "provider_unavailable"
+        retryable = True
+    elif _normalization_error(exc):
+        category = "protocol_normalization"
+        retryable = False
+    elif any(term in message for term in ("authentication", "api key", "unauthorized")):
+        category = "authentication"
+        retryable = False
+    else:
+        category = "invalid_request" if isinstance(exc, ValueError) else "unknown"
+        retryable = False
+    return {"category": category, "retryable": retryable}
 
 
 def _normalization_error(exc: BaseException) -> bool:

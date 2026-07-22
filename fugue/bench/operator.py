@@ -123,7 +123,7 @@ from fugue.bench.task_runtime import (
     prepare_task_runtime,
     read_task_runtime_lock,
     task_architecture,
-    task_runtime_requires_gold_verification,
+    task_runtime_requires_verification,
 )
 from fugue.bench.workloads import (
     PreparedWorkloadDataset,
@@ -1139,9 +1139,7 @@ class OperatorService:
                     image=str(lock["image"]),
                     image_id=str(lock["image_id"]),
                     recipe_sha256=str(lock["recipe_sha256"]),
-                    verification_required=task_runtime_requires_gold_verification(
-                        manifest
-                    ),
+                    verification_required=task_runtime_requires_verification(manifest),
                     verification=(
                         dict(lock["verification"])
                         if isinstance(lock.get("verification"), dict)

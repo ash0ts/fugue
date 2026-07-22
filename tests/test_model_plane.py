@@ -76,7 +76,7 @@ def test_wba_transport_receipts_lock_three_distinct_topologies() -> None:
         "https://api.inference.wandb.ai/v1"
     }
     assert receipts["responses-proxy"]["bridge_required"] is True
-    assert receipts["responses-proxy"]["codec"] == "fugue-litellm-responses-proxy-v3"
+    assert receipts["responses-proxy"]["codec"] == "fugue-litellm-responses-proxy-v4"
     assert receipts["responses-inline"]["bridge_required"] is False
     assert receipts["chat-inline"]["bridge_required"] is False
     assert {value["sampling_policy"]["temperature"] for value in receipts.values()} == {

@@ -766,6 +766,7 @@ def _evaluation_cases(
     if manifest.dataset.materializer in {
         "fugue.bench.task_authoring:AuthoredTaskMaterializer",
         "fugue.bench.wba_transport_tasks:WBATransportTaskMaterializer",
+        "fugue.bench.wba_transport_tasks:WBATransportTaskMaterializerV2",
     }:
         return {}
     source_path = str(manifest.dataset.source.get("path") or "")

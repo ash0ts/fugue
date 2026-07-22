@@ -97,9 +97,7 @@ def analyze_wba_transport_rows(
                 if row.get("transport_profile") == profile
             ),
             "stream_anomaly_kinds": _sum_stream_anomaly_kinds(
-                row
-                for row in selected
-                if row.get("transport_profile") == profile
+                row for row in selected if row.get("transport_profile") == profile
             ),
         }
         for profile in _PROFILES
@@ -132,6 +130,123 @@ def analyze_wba_transport_rows(
             "Task failures are observations; evidence and infrastructure failures invalidate progression.",
         ],
     }
+
+
+def analyze_wba_transport_v2_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    bootstrap_samples: int = 2_000,
+    seed: str = "wba-transport-ablation-v2",
+) -> dict[str, Any]:
+    """Analyze protocol, operational, and task outcomes without conflating them."""
+
+    report = analyze_wba_transport_rows(
+        rows,
+        bootstrap_samples=bootstrap_samples,
+        seed=seed,
+    )
+    selected = [
+        row
+        for row in rows
+        if row.get("harness") == "wba-responses"
+        and row.get("transport_profile") in _PROFILES
+    ]
+    for profile in _PROFILES:
+        profile_rows = [
+            row for row in selected if row.get("transport_profile") == profile
+        ]
+        report["arm_totals"][profile].update(
+            {
+                "protocol_applicable": sum(
+                    row.get("transport_protocol_applicability") == "applicable"
+                    for row in profile_rows
+                ),
+                "protocol_conformant": sum(
+                    row.get("transport_protocol_status") == "conformant"
+                    for row in profile_rows
+                ),
+                "protocol_nonconformant": sum(
+                    row.get("transport_protocol_status") == "nonconformant"
+                    for row in profile_rows
+                ),
+                "turn_integrity_errors": sum(
+                    int(row.get("transport_turn_integrity_errors") or 0)
+                    for row in profile_rows
+                ),
+                "agent_retries": sum(
+                    int(row.get("transport_agent_retries") or 0) for row in profile_rows
+                ),
+                "agent_errors": sum(
+                    int(row.get("transport_agent_errors") or 0) for row in profile_rows
+                ),
+                "compaction_errors": sum(
+                    int(row.get("transport_compaction_errors") or 0)
+                    for row in profile_rows
+                ),
+                "compaction_fallbacks": sum(
+                    int(row.get("transport_compaction_fallbacks") or 0)
+                    for row in profile_rows
+                ),
+                "answer_present": sum(
+                    _score_component(row, "answer_present") for row in profile_rows
+                ),
+                "artifact_schema": sum(
+                    _score_component(row, "artifact_schema") for row in profile_rows
+                ),
+                "artifact_facts": sum(
+                    _score_component(row, "artifact_facts") for row in profile_rows
+                ),
+            }
+        )
+    outcomes = [
+        row.get("pass") for row in selected if isinstance(row.get("pass"), bool)
+    ]
+    report.update(
+        {
+            "schema_version": 2,
+            "analysis_id": "wba-transport-ablation-v2",
+            "sections": {
+                "protocol_conformance": [
+                    "transport_protocol_applicability",
+                    "transport_protocol_status",
+                    "transport_turn_integrity_errors",
+                ],
+                "task_outcomes": [
+                    "answer_present",
+                    "artifact_schema",
+                    "artifact_facts",
+                    "task_pass",
+                ],
+                "operations": [
+                    "transport_agent_retries",
+                    "transport_agent_errors",
+                    "transport_compaction_errors",
+                    "transport_compaction_fallbacks",
+                    "latency",
+                    "tokens",
+                    "available_cost",
+                ],
+            },
+            "non_discriminating": bool(outcomes) and len(set(outcomes)) == 1,
+            "non_discriminating_reason": (
+                "All observed deterministic task outcomes are identical; this cohort "
+                "does not discriminate among transport profiles."
+                if outcomes and len(set(outcomes)) == 1
+                else None
+            ),
+            "interpretation_guardrails": [
+                "A non-discriminating cohort does not establish transport equivalence.",
+                "Wire conformance, Agent-loop behavior, and task outcomes are separate results.",
+                "Results apply only to this compatible Fugue harness, locked model, tasks, and attempts.",
+            ],
+        }
+    )
+    return report
+
+
+def _score_component(row: Mapping[str, Any], name: str) -> int:
+    values = row.get("task_score_components") or {}
+    return int(isinstance(values, Mapping) and values.get(name) == 1.0)
 
 
 def _sum_stream_anomaly_kinds(

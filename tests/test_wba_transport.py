@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import runpy
@@ -14,14 +15,21 @@ import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
 import fugue.bench.job_config as job_config
+import fugue.preflight as preflight
 from fugue.agents import FugueWBAResponses
 from fugue.bench.campaign_evidence import safe_prediction_row
 from fugue.bench.campaigns import CampaignService, build_experiment_proposal
 from fugue.bench.export import _wba_transport_evidence
 from fugue.bench.manifest import load_manifest
 from fugue.bench.operator import ExperimentRequest, OperatorService
-from fugue.bench.wba_transport_analysis import analyze_wba_transport_rows
-from fugue.bench.wba_transport_tasks import WBATransportTaskMaterializer
+from fugue.bench.wba_transport_analysis import (
+    analyze_wba_transport_rows,
+    analyze_wba_transport_v2_rows,
+)
+from fugue.bench.wba_transport_tasks import (
+    WBATransportTaskMaterializer,
+    WBATransportTaskMaterializerV2,
+)
 from fugue.task_interaction import TaskInteractionController
 
 RUNNER_PATH = Path("configs/fugue/runtime/wba-responses/wba-runner")
@@ -104,6 +112,50 @@ def test_wba_weave_trace_disables_implicit_sdk_patching(
     }
     assert trace.conversation is None
     assert trace.turn is None
+
+
+def test_wba_weave_chat_span_carries_queryable_fugue_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import weave
+
+    class Span:
+        def __init__(self) -> None:
+            self.attributes: dict[str, Any] = {}
+
+        def __enter__(self) -> Span:
+            return self
+
+        def set_attributes(self, value: dict[str, Any]) -> None:
+            self.attributes.update(value)
+
+    span = Span()
+    monkeypatch.setattr(weave, "start_llm", lambda **_kwargs: span)
+    trace = RUNNER["WeaveTrace"](
+        {
+            "trace_content": "full",
+            "profile": "responses-inline",
+            "model_id": "zai-org/GLM-5.2",
+            "provider": "wandb",
+            "conversation_id": "conversation-1",
+            "trace_attributes": {
+                "fugue.run_key": "run-1",
+                "fugue.candidate_id": "candidate-1",
+            },
+        }
+    )
+    trace.turn = object()
+
+    observed = trace.start_llm("compaction", [])
+
+    assert observed is span
+    assert span.attributes == {
+        "fugue.run_key": "run-1",
+        "fugue.candidate_id": "candidate-1",
+        "fugue.call_kind": "compaction",
+        "fugue.transport_profile": "responses-inline",
+        "fugue.conversation_id": "conversation-1",
+    }
 
 
 def _client(profile: str) -> Any:
@@ -192,10 +244,50 @@ def test_wba_adapter_exposes_the_locked_transport_receipt(
 
     assert agent.transport_receipt["profile"] == "chat-inline"
     assert agent.transport_receipt["bridge_required"] is False
-    assert agent.transport_receipt["codec"] == "chat-completions-native-v1"
+    assert agent.transport_receipt["codec"] == "chat-completions-native-v2"
+    assert agent.transport_receipt["protocol_qualification"]["status"] == "supported"
     assert len(str(agent.transport_receipt["retry_policy_digest"])) == 64
     assert len(str(agent.transport_receipt["timeout_policy_digest"])) == 64
     assert len(str(agent.transport_receipt["compaction_policy_digest"])) == 64
+
+
+def test_live_preflight_blocks_an_unqualified_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        preflight,
+        "bridge_status",
+        lambda **_kwargs: {
+            "ok": True,
+            "body": "healthy",
+        },
+    )
+
+    checks = preflight.run_preflight(
+        "wandb/zai-org/GLM-5.2",
+        env={},
+        live=True,
+        harnesses=("wba-responses",),
+        wba_transport_profiles=(
+            "responses-proxy",
+            "responses-inline",
+            "chat-inline",
+        ),
+    )
+
+    blocked = next(check for check in checks if check.name.endswith("responses-proxy"))
+    assert blocked.ok is False
+    assert "no tested immutable" in blocked.detail
+
+
+def test_proxy_qualification_receipt_locks_its_evidence() -> None:
+    evidence = Path("configs/fugue/runtime/wba-responses/proxy-conformance.json")
+    qualification = preflight.wba_transport_profile_qualification("responses-proxy")
+
+    assert qualification["evidence"] == evidence.as_posix()
+    assert qualification["evidence_sha256"] == hashlib.sha256(
+        evidence.read_bytes()
+    ).hexdigest()
 
 
 def test_wba_adapter_executes_through_the_harbor_agent_user(
@@ -296,14 +388,14 @@ def test_chat_stream_reconciles_fragmented_tool_arguments(
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=completion))
     monkeypatch.setenv("WANDB_API_KEY", "test-only")
 
-    async def exercise() -> Any:
+    async def exercise() -> tuple[Any, str]:
         client = _client("chat-inline")
         try:
-            return await client._chat_inline([], stream=True)
+            return await client._chat_inline([], stream=True), client.chat_protocol_status
         finally:
             await client.close()
 
-    result = asyncio.run(exercise())
+    result, protocol_status = asyncio.run(exercise())
 
     assert result.reasoning == {"text": "inspect evidence"}
     assert result.tool_calls[0].call_id == "call_1"
@@ -311,6 +403,39 @@ def test_chat_stream_reconciles_fragmented_tool_arguments(
     assert result.tool_calls[0].arguments == {"command": "python -V"}
     assert result.input_tokens == 12
     assert result.output_tokens == 8
+    assert protocol_status == "conformant"
+
+
+def test_chat_stream_requires_one_terminal_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def completion(**kwargs: Any) -> Any:
+        del kwargs
+
+        async def chunks():
+            yield {
+                "id": "response-a",
+                "choices": [{"delta": {"content": "unterminated"}}],
+            }
+
+        return chunks()
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=completion))
+    monkeypatch.setenv("WANDB_API_KEY", "test-only")
+
+    async def exercise() -> tuple[Any, str, dict[str, int]]:
+        client = _client("chat-inline")
+        try:
+            result = await client._chat_inline([], stream=True)
+            return result, client.chat_protocol_status, client.stream_anomaly_kinds
+        finally:
+            await client.close()
+
+    result, protocol_status, anomaly_kinds = asyncio.run(exercise())
+
+    assert result.text == "unterminated"
+    assert protocol_status == "nonconformant"
+    assert anomaly_kinds == {"missing_terminal_event": 1}
 
 
 def test_inline_profiles_pass_an_owned_openai_client_to_litellm(
@@ -590,6 +715,80 @@ def test_retry_policy_records_recoverable_failures(
     assert client.events.rows[0][1]["will_retry"] is True
 
 
+def test_compaction_uses_one_attempt_and_normalizes_litellm_timeout() -> None:
+    client = _client("responses-inline")
+    attempts = 0
+    timeout_error = type("Timeout", (Exception,), {})
+
+    async def operation() -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise timeout_error("compaction timed out")
+
+    with pytest.raises(timeout_error):
+        asyncio.run(client._retry(operation, "compaction"))
+
+    assert attempts == 1
+    assert client.retries_by_kind == {"agent": 0, "compaction": 0}
+    assert client.errors_by_kind == {"agent": 0, "compaction": 1}
+    assert client.transport_timeouts == {"agent": 0, "compaction": 1}
+    assert client.failure_categories == {"timeout": 1}
+
+
+def test_model_cancellation_is_terminal_and_not_retried() -> None:
+    client = _client("responses-inline")
+    attempts = 0
+
+    async def operation() -> Any:
+        nonlocal attempts
+        attempts += 1
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(client._retry(operation, "agent"))
+
+    assert attempts == 1
+    assert client.calls_by_kind == {"agent": 1, "compaction": 0}
+    assert client.retries_by_kind == {"agent": 0, "compaction": 0}
+    assert client.errors_by_kind == {"agent": 0, "compaction": 0}
+    assert any(event == "model_cancelled" for event, _value in client.events.rows)
+
+
+def test_responses_validator_requires_sequence_and_terminal_order() -> None:
+    valid = RUNNER["ResponsesStreamInspector"]()
+    for event in (
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 0,
+            "output_index": 0,
+            "item": {"type": "message"},
+        },
+        {
+            "type": "response.output_text.delta",
+            "sequence_number": 1,
+            "output_index": 0,
+            "delta": "ok",
+        },
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {"type": "message"},
+        },
+        {"type": "response.completed", "sequence_number": 3, "response": {}},
+    ):
+        valid.observe(event)
+    valid.finish()
+    assert valid.anomaly_kinds == {}
+
+    invalid = RUNNER["ResponsesStreamInspector"]()
+    invalid.observe({"type": "response.completed", "response": {}})
+    invalid.observe({"type": "response.output_text.delta", "output_index": 0})
+    invalid.finish()
+    assert invalid.anomaly_kinds["missing_sequence_number"] == 2
+    assert invalid.anomaly_kinds["event_after_terminal"] == 1
+
+
 def test_responses_stream_fails_closed_when_completion_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -658,6 +857,18 @@ def test_model_turn_rejects_duplicate_tool_call_ids() -> None:
 
     with pytest.raises(ValueError, match="duplicate tool-call IDs"):
         RUNNER["_validate_model_turn"](duplicate)
+
+
+@pytest.mark.parametrize("outputs", [[], [("first", False), ("duplicate", False)]])
+def test_tool_exchange_requires_exactly_one_output_per_call(
+    outputs: list[tuple[str, bool]],
+) -> None:
+    turn = RUNNER["ModelTurn"](
+        tool_calls=[RUNNER["ToolCall"]("call-1", "shell", {"command": "pwd"})]
+    )
+
+    with pytest.raises(ValueError, match="exactly one output per call"):
+        RUNNER["_validate_tool_exchange"](turn, outputs)
 
 
 def test_failed_session_writes_terminal_transport_evidence(
@@ -906,8 +1117,8 @@ def test_proxy_codec_normalizes_litellm_reasoning_index_reuse() -> None:
         model_client.stream_anomalies
     )
     assert any(
-        event == "stream_normalized"
-        and value["codec"].endswith("-v3")
+        event == "stream_conformance"
+        and value["status"] == "nonconformant"
         and value["stream_anomalies"] >= 4
         and value["anomaly_kinds"]
         for event, value in model_client.events.rows
@@ -939,24 +1150,30 @@ def test_inline_client_lifecycle_closes_once() -> None:
 
 def test_wba_registered_experiment_resolves_exact_locked_matrices() -> None:
     service = OperatorService(Path(__file__).parents[1])
+    plans = []
+    for version in ("v1", "v2"):
+        plans.append(
+            (
+                service.resolve_run_plan(
+                    ExperimentRequest(
+                        experiment_id=f"wba-transport-ablation-{version}",
+                        preset="canary",
+                    ),
+                    run_id=f"wba-canary-test-{version}",
+                ),
+                service.resolve_run_plan(
+                    ExperimentRequest(
+                        experiment_id=f"wba-transport-ablation-{version}",
+                        preset="primary",
+                    ),
+                    run_id=f"wba-primary-test-{version}",
+                ),
+            )
+        )
+    canary, primary = plans[-1]
 
-    canary = service.resolve_run_plan(
-        ExperimentRequest(
-            experiment_id="wba-transport-ablation-v1",
-            preset="canary",
-        ),
-        run_id="wba-canary-test",
-    )
-    primary = service.resolve_run_plan(
-        ExperimentRequest(
-            experiment_id="wba-transport-ablation-v1",
-            preset="primary",
-        ),
-        run_id="wba-primary-test",
-    )
-
-    assert (len(canary.cells), canary.max_workers) == (3, 1)
-    assert (len(primary.cells), primary.max_workers) == (48, 1)
+    assert all((len(item.cells), item.max_workers) == (3, 1) for item, _ in plans)
+    assert all((len(item.cells), item.max_workers) == (48, 1) for _, item in plans)
     assert len({job.candidate_id for job in canary.jobs}) == 3
     assert {job.model_transport["profile"] for job in canary.jobs} == {
         "responses-proxy",
@@ -1189,6 +1406,127 @@ def test_wba_offline_tasks_materialize_and_verify_reference_output(
     }
 
 
+def test_wba_v2_task_discloses_schema_and_passes_gold_with_extra_fields(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).parents[1]
+    manifest = load_manifest(repo_root / "datasets/wba-transport-ablation-v2.yaml")
+    result = WBATransportTaskMaterializerV2().materialize(
+        manifest,
+        tmp_path / "tasks",
+        repo_root / "datasets/wba-transport-ablation-v2.jsonl",
+        repo_root=repo_root,
+    )
+
+    assert result["evaluation_contract"] == "public-schema-private-json-pointer-v2"
+    task = tmp_path / "tasks/evaluation-regression"
+    instruction = (task / "instruction.md").read_text()
+    assert '"required": [' in instruction
+    assert '"net_pass_delta"' in instruction
+    assert '"x-fugue-list-semantics": "set"' in instruction
+    assert "expected_fields" not in instruction
+
+    logs = tmp_path / "logs"
+    artifacts = logs / "artifacts"
+    artifacts.mkdir(parents=True)
+    verifier = tmp_path / "verify-v2.sh"
+    verifier.write_text(
+        (task / "tests/test.sh").read_text().replace("/logs", logs.as_posix())
+    )
+    failed = subprocess.run(
+        ["sh", verifier.as_posix()], check=False, capture_output=True, text=True
+    )
+    assert failed.returncode == 1
+    assert json.loads((logs / "verifier/reward.json").read_text())["task_pass"] == 0.0
+
+    (artifacts / "fugue-answer.md").write_text(
+        "Two regressions produced a net change of Unicode minus one: −1."
+    )
+    (artifacts / "regression-summary.json").write_text(
+        json.dumps(
+            {
+                "regressions": ["task-04", "task-02"],
+                "improvements": ["task-03"],
+                "net_pass_delta": -1,
+                "explanation": "The extra field is intentionally permitted.",
+            }
+        )
+    )
+    passed = subprocess.run(
+        ["sh", verifier.as_posix()], check=False, capture_output=True, text=True
+    )
+    assert passed.returncode == 0, passed.stderr
+    assert json.loads((logs / "verifier/reward.json").read_text()) == {
+        "answer_present": 1.0,
+        "artifact_facts": 1.0,
+        "artifact_schema": 1.0,
+        "reward": 1.0,
+        "task_pass": 1.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("artifact", "answer", "failed_component"),
+    [
+        ({"regressions": [], "improvements": []}, "answer", "artifact_schema"),
+        (
+            {
+                "regressions": ["task-02", "task-04"],
+                "improvements": ["task-03"],
+                "net_pass_delta": 1,
+            },
+            "answer",
+            "artifact_facts",
+        ),
+        ("{malformed", "answer", "artifact_schema"),
+        (
+            {
+                "regressions": ["task-02", "task-04"],
+                "improvements": ["task-03"],
+                "net_pass_delta": -1,
+            },
+            "",
+            "answer_present",
+        ),
+    ],
+)
+def test_wba_v2_scorer_rejects_invalid_outputs(
+    tmp_path: Path,
+    artifact: object,
+    answer: str,
+    failed_component: str,
+) -> None:
+    repo_root = Path(__file__).parents[1]
+    manifest = load_manifest(repo_root / "datasets/wba-transport-ablation-v2.yaml")
+    WBATransportTaskMaterializerV2().materialize(
+        manifest,
+        tmp_path / "tasks",
+        repo_root / "datasets/wba-transport-ablation-v2.jsonl",
+        repo_root=repo_root,
+    )
+    task = tmp_path / "tasks/evaluation-regression"
+    logs = tmp_path / "logs"
+    artifacts = logs / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "fugue-answer.md").write_text(answer)
+    (artifacts / "regression-summary.json").write_text(
+        artifact if isinstance(artifact, str) else json.dumps(artifact)
+    )
+    verifier = tmp_path / "verify-v2-invalid.sh"
+    verifier.write_text(
+        (task / "tests/test.sh").read_text().replace("/logs", logs.as_posix())
+    )
+
+    completed = subprocess.run(
+        ["sh", verifier.as_posix()], check=False, capture_output=True, text=True
+    )
+
+    scores = json.loads((logs / "verifier/reward.json").read_text())
+    assert completed.returncode == 1
+    assert scores["task_pass"] == 0.0
+    assert scores[failed_component] == 0.0
+
+
 def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
     rows = []
     for task in ("task-a", "task-b"):
@@ -1235,6 +1573,37 @@ def test_wba_analysis_uses_aligned_task_attempt_contrasts() -> None:
     }
 
 
+def test_wba_v2_analysis_marks_identical_outcomes_non_discriminating() -> None:
+    rows = [
+        {
+            "harness": "wba-responses",
+            "task_name": "task-a",
+            "trial_index": 1,
+            "transport_profile": profile,
+            "pass": True,
+            "task_score_components": {
+                "answer_present": 1.0,
+                "artifact_schema": 1.0,
+                "artifact_facts": 1.0,
+            },
+            "transport_protocol_applicability": (
+                "not_applicable" if profile == "chat-inline" else "applicable"
+            ),
+            "transport_protocol_status": (
+                "not_applicable" if profile == "chat-inline" else "conformant"
+            ),
+            "transport_stream_anomaly_kinds": {},
+        }
+        for profile in ("responses-proxy", "responses-inline", "chat-inline")
+    ]
+
+    result = analyze_wba_transport_v2_rows(rows)
+
+    assert result["analysis_id"] == "wba-transport-ablation-v2"
+    assert result["non_discriminating"] is True
+    assert result["arm_totals"]["responses-proxy"]["artifact_facts"] == 1
+
+
 def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
     tmp_path: Path,
 ) -> None:
@@ -1279,9 +1648,7 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
         "stream_anomalies": 17,
         "stream_anomaly_kinds": {"reused_output_index": 17},
     }
-    (agent / "wba-responses-summary.json").write_text(
-        json.dumps(normalized_summary)
-    )
+    (agent / "wba-responses-summary.json").write_text(json.dumps(normalized_summary))
     normalized_evidence = _wba_transport_evidence(trial, meta)
     assert normalized_evidence["wba_transport_status"] == "valid"
     assert normalized_evidence["transport_stream_anomalies"] == 17
@@ -1294,9 +1661,7 @@ def test_wba_transport_summary_is_required_and_safe_for_campaign_evidence(
         "transport_errors": 1,
         "retries": 1,
     }
-    (agent / "wba-responses-summary.json").write_text(
-        json.dumps(recovered_summary)
-    )
+    (agent / "wba-responses-summary.json").write_text(json.dumps(recovered_summary))
     assert _wba_transport_evidence(trial, meta)["wba_transport_status"] == "valid"
     failed_summary = {
         **summary,

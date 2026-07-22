@@ -3003,6 +3003,105 @@ def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
     assert activity["error_events"][0]["kind"] == "invalid_tool_arguments"
 
 
+def test_wba_completed_row_preserves_artifacts_and_blank_workspace_status(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    agent = trial / "agent"
+    agent.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "fugue/trace-auth-diagnosis",
+                "trial_name": "trial-a",
+                "agent_execution": {"started_at": "2026-07-22T12:00:00Z"},
+                "verifier_result": {
+                    "rewards": {
+                        "reward": 1.0,
+                        "task_pass": 1.0,
+                        "answer_present": 1.0,
+                        "artifact_schema": 1.0,
+                        "artifact_facts": 1.0,
+                    }
+                },
+                "started_at": "2026-07-22T12:00:00Z",
+                "finished_at": "2026-07-22T12:01:00Z",
+            }
+        )
+    )
+    (agent / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "run_key": "run-a",
+                "harness": "wba-responses",
+                "model_transport": {"profile": "responses-inline"},
+                "native_session_ids": ["session-a"],
+                "repository_change_status": "not_applicable",
+                "changed_paths": [],
+                "captured_artifact_paths": [
+                    "/logs/artifacts/fugue-answer.md",
+                    "/logs/artifacts/root-cause.json",
+                ],
+            }
+        )
+    )
+    (agent / "wba-responses-summary.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "session_id": "session-a",
+                "profile": "responses-inline",
+                "outputs": ["The artifact records the diagnosed cause."],
+                "orphan_tool_outputs": 0,
+                "stream_anomalies": 0,
+                "stream_anomaly_kinds": {},
+                "responses_protocol_applicability": "applicable",
+                "responses_protocol_status": "conformant",
+                "chat_protocol_status": "not_applicable",
+                "wire_protocol_status": "conformant",
+                "stop_reason": "completed",
+            }
+        )
+    )
+
+    row = export._row_from_trial(trial / "result.json")
+
+    assert row["agent_execution_status"] == "completed"
+    assert row["repository_change_status"] == "not_applicable"
+    assert row["changed_paths"] == []
+    assert row["captured_artifact_paths"] == [
+        "/logs/artifacts/fugue-answer.md",
+        "/logs/artifacts/root-cause.json",
+    ]
+    assert row["task_score_components"]["artifact_facts"] == 1.0
+    assert row["agent_response"] == "The artifact records the diagnosed cause."
+
+
+def test_wba_trace_usage_does_not_invent_cost_without_locked_prices() -> None:
+    row = {
+        "harness": "wba-responses",
+        "model_transport": {"profile": "responses-inline"},
+        "context_assigned": False,
+        "cost_usd": 25.0,
+    }
+
+    export._apply_trace_summary(
+        row,
+        {
+            "weave_input_tokens": 100,
+            "weave_output_tokens": 20,
+            "weave_total_cost_usd": 1.23,
+            "weave_cost_status": "available",
+        },
+    )
+
+    assert row["weave_input_tokens"] == 100
+    assert row["weave_output_tokens"] == 20
+    assert row["weave_total_cost_usd"] is None
+    assert row["cost_usd"] is None
+    assert row["cost_source"] == "unavailable_without_locked_price_source"
+
+
 def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:
     rows = [
         {

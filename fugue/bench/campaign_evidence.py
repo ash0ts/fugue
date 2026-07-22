@@ -110,6 +110,21 @@ def _row_eligibility_failures(
         and row.get("wba_transport_status") != "valid"
     ):
         failures.append(f"row {index} lacks valid WBA transport evidence")
+    if (
+        row.get("harness") == "wba-responses"
+        and row.get("experiment_id") == "wba-transport-ablation-v2"
+    ):
+        if row.get("transport_wire_protocol_status") != "conformant":
+            failures.append(f"row {index} lacks conformant wire-protocol evidence")
+        if int(row.get("transport_turn_integrity_errors") or 0) != 0:
+            failures.append(f"row {index} reports turn-integrity errors")
+        expected_calls = int(row.get("transport_agent_calls") or 0) + int(
+            row.get("transport_compaction_calls") or 0
+        )
+        if expected_calls < 1 or row.get("weave_llm_call_count") != expected_calls:
+            failures.append(
+                f"row {index} does not reconcile every WBA model call to Weave chat"
+            )
     return failures
 
 
@@ -313,6 +328,7 @@ _SAFE_PREDICTION_FIELDS = (
     "status",
     "pass",
     "reward",
+    "task_score_components",
     "workload_id",
     "task_name",
     "harness",
@@ -356,6 +372,21 @@ _SAFE_PREDICTION_FIELDS = (
     "transport_stream_anomalies",
     "transport_stream_anomaly_kinds",
     "transport_stop_reason",
+    "transport_agent_retries",
+    "transport_compaction_retries",
+    "transport_agent_calls",
+    "transport_compaction_calls",
+    "transport_agent_errors",
+    "transport_compaction_errors",
+    "transport_agent_timeouts",
+    "transport_compaction_timeouts",
+    "transport_compaction_fallbacks",
+    "transport_failure_categories",
+    "transport_turn_integrity_errors",
+    "transport_protocol_applicability",
+    "transport_protocol_status",
+    "transport_chat_protocol_status",
+    "transport_wire_protocol_status",
 )
 
 

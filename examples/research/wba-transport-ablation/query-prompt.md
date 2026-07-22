@@ -5,16 +5,19 @@ outcome, registered analysis, route and transport receipts, normalized rows,
 Agent conversations, and accounting evidence.
 
 Explain what stayed fixed and what varied. Compare the three transport profiles
-on aligned task-attempt cells. Report deterministic task and artifact outcomes
-separately from stream/tool integrity, retries, compaction, stop reasons,
-provider or bridge errors, latency, tokens, and cost. Explain the two
+on aligned task-attempt cells. Report Responses or Chat wire conformance,
+Agent-loop operational behavior, and visible-schema deterministic task outcomes
+separately. Include tool integrity, Agent-call errors, compaction errors and
+fallbacks, stop reasons, provider or bridge errors, latency, tokens, and
+observed cost. Explain the two
 preregistered contrasts:
 
 1. `responses-inline - responses-proxy` tests conversion topology.
 2. `chat-inline - responses-inline` tests the remaining Responses-stack gap.
 
 Separate observations, plausible explanations, and limitations. A null
-difference is not equivalence, and these results apply only to Fugue's
+difference is not equivalence; an all-identical cohort is non-discriminating.
+These results apply only to Fugue's
 independently authored compatible harness, GLM-5.2, the locked tasks, and two
 attempts. Do not claim that `wandb/core` was tested and do not declare a
 universal transport winner.

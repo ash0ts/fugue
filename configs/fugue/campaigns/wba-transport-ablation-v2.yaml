@@ -1,0 +1,67 @@
+schema_version: 1
+id: wba-transport-ablation-v2
+revision: v2
+title: WBA-compatible transport ablation V2
+objective: Determine where proxy Responses, inline Responses, and inline Chat differ in wire conformance, Agent-loop behavior, and visible-schema task outcomes.
+allowed:
+  experiments: [wba-transport-ablation-v2]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [wba-responses]
+  workloads: [transport]
+  variants: [responses-proxy, responses-inline, chat-inline]
+  context_systems: [none]
+  analyses: [wba-transport-ablation-v2]
+  trace_content: [full]
+stages:
+  - id: qualification
+    predecessors: []
+    max_proposals: 1
+    max_cells: 3
+    require_eligible_parent: false
+  - id: primary
+    predecessors: [qualification]
+    max_proposals: 1
+    max_cells: 48
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 1275
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 48
+  max_total_cells: 51
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+task_authoring:
+  enabled_stages: [qualification, primary]
+  allowed_partitions: [qualification, holdout]
+  allowed_environment_profiles: [artifact-python-v1]
+  allowed_resource_profiles:
+    - wba-trace-auth-failure-v1
+    - wba-tool-call-integrity-v1
+    - wba-evaluation-regression-v1
+    - wba-judge-disagreement-v1
+    - wba-latency-anomaly-v1
+    - wba-retry-cost-anomaly-v1
+    - wba-intervention-evidence-v1
+    - wba-evaluation-plan-input-v1
+  allowed_interactor_profiles: [scripted-reviewer-v1]
+  allowed_judge_profiles: []
+  allowed_scorer_runtimes: []
+  allowed_prompt_parts: [text, resource]
+  adaptive_discovery: false
+  limits:
+    max_tasks: 8
+    max_scenarios: 4
+    max_prompt_bytes: 32768
+    max_authored_asset_bytes: 1048576
+    max_user_turns: 1
+    max_agent_turns: 2
+    max_interactor_calls: 0
+    max_judge_calls: 0
+    scorer_timeout_sec: 30
+    scorer_memory_mb: 256
+    scorer_cpus: 1
+    scorer_output_bytes: 16384
+evidence_scope: traces
+require_clean_source: true

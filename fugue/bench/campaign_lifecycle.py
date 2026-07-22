@@ -107,7 +107,10 @@ from fugue.bench.task_authoring import (
     task_suite_lock_from_dict,
     task_suite_preview_from_dict,
 )
-from fugue.bench.wba_transport_analysis import analyze_wba_transport_rows
+from fugue.bench.wba_transport_analysis import (
+    analyze_wba_transport_rows,
+    analyze_wba_transport_v2_rows,
+)
 from fugue.model_plane import (
     model_route_identity,
     resolve_harness_model_route,
@@ -2438,6 +2441,16 @@ class CampaignService:
                             )
                         }
                         if analysis_id == "wba-transport-ablation-v1"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "transport_analysis": analyze_wba_transport_v2_rows(
+                                preview.snapshot.rows,
+                                seed=preview.snapshot.digest,
+                            )
+                        }
+                        if analysis_id == "wba-transport-ablation-v2"
                         else {}
                     ),
                 }

@@ -92,6 +92,92 @@ def test_gold_verification_requirement_is_manifest_scoped(tmp_path: Path) -> Non
     assert task_runtime.task_runtime_requires_gold_verification(swe_manifest)
 
 
+def test_wba_v2_reference_verification_is_manifest_scoped(tmp_path: Path) -> None:
+    manifest, _ = _fixture(tmp_path)
+    v2_manifest = replace(
+        manifest,
+        dataset=replace(
+            manifest.dataset,
+            materializer=(
+                "fugue.bench.wba_transport_tasks:WBATransportTaskMaterializerV2"
+            ),
+        ),
+    )
+
+    assert not task_runtime.task_runtime_requires_gold_verification(v2_manifest)
+    assert task_runtime.task_runtime_requires_verification(v2_manifest)
+
+
+def test_reference_task_setup_verifies_empty_and_locked_solution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source = _fixture(tmp_path)
+    (source / "tests").mkdir()
+    (source / "tests/test.sh").write_text("#!/bin/sh\nexit 1\n")
+    (source / "solution").mkdir()
+    (source / "solution/solve.sh").write_text("#!/bin/sh\nexit 0\n")
+    calls: list[bool] = []
+
+    def verify(*args, apply_reference: bool, **kwargs) -> bool:
+        calls.append(apply_reference)
+        return apply_reference
+
+    monkeypatch.setattr(task_runtime, "_run_reference_task_verifier", verify)
+    verification = task_runtime._verify_reference_task_outcomes(
+        "task-image",
+        manifest.tasks[0],
+        source,
+        architecture="arm64",
+        repo_root=tmp_path,
+    )
+
+    assert calls == [False, True]
+    assert verification == {
+        "base_failed": True,
+        "gold_passed": True,
+        "reference_sha256": task_runtime._tree_digest(source / "solution"),
+    }
+    assert not list((tmp_path / ".fugue/runtime").glob("fugue-task-reference-verify-*"))
+
+
+def test_reference_solution_is_mounted_only_for_gold_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source = _fixture(tmp_path)
+    (source / "tests").mkdir()
+    (source / "solution").mkdir()
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs):
+        calls.append(command)
+        logs_mount = next(
+            value for value in command if value.endswith("target=/logs")
+        )
+        logs = Path(dict(part.split("=", 1) for part in logs_mount.split(","))["source"])
+        passed = any(value.endswith("target=/solution,readonly") for value in command)
+        (logs / "verifier/reward.json").write_text(
+            json.dumps({"task_pass": float(passed)})
+        )
+        return subprocess.CompletedProcess(command, 0 if passed else 1, "", "")
+
+    monkeypatch.setattr(task_runtime.subprocess, "run", run)
+    for apply_reference in (False, True):
+        logs = tmp_path / ("gold" if apply_reference else "base")
+        (logs / "verifier").mkdir(parents=True)
+        assert task_runtime._run_reference_task_verifier(
+            "task-image",
+            manifest.tasks[0],
+            source,
+            architecture="arm64",
+            logs=logs,
+            apply_reference=apply_reference,
+            repo_root=tmp_path,
+        ) is apply_reference
+
+    assert not any(value.endswith("target=/solution,readonly") for value in calls[0])
+    assert any(value.endswith("target=/solution,readonly") for value in calls[1])
+
+
 def test_task_preparation_locks_image_and_disables_trial_network(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -453,7 +539,7 @@ def test_task_runtime_lock_rejects_dataset_drift(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("contract_version", [7, 8])
+@pytest.mark.parametrize("contract_version", [7, 8, 9])
 def test_task_runtime_lock_rejects_preintegration_contracts(
     tmp_path: Path, contract_version: int
 ) -> None:

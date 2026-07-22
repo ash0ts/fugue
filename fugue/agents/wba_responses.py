@@ -76,7 +76,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
     """Task-neutral WBA-style loop with locked transport-profile ablations."""
 
     TRACE_HARNESS = "wba-responses"
-    _VERSION = "0.1.5"
+    _VERSION = "0.2.0"
 
     @staticmethod
     @override
@@ -103,7 +103,7 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
             )
         if kwargs.get("mcp_servers"):
             raise ValueError(
-                "wba-responses does not support native MCP servers in contract v1"
+                "wba-responses does not support native MCP servers in contract v2"
             )
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
@@ -290,6 +290,23 @@ class FugueWBAResponses(_TrialMetaMixin, _WBAExecutionBase):
                 "retries": summary.get("retries"),
                 "transport_errors": summary.get("transport_errors"),
                 "compactions": summary.get("compactions"),
+                "agent_retries": summary.get("agent_retries"),
+                "compaction_retries": summary.get("compaction_retries"),
+                "agent_calls": summary.get("agent_calls"),
+                "compaction_calls": summary.get("compaction_calls"),
+                "agent_errors": summary.get("agent_errors"),
+                "compaction_errors": summary.get("compaction_errors"),
+                "agent_timeouts": summary.get("agent_timeouts"),
+                "compaction_timeouts": summary.get("compaction_timeouts"),
+                "compaction_fallbacks": summary.get("compaction_fallbacks"),
+                "failure_categories": summary.get("failure_categories"),
+                "turn_integrity_errors": summary.get("turn_integrity_errors"),
+                "responses_protocol_applicability": summary.get(
+                    "responses_protocol_applicability"
+                ),
+                "responses_protocol_status": summary.get("responses_protocol_status"),
+                "chat_protocol_status": summary.get("chat_protocol_status"),
+                "wire_protocol_status": summary.get("wire_protocol_status"),
                 "stop_reason": summary.get("stop_reason"),
             }
         finally:
