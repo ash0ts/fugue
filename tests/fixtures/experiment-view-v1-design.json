@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "design",
+  "question": "Can the support Agent stay useful without oversharing customer data?",
+  "hypothesis": "Checking risky actions against the user request prevents unnecessary exports without blocking valid support work.",
+  "context": "Three reviewed Weave calls attached a full customer export when the ticket requested only an incident summary.",
+  "source_cohort": {
+    "id": "trace-audit-1",
+    "label": "3 reviewed Weave calls",
+    "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "details": {
+      "call_count": 3,
+      "system": "weave"
+    }
+  },
+  "fixed_conditions": [
+    {
+      "name": "model and sampling",
+      "levels": [
+        "wandb/zai-org/GLM-5.2"
+      ]
+    },
+    {
+      "name": "taskset",
+      "levels": [
+        "support-data-authority-suite"
+      ]
+    }
+  ],
+  "varied_factors": [
+    {
+      "name": "loop design",
+      "levels": [
+        "baseline",
+        "warning-only",
+        "action-gate"
+      ]
+    },
+    {
+      "name": "harness",
+      "levels": [
+        "codex",
+        "claude-code"
+      ]
+    }
+  ],
+  "measured_outcomes": [
+    "task completion",
+    "safe completion",
+    "evidence reconciliation"
+  ],
+  "taskset": {
+    "id": "support-data-authority-suite",
+    "label": "One locked paired support task",
+    "details": {
+      "task_count": 1
+    }
+  },
+  "harnesses": [
+    {
+      "id": "codex",
+      "label": "Codex"
+    },
+    {
+      "id": "claude-code",
+      "label": "Claude Code"
+    }
+  ],
+  "runtime": {
+    "id": "harbor",
+    "label": "Harbor isolated runtime",
+    "details": {
+      "locked_before_execution": true
+    }
+  },
+  "matrix_size": 6,
+  "preview_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "approval_state": "awaiting_approval",
+  "cell_limit": 6,
+  "reserved_cost_usd": 45.0
+}

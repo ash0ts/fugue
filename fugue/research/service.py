@@ -181,6 +181,7 @@ class ResearchService:
 
         try:
             self.store.ensure_result_projection_events()
+            self.store.ensure_experiment_view_projection_events()
             return self.record_publisher.flush(limit=limit)
         except Exception:
             return {"delivered": 0, "failed": 1}
@@ -603,6 +604,12 @@ class ResearchService:
         assert record.run_id is not None
         status = self.campaign.status(record.run_id).to_dict()
         run_state = self._run_state(status, record.run_id)
+        lease.check()
+        self.store.record_run_progress(
+            record,
+            self.campaign.run_progress(record.run_id),
+            worker_id=worker_id,
+        )
         if run_state not in _RUN_TERMINAL:
             lease.check()
             self.store.release_lease(record.id, worker_id)

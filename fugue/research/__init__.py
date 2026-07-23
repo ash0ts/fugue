@@ -36,6 +36,15 @@ from fugue.research.contracts import (
     StudyResultV1,
     StudyV1,
 )
+from fugue.research.experiment_views import (
+    EXPERIMENT_VIEW_CELL_LIMIT,
+    EXPERIMENT_VIEW_SCHEMA_VERSION,
+    ExperimentCellViewV1,
+    ExperimentDescriptorV1,
+    ExperimentFactorV1,
+    ExperimentViewV1,
+    experiment_view_from_dict,
+)
 from fugue.research.records import (
     HttpResearchRecordSink,
     JsonlResearchRecordSink,
@@ -60,10 +69,16 @@ __all__ = [
     "EvidenceRefV1",
     "ExecutionApprovalV1",
     "ExperimentDraftV1",
+    "ExperimentCellViewV1",
+    "ExperimentDescriptorV1",
     "ExperimentEventV1",
+    "ExperimentFactorV1",
     "ExperimentHandle",
     "ExperimentPreviewV1",
     "ExperimentRecordV1",
+    "ExperimentViewV1",
+    "EXPERIMENT_VIEW_CELL_LIMIT",
+    "EXPERIMENT_VIEW_SCHEMA_VERSION",
     "FugueResearchClient",
     "ResearchContextV1",
     "ResearchEvidenceRefV1",
@@ -91,4 +106,5 @@ __all__ = [
     "TraceSourceRefV1",
     "TraceSourceRegistry",
     "build_trace_audit_draft",
+    "experiment_view_from_dict",
 ]

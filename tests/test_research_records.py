@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -181,8 +182,12 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
 
     serialized = json.dumps([item.to_dict() for item in store.research_log_events()])
     assert "Private research question" not in serialized
-    assert "Private controlled question" not in serialized
-    assert "Private hypothesis" not in serialized
+    assert request.summary["experiment_view"]["kind"] == "design"
+    assert (
+        request.summary["experiment_view"]["question"] == "Private controlled question"
+    )
+    assert request.summary["experiment_view"]["hypothesis"] == "Private hypothesis"
+    assert "prompt" not in request.summary["experiment_view"]
 
 
 def test_approval_request_operation_conflict_is_rejected(tmp_path: Path) -> None:
@@ -266,6 +271,10 @@ def test_experiment_state_and_sourced_update_append_safe_records(
     assert terminal.summary["passed"] == 4
     assert terminal.summary["limitation_count"] == 1
     assert "private limitation text" not in json.dumps(terminal.to_dict())
+    assert terminal.summary["experiment_view"]["kind"] == "evaluation"
+    assert terminal.summary["experiment_view"]["limitations"] == [
+        "Additional limitations are recorded in the immutable Fugue outcome."
+    ]
 
     study = store.get_study("research-1")
     store.update_study(
@@ -282,6 +291,152 @@ def test_experiment_state_and_sourced_update_append_safe_records(
     assert "private note body" not in json.dumps(
         store.research_log_events()[-1].to_dict()
     )
+
+
+def test_historical_experiment_views_are_backfilled_without_execution(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    preview = _preview()
+    timestamp = now()
+    record = sign_record(
+        ExperimentRecordV1(
+            schema_version=1,
+            id=preview.experiment_id,
+            study_id=preview.study_id,
+            campaign_id=preview.campaign_id,
+            state="queued",
+            draft=preview.draft,
+            preview=preview.to_dict(),
+            approval={"approval_digest": _A},
+            parent_experiment_ids=(),
+            proposal=None,
+            plan=preview.plan_receipt,
+            task_suite_lock=None,
+            prepared_plan=None,
+            admission={"reserved_cost_usd": 45.0},
+            run_id=None,
+            outcome=None,
+            evaluation=None,
+            analysis=None,
+            error=None,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+    )
+    store.insert_experiment(record, operation_id="start-old", input_digest=_A)
+    export_rows = [
+        {
+            "schema_version": 1,
+            "prediction_schema_version": 1,
+            "prediction_id": f"prediction-{index}",
+            "run_id": "run-old",
+            "candidate_id": f"candidate-{index}",
+            "comparison_example_id": "paired-support-review",
+            "trial_index": 1,
+            "execution_kind": "agent",
+            "status": "passed",
+            "pass": index < 2,
+            "workload_id": "support-data-authority-suite",
+            "task_name": "Paired support review",
+            "harness": "codex" if index % 2 else "claude-code",
+            "variant_id": ("action-gate" if index < 2 else "baseline"),
+            "context_system_id": "none",
+            "trace_link_status": "linked",
+            "trace_project": "team/evaluations",
+            "weave_call_id": f"call-{index}",
+            "weave_conversation_ids": [f"conversation-{index}"],
+            "weave_root_span_ids": [f"root-{index}"],
+            "weave_trace_ids": [f"trace-{index}"],
+            "runtime_equivalence_status": "equivalent",
+            "runtime_drift": False,
+        }
+        for index in range(6)
+    ]
+    export_payload = "".join(
+        json.dumps(row, sort_keys=True) + "\n" for row in export_rows
+    ).encode()
+    export_path = tmp_path / ".fugue" / "runtime" / "historical-export.jsonl"
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_bytes(export_payload)
+    completed = sign_record(
+        replace(
+            record,
+            state="completed",
+            run_id="run-old",
+            outcome={
+                "outcome_id": "outcome-old",
+                "outcome_digest": _A,
+                "run_snapshot_sha256": _B,
+                "expected_predictions": 6,
+                "observed_predictions": 6,
+                "passed": 2,
+                "failed": 4,
+                "not_applicable": 0,
+                "eligible": True,
+                "limitations": ["private limitation text"],
+                "observed_cost_usd": 1.53,
+                "export_path": export_path.relative_to(tmp_path).as_posix(),
+                "export_sha256": hashlib.sha256(export_payload).hexdigest(),
+                "row_refs": [
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if not key.startswith("weave_") and key != "trace_project"
+                    }
+                    for row in export_rows
+                ],
+            },
+            updated_at=now(),
+        )
+    )
+    store.update_experiment(
+        completed,
+        event_type="experiment_completed",
+        message="Historical experiment completed.",
+        release=True,
+    )
+
+    # Simulate a database produced before experiment-view publication existed.
+    with store._connect() as conn:
+        old_sequences = [
+            event.sequence
+            for event in store.research_log_events()
+            if event.study_id == record.id
+        ]
+        conn.executemany(
+            "DELETE FROM research_log_events WHERE sequence=?",
+            [(sequence,) for sequence in old_sequences],
+        )
+    assert store.ensure_experiment_view_projection_events() == 2
+    projected = [
+        event for event in store.research_log_events() if event.study_id == record.id
+    ]
+    assert [event.summary["experiment_view"]["kind"] for event in projected] == [
+        "design",
+        "evaluation",
+    ]
+    assert projected[-1].state == "completed"
+    assert projected[-1].summary["passed"] == 2
+    assert (
+        projected[-1].summary["experiment_view"]["infrastructure_health"]
+        == "unavailable"
+    )
+    assert projected[-1].observed_cost_usd == 1.53
+    assert all(
+        any(link["system"] == "weave" for link in cell["evidence_links"])
+        for cell in projected[-1].summary["experiment_view"]["cells"]
+    )
+    assert "private limitation text" not in json.dumps(
+        [event.to_dict() for event in projected]
+    )
+    assert store.ensure_experiment_view_projection_events() == 0
+
+    restarted = StudyStore(tmp_path)
+    assert restarted.ensure_experiment_view_projection_events() == 0
+    assert [event.producer_event_id for event in restarted.research_log_events()] == [
+        event.producer_event_id for event in store.research_log_events()
+    ]
 
 
 def test_jsonl_publication_is_ordered_idempotent_and_restart_safe(
