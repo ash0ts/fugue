@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from fugue.bench.library import get_experiment
+from fugue.bench.manifest import load_manifest
 from fugue.bench.operator import ExperimentRequest, OperatorService
 from fugue.research.agent_contracts import (
     build_trace_audit_draft,
@@ -291,6 +292,10 @@ def test_support_data_canary_has_exact_six_cell_matrix(monkeypatch) -> None:
     assert preview.harnesses == ("claude-code", "codex")
     assert preview.variants == ("action-gate", "baseline", "warning-only")
     assert {cell.task_id for cell in preview.matrix_cells} == {"paired-support-review"}
+    manifest = load_manifest(REPO_ROOT / "datasets/support-data-authority-v1.yaml")
+    assert manifest.tasks[0].metadata == {
+        "gold_solution": "solution/solve.sh"
+    }
 
 
 def test_support_data_fixture_is_synthetic_local_and_requires_both_cases() -> None:

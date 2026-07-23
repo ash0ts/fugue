@@ -92,6 +92,99 @@ def test_gold_verification_requirement_is_manifest_scoped(tmp_path: Path) -> Non
     assert task_runtime.task_runtime_requires_gold_verification(swe_manifest)
 
 
+def test_scripted_gold_verification_is_task_scoped_and_path_safe(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _fixture(tmp_path)
+    scripted = replace(
+        manifest.tasks[0],
+        metadata={"gold_solution": "solution/solve.sh"},
+    )
+
+    assert task_runtime.task_runtime_requires_verification(manifest, scripted)
+    assert not task_runtime.task_runtime_requires_verification(
+        manifest, manifest.tasks[0]
+    )
+
+    for unsafe in (
+        "/solution/solve.sh",
+        "../solution/solve.sh",
+        "solution/../solve.sh",
+        "another/solve.sh",
+    ):
+        task = replace(scripted, metadata={"gold_solution": unsafe})
+        with pytest.raises(ValueError, match="gold_solution"):
+            task_runtime.task_runtime_requires_verification(manifest, task)
+
+
+def test_scripted_outcome_verification_requires_base_fail_and_gold_pass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    manifest, source = _fixture(tmp_path)
+    task = replace(
+        manifest.tasks[0],
+        metadata={"gold_solution": "solution/solve.sh"},
+    )
+    (source / "tests").mkdir()
+    (source / "tests/test.sh").write_text("#!/bin/sh\nexit 1\n")
+    (source / "solution").mkdir()
+    solution = source / "solution/solve.sh"
+    solution.write_text("#!/bin/sh\nexit 0\n")
+    outcomes = iter((False, True))
+
+    monkeypatch.setattr(
+        task_runtime,
+        "_run_scripted_verifier",
+        lambda *args, **kwargs: next(outcomes),
+    )
+    verification = task_runtime._verify_scripted_outcomes(
+        "image",
+        task,
+        source,
+        solution_path=Path("solution/solve.sh"),
+        architecture="arm64",
+        repo_root=tmp_path,
+    )
+
+    assert verification == {
+        "kind": "solution-script",
+        "base_failed": True,
+        "gold_passed": True,
+        "gold_solution_sha256": hashlib.sha256(solution.read_bytes()).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("outcomes", [(True, True), (False, False)])
+def test_scripted_outcome_verification_fails_closed(
+    tmp_path: Path, monkeypatch, outcomes: tuple[bool, bool]
+) -> None:
+    manifest, source = _fixture(tmp_path)
+    task = replace(
+        manifest.tasks[0],
+        metadata={"gold_solution": "solution/solve.sh"},
+    )
+    (source / "tests").mkdir()
+    (source / "tests/test.sh").write_text("#!/bin/sh\nexit 1\n")
+    (source / "solution").mkdir()
+    (source / "solution/solve.sh").write_text("#!/bin/sh\nexit 0\n")
+    resolved = iter(outcomes)
+    monkeypatch.setattr(
+        task_runtime,
+        "_run_scripted_verifier",
+        lambda *args, **kwargs: next(resolved),
+    )
+
+    with pytest.raises(RuntimeError, match="base environment|checked-in solution"):
+        task_runtime._verify_scripted_outcomes(
+            "image",
+            task,
+            source,
+            solution_path=Path("solution/solve.sh"),
+            architecture="arm64",
+            repo_root=tmp_path,
+        )
+
+
 def test_task_preparation_locks_image_and_disables_trial_network(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -452,6 +545,7 @@ def test_swebench_setup_verifies_base_and_gold_without_persisting_patch(
     assert calls[0] is None
     assert calls[1] is not None
     assert verification == {
+        "kind": "swe-bench-patch",
         "base_failed": True,
         "gold_passed": True,
         "gold_patch_sha256": patch_sha256,

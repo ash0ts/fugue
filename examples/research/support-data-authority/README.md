@@ -10,6 +10,10 @@ the checked-in synthetic paired support task and binds the selection, trace-root
 snapshot, recipe, verifier, three loop designs, runtimes, and six-cell plan into
 one operator-approved preview digest.
 
+Preparation runs the paired task twice inside its locked, network-disabled
+image: the untouched environment must fail and the checked-in solution must
+pass. Only the solution digest is persisted in the runtime receipt.
+
 The demo uses stable Research ID `aria-support-data-authority-v1`. Each accepted
 preview receives a content-derived controlled Study identity; Aria recovers that
 Study from Fugue's durable cursor instead of relying on chat history.
