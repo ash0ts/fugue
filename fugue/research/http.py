@@ -44,6 +44,17 @@ class CreateStudyBody(StrictBody):
     idempotency_key: str
 
 
+class CreateResearchBody(StrictBody):
+    research_id: str
+    title: str
+    campaign_id: str
+    question: str
+    background: str = ""
+    parent_research_ids: tuple[str, ...] = ()
+    attribution: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str
+
+
 class UpdateStudyBody(StrictBody):
     update: dict[str, Any]
     expected_revision: int | None = None
@@ -182,13 +193,38 @@ def create_app(  # noqa: C901
             operation_id=body.idempotency_key,
         ).to_dict()
 
+    @app.post("/v1/research")
+    def create_research(body: CreateResearchBody) -> dict[str, Any]:
+        """Create programme-level Research while preserving stable V1 records."""
+
+        from fugue.research.contracts import attribution_from_dict
+
+        return research.store.create_study(
+            study_id=body.research_id,
+            title=body.title,
+            campaign_id=body.campaign_id,
+            question=body.question,
+            background=body.background,
+            parent_study_ids=body.parent_research_ids,
+            attribution=attribution_from_dict(body.attribution),
+            operation_id=body.idempotency_key,
+        ).to_dict()
+
     @app.get("/v1/studies/{study_id}")
     def get_study(study_id: str) -> dict[str, Any]:
         return research.store.get_study(study_id).to_dict()
 
+    @app.get("/v1/research/{research_id}")
+    def get_research(research_id: str) -> dict[str, Any]:
+        return research.store.get_study(research_id).to_dict()
+
     @app.get("/v1/studies/{study_id}/catalog")
     def get_catalog(study_id: str) -> dict[str, Any]:
         return research.catalog(study_id)
+
+    @app.get("/v1/research/{research_id}/catalog")
+    def get_research_catalog(research_id: str) -> dict[str, Any]:
+        return research.catalog(research_id)
 
     @app.get("/v1/studies/{study_id}/context")
     def get_study_context(
@@ -206,10 +242,35 @@ def create_app(  # noqa: C901
             max_chars=max_chars,
         ).to_dict()
 
+    @app.get("/v1/research/{research_id}/context")
+    def get_research_context(
+        research_id: str,
+        max_experiments: int = 20,
+        max_results: int = 20,
+        max_notes: int = 20,
+        max_chars: int = 32000,
+    ) -> dict[str, Any]:
+        return research.store.context(
+            research_id,
+            max_experiments=max_experiments,
+            max_results=max_results,
+            max_notes=max_notes,
+            max_chars=max_chars,
+        ).to_dict()
+
     @app.post("/v1/studies/{study_id}/updates")
     def update_study(study_id: str, body: UpdateStudyBody) -> dict[str, Any]:
         return research.store.update_study(
             study_id,
+            study_update_from_dict(body.update),
+            operation_id=body.idempotency_key,
+            expected_revision=body.expected_revision,
+        ).to_dict()
+
+    @app.post("/v1/research/{research_id}/updates")
+    def update_research(research_id: str, body: UpdateStudyBody) -> dict[str, Any]:
+        return research.store.update_study(
+            research_id,
             study_update_from_dict(body.update),
             operation_id=body.idempotency_key,
             expected_revision=body.expected_revision,
@@ -222,11 +283,33 @@ def create_app(  # noqa: C901
             trace_audit_draft_from_dict(body.draft, require_digest=False),
         ).to_dict()
 
+    @app.post("/v1/research/{research_id}/trace-audits:preview")
+    def preview_research_trace_audit(
+        research_id: str, body: PreviewAuditBody
+    ) -> dict[str, Any]:
+        return research.traces.preview(
+            research_id,
+            trace_audit_draft_from_dict(body.draft, require_digest=False),
+        ).to_dict()
+
     @app.post("/v1/studies/{study_id}/trace-audits", status_code=201)
     def start_trace_audit(study_id: str, body: StartAuditBody) -> dict[str, Any]:
         preview = trace_audit_preview_from_dict(body.preview)
         if preview.study_id != study_id:
             raise ResearchError("study_mismatch", "audit belongs to another Study")
+        return research.traces.run(
+            preview,
+            operation_id=body.idempotency_key,
+            approval_digest=body.approval_digest,
+        ).to_dict()
+
+    @app.post("/v1/research/{research_id}/trace-audits", status_code=201)
+    def start_research_trace_audit(
+        research_id: str, body: StartAuditBody
+    ) -> dict[str, Any]:
+        preview = trace_audit_preview_from_dict(body.preview)
+        if preview.study_id != research_id:
+            raise ResearchError("study_mismatch", "audit belongs to another Research")
         return research.traces.run(
             preview,
             operation_id=body.idempotency_key,
@@ -246,6 +329,15 @@ def create_app(  # noqa: C901
             experiment_draft_from_dict(body.draft, require_digest=False),
         ).to_dict()
 
+    @app.post("/v1/research/{research_id}/studies:preview")
+    def preview_controlled_study(
+        research_id: str, body: PreviewExperimentBody
+    ) -> dict[str, Any]:
+        return research.preview_experiment(
+            research_id,
+            experiment_draft_from_dict(body.draft, require_digest=False),
+        ).to_dict()
+
     @app.post("/v1/studies/{study_id}/experiments", status_code=202)
     def start_experiment(study_id: str, body: StartExperimentBody) -> dict[str, Any]:
         preview = experiment_preview_from_dict(body.preview)
@@ -257,10 +349,25 @@ def create_app(  # noqa: C901
             idempotency_key=body.idempotency_key,
         ).to_dict()
 
+    @app.post("/v1/research/{research_id}/studies", status_code=202)
+    def start_controlled_study(
+        research_id: str, body: StartExperimentBody
+    ) -> dict[str, Any]:
+        preview = experiment_preview_from_dict(body.preview)
+        if preview.study_id != research_id:
+            raise ResearchError("study_mismatch", "preview belongs to another Research")
+        return research.start_experiment(
+            preview,
+            approval_digest=body.approval_digest,
+            idempotency_key=body.idempotency_key,
+        ).to_dict()
+
+    @app.get("/v1/research-studies/{experiment_id}")
     @app.get("/v1/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, Any]:
         return research.store.get_experiment(experiment_id).to_dict()
 
+    @app.get("/v1/research-studies/{experiment_id}/events")
     @app.get("/v1/experiments/{experiment_id}/events")
     async def experiment_events(
         experiment_id: str,
@@ -287,6 +394,7 @@ def create_app(  # noqa: C901
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
+    @app.post("/v1/research-studies/{experiment_id}:cancel")
     @app.post("/v1/experiments/{experiment_id}:cancel")
     def cancel_experiment(
         experiment_id: str, body: CancelExperimentBody
@@ -297,6 +405,7 @@ def create_app(  # noqa: C901
             reason=body.reason,
         ).to_dict()
 
+    @app.get("/v1/research-studies/{experiment_id}/outcome")
     @app.get("/v1/experiments/{experiment_id}/outcome")
     def get_outcome(experiment_id: str) -> dict[str, Any]:
         try:

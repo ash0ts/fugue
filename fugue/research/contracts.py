@@ -388,6 +388,17 @@ class ExperimentEventV1:
         return _drop_empty(_json_value(asdict(self)))
 
 
+# Public research vocabulary.  These aliases deliberately preserve the persisted
+# V1 field names and digests: the former programme-level Study is presented as a
+# Research record, while one controlled Experiment is presented as a Study.
+ResearchV1 = StudyV1
+ResearchContextV1 = StudyContextV1
+ControlledStudyDraftV1 = ExperimentDraftV1
+ControlledStudyPreviewV1 = ExperimentPreviewV1
+ControlledStudyV1 = ExperimentRecordV1
+ControlledStudyEventV1 = ExperimentEventV1
+
+
 def study_from_dict(raw: Mapping[str, Any]) -> StudyV1:
     fields = {item.name for item in StudyV1.__dataclass_fields__.values()}
     _reject_unknown(raw, fields, "study")

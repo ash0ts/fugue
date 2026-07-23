@@ -11,14 +11,24 @@ from fugue.research.agent_contracts import (
 )
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.candidate_sources import CandidateSourceRegistry
-from fugue.research.client import FugueResearchClient
+from fugue.research.client import (
+    ControlledStudyHandle,
+    FugueResearchClient,
+    ResearchHandle,
+)
 from fugue.research.contracts import (
+    ControlledStudyDraftV1,
+    ControlledStudyEventV1,
+    ControlledStudyPreviewV1,
+    ControlledStudyV1,
     EvidenceRefV1,
     ExperimentDraftV1,
     ExperimentEventV1,
     ExperimentPreviewV1,
     ExperimentRecordV1,
+    ResearchContextV1,
     ResearchError,
+    ResearchV1,
     StudyBriefV1,
     StudyContextV1,
     StudyNoteV1,
@@ -33,6 +43,11 @@ __all__ = [
     "ApprovalLedger",
     "CandidateRefV1",
     "CandidateSourceRegistry",
+    "ControlledStudyDraftV1",
+    "ControlledStudyEventV1",
+    "ControlledStudyHandle",
+    "ControlledStudyPreviewV1",
+    "ControlledStudyV1",
     "EvidenceRefV1",
     "ExecutionApprovalV1",
     "ExperimentDraftV1",
@@ -41,8 +56,11 @@ __all__ = [
     "ExperimentPreviewV1",
     "ExperimentRecordV1",
     "FugueResearchClient",
+    "ResearchContextV1",
     "ResearchError",
+    "ResearchHandle",
     "ResearchService",
+    "ResearchV1",
     "ResearchWorker",
     "StudyBriefV1",
     "StudyContextV1",

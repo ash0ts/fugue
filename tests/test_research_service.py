@@ -503,6 +503,27 @@ def test_python_client_preserves_same_artifacts(tmp_path: Path) -> None:
     assert updated.notes[-1].text == "Experiment completed."
 
 
+def test_python_client_research_study_facade_preserves_v1_identity(
+    tmp_path: Path,
+) -> None:
+    service, _ = _service(tmp_path)
+    client = FugueResearchClient(service)
+    research = client.research.get("study-1")
+
+    assert research.get() == client.studies.get("study-1").get()
+    assert research.context() == client.studies.get("study-1").context()
+
+    preview = research.studies.preview(_draft())
+    handle = research.studies.start(
+        preview,
+        approval_digest=_approval(service, preview, "approve-facade"),
+        idempotency_key="start-facade",
+    )
+    assert handle.id == preview.experiment_id
+    assert client.study(handle.id).status() == client.experiment(handle.id).status()
+    assert research.studies.get(handle.id).status().study_id == research.id
+
+
 def test_outer_loop_resumes_records_result_and_previews_child(tmp_path: Path) -> None:
     traces = tmp_path / "traces.jsonl"
     traces.write_text(

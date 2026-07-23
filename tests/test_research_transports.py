@@ -139,15 +139,44 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
         assert "id: 1" not in events.text
 
 
+def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _terminal_experiment(service)
+    app = create_app(tmp_path, api_key="secret", service=service)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        legacy = client.get("/v1/studies/study-1", headers=headers)
+        research = client.get("/v1/research/study-1", headers=headers)
+        assert research.status_code == 200
+        assert research.json() == legacy.json()
+
+        legacy_study = client.get("/v1/experiments/study-1.proposal-1", headers=headers)
+        controlled_study = client.get(
+            "/v1/research-studies/study-1.proposal-1", headers=headers
+        )
+        assert controlled_study.status_code == 200
+        assert controlled_study.json() == legacy_study.json()
+
+
 def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None:
     server = create_mcp_server(tmp_path, service=_service(tmp_path))
     tools = asyncio.run(server.list_tools())
     names = {tool.name for tool in tools}
     assert names == {
         "fugue_catalog",
+        "fugue_research_catalog",
+        "fugue_research_context",
+        "fugue_research_create",
+        "fugue_research_record",
+        "fugue_research_result_record",
         "fugue_study_create",
         "fugue_study_context",
         "fugue_study_record",
+        "fugue_study_preview",
+        "fugue_study_start",
+        "fugue_study_get",
+        "fugue_study_watch",
+        "fugue_study_cancel",
         "fugue_trace_audit_preview",
         "fugue_trace_audit_start",
         "fugue_experiment_preview",
@@ -158,4 +187,4 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
         "fugue_result_record",
     }
     templates = asyncio.run(server.list_resource_templates())
-    assert len(templates) == 4
+    assert len(templates) == 7

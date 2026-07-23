@@ -15,9 +15,13 @@ from fugue.research.agent_contracts import (
 )
 from fugue.research.contracts import (
     AttributionV1,
+    ControlledStudyPreviewV1,
+    ControlledStudyV1,
     EvidenceRefV1,
     ExperimentDraftV1,
     ExperimentPreviewV1,
+    ResearchContextV1,
+    ResearchV1,
     StudyContextV1,
     StudyV1,
     build_experiment_draft,
@@ -38,6 +42,7 @@ class FugueResearchClient:
     ) -> None:
         self.service = service
         self.worker = worker
+        self.research = ResearchPrograms(self)
         self.studies = Studies(self)
 
     @classmethod
@@ -72,6 +77,50 @@ class FugueResearchClient:
     def experiment(self, experiment_id: str) -> ExperimentHandle:
         self.service.store.get_experiment(experiment_id)
         return ExperimentHandle(self.service, experiment_id)
+
+    def study(self, study_id: str) -> ControlledStudyHandle:
+        """Open one controlled comparison by its stable experiment ID."""
+
+        self.service.store.get_experiment(study_id)
+        return ControlledStudyHandle(self.service, study_id)
+
+
+class ResearchPrograms:
+    """Programme-level research records using the W&B-aligned vocabulary."""
+
+    def __init__(self, client: FugueResearchClient) -> None:
+        self.client = client
+
+    def create(
+        self,
+        *,
+        title: str,
+        question: str,
+        campaign_id: str,
+        research_id: str | None = None,
+        background: str = "",
+        parent_research_ids: Iterable[str] = (),
+        attribution: AttributionV1 | Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+    ) -> ResearchHandle:
+        handle = self.client.studies.create(
+            title=title,
+            question=question,
+            campaign_id=campaign_id,
+            study_id=research_id,
+            background=background,
+            parent_study_ids=parent_research_ids,
+            attribution=attribution,
+            idempotency_key=idempotency_key,
+        )
+        return ResearchHandle(self.client, handle.id)
+
+    def get(self, research_id: str) -> ResearchHandle:
+        self.client.service.store.get_study(research_id)
+        return ResearchHandle(self.client, research_id)
+
+    def list(self, *, limit: int = 100) -> tuple[ResearchV1, ...]:
+        return self.client.service.store.list_studies(limit=limit)
 
 
 class Studies:
@@ -198,6 +247,32 @@ class StudyHandle:
         )
 
 
+class ResearchHandle(StudyHandle):
+    """Durable programme context containing controlled Studies and Results."""
+
+    def __init__(self, client: FugueResearchClient, research_id: str) -> None:
+        super().__init__(client, research_id)
+        self.studies = ControlledStudies(self)
+
+    def get(self) -> ResearchV1:
+        return super().get()
+
+    def context(
+        self,
+        *,
+        max_experiments: int = 20,
+        max_results: int = 20,
+        max_notes: int = 20,
+        max_chars: int = 32000,
+    ) -> ResearchContextV1:
+        return super().context(
+            max_experiments=max_experiments,
+            max_results=max_results,
+            max_notes=max_notes,
+            max_chars=max_chars,
+        )
+
+
 class TraceAudits:
     def __init__(self, study: StudyHandle) -> None:
         self.study = study
@@ -318,6 +393,53 @@ class Experiments:
     def list(self, *, limit: int = 100) -> tuple[Any, ...]:
         return self.study.client.service.store.list_experiments(
             self.study.id, limit=limit
+        )
+
+
+class ControlledStudyHandle(ExperimentHandle):
+    """One admitted controlled comparison within a Research programme."""
+
+    def status(self) -> ControlledStudyV1:
+        return super().status()
+
+
+class ControlledStudies:
+    """W&B-aligned façade over the persisted Experiment lifecycle."""
+
+    def __init__(self, research: ResearchHandle) -> None:
+        self.research = research
+        self._experiments = research.experiments
+
+    def preview(
+        self,
+        draft: ExperimentDraftV1 | Mapping[str, Any] | None = None,
+        **values: Any,
+    ) -> ControlledStudyPreviewV1:
+        return self._experiments.preview(draft, **values)
+
+    def start(
+        self,
+        preview: ControlledStudyPreviewV1,
+        *,
+        approval_digest: str,
+        idempotency_key: str,
+    ) -> ControlledStudyHandle:
+        handle = self._experiments.start(
+            preview,
+            approval_digest=approval_digest,
+            idempotency_key=idempotency_key,
+        )
+        return ControlledStudyHandle(handle.service, handle.id)
+
+    def get(self, study_id: str) -> ControlledStudyHandle:
+        record = self.research.client.service.store.get_experiment(study_id)
+        if record.study_id != self.research.id:
+            raise ValueError("controlled Study belongs to another Research")
+        return ControlledStudyHandle(self.research.client.service, study_id)
+
+    def list(self, *, limit: int = 100) -> tuple[ControlledStudyV1, ...]:
+        return self.research.client.service.store.list_experiments(
+            self.research.id, limit=limit
         )
 
 
