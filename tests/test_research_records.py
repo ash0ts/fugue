@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from fugue.research.records import (
     JsonlResearchRecordSink,
     ResearchRecordPublisher,
     research_log_event_from_dict,
+    sign_research_log_event,
 )
 from fugue.research.store import StudyStore
 
@@ -263,6 +265,32 @@ def test_jsonl_publication_is_ordered_idempotent_and_restart_safe(
     status = restarted.research_publication_status()
     assert status["event_count"] == 2
     assert status["deliveries"][0]["state"] == "delivered"
+
+
+def test_jsonl_publication_recovers_a_missing_index_and_serializes_writers(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    event = store.research_log_events()[0]
+    sink = JsonlResearchRecordSink(tmp_path / "projection" / "events.jsonl")
+    sink.publish(event)
+    sink.path.with_suffix(f"{sink.path.suffix}.index.json").unlink()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        tuple(executor.map(sink.publish, [event] * 8))
+
+    assert len(sink.path.read_text(encoding="utf-8").splitlines()) == 1
+    conflicting = sign_research_log_event(
+        replace(event, message="Conflicting replay.", event_digest="")
+    )
+    with pytest.raises(ResearchError, match="different content"):
+        sink.publish(conflicting)
+
+    second = store.record_approval_request(_preview(), operation_id="request-1")
+    with sink.path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(second.to_dict(), sort_keys=True) + "\n")
+    sink.publish(second)
+    assert len(sink.path.read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_failed_sink_remains_pending_without_changing_research(

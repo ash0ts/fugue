@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from filelock import FileLock
+
 from fugue.bench.candidates import stable_digest
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
@@ -233,30 +235,104 @@ class JsonlResearchRecordSink:
 
     def publish(self, event: ResearchLogEventV1) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(f"{self.path.suffix}.lock")
+        with FileLock(lock_path):
+            # The append-only log is authoritative. Rebuilding the compact index
+            # makes a crash after fsync but before the index rename recoverable
+            # without appending the producer event a second time.
+            records = self._records_from_log()
+            prior = records.get(event.producer_event_id)
+            if prior:
+                if prior != event.event_digest:
+                    raise ResearchError(
+                        "publication_conflict",
+                        "producer event id was replayed with different content",
+                        category="conflict",
+                    )
+                self._write_index(records)
+                return
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            records[event.producer_event_id] = event.event_digest
+            self._write_index(records)
+
+    def _records_from_log(self) -> dict[str, str]:
+        if not self.path.is_file():
+            return {}
+        size = self.path.stat().st_size
         index = self.path.with_suffix(f"{self.path.suffix}.index.json")
-        records: dict[str, str] = {}
         if index.is_file():
-            loaded = json.loads(index.read_text(encoding="utf-8"))
-            if not isinstance(loaded, dict):
-                raise RuntimeError("research record JSONL index is invalid")
-            records = {str(key): str(value) for key, value in loaded.items()}
-        prior = records.get(event.producer_event_id)
-        if prior:
-            if prior != event.event_digest:
+            try:
+                cached = json.loads(index.read_text(encoding="utf-8"))
+                offset = int(cached["offset"])
+                raw_records = cached["records"]
+                if (
+                    cached.get("version") == 1
+                    and 0 <= offset <= size
+                    and isinstance(raw_records, dict)
+                    and all(
+                        isinstance(key, str) and isinstance(value, str)
+                        for key, value in raw_records.items()
+                    )
+                ):
+                    records = dict(raw_records)
+                    if offset == size:
+                        return records
+                    with self.path.open("rb") as stream:
+                        stream.seek(offset)
+                        tail = stream.read().decode("utf-8")
+                    return self._records_from_lines(
+                        tail.splitlines(), records=records, first_line=0
+                    )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+                # The index is a disposable cache. Rebuild it from the durable
+                # append-only log rather than turning cache damage into data loss.
+                pass
+        return self._records_from_lines(
+            self.path.read_text(encoding="utf-8").splitlines(),
+            records={},
+            first_line=1,
+        )
+
+    @staticmethod
+    def _records_from_lines(
+        lines: Iterable[str], *, records: dict[str, str], first_line: int
+    ) -> dict[str, str]:
+        for line_number, line in enumerate(lines, start=first_line):
+            if not line.strip():
+                continue
+            try:
+                event = research_log_event_from_dict(json.loads(line))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"research record JSONL is invalid at line {line_number}"
+                ) from exc
+            prior = records.get(event.producer_event_id)
+            if prior and prior != event.event_digest:
                 raise ResearchError(
                     "publication_conflict",
-                    "producer event id was replayed with different content",
+                    "producer event id appears with conflicting content",
                     category="conflict",
                 )
-            return
-        with self.path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event.to_dict(), sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        records[event.producer_event_id] = event.event_digest
+            records[event.producer_event_id] = event.event_digest
+        return records
+
+    def _write_index(self, records: Mapping[str, str]) -> None:
+        index = self.path.with_suffix(f"{self.path.suffix}.index.json")
         temporary = index.with_suffix(f"{index.suffix}.tmp")
         temporary.write_text(
-            json.dumps(records, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                {
+                    "version": 1,
+                    "offset": self.path.stat().st_size,
+                    "records": dict(records),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
             encoding="utf-8",
         )
         temporary.replace(index)
