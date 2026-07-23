@@ -229,6 +229,7 @@ def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None
     assert all(
         {
             "agent_conversation",
+            "conversation_identity",
             "invoke_agent_root",
             "trace",
         }.issubset({link["kind"] for link in cell.evidence_links})

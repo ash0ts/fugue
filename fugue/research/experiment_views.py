@@ -589,7 +589,7 @@ def _outcome_cell(
             links.append(
                 {
                     "system": "weave",
-                    "kind": "agent_conversation",
+                    "kind": "conversation_identity",
                     "ref": str(conversation_id),
                 }
             )
