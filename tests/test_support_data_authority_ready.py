@@ -37,7 +37,7 @@ def test_readiness_probe_uses_the_explicit_research_identity(
     captured: dict[str, Any] = {}
 
     class Adapter:
-        source = SimpleNamespace(digest="source-digest")
+        source = SimpleNamespace(source_digest="source-digest")
 
         def read(self, draft: Any) -> tuple[dict[str, Any], ...]:
             captured["draft"] = draft

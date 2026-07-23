@@ -80,7 +80,7 @@ def main() -> int:
                 "status": "ready",
                 "research_id": research_id,
                 "project": project,
-                "source_digest": source.source.digest,
+                "source_digest": source.source.source_digest,
                 "source_snapshot_digest": stable_digest(list(records)),
             },
             sort_keys=True,
