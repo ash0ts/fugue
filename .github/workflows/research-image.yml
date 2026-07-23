@@ -90,10 +90,12 @@ jobs:
           -f compose.research.yaml run --rm --no-deps
           --entrypoint python fugue-worker -c
           'import subprocess;
-          from fugue.bench.files import docker_build_command;
-          command = docker_build_command("--help");
-          subprocess.run(command, check=True, stdout=subprocess.DEVNULL);
-          print(command)'
+          from fugue.bench.files import docker_build_command, docker_compose_command;
+          build_command = docker_build_command("--help");
+          compose_command = docker_compose_command("version");
+          subprocess.run(build_command, check=True, stdout=subprocess.DEVNULL);
+          subprocess.run(compose_command, check=True, stdout=subprocess.DEVNULL);
+          print(build_command, compose_command)'
       - name: Export the portable skill through the socket-free operator
         env:
           FUGUE_RESEARCH_IMAGE: fugue-research:ci

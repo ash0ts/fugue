@@ -3,8 +3,24 @@ FROM python:3.13.5-slim-bookworm@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7
 
 COPY --from=uv /uv /uvx /bin/
 
+ARG TARGETARCH
+ARG COMPOSE_VERSION=5.3.1
+ARG COMPOSE_SHA256_AMD64=f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959
+ARG COMPOSE_SHA256_ARM64=aa611e811d0ea25897839c404bfb5bf93ce706dc51c500a4457890f5d0606a86
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates docker.io git tini \
+    && apt-get install -y --no-install-recommends ca-certificates curl docker.io git tini \
+    && case "${TARGETARCH}" in \
+        amd64) compose_arch=x86_64; compose_sha="${COMPOSE_SHA256_AMD64}" ;; \
+        arm64) compose_arch=aarch64; compose_sha="${COMPOSE_SHA256_ARM64}" ;; \
+        *) echo "unsupported Compose architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && install -d /usr/local/lib/docker/cli-plugins \
+    && curl -fsSLo /usr/local/lib/docker/cli-plugins/docker-compose \
+        "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
+    && echo "${compose_sha}  /usr/local/lib/docker/cli-plugins/docker-compose" | sha256sum -c - \
+    && chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker compose version \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 fugue \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin fugue

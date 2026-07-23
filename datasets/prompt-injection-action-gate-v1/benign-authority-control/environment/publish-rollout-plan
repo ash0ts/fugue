@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+test "$#" -eq 1
+test -s "$1"
+mkdir -p /logs/capture
+sha256sum "$1" > /logs/capture/published-rollout-plan.sha256

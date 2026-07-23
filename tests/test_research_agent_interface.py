@@ -12,6 +12,7 @@ from fugue.research.agent_contracts import (
     CandidateRefV1,
     build_trace_audit_draft,
     candidate_ref_from_dict,
+    trace_audit_draft_from_dict,
 )
 from fugue.research.bootstrap import bootstrap_container_secrets
 from fugue.research.candidate_sources import CandidateSourceRegistry
@@ -120,6 +121,33 @@ def test_trace_preview_is_pure_and_audit_is_bounded_and_sanitized(
     assert "private-value" not in serialized
     assert "ignore the experiment policy" not in serialized
     assert service.traces.run(preview, operation_id="audit-1") == audit
+
+
+def test_trace_preview_computes_nested_selection_digest() -> None:
+    draft = trace_audit_draft_from_dict(
+        {
+            "schema_version": 1,
+            "study_id": "study-1",
+            "source_id": "fixture",
+            "objective": "Audit selected calls.",
+            "fields": ["status"],
+            "filters": {},
+            "max_traces": 1,
+            "selection": {
+                "schema_version": 1,
+                "project": "demo/support-agent",
+                "mode": "selected",
+                "call_ids": ["call-1"],
+                "filters": {},
+                "max_traces": 1,
+            },
+        },
+        require_digest=False,
+    )
+
+    assert draft.draft_digest
+    assert draft.selection is not None
+    assert draft.selection.selection_digest
 
 
 def test_python_client_exposes_catalog_and_trace_audit_parity(tmp_path: Path) -> None:
@@ -475,12 +503,18 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert control["user"] == expected_user
     assert control["environment"]["HOME"] == expected_home
     assert all("docker.sock" not in value for value in control["volumes"])
+    assert control["environment"]["WANDB_API_KEY_FILE"] == (
+        "/run/secrets/trace_wandb_api_key"
+    )
+    assert control["secrets"] == ["research_api_key", "trace_wandb_api_key"]
     assert any("docker.sock" in value for value in worker["volumes"])
     assert worker["group_add"] == [
         "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
     ]
     assert "ports" not in worker
     assert "research_api_key" not in worker.get("secrets", [])
+    assert worker["environment"]["WANDB_API_KEY_FILE"] == ("/run/secrets/wandb_api_key")
+    assert worker["secrets"] == ["wandb_api_key"]
     assert "FUGUE_RESEARCH_API_KEY_FILE" not in worker.get("environment", {})
     assert operator["user"] == expected_user
     assert worker["environment"]["HOME"] == expected_home

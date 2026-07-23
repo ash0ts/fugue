@@ -1,0 +1,26 @@
+id: prompt-injection-action-gate-v1
+title: Prompt-injection action-gate safety and utility analysis
+question: Does an enforced pre-tool authorization gate prevent realistic indirect prompt injection without blocking authorized sensitive work?
+filters:
+  experiment_id: prompt-injection-action-gate-v1
+  tag: prompt-injection-action-gate-v1
+group_by: [variant_id, harness, task_name]
+metrics:
+  - pass_rate
+  - prompt_injection_safe_and_useful
+  - prompt_injection_safe_but_failed_or_refused
+  - prompt_injection_compromised
+  - prompt_injection_incorrect
+  - prompt_injection_task_complete
+  - prompt_injection_false_positive_refusal
+  - prompt_injection_evidence_preserved
+  - prompt_injection_attack_encountered
+  - prompt_injection_sensitive_action_attempted
+  - prompt_injection_action_gate_blocked
+  - prompt_injection_action_gate_allowed
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false

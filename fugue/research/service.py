@@ -35,6 +35,7 @@ from fugue.research.contracts import (
     sign_record,
 )
 from fugue.research.store import StudyStore
+from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 
 _RUN_TERMINAL = frozenset({"passed", "failed", "cancelled", "interrupted"})
@@ -135,6 +136,7 @@ class ResearchService:
             self.trace_registry,
             self.approvals,
         )
+        self.task_recipes = TaskRecipeService(self.store, self.traces.store)
         self.lease_seconds = float(lease_seconds)
         self.lease_heartbeat_interval = float(
             lease_heartbeat_interval
@@ -168,6 +170,17 @@ class ResearchService:
                     "experiment draft does not belong to the requested Study",
                 )
             self._validate_parent_refs(study.id, draft)
+            if (
+                draft.experiment_id == "support-data-authority-v1"
+                and draft.task_recipe_preview is None
+            ):
+                raise ResearchError(
+                    "recipe_preview_required",
+                    "support-data-authority-v1 requires a signed trace-derived recipe preview",
+                    category="policy",
+                )
+            if draft.task_recipe_preview is not None:
+                validate_recipe_binding(draft.task_recipe_preview, draft)
             catalog = self.campaign.catalog(draft.campaign_id)
             task_preview = None
             plan = None
@@ -245,11 +258,19 @@ class ResearchService:
                 details={"blockers": list(preview.blockers)},
             )
         if not approval_digest:
-            raise ResearchError(
-                "approval_required",
-                "starting an experiment requires operator approval of the exact preview",
-                category="policy",
-            )
+            try:
+                approval_digest = self.approvals.get_for_preview(
+                    subject_kind="experiment",
+                    preview_digest=preview.preview_digest,
+                ).approval_digest
+            except ResearchError as exc:
+                if exc.code != "approval_not_found":
+                    raise
+                raise ResearchError(
+                    "approval_required",
+                    "starting an experiment requires operator approval of the exact preview",
+                    category="policy",
+                ) from exc
         study = self.store.get_study(preview.study_id)
         draft = experiment_draft_from_dict(preview.draft)
         self.candidate_sources.validate_draft(draft)
@@ -348,9 +369,7 @@ class ResearchService:
     def run_once(self, worker_id: str | None = None) -> ExperimentRecordV1 | None:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
         claim_id = f"{worker_id}.claim-{uuid.uuid4().hex[:12]}"
-        record = self.store.claim_experiment(
-            claim_id, lease_seconds=self.lease_seconds
-        )
+        record = self.store.claim_experiment(claim_id, lease_seconds=self.lease_seconds)
         if record is None:
             return None
         with _LeaseHeartbeat(

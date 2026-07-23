@@ -518,6 +518,7 @@ def _proposal(
     *,
     proposal_id: str = "qualification-1",
     stage_id: str = "qualification",
+    n_attempts: int = 1,
     parent_outcome_id: str | None = None,
 ) -> Any:
     catalog = service.catalog("demo")
@@ -533,7 +534,7 @@ def _proposal(
         measured_dimensions=("repair outcome", "Agent evidence"),
         experiment_id="demo",
         model="openai/gpt-5",
-        n_attempts=1,
+        n_attempts=n_attempts,
         n_concurrent=1,
         harnesses=("codex",),
         context_systems=("none",),
@@ -590,6 +591,26 @@ def test_catalog_and_preview_are_pure_and_hide_execution_details(
     assert "jobs_dir" not in serialized
     assert "expected_evidence_paths" not in serialized
     assert not (tmp_path / ".fugue").exists()
+
+
+def test_campaign_preview_accepts_complete_expanded_agent_attempts(
+    tmp_path: Path,
+) -> None:
+    _campaign_repo(tmp_path)
+    campaign_path = tmp_path / "configs/fugue/campaigns/demo.yaml"
+    campaign_path.write_text(
+        campaign_path.read_text()
+        .replace("max_cells: 1", "max_cells: 2")
+        .replace("max_cells_per_proposal: 1", "max_cells_per_proposal: 2")
+        .replace("max_total_cells: 2", "max_total_cells: 4")
+        .replace("max_attempts_per_cell: 1", "max_attempts_per_cell: 2")
+    )
+    service = CampaignService(tmp_path, operator=FakeCampaignOperator(tmp_path))
+
+    preview = service.preview(_proposal(service, n_attempts=2))
+
+    assert preview.cell_count == 2
+    assert {cell["trial_index"] for cell in preview.cells} == {1, 2}
 
 
 def test_task_authoring_catalog_registers_the_virtual_harbor_workload(

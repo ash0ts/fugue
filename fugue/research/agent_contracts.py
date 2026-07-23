@@ -56,6 +56,20 @@ class TraceSourceRefV1:
 
 
 @dataclass(frozen=True)
+class TraceSelectionV1:
+    schema_version: int
+    project: str
+    mode: Literal["attached", "selected", "focused", "filtered"]
+    call_ids: tuple[str, ...]
+    filters: dict[str, JsonValue]
+    max_traces: int
+    selection_digest: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json(asdict(self)), preserve_zero=True)
+
+
+@dataclass(frozen=True)
 class TraceAuditDraftV1:
     schema_version: int
     study_id: str
@@ -64,6 +78,7 @@ class TraceAuditDraftV1:
     fields: tuple[str, ...]
     filters: dict[str, JsonValue]
     max_traces: int
+    selection: TraceSelectionV1 | None = None
     started_after: str | None = None
     started_before: str | None = None
     draft_digest: str = ""
@@ -101,6 +116,7 @@ class TraceAuditV1:
     preview_digest: str
     source: TraceSourceRefV1
     source_snapshot_digest: str
+    selection: dict[str, JsonValue] | None
     cohort_count: int
     coverage: dict[str, JsonValue]
     clusters: tuple[dict[str, JsonValue], ...]
@@ -184,6 +200,14 @@ def trace_audit_draft_from_dict(
         fields=fields,
         filters=_json(filters),
         max_traces=_bounded_int(raw.get("max_traces"), "maximum traces", 1, 1000),
+        selection=(
+            trace_selection_from_dict(
+                _mapping(raw.get("selection"), "trace selection"),
+                require_digest=require_digest,
+            )
+            if raw.get("selection") is not None
+            else None
+        ),
         started_after=_optional_timestamp(raw.get("started_after"), "started after"),
         started_before=_optional_timestamp(raw.get("started_before"), "started before"),
         draft_digest=str(raw.get("draft_digest") or ""),
@@ -191,12 +215,79 @@ def trace_audit_draft_from_dict(
     if draft.started_after and draft.started_before:
         if draft.started_after >= draft.started_before:
             raise ValueError("started_after must precede started_before")
+    if draft.selection:
+        if draft.max_traces != draft.selection.max_traces:
+            raise ValueError(
+                "trace audit and selection maximum trace counts must match"
+            )
+        if draft.selection.mode == "filtered":
+            if draft.filters != draft.selection.filters:
+                raise ValueError(
+                    "filtered selection and trace audit filters must match"
+                )
+        elif draft.filters:
+            raise ValueError("call-based trace selection cannot add trace filters")
     digest = _artifact_digest(draft.to_dict(), "draft_digest")
     if require_digest and draft.draft_digest != digest:
         raise ValueError("draft_digest does not match the trace audit draft")
     if draft.draft_digest and draft.draft_digest != digest:
         raise ValueError("draft_digest does not match the trace audit draft")
     return replace(draft, draft_digest=digest)
+
+
+def trace_selection_from_dict(
+    raw: Mapping[str, Any], *, require_digest: bool = True
+) -> TraceSelectionV1:
+    _reject_unknown(raw, TraceSelectionV1, "trace selection")
+    project = _text(raw.get("project"), "trace project", 500)
+    if project.count("/") != 1 or any(not part for part in project.split("/")):
+        raise ValueError("trace project must be an entity/project path")
+    mode = str(raw.get("mode") or "")
+    if mode not in {"attached", "selected", "focused", "filtered"}:
+        raise ValueError(
+            "trace selection mode must be attached, selected, focused, or filtered"
+        )
+    call_ids = _strings(raw.get("call_ids"), "selected call id", allow_empty=True)
+    if len(call_ids) > 20:
+        raise ValueError("trace selection accepts at most 20 call ids")
+    filters = _mapping(raw.get("filters") or {}, "selection filters")
+    unknown_filters = sorted(set(filters) - _FILTER_FIELDS)
+    if unknown_filters:
+        raise ValueError("unknown selection filters: " + ", ".join(unknown_filters))
+    for key, value in filters.items():
+        _filter_value(value, key)
+    if mode in {"attached", "selected", "focused"} and not call_ids:
+        raise ValueError(f"{mode} trace selection requires call ids")
+    if mode == "filtered" and call_ids:
+        raise ValueError("filtered trace selection cannot include call ids")
+    if mode != "filtered" and filters:
+        raise ValueError("call-based trace selection cannot include filters")
+    selection = TraceSelectionV1(
+        schema_version=_schema(raw, "trace selection"),
+        project=project,
+        mode=mode,  # type: ignore[arg-type]
+        call_ids=call_ids,
+        filters=_json(filters),
+        max_traces=_bounded_int(
+            raw.get("max_traces"), "selection maximum traces", 1, 20
+        ),
+        selection_digest=str(raw.get("selection_digest") or ""),
+    )
+    if len(call_ids) > selection.max_traces:
+        raise ValueError("selected call ids exceed selection maximum traces")
+    digest = _artifact_digest(selection.to_dict(), "selection_digest")
+    if require_digest and selection.selection_digest != digest:
+        raise ValueError("selection_digest does not match the trace selection")
+    if selection.selection_digest and selection.selection_digest != digest:
+        raise ValueError("selection_digest does not match the trace selection")
+    return replace(selection, selection_digest=digest)
+
+
+def build_trace_selection(**values: Any) -> TraceSelectionV1:
+    return trace_selection_from_dict(
+        {"schema_version": RESEARCH_SCHEMA_VERSION, **values, "selection_digest": ""},
+        require_digest=False,
+    )
 
 
 def build_trace_audit_draft(**values: Any) -> TraceAuditDraftV1:
@@ -257,6 +348,11 @@ def trace_audit_from_dict(raw: Mapping[str, Any]) -> TraceAuditV1:
         source=trace_source_ref_from_dict(_mapping(raw.get("source"), "trace source")),
         source_snapshot_digest=_digest_value(
             raw.get("source_snapshot_digest"), "source snapshot digest"
+        ),
+        selection=(
+            _json(_mapping(raw.get("selection"), "trace selection"))
+            if raw.get("selection") is not None
+            else None
         ),
         cohort_count=_bounded_int(raw.get("cohort_count"), "cohort count", 0, 1000),
         coverage=_json(_mapping(raw.get("coverage"), "trace coverage")),

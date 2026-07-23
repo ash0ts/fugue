@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import toml
 from filelock import FileLock
@@ -28,6 +28,7 @@ TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
 TASK_RUNTIME_CONTRACT_VERSION = 9
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
+VerificationKind = Literal["swe-bench-patch", "solution-script"]
 
 
 def prepare_task_runtime(
@@ -41,7 +42,8 @@ def prepare_task_runtime(
     """Build a task once and publish a local dataset pinned to its image ID."""
     if shutil.which("docker") is None:
         raise RuntimeError("docker is required to prepare task images")
-    requires_gold_verification = _requires_gold_verification(manifest)
+    verification_kind = _verification_kind(manifest, task)
+    requires_gold_verification = verification_kind == "swe-bench-patch"
     if requires_gold_verification and not (gold_patch or "").strip():
         raise RuntimeError(
             f"task {task.id} requires a pinned gold patch for setup verification"
@@ -49,6 +51,7 @@ def prepare_task_runtime(
     gold_patch_sha256 = (
         hashlib.sha256(gold_patch.encode()).hexdigest() if gold_patch else None
     )
+    scripted_solution = _scripted_solution_path(task)
     architecture = task_architecture(task)
     verifier_runtime = _verifier_runtime(manifest, task)
     root = _lock_root(manifest, task, repo_root)
@@ -70,6 +73,14 @@ def prepare_task_runtime(
                     verifier_runtime.to_dict() if verifier_runtime else None
                 ),
                 "gold_patch_sha256": gold_patch_sha256,
+                "gold_solution_sha256": (
+                    hashlib.sha256(
+                        (source / scripted_solution).read_bytes()
+                    ).hexdigest()
+                    if scripted_solution is not None
+                    else None
+                ),
+                "verification_kind": verification_kind,
                 "trial_policy": {
                     "network_mode": "no-network",
                     "allowed_hosts": [],
@@ -115,8 +126,9 @@ def prepare_task_runtime(
         shutil.copytree(source, task_root, symlinks=True)
         _reject_escaping_symlinks(task_root)
         verifier_script = _lock_verifier_script(task_root, task, verifier_runtime)
-        verification = (
-            _verify_swe_bench_outcomes(
+        verification = None
+        if verification_kind == "swe-bench-patch":
+            verification = _verify_swe_bench_outcomes(
                 image,
                 task,
                 task_root,
@@ -125,9 +137,15 @@ def prepare_task_runtime(
                 architecture=architecture,
                 repo_root=repo_root,
             )
-            if requires_gold_verification
-            else None
-        )
+        elif verification_kind == "solution-script":
+            verification = _verify_scripted_outcomes(
+                image,
+                task,
+                task_root,
+                solution_path=scripted_solution,
+                architecture=architecture,
+                repo_root=repo_root,
+            )
         task_toml = task_root / "task.toml"
         value = toml.loads(task_toml.read_text())
         environment = value.setdefault("environment", {})
@@ -190,12 +208,22 @@ def read_task_runtime_lock(
         value.get(key) != item for key, item in required.items()
     ):
         return None
-    if _requires_gold_verification(manifest):
+    verification_kind = _verification_kind(manifest, task)
+    if verification_kind is not None:
         verification = value.get("verification") or {}
         if not (
             verification.get("base_failed") is True
             and verification.get("gold_passed") is True
-            and _is_sha256(str(verification.get("gold_patch_sha256") or ""))
+        ):
+            return None
+        digest_field = (
+            "gold_patch_sha256"
+            if verification_kind == "swe-bench-patch"
+            else "gold_solution_sha256"
+        )
+        if (
+            verification.get("kind") != verification_kind
+            or not _is_sha256(str(verification.get(digest_field) or ""))
         ):
             return None
     image_id = str(value.get("image_id") or "")
@@ -234,6 +262,13 @@ def task_architecture(task: TaskSpec) -> str:
 def task_runtime_requires_gold_verification(manifest: BenchmarkManifest) -> bool:
     """Return whether the manifest's runtime contract requires SWE gold verification."""
     return _requires_gold_verification(manifest)
+
+
+def task_runtime_requires_verification(
+    manifest: BenchmarkManifest, task: TaskSpec
+) -> bool:
+    """Return whether this task requires base-fail/gold-pass setup verification."""
+    return _verification_kind(manifest, task) is not None
 
 
 def _extend_task_image(dockerfile: Path, runtime: VerifierRuntime | None) -> None:
@@ -345,10 +380,128 @@ def _verify_swe_bench_outcomes(
         if not gold_resolved:
             raise RuntimeError(f"task {task.id} gold patch does not pass its verifier")
     return {
+        "kind": "swe-bench-patch",
         "base_failed": True,
         "gold_passed": True,
         "gold_patch_sha256": gold_patch_sha256,
     }
+
+
+def _verify_scripted_outcomes(
+    image: str,
+    task: TaskSpec,
+    task_root: Path,
+    *,
+    solution_path: Path | None,
+    architecture: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    if solution_path is None:
+        raise RuntimeError(f"task {task.id} has no locked gold solution")
+    solution = task_root / solution_path
+    if not solution.is_file():
+        raise RuntimeError(
+            f"task {task.id} gold solution is missing: {solution_path.as_posix()}"
+        )
+    solution_sha256 = hashlib.sha256(solution.read_bytes()).hexdigest()
+    runtime_root = repo_root / ".fugue" / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="fugue-task-verify-", dir=runtime_root
+    ) as temporary:
+        root = Path(temporary)
+        base_resolved = _run_scripted_verifier(
+            image,
+            task,
+            task_root,
+            architecture=architecture,
+            logs=root / "base-logs",
+            solution_path=None,
+            repo_root=repo_root,
+        )
+        if base_resolved:
+            raise RuntimeError(
+                f"task {task.id} base environment unexpectedly passes its verifier"
+            )
+        gold_resolved = _run_scripted_verifier(
+            image,
+            task,
+            task_root,
+            architecture=architecture,
+            logs=root / "gold-logs",
+            solution_path=solution,
+            repo_root=repo_root,
+        )
+        if not gold_resolved:
+            raise RuntimeError(
+                f"task {task.id} checked-in solution does not pass its verifier"
+            )
+    return {
+        "kind": "solution-script",
+        "base_failed": True,
+        "gold_passed": True,
+        "gold_solution_sha256": solution_sha256,
+    }
+
+
+def _run_scripted_verifier(
+    image: str,
+    task: TaskSpec,
+    task_root: Path,
+    *,
+    architecture: str,
+    logs: Path,
+    solution_path: Path | None,
+    repo_root: Path,
+) -> bool:
+    (logs / "verifier").mkdir(parents=True, exist_ok=True)
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--platform",
+        f"linux/{architecture}",
+        "--mount",
+        f"type=bind,source={(task_root / 'tests').resolve()},target=/tests,readonly",
+        "--mount",
+        f"type=bind,source={logs.resolve()},target=/logs",
+    ]
+    shell = "sh /tests/test.sh"
+    if solution_path is not None:
+        command.extend(
+            (
+                "--mount",
+                f"type=bind,source={solution_path.resolve()},target=/fugue-gold-solution,readonly",
+            )
+        )
+        shell = "sh /fugue-gold-solution && sh /tests/test.sh"
+    command.extend((image, "sh", "-lc", shell))
+    result = subprocess.run(
+        command,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=3600,
+    )
+    report_path = logs / "verifier" / "reward.json"
+    try:
+        report = json.loads(report_path.read_text())
+        reward = report.get("reward")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        reward = None
+    resolved = reward in (1, 1.0, True)
+    unresolved = reward in (0, 0.0, False)
+    expected_returncode = 0 if resolved else 1 if unresolved else None
+    if expected_returncode is None or result.returncode != expected_returncode:
+        detail = (result.stderr or result.stdout or "verifier report missing").strip()
+        raise RuntimeError(
+            f"task {task.id} verifier did not produce a trustworthy outcome: "
+            f"{detail[-1_000:]}"
+        )
+    return resolved
 
 
 def _run_swe_bench_verifier(
@@ -641,6 +794,34 @@ def _lock_root(manifest: BenchmarkManifest, task: TaskSpec, repo_root: Path) -> 
 
 def _requires_gold_verification(manifest: BenchmarkManifest) -> bool:
     return manifest.dataset.ref == "swe-bench/swe-bench-verified"
+
+
+def _scripted_solution_path(task: TaskSpec) -> Path | None:
+    value = task.metadata.get("gold_solution")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"task {task.id} gold_solution must be a relative file path")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+        raise ValueError(f"task {task.id} gold_solution must be a safe relative path")
+    if path != Path("solution/solve.sh"):
+        raise ValueError(
+            f"task {task.id} gold_solution must use solution/solve.sh in V1"
+        )
+    return path
+
+
+def _verification_kind(
+    manifest: BenchmarkManifest, task: TaskSpec
+) -> VerificationKind | None:
+    if _requires_gold_verification(manifest):
+        if _scripted_solution_path(task) is not None:
+            raise ValueError(
+                f"task {task.id} cannot mix a SWE-bench patch with a solution script"
+            )
+        return "swe-bench-patch"
+    return "solution-script" if _scripted_solution_path(task) is not None else None
 
 
 def _is_sha256(value: str) -> bool:

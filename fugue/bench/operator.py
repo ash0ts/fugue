@@ -122,7 +122,7 @@ from fugue.bench.task_runtime import (
     prepare_task_runtime,
     read_task_runtime_lock,
     task_architecture,
-    task_runtime_requires_gold_verification,
+    task_runtime_requires_verification,
 )
 from fugue.bench.workloads import (
     PreparedWorkloadDataset,
@@ -865,7 +865,9 @@ class OperatorService:
             )
         )
         if _plan_coordinates(cells) != _plan_coordinates(plan.cells):
-            raise RuntimeError("materialized run coordinates differ from the resolved plan")
+            raise RuntimeError(
+                "materialized run coordinates differ from the resolved plan"
+            )
         return replace(plan, jobs=jobs, cells=cells)
 
     def prepare_context(
@@ -1021,8 +1023,7 @@ class OperatorService:
                     path=prepared.path,
                     variant_id=target.variant_id,
                     config_digest=target.config_digest,
-                    retrieval_mode=str(spec.config.get("retrieval_mode") or "")
-                    or None,
+                    retrieval_mode=str(spec.config.get("retrieval_mode") or "") or None,
                 )
             )
         return tuple(records)
@@ -1099,9 +1100,7 @@ class OperatorService:
             if key in seen_tasks:
                 continue
             seen_tasks.add(key)
-            previous_lock = read_task_runtime_lock(
-                manifest, task, self.repo_root
-            )
+            previous_lock = read_task_runtime_lock(manifest, task, self.repo_root)
             gold = load_evaluation_gold_patch(manifest, task.id, self.repo_root)
             lock = prepare_task_runtime(
                 manifest,
@@ -1125,8 +1124,8 @@ class OperatorService:
                     image=str(lock["image"]),
                     image_id=str(lock["image_id"]),
                     recipe_sha256=str(lock["recipe_sha256"]),
-                    verification_required=task_runtime_requires_gold_verification(
-                        manifest
+                    verification_required=task_runtime_requires_verification(
+                        manifest, task
                     ),
                     verification=(
                         dict(lock["verification"])
@@ -1136,9 +1135,7 @@ class OperatorService:
                 )
             )
 
-        architectures = {
-            task_architecture(task) for _manifest, task in selected_tasks
-        }
+        architectures = {task_architecture(task) for _manifest, task in selected_tasks}
         prepared_agents: list[AgentRuntimePreparation] = []
         for harness in dict.fromkeys(harnesses):
             runtime = agent_runtime_spec(harness)
@@ -1178,9 +1175,7 @@ class OperatorService:
             portable = AgentRuntimePreparation(
                 harness="portable-context",
                 architecture=str(lock.get("architecture") or "unknown"),
-                status=(
-                    "cached" if portable_was_ready and not rebuild else "built"
-                ),
+                status=("cached" if portable_was_ready and not rebuild else "built"),
                 image=str(lock["image"]),
                 image_id=str(lock["image_id"]),
                 recipe_sha256=str(lock["recipe_sha256"]),
@@ -1521,9 +1516,7 @@ class OperatorService:
             )
         rendered: list[RenderedJob] = []
         requested_systems = list(request.systems) or (
-            _request_variant_system_ids(selected, request)
-            if request.variants
-            else None
+            _request_variant_system_ids(selected, request) if request.variants else None
         )
         source_provenance = resolve_fugue_source_provenance(self.repo_root)
         for workload in workloads:
@@ -1567,7 +1560,9 @@ class OperatorService:
                             preset,
                             requested_systems,
                         ),
-                        variant_names=(list(request.variants) or workload.variants or None),
+                        variant_names=(
+                            list(request.variants) or workload.variants or None
+                        ),
                         harness_assignment=workload.harness_assignment,
                         n_tasks=(
                             request.n_tasks
@@ -2117,9 +2112,7 @@ class OperatorService:
                 self.repo_root,
                 run_id,
                 run_dir=run_dir,
-                status=(
-                    "cancelled" if cancelled else "failed" if failed else "passed"
-                ),
+                status=("cancelled" if cancelled else "failed" if failed else "passed"),
                 error="Run cancelled by the operator." if cancelled else None,
                 running=running,
                 values={
@@ -2276,11 +2269,14 @@ class OperatorService:
         args.extend(["--env-file", self.env_file.as_posix()])
         return args
 
-    def runs(self) -> list[RunSummary]:
-        return [self._summarize_run(run) for run in self.supervisor.list()]
+    def runs(self, *, recover: bool = True) -> list[RunSummary]:
+        return [
+            self._summarize_run(run)
+            for run in self.supervisor.list(recover=recover)
+        ]
 
-    def run_summary(self, run_id: str) -> RunSummary:
-        return self._summarize_run(self.supervisor.get(run_id))
+    def run_summary(self, run_id: str, *, recover: bool = True) -> RunSummary:
+        return self._summarize_run(self.supervisor.get(run_id, recover=recover))
 
     def package_candidate(
         self,
@@ -2332,7 +2328,7 @@ class OperatorService:
     def run_trace_refs(
         self, run_id: str, *, cell_id: str | None = None
     ) -> tuple[AgentTraceRef, ...]:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         sources = _run_job_paths(self.repo_root, run)
         rows = [
             row
@@ -2363,7 +2359,7 @@ class OperatorService:
         republish: bool = False,
         republish_reason: str | None = None,
     ) -> ExportSummary:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         project = str(run.metadata.get("trace_project") or trace_project_slug(self.env))
         job_paths = _run_job_paths(self.repo_root, run)
         bundle = compile_export(
@@ -2504,14 +2500,14 @@ class OperatorService:
         )
 
     def run_links(self, run_id: str) -> DeepLinks:
-        run = self.supervisor.get(run_id)
+        run = self.supervisor.get(run_id, recover=False)
         project = str(run.metadata.get("trace_project") or "").strip() or None
         return self.deep_links(project=project)
 
     def run_evaluation(
         self, run_id: str, *, cell_id: str | None = None
     ) -> PublishedEvaluation | None:
-        run = self.run_summary(run_id)
+        run = self.run_summary(run_id, recover=False)
         candidate_id = None
         if cell_id:
             cell = next((item for item in run.cells if item.cell_id == cell_id), None)
@@ -2812,9 +2808,7 @@ def _selected_request_system_ids(
         )
     ]
     requested = list(request.systems) or (
-        _request_variant_system_ids(experiment, request)
-        if request.variants
-        else None
+        _request_variant_system_ids(experiment, request) if request.variants else None
     )
     values: list[str] = []
     for workload in workloads:
@@ -2916,13 +2910,10 @@ def _verify_rendered_setup(jobs: list[RenderedJob]) -> None:
                 f"{job.job_name}: managed runtime {job.context_system_id} is missing"
             )
         context_runtime = fugue.get("context_runtime") or {}
-        if (
-            fugue.get("context_runtime_required") is True
-            and not context_runtime.get("image_id")
+        if fugue.get("context_runtime_required") is True and not context_runtime.get(
+            "image_id"
         ):
-            missing.append(
-                f"{job.job_name}: portable context runtime image is missing"
-            )
+            missing.append(f"{job.job_name}: portable context runtime image is missing")
         if agent_runtime_spec(job.harness) is not None and not fugue.get(
             "agent_runtime"
         ):
@@ -2952,9 +2943,7 @@ def _preparation_targets(
     requested_variants: list[str] | None = None,
     requested_n_tasks: int | None = None,
 ) -> list[ContextPreparationTarget]:
-    targets: dict[
-        tuple[str, str, str, str, str], ContextPreparationTarget
-    ] = {}
+    targets: dict[tuple[str, str, str, str, str], ContextPreparationTarget] = {}
     selected = workloads or [
         WorkloadSpec(
             id="harbor",
@@ -3102,7 +3091,11 @@ def _experiment_with_request_overrides(
         model=request.model,
         builder_model=request.builder_model,
         judge_model=request.judge_model,
-        tags=list(request.tags),
+        # Request tags describe the execution context (for example campaign,
+        # proposal, and stage). They must extend rather than replace the
+        # experiment's authored semantic tags because saved analyses may use
+        # those tags to select the exact registered treatment family.
+        tags=list(dict.fromkeys([*experiment.tags, *request.tags])),
         harnesses=list(request.harnesses),
         n_tasks=request.n_tasks,
         n_attempts=request.n_attempts,

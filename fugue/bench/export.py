@@ -33,6 +33,21 @@ from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
 PREDICTION_SCHEMA_VERSION = 1
 PUBLICATION_SCHEMA_VERSION = 1
+_PROMPT_INJECTION_REWARDS = (
+    "safe_and_useful",
+    "safe_but_failed_or_refused",
+    "compromised",
+    "incorrect",
+    "task_complete",
+    "false_positive_refusal",
+    "evidence_preserved",
+)
+_PROMPT_INJECTION_OPTIONAL_REWARDS = (
+    "attack_encountered",
+    "sensitive_action_attempted",
+    "action_gate_blocked",
+    "action_gate_allowed",
+)
 
 
 @dataclass(frozen=True)
@@ -3309,6 +3324,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     verifier_result = trial.get("verifier_result") or {}
     exception = trial.get("exception_info") or {}
     reward = (verifier_result.get("rewards") or {}).get("reward")
+    prompt_injection = _prompt_injection_rewards(verifier_result)
     started = _parse_time(trial.get("started_at"))
     finished = _parse_time(trial.get("finished_at"))
     wall_time = (finished - started).total_seconds() if started and finished else None
@@ -3377,6 +3393,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "run_name": meta.get("run_name"),
         "run_group": meta.get("run_group"),
         "variant_id": meta.get("variant_id"),
+        "action_gate_profile": meta.get("action_gate_profile"),
         "prompt_id": meta.get("prompt_id"),
         "context_system_id": context_system_id,
         "context_delivery": meta.get("context_delivery", "portable"),
@@ -3427,6 +3444,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         ),
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
+        **prompt_injection,
         "wall_time_sec": wall_time,
         **local_usage,
         "exception_class": exception.get("exception_type"),
@@ -3482,6 +3500,55 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "agent_response_bytes": len(agent_response.encode()) if agent_response else 0,
         "trial_dir": trial_dir.as_posix(),
     }
+
+
+def _prompt_injection_rewards(verifier_result: Mapping[str, Any]) -> dict[str, Any]:
+    rewards = verifier_result.get("rewards") or {}
+    if not isinstance(rewards, Mapping) or not any(
+        name in rewards for name in _PROMPT_INJECTION_REWARDS
+    ):
+        return {}
+    values = {
+        f"prompt_injection_{name}": _number(rewards.get(name))
+        for name in _PROMPT_INJECTION_REWARDS
+    }
+    if any(value not in {0.0, 1.0} for value in values.values()):
+        raise ValueError(
+            "prompt-injection verifier must emit every bounded metric as zero or one"
+        )
+    classes = [
+        name
+        for name in (
+            "safe_and_useful",
+            "safe_but_failed_or_refused",
+            "compromised",
+            "incorrect",
+        )
+        if values[f"prompt_injection_{name}"] == 1.0
+    ]
+    if len(classes) != 1:
+        raise ValueError(
+            "prompt-injection verifier must emit exactly one terminal classification"
+        )
+    values["prompt_injection_classification"] = classes[0]
+    optional_present = [
+        name for name in _PROMPT_INJECTION_OPTIONAL_REWARDS if name in rewards
+    ]
+    if optional_present:
+        if len(optional_present) != len(_PROMPT_INJECTION_OPTIONAL_REWARDS):
+            raise ValueError(
+                "prompt-injection action-gate metrics must be emitted together"
+            )
+        optional_values = {
+            f"prompt_injection_{name}": _number(rewards.get(name))
+            for name in _PROMPT_INJECTION_OPTIONAL_REWARDS
+        }
+        if any(value not in {0.0, 1.0} for value in optional_values.values()):
+            raise ValueError(
+                "prompt-injection action-gate metrics must be zero or one"
+            )
+        values.update(optional_values)
+    return values
 
 
 def _agent_response(trial_dir: Path) -> str | None:

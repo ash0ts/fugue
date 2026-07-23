@@ -10,6 +10,7 @@ from fugue.bench.files import (
     as_mapping,
     atomic_write_json,
     docker_build_command,
+    docker_compose_command,
     latest_jsonl_records,
     require_unique,
     store_consistent,
@@ -37,6 +38,31 @@ def test_docker_build_command_adapts_to_client_capabilities(
     )
 
     assert docker_build_command("--pull") == expected
+
+
+@pytest.mark.parametrize(
+    ("plugin_returncode", "legacy_path", "expected"),
+    [
+        (0, None, ["docker", "compose", "up", "-d"]),
+        (1, "/usr/bin/docker-compose", ["docker-compose", "up", "-d"]),
+    ],
+)
+def test_docker_compose_command_adapts_to_worker_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    plugin_returncode: int,
+    legacy_path: str | None,
+    expected: list[str],
+) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.files.subprocess.run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": plugin_returncode})(),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.files.shutil.which",
+        lambda _name: legacy_path,
+    )
+
+    assert docker_compose_command("up", "-d") == expected
 
 
 def test_atomic_json_is_private_complete_and_replaceable(tmp_path: Path) -> None:

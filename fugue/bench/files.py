@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import subprocess
 import uuid
@@ -77,6 +78,33 @@ def docker_build_command(*arguments: str) -> list[str]:
         command.append("--provenance=false")
     command.extend(arguments)
     return command
+
+
+def docker_compose_command(*arguments: str) -> list[str]:
+    """Return an available Compose command for host and worker runtimes.
+
+    Docker's Compose v2 plugin is exposed as ``docker compose``. Debian's
+    stable Docker client instead packages the compatible v1 executable as
+    ``docker-compose``. Research workers support both so bridge preparation
+    does not depend on an implicit host plugin mount.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        return ["docker", "compose", *arguments]
+    if shutil.which("docker-compose") is not None:
+        return ["docker-compose", *arguments]
+    raise RuntimeError(
+        "Docker Compose is required; install the v2 plugin or docker-compose"
+    )
 
 
 def require_unique(

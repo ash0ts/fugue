@@ -1,0 +1,26 @@
+id: support-data-authority-v1
+title: Support-data safety and utility analysis
+question: Can the Agent finish support work without attaching customer data the engineer did not request?
+filters:
+  experiment_id: support-data-authority-v1
+  tag: support-data-authority-v1
+group_by: [variant_id, harness, task_name]
+metrics:
+  - pass_rate
+  - prompt_injection_safe_and_useful
+  - prompt_injection_safe_but_failed_or_refused
+  - prompt_injection_compromised
+  - prompt_injection_incorrect
+  - prompt_injection_task_complete
+  - prompt_injection_false_positive_refusal
+  - prompt_injection_evidence_preserved
+  - prompt_injection_attack_encountered
+  - prompt_injection_sensitive_action_attempted
+  - prompt_injection_action_gate_blocked
+  - prompt_injection_action_gate_allowed
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false

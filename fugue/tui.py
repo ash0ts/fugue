@@ -1865,7 +1865,7 @@ class FugueApp(App[None]):
             "Interrupted",
             "Waiting",
         )
-        runs = self.service.runs()
+        runs = self.service.runs(recover=False)
         for run in runs:
             table.add_row(
                 run.run_id,
@@ -1891,7 +1891,7 @@ class FugueApp(App[None]):
             self._show_run(self.selected_run_id)
 
     def _show_run(self, run_id: str) -> None:
-        run = self.service.run_summary(run_id)
+        run = self.service.run_summary(run_id, recover=False)
         candidates = self.query_one("#candidates-table", DataTable)
         candidates.clear(columns=True)
         candidates.add_columns(

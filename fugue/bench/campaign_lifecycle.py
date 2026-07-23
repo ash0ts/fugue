@@ -2610,7 +2610,7 @@ class CampaignService:
                 "resolved concurrency differs from the proposal",
                 category="validation",
             )
-        if any(cell.n_attempts != proposal.n_attempts for cell in plan.cells):
+        if not _resolved_attempts_match(plan, proposal.n_attempts):
             raise CampaignError(
                 "attempt_drift",
                 "resolved attempts differ from the proposal",
@@ -3684,6 +3684,28 @@ def _plan_component_digests(
             path = repo_root / path
         values["selection_lock"] = _sha256_path(path)
     return dict(sorted(values.items()))
+
+
+def _resolved_attempts_match(plan: ResolvedRunPlan, expected: int) -> bool:
+    """Validate expanded Agent trials and in-cell diagnostic attempts."""
+    expected_trials = set(range(1, expected + 1))
+    agent_coordinates: dict[tuple[str, ...], set[int]] = {}
+    for cell in plan.cells:
+        if cell.execution_kind != "agent":
+            if cell.n_attempts != expected:
+                return False
+            continue
+        coordinate = (
+            cell.workload_id,
+            cell.task_id,
+            cell.harness,
+            cell.context_system_id,
+            cell.variant_id,
+            cell.model,
+            cell.candidate_id,
+        )
+        agent_coordinates.setdefault(coordinate, set()).add(cell.trial_index)
+    return all(indices == expected_trials for indices in agent_coordinates.values())
 
 
 def _safe_request(request: ExperimentRequest) -> dict[str, Any]:

@@ -26,7 +26,9 @@ from fugue.research.contracts import (
 )
 from fugue.research.mcp import create_mcp_server
 from fugue.research.service import ExperimentHandle, ResearchService
+from fugue.research.task_recipes import task_recipe_draft_from_dict
 from fugue.research.traces import TraceSourceRegistry
+from fugue.research.watch import watch_experiment_page
 
 
 class StrictBody(BaseModel):
@@ -75,9 +77,13 @@ class PreviewExperimentBody(StrictBody):
     draft: dict[str, Any]
 
 
+class PreviewTaskRecipeBody(StrictBody):
+    draft: dict[str, Any]
+
+
 class StartExperimentBody(StrictBody):
     preview: dict[str, Any]
-    approval_digest: str
+    approval_digest: str | None = None
     idempotency_key: str
 
 
@@ -320,6 +326,18 @@ def create_app(  # noqa: C901
     def get_trace_audit(audit_id: str) -> dict[str, Any]:
         return research.traces.store.get(audit_id).to_dict()
 
+    @app.post("/v1/research/{study_id}/task-suites:derive-preview")
+    @app.post("/v1/studies/{study_id}/task-suites:derive-preview")
+    def derive_task_suite_preview(
+        study_id: str, body: PreviewTaskRecipeBody
+    ) -> dict[str, Any]:
+        """Compile selected trace provenance through one reviewed recipe."""
+
+        return research.task_recipes.derive_preview(
+            study_id,
+            task_recipe_draft_from_dict(body.draft, require_digest=False),
+        ).to_dict()
+
     @app.post("/v1/studies/{study_id}/experiments:preview")
     def preview_experiment(
         study_id: str, body: PreviewExperimentBody
@@ -393,6 +411,22 @@ def create_app(  # noqa: C901
                 await asyncio.sleep(0.5)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/v1/research-studies/{experiment_id}/events:watch")
+    @app.get("/v1/experiments/{experiment_id}/events:watch")
+    def watch_experiment_events(
+        experiment_id: str,
+        after: int = 0,
+        wait_seconds: float = 0.0,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        return watch_experiment_page(
+            research,
+            experiment_id,
+            after=after,
+            wait_seconds=wait_seconds,
+            limit=limit,
+        ).to_dict()
 
     @app.post("/v1/research-studies/{experiment_id}:cancel")
     @app.post("/v1/experiments/{experiment_id}:cancel")

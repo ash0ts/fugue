@@ -11,6 +11,7 @@ from fugue.bench.cli import main
 from fugue.bench.operator import (
     OperatorService,
     PreviewSummary,
+    RunSummary,
     SetupPreparation,
     load_env,
 )
@@ -185,6 +186,53 @@ def test_runs_packages_one_explicit_candidate(
         "allow_failed": False,
     }
     assert "deployment-1" in capsys.readouterr().out
+
+
+def test_runs_status_is_observational_across_supervisor_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: list[bool] = []
+
+    def run_summary(self, run_id: str, *, recover: bool = True) -> RunSummary:
+        del self
+        observed.append(recover)
+        return RunSummary(
+            run_id=run_id,
+            run_name="Foreign worker",
+            experiment_id="demo",
+            status="running",
+            created_at=None,
+            cells=(),
+            passed=0,
+            failed=0,
+            cancelled=0,
+            interrupted=0,
+            pending=1,
+            not_applicable=0,
+            candidates=(),
+            log_path=tmp_path / "combined.log",
+        )
+
+    monkeypatch.setattr(OperatorService, "run_summary", run_summary)
+
+    assert (
+        main(
+            [
+                "runs",
+                "run-foreign",
+                "--json",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert observed == [False]
+    assert '"status": "running"' in capsys.readouterr().out
 
 
 def test_rich_command_center_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:

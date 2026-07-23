@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,11 @@ from fugue.research.http import create_app
 from fugue.research.mcp import create_mcp_server
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
+from fugue.research.watch import (
+    _cell_counts,
+    _recommended_check_seconds,
+    _run_cell_events,
+)
 
 _A = "a" * 64
 _B = "b" * 64
@@ -138,6 +145,47 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
         assert "id: 2" in events.text
         assert "id: 1" not in events.text
 
+        page = client.get(
+            "/v1/experiments/study-1.proposal-1/events:watch",
+            headers=headers,
+            params={"after": 0, "wait_seconds": 0, "limit": 1},
+        )
+        assert page.status_code == 200
+        assert page.json()["next_cursor"] == 1
+        assert page.json()["has_more"] is True
+        assert page.json()["planned_cells"] == 1
+        assert page.json()["terminal_cells"] == 1
+        assert page.json()["terminal"] is True
+        assert page.json()["recommended_check_seconds"] == 0
+        assert page.json()["next_check_at"].endswith("+00:00")
+
+
+def test_watch_page_validates_bounded_cursor_wait_and_limit(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _terminal_experiment(service)
+    app = create_app(tmp_path, api_key="secret", service=service)
+    headers = {"Authorization": "Bearer secret"}
+    with TestClient(app) as client:
+        for params in (
+            {"after": -1},
+            {"wait_seconds": 31},
+            {"limit": 0},
+            {"limit": 201},
+        ):
+            response = client.get(
+                "/v1/experiments/study-1.proposal-1/events:watch",
+                headers=headers,
+                params=params,
+            )
+            assert response.status_code == 422
+
+
+def test_watch_recommendation_drains_pages_then_backs_off() -> None:
+    assert _recommended_check_seconds("running", False, True) == 0
+    assert _recommended_check_seconds("running", False, False) == 30
+    assert _recommended_check_seconds("preparing", False, False) == 10
+    assert _recommended_check_seconds("completed", True, False) == 0
+
 
 def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
     service = _service(tmp_path)
@@ -158,6 +206,98 @@ def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
         assert controlled_study.json() == legacy_study.json()
 
 
+def test_watch_reads_active_worker_progress_without_supervisor_recovery() -> None:
+    class Operator:
+        def run_summary(self, run_id: str, *, recover: bool = True) -> object:
+            assert run_id == "run-1"
+            assert recover is False
+            return SimpleNamespace(
+                cells=(
+                    SimpleNamespace(status="pending"),
+                    SimpleNamespace(status="running"),
+                    SimpleNamespace(status="failed"),
+                )
+            )
+
+    service = SimpleNamespace(campaign=SimpleNamespace(operator=Operator()))
+    record = SimpleNamespace(
+        preview={"estimated_cells": 3},
+        run_id="run-1",
+        state="running",
+    )
+
+    assert _cell_counts(service, record) == (3, 1, 1, 1)
+
+
+def test_watch_replays_safe_timestamped_cell_progress(tmp_path: Path) -> None:
+    run_dir = tmp_path / ".fugue/runtime/run-1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "cells.jsonl").write_text(
+        json.dumps(
+            {
+                "cell_id": "cell-1",
+                "task_id": "poisoned-trace",
+                "harness": "codex",
+                "variant_id": "trust-boundary-loop",
+                "trial_index": 1,
+                "status": "pending",
+            }
+        )
+        + "\n"
+    )
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {
+                    "event": "cell_state",
+                    "event_id": "pending-1",
+                    "cell_id": "cell-1",
+                    "status": "pending",
+                    "recorded_at": "2026-07-21T00:00:01+00:00",
+                },
+                {
+                    "event": "log",
+                    "event_id": "private-log",
+                    "cell_id": "cell-1",
+                    "chunk": "do not replay agent output",
+                    "recorded_at": "2026-07-21T00:00:02+00:00",
+                },
+                {
+                    "event": "cell_state",
+                    "event_id": "passed-1",
+                    "cell_id": "cell-1",
+                    "status": "passed",
+                    "benchmark_outcome": "passed",
+                    "reward": 1.0,
+                    "wall_time_sec": 4.5,
+                    "recorded_at": "2026-07-21T00:00:03+00:00",
+                },
+            )
+        )
+        + "\n"
+    )
+    service = SimpleNamespace(
+        campaign=SimpleNamespace(
+            operator=SimpleNamespace(repo_root=tmp_path),
+        )
+    )
+    record = SimpleNamespace(
+        id="study-1.proposal-1",
+        study_id="study-1",
+        run_id="run-1",
+    )
+
+    events = _run_cell_events(service, record)
+
+    assert [event["state"] for event in events] == ["pending", "passed"]
+    assert events[-1]["task_id"] == "poisoned-trace"
+    assert events[-1]["harness"] == "codex"
+    assert events[-1]["variant_id"] == "trust-boundary-loop"
+    assert events[-1]["benchmark_outcome"] == "passed"
+    assert all("chunk" not in event for event in events)
+
+
 def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None:
     server = create_mcp_server(tmp_path, service=_service(tmp_path))
     tools = asyncio.run(server.list_tools())
@@ -169,6 +309,7 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
         "fugue_research_create",
         "fugue_research_record",
         "fugue_research_result_record",
+        "fugue_research_task_suite_derive_preview",
         "fugue_study_create",
         "fugue_study_context",
         "fugue_study_record",
@@ -179,6 +320,7 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
         "fugue_study_cancel",
         "fugue_trace_audit_preview",
         "fugue_trace_audit_start",
+        "fugue_task_suite_derive_preview",
         "fugue_experiment_preview",
         "fugue_experiment_start",
         "fugue_experiment_get",

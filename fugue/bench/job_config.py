@@ -952,6 +952,11 @@ def _job_env(
             "FUGUE_WORKLOAD_ID": workload_id,
             "FUGUE_PRESET_ID": preset_id or "",
             "FUGUE_VARIANT_ID": variant.id,
+            "FUGUE_ACTION_GATE_PROFILE": str(
+                _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs).get(
+                    "action_gate_profile", ""
+                )
+            ),
             "FUGUE_CONTEXT_SYSTEM_ID": context_spec.id,
             "FUGUE_CONTEXT_DELIVERY": variant.context.delivery,
             "FUGUE_CONTEXT_VERSION": context_spec.version,
@@ -1616,7 +1621,11 @@ def _job_name(
     if task_id:
         base += f"-{_slug(task_id)}"
     suffix = f"-t{trial_index:03d}" if trial_index is not None else ""
-    base = base[: 120 - len(suffix)].rstrip("-") or "fugue"
+    if len(base) + len(suffix) > 120:
+        digest = hashlib.sha256(f"{base}{suffix}".encode()).hexdigest()[:10]
+        base_budget = 120 - len(suffix) - len(digest) - 1
+        base = base[:base_budget].rstrip("-") or "fugue"
+        base = f"{base}-{digest}"
     return f"{base}{suffix}"
 
 
