@@ -168,7 +168,7 @@ def test_packages_explicit_imperfect_candidate_reproducibly(tmp_path: Path) -> N
         "python": "3.13",
         "harbor": "0.18.0",
         "uv": "0.11.27",
-        "fugue": "0.1.0",
+        "fugue": "0.1.2",
     }
     assert spec["protocol_versions"]["open-responses"] == "2026-04-24"
     assert "raw.githubusercontent.com" in spec["network_allowed_hosts"]

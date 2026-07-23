@@ -89,7 +89,8 @@ jobs:
           uv run pytest
           tests/test_task_authoring.py tests/test_research_store.py
           tests/test_research_service.py tests/test_research_transports.py
-          tests/test_research_agent_interface.py
+          tests/test_research_agent_interface.py tests/test_research_records.py
+          tests/test_support_data_authority.py
 
   quality:
     name: Quality, build, and command smoke

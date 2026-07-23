@@ -1,13 +1,13 @@
 # Fugue Research SDK
 
 The research SDK packages Fugue as a governed laboratory for an external
-research loop. The public model is deliberately small:
+research loop. The W&B-aligned public model is deliberately small:
 
 ```text
-Study → Experiment → Run → Result
+Research → controlled Study → admitted Run → evaluation → sourced Result
 ```
 
-A **Study** is durable research memory. An **Experiment** is one controlled,
+A **Research** record is durable programme memory. A controlled **Study** is one
 hypothesis-bearing comparison. A **Run** is an admitted execution through the
 existing Fugue campaign lifecycle. A **Result** is an immutable statement with
 explicit scope, uncertainty, exclusions, and evidence references.
@@ -35,15 +35,15 @@ import os
 from fugue.research import FugueResearchClient
 
 with FugueResearchClient.local(repo_root, env_file=credentials_file) as fugue:
-    study = fugue.studies.create(
-        study_id="harness-sensitive-agents",
+    research = fugue.research.create(
+        research_id="harness-sensitive-agents",
         campaign_id="agent-research",
         title="Harness-sensitive agent behavior",
         question="Which agent-loop components change outcomes?",
         idempotency_key="create-harness-study",
     )
 
-    preview = study.experiments.preview(
+    preview = research.studies.preview(
         question="Does repository search help?",
         hypothesis="Search helps when Agents inspect and verify retrieved code.",
         task_suite=task_suite_draft,
@@ -62,19 +62,19 @@ with FugueResearchClient.local(repo_root, env_file=credentials_file) as fugue:
 
     print(preview.preview_digest, preview.estimated_cost_usd)
     # A human runs `fugue research approve ...` in a separate operator shell.
-    experiment = study.experiments.start(
+    study = research.studies.start(
         preview,
         approval_digest=os.environ["FUGUE_APPROVAL_DIGEST"],
         idempotency_key="retrieval-study-001",
     )
-    for event in experiment.watch():
+    for event in study.watch():
         print(event.state, event.message)
 
-    outcome = experiment.result()
-    study.record(
+    outcome = study.result()
+    research.record(
         "The experiment completed with reconciled run evidence.",
         runs=outcome["run_refs"],
-        expected_revision=study.revision,
+        expected_revision=research.revision,
         idempotency_key="record-retrieval-outcome",
     )
 ```
@@ -86,9 +86,10 @@ available.
 
 ## Recovery and identity
 
-The Study store is SQLite in WAL mode under `.fugue/research.db`. Study events,
-revisions, and experiment events are append-only. Mutations use caller-supplied
-idempotency keys and Study updates can require an `expected_revision`.
+The Research store is SQLite in WAL mode under `.fugue/research.db`. Research
+events, revisions, and controlled-Study events are append-only. Mutations use
+caller-supplied idempotency keys and Research updates can require an
+`expected_revision`.
 
 The execution queue uses leases. Validation, locking, planning, and preparation
 can resume after a process restart. Once Fugue has launched a run, recovery uses
@@ -96,7 +97,7 @@ the campaign operation ledger and the existing run identity. It never silently
 launches the Agent cells a second time. Cancelled or interrupted runs are
 finalized into terminal evidence before another run can be proposed.
 
-Evidence remains in its authoritative system. Study records contain
+Evidence remains in its authoritative system. Research records contain
 content-addressed references to Fugue outcomes, normalized rows, analyses,
 Weave traces, Agent conversations, and versioned resources rather than copies
 of private trace data.
@@ -121,8 +122,10 @@ Run the MCP adapter over the same client and database:
 fugue research mcp --repo-root .
 ```
 
-MCP exposes only high-level Study and Experiment operations plus bounded Study
-context, experiment status, and outcome resources. It does not expose the
+MCP exposes only high-level Research and controlled-Study operations plus
+bounded Research context, Study status, and outcome resources. Stable V1
+transport paths retain their historical `studies` and `experiments` names. It
+does not expose the
 operator, raw environment, shell commands, credentials, or experimental MCP
 Tasks.
 
