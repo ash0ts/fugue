@@ -17,6 +17,7 @@ All four accept one canonical model string:
 ``wandb/...``, ``openai/...``, or ``anthropic/...``.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -61,6 +62,7 @@ from fugue.registration import (
     context_registration_digest,
     skill_registration_probe_command,
 )
+from fugue.task_interaction import TaskInteractionController
 from fugue.tool_policy import (
     HarnessToolPolicy,
     tool_result_guard_cli_flags,
@@ -921,6 +923,27 @@ done
         meta["skill_registration"] = value
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
+    def _task_interaction(self, instruction: str) -> TaskInteractionController:
+        return TaskInteractionController.from_environment(
+            logs_dir=self.logs_dir,
+            initial_instruction=instruction,
+        )
+
+    async def _interaction_follow_up(
+        self, controller: TaskInteractionController, index: int
+    ) -> str:
+        return await asyncio.to_thread(controller.next_follow_up, index)
+
+    def _set_task_interaction_summary(
+        self, controller: TaskInteractionController
+    ) -> None:
+        try:
+            meta = json.loads(self._meta_path().read_text())
+        except (OSError, json.JSONDecodeError):
+            meta = {}
+        meta["task_interaction"] = controller.summary()
+        self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
+
     async def _verify_skill_registration(
         self,
         environment: BaseEnvironment,
@@ -1406,6 +1429,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         context: AgentContext,
     ) -> None:
         instruction = self.render_instruction(instruction)
+        interaction = self._task_interaction(instruction)
         await self._begin_trial("hermes", self.model_route, environment)
 
         entity, project = _weave_entity_project()
@@ -1485,7 +1509,27 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         )
 
         try:
-            await self.exec_as_agent(environment, command=run_cmd, env=env)
+            result = await self.exec_as_agent(environment, command=run_cmd, env=env)
+            interaction.observe_agent(
+                result.stdout or result.stderr or "No response text captured."
+            )
+            for index in range(interaction.plan.follow_up_count):
+                follow_up = await self._interaction_follow_up(interaction, index)
+                follow_up_command = (
+                    'export PATH="/opt/fugue-agent-runtime/bin:'
+                    '$HOME/.local/bin:$PATH" && '
+                    "hermes --yolo chat --continue "
+                    f"-q {shlex.quote(follow_up)} -Q "
+                    f"--provider {shlex.quote(self._provider_name())} "
+                    f"--model {shlex.quote(self.model_route.model_id)} "
+                    "2>&1 | stdbuf -oL tee -a /logs/agent/hermes.txt"
+                )
+                result = await self.exec_as_agent(
+                    environment, command=follow_up_command, env=env
+                )
+                interaction.observe_agent(
+                    result.stdout or result.stderr or "No response text captured."
+                )
         finally:
             try:
                 await self.exec_as_agent(
@@ -1502,6 +1546,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 )
             except Exception:
                 pass
+            self._set_task_interaction_summary(interaction)
             await self._finish_trial(environment)
 
     @override
@@ -1756,6 +1801,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         context: AgentContext,
     ) -> None:
         # The gateway owns plugin lifecycle, so it must bracket the one turn.
+        interaction = self._task_interaction(instruction)
         await self._begin_trial("openclaw", self.model_route, environment)
         escaped_instruction = shlex.quote(instruction)
 
@@ -1882,15 +1928,37 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
                 self.conversation_id
             )
+            session_key = (
+                f"agent:{openclaw_agent_id(self.conversation_id)}:"
+                f"fugue:{self.trace_conversation_id}"
+            )
             cli_flags = self.build_cli_flags()
             cli_flags_arg = (cli_flags + " ") if cli_flags else ""
             command = (
                 f"openclaw agent --json {cli_flags_arg}"
                 f"--model {shlex.quote(self.model_name)} "
+                f"--session-key {shlex.quote(session_key)} "
                 f"--message {escaped_instruction} "
                 f"2>&1 </dev/null | stdbuf -oL tee /logs/agent/openclaw.txt"
             )
-            await self.exec_as_agent(environment, command, env=env)
+            result = await self.exec_as_agent(environment, command, env=env)
+            interaction.observe_agent(
+                result.stdout or result.stderr or "No response text captured."
+            )
+            for index in range(interaction.plan.follow_up_count):
+                follow_up = await self._interaction_follow_up(interaction, index)
+                command = (
+                    f"openclaw agent --json {cli_flags_arg}"
+                    f"--model {shlex.quote(self.model_name)} "
+                    f"--session-key {shlex.quote(session_key)} "
+                    f"--message {shlex.quote(follow_up)} "
+                    "2>&1 </dev/null | stdbuf -oL tee -a "
+                    "/logs/agent/openclaw.txt"
+                )
+                result = await self.exec_as_agent(environment, command, env=env)
+                interaction.observe_agent(
+                    result.stdout or result.stderr or "No response text captured."
+                )
             await self._copy_openclaw_session_file_to_agent_logs(environment, env)
 
             # The plugin flushes on a 1s cadence; give the last batch a beat
@@ -1909,6 +1977,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                     )
                 except Exception:
                     pass
+            self._set_task_interaction_summary(interaction)
             await self._finish_trial(environment)
 
     @override
@@ -2076,6 +2145,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     async def run(
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
+        interaction = self._task_interaction(instruction)
         await self._begin_trial("claude-code", self.model_route, environment)
         self._resolved_env_vars.update(
             {
@@ -2125,6 +2195,51 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 )
             await self._lock_trial_mutators(environment)
             await super().run(instruction, environment, context)
+            captured = await self.exec_as_agent(
+                environment,
+                command="tail -c 16000 /logs/agent/claude-code.txt",
+                env={"CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR},
+                timeout_sec=30,
+            )
+            interaction.observe_agent(
+                captured.stdout or captured.stderr or "No response text captured."
+            )
+            follow_env = {
+                **provider_client_env(self.model_route, os.environ),
+                **self._trace_environment("claude-code", self.model_route),
+                "ANTHROPIC_BASE_URL": _messages_base_url(self.model_route),
+                "ANTHROPIC_API_KEY": _messages_key(self.model_route),
+                "ANTHROPIC_MODEL": self.model_route.model_id,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": self.model_route.model_id,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": self.model_route.model_id,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.model_route.model_id,
+                "CLAUDE_CODE_SUBAGENT_MODEL": self.model_route.model_id,
+                "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
+                "IS_SANDBOX": "1",
+                "WANDB_API_KEY": _require_trace_key(),
+                "WEAVE_PROJECT": _weave_project_slug(),
+                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+            }
+            cli_flags = self.build_cli_flags()
+            extra_flags = (cli_flags + " ") if cli_flags else ""
+            for index in range(interaction.plan.follow_up_count):
+                follow_up = await self._interaction_follow_up(interaction, index)
+                result = await self.exec_as_agent(
+                    environment,
+                    command=(
+                        'export PATH="/opt/fugue-agent-runtime/bin:'
+                        '$HOME/.local/bin:$PATH"; '
+                        "claude --continue --verbose --output-format=stream-json "
+                        f"{extra_flags}--print -- {shlex.quote(follow_up)} "
+                        "2>&1 </dev/null | tee -a /logs/agent/claude-code.txt"
+                    ),
+                    env=follow_env,
+                )
+                interaction.observe_agent(
+                    result.stdout or result.stderr or "No response text captured."
+                )
         finally:
             # Harbor may terminate Claude before its native SessionEnd hook.
             # Forward that lifecycle event for the real transcript so the
@@ -2133,6 +2248,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 await self._finalize_weave_session(environment)
             except Exception:
                 pass
+            self._set_task_interaction_summary(interaction)
             await self._finish_trial(environment)
 
     @override
@@ -2266,6 +2382,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
     ) -> None:
         await self._begin_trial("codex", self.model_route, environment)
         instruction = self.render_instruction(instruction)
+        interaction = self._task_interaction(instruction)
 
         cli_flags = self.build_cli_flags()
         cli_flags_arg = (cli_flags + " ") if cli_flags else ""
@@ -2399,7 +2516,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
 
         try:
             try:
-                await self.exec_as_agent(
+                result = await self.exec_as_agent(
                     environment,
                     command=(
                         "set -o pipefail; "
@@ -2423,6 +2540,35 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 # The long-running command consumed the staged file. Later
                 # cleanup commands must stage a fresh copy instead of reusing it.
                 self._fugue_secret_files.clear()
+            interaction.observe_agent(
+                result.stdout or result.stderr or "No response text captured."
+            )
+            for index in range(interaction.plan.follow_up_count):
+                follow_up = await self._interaction_follow_up(interaction, index)
+                try:
+                    result = await self.exec_as_agent(
+                        environment,
+                        command=(
+                            "set -o pipefail; "
+                            f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}; "
+                            "weave-codex run -- codex exec resume --last "
+                            "--dangerously-bypass-approvals-and-sandbox "
+                            "--skip-git-repo-check "
+                            "--json "
+                            f"{feature_flags}"
+                            f"{hook_flags}"
+                            f"{cli_flags_arg}"
+                            "-- "
+                            f"{shlex.quote(follow_up)} "
+                            f"2>&1 </dev/null | tee -a {codex_output}"
+                        ),
+                        env=env,
+                    )
+                finally:
+                    self._fugue_secret_files.clear()
+                interaction.observe_agent(
+                    result.stdout or result.stderr or "No response text captured."
+                )
         finally:
             try:
                 await self.exec_as_agent(
@@ -2444,6 +2590,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
                 )
             except Exception:
                 pass
+            self._set_task_interaction_summary(interaction)
             await self._finish_trial(environment)
 
     @override

@@ -1377,9 +1377,11 @@ def test_ephemeral_experiment_launch_persists_runtime_snapshot(
     run = service.launch(
         ExperimentRequest(experiment_id="demo"),
         experiment=experiment,
+        run_id="campaign-run-1",
     )
 
     snapshot = tmp_path / ".fugue/runtime" / run.run_id / "experiment.yaml"
+    assert run.run_id == "campaign-run-1"
     assert snapshot.is_file()
     assert "id: demo" in snapshot.read_text()
 

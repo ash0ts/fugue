@@ -272,6 +272,11 @@ def test_prepare_agent_runtime_records_image_identity(
 
     monkeypatch.setattr(agent_runtime.shutil, "which", lambda name: "/docker")
     monkeypatch.setattr(agent_runtime.subprocess, "run", run)
+    monkeypatch.setattr(
+        agent_runtime,
+        "docker_build_command",
+        lambda *args: ["docker", "build", "--provenance=false", *args],
+    )
     lock = agent_runtime.prepare_runtime("codex", repo_root=tmp_path)
     assert lock["image_id"] == "sha256:" + "a" * 64
     assert commands[0][:6] == [

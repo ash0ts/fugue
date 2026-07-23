@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 
 RUNTIME_ROOT = Path(".fugue/runtime/context-runtimes")
@@ -412,15 +412,12 @@ def prepare_runtime(
     for asset in _runtime_build_assets(system_id):
         shutil.copy2(asset, build / asset.name)
     subprocess.run(
-        [
-            "docker",
-            "build",
-            "--provenance=false",
+        docker_build_command(
             "--pull",
             "-t",
             spec.image,
             build.as_posix(),
-        ],
+        ),
         cwd=repo_root,
         check=True,
         timeout=1800,

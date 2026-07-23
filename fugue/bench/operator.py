@@ -122,6 +122,7 @@ from fugue.bench.task_runtime import (
     prepare_task_runtime,
     read_task_runtime_lock,
     task_architecture,
+    task_runtime_requires_gold_verification,
 )
 from fugue.bench.workloads import (
     PreparedWorkloadDataset,
@@ -358,6 +359,7 @@ class TaskRuntimePreparation:
     image: str
     image_id: str
     recipe_sha256: str
+    verification_required: bool = False
     verification: dict[str, Any] | None = None
 
 
@@ -1123,6 +1125,9 @@ class OperatorService:
                     image=str(lock["image"]),
                     image_id=str(lock["image_id"]),
                     recipe_sha256=str(lock["recipe_sha256"]),
+                    verification_required=task_runtime_requires_gold_verification(
+                        manifest
+                    ),
                     verification=(
                         dict(lock["verification"])
                         if isinstance(lock.get("verification"), dict)
@@ -2194,11 +2199,14 @@ class OperatorService:
         request: ExperimentRequest,
         *,
         experiment: ExperimentSpec | None = None,
+        run_id: str | None = None,
     ) -> RunSummary:
-        run_id = new_run_id()
+        run_id = validate_id(run_id or new_run_id(), kind="run id")
         selected = experiment or self.experiment(request.experiment_id)
         resolved = _experiment_with_request_overrides(selected, request)
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
+        if (run_dir / "run.json").exists():
+            raise ValueError(f"run id already exists: {run_id}")
         run_dir.mkdir(parents=True, exist_ok=True)
         snapshot = run_dir / "experiment.yaml"
         temp = snapshot.with_name(f".{snapshot.name}.{os.getpid()}.tmp")

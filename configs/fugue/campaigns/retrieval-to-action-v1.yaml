@@ -1,0 +1,41 @@
+schema_version: 1
+id: retrieval-to-action-v1
+revision: v1
+title: Retrieval-to-action campaign
+objective: Determine whether repository search changes repair outcomes, and whether its value depends on an inspect-and-verify workflow.
+allowed:
+  experiments: [retrieval-to-action]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [codex, claude-code]
+  workloads: [canary, primary]
+  variants: [baseline, memory-only, policy-only, memory-policy]
+  context_systems: [none, rag-dense]
+  analyses: [retrieval-to-action-v1]
+  trace_content: [full]
+stages:
+  - id: qualification
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+  - id: canary
+    predecessors: [qualification]
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: true
+  - id: primary
+    predecessors: [canary]
+    max_proposals: 1
+    max_cells: 64
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 2000
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 64
+  max_total_cells: 80
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: rows
+require_clean_source: true

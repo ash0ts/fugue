@@ -55,6 +55,30 @@ def inspect_docker_image(image: str) -> dict[str, Any]:
     return values[0]
 
 
+def docker_build_command(*arguments: str) -> list[str]:
+    """Build a Docker command compatible with both legacy and current CLIs.
+
+    Docker 23 added the ``--provenance`` flag to ``docker build``. The
+    research worker deliberately supports older distro-packaged clients too;
+    those clients do not emit provenance attestations and reject the flag
+    before they contact an otherwise compatible daemon.
+    """
+    try:
+        help_text = subprocess.check_output(
+            ["docker", "build", "--help"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        help_text = ""
+    command = ["docker", "build"]
+    if "--provenance" in help_text:
+        command.append("--provenance=false")
+    command.extend(arguments)
+    return command
+
+
 def require_unique(
     values: Iterable[str], kind: str, source: Path | None = None
 ) -> None:

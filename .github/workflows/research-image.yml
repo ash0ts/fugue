@@ -1,0 +1,141 @@
+name: Research image
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile.research
+      - compose.research.yaml
+      - pyproject.toml
+      - uv.lock
+      - fugue/research/**
+      - fugue/bench/**
+      - fugue/resources/agent-skills/optimize-agent-with-fugue/**
+      - .github/workflows/research-image.yml
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: research-image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  health:
+    name: Control container health and isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create CI-only Docker secrets
+        run: |
+          mkdir -p .fugue/secrets .fugue/trace-data .fugue/runtime .fugue/cache
+          printf '%s\n' 'ci-research-token' > .fugue/secrets/research_api_key
+          printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
+          {
+            printf 'FUGUE_DOCKER_GID="%s"\n' "$(stat -c '%g' /var/run/docker.sock)"
+            printf 'FUGUE_GIT_COMMON_DIR="%s/.git"\n' "$GITHUB_WORKSPACE"
+            printf 'FUGUE_HOST_GID="%s"\n' "$(id -g)"
+            printf 'FUGUE_HOST_REPO_ROOT="%s"\n' "$GITHUB_WORKSPACE"
+            printf 'FUGUE_HOST_UID="%s"\n' "$(id -u)"
+          } > .fugue/compose.env
+          chmod 700 .fugue/secrets
+          chmod 444 .fugue/secrets/*
+          chmod 600 .fugue/compose.env
+      - name: Build the local architecture image
+        run: docker build -f Dockerfile.research -t fugue-research:ci .
+      - name: Import the complete worker dependency closure
+        run: >-
+          docker run --rm --entrypoint python fugue-research:ci -c
+          'import fastembed, harbor, lancedb, pyarrow;
+          print("research worker dependency closure verified")'
+      - name: Start only the control plane
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: >-
+          docker compose --env-file .fugue/compose.env
+          -f compose.research.yaml up --no-build -d fugue-control
+      - name: Probe readiness and privilege boundary
+        run: |
+          curl --fail --retry 20 --retry-delay 1 --retry-all-errors http://127.0.0.1:8787/readyz
+          CONTROL_ID="$(docker compose --env-file .fugue/compose.env -f compose.research.yaml ps -q fugue-control)"
+          test -n "$CONTROL_ID"
+          test -z "$(docker inspect "$CONTROL_ID" --format '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}{{.Source}}{{end}}{{end}}')"
+          test -n "$(docker inspect "$CONTROL_ID" --format '{{range .Mounts}}{{if eq .Source "${{ github.workspace }}"}}{{.Destination}}{{end}}{{end}}')"
+      - name: Verify worker socket and Harbor-visible runtime mounts
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: |
+          docker compose --env-file .fugue/compose.env -f compose.research.yaml run --rm --no-deps \
+            --entrypoint /bin/sh \
+            fugue-worker -c '
+              set -eu
+              test -w "$PWD/.fugue/runtime"
+              docker version >/dev/null
+              probe_dir=$(mktemp -d "$PWD/.fugue/runtime/host-mount-probe.XXXXXX")
+              trap '\''rm -f "$probe_dir/ready"; rmdir "$probe_dir"'\'' EXIT
+              printf ready > "$probe_dir/ready"
+              docker run --rm --user 0:0 --entrypoint /bin/sh \
+                -v "$probe_dir:/probe:ro" fugue-research:ci \
+                -c "grep -qx ready /probe/ready"
+            '
+      - name: Verify worker Docker-build compatibility
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: >-
+          docker compose --env-file .fugue/compose.env
+          -f compose.research.yaml run --rm --no-deps
+          --entrypoint python fugue-worker -c
+          'import subprocess;
+          from fugue.bench.files import docker_build_command;
+          command = docker_build_command("--help");
+          subprocess.run(command, check=True, stdout=subprocess.DEVNULL);
+          print(command)'
+      - name: Export the portable skill through the socket-free operator
+        env:
+          FUGUE_RESEARCH_IMAGE: fugue-research:ci
+        run: |
+          mkdir -p /tmp/fugue-skills
+          docker compose --env-file .fugue/compose.env -f compose.research.yaml run --rm --no-deps \
+            --user "$(id -u):$(id -g)" \
+            -v /tmp/fugue-skills:/export \
+            fugue-operator skill export \
+            --destination /export/optimize-agent-with-fugue
+          test -f /tmp/fugue-skills/optimize-agent-with-fugue/SKILL.md
+      - name: Show container logs
+        if: failure()
+        run: >-
+          docker compose --env-file .fugue/compose.env
+          -f compose.research.yaml logs --no-color
+      - name: Stop the stack
+        if: always()
+        run: >-
+          docker compose --env-file .fugue/compose.env
+          -f compose.research.yaml down --volumes
+
+  multiarch:
+    name: Multi-architecture OCI build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.research
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ghcr.io/${{ github.repository_owner }}/fugue-research:${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'validation' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

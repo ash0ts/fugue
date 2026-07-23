@@ -250,6 +250,11 @@ def build_run_snapshot(
     jobs_by_execution = {
         job.resolved_candidate.execution_fingerprint: job for job in jobs
     }
+    jobs_by_config = {job.config_path.resolve().as_posix(): job for job in jobs}
+    task_authoring_by_config = {
+        key: (job.config.get("fugue") or {}).get("task_authoring") or {}
+        for key, job in jobs_by_config.items()
+    }
     planned_matrix = tuple(
         {
             "cell_id": cell.id,
@@ -271,6 +276,9 @@ def build_run_snapshot(
                     cell.config_path.resolve().as_posix(),
                     (),
                 )
+            ),
+            "task_authoring": task_authoring_by_config.get(
+                cell.config_path.resolve().as_posix(), {}
             ),
             "planned_prediction_count": _planned_prediction_count(
                 cell,

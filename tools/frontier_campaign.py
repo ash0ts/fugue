@@ -10,22 +10,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from fugue.bench.campaign_accounting import measured_row_cost
 from fugue.bench.files import atomic_write_json
 
 SCHEMA_VERSION = 1
 
 
 def _measured_row_cost(row: Mapping[str, Any]) -> float | None:
-    values: list[float] = []
-    for field in ("cost_usd", "weave_total_cost_usd"):
-        raw = row.get(field)
-        if raw is None:
-            continue
-        value = float(raw)
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("measured campaign costs must be finite and non-negative")
-        values.append(value)
-    return max(values) if values else None
+    return measured_row_cost(row)
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:

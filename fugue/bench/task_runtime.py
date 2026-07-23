@@ -15,7 +15,7 @@ from typing import Any
 import toml
 from filelock import FileLock
 
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 from fugue.bench.manifest import (
     BenchmarkManifest,
@@ -89,17 +89,14 @@ def prepare_task_runtime(
             shutil.copytree(source / "environment", build, symlinks=True)
             _extend_task_image(build / "Dockerfile", verifier_runtime)
             subprocess.run(
-                [
-                    "docker",
-                    "build",
-                    "--provenance=false",
+                docker_build_command(
                     "--platform",
                     f"linux/{architecture}",
                     "--pull",
                     "-t",
                     image,
                     build.as_posix(),
-                ],
+                ),
                 cwd=repo_root,
                 check=True,
                 timeout=3600,
@@ -232,6 +229,11 @@ def task_architecture(task: TaskSpec) -> str:
             f"task {task.id} has unsupported architecture {architecture!r}"
         )
     return architecture
+
+
+def task_runtime_requires_gold_verification(manifest: BenchmarkManifest) -> bool:
+    """Return whether the manifest's runtime contract requires SWE gold verification."""
+    return _requires_gold_verification(manifest)
 
 
 def _extend_task_image(dockerfile: Path, runtime: VerifierRuntime | None) -> None:

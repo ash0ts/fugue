@@ -122,6 +122,11 @@ def test_prepare_runtime_writes_image_identity_lock(
 
     monkeypatch.setattr(runtime_manager.shutil, "which", lambda name: "/docker")
     monkeypatch.setattr(runtime_manager.subprocess, "run", run)
+    monkeypatch.setattr(
+        runtime_manager,
+        "docker_build_command",
+        lambda *args: ["docker", "build", "--provenance=false", *args],
+    )
 
     lock = runtime_manager.prepare_runtime("gitnexus", repo_root=tmp_path)
 

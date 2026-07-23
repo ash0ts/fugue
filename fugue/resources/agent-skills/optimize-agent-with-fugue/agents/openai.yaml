@@ -1,0 +1,12 @@
+interface:
+  display_name: "Optimize Agent with Fugue"
+  short_description: "Turn Agent evidence into controlled experiments"
+  default_prompt: "Use $optimize-agent-with-fugue to inspect my Agent evidence and design a controlled Fugue experiment."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "fugue-research"
+      description: "The governed Fugue Study, trace-audit, experiment, and result interface."
+      transport: "streamable_http"
+      url: "http://127.0.0.1:8787/mcp/"

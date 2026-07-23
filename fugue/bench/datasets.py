@@ -50,6 +50,14 @@ def materialize_manifest_dataset(
             current = json.loads(marker.read_text())
             if current.get("fingerprint") == expected:
                 return destination
+            previous_source = current.get("source")
+            if (
+                isinstance(previous_source, dict)
+                and _same_source_content(previous_source, dataset.source)
+                and current.get("fingerprint")
+                == _legacy_dataset_fingerprint(manifest, previous_source)
+            ):
+                return destination
             raise ValueError(
                 f"cached dataset at {destination} does not match its manifest; "
                 "rerun preparation with --rebuild"
@@ -282,10 +290,25 @@ def _load_materializer(import_path: str) -> DatasetMaterializer:
 
 
 def _dataset_fingerprint(manifest: BenchmarkManifest) -> str:
+    return _dataset_fingerprint_for_source(
+        manifest,
+        _source_content_identity(manifest.dataset.source),
+    )
+
+
+def _legacy_dataset_fingerprint(
+    manifest: BenchmarkManifest, source: dict[str, Any]
+) -> str:
+    return _dataset_fingerprint_for_source(manifest, source)
+
+
+def _dataset_fingerprint_for_source(
+    manifest: BenchmarkManifest, source: dict[str, Any]
+) -> str:
     payload = {
         "materializer": manifest.dataset.materializer,
         "path": manifest.dataset.path.as_posix() if manifest.dataset.path else None,
-        "source": manifest.dataset.source,
+        "source": source,
         "tasks": [
             {
                 "id": task.id,
@@ -298,6 +321,17 @@ def _dataset_fingerprint(manifest: BenchmarkManifest) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _source_content_identity(source: dict[str, Any]) -> dict[str, Any]:
+    sha256 = str(source.get("sha256") or "")
+    if re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return {"sha256": sha256}
+    return source
+
+
+def _same_source_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return _source_content_identity(left) == _source_content_identity(right)
 
 
 def _public_source_metadata(source: dict[str, Any]) -> dict[str, Any]:

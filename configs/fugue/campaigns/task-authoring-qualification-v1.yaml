@@ -1,0 +1,54 @@
+schema_version: 1
+id: task-authoring-qualification-v1
+revision: v1
+title: Task-authoring adapter qualification
+objective: Prove that two locked multi-turn tasks preserve one reconciled Agent identity across all four harnesses.
+allowed:
+  experiments: [swe-frontier-harness]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  workloads: [harbor]
+  variants: [baseline]
+  context_systems: [none]
+  analyses: []
+  trace_content: [full]
+stages:
+  - id: qualification
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+limits:
+  total_cost_usd: 200
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 8
+  max_total_cells: 8
+  max_attempts_per_cell: 1
+  max_concurrent: 1
+  max_active_runs: 1
+task_authoring:
+  enabled_stages: [qualification]
+  allowed_partitions: [qualification]
+  allowed_environment_profiles: [artifact-python-v1]
+  allowed_resource_profiles: []
+  allowed_interactor_profiles: [evidence-clarifier-glm52-v1]
+  allowed_judge_profiles: [grounded-analysis-glm52-v1]
+  allowed_scorer_runtimes: []
+  allowed_prompt_parts: [text]
+  adaptive_discovery: false
+  limits:
+    max_tasks: 2
+    max_scenarios: 2
+    max_prompt_bytes: 16384
+    max_authored_asset_bytes: 1
+    max_user_turns: 1
+    max_agent_turns: 2
+    max_interactor_calls: 8
+    max_judge_calls: 8
+    scorer_timeout_sec: 30
+    scorer_memory_mb: 256
+    scorer_cpus: 1
+    scorer_output_bytes: 16384
+evidence_scope: traces
+require_clean_source: true

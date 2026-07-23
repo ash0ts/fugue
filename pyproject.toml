@@ -49,6 +49,22 @@ serve = [
     "mcp==1.28.1",
     "uvicorn>=0.34,<1",
 ]
+research = [
+    "fastapi>=0.115,<1",
+    "mcp==1.28.1",
+    "pydantic>=2.10,<3",
+    "uvicorn>=0.34,<1",
+]
+research-worker = [
+    "fastapi>=0.115,<1",
+    "fastembed==0.8.0",
+    "harbor==0.18.0; python_version >= '3.13'",
+    "lancedb==0.34.0",
+    "mcp==1.28.1",
+    "pyarrow==25.0.0",
+    "pydantic>=2.10,<3",
+    "uvicorn>=0.34,<1",
+]
 
 [tool.uv]
 # The full context lab contains mem0's older OpenAI client constraint. Candidate
@@ -58,10 +74,17 @@ conflicts = [
         { extra = "context" },
         { extra = "serve" },
     ],
+    [
+        { extra = "context" },
+        { extra = "research-worker" },
+    ],
 ]
 
 [tool.setuptools.packages.find]
 include = ["fugue*", "tools*"]
+
+[tool.setuptools.package-data]
+fugue = ["resources/agent-skills/**/*.md", "resources/agent-skills/**/*.yaml"]
 
 [tool.ruff]
 line-length = 88

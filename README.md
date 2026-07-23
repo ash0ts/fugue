@@ -5,6 +5,13 @@ an experiment into comparable candidates, renders Harbor jobs, executes the
 exact matrix, records native W&B Weave traces, and exports reproducible results.
 Fugue 0.1 supports Hermes, OpenClaw, Claude Code, and Codex on Python 3.12+.
 
+External research Agents can use Fugue through a separate, bearer-authenticated
+Research service. It exposes high-level Study, trace-audit, experiment, and
+Result operations over MCP, REST, and Python while a private worker keeps Harbor
+execution behind an exact human approval and spend cap. See
+[`docs/research-container.md`](docs/research-container.md), or run the complete
+[`retrieval-to-action` external-Agent example](examples/research/retrieval-to-action-canary/README.md).
+
 The core workflow is deliberately small:
 
 1. Define or load an experiment.
@@ -696,7 +703,10 @@ uv build
 ```
 
 Core and context suites support Python 3.12 and 3.13. Serving and protocol
-compatibility run on Python 3.13. See `docs/extension-guide.md` for context and
+compatibility run on Python 3.13. See `docs/campaigns.md` for the governed
+campaign contract, `docs/task-authoring.md` for flexible tasks, scenarios,
+judges, and meta-analysis, `docs/research.md` for the packaged outer-loop SDK,
+and `docs/extension-guide.md` for context and
 integration definitions, `docs/releases/0.1.md` for the base release, and
 `docs/releases/0.1.1.md` for the stacked hardening scope and evidence rules.
 

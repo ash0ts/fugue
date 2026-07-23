@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
-        suite: [core, context, dev]
+        suite: [core, context, dev, research]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -39,6 +39,9 @@ jobs:
       - name: Install development tooling
         if: matrix.suite == 'dev'
         run: uv sync --frozen --extra dev
+      - name: Install research service
+        if: matrix.suite == 'research'
+        run: uv sync --frozen --extra dev --extra research
       - name: Test core contracts
         if: matrix.suite == 'core'
         env:
@@ -46,14 +49,14 @@ jobs:
           FUGUE_NO_ANIMATION: "1"
         run: >-
           uv run pytest
-          tests/test_ai.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
+          tests/test_ai.py tests/test_campaigns.py tests/test_candidates.py tests/test_catalog.py tests/test_cli.py
           tests/test_datasets.py tests/test_demo.py tests/test_evaluations.py
           tests/test_experiment_atlas.py tests/test_frontier_campaign.py
           tests/test_frontier_campaign_budget.py
-          tests/test_execution.py tests/test_integrations.py tests/test_library.py
+          tests/test_execution.py tests/test_files.py tests/test_integrations.py tests/test_library.py
           tests/test_manifest.py tests/test_model_plane.py tests/test_preflight.py
           tests/test_scoring.py tests/test_sources.py tests/test_supervisor.py tests/test_atlas_site.py
-          tests/test_tool_policy.py
+          tests/test_task_authoring.py tests/test_tool_policy.py
       - name: Test context and operator contracts
         if: matrix.suite == 'context'
         env:
@@ -67,6 +70,7 @@ jobs:
           tests/test_evaluation_assets.py tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
           tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
+          tests/test_task_interaction.py
       - name: Test development and release tooling
         if: matrix.suite == 'dev'
         env:
@@ -76,6 +80,16 @@ jobs:
           uv run pytest
           tests/test_curation.py tests/test_deployment.py tests/test_self_eval.py
           tests/test_reachability.py tests/test_skill.py tests/test_tui.py
+      - name: Test task authoring and research interfaces
+        if: matrix.suite == 'research'
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_task_authoring.py tests/test_research_store.py
+          tests/test_research_service.py tests/test_research_transports.py
+          tests/test_research_agent_interface.py
 
   quality:
     name: Quality, build, and command smoke
@@ -114,6 +128,7 @@ jobs:
           uv run fugue --help
           uv run fugue run pilot --preview --json
           uv run fugue runs --json
+          uv run fugue research --help
       - name: Render README Mermaid diagrams
         run: >-
           npx --yes -p @mermaid-js/mermaid-cli@11.16.0

@@ -32,7 +32,15 @@ def test_public_command_surface_is_intentionally_small() -> None:
         for action in cli._parser()._actions
         if isinstance(action, cli.argparse._SubParsersAction)
     )
-    assert set(subparsers.choices) == {"plan", "run", "runs", "analyze", "setup", "tui"}
+    assert set(subparsers.choices) == {
+        "plan",
+        "run",
+        "runs",
+        "analyze",
+        "setup",
+        "tui",
+        "research",
+    }
     assert "--env-file" in subparsers.choices["run"].format_help()
     assert "--env-file" in subparsers.choices["setup"].format_help()
 
