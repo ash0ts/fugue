@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -324,6 +325,40 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         )
     )
     store.insert_experiment(record, operation_id="start-old", input_digest=_A)
+    export_rows = [
+        {
+            "schema_version": 1,
+            "prediction_schema_version": 1,
+            "prediction_id": f"prediction-{index}",
+            "run_id": "run-old",
+            "candidate_id": f"candidate-{index}",
+            "comparison_example_id": "paired-support-review",
+            "trial_index": 1,
+            "execution_kind": "agent",
+            "status": "passed",
+            "pass": index < 2,
+            "workload_id": "support-data-authority-suite",
+            "task_name": "Paired support review",
+            "harness": "codex" if index % 2 else "claude-code",
+            "variant_id": ("action-gate" if index < 2 else "baseline"),
+            "context_system_id": "none",
+            "trace_link_status": "linked",
+            "trace_project": "team/evaluations",
+            "weave_call_id": f"call-{index}",
+            "weave_conversation_ids": [f"conversation-{index}"],
+            "weave_root_span_ids": [f"root-{index}"],
+            "weave_trace_ids": [f"trace-{index}"],
+            "runtime_equivalence_status": "equivalent",
+            "runtime_drift": False,
+        }
+        for index in range(6)
+    ]
+    export_payload = "".join(
+        json.dumps(row, sort_keys=True) + "\n" for row in export_rows
+    ).encode()
+    export_path = tmp_path / ".fugue" / "runtime" / "historical-export.jsonl"
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_bytes(export_payload)
     completed = sign_record(
         replace(
             record,
@@ -341,6 +376,16 @@ def test_historical_experiment_views_are_backfilled_without_execution(
                 "eligible": True,
                 "limitations": ["private limitation text"],
                 "observed_cost_usd": 1.53,
+                "export_path": export_path.relative_to(tmp_path).as_posix(),
+                "export_sha256": hashlib.sha256(export_payload).hexdigest(),
+                "row_refs": [
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if not key.startswith("weave_") and key != "trace_project"
+                    }
+                    for row in export_rows
+                ],
             },
             updated_at=now(),
         )
@@ -378,6 +423,10 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         == "unavailable"
     )
     assert projected[-1].observed_cost_usd == 1.53
+    assert all(
+        any(link["system"] == "weave" for link in cell["evidence_links"])
+        for cell in projected[-1].summary["experiment_view"]["cells"]
+    )
     assert "private limitation text" not in json.dumps(
         [event.to_dict() for event in projected]
     )

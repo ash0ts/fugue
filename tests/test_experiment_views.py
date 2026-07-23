@@ -187,10 +187,13 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
     assert sum(cell.task_outcome == "passed" for cell in view.cells) == 2
     assert {cell.evaluation_status for cell in view.cells} == {"unavailable"}
     assert {cell.evidence_status for cell in view.cells} == {"reconciled"}
-    assert sum(
-        cell.measures["prompt_injection_safe_and_useful"] is True
-        for cell in view.cells
-    ) == 2
+    assert (
+        sum(
+            cell.measures["prompt_injection_safe_and_useful"] is True
+            for cell in view.cells
+        )
+        == 2
+    )
     assert next(
         item
         for item in view.arm_totals
@@ -205,6 +208,40 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
         "evaluation",
         "analysis",
     }
+
+
+def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None:
+    raw = _record()
+    raw["outcome"]["evidence_refs"] = []
+    for index, row in enumerate(raw["outcome"]["row_refs"]):
+        row.update(
+            {
+                "trace_project": "team/evaluations",
+                "weave_call_id": f"call-{index}",
+                "weave_conversation_ids": [f"conversation-{index}"],
+                "weave_root_span_ids": [f"root-{index}"],
+                "weave_trace_ids": [f"trace-{index}"],
+            }
+        )
+
+    view = build_evaluation_view(raw)
+
+    assert all(
+        {
+            "agent_conversation",
+            "invoke_agent_root",
+            "trace",
+        }.issubset({link["kind"] for link in cell.evidence_links})
+        for cell in view.cells
+    )
+    assert next(
+        link
+        for link in view.cells[0].evidence_links
+        if link["system"] == "weave" and link["ref"].endswith("/call/call-0")
+    )["ref"] == ("team/evaluations/call/call-0")
+    serialized = json.dumps(view.to_dict())
+    assert "agent_response" not in serialized
+    assert "tool_output" not in serialized
 
 
 def test_historical_campaign_question_name_is_supported() -> None:
@@ -236,9 +273,7 @@ def test_large_progress_views_are_bounded_without_losing_aggregates() -> None:
                     "harness": "codex",
                     "variant_id": "baseline",
                     "task_id": f"task-{index}",
-                    "benchmark_outcome": (
-                        "unscored" if index == 299 else "passed"
-                    ),
+                    "benchmark_outcome": ("unscored" if index == 299 else "passed"),
                 }
                 for index in range(300)
             ],

@@ -98,9 +98,7 @@ class ExperimentCellViewV1:
     cost_usd: float | None = None
     latency_sec: float | None = None
     evidence_links: tuple[dict[str, str], ...] = ()
-    measures: dict[str, str | int | float | bool | None] = field(
-        default_factory=dict
-    )
+    measures: dict[str, str | int | float | bool | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -144,7 +142,11 @@ class ExperimentViewV1:
 
 
 def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
-    _reject_unknown(raw, {item.name for item in ExperimentViewV1.__dataclass_fields__.values()}, "experiment view")
+    _reject_unknown(
+        raw,
+        {item.name for item in ExperimentViewV1.__dataclass_fields__.values()},
+        "experiment view",
+    )
     schema_version = _positive_int(raw.get("schema_version"), "schema_version")
     if schema_version != EXPERIMENT_VIEW_SCHEMA_VERSION:
         raise ValueError("unsupported experiment view schema")
@@ -159,9 +161,7 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         _factor(item, "varied_factors")
         for item in _sequence(raw.get("varied_factors"), "varied_factors")
     )
-    cells = tuple(
-        _cell(item) for item in _sequence(raw.get("cells"), "cells")
-    )
+    cells = tuple(_cell(item) for item in _sequence(raw.get("cells"), "cells"))
     if len(cells) > EXPERIMENT_VIEW_CELL_LIMIT:
         raise ValueError("experiment view exceeds the public cell limit")
     view = ExperimentViewV1(
@@ -187,7 +187,9 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         preview_digest=_optional_digest(raw.get("preview_digest"), "preview_digest"),
         approval_state=_optional_text(raw.get("approval_state"), "approval_state", 80),
         cell_limit=_optional_non_negative_int(raw.get("cell_limit"), "cell_limit"),
-        reserved_cost_usd=_optional_cost(raw.get("reserved_cost_usd"), "reserved_cost_usd"),
+        reserved_cost_usd=_optional_cost(
+            raw.get("reserved_cost_usd"), "reserved_cost_usd"
+        ),
         phase=_optional_text(raw.get("phase"), "phase", 80),
         completed_cells=_optional_non_negative_int(
             raw.get("completed_cells"), "completed_cells"
@@ -202,14 +204,11 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
             raw.get("infrastructure_health"), "infrastructure_health", 80
         ),
         arm_totals=tuple(
-            _arm_total(item)
-            for item in _sequence(raw.get("arm_totals"), "arm_totals")
+            _arm_total(item) for item in _sequence(raw.get("arm_totals"), "arm_totals")
         ),
         aligned_comparisons=tuple(
             _comparison(item)
-            for item in _sequence(
-                raw.get("aligned_comparisons"), "aligned_comparisons"
-            )
+            for item in _sequence(raw.get("aligned_comparisons"), "aligned_comparisons")
         ),
         behavioral_measures=_measure_mapping(
             raw.get("behavioral_measures"), "behavioral_measures"
@@ -260,14 +259,20 @@ def build_design_view(
     )
     task_count = draft.get("n_tasks")
     if task_count is None:
-        task_count = len({str(item.get("task_id") or "") for item in cells if item.get("task_id")})
+        task_count = len(
+            {str(item.get("task_id") or "") for item in cells if item.get("task_id")}
+        )
     taskset_digest = str(
         draft.get("task_suite_digest")
         or _mapping_or_empty(preview.get("task_suite_preview")).get("preview_digest")
         or ""
     )
     taskset = ExperimentDescriptorV1(
-        id=str(draft.get("task_suite_digest") or draft.get("preset_id") or "registered-taskset"),
+        id=str(
+            draft.get("task_suite_digest")
+            or draft.get("preset_id")
+            or "registered-taskset"
+        ),
         label=_taskset_label(draft, task_count),
         digest=taskset_digest or None,
         details={"task_count": int(task_count or 0)},
@@ -306,9 +311,7 @@ def build_design_view(
         ExperimentViewV1(
             schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
             kind="design",
-            question=str(
-                draft.get("question") or draft.get("research_question") or ""
-            ),
+            question=str(draft.get("question") or draft.get("research_question") or ""),
             hypothesis=str(draft.get("hypothesis") or ""),
             context=context,
             source_cohort=source_cohort,
@@ -365,10 +368,14 @@ def build_progress_view(
             kind="progress",
             matrix_size=int(preview.get("estimated_cells") or len(cells)),
             preview_digest=str(preview.get("preview_digest") or "") or None,
-            approval_state="approved" if record.get("approval") else "awaiting_approval",
+            approval_state="approved"
+            if record.get("approval")
+            else "awaiting_approval",
             cell_limit=int(preview.get("estimated_cells") or len(cells)),
             reserved_cost_usd=_record_reserved_cost(record),
-            phase=_phase(str(record.get("state") or ""), str(run_summary.get("status") or "")),
+            phase=_phase(
+                str(record.get("state") or ""), str(run_summary.get("status") or "")
+            ),
             completed_cells=completed,
             state_counts=state_counts,
             cells=displayed,
@@ -380,11 +387,7 @@ def build_progress_view(
 def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
     preview = _mapping(record.get("preview"), "preview")
     outcome = _mapping_or_empty(record.get("outcome"))
-    rows = [
-        item
-        for item in outcome.get("row_refs") or ()
-        if isinstance(item, Mapping)
-    ]
+    rows = [item for item in outcome.get("row_refs") or () if isinstance(item, Mapping)]
     evidence_by_prediction = {
         str(item.get("prediction_id") or ""): item
         for item in outcome.get("evidence_refs") or ()
@@ -422,7 +425,9 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
                 or len(rows)
             ),
             preview_digest=str(preview.get("preview_digest") or "") or None,
-            approval_state="approved" if record.get("approval") else "awaiting_approval",
+            approval_state="approved"
+            if record.get("approval")
+            else "awaiting_approval",
             cell_limit=int(preview.get("estimated_cells") or len(rows)),
             reserved_cost_usd=_record_reserved_cost(record),
             phase="completed",
@@ -450,23 +455,22 @@ def _planned_cell(
         cell_id=cell_id,
         task_label=_reviewed_task_label(raw),
         factor_levels={
-            name: (_value_for_dimension(name, raw) or "fixed")
-            for name in varied_names
+            name: (_value_for_dimension(name, raw) or "fixed") for name in varied_names
         },
         attempt=max(1, int(raw.get("trial_index") or 1)),
         execution_status=(
             "queued" if bool(raw.get("applicable", True)) else "not_applicable"
         ),
-        task_outcome=("pending" if bool(raw.get("applicable", True)) else "not_applicable"),
+        task_outcome=(
+            "pending" if bool(raw.get("applicable", True)) else "not_applicable"
+        ),
         evaluation_status=(
             "pending" if bool(raw.get("applicable", True)) else "not_applicable"
         ),
         evidence_status=(
             "pending" if bool(raw.get("applicable", True)) else "not_applicable"
         ),
-        reason_code=(
-            None if bool(raw.get("applicable", True)) else "not_applicable"
-        ),
+        reason_code=(None if bool(raw.get("applicable", True)) else "not_applicable"),
     )
 
 
@@ -490,15 +494,9 @@ def _running_cell(
         execution_status=status,
         task_outcome=outcome,
         evaluation_status=(
-            "not_applicable"
-            if status == "not_applicable"
-            else "pending"
+            "not_applicable" if status == "not_applicable" else "pending"
         ),
-        evidence_status=(
-            "not_applicable"
-            if status == "not_applicable"
-            else "pending"
-        ),
+        evidence_status=("not_applicable" if status == "not_applicable" else "pending"),
         reason_code=_safe_reason(status, outcome),
         latency_sec=_optional_float(raw.get("wall_time_sec")),
     )
@@ -560,6 +558,20 @@ def _outcome_cell(
                 "ref": source_commit,
             }
         )
+    trace_project = str(row.get("trace_project") or "")
+    weave_call_id = str(row.get("weave_call_id") or "")
+    if (
+        len(trace_project.split("/")) == 2
+        and all(trace_project.split("/"))
+        and weave_call_id
+    ):
+        links.append(
+            {
+                "system": "weave",
+                "kind": "agent_conversation",
+                "ref": f"{trace_project}/call/{weave_call_id}",
+            }
+        )
     agent_url = str(evidence.get("agent_url") or "")
     if agent_url.startswith("https://"):
         links.append(
@@ -570,7 +582,9 @@ def _outcome_cell(
                 "uri": agent_url,
             }
         )
-    for conversation_id in evidence.get("conversation_ids") or ():
+    for conversation_id in (
+        evidence.get("conversation_ids") or row.get("weave_conversation_ids") or ()
+    ):
         if conversation_id:
             links.append(
                 {
@@ -579,7 +593,9 @@ def _outcome_cell(
                     "ref": str(conversation_id),
                 }
             )
-    for root_span_id in evidence.get("root_span_ids") or ():
+    for root_span_id in (
+        evidence.get("root_span_ids") or row.get("weave_root_span_ids") or ()
+    ):
         if root_span_id:
             links.append(
                 {
@@ -588,7 +604,7 @@ def _outcome_cell(
                     "ref": str(root_span_id),
                 }
             )
-    for trace_id in evidence.get("trace_ids") or ():
+    for trace_id in evidence.get("trace_ids") or row.get("weave_trace_ids") or ():
         if trace_id:
             links.append(
                 {
@@ -613,17 +629,19 @@ def _outcome_cell(
     }
     return ExperimentCellViewV1(
         cell_id=_opaque_cell_id(row),
-        task_label=str(row.get("task_name") or row.get("comparison_example_id") or "Reviewed task")[:200],
-        factor_levels={
-            key: value for key, value in factor_levels.items() if value
-        },
+        task_label=str(
+            row.get("task_name") or row.get("comparison_example_id") or "Reviewed task"
+        )[:200],
+        factor_levels={key: value for key, value in factor_levels.items() if value},
         attempt=max(1, int(row.get("trial_index") or 1)),
         execution_status=execution,
         task_outcome=outcome,
         evaluation_status=evaluation,
         evidence_status=evidence_status,
         reason_code=_safe_reason(execution, outcome, evidence_status),
-        cost_usd=_optional_float(row.get("cost_usd") or row.get("weave_total_cost_usd")),
+        cost_usd=_optional_float(
+            row.get("cost_usd") or row.get("weave_total_cost_usd")
+        ),
         latency_sec=_optional_float(row.get("wall_time_sec")),
         evidence_links=tuple(links),
         measures={
@@ -974,8 +992,15 @@ def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], .
 
 def _validate_view_shape(view: ExperimentViewV1) -> None:
     if view.kind == "design":
-        if not view.question or not view.hypothesis or view.taskset is None or view.runtime is None:
-            raise ValueError("design view requires question, hypothesis, taskset, and runtime")
+        if (
+            not view.question
+            or not view.hypothesis
+            or view.taskset is None
+            or view.runtime is None
+        ):
+            raise ValueError(
+                "design view requires question, hypothesis, taskset, and runtime"
+            )
         _reject_cross_kind_values(
             view,
             (
@@ -1041,9 +1066,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
         raise ValueError("displayed and omitted cells cannot exceed matrix_size")
 
 
-def _reject_cross_kind_values(
-    view: ExperimentViewV1, fields: Sequence[str]
-) -> None:
+def _reject_cross_kind_values(view: ExperimentViewV1, fields: Sequence[str]) -> None:
     for name in fields:
         value = getattr(view, name)
         if value is not None and value not in ((), {}):
@@ -1313,7 +1336,9 @@ def _humanize(value: str) -> str:
     return value.replace("_", " ").replace("-", " ").strip().title()
 
 
-def _drop_empty(value: Mapping[str, Any], *, preserve_false: bool = False) -> dict[str, Any]:
+def _drop_empty(
+    value: Mapping[str, Any], *, preserve_false: bool = False
+) -> dict[str, Any]:
     empty = (None, "", (), [], {})
     return {
         key: item
