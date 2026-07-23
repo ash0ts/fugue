@@ -185,6 +185,36 @@ class FakeCampaignService:
             }
         )
 
+    def run_progress(self, _: str) -> dict[str, Any]:
+        return {
+            "run_id": "run-1",
+            "status": "passed",
+            "cells": [
+                {
+                    "cell_id": "cell-1",
+                    "candidate_id": "candidate-1",
+                    "status": "passed",
+                    "harness": "codex",
+                    "variant_id": "base",
+                    "context_system_id": "none",
+                    "workload_id": "fixture",
+                    "task_id": "task-one",
+                    "benchmark_outcome": "passed",
+                },
+                {
+                    "cell_id": "cell-2",
+                    "candidate_id": "candidate-2",
+                    "status": "passed",
+                    "harness": "claude-code",
+                    "variant_id": "base",
+                    "context_system_id": "none",
+                    "workload_id": "fixture",
+                    "task_id": "task-one",
+                    "benchmark_outcome": "passed",
+                },
+            ],
+        }
+
     def finalize(self, _: str, __: str) -> Artifact:
         return Artifact(
             {

@@ -181,8 +181,13 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
 
     serialized = json.dumps([item.to_dict() for item in store.research_log_events()])
     assert "Private research question" not in serialized
-    assert "Private controlled question" not in serialized
-    assert "Private hypothesis" not in serialized
+    assert request.summary["experiment_view"]["kind"] == "design"
+    assert (
+        request.summary["experiment_view"]["question"]
+        == "Private controlled question"
+    )
+    assert request.summary["experiment_view"]["hypothesis"] == "Private hypothesis"
+    assert "prompt" not in request.summary["experiment_view"]
 
 
 def test_approval_request_operation_conflict_is_rejected(tmp_path: Path) -> None:
@@ -266,6 +271,10 @@ def test_experiment_state_and_sourced_update_append_safe_records(
     assert terminal.summary["passed"] == 4
     assert terminal.summary["limitation_count"] == 1
     assert "private limitation text" not in json.dumps(terminal.to_dict())
+    assert terminal.summary["experiment_view"]["kind"] == "evaluation"
+    assert terminal.summary["experiment_view"]["limitations"] == [
+        "Additional limitations are recorded in the immutable Fugue outcome."
+    ]
 
     study = store.get_study("research-1")
     store.update_study(

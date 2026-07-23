@@ -1926,6 +1926,30 @@ class CampaignService:
             status_digest=_artifact_digest(unsigned.to_dict(), "status_digest"),
         )
 
+    def run_progress(self, run_id: str) -> dict[str, Any]:
+        """Return a public-safe live projection of durable Operator cell state."""
+
+        summary = self.operator.run_summary(run_id)
+        return {
+            "run_id": summary.run_id,
+            "status": summary.status,
+            "cells": [
+                {
+                    "cell_id": cell.cell_id,
+                    "candidate_id": cell.candidate_id,
+                    "status": cell.status,
+                    "harness": cell.harness,
+                    "variant_id": cell.variant_id,
+                    "context_system_id": cell.context_system_id,
+                    "workload_id": cell.workload_id,
+                    "task_id": cell.task_id,
+                    "wall_time_sec": cell.wall_time_sec,
+                    "benchmark_outcome": cell.benchmark_outcome,
+                }
+                for cell in summary.cells
+            ],
+        }
+
     def events(
         self, campaign_id: str, after_sequence: int = 0
     ) -> tuple[CampaignEventV1, ...]:

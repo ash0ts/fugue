@@ -232,6 +232,13 @@ def research_log_event_from_dict(
         summary=_json_mapping(raw.get("summary"), "summary"),
         event_digest=str(raw.get("event_digest") or ""),
     )
+    experiment_view = event.summary.get("experiment_view")
+    if experiment_view is not None:
+        if not isinstance(experiment_view, Mapping):
+            raise ValueError("summary.experiment_view must be an object")
+        from fugue.research.experiment_views import experiment_view_from_dict
+
+        experiment_view_from_dict(experiment_view)
     unsigned = event.to_dict()
     unsigned.pop("event_digest", None)
     if (

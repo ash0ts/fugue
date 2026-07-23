@@ -39,6 +39,11 @@ from fugue.research.contracts import (
     study_from_dict,
 )
 from fugue.research.database import connect_database
+from fugue.research.experiment_views import (
+    build_design_view,
+    build_evaluation_view,
+    build_progress_view,
+)
 from fugue.research.records import (
     ResearchEvidenceRefV1,
     ResearchLogEventV1,
@@ -694,6 +699,9 @@ class StudyStore:
                         "campaign_id": accepted.campaign_id,
                         "planned_cells": accepted.estimated_cells,
                         "estimated_calls": accepted.estimated_calls,
+                        "experiment_view": build_design_view(
+                            accepted.to_dict()
+                        ).to_dict(),
                     },
                     actor=attribution
                     or AttributionV1(actor_type="agent", name="external-agent"),
@@ -716,6 +724,66 @@ class StudyStore:
                 "request_study_approval",
                 input_digest,
                 event.to_dict(),
+            )
+            conn.commit()
+        return event
+
+    def record_run_progress(
+        self,
+        record: ExperimentRecordV1,
+        run_summary: Mapping[str, Any],
+        *,
+        worker_id: str,
+    ) -> ResearchLogEventV1:
+        """Publish one idempotent public snapshot after durable cell transitions."""
+
+        view = build_progress_view(record.to_dict(), run_summary)
+        view_digest = stable_digest(view.to_dict())
+        producer_event_id = (
+            f"fugue:{record.study_id}:{record.id}:run-progress-{view_digest}"
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            lease = conn.execute(
+                "SELECT lease_owner, lease_expires_at FROM experiments "
+                "WHERE experiment_id=?",
+                (record.id,),
+            ).fetchone()
+            if (
+                lease is None
+                or lease[0] != worker_id
+                or not self._lease_is_current(lease[1])
+            ):
+                raise ResearchError(
+                    "lease_lost",
+                    "experiment worker no longer owns a current lease",
+                    category="conflict",
+                    retryable=True,
+                )
+            summary = self._research_summary(record)
+            summary["experiment_view"] = view.to_dict()
+            event = self._append_research_log_event(
+                conn,
+                producer_event_id=producer_event_id,
+                research_id=record.study_id,
+                study_id=record.id,
+                classification="lifecycle",
+                state="running",
+                message="Experiment cell progress was reconciled from durable run state.",
+                reserved_cost_usd=self._reserved_cost(record),
+                observed_cost_usd=self._observed_cost(record),
+                relationships=tuple(
+                    ResearchRelationshipV1(kind="derived_from", target=parent)
+                    for parent in record.parent_experiment_ids
+                ),
+                evidence=self._research_evidence(
+                    record, artifact_type=None, artifact_digest=None
+                ),
+                progress={
+                    "completed": view.completed_cells or 0,
+                    "total": view.matrix_size,
+                },
+                summary=summary,
             )
             conn.commit()
         return event
@@ -1712,6 +1780,25 @@ class StudyStore:
                 summary[key] = outcome[key]
         if outcome.get("limitations") is not None:
             summary["limitation_count"] = len(outcome["limitations"])
+        if outcome:
+            summary["experiment_view"] = build_evaluation_view(
+                record.to_dict()
+            ).to_dict()
+        elif record.run_id:
+            summary["experiment_view"] = build_progress_view(
+                record.to_dict(),
+                {
+                    "status": record.state,
+                    "cells": (),
+                },
+            ).to_dict()
+        else:
+            summary["experiment_view"] = build_design_view(
+                record.preview,
+                approval_state=(
+                    "approved" if record.approval else "awaiting_approval"
+                ),
+            ).to_dict()
         return {key: value for key, value in summary.items() if value is not None}
 
     @staticmethod
