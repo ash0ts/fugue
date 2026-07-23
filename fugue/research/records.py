@@ -76,6 +76,54 @@ _RELATIONSHIPS = {
     "supersedes",
 }
 RESEARCH_LOG_MAX_BYTES = 65_536
+_PRIVATE_KEYS = {
+    "credential",
+    "credentials",
+    "expected",
+    "expected_answer",
+    "expected_answers",
+    "expected_output",
+    "expected_outputs",
+    "expected_path",
+    "expected_paths",
+    "expected_reference",
+    "expected_references",
+    "expected_value",
+    "expected_values",
+    "gold",
+    "gold_path",
+    "gold_paths",
+    "hidden_reasoning",
+    "private_criteria",
+    "prompt",
+    "prompt_body",
+    "prompt_content",
+    "prompt_messages",
+    "prompt_text",
+    "reasoning_body",
+    "reasoning_content",
+    "reasoning_text",
+    "secret",
+    "secrets",
+    "trace_body",
+}
+_PRIVATE_KEY_PREFIXES = ("credential_", "gold_", "private_", "secret_")
+_PRIVATE_KEY_SUFFIXES = ("_credential", "_secret")
+_PUBLIC_SELECTOR_KEYS = {
+    "analysis_id",
+    "artifact_name",
+    "artifact_version",
+    "call_id",
+    "commit",
+    "dataset_row_id",
+    "entity",
+    "evaluation_id",
+    "operation_id",
+    "project",
+    "row_id",
+    "run_id",
+    "trace_id",
+}
 
 
 @dataclass(frozen=True)
@@ -216,6 +264,23 @@ def event_state(value: str) -> ResearchLogState:
     if value in {"blocked", "interrupted", "failed"}:
         return "failed"
     return "proposed"
+
+
+def public_evidence_selector(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Keep only bounded public identities; evidence bodies remain at the source."""
+
+    selector: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if key not in _PUBLIC_SELECTOR_KEYS:
+            continue
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            selector[key] = item
+        elif isinstance(item, list) and len(item) <= 50 and all(
+            isinstance(member, (str, int, float, bool)) or member is None
+            for member in item
+        ):
+            selector[key] = item
+    return selector
 
 
 class ResearchRecordSink(Protocol):
@@ -456,11 +521,14 @@ def _evidence_ref(raw: Any) -> ResearchEvidenceRefV1:
         or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise ValueError("evidence digest must be sha256")
+    uri = _optional_text(value.get("uri"), "evidence uri", 4000)
+    if uri and not uri.startswith(("http://", "https://")):
+        raise ValueError("evidence uri must use http or https")
     return ResearchEvidenceRefV1(
         system=_text(value.get("system"), "evidence system", 300),
         kind=_text(value.get("kind"), "evidence kind", 300),
         ref=_text(value.get("ref"), "evidence ref", 2000),
-        uri=_optional_text(value.get("uri"), "evidence uri", 4000),
+        uri=uri,
         digest=digest,
         version=_optional_text(value.get("version"), "evidence version", 300),
         selector=_json_mapping(value.get("selector"), "evidence selector"),
@@ -522,4 +590,21 @@ def _json_mapping(value: Any, label: str) -> dict[str, JsonValue]:
     serialized = json.loads(json.dumps(value))
     if not isinstance(serialized, dict):
         raise ValueError(f"{label} must be an object")
+    _reject_private_keys(serialized, label)
     return serialized
+
+
+def _reject_private_keys(value: Any, label: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if (
+                normalized in _PRIVATE_KEYS
+                or normalized.startswith(_PRIVATE_KEY_PREFIXES)
+                or normalized.endswith(_PRIVATE_KEY_SUFFIXES)
+            ):
+                raise ValueError(f"{label} contains a private field")
+            _reject_private_keys(item, label)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_private_keys(item, label)

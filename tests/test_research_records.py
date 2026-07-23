@@ -22,6 +22,7 @@ from fugue.research.records import (
     HttpResearchRecordSink,
     JsonlResearchRecordSink,
     ResearchRecordPublisher,
+    public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
 )
@@ -112,6 +113,42 @@ def test_research_log_contract_is_strict_and_content_addressed() -> None:
             {**raw, "summary": {"too_large": "x" * 70_000}},
             require_digest=False,
         )
+    with pytest.raises(ValueError, match="private field"):
+        research_log_event_from_dict(
+            {**raw, "summary": {"hidden_reasoning": "private"}},
+            require_digest=False,
+        )
+    with pytest.raises(ValueError, match="http or https"):
+        research_log_event_from_dict(
+            {
+                **raw,
+                "evidence": [
+                    {
+                        "system": "artifact",
+                        "kind": "artifact",
+                        "ref": "artifact-1",
+                        "uri": "file:///private/result.json",
+                    }
+                ],
+            },
+            require_digest=False,
+        )
+
+
+def test_public_evidence_selectors_keep_identities_not_private_material() -> None:
+    assert public_evidence_selector(
+        {
+            "entity": "example",
+            "project": "evaluation",
+            "call_id": "call-1",
+            "expected_paths": ["private/gold.py"],
+            "criteria": {"answer": "private"},
+        }
+    ) == {
+        "entity": "example",
+        "project": "evaluation",
+        "call_id": "call-1",
+    }
 
 
 def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:

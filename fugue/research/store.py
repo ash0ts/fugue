@@ -44,6 +44,7 @@ from fugue.research.records import (
     ResearchLogEventV1,
     ResearchRelationshipV1,
     event_state,
+    public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
 )
@@ -1706,7 +1707,7 @@ class StudyStore:
             uri=value.uri,
             digest=value.digest,
             version=value.version,
-            selector=value.selector,
+            selector=public_evidence_selector(value.selector),
         )
 
     def _operation(
