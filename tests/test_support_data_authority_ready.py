@@ -76,8 +76,14 @@ def test_readiness_probe_uses_the_explicit_research_identity(
     assert module.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["research_id"] == "aria-support-data-authority-local-01"
-    assert calls[0][1] == ("/v1/research/aria-support-data-authority-local-01")
-    assert calls[1][2]["research_id"] == ("aria-support-data-authority-local-01")
+    readiness_id = output["readiness_research_id"]
+    assert readiness_id.startswith("readiness-")
+    assert calls[0][1] == f"/v1/research/{readiness_id}"
+    assert calls[1][2]["research_id"] == readiness_id
+    assert all(
+        "aria-support-data-authority-local-01" not in path
+        for _method, path, _body in calls
+    )
     assert all(
         "aria-support-data-authority-v1" not in path for _method, path, _body in calls
     )

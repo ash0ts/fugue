@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import urllib.error
 import urllib.request
@@ -65,8 +66,12 @@ def main() -> int:
     if not entity:
         parser.error("--entity or an --env-file containing WANDB_ENTITY is required")
     project = f"{entity}/northstar-support-agent"
+    readiness_id = (
+        "readiness-"
+        + hashlib.sha256(f"{research_id}\0{project}".encode()).hexdigest()[:24]
+    )
     try:
-        _request(args.base_url, api_key, "GET", f"/v1/research/{research_id}")
+        _request(args.base_url, api_key, "GET", f"/v1/research/{readiness_id}")
     except urllib.error.HTTPError as exc:
         body = json.loads(exc.read()) if exc.code == 400 else {}
         error = body.get("error") if isinstance(body, dict) else None
@@ -83,17 +88,17 @@ def main() -> int:
             "POST",
             "/v1/research",
             {
-                "research_id": research_id,
+                "research_id": readiness_id,
                 "title": "Northstar support readiness probe",
                 "campaign_id": "support-data-authority-v1",
                 "question": "Can Fugue query the seeded synthetic support project?",
                 "background": "Read-only local-demo readiness check.",
-                "idempotency_key": f"create-{research_id}",
+                "idempotency_key": f"create-{readiness_id}",
             },
         )
     draft = {
         "schema_version": 1,
-        "study_id": research_id,
+        "study_id": readiness_id,
         "source_id": "northstar-support-agent",
         "objective": "Verify one seeded synthetic call is queryable.",
         "fields": ["status", "operation"],
@@ -112,15 +117,15 @@ def main() -> int:
         args.base_url,
         api_key,
         "POST",
-        f"/v1/research/{research_id}/trace-audits:preview",
+        f"/v1/research/{readiness_id}/trace-audits:preview",
         {"draft": draft},
     )
     audit = _request(
         args.base_url,
         api_key,
         "POST",
-        f"/v1/research/{research_id}/trace-audits",
-        {"preview": preview, "idempotency_key": f"query-{research_id}"},
+        f"/v1/research/{readiness_id}/trace-audits",
+        {"preview": preview, "idempotency_key": f"query-{readiness_id}"},
     )
     if audit.get("cohort_count") != 1:
         raise RuntimeError("Fugue did not resolve exactly one seeded support trace")
@@ -129,6 +134,7 @@ def main() -> int:
             {
                 "status": "ready",
                 "research_id": research_id,
+                "readiness_research_id": readiness_id,
                 "project": project,
                 "trace_audit_id": audit["id"],
                 "source_snapshot_digest": audit["source_snapshot_digest"],
