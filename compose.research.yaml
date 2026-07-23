@@ -33,9 +33,12 @@ services:
       WANDB_BASE_URL: ${WANDB_BASE_URL:-https://api.wandb.ai}
       WANDB_ENTITY: ${WANDB_ENTITY:-wandb}
       WF_TRACE_SERVER_URL: ${WF_TRACE_SERVER_URL:-}
+      FUGUE_RESEARCH_RECORD_HTTP_URL: ${FUGUE_RESEARCH_RECORD_HTTP_URL:-}
+      FUGUE_RESEARCH_RECORD_TOKEN_FILE: /run/secrets/research_record_ingest_key
     secrets:
       - research_api_key
       - trace_wandb_api_key
+      - research_record_ingest_key
     volumes:
       # The worker talks to the host Docker daemon. Keeping the checkout at the
       # same absolute path on both sides makes generated Harbor bind mounts
@@ -96,8 +99,11 @@ services:
       FUGUE_BRIDGE_HEALTH_TRANSPORT: docker-exec
       FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
       WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
+      FUGUE_RESEARCH_RECORD_HTTP_URL: ${FUGUE_RESEARCH_RECORD_HTTP_URL:-}
+      FUGUE_RESEARCH_RECORD_TOKEN_FILE: /run/secrets/research_record_ingest_key
     secrets:
       - wandb_api_key
+      - research_record_ingest_key
     command:
       - worker
       - --repo-root
@@ -159,3 +165,5 @@ secrets:
     file: ${WANDB_API_KEY_FILE:-./.fugue/secrets/wandb_api_key}
   trace_wandb_api_key:
     file: ${FUGUE_TRACE_WANDB_API_KEY_FILE:-./.fugue/secrets/wandb_api_key}
+  research_record_ingest_key:
+    file: ${FUGUE_RESEARCH_RECORD_TOKEN_FILE:-./.fugue/secrets/research_record_ingest_key}

@@ -87,6 +87,11 @@ class StartExperimentBody(StrictBody):
     idempotency_key: str
 
 
+class RequestStudyApprovalBody(StrictBody):
+    preview: dict[str, Any]
+    idempotency_key: str
+
+
 class CancelExperimentBody(StrictBody):
     idempotency_key: str
     reason: str
@@ -380,6 +385,18 @@ def create_app(  # noqa: C901
             idempotency_key=body.idempotency_key,
         ).to_dict()
 
+    @app.post("/v1/research/{research_id}/studies:request-approval")
+    def request_controlled_study_approval(
+        research_id: str, body: RequestStudyApprovalBody
+    ) -> dict[str, Any]:
+        preview = experiment_preview_from_dict(body.preview)
+        if preview.study_id != research_id:
+            raise ResearchError("study_mismatch", "preview belongs to another Research")
+        return research.request_study_approval(
+            preview,
+            idempotency_key=body.idempotency_key,
+        ).to_dict()
+
     @app.get("/v1/research-studies/{experiment_id}")
     @app.get("/v1/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, Any]:
@@ -448,6 +465,10 @@ def create_app(  # noqa: C901
             if exc.code in {"experiment_not_terminal", "outcome_unavailable"}:
                 raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
             raise
+
+    @app.get("/v1/research-publications")
+    def research_publication_status() -> dict[str, Any]:
+        return research.store.research_publication_status()
 
     if mcp_app is not None:
         app.mount("/mcp", mcp_app)

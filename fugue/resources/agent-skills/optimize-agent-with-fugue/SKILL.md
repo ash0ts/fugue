@@ -11,7 +11,8 @@ locking, admission, Harbor execution, evaluation, and evidence reconciliation.
 
 ## Workflow
 
-1. Read `fugue://studies/{study_id}/context` and call `fugue_catalog` before
+1. Read `fugue://research/{research_id}/context` and call
+   `fugue_research_catalog` before
    proposing work. Stay inside the registered campaign, sources, and limits.
 2. Define the practical objective, current baseline, operating constraints, and the
    single decision the experiment should inform.
@@ -25,10 +26,10 @@ locking, admission, Harbor execution, evaluation, and evidence reconciliation.
    lock a separate holdout before choosing a confirmatory intervention.
 6. Change one meaningful dimension at a time. State fixed, varied, and measured
    dimensions explicitly. Use only registered variants or immutable candidate refs.
-7. Call `fugue_experiment_preview`. Check the exact cells, calls, estimated cost,
+7. Call `fugue_study_preview`. Check the exact cells, calls, estimated cost,
    evidence requirements, and blockers. A preview never authorizes spending.
-8. Present the preview digest and cost to the user. Start only after the operator
-   supplies an approval digest for that exact preview.
+8. Call `fugue_study_request_approval`, then present the preview digest and cost
+   to the user. Start only after the operator approves that exact preview.
 9. Inspect durable events instead of retrying uncertain work. Cancel when policy,
    evidence, or production conditions require it. Never silently relaunch a cell.
 10. Interpret aligned task-level outcomes. Keep benchmark outcome, authored
@@ -37,15 +38,15 @@ locking, admission, Harbor execution, evaluation, and evidence reconciliation.
 
 ## One bounded research cycle
 
-A cycle starts from registered trace evidence or a terminal parent experiment and
+A cycle starts from registered trace evidence or a terminal parent Study and
 ends in exactly one of four states: a recorded Result, one eligible child preview
 awaiting approval, an explicit blocker, or a justified decision to stop. Do not turn
 the workflow into an unbounded experiment generator.
 
 - Reconcile and record a terminal parent before proposing its child.
-- Carry `parent_experiment_ids`, `parent_outcome_id`, and `decision_rationale` into
+- Carry the stable parent IDs, exact outcome ID, and `decision_rationale` into
   the child draft so another Agent can reconstruct why that branch exists.
-- Generate at most one child preview per cycle. Never approve or start it in the
+- Generate at most one child Study preview per cycle. Never approve or start it in the
   same cycle; a new exact operator approval is the deliberate research checkpoint.
 - Prefer replication, a held-out confirmation, or a discriminating ablation over a
   larger matrix that changes several explanations at once.

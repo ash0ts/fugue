@@ -494,7 +494,9 @@ def attribution_from_dict(raw: Mapping[str, Any]) -> AttributionV1:
 
 def evidence_ref_from_dict(raw: Mapping[str, Any]) -> EvidenceRefV1:
     _reject_unknown(
-        raw, {"kind", "ref", "digest", "version", "uri", "selector"}, "evidence ref"
+        raw,
+        {"kind", "ref", "digest", "version", "uri", "selector"},
+        "evidence ref",
     )
     kind = str(raw.get("kind") or "")
     allowed = {
