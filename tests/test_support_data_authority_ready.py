@@ -3,9 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-import urllib.error
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 
@@ -33,39 +32,39 @@ def test_readiness_probe_uses_the_explicit_research_identity(
     module = _module()
     api_key = tmp_path / "research-key"
     api_key.write_text("secret\n", encoding="utf-8")
-    calls: list[tuple[str, str, dict[str, Any] | None]] = []
+    sources = tmp_path / "trace-sources.yaml"
+    sources.write_text("version: 1\nsources: []\n", encoding="utf-8")
+    captured: dict[str, Any] = {}
 
-    def request(
-        _base_url: str,
-        supplied_key: str,
-        method: str,
-        path: str,
-        body: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        assert supplied_key == "secret"
-        calls.append((method, path, body))
-        if method == "GET":
-            raise urllib.error.HTTPError(path, 404, "missing", {}, None)
-        if path == "/v1/research":
-            return {"id": body["research_id"] if body else ""}
-        if path.endswith(":preview"):
-            return {"preview_digest": "preview"}
-        return {
-            "id": "audit-1",
-            "cohort_count": 1,
-            "source_snapshot_digest": "source-digest",
-        }
+    class Adapter:
+        source = SimpleNamespace(source_digest="source-digest")
 
-    monkeypatch.setattr(module, "_request", request)
+        def read(self, draft: Any) -> tuple[dict[str, Any], ...]:
+            captured["draft"] = draft
+            return ({"status": "success", "operation": "support"},)
+
+    class Registry:
+        def get(self, source_id: str) -> Adapter:
+            assert source_id == "northstar-support-agent"
+            return Adapter()
+
+    def from_file(path: Path, *, env: dict[str, str]) -> Registry:
+        assert path == sources
+        captured["env"] = env
+        return Registry()
+
+    monkeypatch.setattr(module.TraceSourceRegistry, "from_file", from_file)
     monkeypatch.setattr(
         sys,
         "argv",
         [
             "verify_ready.py",
-            "--base-url",
-            "http://fugue.test",
-            "--api-key-file",
+            "--trace-sources-file",
+            str(sources),
+            "--trace-api-key-file",
             str(api_key),
+            "--trace-server-url",
+            "http://trace.test",
             "--entity",
             "demo-entity",
             "--research-id",
@@ -76,8 +75,10 @@ def test_readiness_probe_uses_the_explicit_research_identity(
     assert module.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["research_id"] == "aria-support-data-authority-local-01"
-    assert calls[0][1] == ("/v1/research/aria-support-data-authority-local-01")
-    assert calls[1][2]["research_id"] == ("aria-support-data-authority-local-01")
-    assert all(
-        "aria-support-data-authority-v1" not in path for _method, path, _body in calls
+    assert output["source_digest"] == "source-digest"
+    assert captured["draft"].study_id == "aria-support-data-authority-local-01"
+    assert captured["draft"].selection.project == (
+        "demo-entity/northstar-support-agent"
     )
+    assert captured["env"]["WANDB_API_KEY_FILE"] == str(api_key)
+    assert captured["env"]["WF_TRACE_SERVER_URL"] == "http://trace.test"
