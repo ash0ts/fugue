@@ -133,6 +133,11 @@ def test_research_log_contract_is_strict_and_content_addressed() -> None:
             },
             require_digest=False,
         )
+    with pytest.raises(ValueError, match="timezone"):
+        research_log_event_from_dict(
+            {**raw, "timestamp": "2026-07-22T12:00:00"},
+            require_digest=False,
+        )
 
 
 def test_public_evidence_selectors_keep_identities_not_private_material() -> None:

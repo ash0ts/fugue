@@ -6,6 +6,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -215,7 +216,7 @@ def research_log_event_from_dict(
             raw.get("producer_event_id"), "producer_event_id", 1000
         ),
         sequence=_positive_int(raw.get("sequence"), "sequence"),
-        timestamp=_text(raw.get("timestamp"), "timestamp", 100),
+        timestamp=_timestamp(raw.get("timestamp")),
         source=_text(raw.get("source"), "source", 300),
         actor=attribution_from_dict(_mapping(raw.get("actor"), "actor")),
         research_id=_text(raw.get("research_id"), "research_id", 1000),
@@ -560,6 +561,17 @@ def _optional_text(value: Any, label: str, maximum: int) -> str | None:
     if value in (None, ""):
         return None
     return _text(value, label, maximum)
+
+
+def _timestamp(value: Any) -> str:
+    text = _text(value, "timestamp", 100)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp must use ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return text
 
 
 def _positive_int(value: Any, label: str) -> int:
