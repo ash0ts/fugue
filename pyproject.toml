@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fugue"
-version = "0.1.0"
-description = "Harbor + Weave runner for comparing agent harnesses and context systems."
+version = "0.1.2"
+description = "Governed laboratory for controlled experiments on agent systems."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"

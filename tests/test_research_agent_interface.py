@@ -506,7 +506,11 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert control["environment"]["WANDB_API_KEY_FILE"] == (
         "/run/secrets/trace_wandb_api_key"
     )
-    assert control["secrets"] == ["research_api_key", "trace_wandb_api_key"]
+    assert control["secrets"] == [
+        "research_api_key",
+        "trace_wandb_api_key",
+        "research_record_ingest_key",
+    ]
     assert any("docker.sock" in value for value in worker["volumes"])
     assert worker["group_add"] == [
         "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
@@ -514,7 +518,7 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert "ports" not in worker
     assert "research_api_key" not in worker.get("secrets", [])
     assert worker["environment"]["WANDB_API_KEY_FILE"] == ("/run/secrets/wandb_api_key")
-    assert worker["secrets"] == ["wandb_api_key"]
+    assert worker["secrets"] == ["wandb_api_key", "research_record_ingest_key"]
     assert "FUGUE_RESEARCH_API_KEY_FILE" not in worker.get("environment", {})
     assert operator["user"] == expected_user
     assert worker["environment"]["HOME"] == expected_home
@@ -524,6 +528,16 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     )
     assert "ports" not in operator and "secrets" not in operator
     assert all("docker.sock" not in value for value in operator["volumes"])
+
+
+def test_research_image_ci_materializes_every_compose_secret() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github/workflows/research-image.yml"
+    ).read_text(encoding="utf-8")
+
+    assert ".fugue/secrets/research_api_key" in workflow
+    assert ".fugue/secrets/research_record_ingest_key" in workflow
+    assert ".fugue/secrets/wandb_api_key" in workflow
 
 
 def test_compose_preserves_host_checkout_path_for_harbor_bind_mounts() -> None:
@@ -638,7 +652,7 @@ def test_mcp_has_prompts_but_no_approval_tool(tmp_path: Path) -> None:
         server.get_prompt(
             "advance_research_cycle",
             {
-                "study_id": "study-1",
+                "research_id": "study-1",
                 "objective": "Reduce recurring tool failures.",
             },
         )

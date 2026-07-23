@@ -1,42 +1,128 @@
 # Fugue
 
-Fugue is a local-first operator for controlled agent experiments. It resolves
-an experiment into comparable candidates, renders Harbor jobs, executes the
-exact matrix, records native W&B Weave traces, and exports reproducible results.
-Fugue 0.1 supports Hermes, OpenClaw, Claude Code, and Codex on Python 3.12+.
+Fugue 0.1.2 is a local-first, governed laboratory for controlled experiments on
+agent systems. It lets an engineer vary a harness, prompt, tool, retrieval
+system, memory treatment, interaction policy, or other loop component while
+holding the intended controls fixed. Fugue resolves the exact matrix once,
+runs each coordinate in Harbor, records native W&B Weave evidence, and exports
+reproducible outcomes without collapsing task success, behavior, errors,
+latency, usage, and cost into one synthetic score.
 
-External research Agents can use Fugue through a separate, bearer-authenticated
-Research service. It exposes high-level Study, trace-audit, experiment, and
-Result operations over MCP, REST, and Python while a private worker keeps Harbor
-execution behind an exact human approval and spend cap. See
-[`docs/research-container.md`](docs/research-container.md), or run the complete
-[`retrieval-to-action` external-Agent example](examples/research/retrieval-to-action-canary/README.md).
+Fugue is not an agent framework, an automatic winner selector, or a replacement
+for Weave. An Agent or researcher still chooses the question, proposes the
+intervention, and interprets the result. Fugue is the part that makes the
+comparison admissible, recoverable, and inspectable.
 
-The core workflow is deliberately small:
+## Why Fugue
 
-1. Define or load an experiment.
-2. Preview the exact candidate × task × trial matrix.
-3. Prepare reviewed skills and declared context explicitly.
-4. Run through the durable operator transaction.
-5. Inspect candidates and export normalized JSONL.
+An agent result belongs to the whole system around the model. Changing the
+harness can change tool use; changing retrieval can change what evidence is
+available; changing instructions can change whether that evidence is opened or
+used. A result is difficult to interpret when those dimensions drift together,
+when setup happens inside a trial, or when missing traces are silently counted
+as task failures.
+
+Fugue makes those problems explicit:
+
+- the experiment declares what is fixed, varied, and measured;
+- preview resolves the complete candidate × task × attempt matrix without side
+  effects;
+- preparation locks sources, runtimes, skills, context, tasks, and evaluation
+  assets before execution;
+- approval binds spend and cell limits to the exact preview digest;
+- every active Agent cell runs in an isolated Harbor environment;
+- every planned coordinate becomes terminal, explicitly not applicable, or
+  cancelled, and every executed Agent cell reconciles to its native Weave
+  conversation, root, receipts, and normalized row;
+- infrastructure, evaluation, and Agent outcomes remain separate.
+
+The result is not certainty. It is a bounded claim with enough provenance to
+understand what was compared, reproduce the comparison, and decide what
+experiment is justified next.
+
+## When to use Fugue
+
+Fugue is a good fit when you need to:
+
+- compare agent harnesses or loop implementations on aligned tasks;
+- test a prompt, tool, retrieval, memory, or interaction intervention without
+  changing the rest of the system;
+- turn reviewed production-trace failures into locked discovery and holdout
+  tasks;
+- evaluate deterministic task success alongside tool, trace, artifact, or
+  blind-judge criteria;
+- let an external research Agent propose and monitor experiments while a human
+  retains approval and spend authority;
+- preserve a durable chain from question to Study, admitted Run, evaluation,
+  and sourced Result.
+
+Use something simpler for a one-off prompt check, ordinary trace inspection, or
+an ungoverned local benchmark where restart recovery, isolation, exact identity,
+and evidence provenance do not matter. Fugue also does not host your
+application, edit its writable checkout, invent hypotheses, approve its own
+spend, or turn a small study into a universal model or harness ranking.
+
+## Choose an interface
+
+Use the operator CLI or TUI when a human is directly designing and running a
+saved experiment:
+
+```text
+ExperimentSpec → preview → prepare → run → normalized evidence → analysis
+```
+
+Use the Research service when an outer loop or external Agent needs a governed
+laboratory:
+
+```text
+Research → controlled Study → admitted Run → evaluation → sourced Result
+```
+
+The Research service is bearer-authenticated and available through Python,
+REST, and MCP. Pure preview remains free of preparation and model calls. A
+private worker is the only service allowed to operate Harbor, and paid work
+requires a separate operator approval bound to the exact preview and cost cap.
+Weave remains the prediction-level evidence system. Optional consoles consume a
+generic, public-safe research-record projection rather than copied trace bodies
+or private evaluation data.
+
+Fugue 0.1.2 supports Hermes, OpenClaw, Claude Code, and Codex as stable harness
+identities. Direct provider diagnostics remain separate from Agent cells and do
+not synthesize conversations or Agent roots.
+
+See [`docs/research.md`](docs/research.md) for the Python and transport API,
+[`docs/research-container.md`](docs/research-container.md) for the isolated
+control/worker deployment, and the
+[`retrieval-to-action` example](examples/research/retrieval-to-action-canary/README.md)
+for a complete external-Agent handoff.
+
+## How it works
+
+1. Define or load a strict experiment and immutable task sources.
+2. Preview the exact matrix, applicability decisions, call estimate, and cost.
+3. Prepare and lock the selected sources, runtimes, skills, context, and task
+   environments.
+4. Obtain explicit approval when the workflow is Agent-driven or paid.
+5. Execute bounded cells through the durable operator and Harbor.
+6. Reconcile every planned coordinate with terminal execution and Weave
+   evidence.
+7. Score, analyze, and record only conclusions whose scope and evidence remain
+   explicit.
 
 Generated evaluations, self-evaluation, automated curation, and candidate
 serving are advanced or experimental extensions. None runs implicitly.
 
 ```mermaid
 flowchart LR
-    USER["Saved experiment or planning intent"] --> RESOLVE["Resolve candidates once"]
-    RESOLVE --> OP["OperatorService transaction"]
-    OP --> MATRIX["Candidate x example x trial"]
-    MATRIX --> HARBOR["Harbor agent cells"]
-    MATRIX --> DIRECT["Provider diagnostics"]
-    HARBOR --> LOCAL["Durable local state"]
-    DIRECT --> LOCAL
-    HARBOR --> WEAVE["Weave Agent conversations"]
-    DIRECT --> OPS["Ordinary Weave operation calls"]
-    LOCAL --> EXPORT["Normalized export and analysis"]
-    WEAVE --> EXPORT
-    OPS --> EXPORT
+    QUESTION["Question and controls"] --> SPEC["Strict experiment"]
+    SPEC --> PREVIEW["Pure exact preview"]
+    PREVIEW --> APPROVAL["Human approval when required"]
+    APPROVAL --> LOCK["Plan, task, runtime, and cost locks"]
+    LOCK --> HARBOR["Isolated Harbor cells"]
+    HARBOR --> WEAVE["Native Weave evidence"]
+    HARBOR --> ROWS["Terminal normalized rows"]
+    WEAVE --> RESULT["Bounded sourced Result"]
+    ROWS --> RESULT
 ```
 
 ## Install
@@ -114,7 +200,7 @@ fugue setup --experiment repo-memory-impact --systems graphiti \
 
 When Graphiti credentials are absent, Fugue generates an ignored mode-0600
 credential file and resolves host and Harbor endpoints internally. Stopping the
-service preserves its named data volume; 0.1.1 has no destructive purge action.
+service preserves its named data volume; 0.1.2 has no destructive purge action.
 
 Remote skills are fetched for review but not executed. Approve one exact
 reviewed digest before it can enter a run:
@@ -668,13 +754,13 @@ Cancellation terminates the isolated Harbor process group and removes request
 state. `/readyz` performs a bounded Docker daemon or configured remote probe.
 
 Stored conversations, server-side tools, media, compaction, WebSockets,
-registry push, deployment management, and autoscaling are not part of 0.1.
+registry push, deployment management, and autoscaling are not part of 0.1.2.
 
 ## Experimental: self-evaluation
 
 `fugue-maintainer-v1` and `fugue-operator-v1` are separate suites pinned to
 Fugue commit `96512017842d68add2546a057f0601de3eaf610e`. Their tasks, mutations,
-fixtures, and verifiers remain unchanged. Fugue 0.1 ships no promoted agent
+fixtures, and verifiers remain unchanged. Fugue 0.1.2 ships no promoted agent
 preset and makes no efficacy claim; a release-current benchmark requires a
 separately reviewed v2.
 
@@ -708,6 +794,8 @@ campaign contract, `docs/task-authoring.md` for flexible tasks, scenarios,
 judges, and meta-analysis, `docs/research.md` for the packaged outer-loop SDK,
 and `docs/extension-guide.md` for context and
 integration definitions, `docs/releases/0.1.md` for the base release, and
-`docs/releases/0.1.1.md` for the stacked hardening scope and evidence rules.
+`docs/releases/0.1.1.md` for the original evidence hardening, and
+`docs/releases/0.1.2.md` for governed Studies, trace-grounded task authoring,
+external-Agent packaging, and research-record projection.
 
 Fugue is licensed under the Apache License 2.0. See `LICENSE`.

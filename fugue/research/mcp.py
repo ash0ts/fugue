@@ -252,6 +252,18 @@ def create_mcp_server(  # noqa: C901
         ).to_dict()
 
     @mcp.tool()
+    def fugue_study_request_approval(
+        preview: dict[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Durably request human approval for an exact Study preview."""
+
+        return research.request_study_approval(
+            experiment_preview_from_dict(preview),
+            idempotency_key=idempotency_key,
+        ).to_dict()
+
+    @mcp.tool()
     def fugue_experiment_get(experiment_id: str) -> dict[str, Any]:
         """Inspect current state and ordered durable events."""
 
@@ -406,48 +418,48 @@ def create_mcp_server(  # noqa: C901
         return json.dumps(ExperimentHandle(research, study_id).result(), indent=2)
 
     @mcp.prompt()
-    def optimize_agent_use_case(study_id: str) -> str:
+    def optimize_agent_use_case(research_id: str) -> str:
         """Use Fugue to turn observed Agent failures into controlled evidence."""
 
         return (
             _skill_instructions()
-            + f"\n\nWork within Study `{study_id}`. Read its context and catalog first."
+            + f"\n\nWork within Research `{research_id}`. Read its context and catalog first."
         )
 
     @mcp.prompt()
-    def design_controlled_experiment(study_id: str, question: str) -> str:
-        """Design one controlled comparison using an existing Fugue Study."""
+    def design_controlled_experiment(research_id: str, question: str) -> str:
+        """Design one controlled Study using an existing Fugue Research record."""
 
         return (
             _skill_instructions()
-            + f"\n\nDesign one experiment for Study `{study_id}` that answers: {question}"
+            + f"\n\nDesign one Study for Research `{research_id}` that answers: {question}"
         )
 
     @mcp.prompt()
-    def interpret_experiment(experiment_id: str) -> str:
-        """Interpret a terminal experiment without manufacturing a ranking."""
+    def interpret_experiment(study_id: str) -> str:
+        """Interpret a terminal controlled Study without manufacturing a ranking."""
 
         return (
             _skill_instructions()
-            + f"\n\nInterpret experiment `{experiment_id}` from its exact outcome evidence."
+            + f"\n\nInterpret Study `{study_id}` from its exact outcome evidence."
         )
 
     @mcp.prompt()
-    def advance_research_cycle(study_id: str, objective: str) -> str:
+    def advance_research_cycle(research_id: str, objective: str) -> str:
         """Advance one evidence-to-result-to-next-preview research cycle."""
 
         return (
             _skill_instructions()
-            + "\n\nAdvance exactly one bounded research cycle. Start from the Study's "
-            "existing evidence or a registered trace source; do not invent an "
-            "observation. If an experiment is already terminal, reconcile and "
+            + "\n\nAdvance exactly one bounded research cycle. Start from Research "
+            "evidence or a registered trace source; do not invent an observation. "
+            "If a Study is already terminal, reconcile and "
             "record its scoped Result before designing anything else. Propose at "
-            "most one child experiment, bind it to parent_experiment_ids, "
+            "most one child Study, bind it to parent_experiment_ids, "
             "parent_outcome_id, and decision_rationale, and stop after returning "
             "the next eligible preview. Never approve or start that child in the "
             "same cycle. If evidence, policy, or eligibility is insufficient, "
             "record the blocker and stop without a preview."
-            + f"\n\nStudy: `{study_id}`\nObjective: {objective}"
+            + f"\n\nResearch: `{research_id}`\nObjective: {objective}"
         )
 
     return mcp

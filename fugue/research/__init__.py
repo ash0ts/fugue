@@ -36,6 +36,15 @@ from fugue.research.contracts import (
     StudyResultV1,
     StudyV1,
 )
+from fugue.research.records import (
+    HttpResearchRecordSink,
+    JsonlResearchRecordSink,
+    ResearchEvidenceRefV1,
+    ResearchLogEventV1,
+    ResearchRecordPublisher,
+    ResearchRecordSink,
+    ResearchRelationshipV1,
+)
 from fugue.research.service import ExperimentHandle, ResearchService, ResearchWorker
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 
@@ -57,8 +66,13 @@ __all__ = [
     "ExperimentRecordV1",
     "FugueResearchClient",
     "ResearchContextV1",
+    "ResearchEvidenceRefV1",
     "ResearchError",
     "ResearchHandle",
+    "ResearchLogEventV1",
+    "ResearchRecordPublisher",
+    "ResearchRecordSink",
+    "ResearchRelationshipV1",
     "ResearchService",
     "ResearchV1",
     "ResearchWorker",
@@ -68,6 +82,8 @@ __all__ = [
     "StudyResourceV1",
     "StudyResultV1",
     "StudyV1",
+    "HttpResearchRecordSink",
+    "JsonlResearchRecordSink",
     "TraceAuditDraftV1",
     "TraceAuditPreviewV1",
     "TraceAuditService",

@@ -39,6 +39,17 @@ from fugue.research.contracts import (
     study_from_dict,
 )
 from fugue.research.database import connect_database
+from fugue.research.records import (
+    ResearchEvidenceRefV1,
+    ResearchLogEventV1,
+    ResearchRelationshipV1,
+    event_state,
+    public_evidence_selector,
+    research_log_event_from_dict,
+    sign_research_log_event,
+)
+
+_RESULT_PROJECTION_VERSION = 2
 
 
 class StudyStore:
@@ -104,11 +115,51 @@ class StudyStore:
                     PRIMARY KEY (experiment_id, sequence),
                     UNIQUE (experiment_id, event_id)
                 );
+                CREATE TABLE IF NOT EXISTS approval_requests (
+                    preview_digest TEXT PRIMARY KEY,
+                    research_id TEXT NOT NULL,
+                    study_id TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_log_events (
+                    sequence INTEGER PRIMARY KEY,
+                    producer_event_id TEXT NOT NULL UNIQUE,
+                    event_digest TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_record_deliveries (
+                    sink_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (sink_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS research_result_projection_state (
+                    study_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL,
+                    projection_version INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS schema_info (
                     schema_version INTEGER NOT NULL
                 );
                 """
             )
+            projection_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(research_result_projection_state)"
+                ).fetchall()
+            }
+            if "projection_version" not in projection_columns:
+                conn.execute(
+                    "ALTER TABLE research_result_projection_state "
+                    "ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 1"
+                )
             version = conn.execute("SELECT schema_version FROM schema_info").fetchone()
             if version is None:
                 conn.execute(
@@ -204,6 +255,16 @@ class StudyStore:
             self._append_study_event(
                 conn, study, "study_created", operation_id, {"study": study.to_dict()}
             )
+            self._append_research_log_event(
+                conn,
+                producer_event_id=f"fugue:{study.id}:research-created",
+                research_id=study.id,
+                study_id=None,
+                classification="lifecycle",
+                state="proposed",
+                message="Research record created.",
+                summary={"campaign_id": study.campaign_id, "revision": study.revision},
+            )
             self._record_operation(
                 conn,
                 study_id,
@@ -296,6 +357,53 @@ class StudyStore:
                     "study": updated.to_dict(),
                     "study_digest": updated.study_digest,
                 },
+            )
+            classification = (
+                "result"
+                if update.results
+                else "observation"
+                if update.message
+                else "decision"
+            )
+            added_results = updated.results[len(current.results) :]
+            self._append_research_log_event(
+                conn,
+                producer_event_id=f"fugue:{study_id}:research-revision-{updated.revision}",
+                research_id=study_id,
+                study_id=None,
+                classification=classification,
+                state="completed" if update.results else "proposed",
+                message=(
+                    "Sourced Result recorded."
+                    if update.results
+                    else "Research record updated."
+                ),
+                relationships=tuple(
+                    ResearchRelationshipV1(
+                        kind="supersedes", target=str(item.supersedes)
+                    )
+                    for item in added_results
+                    if item.supersedes
+                ),
+                evidence=tuple(
+                    self._external_evidence(source)
+                    for source in [
+                        *update.note_sources,
+                        *update.run_refs,
+                        *[
+                            source
+                            for result in added_results
+                            for source in result.sources
+                        ],
+                    ]
+                ),
+                summary={
+                    "revision": updated.revision,
+                    "notes_added": len(updated.notes) - len(current.notes),
+                    "results_added": len(added_results),
+                    "resources_added": len(updated.resources) - len(current.resources),
+                },
+                actor=update.attribution,
             )
             self._record_operation(
                 conn,
@@ -509,6 +617,108 @@ class StudyStore:
                 category="evidence",
             )
         return study_from_dict(raw)
+
+    def record_approval_request(
+        self,
+        preview: Any,
+        *,
+        operation_id: str,
+        attribution: AttributionV1 | None = None,
+    ) -> ResearchLogEventV1:
+        """Durably expose an exact preview without preparing or launching it."""
+
+        from fugue.research.contracts import experiment_preview_from_dict
+
+        accepted = experiment_preview_from_dict(preview.to_dict())
+        operation_id = validate_id(operation_id, kind="operation id")
+        if not accepted.eligible:
+            raise ResearchError(
+                "preview_ineligible",
+                "an ineligible Study preview cannot request approval",
+                category="policy",
+            )
+        self.get_study(accepted.study_id)
+        input_digest = stable_digest(
+            {
+                "action": "request_study_approval",
+                "preview_digest": accepted.preview_digest,
+            }
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            prior_operation = self._operation(conn, accepted.study_id, operation_id)
+            if prior_operation:
+                return research_log_event_from_dict(
+                    self._operation_response(
+                        prior_operation,
+                        "request_study_approval",
+                        input_digest,
+                        operation_id,
+                    )
+                )
+            existing = conn.execute(
+                "SELECT request_json FROM approval_requests WHERE preview_digest=?",
+                (accepted.preview_digest,),
+            ).fetchone()
+            if existing:
+                prior = research_log_event_from_dict(json.loads(existing[0]))
+                if prior.study_id != accepted.experiment_id:
+                    raise ResearchError(
+                        "approval_request_conflict",
+                        "preview digest is attached to another controlled Study",
+                        category="conflict",
+                    )
+                event = prior
+            else:
+                event = self._append_research_log_event(
+                    conn,
+                    producer_event_id=(
+                        f"fugue:{accepted.study_id}:{accepted.experiment_id}:"
+                        f"approval-request-{accepted.preview_digest}"
+                    ),
+                    research_id=accepted.study_id,
+                    study_id=accepted.experiment_id,
+                    classification="decision",
+                    state="awaiting_approval",
+                    message="Exact Study preview is awaiting operator approval.",
+                    reserved_cost_usd=accepted.estimated_cost_usd,
+                    evidence=(
+                        ResearchEvidenceRefV1(
+                            kind="artifact",
+                            ref=f"preview:{accepted.preview_digest}",
+                            system="fugue",
+                            digest=accepted.preview_digest,
+                        ),
+                    ),
+                    summary={
+                        "campaign_id": accepted.campaign_id,
+                        "planned_cells": accepted.estimated_cells,
+                        "estimated_calls": accepted.estimated_calls,
+                    },
+                    actor=attribution
+                    or AttributionV1(actor_type="agent", name="external-agent"),
+                )
+                conn.execute(
+                    "INSERT INTO approval_requests VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        accepted.preview_digest,
+                        accepted.study_id,
+                        accepted.experiment_id,
+                        self._json(event.to_dict()),
+                        operation_id,
+                        event.timestamp,
+                    ),
+                )
+            self._record_operation(
+                conn,
+                accepted.study_id,
+                operation_id,
+                "request_study_approval",
+                input_digest,
+                event.to_dict(),
+            )
+            conn.commit()
+        return event
 
     def insert_experiment(
         self,
@@ -1175,7 +1385,437 @@ class StudyStore:
                 event.created_at,
             ),
         )
+        self._append_research_log_event(
+            conn,
+            producer_event_id=(f"fugue:{record.study_id}:{record.id}:event-{sequence}"),
+            research_id=record.study_id,
+            study_id=record.id,
+            classification=self._research_classification(event_type, state),
+            state=event_state(state),
+            message=message,
+            reserved_cost_usd=self._reserved_cost(record),
+            observed_cost_usd=self._observed_cost(record),
+            relationships=tuple(
+                ResearchRelationshipV1(kind="derived_from", target=parent)
+                for parent in record.parent_experiment_ids
+            ),
+            evidence=self._research_evidence(
+                record,
+                artifact_type=artifact_type,
+                artifact_digest=artifact_digest,
+            ),
+            progress=self._research_progress(record),
+            summary=self._research_summary(record),
+        )
         return event
+
+    def research_log_events(
+        self, *, after: int = 0, limit: int = 1000
+    ) -> tuple[ResearchLogEventV1, ...]:
+        if after < 0:
+            raise ValueError("research log cursor must be non-negative")
+        if limit < 1 or limit > 1000:
+            raise ValueError("research log limit must be between 1 and 1000")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT event_json FROM research_log_events "
+                "WHERE sequence>? ORDER BY sequence LIMIT ?",
+                (after, limit),
+            ).fetchall()
+        return tuple(research_log_event_from_dict(json.loads(row[0])) for row in rows)
+
+    def ensure_result_projection_events(self) -> int:
+        """Append one public-safe projection event per immutable Study Result."""
+
+        created = 0
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT studies.snapshot_json FROM studies "
+                "LEFT JOIN research_result_projection_state AS projection "
+                "ON projection.study_id=studies.study_id "
+                "WHERE projection.revision IS NULL "
+                "OR projection.revision<studies.revision "
+                "OR projection.projection_version<? "
+                "ORDER BY studies.study_id",
+                (_RESULT_PROJECTION_VERSION,),
+            ).fetchall()
+            for row in rows:
+                study = study_from_dict(json.loads(row["snapshot_json"]))
+                for result in study.results:
+                    producer_event_id = (
+                        f"fugue:{study.id}:result-{result.id}-"
+                        f"revision-{result.revision}:"
+                        f"projection-v{_RESULT_PROJECTION_VERSION}"
+                    )
+                    if conn.execute(
+                        "SELECT 1 FROM research_log_events WHERE producer_event_id=?",
+                        (producer_event_id,),
+                    ).fetchone():
+                        continue
+                    message = result.statement
+                    if len(message) > 4000:
+                        message = message[:3997] + "..."
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=producer_event_id,
+                        research_id=study.id,
+                        study_id=None,
+                        classification="result",
+                        state="completed",
+                        message=message,
+                        relationships=(
+                            (
+                                ResearchRelationshipV1(
+                                    kind="supersedes",
+                                    target=str(result.supersedes),
+                                ),
+                            )
+                            if result.supersedes
+                            else ()
+                        ),
+                        evidence=tuple(
+                            self._external_evidence(source) for source in result.sources
+                        ),
+                        summary={
+                            "result": self._public_result_summary(result),
+                            "study_revision": study.revision,
+                        },
+                        actor=result.attribution,
+                    )
+                    created += 1
+                conn.execute(
+                    "INSERT INTO research_result_projection_state VALUES (?, ?, ?) "
+                    "ON CONFLICT(study_id) DO UPDATE SET "
+                    "revision=excluded.revision, "
+                    "projection_version=excluded.projection_version",
+                    (study.id, study.revision, _RESULT_PROJECTION_VERSION),
+                )
+            conn.commit()
+        return created
+
+    def pending_research_log_events(
+        self, sink_id: str, *, limit: int = 100
+    ) -> tuple[ResearchLogEventV1, ...]:
+        if not sink_id or len(sink_id) > 300:
+            raise ValueError("sink id must contain 1 to 300 characters")
+        if limit < 1 or limit > 1000:
+            raise ValueError("research log limit must be between 1 and 1000")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT events.event_json FROM research_log_events AS events "
+                "LEFT JOIN research_record_deliveries AS deliveries "
+                "ON deliveries.sequence=events.sequence AND deliveries.sink_id=? "
+                "WHERE deliveries.state IS NULL OR deliveries.state!='delivered' "
+                "ORDER BY events.sequence LIMIT ?",
+                (sink_id, limit),
+            ).fetchall()
+        return tuple(research_log_event_from_dict(json.loads(row[0])) for row in rows)
+
+    def mark_research_log_delivered(self, sink_id: str, sequence: int) -> None:
+        self._record_delivery(sink_id, sequence, "delivered", None)
+
+    def mark_research_log_failed(self, sink_id: str, sequence: int, error: str) -> None:
+        self._record_delivery(sink_id, sequence, "failed", error[:4000])
+
+    def research_publication_status(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            total = int(
+                conn.execute("SELECT COUNT(*) FROM research_log_events").fetchone()[0]
+            )
+            rows = conn.execute(
+                "SELECT sink_id, state, COUNT(*) AS count, MAX(updated_at) AS updated_at "
+                "FROM research_record_deliveries GROUP BY sink_id, state "
+                "ORDER BY sink_id, state"
+            ).fetchall()
+        return {
+            "event_count": total,
+            "deliveries": [
+                {
+                    "sink_id": str(row["sink_id"]),
+                    "state": str(row["state"]),
+                    "count": int(row["count"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in rows
+            ],
+        }
+
+    def _append_research_log_event(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        producer_event_id: str,
+        research_id: str,
+        study_id: str | None,
+        classification: Any,
+        state: Any,
+        message: str,
+        progress: Mapping[str, Any] | None = None,
+        reserved_cost_usd: float | None = None,
+        observed_cost_usd: float | None = None,
+        relationships: tuple[ResearchRelationshipV1, ...] = (),
+        evidence: tuple[ResearchEvidenceRefV1, ...] = (),
+        summary: Mapping[str, Any] | None = None,
+        actor: AttributionV1 | None = None,
+    ) -> ResearchLogEventV1:
+        existing = conn.execute(
+            "SELECT event_json FROM research_log_events WHERE producer_event_id=?",
+            (producer_event_id,),
+        ).fetchone()
+        if existing:
+            prior = research_log_event_from_dict(json.loads(existing[0]))
+            candidate = sign_research_log_event(
+                replace(
+                    prior,
+                    source="fugue",
+                    actor=actor
+                    or AttributionV1(actor_type="service", name="fugue-research"),
+                    research_id=research_id,
+                    study_id=study_id,
+                    classification=classification,
+                    state=state,
+                    message=message,
+                    progress=dict(progress or {}),
+                    reserved_cost_usd=reserved_cost_usd,
+                    observed_cost_usd=observed_cost_usd,
+                    relationships=relationships,
+                    evidence=evidence,
+                    summary=dict(summary or {}),
+                    event_digest="",
+                )
+            )
+            if candidate.event_digest != prior.event_digest:
+                raise ResearchError(
+                    "publication_conflict",
+                    "producer event id was replayed with different content",
+                    category="conflict",
+                )
+            return prior
+        sequence = (
+            int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM research_log_events"
+                ).fetchone()[0]
+            )
+            + 1
+        )
+        event = sign_research_log_event(
+            ResearchLogEventV1(
+                schema_version=RESEARCH_SCHEMA_VERSION,
+                producer_event_id=producer_event_id,
+                sequence=sequence,
+                timestamp=now(),
+                source="fugue",
+                actor=actor
+                or AttributionV1(actor_type="service", name="fugue-research"),
+                research_id=research_id,
+                study_id=study_id,
+                classification=classification,
+                state=state,
+                message=message,
+                progress=dict(progress or {}),
+                reserved_cost_usd=reserved_cost_usd,
+                observed_cost_usd=observed_cost_usd,
+                relationships=relationships,
+                evidence=evidence,
+                summary=dict(summary or {}),
+            )
+        )
+        conn.execute(
+            "INSERT INTO research_log_events VALUES (?, ?, ?, ?, ?)",
+            (
+                event.sequence,
+                event.producer_event_id,
+                event.event_digest,
+                self._json(event.to_dict()),
+                event.timestamp,
+            ),
+        )
+        return event
+
+    def _record_delivery(
+        self, sink_id: str, sequence: int, state: str, error: str | None
+    ) -> None:
+        if state not in {"delivered", "failed"}:
+            raise ValueError("unknown research record delivery state")
+        with self._connect() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM research_log_events WHERE sequence=?", (sequence,)
+            ).fetchone():
+                raise ResearchError(
+                    "publication_event_not_found",
+                    "research publication event was not found",
+                )
+            conn.execute(
+                "INSERT INTO research_record_deliveries "
+                "(sink_id, sequence, state, attempts, last_error, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?) "
+                "ON CONFLICT(sink_id, sequence) DO UPDATE SET "
+                "state=excluded.state, attempts=attempts+1, "
+                "last_error=excluded.last_error, updated_at=excluded.updated_at",
+                (sink_id, sequence, state, error, now()),
+            )
+
+    @staticmethod
+    def _research_classification(event_type: str, state: str) -> str:
+        if state == "completed":
+            return "result"
+        if state in {"blocked", "cancelled", "interrupted", "failed"}:
+            return "limitation"
+        if event_type.startswith(("evidence_", "evaluation_", "analysis_")):
+            return "evidence"
+        if "admission" in event_type:
+            return "budget"
+        return "lifecycle"
+
+    @staticmethod
+    def _reserved_cost(record: ExperimentRecordV1) -> float | None:
+        value = (record.admission or {}).get("reserved_cost_usd")
+        if value is None:
+            value = record.preview.get("estimated_cost_usd")
+        return float(value) if value is not None else None
+
+    @staticmethod
+    def _observed_cost(record: ExperimentRecordV1) -> float | None:
+        value = (record.outcome or {}).get("observed_cost_usd")
+        return float(value) if value is not None else None
+
+    @staticmethod
+    def _research_progress(record: ExperimentRecordV1) -> dict[str, Any]:
+        outcome = record.outcome or {}
+        total = int(
+            outcome.get("expected_predictions")
+            or record.preview.get("estimated_cells")
+            or 0
+        )
+        completed = int(outcome.get("observed_predictions") or 0)
+        return {"completed": completed, "total": total}
+
+    @staticmethod
+    def _research_summary(record: ExperimentRecordV1) -> dict[str, Any]:
+        outcome = record.outcome or {}
+        summary: dict[str, Any] = {
+            "campaign_id": record.campaign_id,
+            "stage_id": record.draft.get("stage_id"),
+            "planned_cells": record.preview.get("estimated_cells"),
+        }
+        for key in (
+            "expected_predictions",
+            "observed_predictions",
+            "passed",
+            "failed",
+            "not_applicable",
+            "eligible",
+        ):
+            if key in outcome:
+                summary[key] = outcome[key]
+        if outcome.get("limitations") is not None:
+            summary["limitation_count"] = len(outcome["limitations"])
+        return {key: value for key, value in summary.items() if value is not None}
+
+    @staticmethod
+    def _research_evidence(
+        record: ExperimentRecordV1,
+        *,
+        artifact_type: str | None,
+        artifact_digest: str | None,
+    ) -> tuple[ResearchEvidenceRefV1, ...]:
+        values: list[ResearchEvidenceRefV1] = [
+            ResearchEvidenceRefV1(
+                kind="artifact",
+                ref=f"preview:{record.preview['preview_digest']}",
+                system="fugue",
+                digest=str(record.preview["preview_digest"]),
+            )
+        ]
+        if record.run_id:
+            values.append(
+                ResearchEvidenceRefV1(
+                    kind="run",
+                    ref=record.run_id,
+                    system="fugue",
+                    digest=(record.outcome or {}).get("run_snapshot_sha256"),
+                )
+            )
+        outcome = record.outcome or {}
+        if outcome:
+            values.append(
+                ResearchEvidenceRefV1(
+                    kind="outcome",
+                    ref=str(outcome.get("outcome_id") or record.id),
+                    system="fugue",
+                    digest=outcome.get("outcome_digest"),
+                )
+            )
+        if record.evaluation:
+            values.append(
+                ResearchEvidenceRefV1(
+                    kind="evaluation",
+                    ref=str(record.evaluation.get("evaluation_id") or record.id),
+                    system="weave",
+                    digest=record.evaluation.get("evaluation_digest"),
+                )
+            )
+        if record.analysis:
+            values.append(
+                ResearchEvidenceRefV1(
+                    kind="analysis",
+                    ref=str(record.analysis.get("analysis_id") or record.id),
+                    system="fugue",
+                    digest=record.analysis.get("analysis_digest"),
+                )
+            )
+        if artifact_digest and not any(
+            item.digest == artifact_digest for item in values
+        ):
+            values.append(
+                ResearchEvidenceRefV1(
+                    kind="artifact",
+                    ref=f"{artifact_type or 'artifact'}:{artifact_digest}",
+                    system="fugue",
+                    digest=artifact_digest,
+                )
+            )
+        return tuple(values)
+
+    @staticmethod
+    def _external_evidence(value: EvidenceRefV1) -> ResearchEvidenceRefV1:
+        system = (
+            "weave"
+            if value.kind in {"conversation", "evaluation", "trace_audit"}
+            else "fugue"
+        )
+        return ResearchEvidenceRefV1(
+            system=system,
+            kind=value.kind,
+            ref=value.ref,
+            uri=value.uri,
+            digest=value.digest,
+            version=value.version,
+            selector=public_evidence_selector(value.selector),
+        )
+
+    @staticmethod
+    def _public_result_summary(result: Any) -> dict[str, Any]:
+        """Keep the human conclusion and aggregates, never task-private detail."""
+
+        raw = result.to_dict()
+        allowed = (
+            "id",
+            "revision",
+            "statement",
+            "kind",
+            "outcome",
+            "estimate",
+            "population",
+            "sample_size",
+            "aggregation",
+            "exclusions",
+            "created_at",
+            "supersedes",
+        )
+        return {key: raw[key] for key in allowed if key in raw}
 
     def _operation(
         self, conn: sqlite3.Connection, scope_id: str, operation_id: str

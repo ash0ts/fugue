@@ -27,6 +27,12 @@ def bootstrap_container_secrets(
     else:
         _make_compose_readable(agent_token)
 
+    record_token = secret_dir / "research_record_ingest_key"
+    if not record_token.exists():
+        _write_secret(record_token, secrets.token_urlsafe(32))
+    else:
+        _make_compose_readable(record_token)
+
     wandb_token = secret_dir / "wandb_api_key"
     if not wandb_token.exists():
         value = os.environ.get("WANDB_API_KEY", "").strip()
@@ -49,6 +55,7 @@ def bootstrap_container_secrets(
     return {
         "compose_environment_file": str(compose_environment),
         "research_api_key_file": str(agent_token),
+        "research_record_ingest_key_file": str(record_token),
         "wandb_api_key_file": str(wandb_token),
         "trace_data_directory": str(root / ".fugue" / "trace-data"),
     }

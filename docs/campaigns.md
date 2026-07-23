@@ -75,6 +75,7 @@ identities. They never copy raw conversations, commands, environment values,
 expected paths, or gold data. Campaigns cannot publish to the public Atlas.
 
 `fugue.research` packages this lifecycle as the higher-level
-`Study → Experiment → Run → Result` interface for outer loops. Its Python,
+`Research → controlled Study → admitted Run → evaluation → sourced Result`
+interface for outer loops. Its Python,
 HTTP/SSE, and MCP surfaces all wrap `CampaignService`; none calls operator
 internals or introduces another executor. See `docs/research.md`.

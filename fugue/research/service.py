@@ -34,6 +34,7 @@ from fugue.research.contracts import (
     sign_preview,
     sign_record,
 )
+from fugue.research.records import ResearchRecordPublisher
 from fugue.research.store import StudyStore
 from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
@@ -114,12 +115,16 @@ class ResearchService:
         approval_ledger: ApprovalLedger | None = None,
         trace_registry: TraceSourceRegistry | None = None,
         candidate_sources: CandidateSourceRegistry | None = None,
+        record_publisher: ResearchRecordPublisher | None = None,
         lease_seconds: float = 30,
         lease_heartbeat_interval: float | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
         self.campaign = campaign_service or CampaignService(self.repo_root, env_file)
         self.store = store or StudyStore(self.repo_root)
+        self.record_publisher = (
+            record_publisher or ResearchRecordPublisher.from_environment(self.store)
+        )
         self.approvals = approval_ledger or ApprovalLedger(self.store.path)
         self.trace_registry = trace_registry or TraceSourceRegistry.from_file(
             _optional_config(
@@ -155,6 +160,30 @@ class ResearchService:
             "trace_sources": list(self.trace_registry.catalog()),
             "candidate_sources": list(self.candidate_sources.catalog()),
         }
+
+    def request_study_approval(
+        self,
+        preview: ExperimentPreviewV1,
+        *,
+        idempotency_key: str,
+    ) -> Any:
+        """Record the first externally visible preview event without execution."""
+
+        event = self.store.record_approval_request(
+            preview,
+            operation_id=idempotency_key,
+        )
+        self.publish_records()
+        return event
+
+    def publish_records(self, *, limit: int = 100) -> dict[str, int]:
+        """Best-effort projection; sink failures never alter research state."""
+
+        try:
+            self.store.ensure_result_projection_events()
+            return self.record_publisher.flush(limit=limit)
+        except Exception:
+            return {"delivered": 0, "failed": 1}
 
     def preview_experiment(
         self, study_id: str, draft: ExperimentDraftV1
@@ -291,6 +320,10 @@ class ResearchService:
                 "the accepted preview no longer matches campaign policy or catalog",
                 category="policy",
             )
+        self.store.record_approval_request(
+            preview,
+            operation_id=f"request-{preview.preview_digest[:20]}",
+        )
         timestamp = now()
         approval = self.approvals.claim(
             approval_digest=approval_digest,
@@ -1017,6 +1050,7 @@ class ResearchWorker:
     def run_forever(self) -> None:
         while not self._stop.is_set():
             record = self.service.run_once(self.worker_id)
+            self.service.publish_records()
             if record is None or record.state == "running":
                 self._stop.wait(self.poll_interval)
 
