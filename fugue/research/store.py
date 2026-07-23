@@ -55,6 +55,7 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 2
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 1
 
 
 class StudyStore:
@@ -147,6 +148,11 @@ class StudyStore:
                 CREATE TABLE IF NOT EXISTS research_result_projection_state (
                     study_id TEXT PRIMARY KEY,
                     revision INTEGER NOT NULL,
+                    projection_version INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS experiment_view_projection_state (
+                    experiment_id TEXT PRIMARY KEY,
+                    record_updated_at TEXT NOT NULL,
                     projection_version INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS schema_info (
@@ -1562,6 +1568,154 @@ class StudyStore:
             conn.commit()
         return created
 
+    def ensure_experiment_view_projection_events(self) -> int:
+        """Backfill decision-ready views without changing experiment execution.
+
+        Older Fugue records can contain a complete, immutable experiment while
+        their publication events predate ``summary.experiment_view``.  This
+        migration emits only the missing public projections through the same
+        append-only outbox used by live transitions.  It never updates the
+        experiment, claims a worker lease, or invokes the campaign executor.
+        """
+
+        created = 0
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT experiments.record_json, experiments.updated_at "
+                "FROM experiments "
+                "LEFT JOIN experiment_view_projection_state AS projection "
+                "ON projection.experiment_id=experiments.experiment_id "
+                "WHERE projection.record_updated_at IS NULL "
+                "OR projection.record_updated_at!=experiments.updated_at "
+                "OR projection.projection_version<? "
+                "ORDER BY experiments.created_at, experiments.experiment_id",
+                (_EXPERIMENT_VIEW_PROJECTION_VERSION,),
+            ).fetchall()
+            published_kinds = self._published_experiment_view_kinds(conn)
+            for row in rows:
+                record = experiment_record_from_dict(json.loads(row["record_json"]))
+                existing_kinds = published_kinds.get(record.id, set())
+                if "design" not in existing_kinds:
+                    view = build_design_view(
+                        record.preview,
+                        approval_state=(
+                            "approved" if record.approval else "awaiting_approval"
+                        ),
+                    )
+                    view_digest = stable_digest(view.to_dict())
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=(
+                            f"fugue:{record.study_id}:{record.id}:"
+                            f"experiment-view-design-v"
+                            f"{_EXPERIMENT_VIEW_PROJECTION_VERSION}-{view_digest}"
+                        ),
+                        research_id=record.study_id,
+                        study_id=record.id,
+                        classification="lifecycle",
+                        state=event_state(record.state),
+                        message=(
+                            "Replayed the immutable experiment design into the "
+                            "decision-ready projection."
+                        ),
+                        reserved_cost_usd=self._reserved_cost(record),
+                        relationships=tuple(
+                            ResearchRelationshipV1(
+                                kind="derived_from",
+                                target=parent,
+                            )
+                            for parent in record.parent_experiment_ids
+                        ),
+                        evidence=(
+                            ResearchEvidenceRefV1(
+                                kind="artifact",
+                                ref=f"preview:{record.preview['preview_digest']}",
+                                system="fugue",
+                                digest=str(record.preview["preview_digest"]),
+                            ),
+                        ),
+                        summary={
+                            "campaign_id": record.campaign_id,
+                            "planned_cells": record.preview.get("estimated_cells"),
+                            "experiment_view": view.to_dict(),
+                        },
+                    )
+                    created += 1
+                if record.outcome and "evaluation" not in existing_kinds:
+                    view = build_evaluation_view(record.to_dict())
+                    view_digest = stable_digest(view.to_dict())
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=(
+                            f"fugue:{record.study_id}:{record.id}:"
+                            f"experiment-view-evaluation-v"
+                            f"{_EXPERIMENT_VIEW_PROJECTION_VERSION}-{view_digest}"
+                        ),
+                        research_id=record.study_id,
+                        study_id=record.id,
+                        classification=self._research_classification(
+                            "experiment_projection_replayed",
+                            record.state,
+                        ),
+                        state=event_state(record.state),
+                        message=(
+                            "Replayed immutable experiment evidence into the "
+                            "decision-ready evaluation projection."
+                        ),
+                        reserved_cost_usd=self._reserved_cost(record),
+                        observed_cost_usd=self._observed_cost(record),
+                        relationships=tuple(
+                            ResearchRelationshipV1(
+                                kind="derived_from",
+                                target=parent,
+                            )
+                            for parent in record.parent_experiment_ids
+                        ),
+                        evidence=self._research_evidence(
+                            record,
+                            artifact_type=None,
+                            artifact_digest=None,
+                        ),
+                        progress=self._research_progress(record),
+                        summary={
+                            **self._research_summary(record),
+                            "experiment_view": view.to_dict(),
+                        },
+                    )
+                    created += 1
+                conn.execute(
+                    "INSERT INTO experiment_view_projection_state VALUES (?, ?, ?) "
+                    "ON CONFLICT(experiment_id) DO UPDATE SET "
+                    "record_updated_at=excluded.record_updated_at, "
+                    "projection_version=excluded.projection_version",
+                    (
+                        record.id,
+                        str(row["updated_at"]),
+                        _EXPERIMENT_VIEW_PROJECTION_VERSION,
+                    ),
+                )
+            conn.commit()
+        return created
+
+    @staticmethod
+    def _published_experiment_view_kinds(
+        conn: sqlite3.Connection,
+    ) -> dict[str, set[str]]:
+        rows = conn.execute(
+            "SELECT event_json FROM research_log_events ORDER BY sequence",
+        ).fetchall()
+        kinds: dict[str, set[str]] = {}
+        for row in rows:
+            raw = json.loads(row["event_json"])
+            experiment_id = raw.get("study_id")
+            if not isinstance(experiment_id, str):
+                continue
+            view = raw.get("summary", {}).get("experiment_view")
+            if isinstance(view, Mapping) and isinstance(view.get("kind"), str):
+                kinds.setdefault(experiment_id, set()).add(str(view["kind"]))
+        return kinds
+
     def pending_research_log_events(
         self, sink_id: str, *, limit: int = 100
     ) -> tuple[ResearchLogEventV1, ...]:
@@ -1795,9 +1949,7 @@ class StudyStore:
         else:
             summary["experiment_view"] = build_design_view(
                 record.preview,
-                approval_state=(
-                    "approved" if record.approval else "awaiting_approval"
-                ),
+                approval_state=("approved" if record.approval else "awaiting_approval"),
             ).to_dict()
         return {key: value for key, value in summary.items() if value is not None}
 

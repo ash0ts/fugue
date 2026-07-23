@@ -181,6 +181,7 @@ class ResearchService:
 
         try:
             self.store.ensure_result_projection_events()
+            self.store.ensure_experiment_view_projection_events()
             return self.record_publisher.flush(limit=limit)
         except Exception:
             return {"delivered": 0, "failed": 1}
