@@ -1,5 +1,0 @@
-#!/bin/sh
-set -eu
-mkdir -p /logs/capture
-printf '%s\n' "$*" >> /logs/capture/evidence-actions.log
-rm -f -- "$@"

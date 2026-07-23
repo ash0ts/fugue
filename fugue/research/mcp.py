@@ -193,6 +193,17 @@ def create_mcp_server(  # noqa: C901
         ).to_dict()
 
     @mcp.tool()
+    def fugue_research_task_suite_derive_preview(
+        research_id: str, draft: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Map selected traces to a reviewed synthetic task without execution."""
+
+        return research.task_recipes.derive_preview(
+            research_id,
+            task_recipe_draft_from_dict(draft, require_digest=False),
+        ).to_dict()
+
+    @mcp.tool()
     def fugue_experiment_preview(
         study_id: str, draft: dict[str, Any]
     ) -> dict[str, Any]:
@@ -282,33 +293,19 @@ def create_mcp_server(  # noqa: C901
         study_id: str,
         after: int = 0,
         wait_seconds: float = 0.0,
+        limit: int = 100,
     ) -> dict[str, Any]:
         """Read controlled Study events after a resumable cursor."""
 
-        if after < 0 or wait_seconds < 0 or wait_seconds > 30:
-            raise ValueError("after must be non-negative and wait_seconds at most 30")
-        deadline = time.monotonic() + wait_seconds
-        while True:
-            events = research.store.events(study_id, after=after)
-            record = research.store.get_experiment(study_id)
-            if events or record.state in {
-                "completed",
-                "blocked",
-                "cancelled",
-                "interrupted",
-            }:
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
-        return {
-            "study_id": study_id,
-            "events": [item.to_dict() for item in events],
-            "next_cursor": events[-1].sequence if events else after,
-            "state": record.state,
-            "terminal": record.state
-            in {"completed", "blocked", "cancelled", "interrupted"},
-        }
+        page = watch_experiment_page(
+            research,
+            study_id,
+            after=after,
+            wait_seconds=wait_seconds,
+            limit=limit,
+        ).to_dict()
+        page["study_id"] = page.pop("experiment_id")
+        return page
 
     @mcp.tool()
     def fugue_experiment_cancel(

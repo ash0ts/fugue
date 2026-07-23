@@ -162,7 +162,7 @@ def test_selected_child_calls_lock_roots_and_derive_synthetic_recipe(
     app = create_app(REPO_ROOT, api_key="test-key", service=service)
     with TestClient(app) as client:
         response = client.post(
-            "/v1/studies/northstar-loop-study/task-suites:derive-preview",
+            "/v1/research/northstar-loop-study/task-suites:derive-preview",
             headers={"Authorization": "Bearer test-key"},
             json={
                 "draft": {

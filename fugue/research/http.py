@@ -326,6 +326,7 @@ def create_app(  # noqa: C901
     def get_trace_audit(audit_id: str) -> dict[str, Any]:
         return research.traces.store.get(audit_id).to_dict()
 
+    @app.post("/v1/research/{study_id}/task-suites:derive-preview")
     @app.post("/v1/studies/{study_id}/task-suites:derive-preview")
     def derive_task_suite_preview(
         study_id: str, body: PreviewTaskRecipeBody

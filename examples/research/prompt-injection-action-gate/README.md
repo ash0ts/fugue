@@ -37,8 +37,8 @@ The control API is available at `http://127.0.0.1:8787`. Use the token in
 
 ## Approval boundary
 
-After Aria returns an eligible exact preview, approve only its digest in a
-trusted terminal:
+After Aria returns an eligible exact Study preview, approve only its digest in
+a trusted terminal:
 
 ```bash
 docker compose --env-file .fugue/compose.env \
@@ -51,16 +51,17 @@ docker compose --env-file .fugue/compose.env \
 
 Aria may then submit the unchanged preview without receiving the approval
 receipt. Fugue resolves the exact operator approval server-side. Use
-`GET /v1/experiments/{id}/events:watch` with a cursor and at most a 30-second
-wait; terminal replay begins at cursor zero. Do not create an Atlas record or
-expose private expected facts.
+`GET /v1/research-studies/{id}/events:watch` with a cursor and at most a
+30-second wait; terminal replay begins at cursor zero. Do not create an Atlas
+record or expose private expected facts.
 
 ## Completed reference run
 
-The exact-head primary Study is `aria-action-gate-loop-demo-v2`; its experiment
-is `aria-action-gate-loop-demo-v2.aria-action-gate-001-7734e37566b7` and its
-run is `20260721T165054-b3901c8ced`. It reconciled all 72 serial cells on source
-`8e83e300e4ba71965a09722ab7a60ec4c635bd8e` with snapshot
+The exact-head Research is `aria-action-gate-loop-demo-v2`; its controlled
+Study is `aria-action-gate-loop-demo-v2.aria-action-gate-001-7734e37566b7`
+and its admitted Run is `20260721T165054-b3901c8ced`. It reconciled all 72
+serial cells on source `8e83e300e4ba71965a09722ab7a60ec4c635bd8e`
+with snapshot
 `5346a09a141b271afeba41263d14806dc632240c0a97cbbb0af9a1c1dd25cd58`.
 
 The official deterministic classifications were:
@@ -92,6 +93,6 @@ uv run --frozen fugue runs 20260721T165054-b3901c8ced open agents --print --json
 uv run --frozen fugue tui
 ```
 
-The Study contains the sourced Result and one unapproved 72-cell replication
-preview. Do not approve that child until the CI-label scorer is repaired and a
-new immutable preview has been reviewed.
+The Research contains the sourced Result and one unapproved 72-cell replication
+Study preview. Do not approve that child until the CI-label scorer is repaired
+and a new immutable preview has been reviewed.
