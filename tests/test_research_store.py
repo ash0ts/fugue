@@ -125,7 +125,7 @@ def test_notes_do_not_rewrite_brief_and_results_require_provenance(
     result_event = next(
         event
         for event in store.research_log_events()
-        if event.producer_event_id.endswith(":projection-v1")
+        if event.producer_event_id.endswith(":projection-v2")
     )
     assert result_event.message == "Harness A and B differed on the locked tasks."
     projected_result = result_event.summary["result"]
@@ -140,6 +140,7 @@ def test_notes_do_not_rewrite_brief_and_results_require_provenance(
     assert projected_result["sample_size"] == 8
     assert projected_result["exclusions"] == ["not a universal ranking"]
     assert "conditions" not in projected_result
+    assert result_event.evidence[0].system == "fugue"
     assert store.ensure_result_projection_events() == 0
 
 

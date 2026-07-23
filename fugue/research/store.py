@@ -49,6 +49,8 @@ from fugue.research.records import (
     sign_research_log_event,
 )
 
+_RESULT_PROJECTION_VERSION = 2
+
 
 class StudyStore:
     """Transactional research memory and operational experiment index."""
@@ -139,13 +141,25 @@ class StudyStore:
                 );
                 CREATE TABLE IF NOT EXISTS research_result_projection_state (
                     study_id TEXT PRIMARY KEY,
-                    revision INTEGER NOT NULL
+                    revision INTEGER NOT NULL,
+                    projection_version INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS schema_info (
                     schema_version INTEGER NOT NULL
                 );
                 """
             )
+            projection_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(research_result_projection_state)"
+                ).fetchall()
+            }
+            if "projection_version" not in projection_columns:
+                conn.execute(
+                    "ALTER TABLE research_result_projection_state "
+                    "ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 1"
+                )
             version = conn.execute("SELECT schema_version FROM schema_info").fetchone()
             if version is None:
                 conn.execute(
@@ -1422,14 +1436,17 @@ class StudyStore:
                 "ON projection.study_id=studies.study_id "
                 "WHERE projection.revision IS NULL "
                 "OR projection.revision<studies.revision "
-                "ORDER BY studies.study_id"
+                "OR projection.projection_version<? "
+                "ORDER BY studies.study_id",
+                (_RESULT_PROJECTION_VERSION,),
             ).fetchall()
             for row in rows:
                 study = study_from_dict(json.loads(row["snapshot_json"]))
                 for result in study.results:
                     producer_event_id = (
                         f"fugue:{study.id}:result-{result.id}-"
-                        f"revision-{result.revision}:projection-v1"
+                        f"revision-{result.revision}:"
+                        f"projection-v{_RESULT_PROJECTION_VERSION}"
                     )
                     if conn.execute(
                         "SELECT 1 FROM research_log_events WHERE producer_event_id=?",
@@ -1468,9 +1485,11 @@ class StudyStore:
                     )
                     created += 1
                 conn.execute(
-                    "INSERT INTO research_result_projection_state VALUES (?, ?) "
-                    "ON CONFLICT(study_id) DO UPDATE SET revision=excluded.revision",
-                    (study.id, study.revision),
+                    "INSERT INTO research_result_projection_state VALUES (?, ?, ?) "
+                    "ON CONFLICT(study_id) DO UPDATE SET "
+                    "revision=excluded.revision, "
+                    "projection_version=excluded.projection_version",
+                    (study.id, study.revision, _RESULT_PROJECTION_VERSION),
                 )
             conn.commit()
         return created
@@ -1715,7 +1734,7 @@ class StudyStore:
                 ResearchEvidenceRefV1(
                     kind="run",
                     ref=record.run_id,
-                    system="wandb",
+                    system="fugue",
                     digest=(record.outcome or {}).get("run_snapshot_sha256"),
                 )
             )
@@ -1765,8 +1784,6 @@ class StudyStore:
         system = (
             "weave"
             if value.kind in {"conversation", "evaluation", "trace_audit"}
-            else "wandb"
-            if value.kind == "run"
             else "fugue"
         )
         return ResearchEvidenceRefV1(
