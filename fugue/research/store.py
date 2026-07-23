@@ -137,6 +137,10 @@ class StudyStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (sink_id, sequence)
                 );
+                CREATE TABLE IF NOT EXISTS research_result_projection_state (
+                    study_id TEXT PRIMARY KEY,
+                    revision INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS schema_info (
                     schema_version INTEGER NOT NULL
                 );
@@ -1406,6 +1410,71 @@ class StudyStore:
             ).fetchall()
         return tuple(research_log_event_from_dict(json.loads(row[0])) for row in rows)
 
+    def ensure_result_projection_events(self) -> int:
+        """Append one public-safe projection event per immutable Study Result."""
+
+        created = 0
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT studies.snapshot_json FROM studies "
+                "LEFT JOIN research_result_projection_state AS projection "
+                "ON projection.study_id=studies.study_id "
+                "WHERE projection.revision IS NULL "
+                "OR projection.revision<studies.revision "
+                "ORDER BY studies.study_id"
+            ).fetchall()
+            for row in rows:
+                study = study_from_dict(json.loads(row["snapshot_json"]))
+                for result in study.results:
+                    producer_event_id = (
+                        f"fugue:{study.id}:result-{result.id}-"
+                        f"revision-{result.revision}:projection-v1"
+                    )
+                    if conn.execute(
+                        "SELECT 1 FROM research_log_events WHERE producer_event_id=?",
+                        (producer_event_id,),
+                    ).fetchone():
+                        continue
+                    message = result.statement
+                    if len(message) > 4000:
+                        message = message[:3997] + "..."
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=producer_event_id,
+                        research_id=study.id,
+                        study_id=None,
+                        classification="result",
+                        state="completed",
+                        message=message,
+                        relationships=(
+                            (
+                                ResearchRelationshipV1(
+                                    kind="supersedes",
+                                    target=str(result.supersedes),
+                                ),
+                            )
+                            if result.supersedes
+                            else ()
+                        ),
+                        evidence=tuple(
+                            self._external_evidence(source) for source in result.sources
+                        ),
+                        summary={
+                            "result": self._public_result_summary(result),
+                            "study_revision": study.revision,
+                        },
+                        actor=result.attribution,
+                    )
+                    created += 1
+                conn.execute(
+                    "INSERT INTO research_result_projection_state VALUES (?, ?) "
+                    "ON CONFLICT(study_id) DO UPDATE SET revision=excluded.revision",
+                    (study.id, study.revision),
+                )
+            conn.commit()
+        return created
+
     def pending_research_log_events(
         self, sink_id: str, *, limit: int = 100
     ) -> tuple[ResearchLogEventV1, ...]:
@@ -1709,6 +1778,27 @@ class StudyStore:
             version=value.version,
             selector=public_evidence_selector(value.selector),
         )
+
+    @staticmethod
+    def _public_result_summary(result: Any) -> dict[str, Any]:
+        """Keep the human conclusion and aggregates, never task-private detail."""
+
+        raw = result.to_dict()
+        allowed = (
+            "id",
+            "revision",
+            "statement",
+            "kind",
+            "outcome",
+            "estimate",
+            "population",
+            "sample_size",
+            "aggregation",
+            "exclusions",
+            "created_at",
+            "supersedes",
+        )
+        return {key: raw[key] for key in allowed if key in raw}
 
     def _operation(
         self, conn: sqlite3.Connection, scope_id: str, operation_id: str

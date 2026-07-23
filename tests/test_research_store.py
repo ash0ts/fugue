@@ -121,6 +121,26 @@ def test_notes_do_not_rewrite_brief_and_results_require_provenance(
     assert store.context("study-1").results[0]["id"] == "result-1"
     assert store.reconstruct_study("study-1", revision=2).brief.findings == ""
     assert store.reconstruct_study("study-1") == study
+    assert store.ensure_result_projection_events() == 1
+    result_event = next(
+        event
+        for event in store.research_log_events()
+        if event.producer_event_id.endswith(":projection-v1")
+    )
+    assert result_event.message == "Harness A and B differed on the locked tasks."
+    projected_result = result_event.summary["result"]
+    assert projected_result["id"] == "result-1"
+    assert projected_result["revision"] == study.results[0].revision
+    assert projected_result["statement"] == (
+        "Harness A and B differed on the locked tasks."
+    )
+    assert projected_result["outcome"] == "observed difference"
+    assert projected_result["estimate"]["value"] == 0.25
+    assert projected_result["population"] == "four locked tasks"
+    assert projected_result["sample_size"] == 8
+    assert projected_result["exclusions"] == ["not a universal ranking"]
+    assert "conditions" not in projected_result
+    assert store.ensure_result_projection_events() == 0
 
 
 def test_revision_conflicts_and_immutable_result_ids(tmp_path: Path) -> None:
