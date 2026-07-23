@@ -530,6 +530,16 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert all("docker.sock" not in value for value in operator["volumes"])
 
 
+def test_research_image_ci_materializes_every_compose_secret() -> None:
+    workflow = (
+        Path(__file__).parents[1] / ".github/workflows/research-image.yml"
+    ).read_text(encoding="utf-8")
+
+    assert ".fugue/secrets/research_api_key" in workflow
+    assert ".fugue/secrets/research_record_ingest_key" in workflow
+    assert ".fugue/secrets/wandb_api_key" in workflow
+
+
 def test_compose_preserves_host_checkout_path_for_harbor_bind_mounts() -> None:
     compose = yaml.safe_load(
         (Path(__file__).parents[1] / "compose.research.yaml").read_text(

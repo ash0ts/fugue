@@ -34,6 +34,7 @@ jobs:
         run: |
           mkdir -p .fugue/secrets .fugue/trace-data .fugue/runtime .fugue/cache
           printf '%s\n' 'ci-research-token' > .fugue/secrets/research_api_key
+          printf '%s\n' 'ci-record-ingest-token' > .fugue/secrets/research_record_ingest_key
           printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
           {
             printf 'FUGUE_DOCKER_GID="%s"\n' "$(stat -c '%g' /var/run/docker.sock)"
