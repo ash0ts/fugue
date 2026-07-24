@@ -229,6 +229,9 @@ def build_run_snapshot(
             "agent": agent,
             "environment": _portable(environment, candidate_required_env, secret_names),
             "required_env": sorted(name for name in candidate_required_env if name),
+            "sandbox_attestation": (job.config.get("fugue") or {}).get(
+                "sandbox_attestation"
+            ),
         }
         context_runtime = resolved.execution_definition.get("context_runtime")
         if context_runtime is not None:

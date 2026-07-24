@@ -577,6 +577,7 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
     assert runtime.service and runtime.image and runtime.port
     service: dict[str, Any] = {
         "image": runtime.image,
+        "pull_policy": "never",
         "read_only": True,
         "user": "65532:65532",
         "cap_drop": ["ALL"],
@@ -586,6 +587,11 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
         "environment": {
             name: f"${{{name}}}" for name in spec.required_env
         },
+        "deploy": {
+            "resources": runtime.resources
+            or {"limits": {"cpus": "2.0", "memory": "2g"}}
+        },
+        "pids_limit": 512,
     }
     if runtime.command:
         service["command"] = list(runtime.command)
@@ -593,8 +599,6 @@ def _compose(spec: IntegrationSpec, config: dict[str, Any]) -> dict[str, Any]:
         service["environment"]["FUGUE_INTEGRATION_CONFIG"] = json.dumps(
             config, sort_keys=True, separators=(",", ":")
         )
-    if runtime.resources:
-        service["deploy"] = {"resources": runtime.resources}
     health = runtime.healthcheck
     if health:
         if health.get("path"):

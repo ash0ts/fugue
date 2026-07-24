@@ -27,6 +27,7 @@ services:
     environment:
       HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
       FUGUE_RESEARCH_API_KEY_FILE: /run/secrets/research_api_key
+      FUGUE_RESEARCH_ACCESS_GRANTS: /run/secrets/research_access_grants
       FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
       FUGUE_RESEARCH_TRACE_SOURCES: /etc/fugue/trace-sources.yaml
       WANDB_API_KEY_FILE: /run/secrets/trace_wandb_api_key
@@ -38,6 +39,7 @@ services:
       FUGUE_RESEARCH_RECORD_RESEARCH_IDS: ${FUGUE_RESEARCH_RECORD_RESEARCH_IDS:-}
     secrets:
       - research_api_key
+      - research_access_grants
       - trace_wandb_api_key
       - research_record_ingest_key
     volumes:
@@ -97,6 +99,7 @@ services:
       - "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
     environment:
       HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+      DOCKER_HOST: unix://${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}
       FUGUE_BRIDGE_HEALTH_TRANSPORT: docker-exec
       FUGUE_RESEARCH_CANDIDATE_SOURCES: /etc/fugue/candidate-sources.yaml
       WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
@@ -126,7 +129,7 @@ services:
       - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/runtime
       - ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache:${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/cache
       - ${FUGUE_CANDIDATE_SOURCES_FILE:-./configs/fugue/research/candidate-sources.yaml}:/etc/fugue/candidate-sources.yaml:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}:${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}
     cap_drop:
       - ALL
     security_opt:
@@ -168,6 +171,8 @@ volumes:
 secrets:
   research_api_key:
     file: ${FUGUE_RESEARCH_API_KEY_FILE:-./.fugue/secrets/research_api_key}
+  research_access_grants:
+    file: ${FUGUE_RESEARCH_ACCESS_GRANTS_FILE:-./.fugue/secrets/research_access_grants.json}
   wandb_api_key:
     file: ${WANDB_API_KEY_FILE:-./.fugue/secrets/wandb_api_key}
   trace_wandb_api_key:

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from fugue.bench.candidates import stable_digest
+from fugue.research.display_labels import humanize_display_id
 
 EXPERIMENT_VIEW_SCHEMA_VERSION = 1
 EXPERIMENT_VIEW_CELL_LIMIT = 256
@@ -510,6 +511,15 @@ def build_design_view(
             details={
                 "call_count": len(selected_calls),
                 "system": "weave",
+                **(
+                    {
+                        "reviewed_cohort_manifest_digest": str(
+                            provenance["reviewed_cohort_manifest_digest"]
+                        )
+                    }
+                    if provenance.get("reviewed_cohort_manifest_digest")
+                    else {}
+                ),
             },
         )
     context = str(draft.get("decision_rationale") or "").strip() or None
@@ -582,7 +592,7 @@ def build_design_view(
             taskset=taskset,
             harnesses=tuple(
                 ExperimentDescriptorV1(
-                    id=value, label=labels.get(value, _humanize(value))
+                    id=value, label=labels.get(value, humanize_display_id(value))
                 )
                 for value in harness_ids
             ),
@@ -1203,7 +1213,7 @@ def _research_treatment_arms(
         arms.append(
             ExperimentTreatmentArmV1(
                 id=arm,
-                label=str(labels.get(arm) or _humanize(arm))[:300],
+                label=str(labels.get(arm) or humanize_display_id(arm))[:300],
                 factor_levels={
                     str(key)[:200]: str(value)[:200]
                     for key, value in levels.items()
@@ -1770,7 +1780,7 @@ def _reviewed_task_label(raw: Mapping[str, Any]) -> str:
 def _taskset_label(draft: Mapping[str, Any], task_count: Any) -> str:
     workloads = [str(item) for item in draft.get("workloads") or ()]
     if workloads:
-        return ", ".join(_humanize(item) for item in workloads)[:300]
+        return ", ".join(humanize_display_id(item) for item in workloads)[:300]
     count = int(task_count or 0)
     return f"{count} locked task{'s' if count != 1 else ''}"
 
@@ -1805,6 +1815,18 @@ def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], .
                         "ref": f"{project}/call/{call_id}",
                     }
                 )
+    manifest_digest = str(
+        provenance.get("reviewed_cohort_manifest_digest") or ""
+    )
+    if manifest_digest:
+        links.append(
+            {
+                "system": "fugue",
+                "kind": "reviewed_cohort_manifest",
+                "ref": manifest_digest,
+                "digest": manifest_digest,
+            }
+        )
     run_id = str(record.get("run_id") or "")
     if run_id:
         links.append({"system": "fugue", "kind": "run", "ref": run_id})
@@ -2646,10 +2668,6 @@ def _optional_digest(raw: Any, field_name: str) -> str | None:
 
 def _ordered_values(values: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
-
-
-def _humanize(value: str) -> str:
-    return value.replace("_", " ").replace("-", " ").strip().title()
 
 
 def _drop_empty(

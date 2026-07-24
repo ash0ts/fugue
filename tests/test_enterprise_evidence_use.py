@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from fugue.bench.campaigns import get_campaign
 from fugue.bench.export import _evidence_use_rewards
@@ -16,6 +19,8 @@ from fugue.research.agent_contracts import (
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
 from fugue.research.task_recipes import (
+    _reviewed_cohort_blockers,
+    reviewed_cohort_manifest_from_dict,
     reviewed_task_recipe_ids,
     task_recipe_draft_from_dict,
 )
@@ -23,6 +28,11 @@ from fugue.research.traces import TraceSourceRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATASET_ROOT = REPO_ROOT / "datasets/enterprise-evidence-use-v1"
+COHORT = json.loads(
+    (
+        REPO_ROOT / "examples/research/enterprise-evidence/cohort-manifest.json"
+    ).read_text()
+)
 
 
 def _run_task_verifier(
@@ -52,19 +62,21 @@ def _run_task_verifier(
 
 
 def _service(tmp_path: Path) -> ResearchService:
+    rows = {item["call_id"]: item for item in COHORT["calls"]}
+
     def fetch(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if "call_ids" in payload["filter"]:
             return [
                 {
                     "id": call_id,
-                    "trace_id": f"trace-{index}",
+                    "trace_id": rows[call_id]["root_id"],
                     "op_name": "open_document",
                 }
-                for index, call_id in enumerate(payload["filter"]["call_ids"], 1)
+                for call_id in payload["filter"]["call_ids"]
             ]
         return [
             {
-                "id": f"root-{index}",
+                "id": trace_id,
                 "trace_id": trace_id,
                 "op_name": "answer_enterprise_question",
                 "started_at": f"2026-07-24T12:0{index}:00Z",
@@ -74,9 +86,26 @@ def _service(tmp_path: Path) -> ResearchService:
                     "demo.outcome": "evidence-not-used",
                     "demo.needs_review": True,
                     "demo.synthetic": True,
+                    "demo.source_row_digest": rows[trace_id]["source_row_digest"],
                 },
             }
             for index, trace_id in enumerate(payload["filter"]["trace_ids"], 1)
+        ]
+
+    def fetch_feedback(_: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": f"feedback-{call_id}",
+                "weave_ref": f"weave:///{COHORT['project']}/call/{call_id}",
+                "feedback_type": COHORT["feedback"]["feedback_type"],
+                "creator": COHORT["feedback"]["creator_class"],
+                "payload": {
+                    **COHORT["feedback"]["expected_value"],
+                    "revision": COHORT["feedback"]["revision"],
+                    "source_row_digest": row["source_row_digest"],
+                },
+            }
+            for call_id, row in rows.items()
         ]
 
     registry = TraceSourceRegistry.from_mapping(
@@ -86,7 +115,9 @@ def _service(tmp_path: Path) -> ResearchService:
                 {
                     "id": "enterprise-evidence-agent",
                     "adapter": "weave",
-                    "allowed_projects": ["demo/enterprise-evidence"],
+                    "allowed_projects": [COHORT["project"]],
+                    "include_review_feedback": True,
+                    "reviewed_cohort_manifest_digest": COHORT["manifest_digest"],
                     "allowed_fields": ["status", "operation"],
                     "allowed_filters": ["status"],
                 }
@@ -94,6 +125,7 @@ def _service(tmp_path: Path) -> ResearchService:
         },
         root=tmp_path,
         weave_fetchers={"enterprise-evidence-agent": fetch},
+        weave_feedback_fetchers={"enterprise-evidence-agent": fetch_feedback},
     )
     service = ResearchService(
         REPO_ROOT,
@@ -163,9 +195,9 @@ def test_enterprise_recipe_requires_exact_reviewed_four_call_cohort(
 ) -> None:
     service = _service(tmp_path)
     selection = build_trace_selection(
-        project="demo/enterprise-evidence",
+        project=COHORT["project"],
         mode="selected",
-        call_ids=[f"reviewed-{index}" for index in range(1, 5)],
+        call_ids=[item["call_id"] for item in COHORT["calls"]],
         filters={},
         max_traces=4,
     )
@@ -200,17 +232,102 @@ def test_enterprise_recipe_requires_exact_reviewed_four_call_cohort(
 
     assert recipe.eligible is True
     assert recipe.provenance["source_dataset"] == "enterprise-evidence-agent-v1"
-    assert recipe.provenance["needs_review_root_count"] == 4
     assert (
-        recipe.experiment_binding["campaign_id"]
-        == "enterprise-evidence-use-demo-v3"
+        recipe.provenance["reviewed_cohort_manifest_digest"]
+        == COHORT["manifest_digest"]
     )
+    assert recipe.provenance["needs_review_root_count"] == 4
+    assert recipe.experiment_binding["campaign_id"] == "enterprise-evidence-use-demo-v3"
     assert recipe.experiment_binding["estimated_cells"] == 8
     assert recipe.sanitization_report["copied_trace_content"] is False
     assert reviewed_task_recipe_ids() == (
         "enterprise-evidence-use-v1",
         "support-data-authority-v1",
     )
+
+
+def _reviewed_refs() -> list[dict[str, Any]]:
+    return [
+        {
+            "selected_call_ids": [row["call_id"]],
+            "root_call_id": row["root_id"],
+            "source_row_digest": row["source_row_digest"],
+            "review_evidence": [
+                {
+                    "feedback_type": COHORT["feedback"]["feedback_type"],
+                    "creator": COHORT["feedback"]["creator_class"],
+                    "payload": {
+                        **COHORT["feedback"]["expected_value"],
+                        "revision": COHORT["feedback"]["revision"],
+                        "source_row_digest": row["source_row_digest"],
+                    },
+                }
+            ],
+            "reviewed_cohort_manifest_digest": COHORT["manifest_digest"],
+        }
+        for row in COHORT["calls"]
+    ]
+
+
+def test_reviewed_cohort_rejects_cross_project_and_partial_selection() -> None:
+    manifest = reviewed_cohort_manifest_from_dict(COHORT)
+    refs = _reviewed_refs()[:-1]
+
+    blockers = _reviewed_cohort_blockers(
+        audit=SimpleNamespace(trace_refs=refs),
+        manifest=manifest,
+        project="lookalike/enterprise-evidence-agent",
+    )
+
+    assert "selected evidence belongs to a different Weave project" in blockers
+    assert "selected calls do not exactly match the reviewed cohort" in blockers
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda ref: ref.update(root_call_id="lookalike-root"),
+            "resolved to a different root",
+        ),
+        (
+            lambda ref: ref.update(source_row_digest="0" * 64),
+            "changed source-row evidence",
+        ),
+        (
+            lambda ref: ref.update(review_evidence=[]),
+            "lacks the exact required feedback revision",
+        ),
+        (
+            lambda ref: ref["review_evidence"][0]["payload"].update(revision="0"),
+            "lacks the exact required feedback revision",
+        ),
+        (
+            lambda ref: ref["review_evidence"][0].update(
+                feedback_type="demo.enterprise_evidence_review.lookalike"
+            ),
+            "lacks the exact required feedback revision",
+        ),
+        (
+            lambda ref: ref.update(reviewed_cohort_manifest_digest="0" * 64),
+            "is not bound to the cohort manifest",
+        ),
+    ],
+)
+def test_reviewed_cohort_rejects_changed_or_lookalike_evidence(
+    mutation: Any, message: str
+) -> None:
+    manifest = reviewed_cohort_manifest_from_dict(COHORT)
+    refs = _reviewed_refs()
+    mutation(refs[0])
+
+    blockers = _reviewed_cohort_blockers(
+        audit=SimpleNamespace(trace_refs=refs),
+        manifest=manifest,
+        project=COHORT["project"],
+    )
+
+    assert any(message in blocker for blocker in blockers)
 
 
 def test_enterprise_tasks_expose_schema_but_keep_expected_facts_in_verifiers() -> None:

@@ -57,6 +57,10 @@ from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.sandbox_policy import (
+    SANDBOX_POLICY_VERSION,
+    attest_harbor_job,
+)
 from fugue.bench.services import (
     managed_service_environment,
     without_managed_service_environment,
@@ -66,6 +70,7 @@ from fugue.bench.task_runtime import read_task_runtime_lock
 from fugue.model_plane import (
     ModelRoute,
     model_route_identity,
+    resolve_harness_model_route,
     resolve_model_route,
     select_model,
 )
@@ -303,6 +308,7 @@ def _build_jobs(
                     runtime_root=runtime_root,
                     job_name=job_name,
                     write=write_configs,
+                    bridge_required=_bridge_required(route, harness.name),
                 )
                 trial_policy = _render_trial_policy_compose(
                     runtime_root,
@@ -355,6 +361,7 @@ def _build_jobs(
                     binding,
                     variant.context.delivery,
                     repo_root,
+                    bridge_required=_bridge_required(route, harness.name),
                 )
                 comparison_example_id = _comparison_example_id(
                     dataset_id=manifest.dataset.harbor_ref,
@@ -408,6 +415,7 @@ def _build_jobs(
                         "trace_content": experiment.trace_content,
                         "instrumentation": "weave",
                         "scheduling_seed": scheduling_seed,
+                        "sandbox_policy_version": SANDBOX_POLICY_VERSION,
                         "fugue_source": selected_source_provenance,
                         **(
                             {"context_runtime": context_runtime}
@@ -470,6 +478,13 @@ def _build_jobs(
                 )
                 config_path = config_dir / f"{job_name}.json"
                 if write_configs:
+                    bridge_required = _bridge_required(route, harness.name)
+                    config["fugue"]["sandbox_attestation"] = attest_harbor_job(
+                        config,
+                        repo_root=repo_root,
+                        bridge_required=bridge_required,
+                        require_files=True,
+                    ).to_dict()
                     config_path.write_text(
                         json.dumps(config, indent=2, sort_keys=True) + "\n"
                     )
@@ -830,6 +845,7 @@ def _agent_config(
         "mcp_servers": _instrument_mcp_servers(selected_mcp_servers),
         "extra_allowed_hosts": _agent_allowed_hosts(
             route,
+            harness.name,
             selected_mcp_servers,
             integration_binding.allowed_hosts,
         ),
@@ -843,13 +859,15 @@ def _agent_config(
 
 def _agent_allowed_hosts(
     route: ModelRoute,
+    harness: str,
     mcp_servers: list[dict[str, Any]],
     integration_hosts: tuple[str, ...],
 ) -> list[str]:
+    bridge_required = _bridge_required(route, harness)
     values = [
         "api.wandb.ai",
         "trace.wandb.ai",
-        "host.docker.internal",
+        *(["host.docker.internal"] if bridge_required else []),
         *integration_hosts,
     ]
     for url in (
@@ -1043,6 +1061,7 @@ def _context_binding(
     runtime_root: Path,
     job_name: str,
     write: bool,
+    bridge_required: bool,
 ) -> tuple[ContextBinding, dict[str, str], bool]:
     if variant.context.delivery not in spec.deliveries:
         return (
@@ -1090,6 +1109,7 @@ def _context_binding(
                 job_name=job_name,
                 delivery=variant.context.delivery,
                 write=write,
+                bridge_required=bridge_required,
             )
             env = dict(binding.env)
         elif (
@@ -1169,9 +1189,13 @@ def _bind_fugue_context_runtime(
     job_name: str,
     delivery: str,
     write: bool,
+    bridge_required: bool,
 ) -> ContextBinding:
     descriptor = _portable_context_runtime_descriptor(
-        binding, delivery, runtime.repo_root
+        binding,
+        delivery,
+        runtime.repo_root,
+        bridge_required=bridge_required,
     )
     if descriptor is None:
         raise ValueError("managed Fugue context runtime is portable-only here")
@@ -1186,8 +1210,11 @@ def _bind_fugue_context_runtime(
                 "pull_policy": "never",
                 "network_mode": "service:main",
                 "read_only": True,
+                "user": "65532:65532",
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
+                "deploy": {"resources": {"limits": {"cpus": "2.0", "memory": "2g"}}},
+                "pids_limit": 512,
                 "tmpfs": ["/tmp:rw,noexec,nosuid,size=256m"],
                 "command": [
                     "python",
@@ -1208,7 +1235,11 @@ def _bind_fugue_context_runtime(
                 ],
                 "environment": {
                     **{name: f"${{{name}}}" for name in spec.required_env},
-                    "FUGUE_BRIDGE_BASE_URL": descriptor["bridge_url"],
+                    **(
+                        {"FUGUE_BRIDGE_BASE_URL": descriptor["bridge_url"]}
+                        if descriptor.get("bridge_url")
+                        else {}
+                    ),
                     "FUGUE_CONTEXT_EVENTS_PATH": ("/tmp/fugue-context-events.jsonl"),
                 },
                 "volumes": [
@@ -1271,7 +1302,21 @@ def _render_trial_policy_compose(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             yaml.safe_dump(
-                {"services": {"main": {"pull_policy": "never"}}},
+                {
+                    "services": {
+                        "main": {
+                            "pull_policy": "never",
+                            "cap_drop": ["ALL"],
+                            "security_opt": ["no-new-privileges:true"],
+                            "pids_limit": 1024,
+                            "deploy": {
+                                "resources": {
+                                    "limits": {"cpus": "8.0", "memory": "16g"}
+                                }
+                            },
+                        }
+                    }
+                },
                 sort_keys=False,
             )
         )
@@ -1282,6 +1327,8 @@ def _portable_context_runtime_descriptor(
     binding: ContextBinding,
     delivery: str,
     repo_root: Path | None = None,
+    *,
+    bridge_required: bool = False,
 ) -> dict[str, Any] | None:
     if binding.managed_runtime == "pinned_mcp" and delivery == "native_mcp":
         return binding.runtime_descriptor
@@ -1297,11 +1344,19 @@ def _portable_context_runtime_descriptor(
         "prepared": lock is not None,
         "service": CONTEXT_RUNTIME_SERVICE,
         "network": "shared_main_namespace",
-        "bridge_url": "http://host.docker.internal:4000",
+        "bridge_url": None,
         "mcp_port": 8000,
         "portable_port": 8001,
         "query_url": "http://127.0.0.1:8001",
     }
+
+
+def _bridge_required(route: ModelRoute, harness: str) -> bool:
+    try:
+        return bool(resolve_harness_model_route(route, harness)["bridge_required"])
+    except ValueError:
+        # The capability gate later marks unregistered harness adapters inapplicable.
+        return False
 
 
 def _reserved_context_ports(binding: ContextBinding) -> dict[int, str]:

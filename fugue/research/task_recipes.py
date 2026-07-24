@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from fugue.bench.candidates import stable_digest
@@ -28,6 +30,33 @@ class ReviewedTaskRecipeV1:
     source_failure: str = (
         "selected calls do not belong to the registered synthetic dataset"
     )
+    cohort_manifest_path: str | None = None
+
+
+@dataclass(frozen=True)
+class ReviewedCallV1:
+    call_id: str
+    root_id: str
+    source_row_digest: str
+
+
+@dataclass(frozen=True)
+class ReviewedFeedbackContractV1:
+    feedback_type: str
+    revision: str
+    creator_class: str
+    expected_value: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ReviewedCohortManifestV1:
+    schema_version: int
+    project: str
+    dataset_id: str
+    dataset_digest: str
+    calls: tuple[ReviewedCallV1, ...]
+    feedback: ReviewedFeedbackContractV1
+    manifest_digest: str
 
 
 _SUPPORT_RECIPE = ReviewedTaskRecipeV1(
@@ -140,6 +169,7 @@ _ENTERPRISE_EVIDENCE_RECIPE = ReviewedTaskRecipeV1(
         "selected calls do not belong to the reviewed synthetic enterprise "
         "evidence dataset"
     ),
+    cohort_manifest_path=("examples/research/enterprise-evidence/cohort-manifest.json"),
 )
 
 _RECIPE_REGISTRY: dict[str, ReviewedTaskRecipeV1] = {
@@ -250,9 +280,12 @@ def task_recipe_preview_from_dict(raw: Mapping[str, Any]) -> TaskRecipePreviewV1
 
 
 class TaskRecipeService:
-    def __init__(self, studies: StudyStore, audits: TraceAuditStore) -> None:
+    def __init__(
+        self, studies: StudyStore, audits: TraceAuditStore, *, repo_root: Path
+    ) -> None:
         self.studies = studies
         self.audits = audits
+        self.repo_root = repo_root.resolve()
 
     def derive_preview(
         self, study_id: str, draft: TaskRecipeDraftV1
@@ -325,6 +358,19 @@ class TaskRecipeService:
         )
         if needs_review_roots == 0:
             blockers.append(recipe.review_failure)
+        manifest = (
+            _load_reviewed_cohort_manifest(self.repo_root / recipe.cohort_manifest_path)
+            if recipe.cohort_manifest_path
+            else None
+        )
+        if manifest is not None:
+            blockers.extend(
+                _reviewed_cohort_blockers(
+                    audit=audit,
+                    manifest=manifest,
+                    project=str(selection.get("project") or ""),
+                )
+            )
         provenance = {
             "trace_audit_id": audit.id,
             "trace_audit_digest": audit.audit_digest,
@@ -342,6 +388,17 @@ class TaskRecipeService:
             "demo_dataset": expected_dataset,
             "source_dataset": expected_dataset,
             "needs_review_root_count": needs_review_roots,
+            **(
+                {
+                    "reviewed_cohort_manifest_digest": manifest.manifest_digest,
+                    "weave_dataset_id": manifest.dataset_id,
+                    "weave_dataset_digest": manifest.dataset_digest,
+                    "feedback_type": manifest.feedback.feedback_type,
+                    "feedback_revision": manifest.feedback.revision,
+                }
+                if manifest is not None
+                else {}
+            ),
         }
         preview = TaskRecipePreviewV1(
             schema_version=RESEARCH_SCHEMA_VERSION,
@@ -415,6 +472,165 @@ def validate_recipe_binding(
                 category="policy",
             )
     return preview
+
+
+def reviewed_cohort_manifest_from_dict(
+    raw: Mapping[str, Any],
+) -> ReviewedCohortManifestV1:
+    allowed = {
+        "schema_version",
+        "project",
+        "dataset_id",
+        "dataset_digest",
+        "calls",
+        "feedback",
+        "manifest_digest",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(
+            "unknown reviewed cohort manifest fields: " + ", ".join(unknown)
+        )
+    if raw.get("schema_version") != 1:
+        raise ValueError("reviewed cohort manifest schema_version must be 1")
+    project = str(raw.get("project") or "")
+    if project.count("/") != 1:
+        raise ValueError("reviewed cohort project must use entity/project")
+    dataset_id = validate_id(str(raw.get("dataset_id") or ""), kind="dataset id")
+    dataset_digest = _sha(raw.get("dataset_digest"), "dataset digest")
+    calls_raw = raw.get("calls")
+    if not isinstance(calls_raw, list) or not calls_raw:
+        raise ValueError("reviewed cohort calls must be a non-empty list")
+    calls: list[ReviewedCallV1] = []
+    for item in calls_raw:
+        if not isinstance(item, Mapping) or set(item) != {
+            "call_id",
+            "root_id",
+            "source_row_digest",
+        }:
+            raise ValueError(
+                "reviewed cohort calls require only call_id, root_id, and "
+                "source_row_digest"
+            )
+        call_id = str(item["call_id"])
+        root_id = str(item["root_id"])
+        if not call_id or not root_id:
+            raise ValueError("reviewed cohort call and root ids must be non-empty")
+        calls.append(
+            ReviewedCallV1(
+                call_id=call_id,
+                root_id=root_id,
+                source_row_digest=_sha(item["source_row_digest"], "source row digest"),
+            )
+        )
+    if len({item.call_id for item in calls}) != len(calls):
+        raise ValueError("reviewed cohort call ids must be unique")
+    feedback_raw = raw.get("feedback")
+    if not isinstance(feedback_raw, Mapping) or set(feedback_raw) != {
+        "feedback_type",
+        "revision",
+        "creator_class",
+        "expected_value",
+    }:
+        raise ValueError(
+            "reviewed feedback requires type, revision, creator class, and expected value"
+        )
+    expected = feedback_raw["expected_value"]
+    if not isinstance(expected, Mapping):
+        raise ValueError("reviewed feedback expected value must be an object")
+    feedback = ReviewedFeedbackContractV1(
+        feedback_type=str(feedback_raw["feedback_type"]),
+        revision=str(feedback_raw["revision"]),
+        creator_class=str(feedback_raw["creator_class"]),
+        expected_value={str(key): value for key, value in expected.items()},
+    )
+    manifest = ReviewedCohortManifestV1(
+        schema_version=1,
+        project=project,
+        dataset_id=dataset_id,
+        dataset_digest=dataset_digest,
+        calls=tuple(calls),
+        feedback=feedback,
+        manifest_digest=_sha(raw.get("manifest_digest"), "manifest digest"),
+    )
+    expected_digest = stable_digest(
+        {
+            key: value
+            for key, value in asdict(manifest).items()
+            if key != "manifest_digest"
+        }
+    )
+    if manifest.manifest_digest != expected_digest:
+        raise ValueError("manifest_digest does not match the reviewed cohort manifest")
+    return manifest
+
+
+def _load_reviewed_cohort_manifest(path: Path) -> ReviewedCohortManifestV1:
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(path.parents[3].resolve()):
+        raise ValueError("reviewed cohort manifest escapes the Fugue repository")
+    raw = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise ValueError("reviewed cohort manifest must be an object")
+    return reviewed_cohort_manifest_from_dict(raw)
+
+
+def _reviewed_cohort_blockers(
+    *,
+    audit: Any,
+    manifest: ReviewedCohortManifestV1,
+    project: str,
+) -> list[str]:
+    blockers: list[str] = []
+    if project != manifest.project:
+        blockers.append("selected evidence belongs to a different Weave project")
+    expected_calls = {item.call_id: item for item in manifest.calls}
+    actual_calls = {
+        str(call_id)
+        for ref in audit.trace_refs
+        for call_id in ref.get("selected_call_ids", [])
+    }
+    if actual_calls != set(expected_calls):
+        blockers.append("selected calls do not exactly match the reviewed cohort")
+    refs_by_selected = {
+        str(call_id): ref
+        for ref in audit.trace_refs
+        for call_id in ref.get("selected_call_ids", [])
+    }
+    for call_id, expected in expected_calls.items():
+        ref = refs_by_selected.get(call_id)
+        if ref is None:
+            continue
+        if (
+            ref.get("reviewed_cohort_manifest_digest")
+            != manifest.manifest_digest
+        ):
+            blockers.append(
+                f"reviewed call {call_id} is not bound to the cohort manifest"
+            )
+        if ref.get("root_call_id") != expected.root_id:
+            blockers.append(f"reviewed call {call_id} resolved to a different root")
+        if ref.get("source_row_digest") != expected.source_row_digest:
+            blockers.append(f"reviewed call {call_id} has changed source-row evidence")
+        matches = [
+            value
+            for value in ref.get("review_evidence", [])
+            if isinstance(value, Mapping)
+            and value.get("feedback_type") == manifest.feedback.feedback_type
+            and value.get("creator") == manifest.feedback.creator_class
+            and isinstance(value.get("payload"), Mapping)
+            and all(
+                value["payload"].get(key) == expected_value
+                for key, expected_value in manifest.feedback.expected_value.items()
+            )
+            and value["payload"].get("revision") == manifest.feedback.revision
+            and value["payload"].get("source_row_digest") == expected.source_row_digest
+        ]
+        if len(matches) != 1:
+            blockers.append(
+                f"reviewed call {call_id} lacks the exact required feedback revision"
+            )
+    return blockers
 
 
 def _digest(value: Mapping[str, Any], field: str) -> str:

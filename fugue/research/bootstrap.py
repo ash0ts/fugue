@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import hmac
+import json
 import os
 import secrets
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from fugue.research.access import AGENT_SCOPES, token_digest
+from fugue.research.contracts import validate_id
+
+_DEFAULT_AGENT_RESEARCH_IDS = (
+    "aria-enterprise-evidence-use-v1",
+    "aria-support-data-authority-v1",
+)
 
 
 def bootstrap_container_secrets(
@@ -26,6 +37,8 @@ def bootstrap_container_secrets(
         _write_secret(agent_token, secrets.token_urlsafe(32))
     else:
         _make_compose_readable(agent_token)
+    access_grants = secret_dir / "research_access_grants.json"
+    _ensure_access_grants(access_grants, agent_token, root)
 
     record_token = secret_dir / "research_record_ingest_key"
     if not record_token.exists():
@@ -55,6 +68,7 @@ def bootstrap_container_secrets(
     return {
         "compose_environment_file": str(compose_environment),
         "research_api_key_file": str(agent_token),
+        "research_access_grants_file": str(access_grants),
         "research_record_ingest_key_file": str(record_token),
         "wandb_api_key_file": str(wandb_token),
         "trace_data_directory": str(root / ".fugue" / "trace-data"),
@@ -82,7 +96,19 @@ def _write_compose_environment(path: Path, repo_root: Path) -> None:
             git_common_dir = candidate
     except (OSError, subprocess.SubprocessError):
         pass
-    socket = Path("/var/run/docker.sock")
+    deployment_mode = os.environ.get("FUGUE_RESEARCH_DEPLOYMENT_MODE", "local").strip()
+    docker_host = os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock").strip()
+    if not docker_host.startswith("unix://"):
+        raise RuntimeError("research workers support only a local Unix Docker endpoint")
+    configured_socket = Path(docker_host.removeprefix("unix://"))
+    if deployment_mode != "local" and configured_socket == Path(
+        "/var/run/docker.sock"
+    ):
+        raise RuntimeError(
+            "non-local research workers require an explicitly configured rootless "
+            "Docker endpoint"
+        )
+    socket = configured_socket.resolve()
     # Docker Desktop and OrbStack expose the socket as root:root inside their
     # Linux VM even when the macOS symlink target has the host user's group.
     # Native Linux preserves the socket's real Docker group.
@@ -95,14 +121,73 @@ def _write_compose_environment(path: Path, repo_root: Path) -> None:
     )
     values = {
         "FUGUE_DOCKER_GID": str(docker_gid),
+        "FUGUE_DOCKER_SOCKET": str(socket),
         "FUGUE_GIT_COMMON_DIR": str(git_common_dir.resolve()),
         "FUGUE_HOST_GID": str(os.getgid()),
         "FUGUE_HOST_REPO_ROOT": str(repo_root),
         "FUGUE_HOST_UID": str(os.getuid()),
+        "FUGUE_RESEARCH_DEPLOYMENT_MODE": deployment_mode,
     }
     lines = [f"{key}={_dotenv_value(value)}" for key, value in sorted(values.items())]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+def _ensure_access_grants(path: Path, token_path: Path, repo_root: Path) -> None:
+    token = _read_secret_file(token_path)
+    instance_path = repo_root / ".fugue" / "instance-id"
+    if not instance_path.exists():
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(instance_path, flags, 0o600)
+        try:
+            os.write(descriptor, f"fugue-{secrets.token_hex(16)}\n".encode())
+        finally:
+            os.close(descriptor)
+    instance_id = _read_secret_file(instance_path)
+    if path.exists():
+        raw = json.loads(_read_secret_file(path))
+        digests = {
+            str(item.get("token_digest") or "")
+            for item in raw.get("grants", [])
+            if isinstance(item, dict)
+        }
+        if not any(
+            hmac.compare_digest(value, token_digest(token)) for value in digests
+        ):
+            raise RuntimeError(
+                "research access grants do not match the existing Agent credential"
+            )
+        _make_compose_readable(path)
+        return
+    expires = (datetime.now(UTC) + timedelta(days=366)).isoformat()
+    configured_ids = os.environ.get("FUGUE_RESEARCH_AGENT_RESEARCH_IDS", "").strip()
+    research_ids = (
+        tuple(
+            validate_id(value.strip(), kind="research access id")
+            for value in configured_ids.split(",")
+            if value.strip()
+        )
+        if configured_ids
+        else _DEFAULT_AGENT_RESEARCH_IDS
+    )
+    if not research_ids or len(set(research_ids)) != len(research_ids):
+        raise RuntimeError("Agent Research IDs must be a unique non-empty list")
+    value = {
+        "schema_version": 1,
+        "instance_id": instance_id,
+        "grants": [
+            {
+                "schema_version": 1,
+                "token_digest": token_digest(token),
+                "subject": "external-research-agent",
+                "instance_id": instance_id,
+                "research_ids": list(research_ids),
+                "scopes": sorted(AGENT_SCOPES),
+                "expires_at": expires,
+            }
+        ],
+    }
+    _write_secret(path, json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 def _dotenv_value(value: str) -> str:

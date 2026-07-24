@@ -34,10 +34,12 @@ jobs:
         run: |
           mkdir -p .fugue/secrets .fugue/trace-data .fugue/runtime .fugue/cache
           printf '%s\n' 'ci-research-token' > .fugue/secrets/research_api_key
+          printf '%s\n' '{"schema_version":1,"instance_id":"ci","grants":[{"schema_version":1,"token_digest":"2e768219792c2c63315115c6b2afd086eb422a2c97ff96740cb476223cc031a9","subject":"ci","instance_id":"ci","research_ids":["*"],"scopes":["approval:request","mcp:agent","research:read","research:write","result:record","study:cancel","study:preview","study:start-approved","study:watch","trace:preview","trace:run"],"expires_at":"9999-12-31T23:59:59+00:00"}]}' > .fugue/secrets/research_access_grants.json  # gitleaks:allow — deterministic digest of the CI-only fixture token
           printf '%s\n' 'ci-record-ingest-token' > .fugue/secrets/research_record_ingest_key
           printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
           {
             printf 'FUGUE_DOCKER_GID="%s"\n' "$(stat -c '%g' /var/run/docker.sock)"
+            printf 'FUGUE_DOCKER_SOCKET="%s"\n' /var/run/docker.sock
             printf 'FUGUE_GIT_COMMON_DIR="%s/.git"\n' "$GITHUB_WORKSPACE"
             printf 'FUGUE_HOST_GID="%s"\n' "$(id -g)"
             printf 'FUGUE_HOST_REPO_ROOT="%s"\n' "$GITHUB_WORKSPACE"

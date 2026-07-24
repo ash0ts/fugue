@@ -162,7 +162,7 @@ def test_selected_child_calls_lock_roots_and_derive_synthetic_recipe(
     assert recipe.experiment_binding["estimated_cells"] == 6
 
     app = create_app(REPO_ROOT, api_key="test-key", service=service)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         response = client.post(
             "/v1/research/northstar-loop-study/task-suites:derive-preview",
             headers={"Authorization": "Bearer test-key"},

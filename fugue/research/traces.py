@@ -37,9 +37,11 @@ _SOURCE_FIELDS = {
     "allowed_filters",
     "allowed_projects",
     "id",
+    "include_review_feedback",
     "path",
     "project",
     "redactions",
+    "reviewed_cohort_manifest_digest",
 }
 _SECRET = re.compile(
     r"(?i)(api[_-]?key|authorization|bearer|password|secret|token)\s*[:=]\s*\S+"
@@ -87,6 +89,8 @@ class _SourceConfig:
     path: Path | None = None
     project: str | None = None
     allowed_projects: tuple[str, ...] = ()
+    include_review_feedback: bool = False
+    reviewed_cohort_manifest_digest: str | None = None
 
     @property
     def safe_digest(self) -> str:
@@ -99,6 +103,10 @@ class _SourceConfig:
                 "redactions": list(self.redactions),
                 "project": self.project,
                 "allowed_projects": list(self.allowed_projects),
+                "include_review_feedback": self.include_review_feedback,
+                "reviewed_cohort_manifest_digest": (
+                    self.reviewed_cohort_manifest_digest
+                ),
             }
         )
 
@@ -176,6 +184,8 @@ class WeaveTraceSource:
         *,
         env: Mapping[str, str] | None = None,
         fetcher: Callable[[dict[str, Any]], Sequence[Mapping[str, Any]]] | None = None,
+        feedback_fetcher: Callable[[dict[str, Any]], Sequence[Mapping[str, Any]]]
+        | None = None,
     ) -> None:
         if not config.project and not config.allowed_projects:
             raise ValueError(
@@ -184,6 +194,7 @@ class WeaveTraceSource:
         self.config = config
         self.env = dict(os.environ if env is None else env)
         self.fetcher = fetcher
+        self.feedback_fetcher = feedback_fetcher
 
     @property
     def source(self) -> TraceSourceRefV1:
@@ -259,6 +270,18 @@ class WeaveTraceSource:
             }
             payload["limit"] = len(root_trace_ids)
         raw_records = self._read_payload(payload)
+        review_evidence = (
+            self._read_review_feedback(
+                project,
+                [
+                    str(item.get("id") or item.get("call_id") or "")
+                    for item in raw_records
+                    if item.get("id") or item.get("call_id")
+                ],
+            )
+            if draft.selection is not None and self.config.include_review_feedback
+            else {}
+        )
         records = []
         for raw in raw_records:
             normalized = _normalize_trace(dict(raw), draft.fields)
@@ -273,11 +296,14 @@ class WeaveTraceSource:
                     else [root_call_id]
                 )
                 normalized["root_call_id"] = root_call_id
-                normalized["source_row_digest"] = stable_digest(dict(raw))
                 attributes = (
                     raw.get("attributes")
                     if isinstance(raw.get("attributes"), Mapping)
                     else {}
+                )
+                normalized["source_record_digest"] = stable_digest(dict(raw))
+                normalized["source_row_digest"] = _clean_text(
+                    attributes.get("demo.source_row_digest"), 128
                 )
                 normalized["source_markers"] = _remove_empty(
                     {
@@ -286,6 +312,12 @@ class WeaveTraceSource:
                         "demo.needs_review": attributes.get("demo.needs_review"),
                         "demo.synthetic": attributes.get("demo.synthetic"),
                     }
+                )
+                normalized["review_evidence"] = list(
+                    review_evidence.get(root_call_id, ())
+                )
+                normalized["reviewed_cohort_manifest_digest"] = (
+                    self.config.reviewed_cohort_manifest_digest
                 )
             if _matches(normalized, draft):
                 records.append(normalized)
@@ -318,22 +350,65 @@ class WeaveTraceSource:
             return self.fetcher(payload)
         return self._fetch(payload)
 
-    def _fetch(self, payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-        api_key = self.env.get("WANDB_API_KEY", "").strip()
-        if not api_key:
-            key_file = self.env.get("WANDB_API_KEY_FILE", "").strip()
-            if key_file:
-                try:
-                    api_key = Path(key_file).read_text(encoding="utf-8").strip()
-                except OSError:
-                    api_key = ""
-        if not api_key:
-            raise ResearchError(
-                "trace_credentials_unavailable",
-                "the registered Weave source has no runtime credentials",
-                category="evidence",
-                retryable=True,
+    def _read_review_feedback(
+        self, project: str, root_call_ids: Sequence[str]
+    ) -> dict[str, tuple[dict[str, Any], ...]]:
+        selected = tuple(sorted({item for item in root_call_ids if item}))
+        if not selected:
+            return {}
+        payload = {
+            "project_id": project,
+            "query": {
+                "$expr": {
+                    "$or": [
+                        {
+                            "$eq": [
+                                {"$getField": "weave_ref"},
+                                {
+                                    "$literal": (
+                                        f"weave:///{project}/call/{root_call_id}"
+                                    )
+                                },
+                            ]
+                        }
+                        for root_call_id in selected
+                    ]
+                }
+            },
+        }
+        rows = (
+            self.feedback_fetcher(payload)
+            if self.feedback_fetcher is not None
+            else self._fetch_feedback(payload)
+        )
+        allowed_refs = {
+            f"weave:///{project}/call/{root_call_id}": root_call_id
+            for root_call_id in selected
+        }
+        result: dict[str, list[dict[str, Any]]] = {
+            root_call_id: [] for root_call_id in selected
+        }
+        for raw in rows:
+            weave_ref = str(raw.get("weave_ref") or "")
+            root_call_id = allowed_refs.get(weave_ref)
+            if root_call_id is None:
+                continue
+            result[root_call_id].append(_safe_review_evidence(raw))
+        return {
+            root_call_id: tuple(
+                sorted(
+                    values,
+                    key=lambda item: (
+                        str(item["feedback_type"]),
+                        str(item["feedback_id"]),
+                    ),
+                )
             )
+            for root_call_id, values in result.items()
+        }
+
+    def _fetch(self, payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+        api_key = self._api_key()
         base_url = resolved_weave_trace_server_url(self.env)
         try:
             with httpx.Client(
@@ -350,6 +425,53 @@ class WeaveTraceSource:
                 retryable=True,
             ) from exc
         return tuple(_decode_stream(response.text))
+
+    def _fetch_feedback(self, payload: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+        api_key = self._api_key()
+        base_url = resolved_weave_trace_server_url(self.env)
+        try:
+            with httpx.Client(
+                timeout=30,
+                auth=httpx.BasicAuth("api", api_key),
+            ) as client:
+                response = client.post(f"{base_url}/feedback/query", json=payload)
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ResearchError(
+                "trace_feedback_unavailable",
+                "review feedback for the registered Weave source could not be read",
+                category="evidence",
+                retryable=True,
+            ) from exc
+        value = response.json()
+        rows = value.get("result") if isinstance(value, Mapping) else None
+        if not isinstance(rows, list) or not all(
+            isinstance(item, Mapping) for item in rows
+        ):
+            raise ResearchError(
+                "trace_feedback_invalid",
+                "the Weave feedback response was not a list of records",
+                category="evidence",
+            )
+        return tuple(dict(item) for item in rows)
+
+    def _api_key(self) -> str:
+        api_key = self.env.get("WANDB_API_KEY", "").strip()
+        if not api_key:
+            key_file = self.env.get("WANDB_API_KEY_FILE", "").strip()
+            if key_file:
+                try:
+                    api_key = Path(key_file).read_text(encoding="utf-8").strip()
+                except OSError:
+                    api_key = ""
+        if not api_key:
+            raise ResearchError(
+                "trace_credentials_unavailable",
+                "the registered Weave source has no runtime credentials",
+                category="evidence",
+                retryable=True,
+            )
+        return api_key
 
 
 class TraceSourceRegistry:
@@ -383,6 +505,10 @@ class TraceSourceRegistry:
             str, Callable[[dict[str, Any]], Sequence[Mapping[str, Any]]]
         ]
         | None = None,
+        weave_feedback_fetchers: Mapping[
+            str, Callable[[dict[str, Any]], Sequence[Mapping[str, Any]]]
+        ]
+        | None = None,
     ) -> TraceSourceRegistry:
         if not isinstance(raw, dict) or set(raw) != {"version", "sources"}:
             raise ValueError("trace source config requires only version and sources")
@@ -399,6 +525,7 @@ class TraceSourceRegistry:
                         config,
                         env=env,
                         fetcher=(weave_fetchers or {}).get(config.id),
+                        feedback_fetcher=(weave_feedback_fetchers or {}).get(config.id),
                     )
                 )
         return cls(adapters)
@@ -681,6 +808,24 @@ def _source_config(
     for candidate in tuple(item for item in (project, *allowed_projects) if item):
         if candidate.count("/") != 1:
             raise ValueError("Weave projects must use entity/project paths")
+    include_review_feedback = raw.get("include_review_feedback", False)
+    if type(include_review_feedback) is not bool:
+        raise ValueError("include_review_feedback must be a boolean")
+    if include_review_feedback and adapter != "weave":
+        raise ValueError("include_review_feedback is permitted only for Weave sources")
+    manifest_digest = raw.get("reviewed_cohort_manifest_digest")
+    if manifest_digest is not None:
+        if adapter != "weave" or not include_review_feedback:
+            raise ValueError(
+                "reviewed_cohort_manifest_digest requires reviewed Weave feedback"
+            )
+        manifest_digest = str(manifest_digest)
+        if len(manifest_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in manifest_digest
+        ):
+            raise ValueError(
+                "reviewed_cohort_manifest_digest must be a sha256 digest"
+            )
     return _SourceConfig(
         id=source_id,
         adapter=adapter,
@@ -690,6 +835,8 @@ def _source_config(
         path=path,
         project=project,
         allowed_projects=allowed_projects,
+        include_review_feedback=include_review_feedback,
+        reviewed_cohort_manifest_digest=manifest_digest,
     )
 
 
@@ -913,7 +1060,12 @@ def _trace_ref(record: Mapping[str, Any]) -> dict[str, Any]:
             "selected_call_ids": record.get("selected_call_ids"),
             "root_call_id": record.get("root_call_id"),
             "source_row_digest": record.get("source_row_digest"),
+            "source_record_digest": record.get("source_record_digest"),
             "source_markers": record.get("source_markers"),
+            "review_evidence": record.get("review_evidence"),
+            "reviewed_cohort_manifest_digest": record.get(
+                "reviewed_cohort_manifest_digest"
+            ),
             "summary_digest": stable_digest(record),
         }
     )
@@ -1098,6 +1250,37 @@ def _expand_env(value: str, env: Mapping[str, str] | None) -> str:
 def _clean_text(value: Any, limit: int) -> str:
     text = " ".join(str(value).replace("\x00", " ").split())[:limit]
     return _SECRET.sub("[REDACTED]", text)
+
+
+def _safe_review_evidence(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Project operator review feedback without copying comments or trace content."""
+
+    payload = raw.get("payload")
+    safe_payload = (
+        {
+            key: payload.get(key)
+            for key in (
+                "review_status",
+                "failure_class",
+                "source_row_digest",
+                "synthetic",
+                "revision",
+            )
+            if key in payload
+        }
+        if isinstance(payload, Mapping)
+        else {}
+    )
+    value = {
+        "feedback_id": _clean_text(raw.get("id"), 300),
+        "feedback_type": _clean_text(raw.get("feedback_type"), 300),
+        "creator": _clean_text(raw.get("creator"), 300),
+        "payload": _remove_empty(safe_payload),
+        "payload_digest": stable_digest(
+            payload if isinstance(payload, Mapping) else {}
+        ),
+    }
+    return _remove_empty(value)
 
 
 def _clean_optional(value: Any, limit: int) -> str | None:
