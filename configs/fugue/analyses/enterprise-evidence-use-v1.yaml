@@ -1,0 +1,38 @@
+id: enterprise-evidence-use-v1
+title: Enterprise evidence-use analysis
+question: Does repository search change outcomes by itself, or only when the Agent must inspect and cite the source?
+filters:
+  experiment_id: enterprise-evidence-use-v1
+  tag: evidence-use
+group_by: [variant_id, harness, task_name]
+metrics:
+  - pass_rate
+  - document_search_invocation_rate
+  - relevant_document_return_rate
+  - relevant_document_open_rate
+  - current_document_citation_rate
+  - current_document_use_rate
+  - artifact_schema_rate
+  - answer_fact_rate
+  - unsupported_claim_absence_rate
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false
+selection:
+  selection_unit: variant
+  baseline_variant_id: baseline
+  metric: pass_rate
+  confidence: 0.95
+  noninferiority_margin: 0.05
+  require_complete_grid: true
+  required_examples: 4
+  required_harnesses: [claude-code, codex]
+  require_agent_links: true
+  bootstrap_samples: 2000
+  tie_breakers: [recoverable_error_rate, cost_per_success, median_wall_time_sec]
+  minimum_pass_rate_improvement: 0.05
+  minimum_cost_improvement: 0.15
+  minimum_latency_improvement: 0.15

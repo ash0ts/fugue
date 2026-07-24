@@ -1,0 +1,36 @@
+schema_version: 1
+id: enterprise-evidence-use-demo-v2
+revision: v2
+title: Enterprise evidence-use demo campaign
+objective: Determine whether repository search, source-inspection instructions, or both change whether an Agent uses the current authoritative document.
+allowed:
+  experiments: [enterprise-evidence-use-v1]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [codex, claude-code]
+  workloads: [enterprise-evidence-suite]
+  variants: [baseline, search-only, inspect-only, search-and-inspect]
+  context_systems: [none, rag-dense]
+  analyses: [enterprise-evidence-use-v1]
+  trace_content: [full]
+stages:
+  - id: canary
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+  - id: primary
+    predecessors: [canary]
+    max_proposals: 1
+    max_cells: 64
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 2000
+  initial_cell_reserve_usd: 25
+  safety_margin: 1.5
+  max_cells_per_proposal: 64
+  max_total_cells: 72
+  max_attempts_per_cell: 2
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: traces
+require_clean_source: true
