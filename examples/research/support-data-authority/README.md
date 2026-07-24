@@ -18,6 +18,15 @@ The demo uses stable Research ID `aria-support-data-authority-v1`. Each accepted
 preview receives a content-derived controlled Study identity; Aria recovers that
 Study from Fugue's durable cursor instead of relying on chat history.
 
+The qualified six-attempt result also has a checked-in, public-safe projection
+bundle keyed by the SHA-256 of its exact private export. It contains normalized
+score dimensions and immutable W&B/Weave identities, but no prompts, responses,
+tool output, expected values, or trace bodies. This lets a fresh checkout replay
+the real Study into Study Console without another model call or access to the
+original private export. Its Agent-attempt and predict-and-score call IDs are
+validated against the authoritative Weave project before they are published as
+console links; legacy span IDs remain reproducibility metadata, not web links.
+
 For local Core, the control service receives a dedicated
 `FUGUE_TRACE_WANDB_API_KEY_FILE` that can read the seeded `*.wandb.test`
 project. The worker retains the separately bootstrapped `WANDB_API_KEY_FILE`

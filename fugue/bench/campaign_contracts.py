@@ -291,10 +291,14 @@ class OutcomePacketV1:
     analysis_results: tuple[dict[str, Any], ...]
     metrics: dict[str, Any]
     finalized_at: str
+    evaluation_runs: tuple[dict[str, Any], ...] = ()
     outcome_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return _json_value(asdict(self))
+        value = _json_value(asdict(self))
+        if not self.evaluation_runs:
+            value.pop("evaluation_runs")
+        return value
 
 
 @dataclass(frozen=True)

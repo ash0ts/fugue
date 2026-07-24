@@ -526,7 +526,11 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert operator["working_dir"] == (
         "${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}"
     )
-    assert "ports" not in operator and "secrets" not in operator
+    assert "ports" not in operator
+    assert operator["secrets"] == ["research_record_ingest_key"]
+    assert operator["environment"]["FUGUE_RESEARCH_RECORD_TOKEN_FILE"] == (
+        "/run/secrets/research_record_ingest_key"
+    )
     assert all("docker.sock" not in value for value in operator["volumes"])
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -258,6 +259,63 @@ class EvaluationGenerationSpec:
 
 
 @dataclass(frozen=True)
+class ResearchScoreDimensionSpec:
+    id: str
+    label: str
+    description: str = ""
+    source_key: str | None = None
+    target: str | float | int | bool | None = None
+    primary: bool = False
+
+
+@dataclass(frozen=True)
+class ResearchScorerSpec:
+    id: str
+    label: str
+    kind: Literal["benchmark", "deterministic", "criteria", "llm_judge"]
+    description: str
+    required: bool = True
+    threshold: float | None = None
+    aggregation: str = ""
+    evidence_inputs: list[str] = field(default_factory=list)
+    revision: str | None = None
+    model: str | None = None
+    rubric_summary: str = ""
+    blind_fields: list[str] = field(default_factory=list)
+    dimensions: list[ResearchScoreDimensionSpec] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ResearchMechanismStageSpec:
+    id: str
+    label: str
+    source_key: str
+    eligibility_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ExperimentResearchViewSpec:
+    observation: str = ""
+    rationale: str = ""
+    alternative_explanations: list[str] = field(default_factory=list)
+    success_definition: str = ""
+    task_title: str = ""
+    task_summary: str = ""
+    interaction_mode: str = ""
+    tools: list[str] = field(default_factory=list)
+    resources: list[str] = field(default_factory=list)
+    base_instruction_summary: str = ""
+    treatment_summaries: dict[str, str] = field(default_factory=dict)
+    arm_factor_levels: dict[str, dict[str, str]] = field(default_factory=dict)
+    mechanism_stages: list[ResearchMechanismStageSpec] = field(default_factory=list)
+    pass_rule: str = ""
+    scorers: list[ResearchScorerSpec] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _paths_to_strings(asdict(self))
+
+
+@dataclass(frozen=True)
 class PresetSpec:
     id: str
     workloads: list[str] = field(default_factory=list)
@@ -297,6 +355,7 @@ class ExperimentSpec:
     integrations: list[IntegrationSelection] = field(default_factory=list)
     workloads: list[WorkloadSpec] = field(default_factory=list)
     evaluation_generation: EvaluationGenerationSpec | None = None
+    research_view: ExperimentResearchViewSpec | None = None
     presets: list[PresetSpec] = field(default_factory=list)
     default_preset: str | None = None
     trace_content: str = "full"
@@ -580,6 +639,7 @@ def experiment_from_data(
         ),
         workloads=workloads,
         evaluation_generation=_evaluation_generation(raw.get("evaluation_generation")),
+        research_view=research_view_from_data(raw.get("research_view")),
         presets=presets,
         default_preset=default_preset,
         trace_content=_trace_content(raw.get("trace_content")),
@@ -806,6 +866,166 @@ def _evaluation_generation(raw: Any) -> EvaluationGenerationSpec | None:
         workload_id=workload_id,
         size=size,
         sources=sources,
+    )
+
+
+def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("research_view must be a mapping")
+    _reject_unknown(raw, ExperimentResearchViewSpec, kind="research view")
+    scorers: list[ResearchScorerSpec] = []
+    for index, value in enumerate(_list(raw.get("scorers")), start=1):
+        if not isinstance(value, dict):
+            raise ValueError(f"research view scorer {index} must be a mapping")
+        _reject_unknown(value, ResearchScorerSpec, kind="research view scorer")
+        scorer_kind = str(value.get("kind") or "")
+        if scorer_kind not in {
+            "benchmark",
+            "deterministic",
+            "criteria",
+            "llm_judge",
+        }:
+            raise ValueError(f"unknown research view scorer kind: {scorer_kind}")
+        dimensions: list[ResearchScoreDimensionSpec] = []
+        for dimension_index, dimension in enumerate(
+            _list(value.get("dimensions")), start=1
+        ):
+            if not isinstance(dimension, dict):
+                raise ValueError(
+                    f"research view score dimension {dimension_index} must be a mapping"
+                )
+            _reject_unknown(
+                dimension,
+                ResearchScoreDimensionSpec,
+                kind="research view score dimension",
+            )
+            target = dimension.get("target")
+            if target is not None and not isinstance(target, str | int | float | bool):
+                raise ValueError("research view score target must be scalar")
+            dimension_id = validate_id(
+                dimension.get("id"),
+                kind="research view score dimension id",
+            )
+            dimension_label = str(dimension.get("label") or "").strip()
+            if not dimension_label:
+                raise ValueError(
+                    f"research view score dimension {dimension_id} requires a label"
+                )
+            dimensions.append(
+                ResearchScoreDimensionSpec(
+                    id=dimension_id,
+                    label=dimension_label,
+                    description=str(dimension.get("description") or "").strip(),
+                    source_key=_optional_str(dimension.get("source_key")),
+                    target=target,
+                    primary=bool(dimension.get("primary", False)),
+                )
+            )
+        scorer_id = validate_id(value.get("id"), kind="research view scorer id")
+        label = str(value.get("label") or "").strip()
+        description = str(value.get("description") or "").strip()
+        if not label or not description:
+            raise ValueError(
+                f"research view scorer {scorer_id} requires label and description"
+            )
+        threshold = (
+            float(value["threshold"]) if value.get("threshold") is not None else None
+        )
+        if threshold is not None and (
+            not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0
+        ):
+            raise ValueError(
+                f"research view scorer {scorer_id} threshold must be in [0, 1]"
+            )
+        scorers.append(
+            ResearchScorerSpec(
+                id=scorer_id,
+                label=label,
+                kind=scorer_kind,  # type: ignore[arg-type]
+                description=description,
+                required=bool(value.get("required", True)),
+                threshold=threshold,
+                aggregation=str(value.get("aggregation") or "").strip(),
+                evidence_inputs=_string_list(value.get("evidence_inputs")),
+                revision=_optional_str(value.get("revision")),
+                model=_optional_str(value.get("model")),
+                rubric_summary=str(value.get("rubric_summary") or "").strip(),
+                blind_fields=_string_list(value.get("blind_fields")),
+                dimensions=dimensions,
+            )
+        )
+    treatment_summaries = _dict(raw.get("treatment_summaries"))
+    if any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in treatment_summaries.items()
+    ):
+        raise ValueError("research view treatment summaries must be strings")
+    arm_factor_levels: dict[str, dict[str, str]] = {}
+    for arm_id, levels in _dict(raw.get("arm_factor_levels")).items():
+        arm = validate_id(arm_id, kind="research view arm id")
+        if not isinstance(levels, dict) or not levels:
+            raise ValueError(
+                f"research view arm {arm} factor levels must be a non-empty mapping"
+            )
+        arm_factor_levels[arm] = {
+            validate_id(key, kind="research view factor id"): validate_id(
+                value, kind="research view factor level"
+            )
+            for key, value in levels.items()
+        }
+    mechanism_stages: list[ResearchMechanismStageSpec] = []
+    for index, value in enumerate(_list(raw.get("mechanism_stages")), start=1):
+        if not isinstance(value, dict):
+            raise ValueError(f"research view mechanism stage {index} must be a mapping")
+        _reject_unknown(
+            value,
+            ResearchMechanismStageSpec,
+            kind="research view mechanism stage",
+        )
+        stage_id = validate_id(value.get("id"), kind="research view mechanism stage id")
+        label = str(value.get("label") or "").strip()
+        source_key = validate_id(
+            value.get("source_key"), kind="research view mechanism source key"
+        )
+        if not label:
+            raise ValueError(
+                f"research view mechanism stage {stage_id} requires a label"
+            )
+        eligibility_key = _optional_str(value.get("eligibility_key"))
+        if eligibility_key is not None:
+            validate_id(eligibility_key, kind="research view mechanism eligibility key")
+        mechanism_stages.append(
+            ResearchMechanismStageSpec(
+                id=stage_id,
+                label=label,
+                source_key=source_key,
+                eligibility_key=eligibility_key,
+            )
+        )
+    require_unique(
+        [item.id for item in mechanism_stages],
+        kind="research view mechanism stage",
+    )
+    return ExperimentResearchViewSpec(
+        observation=str(raw.get("observation") or "").strip(),
+        rationale=str(raw.get("rationale") or "").strip(),
+        alternative_explanations=_string_list(raw.get("alternative_explanations")),
+        success_definition=str(raw.get("success_definition") or "").strip(),
+        task_title=str(raw.get("task_title") or "").strip(),
+        task_summary=str(raw.get("task_summary") or "").strip(),
+        interaction_mode=str(raw.get("interaction_mode") or "").strip(),
+        tools=_string_list(raw.get("tools")),
+        resources=_string_list(raw.get("resources")),
+        base_instruction_summary=str(raw.get("base_instruction_summary") or "").strip(),
+        treatment_summaries={
+            str(key): str(value) for key, value in treatment_summaries.items()
+        },
+        arm_factor_levels=arm_factor_levels,
+        mechanism_stages=mechanism_stages,
+        pass_rule=str(raw.get("pass_rule") or "").strip(),
+        scorers=scorers,
     )
 
 

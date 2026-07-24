@@ -397,6 +397,12 @@ def create_app(  # noqa: C901
             idempotency_key=body.idempotency_key,
         ).to_dict()
 
+    @app.get("/v1/research/{research_id}/studies:latest-approval-preview")
+    def get_latest_controlled_study_approval_preview(
+        research_id: str,
+    ) -> dict[str, Any]:
+        return research.latest_approval_preview(research_id).to_dict()
+
     @app.get("/v1/research-studies/{experiment_id}")
     @app.get("/v1/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, Any]:
