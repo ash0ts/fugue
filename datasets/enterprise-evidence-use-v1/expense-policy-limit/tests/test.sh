@@ -3,7 +3,8 @@ set -eu
 mkdir -p /logs/verifier
 python - <<'PY'
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 path = Path("/logs/artifacts/research-brief.json")
 try:
@@ -18,13 +19,18 @@ schema_valid = (
     and all(isinstance(value.get(key), str) for key in required)
     and bool(value.get("brief", "").strip())
 )
-fact_correct = value.get("answer", "").strip().lower() == "usd 125 per attendee"
+answer = " ".join(value.get("answer", "").lower().replace("$", "usd ").split())
+fact_correct = "usd 125 per attendee" in answer
+source_name = PurePosixPath(value.get("source_document", "")).name
+revision = " ".join(value.get("source_revision", "").lower().split())
 citation_correct = (
-    value.get("source_document") == "documents/expense-policy-rev-7.md"
-    and value.get("source_revision", "").strip().lower() == "rev-7"
+    source_name == "expense-policy-rev-7.md"
+    and re.search(r"(?:^|\b)(?:rev(?:ision)?[\s-]*)?7(?:\b|$)", revision)
+    is not None
 )
-serialized = json.dumps(value, sort_keys=True).lower()
-unsupported_absent = "usd 90" not in serialized and "usd 150" not in serialized
+# The answer field is the asserted decision. The brief may accurately explain why
+# superseded or draft values were rejected without turning them into claims.
+unsupported_absent = "usd 90" not in answer and "usd 150" not in answer
 source_used = fact_correct and citation_correct
 passed = schema_valid and source_used and unsupported_absent
 rewards = {

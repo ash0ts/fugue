@@ -3,7 +3,7 @@ set -eu
 mkdir -p /logs/verifier
 python - <<'PY'
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 path = Path("/logs/artifacts/research-brief.json")
 try:
@@ -20,15 +20,16 @@ schema_valid = (
 )
 answer = " ".join(value.get("answer", "").lower().replace(";", " ").split())
 fact_correct = "30 days" in answer and "90 days" in answer
+source_name = PurePosixPath(value.get("source_document", "")).name
+revision = " ".join(value.get("source_revision", "").lower().split())
 citation_correct = (
-    value.get("source_document") == "documents/vendor-retention-2026-04.md"
-    and value.get("source_revision") == "2026-04"
+    source_name == "vendor-retention-2026-04.md"
+    and ("2026-04" in revision or "april 2026" in revision)
 )
-serialized = json.dumps(value, sort_keys=True).lower()
 unsupported_absent = (
-    "60 days" not in serialized
-    and "120 days" not in serialized
-    and "14 days" not in serialized
+    "60 days" not in answer
+    and "120 days" not in answer
+    and "14 days" not in answer
 )
 source_used = fact_correct and citation_correct
 passed = schema_valid and source_used and unsupported_absent

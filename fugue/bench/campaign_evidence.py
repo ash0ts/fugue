@@ -254,6 +254,12 @@ def _runtime_locks_valid(
     }
     portable = prepared.preparation.get("portable_context_runtime") or {}
     context_images = {str(portable.get("image_id") or "")} - {""}
+    context_fingerprints = {
+        str(item.get("execution_fingerprint") or "")
+        for item in plan.cells
+        if item.get("applicable")
+        and str(item.get("context_system_id") or "none") != "none"
+    }
     needs_agent_runtime = any(
         item.get("applicable") and item.get("execution_kind") == "agent"
         for item in plan.cells
@@ -267,6 +273,8 @@ def _runtime_locks_valid(
     if needs_agent_runtime and not agent_images:
         return False
     if needs_task_runtime and not task_images:
+        return False
+    if context_fingerprints and not context_images:
         return False
     for item in locks:
         if not isinstance(item, dict):
@@ -290,7 +298,10 @@ def _runtime_locks_valid(
             return False
         if task_images and task_runtime.get("image_id") not in task_images:
             return False
-        if context_images and context_runtime.get("image_id") not in context_images:
+        if fingerprint in context_fingerprints:
+            if context_runtime.get("image_id") not in context_images:
+                return False
+        elif context_runtime:
             return False
         observed.add(fingerprint)
     return set(expected_pairs) == observed and len(locks) == len(expected_pairs)

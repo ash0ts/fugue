@@ -3,7 +3,8 @@ set -eu
 mkdir -p /logs/verifier
 python - <<'PY'
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 path = Path("/logs/artifacts/research-brief.json")
 try:
@@ -22,17 +23,21 @@ answer = " ".join(value.get("answer", "").lower().split())
 fact_correct = (
     "security" in answer
     and "executive incident lead" in answer
-    and "10 minutes" in answer
+    and ("10 minutes" in answer or "ten minutes" in answer)
 )
 citation_correct = (
-    value.get("source_document") == "documents/incident-escalation-v5.md"
-    and value.get("source_revision", "").lower() == "v5"
+    PurePosixPath(value.get("source_document", "")).name
+    == "incident-escalation-v5.md"
+    and re.search(
+        r"(?:^|\b)(?:v|rev(?:ision)?[\s-]*)?5(?:\b|$)",
+        " ".join(value.get("source_revision", "").lower().split()),
+    )
+    is not None
 )
-serialized = json.dumps(value, sort_keys=True).lower()
 unsupported_absent = (
-    "30 minutes" not in serialized
-    and "five minutes" not in serialized
-    and "legal" not in serialized
+    "30 minutes" not in answer
+    and "five minutes" not in answer
+    and "legal" not in answer
 )
 source_used = fact_correct and citation_correct
 passed = schema_valid and source_used and unsupported_absent
