@@ -1333,6 +1333,26 @@ def _aggregate(
             "premature_completion_rate": _average(
                 _numbers(values, "premature_completion")
             ),
+            "document_search_invocation_rate": _average(
+                _numbers(values, "document_search_invoked")
+            ),
+            "relevant_document_return_rate": _average(
+                _numbers(values, "relevant_document_returned")
+            ),
+            "relevant_document_open_rate": _average(
+                _numbers(values, "relevant_document_opened")
+            ),
+            "current_document_citation_rate": _average(
+                _numbers(values, "current_document_cited")
+            ),
+            "current_document_use_rate": _average(
+                _numbers(values, "current_document_used")
+            ),
+            "artifact_schema_rate": _average(_numbers(values, "artifact_schema_valid")),
+            "answer_fact_rate": _average(_numbers(values, "answer_facts_correct")),
+            "unsupported_claim_absence_rate": _average(
+                _numbers(values, "unsupported_claims_absent")
+            ),
         }
         evidence_id = f"E{index:03d}"
         payload["evidence_id"] = evidence_id
@@ -2177,6 +2197,14 @@ def _metric_present(row: Mapping[str, Any], metric: str) -> bool:
         "relevant_retrieval_change_rate": "relevant_retrieval_changed",
         "off_target_change_only_rate": "off_target_change_only",
         "premature_completion_rate": "premature_completion",
+        "document_search_invocation_rate": "document_search_invoked",
+        "relevant_document_return_rate": "relevant_document_returned",
+        "relevant_document_open_rate": "relevant_document_opened",
+        "current_document_citation_rate": "current_document_cited",
+        "current_document_use_rate": "current_document_used",
+        "artifact_schema_rate": "artifact_schema_valid",
+        "answer_fact_rate": "answer_facts_correct",
+        "unsupported_claim_absence_rate": "unsupported_claims_absent",
     }
     return row.get(aliases.get(metric, metric)) is not None
 

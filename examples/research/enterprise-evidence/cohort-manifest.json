@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "dataset": "enterprise-evidence-agent-v1",
+  "synthetic": true,
+  "conversation_count": 24,
+  "outcomes": {
+    "correct": 12,
+    "evidence-not-used": 4,
+    "retrieval-miss": 3,
+    "wrong-source": 3,
+    "operational-failure": 2
+  },
+  "selected_failure_class": "evidence-not-used",
+  "selected_count": 4,
+  "copied_trace_content": false,
+  "authoritative_system": "weave"
+}

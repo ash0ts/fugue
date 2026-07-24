@@ -257,7 +257,7 @@ def test_reviewed_recipe_rejects_unrelated_healthy_support_calls(
 
 
 def test_reviewed_recipe_registry_preserves_support_recipe() -> None:
-    assert reviewed_task_recipe_ids() == ("support-data-authority-v1",)
+    assert "support-data-authority-v1" in reviewed_task_recipe_ids()
 
 
 def test_task_recipe_draft_rejects_an_unregistered_recipe() -> None:
