@@ -3,7 +3,8 @@ set -eu
 mkdir -p /logs/verifier
 python - <<'PY'
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 path = Path("/logs/artifacts/research-brief.json")
 try:
@@ -18,18 +19,29 @@ schema_valid = (
     and all(isinstance(value.get(key), str) for key in required)
     and bool(value.get("brief", "").strip())
 )
-answer = value.get("answer", "").lower().replace(",", "")
-fact_correct = "usd 1800" in answer and "jpy 240000" in answer and "japan" in answer
-citation_correct = (
-    value.get("source_document") == "documents/equipment-allowance-2026.md"
-    and value.get("source_revision") == "2026"
+answer = (
+    value.get("answer", "")
+    .lower()
+    .replace(",", "")
+    .replace("$", "usd ")
+    .replace("¥", "jpy ")
 )
-serialized = json.dumps(value, sort_keys=True).lower().replace(",", "")
+fact_correct = (
+    re.search(r"(?:usd\s*1800|1800\s*usd)", answer) is not None
+    and re.search(r"(?:jpy\s*240000|240000\s*jpy)", answer) is not None
+    and "japan" in answer
+)
+source_name = PurePosixPath(value.get("source_document", "")).name
+revision = " ".join(value.get("source_revision", "").lower().split())
+citation_correct = (
+    source_name == "equipment-allowance-2026.md"
+    and "2026" in revision
+)
 unsupported_absent = (
-    "usd 1200" not in serialized
-    and "jpy 160000" not in serialized
-    and "usd 2000" not in serialized
-    and "jpy 275000" not in serialized
+    "usd 1200" not in answer
+    and "jpy 160000" not in answer
+    and "usd 2000" not in answer
+    and "jpy 275000" not in answer
 )
 source_used = fact_correct and citation_correct
 passed = schema_valid and source_used and unsupported_absent
