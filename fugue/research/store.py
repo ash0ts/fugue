@@ -57,8 +57,8 @@ from fugue.research.records import (
     sign_research_log_event,
 )
 
-_RESULT_PROJECTION_VERSION = 2
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 7
+_RESULT_PROJECTION_VERSION = 3
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 11
 
 
 class StudyStore:
@@ -1520,6 +1520,7 @@ class StudyStore:
             for row in rows:
                 study = study_from_dict(json.loads(row["snapshot_json"]))
                 for result in study.results:
+                    experiment_id = self._result_experiment_id(study, result)
                     producer_event_id = (
                         f"fugue:{study.id}:result-{result.id}-"
                         f"revision-{result.revision}:"
@@ -1537,7 +1538,7 @@ class StudyStore:
                         conn,
                         producer_event_id=producer_event_id,
                         research_id=study.id,
-                        study_id=None,
+                        study_id=experiment_id,
                         classification="result",
                         state="completed",
                         message=message,
@@ -1664,10 +1665,7 @@ class StudyStore:
                             ),
                             research_id=record.study_id,
                             study_id=record.id,
-                            classification=self._research_classification(
-                                "experiment_projection_replayed",
-                                record.state,
-                            ),
+                            classification="evidence",
                             state=event_state(record.state),
                             message=(
                                 "Replayed immutable experiment evidence into the "
@@ -1742,7 +1740,39 @@ class StudyStore:
         outcome = dict(raw.get("outcome") or {})
         outcome["row_refs"] = list(rows)
         raw["outcome"] = outcome
+        public_source = self._portable_projection_source_evidence(record)
+        if public_source:
+            raw["public_source_evidence"] = public_source
         return raw
+
+    def _portable_projection_source_evidence(
+        self,
+        record: ExperimentRecordV1,
+    ) -> dict[str, Any]:
+        outcome = record.outcome or {}
+        source_export_sha256 = str(outcome.get("export_sha256") or "")
+        if not source_export_sha256:
+            return {}
+        payload = self._portable_projection_payload(source_export_sha256)
+        source = payload.get("source_evidence")
+        if not isinstance(source, Mapping):
+            return {}
+        project = str(source.get("project") or "")
+        call_ids = source.get("selected_call_ids")
+        if (
+            len(project.split("/")) != 2
+            or not all(project.split("/"))
+            or not isinstance(call_ids, list)
+            or not call_ids
+            or any(
+                not isinstance(call_id, str)
+                or not call_id
+                or len(call_id) > 200
+                for call_id in call_ids
+            )
+        ):
+            return {}
+        return {"project": project, "selected_call_ids": list(dict.fromkeys(call_ids))}
 
     def _safe_projection_rows(
         self,
@@ -1751,28 +1781,32 @@ class StudyStore:
         outcome = record.outcome or {}
         export_value = outcome.get("export_path")
         expected_digest = str(outcome.get("export_sha256") or "")
-        if not isinstance(export_value, str) or not export_value or not expected_digest:
+        if not expected_digest:
             return ()
+        rows: tuple[dict[str, Any], ...] = ()
         try:
-            relative = Path(export_value)
-            if relative.is_absolute():
-                return ()
-            path = (self.repo_root / relative).resolve()
-            path.relative_to(self.repo_root)
-            if not path.is_file() or path.stat().st_size > 100_000_000:
-                return ()
-            payload = path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() != expected_digest:
-                return ()
-            rows = tuple(
-                safe_prediction_row(value)
-                for line in payload.decode("utf-8").splitlines()
-                if line.strip()
-                for value in (json.loads(line),)
-                if isinstance(value, Mapping)
-            )
+            if isinstance(export_value, str) and export_value:
+                relative = Path(export_value)
+                if not relative.is_absolute():
+                    path = (self.repo_root / relative).resolve()
+                    path.relative_to(self.repo_root)
+                    if path.is_file() and path.stat().st_size <= 100_000_000:
+                        payload = path.read_bytes()
+                        if hashlib.sha256(payload).hexdigest() == expected_digest:
+                            rows = tuple(
+                                safe_prediction_row(value)
+                                for line in payload.decode("utf-8").splitlines()
+                                if line.strip()
+                                for value in (json.loads(line),)
+                                if isinstance(value, Mapping)
+                            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            return ()
+            rows = ()
+        if not rows:
+            rows = self._portable_projection_rows(
+                record,
+                source_export_sha256=expected_digest,
+            )
         expected_rows = int(outcome.get("expected_predictions") or 0)
         if expected_rows and len(rows) != expected_rows:
             return ()
@@ -1786,6 +1820,83 @@ class StudyStore:
         ):
             return ()
         return rows
+
+    def _portable_projection_rows(
+        self,
+        record: ExperimentRecordV1,
+        *,
+        source_export_sha256: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Load an explicitly public, content-addressed historical projection.
+
+        A portable bundle contains only normalized public fields. It is used
+        when the original private export is no longer mounted in this checkout.
+        The source export digest selects the bundle, and immutable prediction
+        identities must still match the outcome's stored row references.
+        """
+
+        payload = self._portable_projection_payload(source_export_sha256)
+        if not isinstance(payload.get("rows"), list):
+            return ()
+
+        stored_rows = {
+            str(row.get("prediction_id") or ""): row
+            for row in (record.outcome or {}).get("row_refs") or ()
+            if isinstance(row, Mapping) and row.get("prediction_id")
+        }
+        merged: list[dict[str, Any]] = []
+        for value in payload["rows"]:
+            if not isinstance(value, Mapping):
+                return ()
+            public = safe_prediction_row(value)
+            prediction_id = str(public.get("prediction_id") or "")
+            stored = stored_rows.get(prediction_id)
+            if stored is None:
+                return ()
+            for field in (
+                "run_id",
+                "candidate_id",
+                "harness",
+                "variant_id",
+                "trial_index",
+            ):
+                if (
+                    field in stored
+                    and field in public
+                    and stored[field] != public[field]
+                ):
+                    return ()
+            merged.append({**safe_prediction_row(stored), **public})
+        if set(stored_rows) != {
+            str(row.get("prediction_id") or "") for row in merged
+        }:
+            return ()
+        return tuple(merged)
+
+    def _portable_projection_payload(
+        self,
+        source_export_sha256: str,
+    ) -> Mapping[str, Any]:
+        path = (
+            self.repo_root
+            / "configs"
+            / "fugue"
+            / "public-exports"
+            / f"{source_export_sha256}.json"
+        )
+        try:
+            if not path.is_file() or path.stat().st_size > 10_000_000:
+                return {}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema_version") != 1
+            or payload.get("source_export_sha256") != source_export_sha256
+        ):
+            return {}
+        return payload
 
     def pending_research_log_events(
         self,
@@ -2145,6 +2256,21 @@ class StudyStore:
             "supersedes",
         )
         return {key: raw[key] for key in allowed if key in raw}
+
+    @staticmethod
+    def _result_experiment_id(study: Any, result: Any) -> str | None:
+        """Route an authored conclusion to the controlled Study it interprets."""
+
+        conditions = result.conditions
+        if not isinstance(conditions, dict):
+            return None
+        experiment_id = conditions.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            return None
+        known_experiments = {
+            experiment.experiment_id for experiment in study.experiments
+        }
+        return experiment_id if experiment_id in known_experiments else None
 
     def _operation(
         self, conn: sqlite3.Connection, scope_id: str, operation_id: str

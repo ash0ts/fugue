@@ -232,11 +232,16 @@ class LiveEvaluationCoordinator:
                 inputs=self._inputs_by_cell[cell.id]
             )
             prediction.__enter__()
+        row = _planned_evaluation_row(cell)
+        predict_call = getattr(prediction, "predict_call", None)
+        prediction_call_id = str(getattr(predict_call, "id", "") or "")
+        if prediction_call_id:
+            row["weave_prediction_call_id"] = prediction_call_id
         with self._prediction_lock:
             self._predictions[cell.id] = _LivePrediction(
                 session=session,
                 prediction=prediction,
-                row=_planned_evaluation_row(cell),
+                row=row,
                 opened_monotonic=time.monotonic(),
             )
         call = prediction.predict_and_score_call
@@ -266,6 +271,7 @@ class LiveEvaluationCoordinator:
             time.monotonic() - active.opened_monotonic, 0.0
         )
         call_id = str(active.prediction.predict_and_score_call.id)
+        row["eval_predict_and_score_call_id"] = call_id
         if outcome.status in {"cancelled", "interrupted"}:
             self._cancel_prediction(
                 cell.id,
