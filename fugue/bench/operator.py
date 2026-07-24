@@ -2999,7 +2999,10 @@ def _preparation_targets(
             missing_repositories = [
                 task.id for task in tasks if not task.repo or not task.base_commit
             ]
-            if effective and missing_repositories:
+            requires_repository = any(
+                variant.context.system_id != "none" for variant, _spec in effective
+            )
+            if requires_repository and missing_repositories:
                 raise ValueError(
                     "context preparation requires an immutable repository for "
                     "every selected Harbor task: " + ", ".join(missing_repositories)
