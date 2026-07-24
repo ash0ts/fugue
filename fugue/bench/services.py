@@ -403,8 +403,9 @@ def _credentials(
     if not missing or not create:
         return existing
     runtime_dir = _runtime_dir(spec, repo_root)
-    runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(runtime_dir, 0o700)
+    # Owner-only credential directory; Semgrep's generic rule misreads 0700.
+    runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)  # nosemgrep
+    os.chmod(runtime_dir, 0o700)  # nosemgrep
     lock = FileLock(runtime_dir / ".credentials.lock")
     with lock:
         existing = _read_credentials(spec, repo_root)
@@ -512,8 +513,9 @@ def _ensure_service_instance(repo_root: Path) -> str:
     existing = _read_service_instance(repo_root)
     if existing:
         return existing
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
+    # Owner-only instance directory; Semgrep's generic rule misreads 0700.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)  # nosemgrep
+    os.chmod(path.parent, 0o700)  # nosemgrep
     lock = FileLock(path.with_suffix(".lock"))
     with lock:
         existing = _read_service_instance(repo_root)

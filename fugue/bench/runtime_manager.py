@@ -913,8 +913,13 @@ def render_runtime_compose(
                 "pull_policy": "never",
                 "network_mode": "service:main",
                 "read_only": True,
+                "user": "65532:65532",
                 "security_opt": ["no-new-privileges:true"],
                 "cap_drop": ["ALL"],
+                "deploy": {
+                    "resources": {"limits": {"cpus": "2.0", "memory": "2g"}}
+                },
+                "pids_limit": 512,
                 "volumes": [
                     f"{artifact.resolve().as_posix()}:/fugue-context:ro",
                     (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +27,13 @@ def create_mcp_server(  # noqa: C901
     env_file: str | Path | None = None,
     service: ResearchService | None = None,
     streamable_http_path: str = "/mcp",
+    authorize: Callable[[str, str], None] | None = None,
     allowed_hosts: tuple[str, ...] = (
+        "127.0.0.1",
         "127.0.0.1:*",
+        "localhost",
         "localhost:*",
+        "[::1]",
         "fugue-control:*",
         "testserver",
     ),
@@ -54,16 +59,87 @@ def create_mcp_server(  # noqa: C901
         ),
     )
 
+    def require(scope: str, research_id: str) -> None:
+        if authorize is not None:
+            authorize(scope, research_id)
+
+    def experiment_research_id(experiment_id: str) -> str:
+        return research.store.get_experiment(experiment_id).study_id
+
+    def create_research_record(
+        *,
+        record_id: str,
+        title: str,
+        campaign_id: str,
+        question: str,
+        background: str,
+        attribution: dict[str, Any] | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        require("research:write", record_id)
+        return research.store.create_study(
+            study_id=record_id,
+            title=title,
+            campaign_id=campaign_id,
+            question=question,
+            background=background,
+            attribution=attribution_from_dict(attribution or {}),
+            operation_id=idempotency_key,
+        ).to_dict()
+
+    def read_context(record_id: str, max_chars: int) -> dict[str, Any]:
+        require("research:read", record_id)
+        return research.store.context(record_id, max_chars=max_chars).to_dict()
+
+    def record_update(
+        record_id: str,
+        update: dict[str, Any],
+        idempotency_key: str,
+        expected_revision: int | None,
+    ) -> dict[str, Any]:
+        require("result:record", record_id)
+        return research.store.update_study(
+            record_id,
+            study_update_from_dict(update),
+            operation_id=idempotency_key,
+            expected_revision=expected_revision,
+        ).to_dict()
+
+    def start_controlled_study(
+        preview: dict[str, Any],
+        approval_digest: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        accepted = experiment_preview_from_dict(preview)
+        require("study:start-approved", accepted.study_id)
+        return research.start_experiment(
+            accepted,
+            approval_digest=approval_digest,
+            idempotency_key=idempotency_key,
+        ).to_dict()
+
+    def cancel_controlled_study(
+        record_id: str, reason: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        require("study:cancel", experiment_research_id(record_id))
+        return research.cancel_experiment(
+            record_id,
+            idempotency_key=idempotency_key,
+            reason=reason,
+        ).to_dict()
+
     @mcp.tool()
     def fugue_catalog(study_id: str) -> dict[str, Any]:
         """Read the safe campaign and trace-source catalog for one Study."""
 
+        require("research:read", study_id)
         return research.catalog(study_id)
 
     @mcp.tool()
     def fugue_research_catalog(research_id: str) -> dict[str, Any]:
         """Read the safe campaign and trace-source catalog for one Research."""
 
+        require("research:read", research_id)
         return research.catalog(research_id)
 
     @mcp.tool()
@@ -78,15 +154,15 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Create durable research memory without starting an experiment."""
 
-        return research.store.create_study(
-            study_id=study_id,
+        return create_research_record(
+            record_id=study_id,
             title=title,
             campaign_id=campaign_id,
             question=question,
             background=background,
-            attribution=attribution_from_dict(attribution or {}),
-            operation_id=idempotency_key,
-        ).to_dict()
+            attribution=attribution,
+            idempotency_key=idempotency_key,
+        )
 
     @mcp.tool()
     def fugue_research_create(
@@ -100,21 +176,21 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Create durable programme-level Research without starting a Study."""
 
-        return research.store.create_study(
-            study_id=research_id,
+        return create_research_record(
+            record_id=research_id,
             title=title,
             campaign_id=campaign_id,
             question=question,
             background=background,
-            attribution=attribution_from_dict(attribution or {}),
-            operation_id=idempotency_key,
-        ).to_dict()
+            attribution=attribution,
+            idempotency_key=idempotency_key,
+        )
 
     @mcp.tool()
     def fugue_study_context(study_id: str, max_chars: int = 32000) -> dict[str, Any]:
         """Read bounded Study context with explicit omission counts."""
 
-        return research.store.context(study_id, max_chars=max_chars).to_dict()
+        return read_context(study_id, max_chars)
 
     @mcp.tool()
     def fugue_research_context(
@@ -122,7 +198,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Read bounded Research context with explicit omission counts."""
 
-        return research.store.context(research_id, max_chars=max_chars).to_dict()
+        return read_context(research_id, max_chars)
 
     @mcp.tool()
     def fugue_study_record(
@@ -133,12 +209,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Append notes or sourced results without silently rewriting history."""
 
-        return research.store.update_study(
-            study_id,
-            study_update_from_dict(update),
-            operation_id=idempotency_key,
-            expected_revision=expected_revision,
-        ).to_dict()
+        return record_update(study_id, update, idempotency_key, expected_revision)
 
     @mcp.tool()
     def fugue_research_record(
@@ -149,12 +220,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Append notes or sourced Results without rewriting Research history."""
 
-        return research.store.update_study(
-            research_id,
-            study_update_from_dict(update),
-            operation_id=idempotency_key,
-            expected_revision=expected_revision,
-        ).to_dict()
+        return record_update(research_id, update, idempotency_key, expected_revision)
 
     @mcp.tool()
     def fugue_trace_audit_preview(
@@ -162,6 +228,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Validate a bounded trace audit without reading the trace source."""
 
+        require("trace:preview", study_id)
         return research.traces.preview(
             study_id,
             trace_audit_draft_from_dict(draft, require_digest=False),
@@ -175,8 +242,10 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Run an accepted audit; metered audit profiles require approval."""
 
+        accepted = trace_audit_preview_from_dict(preview)
+        require("trace:run", accepted.study_id)
         return research.traces.run(
-            trace_audit_preview_from_dict(preview),
+            accepted,
             operation_id=idempotency_key,
             approval_digest=approval_digest,
         ).to_dict()
@@ -187,6 +256,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Map selected traces to a reviewed synthetic task without execution."""
 
+        require("study:preview", study_id)
         return research.task_recipes.derive_preview(
             study_id,
             task_recipe_draft_from_dict(draft, require_digest=False),
@@ -198,6 +268,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Map selected traces to a reviewed synthetic task without execution."""
 
+        require("study:preview", research_id)
         return research.task_recipes.derive_preview(
             research_id,
             task_recipe_draft_from_dict(draft, require_digest=False),
@@ -209,6 +280,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Resolve and estimate an experiment without preparing or running it."""
 
+        require("study:preview", study_id)
         return research.preview_experiment(
             study_id,
             experiment_draft_from_dict(draft, require_digest=False),
@@ -218,6 +290,7 @@ def create_mcp_server(  # noqa: C901
     def fugue_study_preview(research_id: str, draft: dict[str, Any]) -> dict[str, Any]:
         """Resolve and estimate a controlled Study without running it."""
 
+        require("study:preview", research_id)
         return research.preview_experiment(
             research_id,
             experiment_draft_from_dict(draft, require_digest=False),
@@ -231,11 +304,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Queue an exact preview only after separate operator approval."""
 
-        return research.start_experiment(
-            experiment_preview_from_dict(preview),
-            approval_digest=approval_digest,
-            idempotency_key=idempotency_key,
-        ).to_dict()
+        return start_controlled_study(preview, approval_digest, idempotency_key)
 
     @mcp.tool()
     def fugue_study_start(
@@ -245,11 +314,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Queue an exact controlled Study after separate operator approval."""
 
-        return research.start_experiment(
-            experiment_preview_from_dict(preview),
-            approval_digest=approval_digest,
-            idempotency_key=idempotency_key,
-        ).to_dict()
+        return start_controlled_study(preview, approval_digest, idempotency_key)
 
     @mcp.tool()
     def fugue_study_request_approval(
@@ -258,8 +323,10 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Durably request human approval for an exact Study preview."""
 
+        accepted = experiment_preview_from_dict(preview)
+        require("approval:request", accepted.study_id)
         return research.request_study_approval(
-            experiment_preview_from_dict(preview),
+            accepted,
             idempotency_key=idempotency_key,
         ).to_dict()
 
@@ -267,6 +334,7 @@ def create_mcp_server(  # noqa: C901
     def fugue_experiment_get(experiment_id: str) -> dict[str, Any]:
         """Inspect current state and ordered durable events."""
 
+        require("study:watch", experiment_research_id(experiment_id))
         record = research.store.get_experiment(experiment_id)
         return {
             "record": record.to_dict(),
@@ -277,6 +345,7 @@ def create_mcp_server(  # noqa: C901
     def fugue_study_get(study_id: str) -> dict[str, Any]:
         """Inspect one controlled Study and its ordered durable events."""
 
+        require("study:watch", experiment_research_id(study_id))
         record = research.store.get_experiment(study_id)
         return {
             "record": record.to_dict(),
@@ -292,6 +361,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Read ordered events after a resumable cursor, with bounded long polling."""
 
+        require("study:watch", experiment_research_id(experiment_id))
         return watch_experiment_page(
             research,
             experiment_id,
@@ -309,6 +379,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Read controlled Study events after a resumable cursor."""
 
+        require("study:watch", experiment_research_id(study_id))
         page = watch_experiment_page(
             research,
             study_id,
@@ -325,11 +396,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Cancel queued or running work without granting any new capability."""
 
-        return research.cancel_experiment(
-            experiment_id,
-            idempotency_key=idempotency_key,
-            reason=reason,
-        ).to_dict()
+        return cancel_controlled_study(experiment_id, reason, idempotency_key)
 
     @mcp.tool()
     def fugue_study_cancel(
@@ -337,11 +404,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Cancel a controlled Study without granting new capabilities."""
 
-        return research.cancel_experiment(
-            study_id,
-            idempotency_key=idempotency_key,
-            reason=reason,
-        ).to_dict()
+        return cancel_controlled_study(study_id, reason, idempotency_key)
 
     @mcp.tool()
     def fugue_result_record(
@@ -353,6 +416,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Append one evidence-grounded Result to a Study."""
 
+        require("result:record", study_id)
         update = {
             "results": [result],
             "attribution": attribution
@@ -375,6 +439,7 @@ def create_mcp_server(  # noqa: C901
     ) -> dict[str, Any]:
         """Append one evidence-grounded Result to a Research programme."""
 
+        require("result:record", research_id)
         update = {
             "results": [result],
             "attribution": attribution
@@ -389,32 +454,40 @@ def create_mcp_server(  # noqa: C901
 
     @mcp.resource("fugue://research/{research_id}/context")
     def research_context(research_id: str) -> str:
+        require("research:read", research_id)
         return json.dumps(research.store.context(research_id).to_dict(), indent=2)
 
     @mcp.resource("fugue://studies/{study_id}/context")
     def study_context(study_id: str) -> str:
+        require("research:read", study_id)
         return json.dumps(research.store.context(study_id).to_dict(), indent=2)
 
     @mcp.resource("fugue://audits/{audit_id}")
     def trace_audit(audit_id: str) -> str:
-        return json.dumps(research.traces.store.get(audit_id).to_dict(), indent=2)
+        audit = research.traces.store.get(audit_id)
+        require("research:read", audit.study_id)
+        return json.dumps(audit.to_dict(), indent=2)
 
     @mcp.resource("fugue://experiments/{experiment_id}")
     def experiment_status(experiment_id: str) -> str:
+        require("study:watch", experiment_research_id(experiment_id))
         return json.dumps(
             research.store.get_experiment(experiment_id).to_dict(), indent=2
         )
 
     @mcp.resource("fugue://experiments/{experiment_id}/outcome")
     def experiment_outcome(experiment_id: str) -> str:
+        require("study:watch", experiment_research_id(experiment_id))
         return json.dumps(ExperimentHandle(research, experiment_id).result(), indent=2)
 
     @mcp.resource("fugue://research-studies/{study_id}")
     def controlled_study_status(study_id: str) -> str:
+        require("study:watch", experiment_research_id(study_id))
         return json.dumps(research.store.get_experiment(study_id).to_dict(), indent=2)
 
     @mcp.resource("fugue://research-studies/{study_id}/outcome")
     def controlled_study_outcome(study_id: str) -> str:
+        require("study:watch", experiment_research_id(study_id))
         return json.dumps(ExperimentHandle(research, study_id).result(), indent=2)
 
     @mcp.prompt()

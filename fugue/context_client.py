@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _request(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    _validate_http_url(url)
     data = json.dumps(body).encode() if body is not None else None
     request = urllib.request.Request(
         url,
@@ -57,7 +59,10 @@ def _request(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         headers={"Content-Type": "application/json"},
         method="POST" if body is not None else "GET",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    # URL scheme, authority, credentials, and fragments are constrained above.
+    with urllib.request.urlopen(  # nosec B310  # nosemgrep
+        request, timeout=30
+    ) as response:
         raw = response.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("context response exceeded 1 MiB")
@@ -65,6 +70,20 @@ def _request(url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("context response was not an object")
     return value
+
+
+def _validate_http_url(url: str) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "context URL must be an HTTP(S) endpoint without credentials or fragments"
+        )
 
 
 def _record_query(

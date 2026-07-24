@@ -145,7 +145,11 @@ class ResearchService:
             self.trace_registry,
             self.approvals,
         )
-        self.task_recipes = TaskRecipeService(self.store, self.traces.store)
+        self.task_recipes = TaskRecipeService(
+            self.store,
+            self.traces.store,
+            repo_root=self.repo_root,
+        )
         self.lease_seconds = float(lease_seconds)
         self.lease_heartbeat_interval = float(
             lease_heartbeat_interval

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from fugue.research.access import (
+    AccessGrantV1,
+    ResearchAccessAuthorizer,
+    token_digest,
+)
 from fugue.research.agent_contracts import (
     CandidateRefV1,
     build_trace_audit_draft,
@@ -453,7 +459,7 @@ def test_control_app_mounts_authenticated_mcp_without_embedded_worker(
     service = _study_service(tmp_path, TraceSourceRegistry())
     app = create_app(tmp_path, api_key="agent-secret", service=service)
     assert app.state.research_worker_embedded is False
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         assert client.get("/healthz").status_code == 200
         assert client.get("/v1/studies/study-1").status_code == 401
         response = client.post(
@@ -476,6 +482,77 @@ def test_control_app_mounts_authenticated_mcp_without_embedded_worker(
         )
         assert response.status_code == 200
         assert response.json()["result"]["serverInfo"]["name"] == "Fugue Research"
+
+
+def test_research_api_enforces_scopes_hosts_limits_and_security_headers(
+    tmp_path: Path,
+) -> None:
+    service = _study_service(tmp_path, TraceSourceRegistry())
+    authorizer = ResearchAccessAuthorizer(
+        (
+            AccessGrantV1(
+                schema_version=1,
+                token_digest=token_digest("read-only"),
+                subject="bounded-agent",
+                instance_id="fixture",
+                research_ids=("study-1",),
+                scopes=("research:read", "result:record"),
+                expires_at="9999-12-31T23:59:59+00:00",
+            ),
+        )
+    )
+    app = create_app(
+        tmp_path,
+        api_key="unused",
+        service=service,
+        authorizer=authorizer,
+        max_request_bytes=256,
+    )
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        ready = client.get("/readyz")
+        assert ready.json() == {"status": "ready"}
+        assert ready.headers["x-content-type-options"] == "nosniff"
+        assert ready.headers["content-security-policy"].startswith("default-src")
+        assert (
+            client.get(
+                "/v1/studies/study-1",
+                headers={"Authorization": "Bearer read-only"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/v1/studies",
+                headers={"Authorization": "Bearer read-only"},
+                json={"padding": "x" * 300},
+            ).status_code
+            == 413
+        )
+        assert (
+            client.post(
+                "/v1/studies",
+                headers={"Authorization": "Bearer read-only"},
+                json={},
+            ).status_code
+            == 403
+        )
+        malformed = client.post(
+            "/v1/studies/study-1/updates",
+            headers={"Authorization": "Bearer read-only"},
+            json={"password": "must-not-echo"},
+        )
+        assert malformed.status_code == 422
+        assert "must-not-echo" not in malformed.text
+        assert (
+            client.get(
+                "/v1/studies/study-1",
+                headers={
+                    "Authorization": "Bearer read-only",
+                    "Host": "attacker.invalid",
+                },
+            ).status_code
+            == 400
+        )
 
 
 def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
@@ -508,10 +585,17 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     )
     assert control["secrets"] == [
         "research_api_key",
+        "research_access_grants",
         "trace_wandb_api_key",
         "research_record_ingest_key",
     ]
-    assert any("docker.sock" in value for value in worker["volumes"])
+    assert worker["volumes"][-1] == (
+        "${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}:"
+        "${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}"
+    )
+    assert worker["environment"]["DOCKER_HOST"] == (
+        "unix://${FUGUE_DOCKER_SOCKET:?run fugue research bootstrap first}"
+    )
     assert worker["group_add"] == [
         "${FUGUE_DOCKER_GID:?run fugue research bootstrap first}"
     ]
@@ -540,6 +624,7 @@ def test_research_image_ci_materializes_every_compose_secret() -> None:
     ).read_text(encoding="utf-8")
 
     assert ".fugue/secrets/research_api_key" in workflow
+    assert ".fugue/secrets/research_access_grants.json" in workflow
     assert ".fugue/secrets/research_record_ingest_key" in workflow
     assert ".fugue/secrets/wandb_api_key" in workflow
 
@@ -589,6 +674,7 @@ def test_container_bootstrap_creates_private_idempotent_secrets(
     assert "FUGUE_HOST_UID=" in compose_values
     assert "FUGUE_HOST_GID=" in compose_values
     assert "FUGUE_DOCKER_GID=" in compose_values
+    assert "FUGUE_DOCKER_SOCKET=" in compose_values
     assert "FUGUE_GIT_COMMON_DIR=" in compose_values
     assert "wandb-fixture" not in compose_values
     assert (tmp_path / ".fugue" / "runtime").is_dir()
@@ -596,6 +682,16 @@ def test_container_bootstrap_creates_private_idempotent_secrets(
     second = bootstrap_container_secrets(tmp_path)
     assert second == first
     assert token_path.read_text(encoding="utf-8") == token
+    grants = json.loads(
+        Path(first["research_access_grants_file"]).read_text(encoding="utf-8")
+    )
+    [agent_grant] = grants["grants"]
+    assert agent_grant["research_ids"] == [
+        "aria-enterprise-evidence-use-v1",
+        "aria-support-data-authority-v1",
+    ]
+    assert "study:cancel" not in agent_grant["scopes"]
+    assert "approval:request" in agent_grant["scopes"]
 
 
 def test_container_bootstrap_repairs_secret_modes_for_non_root_compose(
@@ -636,6 +732,17 @@ def test_container_bootstrap_reads_only_allowlisted_dotenv_value(
     secret = Path(values["wandb_api_key_file"]).read_text(encoding="utf-8")
     assert secret.strip() == "wandb-from-dotenv"
     assert "must-not-copy" not in secret
+
+
+def test_non_local_bootstrap_requires_explicit_rootless_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "wandb-fixture")
+    monkeypatch.setenv("FUGUE_RESEARCH_DEPLOYMENT_MODE", "hosted")
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+
+    with pytest.raises(RuntimeError, match="rootless Docker"):
+        bootstrap_container_secrets(tmp_path)
 
 
 def test_mcp_has_prompts_but_no_approval_tool(tmp_path: Path) -> None:

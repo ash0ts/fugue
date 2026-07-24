@@ -6,12 +6,20 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
+from mcp.server.fastmcp.exceptions import ToolError
 
+from fugue.research.access import (
+    AccessGrantV1,
+    ResearchAccessAuthorizer,
+    token_digest,
+)
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     ExperimentPreviewV1,
     ExperimentRecordV1,
+    ResearchError,
     build_experiment_draft,
     now,
     sign_preview,
@@ -122,7 +130,7 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
     service = _service(tmp_path)
     _terminal_experiment(service)
     app = create_app(tmp_path, api_key="secret", service=service)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         assert client.get("/v1/studies/study-1").status_code == 401
         headers = {"Authorization": "Bearer secret"}
         study = client.get("/v1/studies/study-1", headers=headers)
@@ -161,12 +169,50 @@ def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
         assert page.json()["next_check_at"].endswith("+00:00")
 
 
+def test_http_grant_cannot_cross_research_via_experiment_id(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    _terminal_experiment(service)
+    authorizer = ResearchAccessAuthorizer(
+        (
+            AccessGrantV1(
+                schema_version=1,
+                token_digest=token_digest("other-research"),
+                subject="bounded-agent",
+                instance_id="fixture",
+                research_ids=("study-2",),
+                scopes=("research:read", "study:watch"),
+                expires_at="9999-12-31T23:59:59+00:00",
+            ),
+        )
+    )
+    app = create_app(
+        tmp_path,
+        api_key="unused",
+        service=service,
+        authorizer=authorizer,
+    )
+    headers = {"Authorization": "Bearer other-research"}
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        assert client.get("/v1/studies/study-1", headers=headers).status_code == 403
+        assert (
+            client.get(
+                "/v1/experiments/study-1.proposal-1",
+                headers=headers,
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get("/v1/research-publications", headers=headers).status_code
+            == 403
+        )
+
+
 def test_watch_page_validates_bounded_cursor_wait_and_limit(tmp_path: Path) -> None:
     service = _service(tmp_path)
     _terminal_experiment(service)
     app = create_app(tmp_path, api_key="secret", service=service)
     headers = {"Authorization": "Bearer secret"}
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         for params in (
             {"after": -1},
             {"wait_seconds": 31},
@@ -193,7 +239,7 @@ def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
     _terminal_experiment(service)
     app = create_app(tmp_path, api_key="secret", service=service)
     headers = {"Authorization": "Bearer secret"}
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         legacy = client.get("/v1/studies/study-1", headers=headers)
         research = client.get("/v1/research/study-1", headers=headers)
         assert research.status_code == 200
@@ -214,7 +260,7 @@ def test_http_recovers_the_exact_preview_shown_for_approval(tmp_path: Path) -> N
     app = create_app(tmp_path, api_key="secret", service=service)
     headers = {"Authorization": "Bearer secret"}
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         response = client.get(
             "/v1/research/study-1/studies:latest-approval-preview",
             headers=headers,
@@ -349,3 +395,43 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
     }
     templates = asyncio.run(server.list_resource_templates())
     assert len(templates) == 7
+
+
+def test_mcp_operations_enforce_object_scope_and_operator_cancellation(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _terminal_experiment(service)
+    checks: list[tuple[str, str]] = []
+
+    def authorize(scope: str, research_id: str) -> None:
+        checks.append((scope, research_id))
+        if scope == "study:cancel":
+            raise ResearchError(
+                "scope_forbidden",
+                "operator scope required",
+                category="policy",
+            )
+
+    server = create_mcp_server(tmp_path, service=service, authorize=authorize)
+    asyncio.run(
+        server.call_tool(
+            "fugue_study_context",
+            {"study_id": "study-1"},
+        )
+    )
+    with pytest.raises(ToolError, match="operator scope"):
+        asyncio.run(
+            server.call_tool(
+                "fugue_study_cancel",
+                {
+                    "study_id": "study-1.proposal-1",
+                    "reason": "fixture",
+                    "idempotency_key": "cancel-fixture",
+                },
+            )
+        )
+    assert checks == [
+        ("research:read", "study-1"),
+        ("study:cancel", "study-1"),
+    ]

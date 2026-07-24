@@ -249,6 +249,7 @@ def test_cancellation_terminates_active_process_and_never_opens_queued_cell(
         replace(
             _cell("run-cancel", name),
             command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            execution_kind="provider_diagnostic",
         )
         for name in ("active", "queued")
     ]

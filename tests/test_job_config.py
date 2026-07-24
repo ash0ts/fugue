@@ -542,7 +542,6 @@ required_env: [RETRIEVAL_TOKEN]
     assert job.config["agents"][0]["extra_allowed_hosts"] == [
         "api.wandb.ai",
         "trace.wandb.ai",
-        "host.docker.internal",
         "api.openai.com",
     ]
     assert job.config["fugue"]["integration_ids"] == ["retrieval"]
@@ -601,7 +600,6 @@ interfaces:
     assert agent["extra_allowed_hosts"] == [
         "api.wandb.ai",
         "trace.wandb.ai",
-        "host.docker.internal",
         "api.example.test",
         "api.openai.com",
     ]
@@ -952,7 +950,7 @@ tasks:
     assert policy["services"]["main"]["pull_policy"] == "never"
     descriptor = job.resolved_candidate.execution_definition["context_runtime"]
     assert descriptor == {
-        "bridge_url": "http://host.docker.internal:4000",
+        "bridge_url": None,
         "image": "sha256:" + "1" * 64,
         "image_id": "sha256:" + "1" * 64,
         "kind": "compose_service",
@@ -975,7 +973,7 @@ tasks:
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert "extra_hosts" not in service
-    assert service["environment"]["FUGUE_BRIDGE_BASE_URL"] == descriptor["bridge_url"]
+    assert "FUGUE_BRIDGE_BASE_URL" not in service["environment"]
     assert "WANDB_API_KEY" not in service["environment"]
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == descriptor["query_url"]
     dockerfile = Path(__file__).parents[1] / "Dockerfile.context"

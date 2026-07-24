@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlsplit
 
+import httpx
 from filelock import FileLock
 
 from fugue.bench.candidates import stable_digest
@@ -420,7 +420,14 @@ class HttpResearchRecordSink:
         self.url = url.rstrip("/")
         self.token = token
         self.timeout = float(timeout)
-        if not self.url.startswith(("http://", "https://")):
+        parsed = urlsplit(self.url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
             raise ValueError("research record HTTP sink must use http or https")
         if not token:
             raise ValueError("research record HTTP sink requires an ingest token")
@@ -430,27 +437,28 @@ class HttpResearchRecordSink:
         return f"http:{stable_digest(self.url)[:20]}"
 
     def publish(self, event: ResearchLogEventV1) -> None:
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(event.to_dict(), separators=(",", ":")).encode(),
-            headers={
-                "Authorization": f"Bearer {self.token}",
-                "Content-Type": "application/json",
-                "Idempotency-Key": event.producer_event_id,
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                if response.status not in {200, 201, 202, 204}:
+            with httpx.Client(
+                timeout=self.timeout,
+                follow_redirects=False,
+            ) as client:
+                response = client.post(
+                    self.url,
+                    content=json.dumps(
+                        event.to_dict(), separators=(",", ":")
+                    ).encode(),
+                    headers={
+                        "Authorization": f"Bearer {self.token}",
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": event.producer_event_id,
+                    },
+                )
+                if response.status_code not in {200, 201, 202, 204}:
                     raise RuntimeError(
-                        f"research record sink returned HTTP {response.status}"
+                        f"research record sink returned HTTP {response.status_code}"
                     )
-        except urllib.error.HTTPError as exc:
-            body = exc.read(2048).decode("utf-8", "replace")
-            raise RuntimeError(
-                f"research record sink returned HTTP {exc.code}: {body}"
-            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError("research record sink delivery failed") from exc
 
 
 class ResearchRecordPublisher:

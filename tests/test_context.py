@@ -1361,6 +1361,21 @@ def test_portable_context_client_probes_and_records_bounded_queries(
     assert event["metrics"]["result_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "url",
+    (
+        "file:///etc/passwd",
+        "ftp://127.0.0.1/context",
+        "http://user:secret@127.0.0.1/context",
+        "http://127.0.0.1/context#fragment",
+        "not-a-url",
+    ),
+)
+def test_portable_context_client_rejects_unsafe_urls(url: str) -> None:
+    with pytest.raises(ValueError, match=r"HTTP\(S\) endpoint"):
+        context_client._validate_http_url(url)
+
+
 @pytest.mark.skipif(
     os.environ.get("FUGUE_RUN_PORTABLE_CONTEXT_INTEGRATION") != "1",
     reason="requires Docker plus configured W&B Inference and Weave credentials",

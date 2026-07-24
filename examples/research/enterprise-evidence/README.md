@@ -74,3 +74,49 @@ a treatment from the canary.
 
 The Study supports a bounded implementation decision. It does not prove that
 one harness or retrieval strategy is universally better.
+
+## Replay the qualified Study in the full local demo
+
+The default presentation replays the existing immutable eight-attempt Study.
+It does not call a model or approve new spend. Core/Aria is an unchanged
+external dependency; the launcher points it at a clean Fugue `main` worktree
+and the reviewed Study Console branch.
+
+```bash
+cd /Users/ashah/Documents/GitHub/core-aria-fugue-study-loop
+
+export FUGUE_DEMO_REPO_ROOT=/Users/ashah/Documents/GitHub/fugue-main-demo
+export STUDY_CONSOLE_REPO_ROOT=/Users/ashah/Documents/GitHub/study-console-minimal-dashboard
+DEMO=services/wb_agent/examples/loop-engineering-demo/demo.sh
+
+$DEMO --profile enterprise-evidence doctor
+$DEMO --profile enterprise-evidence up
+```
+
+In another terminal:
+
+```bash
+$DEMO --profile enterprise-evidence status --open
+$DEMO --profile enterprise-evidence console
+```
+
+The replay should show:
+
+1. the four exact reviewed Weave Calls and their safe review status;
+2. the locked search × source-inspection design before execution;
+3. eight reconciled attempts with deterministic scores;
+4. links from each attempt to its authoritative Weave evidence;
+5. the honest conclusion that the 8/8 canary was non-discriminating.
+
+Restart Fugue control and Study Console once while replaying. Publication
+should resume from the durable outbox without duplicating the Study or any
+attempt. Study Console availability must not alter the stored outcome.
+
+Stop the local stack with:
+
+```bash
+$DEMO --profile enterprise-evidence down
+```
+
+Running a fresh canary or primary is intentionally not part of this runbook. A
+new run requires a new exact preview and separate operator approval.

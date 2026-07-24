@@ -18,6 +18,7 @@ from filelock import FileLock
 
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
+from fugue.bench.sandbox_policy import verify_harbor_job_attestation
 from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
@@ -453,6 +454,8 @@ def _run_cell_process(
     *,
     cancellation_event: threading.Event | None = None,
 ) -> int:
+    if cell.execution_kind == "agent":
+        verify_harbor_job_attestation(cell.config_path, repo_root)
     log_path = store.logs_dir / f"{cell.id}.log"
     process = subprocess.Popen(
         list(cell.command),

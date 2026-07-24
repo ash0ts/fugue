@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 
 from fugue.research.contracts import (
@@ -715,23 +716,18 @@ def test_failed_sink_remains_pending_without_changing_research(
 def test_http_sink_uses_ingest_auth_and_producer_idempotency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    requests: list[object] = []
+    requests: list[httpx.Request] = []
 
-    class Response:
-        status = 201
-
-        def __enter__(self) -> Response:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    def urlopen(request: object, *, timeout: float) -> Response:
-        assert timeout == 3
+    def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return Response()
+        return httpx.Response(201)
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        "fugue.research.records.httpx.Client",
+        lambda **kwargs: original_client(transport=transport, **kwargs),
+    )
     event = _store(tmp_path).research_log_events()[0]
     sink = HttpResearchRecordSink(
         "http://127.0.0.1:3000/api/research-log-events",
@@ -741,6 +737,20 @@ def test_http_sink_uses_ingest_auth_and_producer_idempotency(
     sink.publish(event)
 
     request = requests[0]
-    assert request.get_header("Authorization") == "Bearer ingest-secret"
-    assert request.get_header("Idempotency-key") == event.producer_event_id
-    assert json.loads(request.data)["event_digest"] == event.event_digest
+    assert request.headers["Authorization"] == "Bearer ingest-secret"
+    assert request.headers["Idempotency-Key"] == event.producer_event_id
+    assert json.loads(request.content)["event_digest"] == event.event_digest
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/events",
+        "https://user:secret@example.com/ingest",
+        "https://example.com/ingest#fragment",
+        "https:///missing-host",
+    ],
+)
+def test_http_sink_rejects_ambiguous_or_credentialed_urls(url: str) -> None:
+    with pytest.raises(ValueError, match="must use http or https"):
+        HttpResearchRecordSink(url, "ingest-secret")
