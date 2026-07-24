@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -58,7 +58,7 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 3
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 11
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 12
 
 
 class StudyStore:
@@ -1788,6 +1788,20 @@ class StudyStore:
             return raw
         outcome = dict(raw.get("outcome") or {})
         outcome["row_refs"] = list(rows)
+        if not outcome.get("evaluation_runs") and record.run_id:
+            try:
+                from fugue.bench.operator import OperatorService
+
+                run = OperatorService(self.repo_root).run_summary(
+                    record.run_id,
+                    recover=False,
+                )
+                if run.status in {"passed", "failed", "cancelled", "interrupted"}:
+                    outcome["evaluation_runs"] = [
+                        asdict(item) for item in run.evaluations
+                    ]
+            except (FileNotFoundError, OSError, ValueError):
+                pass
         raw["outcome"] = outcome
         public_source = self._portable_projection_source_evidence(record)
         if public_source:

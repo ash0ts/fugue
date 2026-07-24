@@ -627,6 +627,7 @@ def test_evaluation_links_exact_weave_evaluation_and_dataset() -> None:
     record["outcome"]["evaluation_runs"] = [
         {
             "publication_id": "evaluation-publication-1",
+            "candidate_id": "candidate-0",
             "evaluation_ref": "weave:///team/project/object/evaluation:v1",
             "dataset_ref": "weave:///team/project/object/dataset:v1",
             "url": "https://wandb.ai/team/project/weave/evaluations/evaluation-1",
@@ -648,6 +649,13 @@ def test_evaluation_links_exact_weave_evaluation_and_dataset() -> None:
         if link["system"] == "weave" and link["kind"] == "dataset"
     )
     assert dataset["ref"] == "weave:///team/project/object/dataset:v1"
+    cell_evaluation = next(
+        link
+        for link in view.cells[0].evidence_links
+        if link["system"] == "weave" and link["kind"] == "evaluation"
+    )
+    assert cell_evaluation["ref"] == "weave:///team/project/object/evaluation:v1"
+    assert any(link["kind"] == "dataset" for link in view.cells[0].evidence_links)
 
 
 def test_evaluation_prefers_verified_public_source_evidence() -> None:
