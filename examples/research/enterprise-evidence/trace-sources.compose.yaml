@@ -2,7 +2,7 @@ version: 1
 sources:
   - id: enterprise-evidence-agent
     adapter: weave
-    allowed_projects: ["${WANDB_ENTITY}/fugue-enterprise-evidence-demo"]
+    allowed_projects: ["${WANDB_ENTITY}/enterprise-evidence-agent"]
     allowed_fields: [status, operation, errors, tools, latency, conversation]
     allowed_filters: [run_id, status]
     redactions: [credentials, hidden_reasoning, prompt_instructions, document_content]
