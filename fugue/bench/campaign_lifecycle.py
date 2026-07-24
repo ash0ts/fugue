@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -2374,6 +2374,10 @@ class CampaignService:
                     analysis_results=analysis_results,
                     metrics=_outcome_metrics(rows, passed),
                     finalized_at=_now(),
+                    evaluation_runs=tuple(
+                        json.loads(json.dumps(asdict(item), sort_keys=True))
+                        for item in run.evaluations
+                    ),
                 )
                 outcome = replace(
                     unsigned,
@@ -4090,6 +4094,7 @@ def outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
         "analysis_results",
         "metrics",
         "finalized_at",
+        "evaluation_runs",
         "outcome_digest",
     }
     _reject_unknown(raw, fields, "outcome packet")
@@ -4163,6 +4168,10 @@ def outcome_packet_from_dict(raw: Mapping[str, Any]) -> OutcomePacketV1:
         ),
         metrics=_mapping(raw.get("metrics"), "outcome metrics"),
         finalized_at=_bounded_text(raw.get("finalized_at"), "finalized_at", 100),
+        evaluation_runs=tuple(
+            _mapping(item, "evaluation run")
+            for item in _sequence(raw.get("evaluation_runs"), "evaluation runs")
+        ),
         outcome_digest=_required_digest(raw.get("outcome_digest"), "outcome_digest"),
     )
     _verify_artifact(outcome.to_dict(), "outcome_digest", "outcome packet")

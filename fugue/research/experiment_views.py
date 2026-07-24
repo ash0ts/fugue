@@ -788,6 +788,11 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
         for item in evaluation.get("prediction_results") or ()
         if isinstance(item, Mapping)
     }
+    publication_by_candidate = {
+        str(item.get("candidate_id") or ""): item
+        for item in outcome.get("evaluation_runs") or ()
+        if isinstance(item, Mapping) and item.get("candidate_id")
+    }
     authored_evaluation_configured = bool(
         evaluation_by_prediction
         or (
@@ -803,6 +808,7 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
             item,
             evidence_by_prediction,
             evaluation_by_prediction,
+            publication_by_candidate=publication_by_candidate,
             evaluation_design=evaluation_design,
             authored_evaluation_configured=authored_evaluation_configured,
         )
@@ -921,6 +927,7 @@ def _outcome_cell(
     evidence_by_prediction: Mapping[str, Mapping[str, Any]],
     evaluation_by_prediction: Mapping[str, Mapping[str, Any]],
     *,
+    publication_by_candidate: Mapping[str, Mapping[str, Any]],
     evaluation_design: ExperimentEvaluationDesignV1 | None,
     authored_evaluation_configured: bool,
 ) -> ExperimentCellViewV1:
@@ -958,6 +965,31 @@ def _outcome_cell(
                 "system": "fugue",
                 "kind": "route_runtime_receipt",
                 "ref": candidate_id,
+            }
+        )
+    publication = publication_by_candidate.get(candidate_id, {})
+    evaluation_ref = str(publication.get("evaluation_ref") or "")
+    evaluation_url = str(publication.get("url") or "")
+    if evaluation_ref:
+        links.append(
+            {
+                "system": "weave",
+                "kind": "evaluation",
+                "ref": evaluation_ref,
+                **(
+                    {"uri": evaluation_url}
+                    if evaluation_url.startswith("https://")
+                    else {}
+                ),
+            }
+        )
+    dataset_ref = str(publication.get("dataset_ref") or "")
+    if dataset_ref:
+        links.append(
+            {
+                "system": "weave",
+                "kind": "dataset",
+                "ref": dataset_ref,
             }
         )
     run_snapshot = str(row.get("run_snapshot_sha256") or "")
