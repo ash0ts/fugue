@@ -339,6 +339,50 @@ def test_context_rebuild_keeps_content_addressed_dataset(
     assert rebuild_values == [False]
 
 
+def test_context_preparation_rejects_harbor_tasks_without_repository_identity(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/rag-bm25.yaml").write_text(
+        """
+id: rag-bm25
+title: Fugue RAG
+provider: fugue.bench.context:RagContextProvider
+version: "2"
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable]
+license: Fugue
+config: {mode: bm25}
+"""
+    )
+    (tmp_path / "datasets/demo.yaml").write_text(
+        """
+dataset: {path: local-tasks}
+harnesses: [{name: codex, agent: fugue.agents:FugueCodex}]
+tasks: [{id: task-one}]
+"""
+    )
+    experiment = service.experiment("demo")
+    experiment = replace(
+        experiment,
+        variants=[
+            replace(
+                experiment.variants[0],
+                context=ContextSelection(system_id="rag-bm25"),
+            )
+        ],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="context preparation requires an immutable repository.*task-one",
+    ):
+        service.prepare_context(
+            service.request_for_experiment(experiment),
+            experiment=experiment,
+        )
+
+
 def test_setup_materializes_a_dataset_before_preparing_its_task_image(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

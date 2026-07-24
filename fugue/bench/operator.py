@@ -2996,6 +2996,14 @@ def _preparation_targets(
             )
             manifest = load_manifest(path)
             tasks = manifest.tasks[:limit] if limit else manifest.tasks
+            missing_repositories = [
+                task.id for task in tasks if not task.repo or not task.base_commit
+            ]
+            if effective and missing_repositories:
+                raise ValueError(
+                    "context preparation requires an immutable repository for "
+                    "every selected Harbor task: " + ", ".join(missing_repositories)
+                )
             snapshots.extend(
                 RepositorySnapshot(
                     task.id,

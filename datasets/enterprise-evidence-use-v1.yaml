@@ -10,21 +10,37 @@ harnesses:
 tasks:
   - id: expense-policy-limit
     notes: Determine the current client-meal reimbursement limit.
+    repository:
+      type: fixture
+      path: datasets/enterprise-evidence-use-v1/expense-policy-limit/environment
+      sha256: f78c1991388fea199a992ba629d2d145fe72583c5af0eee46e36591960c6b702
     expected_paths: [documents/expense-policy-rev-7.md]
     metadata: {gold_solution: solution/solve.sh}
     artifacts: [/logs/artifacts/research-brief.json]
   - id: vendor-retention
     notes: Determine the current vendor data-retention requirement.
+    repository:
+      type: fixture
+      path: datasets/enterprise-evidence-use-v1/vendor-retention/environment
+      sha256: 63d698fd3044ddf8fc28624a5b159f7b71072328873efba631c958f38e0ca4e7
     expected_paths: [documents/vendor-retention-2026-04.md]
     metadata: {gold_solution: solution/solve.sh}
     artifacts: [/logs/artifacts/research-brief.json]
   - id: equipment-allowance
     notes: Determine the equipment allowance and regional exception.
+    repository:
+      type: fixture
+      path: datasets/enterprise-evidence-use-v1/equipment-allowance/environment
+      sha256: 3933312eb6e77f993bc3c0a0b123483c1518c1b49be462a87caab73415900a43
     expected_paths: [documents/equipment-allowance-2026.md]
     metadata: {gold_solution: solution/solve.sh}
     artifacts: [/logs/artifacts/research-brief.json]
   - id: incident-escalation
     notes: Determine the current critical-incident escalation rule.
+    repository:
+      type: fixture
+      path: datasets/enterprise-evidence-use-v1/incident-escalation/environment
+      sha256: 6d8e99185436acc58af18c5b4a65c127d1fd77e02b2e96c3a36a8bdf80d0a9eb
     expected_paths: [documents/incident-escalation-v5.md]
     metadata: {gold_solution: solution/solve.sh}
     artifacts: [/logs/artifacts/research-brief.json]
