@@ -47,7 +47,7 @@ def _service(tmp_path: Path) -> ResearchService:
     return service
 
 
-def _terminal_experiment(service: ResearchService) -> None:
+def _terminal_experiment(service: ResearchService) -> ExperimentPreviewV1:
     draft = build_experiment_draft(
         study_id="study-1",
         campaign_id="campaign-1",
@@ -115,6 +115,7 @@ def _terminal_experiment(service: ResearchService) -> None:
         message="Cancelled before launch.",
         release=True,
     )
+    return preview
 
 
 def test_http_auth_revision_and_sse_cursor(tmp_path: Path) -> None:
@@ -204,6 +205,23 @@ def test_http_research_study_aliases_preserve_artifacts(tmp_path: Path) -> None:
         )
         assert controlled_study.status_code == 200
         assert controlled_study.json() == legacy_study.json()
+
+
+def test_http_recovers_the_exact_preview_shown_for_approval(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    preview = _terminal_experiment(service)
+    service.request_study_approval(preview, idempotency_key="request-approval")
+    app = create_app(tmp_path, api_key="secret", service=service)
+    headers = {"Authorization": "Bearer secret"}
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/research/study-1/studies:latest-approval-preview",
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert response.json() == preview.to_dict()
 
 
 def test_watch_reads_active_worker_progress_without_supervisor_recovery() -> None:

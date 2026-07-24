@@ -180,6 +180,11 @@ class ResearchService:
         self.publish_records()
         return event
 
+    def latest_approval_preview(self, research_id: str) -> ExperimentPreviewV1:
+        """Recover the exact preview most recently shown for approval."""
+
+        return self.store.get_latest_approval_preview(research_id)
+
     def publish_records(self, *, limit: int = 100) -> dict[str, int]:
         """Best-effort projection; sink failures never alter research state."""
 
