@@ -35,11 +35,7 @@ def governed_display_labels(
         "loop design": "Loop design",
     }
     defaults.update(
-        {
-            harness: _humanize(harness)
-            for harness in experiment.harnesses
-            if harness
-        }
+        {harness: _humanize(harness) for harness in experiment.harnesses if harness}
     )
     defaults.update(
         {

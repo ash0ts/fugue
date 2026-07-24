@@ -482,9 +482,7 @@ class ResearchRecordPublisher:
             sinks.append(HttpResearchRecordSink(url, token))
         research_ids = tuple(
             value.strip()
-            for value in values.get(
-                "FUGUE_RESEARCH_RECORD_RESEARCH_IDS", ""
-            ).split(",")
+            for value in values.get("FUGUE_RESEARCH_RECORD_RESEARCH_IDS", "").split(",")
             if value.strip()
         )
         return cls(store, sinks, research_ids=research_ids)

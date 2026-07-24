@@ -1652,9 +1652,7 @@ class StudyStore:
                 if record.outcome:
                     projection_record = self._experiment_projection_record(record)
                     projection_record["preview"] = projection_preview
-                    view = build_evaluation_view(
-                        projection_record
-                    )
+                    view = build_evaluation_view(projection_record)
                     view_digest = stable_digest(view.to_dict())
                     if view_digest not in existing.get("evaluation", set()):
                         self._append_research_log_event(
