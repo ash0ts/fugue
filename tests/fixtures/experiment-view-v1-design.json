@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "kind": "design",
+  "research_label": "Agent eval · Support-data safety",
+  "study_label": "Support-data safety",
   "question": "Can the support Agent stay useful without oversharing customer data?",
   "hypothesis": "Checking risky actions against the user request prevents unnecessary exports without blocking valid support work.",
   "context": "Three reviewed Weave calls attached a full customer export when the ticket requested only an incident summary.",

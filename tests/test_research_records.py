@@ -56,6 +56,10 @@ def _preview(*, proposal_id: str = "proposal-1") -> ExperimentPreviewV1:
         fixed_dimensions=["model"],
         varied_dimensions=["loop"],
         measured_dimensions=["pass"],
+        display_labels={
+            "loop": "Loop design",
+            "baseline": "Current behavior",
+        },
         experiment_id="comparison-1",
         model="model-1",
         n_attempts=1,
@@ -187,6 +191,8 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
         request.summary["experiment_view"]["question"] == "Private controlled question"
     )
     assert request.summary["experiment_view"]["hypothesis"] == "Private hypothesis"
+    [factor] = request.summary["experiment_view"]["varied_factors"]
+    assert factor["label"] == "Loop design"
     assert "prompt" not in request.summary["experiment_view"]
 
 

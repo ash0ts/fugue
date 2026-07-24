@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fugue.research.experiment_views import (
     EXPERIMENT_VIEW_CELL_LIMIT,
     build_design_view,
@@ -43,6 +45,17 @@ def _preview() -> dict[str, object]:
             "fixed_dimensions": ["model", "task", "runtime", "attempt"],
             "varied_dimensions": ["harness", "loop design"],
             "measured_dimensions": ["task completion", "safe completion"],
+            "display_labels": {
+                "research": "Agent eval · Support-data safety",
+                "study": "Support-data safety",
+                "harness": "Harness",
+                "loop design": "Loop design",
+                "codex": "Codex",
+                "claude-code": "Claude Code",
+                "baseline": "Current behavior",
+                "warning-only": "Add a reminder",
+                "action-gate": "Check risky actions",
+            },
             "model": "wandb/zai-org/GLM-5.2",
             "n_attempts": 1,
             "n_tasks": 1,
@@ -125,6 +138,8 @@ def _record() -> dict[str, object]:
 def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
     view = build_design_view(_preview())
     assert view.kind == "design"
+    assert view.research_label == "Agent eval · Support-data safety"
+    assert view.study_label == "Support-data safety"
     assert view.matrix_size == 6
     assert len(view.cells) == 6
     assert view.taskset is not None
@@ -137,13 +152,30 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
         "harness": ("codex", "claude-code"),
         "loop design": ("baseline", "warning-only", "action-gate"),
     }
+    labels = {item.name: item for item in view.varied_factors}
+    assert labels["harness"].label == "Harness"
+    assert labels["harness"].level_labels == {
+        "codex": "Codex",
+        "claude-code": "Claude Code",
+    }
+    assert labels["loop design"].level_labels == {
+        "baseline": "Current behavior",
+        "warning-only": "Add a reminder",
+        "action-gate": "Check risky actions",
+    }
     assert {item.id for item in view.harnesses} == {"codex", "claude-code"}
+    assert {item.id: item.label for item in view.harnesses} == {
+        "codex": "Codex",
+        "claude-code": "Claude Code",
+    }
 
 
 def test_canonical_design_fixture_matches_the_public_contract() -> None:
     view = experiment_view_from_dict(json.loads(_FIXTURE.read_text()))
 
     assert view.kind == "design"
+    assert view.research_label == "Agent eval · Support-data safety"
+    assert view.study_label == "Support-data safety"
     assert view.source_cohort is not None
     assert view.source_cohort.details["call_count"] == 3
 
@@ -208,6 +240,34 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
         "evaluation",
         "analysis",
     }
+    summaries = {item.id: item for item in view.outcome_summaries}
+    assert summaries["deterministic_task"].status == "failed"
+    assert summaries["deterministic_task"].passed == 2
+    assert summaries["deterministic_task"].total == 6
+    assert summaries["authored_evaluation"].status == "unavailable"
+    assert summaries["authored_evaluation"].passed is None
+    assert summaries["infrastructure"].status == "passed"
+    assert summaries["evidence"].status == "passed"
+
+
+def test_outcome_summary_does_not_turn_unavailable_evaluation_into_failure() -> None:
+    raw = _record()
+    raw["evaluation"]["prediction_results"] = [
+        {
+            "prediction_id": raw["outcome"]["row_refs"][0]["prediction_id"],
+            "criteria_pass": True,
+        }
+    ]
+
+    view = build_evaluation_view(raw)
+
+    summary = next(
+        item for item in view.outcome_summaries if item.id == "authored_evaluation"
+    )
+    assert summary.status == "passed"
+    assert summary.passed == 1
+    assert summary.total == 1
+    assert summary.unavailable == 5
 
 
 def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None:
@@ -300,6 +360,13 @@ def test_experiment_view_union_rejects_unknown_nested_fields() -> None:
         assert "unknown fields" in str(exc)
     else:
         raise AssertionError("unknown experiment-view fields must be rejected")
+
+
+def test_factor_labels_are_strict_and_must_name_declared_levels() -> None:
+    raw = build_design_view(_preview()).to_dict()
+    raw["varied_factors"][0]["level_labels"]["unknown"] = "Unknown"
+    with pytest.raises(ValueError, match="names an unknown level"):
+        experiment_view_from_dict(raw)
 
 
 def test_experiment_view_union_rejects_fields_from_another_view_kind() -> None:
