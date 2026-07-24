@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from fugue.bench.campaigns import get_campaign
 from fugue.bench.export import _evidence_use_rewards
 from fugue.bench.library import get_experiment
 from fugue.bench.manifest import load_manifest
@@ -116,6 +117,17 @@ def test_enterprise_evidence_previews_exact_canary_and_primary() -> None:
         "primary": 1,
     }
     assert len({cell.task_id for cell in primary.matrix_cells}) == 4
+
+
+def test_enterprise_recipe_uses_fresh_versioned_demo_campaign() -> None:
+    campaign = get_campaign("enterprise-evidence-use-demo-v2", REPO_ROOT)
+    stages = {stage.id: stage for stage in campaign.stages}
+
+    assert campaign.allowed_experiments == ("enterprise-evidence-use-v1",)
+    assert stages["canary"].max_proposals == 1
+    assert stages["primary"].max_proposals == 1
+    assert campaign.limits.max_total_cells == 72
+    assert campaign.limits.max_concurrent == 1
 
 
 def test_enterprise_recipe_requires_exact_reviewed_four_call_cohort(
