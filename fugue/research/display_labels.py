@@ -62,8 +62,31 @@ def preview_with_governed_display_labels(
     labels = governed_display_labels(repo_root, draft)
     if labels:
         draft["display_labels"] = labels
+    research_view = governed_research_view(repo_root, draft)
+    if research_view:
+        draft["research_view"] = research_view
     value["draft"] = draft
     return value
+
+
+def governed_research_view(
+    repo_root: Path,
+    draft: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return public-safe research metadata owned by the registered experiment."""
+
+    supplied = draft.get("research_view")
+    supplied_view = dict(supplied) if isinstance(supplied, Mapping) else {}
+    experiment_id = str(draft.get("experiment_id") or "").strip()
+    if not experiment_id:
+        return supplied_view
+    try:
+        experiment = get_experiment(experiment_id, repo_root)
+    except (FileNotFoundError, ValueError):
+        return supplied_view
+    if experiment.research_view is None:
+        return supplied_view
+    return experiment.research_view.to_dict()
 
 
 def _labels(raw: Any) -> dict[str, str]:

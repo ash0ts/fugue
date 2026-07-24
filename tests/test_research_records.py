@@ -298,6 +298,41 @@ def test_experiment_state_and_sourced_update_append_safe_records(
         store.research_log_events()[-1].to_dict()
     )
 
+    study = store.get_study("research-1")
+    store.update_study(
+        study.id,
+        study_update_from_dict(
+            {
+                "message": "Record a bounded conclusion.",
+                "results": [
+                    {
+                        "id": "result-1",
+                        "statement": "The locked comparison completed.",
+                        "kind": "controlled_experiment_result",
+                        "conditions": {"experiment_id": completed.id},
+                        "sources": [
+                            {
+                                "kind": "evaluation",
+                                "ref": "evaluation-1",
+                                "digest": _A,
+                            }
+                        ],
+                    }
+                ],
+                "attribution": {"actor_type": "agent", "name": "researcher"},
+            }
+        ),
+        operation_id="record-result",
+        expected_revision=study.revision,
+    )
+    assert store.ensure_result_projection_events() == 1
+    result_event = store.research_log_events()[-1]
+    assert result_event.classification == "result"
+    assert result_event.study_id == completed.id
+    assert result_event.summary["result"]["statement"] == (
+        "The locked comparison completed."
+    )
+
 
 def test_historical_experiment_views_are_backfilled_without_execution(
     tmp_path: Path,
@@ -423,6 +458,7 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         "evaluation",
     ]
     assert projected[-1].state == "completed"
+    assert projected[-1].classification == "evidence"
     assert projected[-1].summary["passed"] == 2
     assert (
         projected[-1].summary["experiment_view"]["infrastructure_health"]
@@ -437,6 +473,73 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         [event.to_dict() for event in projected]
     )
     assert store.ensure_experiment_view_projection_events() == 0
+
+    # A fresh checkout may no longer have the private export mount. A
+    # content-addressed public bundle reconstructs only normalized safe fields.
+    export_path.unlink()
+    bundle_path = (
+        tmp_path
+        / "configs"
+        / "fugue"
+        / "public-exports"
+        / f"{hashlib.sha256(export_payload).hexdigest()}.json"
+    )
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_export_sha256": hashlib.sha256(export_payload).hexdigest(),
+                "source_evidence": {
+                    "project": "team/reviewed-source",
+                    "selected_call_ids": ["source-call-1"],
+                },
+                "rows": [
+                    {
+                        **row,
+                        "private_prompt": "must never enter the projection",
+                    }
+                    for row in export_rows
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "DELETE FROM research_log_events "
+            "WHERE producer_event_id LIKE '%:experiment-view-%'"
+        )
+        conn.execute(
+            "DELETE FROM experiment_view_projection_state WHERE experiment_id=?",
+            (record.id,),
+        )
+    assert store.ensure_experiment_view_projection_events() == 2
+    replayed = [
+        event for event in store.research_log_events() if event.study_id == record.id
+    ]
+    assert "private_prompt" not in json.dumps(
+        [event.to_dict() for event in replayed]
+    )
+    assert all(
+        any(link["system"] == "weave" for link in cell["evidence_links"])
+        for cell in replayed[-1].summary["experiment_view"]["cells"]
+    )
+    assert any(
+        link["kind"] == "source_call"
+        and link["ref"] == "team/reviewed-source/call/source-call-1"
+        for link in replayed[-1].summary["experiment_view"]["evidence_links"]
+    )
+    mismatched = json.loads(bundle_path.read_text(encoding="utf-8"))
+    mismatched["rows"][0]["candidate_id"] = "different-candidate"
+    bundle_path.write_text(json.dumps(mismatched), encoding="utf-8")
+    assert (
+        store._portable_projection_rows(
+            completed,
+            source_export_sha256=hashlib.sha256(export_payload).hexdigest(),
+        )
+        == ()
+    )
 
     restarted = StudyStore(tmp_path)
     assert restarted.ensure_experiment_view_projection_events() == 0

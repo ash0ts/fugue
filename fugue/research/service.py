@@ -34,7 +34,10 @@ from fugue.research.contracts import (
     sign_preview,
     sign_record,
 )
-from fugue.research.display_labels import governed_display_labels
+from fugue.research.display_labels import (
+    governed_display_labels,
+    governed_research_view,
+)
 from fugue.research.records import ResearchRecordPublisher
 from fugue.research.store import StudyStore
 from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
@@ -198,11 +201,23 @@ class ResearchService:
                 self.repo_root,
                 draft.to_dict(),
             )
-            if display_labels != draft.display_labels:
+            research_view = governed_research_view(
+                self.repo_root,
+                draft.to_dict(),
+            )
+            if (
+                display_labels != draft.display_labels
+                or research_view != (draft.research_view or {})
+            ):
                 draft = experiment_draft_from_dict(
                     {
                         **draft.to_dict(),
                         "display_labels": display_labels,
+                        **(
+                            {"research_view": research_view}
+                            if research_view
+                            else {}
+                        ),
                         "draft_digest": "",
                     },
                     require_digest=False,

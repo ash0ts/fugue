@@ -1077,6 +1077,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 project_id="entity/project",
                 summary=None,
             )
+            self.predict_call = SimpleNamespace(id=f"{call_id}-model")
             self.output = None
             self.scores = {}
             self.finished = False
@@ -1209,6 +1210,8 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
     assert live_row["evaluation_prediction_latency_sec"] >= 0
+    assert live_row["eval_predict_and_score_call_id"] == "predict-1"
+    assert live_row["weave_prediction_call_id"] == "predict-1-model"
     assert live_row["evaluation_judge_status"] == "not_requested"
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"

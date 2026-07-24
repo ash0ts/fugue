@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.library import validate_id
+from fugue.bench.library import research_view_from_data, validate_id
 
 RESEARCH_SCHEMA_VERSION = 1
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -297,6 +297,7 @@ class ExperimentDraftV1:
     n_attempts: int
     n_concurrent: int
     display_labels: dict[str, str] = field(default_factory=dict)
+    research_view: dict[str, Any] | None = None
     preset_id: str | None = None
     workloads: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
@@ -769,6 +770,7 @@ def experiment_draft_from_dict(
             "experiment draft accepts a task suite digest or draft, not both"
         )
     task_digest = _optional_digest(raw.get("task_suite_digest"), "task suite digest")
+    research_view = research_view_from_data(raw.get("research_view"))
     draft = ExperimentDraftV1(
         schema_version=_schema(raw, "experiment draft"),
         study_id=validate_id(raw.get("study_id") or "", kind="study id"),
@@ -783,6 +785,7 @@ def experiment_draft_from_dict(
             raw.get("measured_dimensions"), "measured dimension"
         ),
         display_labels=_display_labels(raw.get("display_labels")),
+        research_view=research_view.to_dict() if research_view is not None else None,
         experiment_id=validate_id(
             raw.get("experiment_id") or "", kind="registered experiment id"
         ),

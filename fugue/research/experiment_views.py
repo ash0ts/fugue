@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -24,6 +25,9 @@ ExecutionStatus = Literal[
 OutcomeStatus = Literal["pending", "passed", "failed", "unavailable", "not_applicable"]
 EvidenceStatus = Literal["pending", "reconciled", "missing", "not_applicable"]
 SummaryStatus = Literal["passed", "failed", "unavailable", "not_applicable"]
+ScoreStatus = Literal[
+    "passed", "failed", "observed", "unavailable", "not_applicable"
+]
 
 _EXECUTION_STATES = {
     "queued",
@@ -51,6 +55,7 @@ _SAFE_BEHAVIORAL_MEASURES = (
     "prompt_injection_action_gate_blocked",
     "prompt_injection_attack_encountered",
     "prompt_injection_compromised",
+    "prompt_injection_evidence_preserved",
     "prompt_injection_false_positive_refusal",
     "prompt_injection_incorrect",
     "prompt_injection_safe_and_useful",
@@ -101,6 +106,99 @@ class ExperimentOutcomeSummaryV1:
 
 
 @dataclass(frozen=True)
+class ExperimentTaskDesignV1:
+    title: str
+    summary: str
+    interaction_mode: str | None = None
+    tools: tuple[str, ...] = ()
+    resources: tuple[str, ...] = ()
+    evidence_links: tuple[dict[str, str], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentPromptDesignV1:
+    base_instruction_summary: str
+    treatment_summaries: dict[str, str] = field(default_factory=dict)
+    evidence_links: tuple[dict[str, str], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentScoreDefinitionV1:
+    id: str
+    label: str
+    description: str | None = None
+    source_key: str | None = None
+    target: str | float | int | bool | None = None
+    primary: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentScorerDesignV1:
+    id: str
+    label: str
+    kind: Literal["benchmark", "deterministic", "criteria", "llm_judge"]
+    description: str
+    required: bool
+    threshold: float | None = None
+    aggregation: str | None = None
+    evidence_inputs: tuple[str, ...] = ()
+    revision: str | None = None
+    model: str | None = None
+    rubric_summary: str | None = None
+    blind_fields: tuple[str, ...] = ()
+    dimensions: tuple[ExperimentScoreDefinitionV1, ...] = ()
+    evidence_links: tuple[dict[str, str], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentEvaluationDesignV1:
+    pass_rule: str
+    scorers: tuple[ExperimentScorerDesignV1, ...]
+    llm_judge_used: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentScoreResultV1:
+    id: str
+    label: str
+    status: ScoreStatus
+    value: str | float | int | bool | None = None
+    scorer_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentScoreSummaryV1:
+    id: str
+    label: str
+    observed: int
+    passed: int | None = None
+    failed: int | None = None
+    unavailable: int = 0
+    mean: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
 class ExperimentCellViewV1:
     cell_id: str
     task_label: str
@@ -115,6 +213,7 @@ class ExperimentCellViewV1:
     latency_sec: float | None = None
     evidence_links: tuple[dict[str, str], ...] = ()
     measures: dict[str, str | int | float | bool | None] = field(default_factory=dict)
+    scores: tuple[ExperimentScoreResultV1, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -129,6 +228,13 @@ class ExperimentViewV1:
     question: str | None = None
     hypothesis: str | None = None
     context: str | None = None
+    observation: str | None = None
+    rationale: str | None = None
+    alternative_explanations: tuple[str, ...] = ()
+    success_definition: str | None = None
+    task_design: ExperimentTaskDesignV1 | None = None
+    prompt_design: ExperimentPromptDesignV1 | None = None
+    evaluation_design: ExperimentEvaluationDesignV1 | None = None
     source_cohort: ExperimentDescriptorV1 | None = None
     fixed_conditions: tuple[ExperimentFactorV1, ...] = ()
     varied_factors: tuple[ExperimentFactorV1, ...] = ()
@@ -152,6 +258,7 @@ class ExperimentViewV1:
     aligned_comparisons: tuple[dict[str, Any], ...] = ()
     behavioral_measures: dict[str, Any] = field(default_factory=dict)
     outcome_summaries: tuple[ExperimentOutcomeSummaryV1, ...] = ()
+    score_summaries: tuple[ExperimentScoreSummaryV1, ...] = ()
     evidence_eligible: bool | None = None
     limitations: tuple[str, ...] = ()
     evidence_links: tuple[dict[str, str], ...] = ()
@@ -191,6 +298,22 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         question=_optional_text(raw.get("question"), "question", 2000),
         hypothesis=_optional_text(raw.get("hypothesis"), "hypothesis", 2000),
         context=_optional_text(raw.get("context"), "context", 4000),
+        observation=_optional_text(raw.get("observation"), "observation", 4000),
+        rationale=_optional_text(raw.get("rationale"), "rationale", 4000),
+        alternative_explanations=tuple(
+            _text(item, "alternative explanation", 1000)
+            for item in _sequence(
+                raw.get("alternative_explanations"), "alternative_explanations"
+            )
+        ),
+        success_definition=_optional_text(
+            raw.get("success_definition"), "success_definition", 4000
+        ),
+        task_design=_optional_task_design(raw.get("task_design")),
+        prompt_design=_optional_prompt_design(raw.get("prompt_design")),
+        evaluation_design=_optional_evaluation_design(
+            raw.get("evaluation_design")
+        ),
         source_cohort=_optional_descriptor(raw.get("source_cohort"), "source_cohort"),
         fixed_conditions=fixed,
         varied_factors=varied,
@@ -237,6 +360,10 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         outcome_summaries=tuple(
             _outcome_summary(item)
             for item in _sequence(raw.get("outcome_summaries"), "outcome_summaries")
+        ),
+        score_summaries=tuple(
+            _score_summary(item)
+            for item in _sequence(raw.get("score_summaries"), "score_summaries")
         ),
         evidence_eligible=_optional_bool(
             raw.get("evidence_eligible"), "evidence_eligible"
@@ -307,6 +434,7 @@ def build_design_view(
         digest=taskset_digest or None,
         details={"task_count": int(task_count or 0)},
     )
+    preview_digest = str(preview.get("preview_digest") or "")
     harness_ids = _ordered_values(
         [str(item) for item in draft.get("harnesses") or ()]
         + [str(item.get("harness") or "") for item in cells]
@@ -337,6 +465,39 @@ def build_design_view(
             },
         )
     context = str(draft.get("decision_rationale") or "").strip() or None
+    research_view = _mapping_or_empty(draft.get("research_view"))
+    task_design = _research_task_design(research_view, recipe)
+    prompt_design = _research_prompt_design(research_view)
+    evaluation_design = _research_evaluation_design(research_view)
+    if task_design is not None and not task_design.evidence_links:
+        task_reference = {
+            "system": "fugue",
+            "kind": "task_definition",
+            "ref": taskset.id,
+        }
+        if taskset.digest:
+            task_reference["digest"] = taskset.digest
+        task_design = ExperimentTaskDesignV1(
+            title=task_design.title,
+            summary=task_design.summary,
+            interaction_mode=task_design.interaction_mode,
+            tools=task_design.tools,
+            resources=task_design.resources,
+            evidence_links=(task_reference,),
+        )
+    if prompt_design is not None and not prompt_design.evidence_links and preview_digest:
+        prompt_design = ExperimentPromptDesignV1(
+            base_instruction_summary=prompt_design.base_instruction_summary,
+            treatment_summaries=prompt_design.treatment_summaries,
+            evidence_links=(
+                {
+                    "system": "fugue",
+                    "kind": "prompt_design",
+                    "ref": preview_digest,
+                    "digest": preview_digest,
+                },
+            ),
+        )
     return experiment_view_from_dict(
         ExperimentViewV1(
             schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
@@ -346,6 +507,19 @@ def build_design_view(
             question=str(draft.get("question") or draft.get("research_question") or ""),
             hypothesis=str(draft.get("hypothesis") or ""),
             context=context,
+            observation=str(research_view.get("observation") or "").strip() or None,
+            rationale=str(research_view.get("rationale") or "").strip() or context,
+            alternative_explanations=tuple(
+                str(item)
+                for item in research_view.get("alternative_explanations") or ()
+                if str(item).strip()
+            ),
+            success_definition=(
+                str(research_view.get("success_definition") or "").strip() or None
+            ),
+            task_design=task_design,
+            prompt_design=prompt_design,
+            evaluation_design=evaluation_design,
             source_cohort=source_cohort,
             fixed_conditions=fixed,
             varied_factors=varied,
@@ -365,13 +539,144 @@ def build_design_view(
                 details={"locked_before_execution": True},
             ),
             matrix_size=matrix_size,
-            preview_digest=str(preview.get("preview_digest") or "") or None,
+            preview_digest=preview_digest or None,
             approval_state=approval_state,
             cell_limit=matrix_size,
             reserved_cost_usd=float(preview.get("estimated_cost_usd") or 0.0),
             cells=display_cells,
             omitted_cells=max(0, len(cells) - len(display_cells)),
         ).to_dict()
+    )
+
+
+def _research_task_design(
+    research_view: Mapping[str, Any],
+    recipe: Mapping[str, Any],
+) -> ExperimentTaskDesignV1 | None:
+    title = str(research_view.get("task_title") or "").strip()
+    summary = str(research_view.get("task_summary") or "").strip()
+    if not title or not summary:
+        return None
+    links: list[dict[str, str]] = []
+    preview_digest = str(recipe.get("preview_digest") or "")
+    recipe_id = str(recipe.get("recipe_id") or "")
+    if recipe_id and preview_digest:
+        links.append(
+            {
+                "system": "fugue",
+                "kind": "task_definition",
+                "ref": recipe_id,
+                "digest": preview_digest,
+            }
+        )
+    return ExperimentTaskDesignV1(
+        title=title,
+        summary=summary,
+        interaction_mode=(
+            str(research_view.get("interaction_mode") or "").strip() or None
+        ),
+        tools=tuple(
+            str(item)
+            for item in research_view.get("tools") or ()
+            if str(item).strip()
+        ),
+        resources=tuple(
+            str(item)
+            for item in research_view.get("resources") or ()
+            if str(item).strip()
+        ),
+        evidence_links=tuple(links),
+    )
+
+
+def _research_prompt_design(
+    research_view: Mapping[str, Any],
+) -> ExperimentPromptDesignV1 | None:
+    summary = str(research_view.get("base_instruction_summary") or "").strip()
+    treatments = {
+        str(key): str(value)
+        for key, value in _mapping_or_empty(
+            research_view.get("treatment_summaries")
+        ).items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not summary and not treatments:
+        return None
+    return ExperimentPromptDesignV1(
+        base_instruction_summary=summary or "No additional base instruction summary.",
+        treatment_summaries=treatments,
+    )
+
+
+def _research_evaluation_design(
+    research_view: Mapping[str, Any],
+) -> ExperimentEvaluationDesignV1 | None:
+    raw_scorers = [
+        item
+        for item in research_view.get("scorers") or ()
+        if isinstance(item, Mapping)
+    ]
+    pass_rule = str(research_view.get("pass_rule") or "").strip()
+    if not raw_scorers or not pass_rule:
+        return None
+    scorers: list[ExperimentScorerDesignV1] = []
+    for raw in raw_scorers:
+        dimensions = tuple(
+            ExperimentScoreDefinitionV1(
+                id=str(item.get("id") or ""),
+                label=str(item.get("label") or ""),
+                description=str(item.get("description") or "").strip() or None,
+                source_key=str(item.get("source_key") or "").strip() or None,
+                target=item.get("target"),
+                primary=bool(item.get("primary", False)),
+            )
+            for item in raw.get("dimensions") or ()
+            if isinstance(item, Mapping)
+        )
+        revision = str(raw.get("revision") or "").strip() or None
+        links = (
+            (
+                {
+                    "system": "fugue",
+                    "kind": "scorer_revision",
+                    "ref": revision,
+                },
+            )
+            if revision
+            else ()
+        )
+        scorers.append(
+            ExperimentScorerDesignV1(
+                id=str(raw.get("id") or ""),
+                label=str(raw.get("label") or ""),
+                kind=str(raw.get("kind") or ""),  # type: ignore[arg-type]
+                description=str(raw.get("description") or ""),
+                required=bool(raw.get("required", True)),
+                threshold=_optional_float(raw.get("threshold")),
+                aggregation=str(raw.get("aggregation") or "").strip() or None,
+                evidence_inputs=tuple(
+                    str(item)
+                    for item in raw.get("evidence_inputs") or ()
+                    if str(item).strip()
+                ),
+                revision=revision,
+                model=str(raw.get("model") or "").strip() or None,
+                rubric_summary=(
+                    str(raw.get("rubric_summary") or "").strip() or None
+                ),
+                blind_fields=tuple(
+                    str(item)
+                    for item in raw.get("blind_fields") or ()
+                    if str(item).strip()
+                ),
+                dimensions=dimensions,
+                evidence_links=links,
+            )
+        )
+    return ExperimentEvaluationDesignV1(
+        pass_rule=pass_rule,
+        scorers=tuple(scorers),
+        llm_judge_used=any(item.kind == "llm_judge" for item in scorers),
     )
 
 
@@ -420,6 +725,9 @@ def build_progress_view(
 
 def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
     preview = _mapping(record.get("preview"), "preview")
+    draft = _mapping(preview.get("draft"), "draft")
+    research_view = _mapping_or_empty(draft.get("research_view"))
+    evaluation_design = _research_evaluation_design(research_view)
     outcome = _mapping_or_empty(record.get("outcome"))
     rows = [item for item in outcome.get("row_refs") or () if isinstance(item, Mapping)]
     evidence_by_prediction = {
@@ -433,8 +741,24 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
         for item in evaluation.get("prediction_results") or ()
         if isinstance(item, Mapping)
     }
+    authored_evaluation_configured = bool(
+        evaluation_by_prediction
+        or (
+            evaluation_design
+            and any(
+                scorer.kind in {"criteria", "llm_judge"}
+                for scorer in evaluation_design.scorers
+            )
+        )
+    )
     cells = [
-        _outcome_cell(item, evidence_by_prediction, evaluation_by_prediction)
+        _outcome_cell(
+            item,
+            evidence_by_prediction,
+            evaluation_by_prediction,
+            evaluation_design=evaluation_design,
+            authored_evaluation_configured=authored_evaluation_configured,
+        )
         for item in rows
     ]
     displayed = tuple(cells[:EXPERIMENT_VIEW_CELL_LIMIT])
@@ -479,6 +803,7 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
                 infrastructure_health=infrastructure_health,
                 evidence_eligible=bool(outcome.get("eligible")),
             ),
+            score_summaries=_score_summaries(cells),
             evidence_eligible=bool(outcome.get("eligible")),
             limitations=limitations,
             evidence_links=_record_evidence_links(record),
@@ -545,13 +870,20 @@ def _outcome_cell(
     row: Mapping[str, Any],
     evidence_by_prediction: Mapping[str, Mapping[str, Any]],
     evaluation_by_prediction: Mapping[str, Mapping[str, Any]],
+    *,
+    evaluation_design: ExperimentEvaluationDesignV1 | None,
+    authored_evaluation_configured: bool,
 ) -> ExperimentCellViewV1:
     prediction_id = str(row.get("prediction_id") or "")
     evidence = evidence_by_prediction.get(prediction_id, {})
     evaluation_row = evaluation_by_prediction.get(prediction_id, {})
     execution = _execution_status(str(row.get("status") or "completed"))
     outcome = _row_outcome(row, execution)
-    evaluation = _row_evaluation(evaluation_row, execution)
+    evaluation = _row_evaluation(
+        evaluation_row,
+        execution,
+        configured=authored_evaluation_configured,
+    )
     trace_status = str(row.get("trace_link_status") or "")
     evidence_status: EvidenceStatus = (
         "not_applicable"
@@ -598,17 +930,30 @@ def _outcome_cell(
             }
         )
     trace_project = str(row.get("trace_project") or "")
-    weave_call_id = str(row.get("weave_call_id") or "")
+    prediction_call_id = str(row.get("weave_prediction_call_id") or "")
     if (
         len(trace_project.split("/")) == 2
         and all(trace_project.split("/"))
-        and weave_call_id
+        and prediction_call_id
     ):
         links.append(
             {
                 "system": "weave",
                 "kind": "agent_conversation",
-                "ref": f"{trace_project}/call/{weave_call_id}",
+                "ref": f"{trace_project}/call/{prediction_call_id}",
+            }
+        )
+    evaluation_call_id = str(row.get("eval_predict_and_score_call_id") or "")
+    if (
+        len(trace_project.split("/")) == 2
+        and all(trace_project.split("/"))
+        and evaluation_call_id
+    ):
+        links.append(
+            {
+                "system": "weave",
+                "kind": "evaluation_attempt",
+                "ref": f"{trace_project}/call/{evaluation_call_id}",
             }
         )
     agent_url = str(evidence.get("agent_url") or "")
@@ -689,6 +1034,7 @@ def _outcome_cell(
             if row.get(key) is not None
             and isinstance(row[key], str | int | float | bool)
         },
+        scores=_attempt_scores(row, evaluation_row, evaluation_design),
     )
 
 
@@ -844,6 +1190,105 @@ def _behavioral_measures(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _attempt_scores(
+    row: Mapping[str, Any],
+    evaluation_row: Mapping[str, Any],
+    design: ExperimentEvaluationDesignV1 | None,
+) -> tuple[ExperimentScoreResultV1, ...]:
+    if design is None:
+        return ()
+    criteria = {
+        str(item.get("criterion_id") or ""): item
+        for item in evaluation_row.get("criteria") or ()
+        if isinstance(item, Mapping)
+    }
+    results: list[ExperimentScoreResultV1] = []
+    for scorer in design.scorers:
+        if not scorer.dimensions:
+            value = evaluation_row.get("criteria_score")
+            passed = evaluation_row.get("criteria_pass")
+            results.append(
+                ExperimentScoreResultV1(
+                    id=scorer.id,
+                    label=scorer.label,
+                    status=(
+                        "passed"
+                        if passed is True
+                        else "failed"
+                        if passed is False
+                        else "unavailable"
+                    ),
+                    value=value if isinstance(value, str | int | float | bool) else None,
+                    scorer_id=scorer.id,
+                )
+            )
+            continue
+        for dimension in scorer.dimensions:
+            source_key = dimension.source_key or dimension.id
+            criterion = criteria.get(source_key, {})
+            value = row.get(source_key)
+            if value is None and criterion:
+                value = criterion.get("score")
+            if value is not None and not isinstance(value, str | int | float | bool):
+                value = None
+            status: ScoreStatus
+            if value is None:
+                status = "unavailable"
+            elif dimension.target is not None:
+                status = "passed" if value == dimension.target else "failed"
+            elif criterion.get("passed") is True:
+                status = "passed"
+            elif criterion.get("passed") is False:
+                status = "failed"
+            else:
+                status = "observed"
+            results.append(
+                ExperimentScoreResultV1(
+                    id=dimension.id,
+                    label=dimension.label,
+                    status=status,
+                    value=value,
+                    scorer_id=scorer.id,
+                )
+            )
+    return tuple(results)
+
+
+def _score_summaries(
+    cells: Sequence[ExperimentCellViewV1],
+) -> tuple[ExperimentScoreSummaryV1, ...]:
+    grouped: dict[str, list[ExperimentScoreResultV1]] = defaultdict(list)
+    labels: dict[str, str] = {}
+    for cell in cells:
+        for score in cell.scores:
+            grouped[score.id].append(score)
+            labels.setdefault(score.id, score.label)
+    summaries: list[ExperimentScoreSummaryV1] = []
+    for score_id, values in grouped.items():
+        numeric = [
+            float(item.value)
+            for item in values
+            if isinstance(item.value, int | float)
+        ]
+        passed = sum(item.status == "passed" for item in values)
+        failed = sum(item.status == "failed" for item in values)
+        summaries.append(
+            ExperimentScoreSummaryV1(
+                id=score_id,
+                label=labels[score_id],
+                observed=sum(
+                    item.status not in {"unavailable", "not_applicable"}
+                    for item in values
+                ),
+                passed=passed if passed or failed else None,
+                failed=failed if passed or failed else None,
+                unavailable=sum(item.status == "unavailable" for item in values),
+                mean=(sum(numeric) / len(numeric) if numeric else None),
+            )
+        )
+    return tuple(summaries)
+
+
 def _outcome_summaries(
     cells: Sequence[ExperimentCellViewV1],
     *,
@@ -972,9 +1417,14 @@ def _row_outcome(row: Mapping[str, Any], execution: ExecutionStatus) -> OutcomeS
 
 
 def _row_evaluation(
-    row: Mapping[str, Any], execution: ExecutionStatus
+    row: Mapping[str, Any],
+    execution: ExecutionStatus,
+    *,
+    configured: bool,
 ) -> OutcomeStatus:
     if execution == "not_applicable":
+        return "not_applicable"
+    if not configured:
         return "not_applicable"
     for key in ("criteria_pass", "authored_pass", "evaluation_pass"):
         if row.get(key) is True:
@@ -1087,9 +1537,15 @@ def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], .
     draft = _mapping_or_empty(preview.get("draft"))
     recipe = _mapping_or_empty(draft.get("task_recipe_preview"))
     provenance = _mapping_or_empty(recipe.get("provenance"))
-    project = str(provenance.get("project") or "")
+    public_source = _mapping_or_empty(record.get("public_source_evidence"))
+    project = str(public_source.get("project") or provenance.get("project") or "")
+    selected_call_ids = (
+        public_source.get("selected_call_ids")
+        or provenance.get("selected_call_ids")
+        or ()
+    )
     if len(project.split("/")) == 2 and all(project.split("/")):
-        for call_id in provenance.get("selected_call_ids") or ():
+        for call_id in selected_call_ids:
             if isinstance(call_id, str) and call_id:
                 links.append(
                     {
@@ -1164,6 +1620,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "aligned_comparisons",
                 "behavioral_measures",
                 "outcome_summaries",
+                "score_summaries",
                 "evidence_eligible",
                 "limitations",
                 "evidence_links",
@@ -1178,6 +1635,13 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "question",
                 "hypothesis",
                 "context",
+                "observation",
+                "rationale",
+                "alternative_explanations",
+                "success_definition",
+                "task_design",
+                "prompt_design",
+                "evaluation_design",
                 "research_label",
                 "study_label",
                 "source_cohort",
@@ -1192,6 +1656,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "aligned_comparisons",
                 "behavioral_measures",
                 "outcome_summaries",
+                "score_summaries",
                 "evidence_eligible",
                 "limitations",
                 "evidence_links",
@@ -1206,6 +1671,13 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "question",
                 "hypothesis",
                 "context",
+                "observation",
+                "rationale",
+                "alternative_explanations",
+                "success_definition",
+                "task_design",
+                "prompt_design",
+                "evaluation_design",
                 "research_label",
                 "study_label",
                 "source_cohort",
@@ -1228,6 +1700,189 @@ def _reject_cross_kind_values(view: ExperimentViewV1, fields: Sequence[str]) -> 
         value = getattr(view, name)
         if value is not None and value not in ((), {}):
             raise ValueError(f"{view.kind} view cannot contain {name}")
+
+
+def _optional_task_design(raw: Any) -> ExperimentTaskDesignV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "task_design")
+    _reject_unknown(
+        value,
+        {
+            "title",
+            "summary",
+            "interaction_mode",
+            "tools",
+            "resources",
+            "evidence_links",
+        },
+        "task_design",
+    )
+    return ExperimentTaskDesignV1(
+        title=_text(value.get("title"), "task_design.title", 300),
+        summary=_text(value.get("summary"), "task_design.summary", 4000),
+        interaction_mode=_optional_text(
+            value.get("interaction_mode"), "task_design.interaction_mode", 200
+        ),
+        tools=tuple(
+            _text(item, "task_design.tool", 200)
+            for item in _sequence(value.get("tools"), "task_design.tools")
+        ),
+        resources=tuple(
+            _text(item, "task_design.resource", 300)
+            for item in _sequence(value.get("resources"), "task_design.resources")
+        ),
+        evidence_links=_evidence_links(value.get("evidence_links")),
+    )
+
+
+def _optional_prompt_design(raw: Any) -> ExperimentPromptDesignV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "prompt_design")
+    _reject_unknown(
+        value,
+        {"base_instruction_summary", "treatment_summaries", "evidence_links"},
+        "prompt_design",
+    )
+    treatments = {
+        _text(key, "prompt_design treatment id", 200): _text(
+            item, "prompt_design treatment summary", 2000
+        )
+        for key, item in _mapping_or_empty(
+            value.get("treatment_summaries")
+        ).items()
+    }
+    return ExperimentPromptDesignV1(
+        base_instruction_summary=_text(
+            value.get("base_instruction_summary"),
+            "prompt_design.base_instruction_summary",
+            4000,
+        ),
+        treatment_summaries=treatments,
+        evidence_links=_evidence_links(value.get("evidence_links")),
+    )
+
+
+def _score_definition(raw: Any) -> ExperimentScoreDefinitionV1:
+    value = _mapping(raw, "score definition")
+    _reject_unknown(
+        value,
+        {"id", "label", "description", "source_key", "target", "primary"},
+        "score definition",
+    )
+    target = value.get("target")
+    if target is not None and not isinstance(target, str | int | float | bool):
+        raise ValueError("score definition target must be scalar")
+    return ExperimentScoreDefinitionV1(
+        id=_text(value.get("id"), "score definition id", 200),
+        label=_text(value.get("label"), "score definition label", 300),
+        description=_optional_text(
+            value.get("description"), "score definition description", 1000
+        ),
+        source_key=_optional_text(
+            value.get("source_key"), "score definition source key", 300
+        ),
+        target=target,
+        primary=_optional_bool(value.get("primary"), "score definition primary")
+        or False,
+    )
+
+
+def _scorer_design(raw: Any) -> ExperimentScorerDesignV1:
+    value = _mapping(raw, "scorer design")
+    _reject_unknown(
+        value,
+        {
+            "id",
+            "label",
+            "kind",
+            "description",
+            "required",
+            "threshold",
+            "aggregation",
+            "evidence_inputs",
+            "revision",
+            "model",
+            "rubric_summary",
+            "blind_fields",
+            "dimensions",
+            "evidence_links",
+        },
+        "scorer design",
+    )
+    kind = _text(value.get("kind"), "scorer design kind", 80)
+    if kind not in {"benchmark", "deterministic", "criteria", "llm_judge"}:
+        raise ValueError("unknown scorer design kind")
+    threshold = _optional_float(value.get("threshold"))
+    if threshold is not None and (
+        not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0
+    ):
+        raise ValueError("scorer design threshold must be in [0, 1]")
+    return ExperimentScorerDesignV1(
+        id=_text(value.get("id"), "scorer design id", 200),
+        label=_text(value.get("label"), "scorer design label", 300),
+        kind=kind,  # type: ignore[arg-type]
+        description=_text(
+            value.get("description"), "scorer design description", 2000
+        ),
+        required=_optional_bool(value.get("required"), "scorer design required")
+        is not False,
+        threshold=threshold,
+        aggregation=_optional_text(
+            value.get("aggregation"), "scorer design aggregation", 1000
+        ),
+        evidence_inputs=tuple(
+            _text(item, "scorer evidence input", 300)
+            for item in _sequence(
+                value.get("evidence_inputs"), "scorer design evidence inputs"
+            )
+        ),
+        revision=_optional_text(value.get("revision"), "scorer revision", 300),
+        model=_optional_text(value.get("model"), "scorer model", 300),
+        rubric_summary=_optional_text(
+            value.get("rubric_summary"), "scorer rubric summary", 2000
+        ),
+        blind_fields=tuple(
+            _text(item, "scorer blind field", 200)
+            for item in _sequence(value.get("blind_fields"), "scorer blind fields")
+        ),
+        dimensions=tuple(
+            _score_definition(item)
+            for item in _sequence(value.get("dimensions"), "scorer dimensions")
+        ),
+        evidence_links=_evidence_links(value.get("evidence_links")),
+    )
+
+
+def _optional_evaluation_design(
+    raw: Any,
+) -> ExperimentEvaluationDesignV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "evaluation_design")
+    _reject_unknown(
+        value,
+        {"pass_rule", "scorers", "llm_judge_used"},
+        "evaluation_design",
+    )
+    scorers = tuple(
+        _scorer_design(item)
+        for item in _sequence(value.get("scorers"), "evaluation_design.scorers")
+    )
+    if not scorers:
+        raise ValueError("evaluation_design requires at least one scorer")
+    judge_used = (
+        _optional_bool(value.get("llm_judge_used"), "evaluation_design.llm_judge_used")
+        or False
+    )
+    if judge_used != any(item.kind == "llm_judge" for item in scorers):
+        raise ValueError("evaluation_design judge usage disagrees with its scorers")
+    return ExperimentEvaluationDesignV1(
+        pass_rule=_text(value.get("pass_rule"), "evaluation_design.pass_rule", 4000),
+        scorers=scorers,
+        llm_judge_used=judge_used,
+    )
 
 
 def _factor(raw: Any, field_name: str) -> ExperimentFactorV1:
@@ -1277,6 +1932,70 @@ def _outcome_summary(raw: Any) -> ExperimentOutcomeSummaryV1:
     )
 
 
+def _score_result(raw: Any) -> ExperimentScoreResultV1:
+    value = _mapping(raw, "score result")
+    _reject_unknown(
+        value,
+        {"id", "label", "status", "value", "scorer_id"},
+        "score result",
+    )
+    status = _text(value.get("status"), "score result status", 80)
+    if status not in {
+        "passed",
+        "failed",
+        "observed",
+        "unavailable",
+        "not_applicable",
+    }:
+        raise ValueError("unknown score result status")
+    score_value = value.get("value")
+    if score_value is not None and not isinstance(
+        score_value, str | int | float | bool
+    ):
+        raise ValueError("score result value must be scalar")
+    return ExperimentScoreResultV1(
+        id=_text(value.get("id"), "score result id", 200),
+        label=_text(value.get("label"), "score result label", 300),
+        status=status,  # type: ignore[arg-type]
+        value=score_value,
+        scorer_id=_optional_text(value.get("scorer_id"), "score result scorer", 200),
+    )
+
+
+def _score_summary(raw: Any) -> ExperimentScoreSummaryV1:
+    value = _mapping(raw, "score summary")
+    _reject_unknown(
+        value,
+        {"id", "label", "observed", "passed", "failed", "unavailable", "mean"},
+        "score summary",
+    )
+    observed = _non_negative_int(value.get("observed", 0), "score summary observed")
+    passed = (
+        None
+        if value.get("passed") is None
+        else _non_negative_int(value["passed"], "score summary passed")
+    )
+    failed = (
+        None
+        if value.get("failed") is None
+        else _non_negative_int(value["failed"], "score summary failed")
+    )
+    unavailable = _non_negative_int(
+        value.get("unavailable", 0), "score summary unavailable"
+    )
+    if (passed or 0) + (failed or 0) > observed:
+        raise ValueError("score summary statuses exceed observed values")
+    return ExperimentScoreSummaryV1(
+        id=_text(value.get("id"), "score summary id", 200),
+        label=_text(value.get("label"), "score summary label", 300),
+        observed=observed,
+        passed=passed,
+        failed=failed,
+        unavailable=unavailable,
+        mean=_optional_float(value.get("mean")),
+    )
+
+
 def _descriptor(raw: Any, field_name: str) -> ExperimentDescriptorV1:
     value = _mapping(raw, field_name)
     _reject_unknown(value, {"id", "label", "digest", "details"}, field_name)
@@ -1316,6 +2035,7 @@ def _cell(raw: Any) -> ExperimentCellViewV1:
             "latency_sec",
             "evidence_links",
             "measures",
+            "scores",
         },
         "cell",
     )
@@ -1355,6 +2075,10 @@ def _cell(raw: Any) -> ExperimentCellViewV1:
         latency_sec=_optional_cost(value.get("latency_sec"), "latency_sec"),
         evidence_links=links,
         measures=measures,
+        scores=tuple(
+            _score_result(item)
+            for item in _sequence(value.get("scores"), "cell scores")
+        ),
     )
 
 
