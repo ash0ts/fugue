@@ -296,6 +296,7 @@ class ExperimentDraftV1:
     model: str
     n_attempts: int
     n_concurrent: int
+    display_labels: dict[str, str] = field(default_factory=dict)
     preset_id: str | None = None
     workloads: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
@@ -781,6 +782,7 @@ def experiment_draft_from_dict(
         measured_dimensions=_texts(
             raw.get("measured_dimensions"), "measured dimension"
         ),
+        display_labels=_display_labels(raw.get("display_labels")),
         experiment_id=validate_id(
             raw.get("experiment_id") or "", kind="registered experiment id"
         ),
@@ -837,6 +839,18 @@ def experiment_draft_from_dict(
     if draft.draft_digest and draft.draft_digest != digest:
         raise ValueError("draft_digest does not match the experiment draft")
     return replace(draft, draft_digest=digest)
+
+
+def _display_labels(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    values = _mapping(raw, "display labels")
+    if len(values) > 128:
+        raise ValueError("display labels may contain at most 128 entries")
+    return {
+        _text(key, "display label id", 300): _text(value, "display label", 300)
+        for key, value in values.items()
+    }
 
 
 def build_experiment_draft(**values: Any) -> ExperimentDraftV1:

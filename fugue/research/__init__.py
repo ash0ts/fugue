@@ -42,6 +42,7 @@ from fugue.research.experiment_views import (
     ExperimentCellViewV1,
     ExperimentDescriptorV1,
     ExperimentFactorV1,
+    ExperimentOutcomeSummaryV1,
     ExperimentViewV1,
     experiment_view_from_dict,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "ExperimentDescriptorV1",
     "ExperimentEventV1",
     "ExperimentFactorV1",
+    "ExperimentOutcomeSummaryV1",
     "ExperimentHandle",
     "ExperimentPreviewV1",
     "ExperimentRecordV1",

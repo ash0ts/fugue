@@ -23,6 +23,7 @@ ExecutionStatus = Literal[
 ]
 OutcomeStatus = Literal["pending", "passed", "failed", "unavailable", "not_applicable"]
 EvidenceStatus = Literal["pending", "reconciled", "missing", "not_applicable"]
+SummaryStatus = Literal["passed", "failed", "unavailable", "not_applicable"]
 
 _EXECUTION_STATES = {
     "queued",
@@ -79,9 +80,24 @@ class ExperimentDescriptorV1:
 class ExperimentFactorV1:
     name: str
     levels: tuple[str, ...]
+    label: str | None = None
+    level_labels: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _drop_empty(asdict(self))
+
+
+@dataclass(frozen=True)
+class ExperimentOutcomeSummaryV1:
+    id: str
+    label: str
+    status: SummaryStatus
+    passed: int | None = None
+    total: int | None = None
+    unavailable: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -108,6 +124,8 @@ class ExperimentCellViewV1:
 class ExperimentViewV1:
     schema_version: int
     kind: ExperimentViewKind
+    research_label: str | None = None
+    study_label: str | None = None
     question: str | None = None
     hypothesis: str | None = None
     context: str | None = None
@@ -133,6 +151,7 @@ class ExperimentViewV1:
     arm_totals: tuple[dict[str, Any], ...] = ()
     aligned_comparisons: tuple[dict[str, Any], ...] = ()
     behavioral_measures: dict[str, Any] = field(default_factory=dict)
+    outcome_summaries: tuple[ExperimentOutcomeSummaryV1, ...] = ()
     evidence_eligible: bool | None = None
     limitations: tuple[str, ...] = ()
     evidence_links: tuple[dict[str, str], ...] = ()
@@ -167,6 +186,10 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
     view = ExperimentViewV1(
         schema_version=schema_version,
         kind=kind,  # type: ignore[arg-type]
+        research_label=_optional_text(
+            raw.get("research_label"), "research_label", 300
+        ),
+        study_label=_optional_text(raw.get("study_label"), "study_label", 300),
         question=_optional_text(raw.get("question"), "question", 2000),
         hypothesis=_optional_text(raw.get("hypothesis"), "hypothesis", 2000),
         context=_optional_text(raw.get("context"), "context", 4000),
@@ -213,6 +236,10 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         behavioral_measures=_measure_mapping(
             raw.get("behavioral_measures"), "behavioral_measures"
         ),
+        outcome_summaries=tuple(
+            _outcome_summary(item)
+            for item in _sequence(raw.get("outcome_summaries"), "outcome_summaries")
+        ),
         evidence_eligible=_optional_bool(
             raw.get("evidence_eligible"), "evidence_eligible"
         ),
@@ -238,10 +265,13 @@ def build_design_view(
     ]
     fixed_names = tuple(str(item) for item in draft.get("fixed_dimensions") or ())
     varied_names = tuple(str(item) for item in draft.get("varied_dimensions") or ())
+    labels = _display_labels(draft.get("display_labels"))
     fixed = tuple(
         ExperimentFactorV1(
             name=_dimension_label(name),
             levels=_levels_for(name, draft, cells),
+            label=labels.get(_dimension_label(name), labels.get(name)),
+            level_labels=_factor_level_labels(name, draft, cells, labels),
         )
         for name in fixed_names
     )
@@ -249,6 +279,8 @@ def build_design_view(
         ExperimentFactorV1(
             name=_dimension_label(name),
             levels=_levels_for(name, draft, cells),
+            label=labels.get(_dimension_label(name), labels.get(name)),
+            level_labels=_factor_level_labels(name, draft, cells, labels),
         )
         for name in varied_names
     )
@@ -311,6 +343,8 @@ def build_design_view(
         ExperimentViewV1(
             schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
             kind="design",
+            research_label=labels.get("research"),
+            study_label=labels.get("study"),
             question=str(draft.get("question") or draft.get("research_question") or ""),
             hypothesis=str(draft.get("hypothesis") or ""),
             context=context,
@@ -322,7 +356,9 @@ def build_design_view(
             ),
             taskset=taskset,
             harnesses=tuple(
-                ExperimentDescriptorV1(id=value, label=_humanize(value))
+                ExperimentDescriptorV1(
+                    id=value, label=labels.get(value, _humanize(value))
+                )
                 for value in harness_ids
             ),
             runtime=ExperimentDescriptorV1(
@@ -440,6 +476,11 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
             arm_totals=arm_totals,
             aligned_comparisons=_aligned_comparisons(outcome),
             behavioral_measures=measures,
+            outcome_summaries=_outcome_summaries(
+                cells,
+                infrastructure_health=infrastructure_health,
+                evidence_eligible=bool(outcome.get("eligible")),
+            ),
             evidence_eligible=bool(outcome.get("eligible")),
             limitations=limitations,
             evidence_links=_record_evidence_links(record),
@@ -697,6 +738,31 @@ def _levels_for(
     return tuple(_ordered_values([value for value in values if value]))
 
 
+def _factor_level_labels(
+    name: str,
+    draft: Mapping[str, Any],
+    cells: Sequence[Mapping[str, Any]],
+    labels: Mapping[str, str],
+) -> dict[str, str]:
+    return {
+        level: labels[level]
+        for level in _levels_for(name, draft, cells)
+        if level in labels
+    }
+
+
+def _display_labels(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    values = _mapping(raw, "display_labels")
+    if len(values) > 128:
+        raise ValueError("display_labels may contain at most 128 entries")
+    return {
+        _text(key, "display label id", 300): _text(value, "display label", 300)
+        for key, value in values.items()
+    }
+
+
 def _dimension_label(name: str) -> str:
     normalized = name.lower().replace("-", "_").replace(" ", "_")
     words = set(normalized.replace(",", "_").split("_"))
@@ -778,6 +844,78 @@ def _behavioral_measures(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             result[key] = {"observed": len(values)}
     return result
+
+
+def _outcome_summaries(
+    cells: Sequence[ExperimentCellViewV1],
+    *,
+    infrastructure_health: str,
+    evidence_eligible: bool,
+) -> tuple[ExperimentOutcomeSummaryV1, ...]:
+    return (
+        _cell_outcome_summary(
+            cells,
+            id="deterministic_task",
+            label="Task outcome",
+            field_name="task_outcome",
+        ),
+        _cell_outcome_summary(
+            cells,
+            id="authored_evaluation",
+            label="Authored evaluation",
+            field_name="evaluation_status",
+        ),
+        ExperimentOutcomeSummaryV1(
+            id="infrastructure",
+            label="Infrastructure",
+            status=(
+                "passed"
+                if infrastructure_health == "healthy"
+                else "failed"
+                if infrastructure_health == "failed"
+                else "unavailable"
+            ),
+        ),
+        ExperimentOutcomeSummaryV1(
+            id="evidence",
+            label="Evidence",
+            status="passed" if evidence_eligible else "failed",
+        ),
+    )
+
+
+def _cell_outcome_summary(
+    cells: Sequence[ExperimentCellViewV1],
+    *,
+    id: str,
+    label: str,
+    field_name: Literal["task_outcome", "evaluation_status"],
+) -> ExperimentOutcomeSummaryV1:
+    values = [getattr(cell, field_name) for cell in cells]
+    scored = [value for value in values if value in {"passed", "failed"}]
+    unavailable = sum(value == "unavailable" for value in values)
+    not_applicable = sum(value == "not_applicable" for value in values)
+    if not scored:
+        status: SummaryStatus = (
+            "not_applicable"
+            if values and not_applicable == len(values)
+            else "unavailable"
+        )
+        return ExperimentOutcomeSummaryV1(
+            id=id,
+            label=label,
+            status=status,
+            unavailable=unavailable,
+        )
+    passed = sum(value == "passed" for value in scored)
+    return ExperimentOutcomeSummaryV1(
+        id=id,
+        label=label,
+        status="passed" if passed == len(scored) else "failed",
+        passed=passed,
+        total=len(scored),
+        unavailable=unavailable,
+    )
 
 
 def _aligned_comparisons(outcome: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -1012,6 +1150,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "arm_totals",
                 "aligned_comparisons",
                 "behavioral_measures",
+                "outcome_summaries",
                 "evidence_eligible",
                 "limitations",
                 "evidence_links",
@@ -1026,6 +1165,8 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "question",
                 "hypothesis",
                 "context",
+                "research_label",
+                "study_label",
                 "source_cohort",
                 "fixed_conditions",
                 "varied_factors",
@@ -1037,6 +1178,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "arm_totals",
                 "aligned_comparisons",
                 "behavioral_measures",
+                "outcome_summaries",
                 "evidence_eligible",
                 "limitations",
                 "evidence_links",
@@ -1051,6 +1193,8 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "question",
                 "hypothesis",
                 "context",
+                "research_label",
+                "study_label",
                 "source_cohort",
                 "fixed_conditions",
                 "varied_factors",
@@ -1075,13 +1219,48 @@ def _reject_cross_kind_values(view: ExperimentViewV1, fields: Sequence[str]) -> 
 
 def _factor(raw: Any, field_name: str) -> ExperimentFactorV1:
     value = _mapping(raw, field_name)
-    _reject_unknown(value, {"name", "levels"}, field_name)
+    _reject_unknown(value, {"name", "levels", "label", "level_labels"}, field_name)
+    levels = tuple(
+        _text(item, f"{field_name}.level", 300)
+        for item in _sequence(value.get("levels"), f"{field_name}.levels")
+    )
+    level_labels = _display_labels(value.get("level_labels"))
+    if set(level_labels) - set(levels):
+        raise ValueError(f"{field_name}.level_labels names an unknown level")
     return ExperimentFactorV1(
         name=_text(value.get("name"), f"{field_name}.name", 200),
-        levels=tuple(
-            _text(item, f"{field_name}.level", 300)
-            for item in _sequence(value.get("levels"), f"{field_name}.levels")
-        ),
+        levels=levels,
+        label=_optional_text(value.get("label"), f"{field_name}.label", 300),
+        level_labels=level_labels,
+    )
+
+
+def _outcome_summary(raw: Any) -> ExperimentOutcomeSummaryV1:
+    value = _mapping(raw, "outcome_summary")
+    _reject_unknown(
+        value,
+        {"id", "label", "status", "passed", "total", "unavailable"},
+        "outcome_summary",
+    )
+    status = _text(value.get("status"), "outcome_summary.status", 80)
+    if status not in {"passed", "failed", "unavailable", "not_applicable"}:
+        raise ValueError("unknown outcome summary status")
+    passed = _optional_non_negative_int(value.get("passed"), "outcome_summary.passed")
+    total = _optional_non_negative_int(value.get("total"), "outcome_summary.total")
+    unavailable = _non_negative_int(
+        value.get("unavailable", 0), "outcome_summary.unavailable"
+    )
+    if passed is not None and total is None:
+        raise ValueError("outcome summary passed count requires total")
+    if passed is not None and total is not None and passed > total:
+        raise ValueError("outcome summary passed count cannot exceed total")
+    return ExperimentOutcomeSummaryV1(
+        id=_text(value.get("id"), "outcome_summary.id", 200),
+        label=_text(value.get("label"), "outcome_summary.label", 300),
+        status=status,  # type: ignore[arg-type]
+        passed=passed,
+        total=total,
+        unavailable=unavailable,
     )
 
 
