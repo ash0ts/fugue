@@ -100,6 +100,16 @@ class ExperimentFactorV1:
 
 
 @dataclass(frozen=True)
+class ExperimentTreatmentArmV1:
+    id: str
+    label: str
+    factor_levels: dict[str, str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self))
+
+
+@dataclass(frozen=True)
 class ExperimentOutcomeSummaryV1:
     id: str
     label: str
@@ -268,6 +278,7 @@ class ExperimentViewV1:
     source_cohort: ExperimentDescriptorV1 | None = None
     fixed_conditions: tuple[ExperimentFactorV1, ...] = ()
     varied_factors: tuple[ExperimentFactorV1, ...] = ()
+    treatment_arms: tuple[ExperimentTreatmentArmV1, ...] = ()
     measured_outcomes: tuple[str, ...] = ()
     taskset: ExperimentDescriptorV1 | None = None
     harnesses: tuple[ExperimentDescriptorV1, ...] = ()
@@ -346,6 +357,10 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         source_cohort=_optional_descriptor(raw.get("source_cohort"), "source_cohort"),
         fixed_conditions=fixed,
         varied_factors=varied,
+        treatment_arms=tuple(
+            _treatment_arm(item)
+            for item in _sequence(raw.get("treatment_arms"), "treatment_arms")
+        ),
         measured_outcomes=tuple(
             _text(item, "measured_outcome", 200)
             for item in _sequence(raw.get("measured_outcomes"), "measured_outcomes")
@@ -560,6 +575,7 @@ def build_design_view(
             source_cohort=source_cohort,
             fixed_conditions=fixed,
             varied_factors=varied,
+            treatment_arms=_research_treatment_arms(research_view, labels),
             measured_outcomes=tuple(
                 str(item) for item in draft.get("measured_dimensions") or ()
             ),
@@ -1139,6 +1155,36 @@ def _display_labels(raw: Any) -> dict[str, str]:
         _text(key, "display label id", 300): _text(value, "display label", 300)
         for key, value in values.items()
     }
+
+
+def _research_treatment_arms(
+    research_view: Mapping[str, Any],
+    labels: Mapping[str, str],
+) -> tuple[ExperimentTreatmentArmV1, ...]:
+    raw_levels = _mapping_or_empty(research_view.get("arm_factor_levels"))
+    treatment_summaries = _mapping_or_empty(research_view.get("treatment_summaries"))
+    arms: list[ExperimentTreatmentArmV1] = []
+    for arm_id, levels in raw_levels.items():
+        if not isinstance(levels, Mapping) or not levels:
+            continue
+        arm = str(arm_id)
+        arms.append(
+            ExperimentTreatmentArmV1(
+                id=arm,
+                label=str(labels.get(arm) or _humanize(arm))[:300],
+                factor_levels={
+                    str(key)[:200]: str(value)[:200]
+                    for key, value in levels.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                },
+            )
+        )
+    declared_ids = {str(item) for item in treatment_summaries if isinstance(item, str)}
+    if arms and set(arm.id for arm in arms) != declared_ids:
+        raise ValueError(
+            "research view arm factor levels must match treatment summaries"
+        )
+    return tuple(arms)
 
 
 def _dimension_label(name: str) -> str:
@@ -1850,6 +1896,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "source_cohort",
                 "fixed_conditions",
                 "varied_factors",
+                "treatment_arms",
                 "measured_outcomes",
                 "taskset",
                 "harnesses",
@@ -1887,6 +1934,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "source_cohort",
                 "fixed_conditions",
                 "varied_factors",
+                "treatment_arms",
                 "measured_outcomes",
                 "taskset",
                 "harnesses",
@@ -2100,6 +2148,26 @@ def _factor(raw: Any, field_name: str) -> ExperimentFactorV1:
         levels=levels,
         label=_optional_text(value.get("label"), f"{field_name}.label", 300),
         level_labels=level_labels,
+    )
+
+
+def _treatment_arm(raw: Any) -> ExperimentTreatmentArmV1:
+    value = _mapping(raw, "treatment_arm")
+    _reject_unknown(value, {"id", "label", "factor_levels"}, "treatment_arm")
+    factor_levels = {
+        _text(key, "treatment_arm factor id", 200): _text(
+            item, "treatment_arm factor level", 200
+        )
+        for key, item in _mapping(
+            value.get("factor_levels"), "treatment_arm.factor_levels"
+        ).items()
+    }
+    if not factor_levels:
+        raise ValueError("treatment_arm requires factor levels")
+    return ExperimentTreatmentArmV1(
+        id=_text(value.get("id"), "treatment_arm.id", 200),
+        label=_text(value.get("label"), "treatment_arm.label", 300),
+        factor_levels=factor_levels,
     )
 
 
