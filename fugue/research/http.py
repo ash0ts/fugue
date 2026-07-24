@@ -259,7 +259,10 @@ def create_app(  # noqa: C901
     def ready() -> dict[str, Any]:
         with research.store._connect() as conn:
             conn.execute("SELECT 1").fetchone()
-        return {"status": "ready"}
+        return {
+            "status": "ready",
+            "trace_source_count": len(research.trace_registry.catalog()),
+        }
 
     @app.post("/v1/studies")
     def create_study(body: CreateStudyBody) -> dict[str, Any]:
