@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.library import validate_id
+from fugue.bench.library import research_view_from_data, validate_id
 
 RESEARCH_SCHEMA_VERSION = 1
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -296,6 +296,8 @@ class ExperimentDraftV1:
     model: str
     n_attempts: int
     n_concurrent: int
+    display_labels: dict[str, str] = field(default_factory=dict)
+    research_view: dict[str, Any] | None = None
     preset_id: str | None = None
     workloads: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
@@ -768,6 +770,7 @@ def experiment_draft_from_dict(
             "experiment draft accepts a task suite digest or draft, not both"
         )
     task_digest = _optional_digest(raw.get("task_suite_digest"), "task suite digest")
+    research_view = research_view_from_data(raw.get("research_view"))
     draft = ExperimentDraftV1(
         schema_version=_schema(raw, "experiment draft"),
         study_id=validate_id(raw.get("study_id") or "", kind="study id"),
@@ -781,6 +784,8 @@ def experiment_draft_from_dict(
         measured_dimensions=_texts(
             raw.get("measured_dimensions"), "measured dimension"
         ),
+        display_labels=_display_labels(raw.get("display_labels")),
+        research_view=research_view.to_dict() if research_view is not None else None,
         experiment_id=validate_id(
             raw.get("experiment_id") or "", kind="registered experiment id"
         ),
@@ -837,6 +842,18 @@ def experiment_draft_from_dict(
     if draft.draft_digest and draft.draft_digest != digest:
         raise ValueError("draft_digest does not match the experiment draft")
     return replace(draft, draft_digest=digest)
+
+
+def _display_labels(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    values = _mapping(raw, "display labels")
+    if len(values) > 128:
+        raise ValueError("display labels may contain at most 128 entries")
+    return {
+        _text(key, "display label id", 300): _text(value, "display label", 300)
+        for key, value in values.items()
+    }
 
 
 def build_experiment_draft(**values: Any) -> ExperimentDraftV1:

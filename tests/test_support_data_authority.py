@@ -19,6 +19,7 @@ from fugue.research.http import create_app
 from fugue.research.service import ResearchService
 from fugue.research.store import StudyStore
 from fugue.research.task_recipes import (
+    reviewed_task_recipe_ids,
     task_recipe_draft_from_dict,
     validate_recipe_binding,
 )
@@ -255,6 +256,24 @@ def test_reviewed_recipe_rejects_unrelated_healthy_support_calls(
     assert any("behavior this recipe tests" in blocker for blocker in recipe.blockers)
 
 
+def test_reviewed_recipe_registry_preserves_support_recipe() -> None:
+    assert reviewed_task_recipe_ids() == ("support-data-authority-v1",)
+
+
+def test_task_recipe_draft_rejects_an_unregistered_recipe() -> None:
+    with pytest.raises(ValueError, match="qualified reviewed recipe"):
+        task_recipe_draft_from_dict(
+            {
+                "schema_version": 1,
+                "study_id": "study-1",
+                "audit_id": "audit-1",
+                "recipe_id": "invented-by-agent",
+                "objective": "Try an unreviewed task generator.",
+            },
+            require_digest=False,
+        )
+
+
 def test_dynamic_weave_project_is_operator_allowlisted(tmp_path: Path) -> None:
     service, _ = _service(tmp_path)
     selection = build_trace_selection(
@@ -293,9 +312,7 @@ def test_support_data_canary_has_exact_six_cell_matrix(monkeypatch) -> None:
     assert preview.variants == ("action-gate", "baseline", "warning-only")
     assert {cell.task_id for cell in preview.matrix_cells} == {"paired-support-review"}
     manifest = load_manifest(REPO_ROOT / "datasets/support-data-authority-v1.yaml")
-    assert manifest.tasks[0].metadata == {
-        "gold_solution": "solution/solve.sh"
-    }
+    assert manifest.tasks[0].metadata == {"gold_solution": "solution/solve.sh"}
 
 
 def test_support_data_fixture_is_synthetic_local_and_requires_both_cases() -> None:

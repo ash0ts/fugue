@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from fugue.research.contracts import (
     study_from_dict,
 )
 from fugue.research.database import connect_database
+from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     build_design_view,
     build_evaluation_view,
@@ -56,8 +57,8 @@ from fugue.research.records import (
     sign_research_log_event,
 )
 
-_RESULT_PROJECTION_VERSION = 2
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 3
+_RESULT_PROJECTION_VERSION = 3
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 12
 
 
 class StudyStore:
@@ -128,6 +129,7 @@ class StudyStore:
                     research_id TEXT NOT NULL,
                     study_id TEXT NOT NULL,
                     request_json TEXT NOT NULL,
+                    preview_json TEXT,
                     operation_id TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
@@ -172,6 +174,16 @@ class StudyStore:
                 conn.execute(
                     "ALTER TABLE research_result_projection_state "
                     "ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 1"
+                )
+            approval_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(approval_requests)"
+                ).fetchall()
+            }
+            if "preview_json" not in approval_columns:
+                conn.execute(
+                    "ALTER TABLE approval_requests ADD COLUMN preview_json TEXT"
                 )
             version = conn.execute("SELECT schema_version FROM schema_info").fetchone()
             if version is None:
@@ -661,6 +673,12 @@ class StudyStore:
             conn.execute("BEGIN IMMEDIATE")
             prior_operation = self._operation(conn, accepted.study_id, operation_id)
             if prior_operation:
+                conn.execute(
+                    "UPDATE approval_requests SET preview_json=COALESCE(preview_json, ?) "
+                    "WHERE preview_digest=?",
+                    (self._json(accepted.to_dict()), accepted.preview_digest),
+                )
+                conn.commit()
                 return research_log_event_from_dict(
                     self._operation_response(
                         prior_operation,
@@ -670,7 +688,8 @@ class StudyStore:
                     )
                 )
             existing = conn.execute(
-                "SELECT request_json FROM approval_requests WHERE preview_digest=?",
+                "SELECT request_json, preview_json FROM approval_requests "
+                "WHERE preview_digest=?",
                 (accepted.preview_digest,),
             ).fetchone()
             if existing:
@@ -682,6 +701,12 @@ class StudyStore:
                         category="conflict",
                     )
                 event = prior
+                if existing[1] is None:
+                    conn.execute(
+                        "UPDATE approval_requests SET preview_json=? "
+                        "WHERE preview_digest=?",
+                        (self._json(accepted.to_dict()), accepted.preview_digest),
+                    )
             else:
                 event = self._append_research_log_event(
                     conn,
@@ -715,12 +740,16 @@ class StudyStore:
                     or AttributionV1(actor_type="agent", name="external-agent"),
                 )
                 conn.execute(
-                    "INSERT INTO approval_requests VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO approval_requests "
+                    "(preview_digest, research_id, study_id, request_json, "
+                    "preview_json, operation_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         accepted.preview_digest,
                         accepted.study_id,
                         accepted.experiment_id,
                         self._json(event.to_dict()),
+                        self._json(accepted.to_dict()),
                         operation_id,
                         event.timestamp,
                     ),
@@ -735,6 +764,27 @@ class StudyStore:
             )
             conn.commit()
         return event
+
+    def get_latest_approval_preview(self, research_id: str) -> Any:
+        """Return the latest exact preview durably shown for human approval."""
+
+        from fugue.research.contracts import experiment_preview_from_dict
+
+        research_id = validate_id(research_id, kind="research id")
+        self.get_study(research_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT preview_json FROM approval_requests "
+                "WHERE research_id=? AND preview_json IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (research_id,),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "approval_preview_not_found",
+                f"Research {research_id} has no durable approval preview",
+            )
+        return experiment_preview_from_dict(json.loads(row[0]))
 
     def record_run_progress(
         self,
@@ -1519,6 +1569,7 @@ class StudyStore:
             for row in rows:
                 study = study_from_dict(json.loads(row["snapshot_json"]))
                 for result in study.results:
+                    experiment_id = self._result_experiment_id(study, result)
                     producer_event_id = (
                         f"fugue:{study.id}:result-{result.id}-"
                         f"revision-{result.revision}:"
@@ -1536,7 +1587,7 @@ class StudyStore:
                         conn,
                         producer_event_id=producer_event_id,
                         research_id=study.id,
-                        study_id=None,
+                        study_id=experiment_id,
                         classification="result",
                         state="completed",
                         message=message,
@@ -1598,8 +1649,12 @@ class StudyStore:
             for row in rows:
                 record = experiment_record_from_dict(json.loads(row["record_json"]))
                 existing = published_views.get(record.id, {})
-                view = build_design_view(
+                projection_preview = preview_with_governed_display_labels(
+                    self.repo_root,
                     record.preview,
+                )
+                view = build_design_view(
+                    projection_preview,
                     approval_state=(
                         "approved" if record.approval else "awaiting_approval"
                     ),
@@ -1645,9 +1700,9 @@ class StudyStore:
                     )
                     created += 1
                 if record.outcome:
-                    view = build_evaluation_view(
-                        self._experiment_projection_record(record)
-                    )
+                    projection_record = self._experiment_projection_record(record)
+                    projection_record["preview"] = projection_preview
+                    view = build_evaluation_view(projection_record)
                     view_digest = stable_digest(view.to_dict())
                     if view_digest not in existing.get("evaluation", set()):
                         self._append_research_log_event(
@@ -1659,10 +1714,7 @@ class StudyStore:
                             ),
                             research_id=record.study_id,
                             study_id=record.id,
-                            classification=self._research_classification(
-                                "experiment_projection_replayed",
-                                record.state,
-                            ),
+                            classification="evidence",
                             state=event_state(record.state),
                             message=(
                                 "Replayed immutable experiment evidence into the "
@@ -1736,8 +1788,54 @@ class StudyStore:
             return raw
         outcome = dict(raw.get("outcome") or {})
         outcome["row_refs"] = list(rows)
+        if not outcome.get("evaluation_runs") and record.run_id:
+            try:
+                from fugue.bench.operator import OperatorService
+
+                run = OperatorService(self.repo_root).run_summary(
+                    record.run_id,
+                    recover=False,
+                )
+                if run.status in {"passed", "failed", "cancelled", "interrupted"}:
+                    outcome["evaluation_runs"] = [
+                        asdict(item) for item in run.evaluations
+                    ]
+            except (FileNotFoundError, OSError, ValueError):
+                pass
         raw["outcome"] = outcome
+        public_source = self._portable_projection_source_evidence(record)
+        if public_source:
+            raw["public_source_evidence"] = public_source
         return raw
+
+    def _portable_projection_source_evidence(
+        self,
+        record: ExperimentRecordV1,
+    ) -> dict[str, Any]:
+        outcome = record.outcome or {}
+        source_export_sha256 = str(outcome.get("export_sha256") or "")
+        if not source_export_sha256:
+            return {}
+        payload = self._portable_projection_payload(source_export_sha256)
+        source = payload.get("source_evidence")
+        if not isinstance(source, Mapping):
+            return {}
+        project = str(source.get("project") or "")
+        call_ids = source.get("selected_call_ids")
+        if (
+            len(project.split("/")) != 2
+            or not all(project.split("/"))
+            or not isinstance(call_ids, list)
+            or not call_ids
+            or any(
+                not isinstance(call_id, str)
+                or not call_id
+                or len(call_id) > 200
+                for call_id in call_ids
+            )
+        ):
+            return {}
+        return {"project": project, "selected_call_ids": list(dict.fromkeys(call_ids))}
 
     def _safe_projection_rows(
         self,
@@ -1746,28 +1844,32 @@ class StudyStore:
         outcome = record.outcome or {}
         export_value = outcome.get("export_path")
         expected_digest = str(outcome.get("export_sha256") or "")
-        if not isinstance(export_value, str) or not export_value or not expected_digest:
+        if not expected_digest:
             return ()
+        rows: tuple[dict[str, Any], ...] = ()
         try:
-            relative = Path(export_value)
-            if relative.is_absolute():
-                return ()
-            path = (self.repo_root / relative).resolve()
-            path.relative_to(self.repo_root)
-            if not path.is_file() or path.stat().st_size > 100_000_000:
-                return ()
-            payload = path.read_bytes()
-            if hashlib.sha256(payload).hexdigest() != expected_digest:
-                return ()
-            rows = tuple(
-                safe_prediction_row(value)
-                for line in payload.decode("utf-8").splitlines()
-                if line.strip()
-                for value in (json.loads(line),)
-                if isinstance(value, Mapping)
-            )
+            if isinstance(export_value, str) and export_value:
+                relative = Path(export_value)
+                if not relative.is_absolute():
+                    path = (self.repo_root / relative).resolve()
+                    path.relative_to(self.repo_root)
+                    if path.is_file() and path.stat().st_size <= 100_000_000:
+                        payload = path.read_bytes()
+                        if hashlib.sha256(payload).hexdigest() == expected_digest:
+                            rows = tuple(
+                                safe_prediction_row(value)
+                                for line in payload.decode("utf-8").splitlines()
+                                if line.strip()
+                                for value in (json.loads(line),)
+                                if isinstance(value, Mapping)
+                            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            return ()
+            rows = ()
+        if not rows:
+            rows = self._portable_projection_rows(
+                record,
+                source_export_sha256=expected_digest,
+            )
         expected_rows = int(outcome.get("expected_predictions") or 0)
         if expected_rows and len(rows) != expected_rows:
             return ()
@@ -1782,21 +1884,117 @@ class StudyStore:
             return ()
         return rows
 
+    def _portable_projection_rows(
+        self,
+        record: ExperimentRecordV1,
+        *,
+        source_export_sha256: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Load an explicitly public, content-addressed historical projection.
+
+        A portable bundle contains only normalized public fields. It is used
+        when the original private export is no longer mounted in this checkout.
+        The source export digest selects the bundle, and immutable prediction
+        identities must still match the outcome's stored row references.
+        """
+
+        payload = self._portable_projection_payload(source_export_sha256)
+        if not isinstance(payload.get("rows"), list):
+            return ()
+
+        stored_rows = {
+            str(row.get("prediction_id") or ""): row
+            for row in (record.outcome or {}).get("row_refs") or ()
+            if isinstance(row, Mapping) and row.get("prediction_id")
+        }
+        merged: list[dict[str, Any]] = []
+        for value in payload["rows"]:
+            if not isinstance(value, Mapping):
+                return ()
+            public = safe_prediction_row(value)
+            prediction_id = str(public.get("prediction_id") or "")
+            stored = stored_rows.get(prediction_id)
+            if stored is None:
+                return ()
+            for field in (
+                "run_id",
+                "candidate_id",
+                "harness",
+                "variant_id",
+                "trial_index",
+            ):
+                if (
+                    field in stored
+                    and field in public
+                    and stored[field] != public[field]
+                ):
+                    return ()
+            merged.append({**safe_prediction_row(stored), **public})
+        if set(stored_rows) != {
+            str(row.get("prediction_id") or "") for row in merged
+        }:
+            return ()
+        return tuple(merged)
+
+    def _portable_projection_payload(
+        self,
+        source_export_sha256: str,
+    ) -> Mapping[str, Any]:
+        path = (
+            self.repo_root
+            / "configs"
+            / "fugue"
+            / "public-exports"
+            / f"{source_export_sha256}.json"
+        )
+        try:
+            if not path.is_file() or path.stat().st_size > 10_000_000:
+                return {}
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema_version") != 1
+            or payload.get("source_export_sha256") != source_export_sha256
+        ):
+            return {}
+        return payload
+
     def pending_research_log_events(
-        self, sink_id: str, *, limit: int = 100
+        self,
+        sink_id: str,
+        *,
+        limit: int = 100,
+        research_ids: Iterable[str] = (),
     ) -> tuple[ResearchLogEventV1, ...]:
         if not sink_id or len(sink_id) > 300:
             raise ValueError("sink id must contain 1 to 300 characters")
         if limit < 1 or limit > 1000:
             raise ValueError("research log limit must be between 1 and 1000")
+        selected_ids = tuple(
+            str(value).strip() for value in research_ids if str(value).strip()
+        )
+        query = (
+            "SELECT events.event_json FROM research_log_events AS events "
+            "LEFT JOIN research_record_deliveries AS deliveries "
+            "ON deliveries.sequence=events.sequence AND deliveries.sink_id=? "
+            "WHERE (deliveries.state IS NULL OR deliveries.state!='delivered') "
+        )
+        parameters: list[Any] = [sink_id]
+        if selected_ids:
+            query += (
+                "AND json_extract(events.event_json, '$.research_id') IN ("
+                + ",".join("?" for _ in selected_ids)
+                + ") "
+            )
+            parameters.extend(selected_ids)
+        query += "ORDER BY events.sequence LIMIT ?"
+        parameters.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT events.event_json FROM research_log_events AS events "
-                "LEFT JOIN research_record_deliveries AS deliveries "
-                "ON deliveries.sequence=events.sequence AND deliveries.sink_id=? "
-                "WHERE deliveries.state IS NULL OR deliveries.state!='delivered' "
-                "ORDER BY events.sequence LIMIT ?",
-                (sink_id, limit),
+                query,
+                parameters,
             ).fetchall()
         return tuple(research_log_event_from_dict(json.loads(row[0])) for row in rows)
 
@@ -2121,6 +2319,21 @@ class StudyStore:
             "supersedes",
         )
         return {key: raw[key] for key in allowed if key in raw}
+
+    @staticmethod
+    def _result_experiment_id(study: Any, result: Any) -> str | None:
+        """Route an authored conclusion to the controlled Study it interprets."""
+
+        conditions = result.conditions
+        if not isinstance(conditions, dict):
+            return None
+        experiment_id = conditions.get("experiment_id")
+        if not isinstance(experiment_id, str) or not experiment_id:
+            return None
+        known_experiments = {
+            experiment.experiment_id for experiment in study.experiments
+        }
+        return experiment_id if experiment_id in known_experiments else None
 
     def _operation(
         self, conn: sqlite3.Connection, scope_id: str, operation_id: str

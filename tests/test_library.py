@@ -10,9 +10,38 @@ from fugue.bench.library import (
     get_agent_preset,
     get_experiment,
     get_prompt,
+    research_view_from_data,
     save_experiment,
     validate_id,
 )
+
+
+def test_research_view_parses_factorial_arms_and_mechanism_stages() -> None:
+    view = research_view_from_data(
+        {
+            "arm_factor_levels": {
+                "search-and-inspect": {
+                    "repository-search": "on",
+                    "source-inspection": "required",
+                }
+            },
+            "mechanism_stages": [
+                {
+                    "id": "source-opened",
+                    "label": "Current source opened",
+                    "source_key": "relevant_document_opened",
+                    "eligibility_key": "document_search_available",
+                }
+            ],
+        }
+    )
+
+    assert view is not None
+    assert view.arm_factor_levels["search-and-inspect"] == {
+        "repository-search": "on",
+        "source-inspection": "required",
+    }
+    assert view.mechanism_stages[0].source_key == "relevant_document_opened"
 
 
 def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
@@ -201,11 +230,11 @@ def test_workload_rejects_unknown_variant_and_assignment() -> None:
         experiment_from_data(
             {
                 **common,
-                "workloads": [
-                    {"id": "study", "harness_assignment": "random"}
-                ],
+                "workloads": [{"id": "study", "harness_assignment": "random"}],
             }
         )
+
+
 def test_experiment_defaults_to_baseline_variant(tmp_path):
     save_experiment(
         "experiment-b",

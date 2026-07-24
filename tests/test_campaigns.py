@@ -27,6 +27,7 @@ from fugue.bench.campaigns import (
     prepared_plan_from_dict,
 )
 from fugue.bench.candidates import stable_digest
+from fugue.bench.export import PublishedEvaluation
 from fugue.bench.files import atomic_write_json
 from fugue.bench.operator import (
     AgentRuntimePreparation,
@@ -433,6 +434,23 @@ class FakeCampaignOperator(OperatorService):
             candidates=(),
             log_path=self.repo_root / ".fugue/runtime" / run_id / "combined.log",
             observability_status="passed",
+            evaluations=(
+                PublishedEvaluation(
+                    candidate_id=cells[0].candidate_id,
+                    name="Demo evaluation",
+                    examples=1,
+                    url="https://wandb.ai/team/fugue-experiments/r/call/eval-1",
+                    evaluation_ref="weave:///team/fugue-experiments/object/eval:v1",
+                    dataset_ref=(
+                        "weave:///team/fugue-experiments/object/dataset:v1"
+                    ),
+                    model_ref="weave:///team/fugue-experiments/object/model:v1",
+                    agent_predictions=1,
+                    linked_agent_predictions=1,
+                    direct_predictions=0,
+                    publication_id="a" * 64,
+                ),
+            ),
         )
 
     def export_run(
@@ -759,6 +777,7 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     assert outcome.accounted_cost_usd == 1.0
     assert outcome.row_refs[0]["prediction_id"] == "prediction-1"
     assert outcome.evidence_refs[0]["conversation_ids"] == ["conversation-1"]
+    assert outcome.evaluation_runs[0]["evaluation_ref"].endswith("/object/eval:v1")
     serialized = json.dumps(outcome.to_dict(), sort_keys=True)
     assert "expected_evidence_paths" not in serialized
     assert "gold" not in serialized.lower()

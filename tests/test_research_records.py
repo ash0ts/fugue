@@ -56,6 +56,10 @@ def _preview(*, proposal_id: str = "proposal-1") -> ExperimentPreviewV1:
         fixed_dimensions=["model"],
         varied_dimensions=["loop"],
         measured_dimensions=["pass"],
+        display_labels={
+            "loop": "Loop design",
+            "baseline": "Current behavior",
+        },
         experiment_id="comparison-1",
         model="model-1",
         n_attempts=1,
@@ -187,7 +191,38 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
         request.summary["experiment_view"]["question"] == "Private controlled question"
     )
     assert request.summary["experiment_view"]["hypothesis"] == "Private hypothesis"
+    [factor] = request.summary["experiment_view"]["varied_factors"]
+    assert factor["label"] == "Loop design"
     assert "prompt" not in request.summary["experiment_view"]
+    assert store.get_latest_approval_preview("research-1") == preview
+
+
+def test_approval_preview_recovery_backfills_an_existing_request(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    preview = _preview()
+    request = store.record_approval_request(preview, operation_id="request-approval")
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE approval_requests SET preview_json=NULL WHERE preview_digest=?",
+            (preview.preview_digest,),
+        )
+
+    assert (
+        store.record_approval_request(preview, operation_id="request-approval")
+        == request
+    )
+    assert store.get_latest_approval_preview("research-1") == preview
+
+
+def test_approval_preview_recovery_requires_a_durable_request(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ResearchError, match="no durable approval preview"):
+        store.get_latest_approval_preview("research-1")
 
 
 def test_approval_request_operation_conflict_is_rejected(tmp_path: Path) -> None:
@@ -290,6 +325,41 @@ def test_experiment_state_and_sourced_update_append_safe_records(
     )
     assert "private note body" not in json.dumps(
         store.research_log_events()[-1].to_dict()
+    )
+
+    study = store.get_study("research-1")
+    store.update_study(
+        study.id,
+        study_update_from_dict(
+            {
+                "message": "Record a bounded conclusion.",
+                "results": [
+                    {
+                        "id": "result-1",
+                        "statement": "The locked comparison completed.",
+                        "kind": "controlled_experiment_result",
+                        "conditions": {"experiment_id": completed.id},
+                        "sources": [
+                            {
+                                "kind": "evaluation",
+                                "ref": "evaluation-1",
+                                "digest": _A,
+                            }
+                        ],
+                    }
+                ],
+                "attribution": {"actor_type": "agent", "name": "researcher"},
+            }
+        ),
+        operation_id="record-result",
+        expected_revision=study.revision,
+    )
+    assert store.ensure_result_projection_events() == 1
+    result_event = store.research_log_events()[-1]
+    assert result_event.classification == "result"
+    assert result_event.study_id == completed.id
+    assert result_event.summary["result"]["statement"] == (
+        "The locked comparison completed."
     )
 
 
@@ -417,6 +487,7 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         "evaluation",
     ]
     assert projected[-1].state == "completed"
+    assert projected[-1].classification == "evidence"
     assert projected[-1].summary["passed"] == 2
     assert (
         projected[-1].summary["experiment_view"]["infrastructure_health"]
@@ -431,6 +502,73 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         [event.to_dict() for event in projected]
     )
     assert store.ensure_experiment_view_projection_events() == 0
+
+    # A fresh checkout may no longer have the private export mount. A
+    # content-addressed public bundle reconstructs only normalized safe fields.
+    export_path.unlink()
+    bundle_path = (
+        tmp_path
+        / "configs"
+        / "fugue"
+        / "public-exports"
+        / f"{hashlib.sha256(export_payload).hexdigest()}.json"
+    )
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_export_sha256": hashlib.sha256(export_payload).hexdigest(),
+                "source_evidence": {
+                    "project": "team/reviewed-source",
+                    "selected_call_ids": ["source-call-1"],
+                },
+                "rows": [
+                    {
+                        **row,
+                        "private_prompt": "must never enter the projection",
+                    }
+                    for row in export_rows
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "DELETE FROM research_log_events "
+            "WHERE producer_event_id LIKE '%:experiment-view-%'"
+        )
+        conn.execute(
+            "DELETE FROM experiment_view_projection_state WHERE experiment_id=?",
+            (record.id,),
+        )
+    assert store.ensure_experiment_view_projection_events() == 2
+    replayed = [
+        event for event in store.research_log_events() if event.study_id == record.id
+    ]
+    assert "private_prompt" not in json.dumps(
+        [event.to_dict() for event in replayed]
+    )
+    assert all(
+        any(link["system"] == "weave" for link in cell["evidence_links"])
+        for cell in replayed[-1].summary["experiment_view"]["cells"]
+    )
+    assert any(
+        link["kind"] == "source_call"
+        and link["ref"] == "team/reviewed-source/call/source-call-1"
+        for link in replayed[-1].summary["experiment_view"]["evidence_links"]
+    )
+    mismatched = json.loads(bundle_path.read_text(encoding="utf-8"))
+    mismatched["rows"][0]["candidate_id"] = "different-candidate"
+    bundle_path.write_text(json.dumps(mismatched), encoding="utf-8")
+    assert (
+        store._portable_projection_rows(
+            completed,
+            source_export_sha256=hashlib.sha256(export_payload).hexdigest(),
+        )
+        == ()
+    )
 
     restarted = StudyStore(tmp_path)
     assert restarted.ensure_experiment_view_projection_events() == 0
@@ -462,6 +600,72 @@ def test_jsonl_publication_is_ordered_idempotent_and_restart_safe(
     status = restarted.research_publication_status()
     assert status["event_count"] == 2
     assert status["deliveries"][0]["state"] == "delivered"
+
+
+def test_operator_replay_republishes_delivered_events_without_new_operations(
+    tmp_path: Path,
+) -> None:
+    class RecordingSink:
+        sink_id = "projection-console"
+
+        def __init__(self) -> None:
+            self.events = []
+
+        def publish(self, event: object) -> None:
+            self.events.append(event)
+
+    store = _store(tmp_path)
+    store.record_approval_request(_preview(), operation_id="request-1")
+    before = store.get_study("research-1")
+    sink = RecordingSink()
+    publisher = ResearchRecordPublisher(store, [sink])
+
+    assert publisher.flush() == {"delivered": 2, "failed": 0}
+    sink.events.clear()
+    assert publisher.replay(research_id="research-1") == {
+        "delivered": 2,
+        "failed": 0,
+    }
+
+    assert [event.sequence for event in sink.events] == [1, 2]
+    assert store.get_study("research-1") == before
+    assert store.research_publication_status()["event_count"] == 2
+
+
+def test_publication_scope_filters_live_flush_and_operator_replay(
+    tmp_path: Path,
+) -> None:
+    class RecordingSink:
+        sink_id = "projection-console"
+
+        def __init__(self) -> None:
+            self.events = []
+
+        def publish(self, event: object) -> None:
+            self.events.append(event)
+
+    store = _store(tmp_path)
+    store.create_study(
+        study_id="research-2",
+        title="Another Study",
+        campaign_id="campaign-1",
+        question="Another question",
+        operation_id="create-research-2",
+    )
+    sink = RecordingSink()
+    publisher = ResearchRecordPublisher(
+        store,
+        [sink],
+        research_ids=("research-1",),
+    )
+
+    assert publisher.flush() == {"delivered": 1, "failed": 0}
+    assert [event.research_id for event in sink.events] == ["research-1"]
+    sink.events.clear()
+    assert publisher.replay() == {"delivered": 1, "failed": 0}
+    assert [event.research_id for event in sink.events] == ["research-1"]
+    with pytest.raises(ValueError, match="outside the configured scope"):
+        publisher.replay(research_id="research-2")
 
 
 def test_jsonl_publication_recovers_a_missing_index_and_serializes_writers(

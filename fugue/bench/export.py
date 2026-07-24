@@ -84,6 +84,7 @@ class PublishedEvaluation:
     examples: int
     url: str | None = None
     evaluation_ref: str | None = None
+    dataset_ref: str | None = None
     model_ref: str | None = None
     agent_predictions: int = 0
     linked_agent_predictions: int = 0
@@ -179,6 +180,7 @@ class LiveEvaluationCoordinator:
         ]
         candidates = _publication_candidates(planned)
         datasets: dict[str, Any] = {}
+        self._datasets = datasets
         self._sessions_by_cell: dict[str, _LiveCandidate] = {}
         self._inputs_by_cell: dict[str, dict[str, Any]] = {}
         for candidate in candidates:
@@ -232,11 +234,16 @@ class LiveEvaluationCoordinator:
                 inputs=self._inputs_by_cell[cell.id]
             )
             prediction.__enter__()
+        row = _planned_evaluation_row(cell)
+        predict_call = getattr(prediction, "predict_call", None)
+        prediction_call_id = str(getattr(predict_call, "id", "") or "")
+        if prediction_call_id:
+            row["weave_prediction_call_id"] = prediction_call_id
         with self._prediction_lock:
             self._predictions[cell.id] = _LivePrediction(
                 session=session,
                 prediction=prediction,
-                row=_planned_evaluation_row(cell),
+                row=row,
                 opened_monotonic=time.monotonic(),
             )
         call = prediction.predict_and_score_call
@@ -266,6 +273,7 @@ class LiveEvaluationCoordinator:
             time.monotonic() - active.opened_monotonic, 0.0
         )
         call_id = str(active.prediction.predict_and_score_call.id)
+        row["eval_predict_and_score_call_id"] = call_id
         if outcome.status in {"cancelled", "interrupted"}:
             self._cancel_prediction(
                 cell.id,
@@ -506,6 +514,9 @@ class LiveEvaluationCoordinator:
                 continue
             url = getattr(session.logger, "ui_url", None)
             evaluation_ref = _logger_ref(session.logger, "_pseudo_evaluation")
+            dataset_ref = _object_ref(
+                self._datasets[session.candidate["evaluation_scope_id"]]
+            )
             model_ref = _logger_ref(session.logger, "model")
             agent_rows = [
                 row
@@ -535,6 +546,7 @@ class LiveEvaluationCoordinator:
                 examples=len(session.rows),
                 url=url,
                 evaluation_ref=evaluation_ref,
+                dataset_ref=dataset_ref,
                 model_ref=model_ref,
                 agent_predictions=len(agent_rows),
                 linked_agent_predictions=linked,
@@ -554,6 +566,7 @@ class LiveEvaluationCoordinator:
                     examples=len(session.rows),
                     url=url,
                     evaluation_ref=evaluation_ref,
+                    dataset_ref=dataset_ref,
                     model_ref=model_ref,
                     agent_predictions=len(agent_rows),
                     linked_agent_predictions=linked,
@@ -1547,6 +1560,7 @@ def publish_to_weave(
                 continue
             url = getattr(logger, "ui_url", None)
             evaluation_ref = _logger_ref(logger, "_pseudo_evaluation")
+            dataset_ref = _object_ref(datasets[scope_id])
             model_ref = _logger_ref(logger, "model")
             agent_rows = [row for row in candidate["rows"] if _is_agent_row(row)]
             direct_rows = [row for row in candidate["rows"] if not _is_agent_row(row)]
@@ -1569,6 +1583,7 @@ def publish_to_weave(
                 examples=len(candidate["rows"]),
                 url=url,
                 evaluation_ref=evaluation_ref,
+                dataset_ref=dataset_ref,
                 model_ref=model_ref,
                 agent_predictions=len(agent_rows),
                 linked_agent_predictions=linked_agent_predictions,
@@ -1598,6 +1613,7 @@ def publish_to_weave(
                     examples=len(candidate["rows"]),
                     url=url,
                     evaluation_ref=evaluation_ref,
+                    dataset_ref=dataset_ref,
                     model_ref=model_ref,
                     agent_predictions=len(agent_rows),
                     linked_agent_predictions=linked_agent_predictions,
@@ -1890,6 +1906,7 @@ def _published_evaluation_from_marker(
         evaluation_ref=(
             str(value["evaluation_ref"]) if value.get("evaluation_ref") else None
         ),
+        dataset_ref=str(value["dataset_ref"]) if value.get("dataset_ref") else None,
         model_ref=str(value["model_ref"]) if value.get("model_ref") else None,
         agent_predictions=agent_predictions,
         linked_agent_predictions=linked_agent_predictions,
@@ -2322,6 +2339,12 @@ def _candidate_model_name(candidate: dict[str, Any]) -> str:
 
 def _logger_ref(logger: Any, attribute: str) -> str | None:
     value = getattr(logger, attribute, None)
+    ref = getattr(value, "ref", None)
+    uri = getattr(ref, "uri", None)
+    return str(uri or ref) if ref else None
+
+
+def _object_ref(value: Any) -> str | None:
     ref = getattr(value, "ref", None)
     uri = getattr(ref, "uri", None)
     return str(uri or ref) if ref else None
@@ -3544,9 +3567,7 @@ def _prompt_injection_rewards(verifier_result: Mapping[str, Any]) -> dict[str, A
             for name in _PROMPT_INJECTION_OPTIONAL_REWARDS
         }
         if any(value not in {0.0, 1.0} for value in optional_values.values()):
-            raise ValueError(
-                "prompt-injection action-gate metrics must be zero or one"
-            )
+            raise ValueError("prompt-injection action-gate metrics must be zero or one")
         values.update(optional_values)
     return values
 

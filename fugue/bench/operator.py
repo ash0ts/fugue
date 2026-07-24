@@ -2271,8 +2271,7 @@ class OperatorService:
 
     def runs(self, *, recover: bool = True) -> list[RunSummary]:
         return [
-            self._summarize_run(run)
-            for run in self.supervisor.list(recover=recover)
+            self._summarize_run(run) for run in self.supervisor.list(recover=recover)
         ]
 
     def run_summary(self, run_id: str, *, recover: bool = True) -> RunSummary:
@@ -2571,6 +2570,9 @@ class OperatorService:
                 url=str(item["url"]) if item.get("url") else None,
                 evaluation_ref=(
                     str(item["evaluation_ref"]) if item.get("evaluation_ref") else None
+                ),
+                dataset_ref=(
+                    str(item["dataset_ref"]) if item.get("dataset_ref") else None
                 ),
                 model_ref=str(item["model_ref"]) if item.get("model_ref") else None,
                 agent_predictions=int(
