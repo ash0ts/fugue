@@ -90,7 +90,8 @@ jobs:
           tests/test_task_authoring.py tests/test_research_store.py
           tests/test_research_service.py tests/test_research_transports.py
           tests/test_research_agent_interface.py tests/test_research_records.py
-          tests/test_support_data_authority.py tests/test_experiment_views.py
+          tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
+          tests/test_experiment_views.py
 
   quality:
     name: Quality, build, and command smoke
