@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
+from fugue.bench.campaign_evidence import _runtime_locks_valid
 from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
     CampaignError,
@@ -1493,6 +1494,76 @@ def test_invalid_or_partial_evidence_is_preserved_but_ineligible(
     assert any(failure in item for item in outcome.eligibility_failures)
     assert outcome.accounted_cost_usd >= 0
     assert service.status("demo").reserved_cost_usd == admission.reserved_cost_usd
+
+
+def test_runtime_lock_validation_scopes_context_runtime_to_context_cells() -> None:
+    plan = SimpleNamespace(
+        cells=(
+            {
+                "applicable": True,
+                "candidate_id": "candidate-control",
+                "context_system_id": "none",
+                "execution_fingerprint": "control-fingerprint",
+                "execution_kind": "agent",
+                "workload_id": "harbor",
+            },
+            {
+                "applicable": True,
+                "candidate_id": "candidate-search",
+                "context_system_id": "rag-dense",
+                "execution_fingerprint": "search-fingerprint",
+                "execution_kind": "agent",
+                "workload_id": "harbor",
+            },
+        )
+    )
+    prepared = SimpleNamespace(
+        preparation={
+            "agent_runtimes": [{"image_id": "sha256:agent"}],
+            "task_runtimes": [{"image_id": "sha256:task"}],
+            "portable_context_runtime": {"image_id": "sha256:context"},
+        }
+    )
+
+    def lock(
+        fingerprint: str,
+        candidate_id: str,
+        *,
+        context_runtime: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        value = {
+            "execution_fingerprint": fingerprint,
+            "candidate_id": candidate_id,
+            "agent_runtime": {"image_id": "sha256:agent"},
+            "task_runtime": {"image_id": "sha256:task"},
+            "context_runtime": context_runtime,
+        }
+        return {**value, "configuration_sha256": stable_digest(value)}
+
+    snapshot = {
+        "runtime_locks": [
+            lock(
+                "control-fingerprint",
+                "candidate-control",
+                context_runtime=None,
+            ),
+            lock(
+                "search-fingerprint",
+                "candidate-search",
+                context_runtime={"image_id": "sha256:context"},
+            ),
+        ]
+    }
+
+    assert _runtime_locks_valid(snapshot, plan, prepared)
+
+    invalid = json.loads(json.dumps(snapshot))
+    invalid["runtime_locks"][0] = lock(
+        "control-fingerprint",
+        "candidate-control",
+        context_runtime={"image_id": "sha256:context"},
+    )
+    assert not _runtime_locks_valid(invalid, plan, prepared)
 
 
 def test_public_outcome_projection_excludes_privileged_content(tmp_path: Path) -> None:

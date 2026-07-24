@@ -1,0 +1,104 @@
+id: enterprise-evidence-use-v1
+title: Enterprise evidence use
+description: Test whether repository search, source-inspection instructions, or both help an Agent answer from the current authoritative enterprise source.
+research_view:
+  observation: Search returned the current document, but the Agent answered from an older source.
+  rationale: Separate a retrieval problem from a failure to inspect and use evidence that was already available.
+  alternative_explanations:
+    - Search ranking may still be too weak on some tasks.
+    - The effect may differ between harnesses.
+    - One or two attempts may reflect ordinary run-to-run variation.
+  success_definition: Produce the required brief with the correct fact, cite the current authoritative revision, and make no unsupported claim.
+  task_title: Answer four enterprise research questions
+  task_summary: Resolve a policy, contract, equipment, or incident question from a versioned local corpus containing current, superseded, draft, and irrelevant documents.
+  interaction_mode: Single turn
+  tools: [Shell, local document corpus]
+  resources: [Versioned synthetic policies, contracts, and runbooks]
+  base_instruction_summary: Answer the assigned question and write the public JSON brief without relying on drafts or superseded sources.
+  treatment_summaries:
+    baseline: Use the standard workflow without added repository search or an inspection requirement.
+    search-only: Add Fugue repository search while keeping the standard workflow.
+    inspect-only: Require the Agent to open and cite its source without added repository search.
+    search-and-inspect: Add repository search and require the Agent to open and cite its source.
+  arm_factor_levels:
+    baseline: {repository-search: "off", source-inspection: standard}
+    search-only: {repository-search: "on", source-inspection: standard}
+    inspect-only: {repository-search: "off", source-inspection: required}
+    search-and-inspect: {repository-search: "on", source-inspection: required}
+  mechanism_stages:
+    - {id: search-available, label: Search available, source_key: document_search_available}
+    - {id: search-invoked, label: Search invoked, source_key: document_search_invoked, eligibility_key: document_search_available}
+    - {id: current-source-returned, label: Current source returned, source_key: relevant_document_returned, eligibility_key: document_search_available}
+    - {id: current-source-opened, label: Current source opened, source_key: relevant_document_opened, eligibility_key: document_search_available}
+    - {id: current-source-cited, label: Current source cited, source_key: current_document_cited}
+    - {id: current-source-used, label: Current source used correctly, source_key: current_document_used}
+  pass_rule: The attempt passes only when the JSON brief matches its public schema, states the expected fact, cites the current revision, and contains no unsupported claim.
+  scorers:
+    - id: enterprise-evidence-verifier
+      label: Deterministic evidence verifier
+      kind: deterministic
+      description: Checks the public artifact schema, private expected fact, current source citation, and absence of superseded or draft claims.
+      required: true
+      aggregation: Every required artifact, fact, citation, and support check must pass.
+      evidence_inputs:
+        - Research brief JSON
+        - Locked private expected fact
+        - Current source revision
+        - Agent trajectory path evidence
+      revision: enterprise-evidence-verifier-v1
+      dimensions:
+        - {id: task-pass, label: Overall task check, source_key: pass, target: true, primary: true}
+        - {id: artifact-schema, label: Artifact matches schema, source_key: artifact_schema_valid, target: 1}
+        - {id: answer-facts, label: Answer facts correct, source_key: answer_facts_correct, target: 1}
+        - {id: current-source-cited, label: Current source cited, source_key: current_document_cited, target: 1}
+        - {id: current-source-used, label: Current source used, source_key: current_document_used, target: 1}
+        - {id: unsupported-claims, label: No unsupported claims, source_key: unsupported_claims_absent, target: 1}
+model: wandb/zai-org/GLM-5.2
+run_name: enterprise-evidence-use-v1
+default_preset: canary
+tags: [agent-eval, enterprise-research, evidence-use]
+harnesses: [claude-code, codex]
+workloads:
+  - id: enterprise-evidence-suite
+    runner: harbor
+    manifest: datasets/enterprise-evidence-use-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, rag-dense]
+    variants: [baseline, search-only, inspect-only, search-and-inspect]
+presets:
+  canary:
+    workloads: [enterprise-evidence-suite]
+    systems: [none, rag-dense]
+    harnesses: [claude-code, codex]
+    n_attempts: 1
+    n_tasks: 1
+    n_concurrent: 1
+    scheduling_seed: enterprise-evidence-canary-v1
+  primary:
+    workloads: [enterprise-evidence-suite]
+    systems: [none, rag-dense]
+    harnesses: [claude-code, codex]
+    n_attempts: 2
+    n_tasks: 4
+    n_concurrent: 1
+    scheduling_seed: enterprise-evidence-primary-v1
+variants:
+  - id: baseline
+    label: Current workflow
+    context: {system_id: none, delivery: portable}
+  - id: search-only
+    label: Repository search
+    context: {system_id: rag-dense, delivery: portable}
+  - id: inspect-only
+    label: Source inspection
+    prompt_id: source-inspection-required
+    context: {system_id: none, delivery: portable}
+  - id: search-and-inspect
+    label: Search + source inspection
+    prompt_id: source-inspection-required
+    context: {system_id: rag-dense, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 1
+jobs_dir: .fugue/runtime/jobs/enterprise-evidence-use-v1
+trace_content: full

@@ -20,6 +20,8 @@ class ReviewedTaskRecipeV1:
     experiment_binding: dict[str, Any]
     required_source_markers: dict[str, str | bool] = field(default_factory=dict)
     required_review_marker: str = "demo.needs_review"
+    minimum_selected_calls: int = 1
+    maximum_selected_calls: int | None = None
     review_failure: str = (
         "selected calls do not contain the reviewed behavior this recipe tests"
     )
@@ -83,8 +85,66 @@ _SUPPORT_RECIPE = ReviewedTaskRecipeV1(
     ),
 )
 
+_ENTERPRISE_EVIDENCE_RECIPE = ReviewedTaskRecipeV1(
+    recipe_id="enterprise-evidence-use-v1",
+    source_dataset="enterprise-evidence-agent-v1",
+    purpose=(
+        "Test whether repository search, requiring source inspection, or both "
+        "help an enterprise research Agent use the current authoritative document."
+    ),
+    synthetic_task_summary={
+        "title": "Answer from the current authoritative enterprise source",
+        "task_count": 4,
+        "task_shapes": [
+            "expense-policy limit",
+            "vendor retention requirement",
+            "equipment allowance and regional exception",
+            "incident escalation rule",
+        ],
+        "success": (
+            "The required brief has the correct fact, cites the current revision, "
+            "and contains no unsupported claim."
+        ),
+    },
+    experiment_binding={
+        "campaign_id": "enterprise-evidence-use-demo-v3",
+        "stage_id": "canary",
+        "experiment_id": "enterprise-evidence-use-v1",
+        "model": "wandb/zai-org/GLM-5.2",
+        "preset_id": "canary",
+        "workloads": ["enterprise-evidence-suite"],
+        "harnesses": ["codex", "claude-code"],
+        "context_systems": ["none", "rag-dense"],
+        "variants": [
+            "baseline",
+            "search-only",
+            "inspect-only",
+            "search-and-inspect",
+        ],
+        "analysis_ids": ["enterprise-evidence-use-v1"],
+        "n_tasks": 1,
+        "n_attempts": 1,
+        "n_concurrent": 1,
+        "estimated_cells": 8,
+    },
+    required_source_markers={
+        "demo.synthetic": True,
+        "demo.outcome": "evidence-not-used",
+    },
+    minimum_selected_calls=4,
+    maximum_selected_calls=4,
+    review_failure=(
+        "selected calls do not contain the reviewed evidence-not-used behavior"
+    ),
+    source_failure=(
+        "selected calls do not belong to the reviewed synthetic enterprise "
+        "evidence dataset"
+    ),
+)
+
 _RECIPE_REGISTRY: dict[str, ReviewedTaskRecipeV1] = {
-    _SUPPORT_RECIPE.recipe_id: _SUPPORT_RECIPE
+    _ENTERPRISE_EVIDENCE_RECIPE.recipe_id: _ENTERPRISE_EVIDENCE_RECIPE,
+    _SUPPORT_RECIPE.recipe_id: _SUPPORT_RECIPE,
 }
 
 
@@ -219,6 +279,19 @@ class TaskRecipeService:
         blockers: list[str] = []
         if not selected_call_ids:
             blockers.append("select one or more Weave calls before deriving this task")
+        if len(selected_call_ids) < recipe.minimum_selected_calls:
+            blockers.append(
+                f"reviewed recipe requires at least {recipe.minimum_selected_calls} "
+                "selected calls"
+            )
+        if (
+            recipe.maximum_selected_calls is not None
+            and len(selected_call_ids) > recipe.maximum_selected_calls
+        ):
+            blockers.append(
+                f"reviewed recipe accepts at most {recipe.maximum_selected_calls} "
+                "selected calls"
+            )
         selection = audit.selection or {}
         if selection.get("project") is None:
             blockers.append("the trace audit lacks a locked Weave project selection")
