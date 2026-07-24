@@ -201,6 +201,42 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
     }
 
 
+def test_design_projects_declared_factorial_treatment_arms() -> None:
+    preview = _preview()
+    research_view = preview["draft"]["research_view"]
+    research_view["arm_factor_levels"] = {
+        "baseline": {"repository-search": "off", "source-inspection": "standard"},
+        "warning-only": {
+            "repository-search": "off",
+            "source-inspection": "required",
+        },
+        "action-gate": {
+            "repository-search": "on",
+            "source-inspection": "required",
+        },
+    }
+
+    view = build_design_view(preview)
+
+    assert [(arm.id, arm.label, arm.factor_levels) for arm in view.treatment_arms] == [
+        (
+            "baseline",
+            "Current behavior",
+            {"repository-search": "off", "source-inspection": "standard"},
+        ),
+        (
+            "warning-only",
+            "Add a reminder",
+            {"repository-search": "off", "source-inspection": "required"},
+        ),
+        (
+            "action-gate",
+            "Check risky actions",
+            {"repository-search": "on", "source-inspection": "required"},
+        ),
+    ]
+
+
 @pytest.mark.parametrize(
     ("scorers", "judge_used"),
     [
