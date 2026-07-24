@@ -176,9 +176,7 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
     assert view.prompt_design.evidence_links[0]["kind"] == "prompt_design"
     assert view.evaluation_design is not None
     assert view.evaluation_design.llm_judge_used is False
-    assert [item.kind for item in view.evaluation_design.scorers] == [
-        "deterministic"
-    ]
+    assert [item.kind for item in view.evaluation_design.scorers] == ["deterministic"]
     factors = {item.name: item.levels for item in view.varied_factors}
     assert factors == {
         "harness": ("codex", "claude-code"),
@@ -394,7 +392,13 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
         item
         for item in view.arm_totals
         if item["arm"] == "action-gate" and item["harness"] == "all"
-    ) == {"arm": "action-gate", "harness": "all", "passed": 2, "total": 2}
+    ) == {
+        "arm": "action-gate",
+        "arm_label": "Check risky actions",
+        "harness": "all",
+        "passed": 2,
+        "total": 2,
+    }
     serialized = str(view.to_dict())
     assert "private operator note" not in serialized
     assert "route_runtime_receipt" in serialized
@@ -418,6 +422,94 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
     assert score_summaries["task-pass"].failed == 4
     assert score_summaries["evidence-preserved"].passed == 6
     assert all(cell.scores for cell in view.cells)
+
+
+def test_factorial_results_publish_arm_definitions_and_mechanism_funnel() -> None:
+    raw = _record()
+    research_view = raw["preview"]["draft"]["research_view"]
+    research_view["arm_factor_levels"] = {
+        "baseline": {"repository-search": "off", "source-inspection": "standard"},
+        "warning-only": {
+            "repository-search": "off",
+            "source-inspection": "required",
+        },
+        "action-gate": {
+            "repository-search": "on",
+            "source-inspection": "required",
+        },
+    }
+    research_view["mechanism_stages"] = [
+        {
+            "id": "search-available",
+            "label": "Search available",
+            "source_key": "document_search_available",
+        },
+        {
+            "id": "current-source-opened",
+            "label": "Current source opened",
+            "source_key": "relevant_document_opened",
+            "eligibility_key": "document_search_available",
+        },
+    ]
+    for row in raw["outcome"]["row_refs"]:
+        search_available = row["variant_id"] == "action-gate"
+        row["document_search_available"] = search_available
+        row["relevant_document_opened"] = search_available
+
+    view = build_evaluation_view(raw)
+
+    arm = next(
+        item
+        for item in view.arm_totals
+        if item["arm"] == "action-gate" and item["harness"] == "all"
+    )
+    assert arm["factor_levels"] == {
+        "repository-search": "on",
+        "source-inspection": "required",
+    }
+    assert [
+        (stage.id, stage.eligible, stage.reached) for stage in view.mechanism_funnel
+    ] == [
+        ("search-available", 6, 2),
+        ("current-source-opened", 2, 2),
+    ]
+    assert view.mechanism_funnel[1].by_arm[0].eligible == 1
+
+
+def test_registered_analysis_projects_aligned_estimates_without_a_winner() -> None:
+    raw = _record()
+    raw["outcome"]["analysis_results"] = [
+        {
+            "analysis_id": "factorial-analysis",
+            "snapshot_digest": _A,
+            "selection": {
+                "candidates": [
+                    {
+                        "candidate_id": "search-only",
+                        "paired_pass_rate_delta": 0.25,
+                        "confidence_low": -0.1,
+                        "confidence_high": 0.6,
+                        "examples": 4,
+                    }
+                ]
+            },
+        }
+    ]
+
+    view = build_evaluation_view(raw)
+
+    assert view.aligned_comparisons == (
+        {
+            "analysis_id": "factorial-analysis",
+            "comparison_id": "search-only",
+            "estimate": 0.25,
+            "confidence_low": -0.1,
+            "confidence_high": 0.6,
+            "pairs": 4,
+            "digest": _A,
+        },
+    )
+    assert "winner" not in json.dumps(view.to_dict()).lower()
 
 
 def test_outcome_summary_does_not_turn_unavailable_evaluation_into_failure() -> None:
@@ -471,8 +563,7 @@ def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None
     assert next(
         link
         for link in view.cells[0].evidence_links
-        if link["system"] == "weave"
-        and link["ref"].endswith("/call/prediction-call-0")
+        if link["system"] == "weave" and link["ref"].endswith("/call/prediction-call-0")
     )["ref"] == ("team/evaluations/call/prediction-call-0")
     serialized = json.dumps(view.to_dict())
     assert "agent_response" not in serialized
@@ -493,6 +584,34 @@ def test_evaluation_links_reviewed_source_calls_without_copying_trace_bodies() -
     serialized = json.dumps(view.to_dict())
     assert "trace_body" not in serialized
     assert "tool_output" not in serialized
+
+
+def test_evaluation_links_exact_weave_evaluation_and_dataset() -> None:
+    record = _record()
+    record["outcome"]["evaluation_runs"] = [
+        {
+            "publication_id": "evaluation-publication-1",
+            "evaluation_ref": "weave:///team/project/object/evaluation:v1",
+            "dataset_ref": "weave:///team/project/object/dataset:v1",
+            "url": "https://wandb.ai/team/project/weave/evaluations/evaluation-1",
+        }
+    ]
+
+    view = build_evaluation_view(record)
+
+    evaluation = next(
+        link
+        for link in view.evidence_links
+        if link["system"] == "weave" and link["kind"] == "evaluation"
+    )
+    assert evaluation["ref"] == "weave:///team/project/object/evaluation:v1"
+    assert evaluation["uri"].startswith("https://wandb.ai/")
+    dataset = next(
+        link
+        for link in view.evidence_links
+        if link["system"] == "weave" and link["kind"] == "dataset"
+    )
+    assert dataset["ref"] == "weave:///team/project/object/dataset:v1"
 
 
 def test_evaluation_prefers_verified_public_source_evidence() -> None:

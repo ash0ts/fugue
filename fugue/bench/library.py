@@ -286,6 +286,14 @@ class ResearchScorerSpec:
 
 
 @dataclass(frozen=True)
+class ResearchMechanismStageSpec:
+    id: str
+    label: str
+    source_key: str
+    eligibility_key: str | None = None
+
+
+@dataclass(frozen=True)
 class ExperimentResearchViewSpec:
     observation: str = ""
     rationale: str = ""
@@ -298,6 +306,8 @@ class ExperimentResearchViewSpec:
     resources: list[str] = field(default_factory=list)
     base_instruction_summary: str = ""
     treatment_summaries: dict[str, str] = field(default_factory=dict)
+    arm_factor_levels: dict[str, dict[str, str]] = field(default_factory=dict)
+    mechanism_stages: list[ResearchMechanismStageSpec] = field(default_factory=list)
     pass_rule: str = ""
     scorers: list[ResearchScorerSpec] = field(default_factory=list)
 
@@ -884,8 +894,7 @@ def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
         ):
             if not isinstance(dimension, dict):
                 raise ValueError(
-                    f"research view score dimension {dimension_index} "
-                    "must be a mapping"
+                    f"research view score dimension {dimension_index} must be a mapping"
                 )
             _reject_unknown(
                 dimension,
@@ -893,9 +902,7 @@ def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
                 kind="research view score dimension",
             )
             target = dimension.get("target")
-            if target is not None and not isinstance(
-                target, str | int | float | bool
-            ):
+            if target is not None and not isinstance(target, str | int | float | bool):
                 raise ValueError("research view score target must be scalar")
             dimension_id = validate_id(
                 dimension.get("id"),
@@ -924,9 +931,7 @@ def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
                 f"research view scorer {scorer_id} requires label and description"
             )
         threshold = (
-            float(value["threshold"])
-            if value.get("threshold") is not None
-            else None
+            float(value["threshold"]) if value.get("threshold") is not None else None
         )
         if threshold is not None and (
             not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0
@@ -957,6 +962,52 @@ def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
         for key, value in treatment_summaries.items()
     ):
         raise ValueError("research view treatment summaries must be strings")
+    arm_factor_levels: dict[str, dict[str, str]] = {}
+    for arm_id, levels in _dict(raw.get("arm_factor_levels")).items():
+        arm = validate_id(arm_id, kind="research view arm id")
+        if not isinstance(levels, dict) or not levels:
+            raise ValueError(
+                f"research view arm {arm} factor levels must be a non-empty mapping"
+            )
+        arm_factor_levels[arm] = {
+            validate_id(key, kind="research view factor id"): validate_id(
+                value, kind="research view factor level"
+            )
+            for key, value in levels.items()
+        }
+    mechanism_stages: list[ResearchMechanismStageSpec] = []
+    for index, value in enumerate(_list(raw.get("mechanism_stages")), start=1):
+        if not isinstance(value, dict):
+            raise ValueError(f"research view mechanism stage {index} must be a mapping")
+        _reject_unknown(
+            value,
+            ResearchMechanismStageSpec,
+            kind="research view mechanism stage",
+        )
+        stage_id = validate_id(value.get("id"), kind="research view mechanism stage id")
+        label = str(value.get("label") or "").strip()
+        source_key = validate_id(
+            value.get("source_key"), kind="research view mechanism source key"
+        )
+        if not label:
+            raise ValueError(
+                f"research view mechanism stage {stage_id} requires a label"
+            )
+        eligibility_key = _optional_str(value.get("eligibility_key"))
+        if eligibility_key is not None:
+            validate_id(eligibility_key, kind="research view mechanism eligibility key")
+        mechanism_stages.append(
+            ResearchMechanismStageSpec(
+                id=stage_id,
+                label=label,
+                source_key=source_key,
+                eligibility_key=eligibility_key,
+            )
+        )
+    require_unique(
+        [item.id for item in mechanism_stages],
+        kind="research view mechanism stage",
+    )
     return ExperimentResearchViewSpec(
         observation=str(raw.get("observation") or "").strip(),
         rationale=str(raw.get("rationale") or "").strip(),
@@ -967,12 +1018,12 @@ def research_view_from_data(raw: Any) -> ExperimentResearchViewSpec | None:
         interaction_mode=str(raw.get("interaction_mode") or "").strip(),
         tools=_string_list(raw.get("tools")),
         resources=_string_list(raw.get("resources")),
-        base_instruction_summary=str(
-            raw.get("base_instruction_summary") or ""
-        ).strip(),
+        base_instruction_summary=str(raw.get("base_instruction_summary") or "").strip(),
         treatment_summaries={
             str(key): str(value) for key, value in treatment_summaries.items()
         },
+        arm_factor_levels=arm_factor_levels,
+        mechanism_stages=mechanism_stages,
         pass_rule=str(raw.get("pass_rule") or "").strip(),
         scorers=scorers,
     )

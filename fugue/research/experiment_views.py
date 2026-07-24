@@ -25,9 +25,7 @@ ExecutionStatus = Literal[
 OutcomeStatus = Literal["pending", "passed", "failed", "unavailable", "not_applicable"]
 EvidenceStatus = Literal["pending", "reconciled", "missing", "not_applicable"]
 SummaryStatus = Literal["passed", "failed", "unavailable", "not_applicable"]
-ScoreStatus = Literal[
-    "passed", "failed", "observed", "unavailable", "not_applicable"
-]
+ScoreStatus = Literal["passed", "failed", "observed", "unavailable", "not_applicable"]
 
 _EXECUTION_STATES = {
     "queued",
@@ -51,6 +49,15 @@ _SAFE_BEHAVIORAL_MEASURES = (
     "relevant_retrieval_change_rate",
     "off_target_change_only",
     "premature_completion",
+    "document_search_available",
+    "document_search_invoked",
+    "relevant_document_returned",
+    "relevant_document_opened",
+    "current_document_cited",
+    "current_document_used",
+    "artifact_schema_valid",
+    "answer_facts_correct",
+    "unsupported_claims_absent",
     "prompt_injection_action_gate_allowed",
     "prompt_injection_action_gate_blocked",
     "prompt_injection_attack_encountered",
@@ -199,6 +206,29 @@ class ExperimentScoreSummaryV1:
 
 
 @dataclass(frozen=True)
+class ExperimentMechanismArmV1:
+    arm: str
+    harness: str
+    eligible: int
+    reached: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ExperimentMechanismStageV1:
+    id: str
+    label: str
+    eligible: int
+    reached: int
+    by_arm: tuple[ExperimentMechanismArmV1, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
 class ExperimentCellViewV1:
     cell_id: str
     task_label: str
@@ -257,6 +287,7 @@ class ExperimentViewV1:
     arm_totals: tuple[dict[str, Any], ...] = ()
     aligned_comparisons: tuple[dict[str, Any], ...] = ()
     behavioral_measures: dict[str, Any] = field(default_factory=dict)
+    mechanism_funnel: tuple[ExperimentMechanismStageV1, ...] = ()
     outcome_summaries: tuple[ExperimentOutcomeSummaryV1, ...] = ()
     score_summaries: tuple[ExperimentScoreSummaryV1, ...] = ()
     evidence_eligible: bool | None = None
@@ -311,9 +342,7 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         ),
         task_design=_optional_task_design(raw.get("task_design")),
         prompt_design=_optional_prompt_design(raw.get("prompt_design")),
-        evaluation_design=_optional_evaluation_design(
-            raw.get("evaluation_design")
-        ),
+        evaluation_design=_optional_evaluation_design(raw.get("evaluation_design")),
         source_cohort=_optional_descriptor(raw.get("source_cohort"), "source_cohort"),
         fixed_conditions=fixed,
         varied_factors=varied,
@@ -356,6 +385,10 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         ),
         behavioral_measures=_measure_mapping(
             raw.get("behavioral_measures"), "behavioral_measures"
+        ),
+        mechanism_funnel=tuple(
+            _mechanism_stage(item)
+            for item in _sequence(raw.get("mechanism_funnel"), "mechanism_funnel")
         ),
         outcome_summaries=tuple(
             _outcome_summary(item)
@@ -485,7 +518,11 @@ def build_design_view(
             resources=task_design.resources,
             evidence_links=(task_reference,),
         )
-    if prompt_design is not None and not prompt_design.evidence_links and preview_digest:
+    if (
+        prompt_design is not None
+        and not prompt_design.evidence_links
+        and preview_digest
+    ):
         prompt_design = ExperimentPromptDesignV1(
             base_instruction_summary=prompt_design.base_instruction_summary,
             treatment_summaries=prompt_design.treatment_summaries,
@@ -576,9 +613,7 @@ def _research_task_design(
             str(research_view.get("interaction_mode") or "").strip() or None
         ),
         tools=tuple(
-            str(item)
-            for item in research_view.get("tools") or ()
-            if str(item).strip()
+            str(item) for item in research_view.get("tools") or () if str(item).strip()
         ),
         resources=tuple(
             str(item)
@@ -612,9 +647,7 @@ def _research_evaluation_design(
     research_view: Mapping[str, Any],
 ) -> ExperimentEvaluationDesignV1 | None:
     raw_scorers = [
-        item
-        for item in research_view.get("scorers") or ()
-        if isinstance(item, Mapping)
+        item for item in research_view.get("scorers") or () if isinstance(item, Mapping)
     ]
     pass_rule = str(research_view.get("pass_rule") or "").strip()
     if not raw_scorers or not pass_rule:
@@ -661,9 +694,7 @@ def _research_evaluation_design(
                 ),
                 revision=revision,
                 model=str(raw.get("model") or "").strip() or None,
-                rubric_summary=(
-                    str(raw.get("rubric_summary") or "").strip() or None
-                ),
+                rubric_summary=(str(raw.get("rubric_summary") or "").strip() or None),
                 blind_fields=tuple(
                     str(item)
                     for item in raw.get("blind_fields") or ()
@@ -762,8 +793,10 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
         for item in rows
     ]
     displayed = tuple(cells[:EXPERIMENT_VIEW_CELL_LIMIT])
-    arm_totals = _arm_totals(rows)
+    labels = _display_labels(draft.get("display_labels"))
+    arm_totals = _arm_totals(rows, research_view=research_view, labels=labels)
     measures = _behavioral_measures(rows)
+    mechanism_funnel = _mechanism_funnel(rows, research_view)
     limitations = _public_limitations(outcome)
     run_status = str(outcome.get("run_status") or "")
     infrastructure_health = (
@@ -798,6 +831,7 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
             arm_totals=arm_totals,
             aligned_comparisons=_aligned_comparisons(outcome),
             behavioral_measures=measures,
+            mechanism_funnel=mechanism_funnel,
             outcome_summaries=_outcome_summaries(
                 cells,
                 infrastructure_health=infrastructure_health,
@@ -1151,7 +1185,13 @@ def _value_for_dimension(name: str, cell: Mapping[str, Any]) -> str:
     return str(value)
 
 
-def _arm_totals(rows: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
+def _arm_totals(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    research_view: Mapping[str, Any],
+    labels: Mapping[str, str],
+) -> tuple[dict[str, Any], ...]:
+    configured_levels = _mapping_or_empty(research_view.get("arm_factor_levels"))
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         variant = str(row.get("variant_id") or "default")
@@ -1162,12 +1202,25 @@ def _arm_totals(rows: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]
     result = []
     for (variant, harness), arm_rows in sorted(grouped.items()):
         passed = sum(1 for row in arm_rows if row.get("pass") is True)
+        raw_levels = configured_levels.get(variant)
+        factor_levels = (
+            {
+                str(key): str(value)
+                for key, value in raw_levels.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            if isinstance(raw_levels, Mapping)
+            else {}
+        )
         result.append(
             {
                 "arm": variant,
                 "harness": harness,
                 "passed": passed,
                 "total": len(arm_rows),
+                **({"arm_label": labels[variant]} if variant in labels else {}),
+                **({"harness_label": labels[harness]} if harness in labels else {}),
+                **({"factor_levels": factor_levels} if factor_levels else {}),
             }
         )
     return tuple(result)
@@ -1188,6 +1241,61 @@ def _behavioral_measures(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         else:
             result[key] = {"observed": len(values)}
     return result
+
+
+def _mechanism_funnel(
+    rows: Sequence[Mapping[str, Any]],
+    research_view: Mapping[str, Any],
+) -> tuple[ExperimentMechanismStageV1, ...]:
+    raw_stages = research_view.get("mechanism_stages")
+    if not isinstance(raw_stages, Sequence) or isinstance(raw_stages, str | bytes):
+        return ()
+    stages: list[ExperimentMechanismStageV1] = []
+    for raw in raw_stages:
+        if not isinstance(raw, Mapping):
+            continue
+        stage_id = str(raw.get("id") or "")
+        label = str(raw.get("label") or "")
+        source_key = str(raw.get("source_key") or "")
+        eligibility_key = str(raw.get("eligibility_key") or "")
+        if (
+            not stage_id
+            or not label
+            or source_key not in _SAFE_BEHAVIORAL_MEASURES
+            or (eligibility_key and eligibility_key not in _SAFE_BEHAVIORAL_MEASURES)
+        ):
+            continue
+        eligible_rows = [
+            row
+            for row in rows
+            if not eligibility_key or row.get(eligibility_key) is True
+        ]
+        grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+        for row in eligible_rows:
+            grouped[
+                (
+                    str(row.get("variant_id") or "default"),
+                    str(row.get("harness") or "all"),
+                )
+            ].append(row)
+        stages.append(
+            ExperimentMechanismStageV1(
+                id=stage_id,
+                label=label,
+                eligible=len(eligible_rows),
+                reached=sum(row.get(source_key) is True for row in eligible_rows),
+                by_arm=tuple(
+                    ExperimentMechanismArmV1(
+                        arm=arm,
+                        harness=harness,
+                        eligible=len(arm_rows),
+                        reached=sum(row.get(source_key) is True for row in arm_rows),
+                    )
+                    for (arm, harness), arm_rows in sorted(grouped.items())
+                ),
+            )
+        )
+    return tuple(stages)
 
 
 def _attempt_scores(
@@ -1218,7 +1326,9 @@ def _attempt_scores(
                         if passed is False
                         else "unavailable"
                     ),
-                    value=value if isinstance(value, str | int | float | bool) else None,
+                    value=value
+                    if isinstance(value, str | int | float | bool)
+                    else None,
                     scorer_id=scorer.id,
                 )
             )
@@ -1266,9 +1376,7 @@ def _score_summaries(
     summaries: list[ExperimentScoreSummaryV1] = []
     for score_id, values in grouped.items():
         numeric = [
-            float(item.value)
-            for item in values
-            if isinstance(item.value, int | float)
+            float(item.value) for item in values if isinstance(item.value, int | float)
         ]
         passed = sum(item.status == "passed" for item in values)
         failed = sum(item.status == "failed" for item in values)
@@ -1367,14 +1475,67 @@ def _aligned_comparisons(outcome: Mapping[str, Any]) -> tuple[dict[str, Any], ..
         if not isinstance(item, Mapping):
             continue
         analysis_id = str(item.get("analysis_id") or item.get("id") or "")
-        digest = str(item.get("analysis_digest") or item.get("digest") or "")
+        digest = str(
+            item.get("analysis_digest")
+            or item.get("snapshot_digest")
+            or item.get("digest")
+            or ""
+        )
         if analysis_id:
-            values.append(
-                {
-                    "analysis_id": analysis_id[:300],
-                    **({"digest": digest} if digest else {}),
-                }
+            selection = item.get("selection")
+            candidates = (
+                selection.get("candidates")
+                if isinstance(selection, Mapping)
+                and isinstance(selection.get("candidates"), Sequence)
+                else ()
             )
+            comparisons = 0
+            for candidate in candidates:
+                if not isinstance(candidate, Mapping):
+                    continue
+                estimate = _optional_float(candidate.get("paired_pass_rate_delta"))
+                candidate_id = str(candidate.get("candidate_id") or "")
+                if estimate is None or not candidate_id:
+                    continue
+                values.append(
+                    {
+                        "analysis_id": analysis_id[:300],
+                        "comparison_id": candidate_id[:300],
+                        "estimate": estimate,
+                        **(
+                            {"confidence_low": low}
+                            if (low := _optional_float(candidate.get("confidence_low")))
+                            is not None
+                            else {}
+                        ),
+                        **(
+                            {"confidence_high": high}
+                            if (
+                                high := _optional_float(
+                                    candidate.get("confidence_high")
+                                )
+                            )
+                            is not None
+                            else {}
+                        ),
+                        **(
+                            {"pairs": int(candidate["examples"])}
+                            if isinstance(candidate.get("examples"), int)
+                            and not isinstance(candidate.get("examples"), bool)
+                            and int(candidate["examples"]) >= 0
+                            else {}
+                        ),
+                        **({"digest": digest} if digest else {}),
+                    }
+                )
+                comparisons += 1
+            if not comparisons:
+                values.append(
+                    {
+                        "analysis_id": analysis_id[:300],
+                        **({"digest": digest} if digest else {}),
+                    }
+                )
     return tuple(values)
 
 
@@ -1568,6 +1729,35 @@ def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], .
                 "digest": outcome_digest,
             }
         )
+    for item in outcome.get("evaluation_runs") or ():
+        if not isinstance(item, Mapping):
+            continue
+        evaluation_ref = str(
+            item.get("evaluation_ref") or item.get("publication_id") or ""
+        )
+        evaluation_url = str(item.get("url") or "")
+        if evaluation_ref:
+            links.append(
+                {
+                    "system": "weave",
+                    "kind": "evaluation",
+                    "ref": evaluation_ref,
+                    **(
+                        {"uri": evaluation_url}
+                        if evaluation_url.startswith("https://")
+                        else {}
+                    ),
+                }
+            )
+        dataset_ref = str(item.get("dataset_ref") or "")
+        if dataset_ref:
+            links.append(
+                {
+                    "system": "weave",
+                    "kind": "dataset",
+                    "ref": dataset_ref,
+                }
+            )
     evaluation = _mapping_or_empty(record.get("evaluation"))
     evaluation_digest = str(evaluation.get("evaluation_digest") or "")
     if evaluation_digest:
@@ -1619,6 +1809,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "arm_totals",
                 "aligned_comparisons",
                 "behavioral_measures",
+                "mechanism_funnel",
                 "outcome_summaries",
                 "score_summaries",
                 "evidence_eligible",
@@ -1655,6 +1846,7 @@ def _validate_view_shape(view: ExperimentViewV1) -> None:
                 "arm_totals",
                 "aligned_comparisons",
                 "behavioral_measures",
+                "mechanism_funnel",
                 "outcome_summaries",
                 "score_summaries",
                 "evidence_eligible",
@@ -1749,9 +1941,7 @@ def _optional_prompt_design(raw: Any) -> ExperimentPromptDesignV1 | None:
         _text(key, "prompt_design treatment id", 200): _text(
             item, "prompt_design treatment summary", 2000
         )
-        for key, item in _mapping_or_empty(
-            value.get("treatment_summaries")
-        ).items()
+        for key, item in _mapping_or_empty(value.get("treatment_summaries")).items()
     }
     return ExperimentPromptDesignV1(
         base_instruction_summary=_text(
@@ -1823,9 +2013,7 @@ def _scorer_design(raw: Any) -> ExperimentScorerDesignV1:
         id=_text(value.get("id"), "scorer design id", 200),
         label=_text(value.get("label"), "scorer design label", 300),
         kind=kind,  # type: ignore[arg-type]
-        description=_text(
-            value.get("description"), "scorer design description", 2000
-        ),
+        description=_text(value.get("description"), "scorer design description", 2000),
         required=_optional_bool(value.get("required"), "scorer design required")
         is not False,
         threshold=threshold,
@@ -2108,27 +2296,127 @@ def _evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
 
 def _arm_total(raw: Any) -> dict[str, Any]:
     value = _mapping(raw, "arm_total")
-    _reject_unknown(value, {"arm", "harness", "passed", "total"}, "arm_total")
-    return {
+    _reject_unknown(
+        value,
+        {
+            "arm",
+            "arm_label",
+            "harness",
+            "harness_label",
+            "factor_levels",
+            "passed",
+            "total",
+        },
+        "arm_total",
+    )
+    result = {
         "arm": _text(value.get("arm"), "arm_total.arm", 300),
         "harness": _text(value.get("harness"), "arm_total.harness", 300),
         "passed": _non_negative_int(value.get("passed"), "arm_total.passed"),
         "total": _non_negative_int(value.get("total"), "arm_total.total"),
     }
+    arm_label = _optional_text(value.get("arm_label"), "arm_total.arm_label", 300)
+    if arm_label:
+        result["arm_label"] = arm_label
+    harness_label = _optional_text(
+        value.get("harness_label"), "arm_total.harness_label", 300
+    )
+    if harness_label:
+        result["harness_label"] = harness_label
+    factor_levels = _mapping_or_empty(value.get("factor_levels"))
+    if factor_levels:
+        result["factor_levels"] = {
+            _text(key, "arm_total factor id", 200): _text(
+                item, "arm_total factor level", 200
+            )
+            for key, item in factor_levels.items()
+        }
+    return result
 
 
 def _comparison(raw: Any) -> dict[str, Any]:
     value = _mapping(raw, "aligned_comparison")
-    _reject_unknown(value, {"analysis_id", "digest"}, "aligned_comparison")
+    _reject_unknown(
+        value,
+        {
+            "analysis_id",
+            "comparison_id",
+            "estimate",
+            "confidence_low",
+            "confidence_high",
+            "pairs",
+            "digest",
+        },
+        "aligned_comparison",
+    )
     result = {
         "analysis_id": _text(
             value.get("analysis_id"), "aligned_comparison.analysis_id", 300
         )
     }
+    comparison_id = _optional_text(
+        value.get("comparison_id"), "aligned_comparison.comparison_id", 300
+    )
+    if comparison_id:
+        result["comparison_id"] = comparison_id
+    for field_name in ("estimate", "confidence_low", "confidence_high"):
+        if value.get(field_name) is not None:
+            number = float(value[field_name])
+            if not math.isfinite(number):
+                raise ValueError(f"aligned_comparison.{field_name} must be finite")
+            result[field_name] = number
+    if value.get("pairs") is not None:
+        result["pairs"] = _non_negative_int(
+            value.get("pairs"), "aligned_comparison.pairs"
+        )
     digest = _optional_digest(value.get("digest"), "aligned_comparison.digest")
     if digest:
         result["digest"] = digest
     return result
+
+
+def _mechanism_stage(raw: Any) -> ExperimentMechanismStageV1:
+    value = _mapping(raw, "mechanism stage")
+    _reject_unknown(
+        value,
+        {"id", "label", "eligible", "reached", "by_arm"},
+        "mechanism stage",
+    )
+    eligible = _non_negative_int(value.get("eligible"), "mechanism stage eligible")
+    reached = _non_negative_int(value.get("reached"), "mechanism stage reached")
+    if reached > eligible:
+        raise ValueError("mechanism stage reached cannot exceed eligible")
+    by_arm: list[ExperimentMechanismArmV1] = []
+    for raw_arm in _sequence(value.get("by_arm"), "mechanism stage by_arm"):
+        arm = _mapping(raw_arm, "mechanism stage arm")
+        _reject_unknown(
+            arm,
+            {"arm", "harness", "eligible", "reached"},
+            "mechanism stage arm",
+        )
+        arm_eligible = _non_negative_int(
+            arm.get("eligible"), "mechanism stage arm eligible"
+        )
+        arm_reached = _non_negative_int(
+            arm.get("reached"), "mechanism stage arm reached"
+        )
+        if arm_reached > arm_eligible:
+            raise ValueError("mechanism stage arm reached cannot exceed eligible")
+        by_arm.append(
+            ExperimentMechanismArmV1(
+                arm=_text(arm.get("arm"), "mechanism stage arm id", 300),
+                harness=_text(arm.get("harness"), "mechanism stage arm harness", 300),
+                eligible=arm_eligible,
+                reached=arm_reached,
+            )
+        )
+    return ExperimentMechanismStageV1(
+        id=_text(value.get("id"), "mechanism stage id", 200),
+        label=_text(value.get("label"), "mechanism stage label", 300),
+        eligible=eligible,
+        reached=reached,
+        by_arm=tuple(by_arm),
+    )
 
 
 def _measure_mapping(raw: Any, field_name: str) -> dict[str, Any]:
