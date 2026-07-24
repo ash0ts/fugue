@@ -1,66 +1,230 @@
 # Fugue
 
-Fugue 0.1.2 is a local-first, governed laboratory for controlled experiments on
-agent systems. It lets an engineer vary a harness, prompt, tool, retrieval
-system, memory treatment, interaction policy, or other loop component while
-holding the intended controls fixed. Fugue resolves the exact matrix once,
-runs each coordinate in Harbor, records native W&B Weave evidence, and exports
-reproducible outcomes without collapsing task success, behavior, errors,
-latency, usage, and cost into one synthetic score.
+**Fugue is the governed experiment layer for agent loop engineering and
+autoresearch.**
 
-Fugue is not an agent framework, an automatic winner selector, or a replacement
-for Weave. An Agent or researcher still chooses the question, proposes the
-intervention, and interprets the result. Fugue is the part that makes the
-comparison admissible, recoverable, and inspectable.
+An outer research loop can inspect traces, form a hypothesis, and decide what
+to try next. Fugue turns that proposal into a controlled experiment: it fixes
+the comparison, locks the inputs, enforces human approval and budget limits,
+runs isolated Agent cells through Harbor, reconciles each cell with native W&B
+Weave evidence, and returns a result whose scope is explicit.
 
-## Why Fugue
+Fugue does not replace the research Agent, the execution sandbox, or the
+observability system. It is the laboratory between them.
 
-An agent result belongs to the whole system around the model. Changing the
-harness can change tool use; changing retrieval can change what evidence is
-available; changing instructions can change whether that evidence is opened or
-used. A result is difficult to interpret when those dimensions drift together,
-when setup happens inside a trial, or when missing traces are silently counted
-as task failures.
+```mermaid
+flowchart TB
+    EVIDENCE["Production evidence<br/>Weave calls, evaluations, artifacts"]
+    RESEARCHER["Researcher or outer loop<br/>Aria, Senpai, or a custom Agent"]
+    FUGUE["Fugue<br/>design, locks, admission, evaluation"]
+    HUMAN["Human operator<br/>approval and spend authority"]
+    EXECUTION["Harbor + native Agent harness<br/>one isolated environment per cell"]
+    WEAVE["W&B Weave<br/>conversations, traces, evaluations"]
+    RESULT["Fugue sourced Result<br/>observation, interpretation, limitations"]
+    CONSOLE["Optional Study Console<br/>read-only research projection"]
 
-Fugue makes those problems explicit:
+    EVIDENCE --> RESEARCHER
+    RESEARCHER -->|"question, hypothesis, proposed comparison"| FUGUE
+    HUMAN -->|"approve exact preview digest and cap"| FUGUE
+    FUGUE -->|"locked task × treatment × attempt cells"| EXECUTION
+    EXECUTION --> WEAVE --> RESULT
+    FUGUE -->|"public-safe lifecycle events"| CONSOLE
+```
 
-- the experiment declares what is fixed, varied, and measured;
-- preview resolves the complete candidate × task × attempt matrix without side
-  effects;
-- preparation locks sources, runtimes, skills, context, tasks, and evaluation
-  assets before execution;
-- approval binds spend and cell limits to the exact preview digest;
-- every active Agent cell runs in an isolated Harbor environment;
-- every planned coordinate becomes terminal, explicitly not applicable, or
-  cancelled, and every executed Agent cell reconciles to its native Weave
-  conversation, root, receipts, and normalized row;
-- infrastructure, evaluation, and Agent outcomes remain separate.
+## Why Fugue exists
 
-The result is not certainty. It is a bounded claim with enough provenance to
-understand what was compared, reproduce the comparison, and decide what
-experiment is justified next.
+Agent behavior belongs to the whole loop around the model. The harness decides
+how tools are exposed and called. Retrieval changes what evidence is available.
+Instructions change whether the Agent opens and uses that evidence. Runtime,
+prompt, task selection, retry policy, and evaluation can all change the result.
+
+That is what makes loop engineering useful—and what makes casual comparisons
+easy to get wrong.
+
+Without a governed experiment layer, an autoresearch loop can accidentally:
+
+- change several dimensions while claiming to test one;
+- compare different tasks, runtimes, prompts, or attempts across treatments;
+- prepare dependencies or retrieval indexes inside a live trial;
+- retry failures until one arm looks better;
+- count infrastructure failures as task failures;
+- lose the route, conversation, root trace, or exact source revision;
+- write a confident conclusion from incomplete or irreconcilable evidence.
+
+Fugue makes these failure modes explicit. It declares what is **held fixed**,
+what is **changed**, and what is **measured**; resolves the full matrix before
+execution; and keeps operational health, Agent execution, task success,
+authored evaluation, evidence integrity, latency, usage, and cost as separate
+outcomes.
+
+The goal is not to manufacture certainty. The goal is to produce a bounded,
+inspectable claim that can support the next research decision.
+
+## Where Fugue sits in an autoresearch loop
+
+The outer loop remains the researcher. Fugue remains the laboratory.
+
+| Layer | Owns | Deliberately does not own |
+| --- | --- | --- |
+| Researcher or outer loop | Evidence review, hypotheses, intervention ideas, research priority, interpretation, the next question | Execution authority, self-approval, hidden changes to an accepted design |
+| Fugue | Experiment validation, immutable identity, matrix expansion, preparation, approval checks, admission, scheduling, recovery, evaluation, evidence reconciliation | Hypothesis generation, winner selection, writable application code, raw trace storage |
+| Harbor | One isolated environment for each admitted Agent cell | Experiment design, scoring, research memory |
+| W&B Weave | Agent conversations, calls, evaluations, annotations, prediction-level evidence | Admission policy, runtime isolation, experiment locking |
+| Study Console or another sink | A public-safe view of why the Study exists, its design, live progress, result, and evidence links | Execution, approval, retries, copied trace bodies |
+
+This division is important. An Agent can say, “these production traces suggest
+the support loop is over-sharing data; compare three safer loop designs.” Fugue
+can validate and preview that comparison. A human approves the exact six cells
+and cost ceiling. Fugue runs them and returns the task-aligned evidence. The
+Agent can then interpret the result and propose another Study—but it cannot
+quietly approve or launch that follow-up itself.
+
+```mermaid
+flowchart TB
+    OBSERVE["1. Observe<br/>review traces and failures"]
+    HYPOTHESIZE["2. Hypothesize<br/>name one explanation"]
+    DESIGN["3. Propose<br/>fixed, varied, measured"]
+    PREVIEW["4. Fugue preview<br/>exact cells and cost"]
+    APPROVE{"5. Human approval?"}
+    RUN["6. Fugue run<br/>lock, admit, isolate"]
+    EVALUATE["7. Evaluate<br/>task, behavior, evidence"]
+    INTERPRET["8. Interpret<br/>result and limitations"]
+    NEXT["9. Choose the next justified question"]
+
+    OBSERVE --> HYPOTHESIZE --> DESIGN --> PREVIEW --> APPROVE
+    APPROVE -->|yes| RUN --> EVALUATE --> INTERPRET --> NEXT
+    APPROVE -->|no| DESIGN
+```
+
+## What Fugue guarantees
+
+- **One declared matrix.** Every task, treatment, harness, and attempt is known
+  before execution.
+- **Pure preview.** Preview estimates applicability, cells, calls, and reserved
+  cost without preparing assets, calling a model, or creating runtime state.
+- **Locked inputs.** Source revisions, task suites, candidates, prompts,
+  runtimes, context, skills, routes, and private evaluation assets are
+  committed before the first cell runs.
+- **Exact approval.** Paid Agent, judge, or interactor calls require approval
+  bound to one preview digest, cell limit, and spend ceiling.
+- **Isolated execution.** Each cell runs through Harbor without access to the
+  Docker socket, host paths, dependency installation, downloads, builds, or
+  service startup.
+- **Durable recovery.** Operation IDs, leases, and immutable run identities
+  make control-plane retries safe. An already-launched trial is reconciled,
+  never silently launched again.
+- **Reconciled evidence.** Every coordinate becomes terminal, explicitly not
+  applicable, or cancelled. Agent cells must resolve to one native
+  conversation, one `invoke_agent` root, route/runtime receipts, and one
+  normalized prediction row.
+- **Bounded conclusions.** Results retain their task, treatment, attempt,
+  evidence, uncertainty, exclusions, and limitations. Fugue does not emit a
+  universal model or harness ranking.
+
+## Architecture
+
+Fugue has one execution path. The CLI, Python SDK, REST API, and MCP interface
+all converge on the same campaign and operator services; none introduces a
+second runner.
+
+```mermaid
+flowchart TB
+    subgraph CLIENTS["Human and Agent interfaces"]
+        direction LR
+        CLI["Human<br/>CLI and TUI"]
+        AGENT_API["External Agent<br/>Python, REST/SSE, or MCP"]
+    end
+
+    subgraph CONTROL["Governed control plane"]
+        direction LR
+        RESEARCH["Research service<br/>Research, Study, Result"]
+        CAMPAIGN["CampaignService<br/>policy, preview, preparation, admission"]
+        APPROVAL["Operator approval ledger<br/>exact digest, cells, cost"]
+        OPERATOR["OperatorService<br/>canonical plan and run lifecycle"]
+        RESEARCH --> CAMPAIGN --> OPERATOR
+        APPROVAL --> CAMPAIGN
+    end
+
+    subgraph EXECUTION["Private execution plane"]
+        direction LR
+        LOCKS["Content-addressed locks<br/>taskset, candidate, runtime, evaluation"]
+        WORKER["Durable worker<br/>leases and recovery"]
+        CELL["Harbor + native Agent harness<br/>one isolated environment per cell"]
+        LOCKS --> WORKER --> CELL
+    end
+
+    subgraph EVIDENCE["Evidence systems"]
+        direction LR
+        WEAVE["W&B Weave<br/>calls, conversations, evaluations"]
+        ROW["PredictionRowV1<br/>normalized terminal outcome"]
+        STORE["Append-only Study store + outbox<br/>revisions, cursors, public-safe events"]
+        UI["Optional Study Console"]
+        WEAVE --> ROW --> STORE --> UI
+    end
+
+    CLI --> OPERATOR
+    AGENT_API --> RESEARCH
+    OPERATOR --> LOCKS
+    CELL --> WEAVE
+    CELL --> ROW
+```
+
+The canonical artifact path is equally important:
+
+```mermaid
+flowchart TB
+    SPEC["ExperimentSpec<br/>declared comparison"]
+    PLAN["ResolvedRunPlan<br/>pure exact matrix"]
+    CANDIDATE["ResolvedCandidate<br/>behavioral identity"]
+    CELL["PlannedCell<br/>task × treatment × attempt"]
+    SNAPSHOT["RunSnapshotV1<br/>immutable execution receipt"]
+    HARBOR["Rendered Harbor job"]
+    WEAVE["Native Weave evidence"]
+    ROW["PredictionRowV1<br/>normalized outcome"]
+    ANALYSIS["Evaluation and analysis"]
+
+    SPEC --> PLAN
+    PLAN --> CANDIDATE
+    PLAN --> CELL
+    CANDIDATE --> SNAPSHOT
+    CELL --> SNAPSHOT
+    SNAPSHOT --> HARBOR
+    HARBOR --> WEAVE
+    HARBOR --> ROW
+    WEAVE --> ROW
+    ROW --> ANALYSIS
+```
+
+Candidate identity contains behavior-changing inputs such as the harness,
+model route, prompt, reviewed skills, context interface, integrations, and
+Agent configuration. Runtime, Harbor, tracing, and scheduling live in a
+separate execution fingerprint. Dataset, task, and attempt remain explicit
+comparison coordinates. Fugue never reconstructs identity from labels or UI
+state.
 
 ## When to use Fugue
 
-Fugue is a good fit when you need to:
+Use Fugue when you need to:
 
-- compare agent harnesses or loop implementations on aligned tasks;
-- test a prompt, tool, retrieval, memory, or interaction intervention without
-  changing the rest of the system;
+- compare harnesses or loop implementations on aligned tasks;
+- test a prompt, tool, repository search, memory, interaction, or policy change
+  while holding the intended controls fixed;
 - turn reviewed production-trace failures into locked discovery and holdout
   tasks;
-- evaluate deterministic task success alongside tool, trace, artifact, or
-  blind-judge criteria;
-- let an external research Agent propose and monitor experiments while a human
-  retains approval and spend authority;
-- preserve a durable chain from question to Study, admitted Run, evaluation,
-  and sourced Result.
+- evaluate deterministic task success alongside tool, trace, artifact, diff,
+  or blind-judge criteria;
+- let Aria, Senpai, or another external research Agent propose and monitor
+  experiments while a human retains approval and spend authority;
+- preserve a durable chain from a research question to a controlled Study,
+  admitted Run, evaluation, and sourced Result.
 
 Use something simpler for a one-off prompt check, ordinary trace inspection, or
-an ungoverned local benchmark where restart recovery, isolation, exact identity,
-and evidence provenance do not matter. Fugue also does not host your
-application, edit its writable checkout, invent hypotheses, approve its own
-spend, or turn a small study into a universal model or harness ranking.
+a disposable local benchmark where identity, isolation, restart recovery,
+approval, and evidence provenance do not matter.
+
+Fugue does not host your application, edit its writable checkout, invent the
+next hypothesis, approve its own spend, copy raw Weave traces, or turn a small
+study into a general capability claim.
 
 ## Choose an interface
 
@@ -71,7 +235,7 @@ saved experiment:
 ExperimentSpec → preview → prepare → run → normalized evidence → analysis
 ```
 
-Use the Research service when an outer loop or external Agent needs a governed
+Use the Research service when Aria or another outer loop needs a governed
 laboratory:
 
 ```text
@@ -90,40 +254,18 @@ Fugue 0.1.2 supports Hermes, OpenClaw, Claude Code, and Codex as stable harness
 identities. Direct provider diagnostics remain separate from Agent cells and do
 not synthesize conversations or Agent roots.
 
-See [`docs/research.md`](docs/research.md) for the Python and transport API,
-[`docs/research-container.md`](docs/research-container.md) for the isolated
-control/worker deployment, and the
-[`retrieval-to-action` example](examples/research/retrieval-to-action-canary/README.md)
-for a complete external-Agent handoff.
+Start with:
 
-## How it works
-
-1. Define or load a strict experiment and immutable task sources.
-2. Preview the exact matrix, applicability decisions, call estimate, and cost.
-3. Prepare and lock the selected sources, runtimes, skills, context, and task
-   environments.
-4. Obtain explicit approval when the workflow is Agent-driven or paid.
-5. Execute bounded cells through the durable operator and Harbor.
-6. Reconcile every planned coordinate with terminal execution and Weave
-   evidence.
-7. Score, analyze, and record only conclusions whose scope and evidence remain
-   explicit.
-
-Generated evaluations, self-evaluation, automated curation, and candidate
-serving are advanced or experimental extensions. None runs implicitly.
-
-```mermaid
-flowchart LR
-    QUESTION["Question and controls"] --> SPEC["Strict experiment"]
-    SPEC --> PREVIEW["Pure exact preview"]
-    PREVIEW --> APPROVAL["Human approval when required"]
-    APPROVAL --> LOCK["Plan, task, runtime, and cost locks"]
-    LOCK --> HARBOR["Isolated Harbor cells"]
-    HARBOR --> WEAVE["Native Weave evidence"]
-    HARBOR --> ROWS["Terminal normalized rows"]
-    WEAVE --> RESULT["Bounded sourced Result"]
-    ROWS --> RESULT
-```
+- [`docs/research.md`](docs/research.md) for the Python, REST, and MCP model;
+- [`docs/research-container.md`](docs/research-container.md) for the isolated
+  control/worker deployment;
+- [`docs/campaigns.md`](docs/campaigns.md) for the governed execution boundary;
+- the
+  [`autoresearch-loop` example](examples/research/autoresearch-loop/README.md)
+  for a Result-to-child-Study handoff;
+- the
+  [`retrieval-to-action` example](examples/research/retrieval-to-action-canary/README.md)
+  for a complete external-Agent approval and run flow.
 
 ## Install
 
