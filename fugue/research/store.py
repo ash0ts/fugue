@@ -129,6 +129,7 @@ class StudyStore:
                     research_id TEXT NOT NULL,
                     study_id TEXT NOT NULL,
                     request_json TEXT NOT NULL,
+                    preview_json TEXT,
                     operation_id TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
@@ -173,6 +174,16 @@ class StudyStore:
                 conn.execute(
                     "ALTER TABLE research_result_projection_state "
                     "ADD COLUMN projection_version INTEGER NOT NULL DEFAULT 1"
+                )
+            approval_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(approval_requests)"
+                ).fetchall()
+            }
+            if "preview_json" not in approval_columns:
+                conn.execute(
+                    "ALTER TABLE approval_requests ADD COLUMN preview_json TEXT"
                 )
             version = conn.execute("SELECT schema_version FROM schema_info").fetchone()
             if version is None:
@@ -662,6 +673,12 @@ class StudyStore:
             conn.execute("BEGIN IMMEDIATE")
             prior_operation = self._operation(conn, accepted.study_id, operation_id)
             if prior_operation:
+                conn.execute(
+                    "UPDATE approval_requests SET preview_json=COALESCE(preview_json, ?) "
+                    "WHERE preview_digest=?",
+                    (self._json(accepted.to_dict()), accepted.preview_digest),
+                )
+                conn.commit()
                 return research_log_event_from_dict(
                     self._operation_response(
                         prior_operation,
@@ -671,7 +688,8 @@ class StudyStore:
                     )
                 )
             existing = conn.execute(
-                "SELECT request_json FROM approval_requests WHERE preview_digest=?",
+                "SELECT request_json, preview_json FROM approval_requests "
+                "WHERE preview_digest=?",
                 (accepted.preview_digest,),
             ).fetchone()
             if existing:
@@ -683,6 +701,12 @@ class StudyStore:
                         category="conflict",
                     )
                 event = prior
+                if existing[1] is None:
+                    conn.execute(
+                        "UPDATE approval_requests SET preview_json=? "
+                        "WHERE preview_digest=?",
+                        (self._json(accepted.to_dict()), accepted.preview_digest),
+                    )
             else:
                 event = self._append_research_log_event(
                     conn,
@@ -716,12 +740,16 @@ class StudyStore:
                     or AttributionV1(actor_type="agent", name="external-agent"),
                 )
                 conn.execute(
-                    "INSERT INTO approval_requests VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO approval_requests "
+                    "(preview_digest, research_id, study_id, request_json, "
+                    "preview_json, operation_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         accepted.preview_digest,
                         accepted.study_id,
                         accepted.experiment_id,
                         self._json(event.to_dict()),
+                        self._json(accepted.to_dict()),
                         operation_id,
                         event.timestamp,
                     ),
@@ -736,6 +764,27 @@ class StudyStore:
             )
             conn.commit()
         return event
+
+    def get_latest_approval_preview(self, research_id: str) -> Any:
+        """Return the latest exact preview durably shown for human approval."""
+
+        from fugue.research.contracts import experiment_preview_from_dict
+
+        research_id = validate_id(research_id, kind="research id")
+        self.get_study(research_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT preview_json FROM approval_requests "
+                "WHERE research_id=? AND preview_json IS NOT NULL "
+                "ORDER BY created_at DESC LIMIT 1",
+                (research_id,),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "approval_preview_not_found",
+                f"Research {research_id} has no durable approval preview",
+            )
+        return experiment_preview_from_dict(json.loads(row[0]))
 
     def record_run_progress(
         self,

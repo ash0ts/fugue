@@ -194,6 +194,35 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
     [factor] = request.summary["experiment_view"]["varied_factors"]
     assert factor["label"] == "Loop design"
     assert "prompt" not in request.summary["experiment_view"]
+    assert store.get_latest_approval_preview("research-1") == preview
+
+
+def test_approval_preview_recovery_backfills_an_existing_request(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    preview = _preview()
+    request = store.record_approval_request(preview, operation_id="request-approval")
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE approval_requests SET preview_json=NULL WHERE preview_digest=?",
+            (preview.preview_digest,),
+        )
+
+    assert (
+        store.record_approval_request(preview, operation_id="request-approval")
+        == request
+    )
+    assert store.get_latest_approval_preview("research-1") == preview
+
+
+def test_approval_preview_recovery_requires_a_durable_request(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ResearchError, match="no durable approval preview"):
+        store.get_latest_approval_preview("research-1")
 
 
 def test_approval_request_operation_conflict_is_rejected(tmp_path: Path) -> None:
