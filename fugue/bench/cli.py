@@ -348,6 +348,22 @@ def _parser() -> FugueArgumentParser:
     approve.add_argument("--operation-id")
     approve.add_argument("--repo-root", type=Path, default=Path.cwd())
     approve.set_defaults(handler=_research)
+    publications = research_actions.add_parser(
+        "publications",
+        help="Inspect or replay public-safe research records",
+    )
+    publication_actions = publications.add_subparsers(
+        dest="publication_action",
+        metavar="ACTION",
+        required=True,
+    )
+    replay_publications = publication_actions.add_parser(
+        "replay",
+        help="Republish immutable records to the configured projection sink",
+    )
+    replay_publications.add_argument("--repo-root", type=Path, default=Path.cwd())
+    replay_publications.add_argument("--research-id")
+    replay_publications.set_defaults(handler=_research)
     skill = research_actions.add_parser(
         "skill", help="Export the portable external-Agent skill"
     )
@@ -438,6 +454,18 @@ def _research(args: argparse.Namespace) -> int:
             expires_in_seconds=args.expires_in,
         )
         print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
+    elif args.research_action == "publications":
+        from fugue.research.records import ResearchRecordPublisher
+        from fugue.research.store import StudyStore
+
+        store = StudyStore(args.repo_root)
+        publisher = ResearchRecordPublisher.from_environment(store)
+        if not publisher.sinks:
+            raise ValueError("research publication replay requires a configured sink")
+        result = publisher.replay(research_id=args.research_id)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        if result["failed"]:
+            return 1
     else:
         from fugue.research.skills import export_skill
 

@@ -283,9 +283,13 @@ def public_evidence_selector(value: Mapping[str, JsonValue]) -> dict[str, JsonVa
             continue
         if isinstance(item, (str, int, float, bool)) or item is None:
             selector[key] = item
-        elif isinstance(item, list) and len(item) <= 50 and all(
-            isinstance(member, (str, int, float, bool)) or member is None
-            for member in item
+        elif (
+            isinstance(item, list)
+            and len(item) <= 50
+            and all(
+                isinstance(member, (str, int, float, bool)) or member is None
+                for member in item
+            )
         ):
             selector[key] = item
     return selector
@@ -450,9 +454,18 @@ class HttpResearchRecordSink:
 
 
 class ResearchRecordPublisher:
-    def __init__(self, store: Any, sinks: Iterable[ResearchRecordSink]) -> None:
+    def __init__(
+        self,
+        store: Any,
+        sinks: Iterable[ResearchRecordSink],
+        *,
+        research_ids: Iterable[str] = (),
+    ) -> None:
         self.store = store
         self.sinks = tuple(sinks)
+        self.research_ids = frozenset(
+            str(value).strip() for value in research_ids if str(value).strip()
+        )
 
     @classmethod
     def from_environment(
@@ -467,14 +480,23 @@ class ResearchRecordPublisher:
         if url:
             token = _secret(values, "FUGUE_RESEARCH_RECORD_TOKEN")
             sinks.append(HttpResearchRecordSink(url, token))
-        return cls(store, sinks)
+        research_ids = tuple(
+            value.strip()
+            for value in values.get(
+                "FUGUE_RESEARCH_RECORD_RESEARCH_IDS", ""
+            ).split(",")
+            if value.strip()
+        )
+        return cls(store, sinks, research_ids=research_ids)
 
     def flush(self, *, limit: int = 100) -> dict[str, int]:
         delivered = 0
         failed = 0
         for sink in self.sinks:
             for event in self.store.pending_research_log_events(
-                sink.sink_id, limit=limit
+                sink.sink_id,
+                limit=limit,
+                research_ids=self.research_ids,
             ):
                 try:
                     sink.publish(event)
@@ -486,6 +508,57 @@ class ResearchRecordPublisher:
                     continue
                 self.store.mark_research_log_delivered(sink.sink_id, event.sequence)
                 delivered += 1
+        return {"delivered": delivered, "failed": failed}
+
+    def replay(
+        self,
+        *,
+        research_id: str | None = None,
+        after: int = 0,
+        page_size: int = 1000,
+    ) -> dict[str, int]:
+        """Republish immutable records without changing the producing operation.
+
+        This is an operator recovery path for a rebuilt projection sink. Event
+        identities and digests remain unchanged, so consumers still enforce
+        idempotency and conflicting replays still fail.
+        """
+
+        delivered = 0
+        failed = 0
+        if (
+            research_id is not None
+            and self.research_ids
+            and research_id not in self.research_ids
+        ):
+            raise ValueError("research publication is outside the configured scope")
+        cursor = after
+        while True:
+            events = self.store.research_log_events(
+                after=cursor,
+                limit=page_size,
+            )
+            if not events:
+                break
+            for event in events:
+                cursor = event.sequence
+                if research_id is not None and event.research_id != research_id:
+                    continue
+                if self.research_ids and event.research_id not in self.research_ids:
+                    continue
+                for sink in self.sinks:
+                    try:
+                        sink.publish(event)
+                    except Exception as exc:
+                        self.store.mark_research_log_failed(
+                            sink.sink_id, event.sequence, str(exc)
+                        )
+                        failed += 1
+                        continue
+                    self.store.mark_research_log_delivered(sink.sink_id, event.sequence)
+                    delivered += 1
+            if len(events) < page_size:
+                break
         return {"delivered": delivered, "failed": failed}
 
 

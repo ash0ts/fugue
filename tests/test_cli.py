@@ -44,6 +44,13 @@ def test_public_command_surface_is_intentionally_small() -> None:
     }
     assert "--env-file" in subparsers.choices["run"].format_help()
     assert "--env-file" in subparsers.choices["setup"].format_help()
+    research_actions = next(
+        action
+        for action in subparsers.choices["research"]._actions
+        if isinstance(action, cli.argparse._SubParsersAction)
+    )
+    assert "publications" in research_actions.choices
+    assert "replay" in research_actions.choices["publications"].format_help()
 
 
 @pytest.mark.parametrize(

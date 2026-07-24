@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     EXPERIMENT_VIEW_CELL_LIMIT,
     build_design_view,
@@ -164,6 +165,45 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
         "action-gate": "Check risky actions",
     }
     assert {item.id for item in view.harnesses} == {"codex", "claude-code"}
+    assert {item.id: item.label for item in view.harnesses} == {
+        "codex": "Codex",
+        "claude-code": "Claude Code",
+    }
+
+
+def test_registered_labels_fill_a_legacy_preview_without_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "configs" / "fugue" / "experiments"
+    config.mkdir(parents=True)
+    (config / "support-data-authority-v1.yaml").write_text(
+        """
+id: support-data-authority-v1
+title: Support-data safety
+harnesses: [codex, claude-code]
+variants:
+  - id: baseline
+    label: Current behavior
+    context: {system_id: none, delivery: portable}
+  - id: warning-only
+    label: Add a reminder
+    context: {system_id: none, delivery: portable}
+  - id: action-gate
+    label: Check risky actions
+    context: {system_id: none, delivery: portable}
+"""
+    )
+    preview = _preview()
+    original = preview["draft"].pop("display_labels")
+    preview["draft"]["experiment_id"] = "support-data-authority-v1"
+
+    projected = preview_with_governed_display_labels(tmp_path, preview)
+    view = build_design_view(projected)
+
+    assert "display_labels" not in preview["draft"]
+    assert original
+    assert view.research_label == "Agent eval · Support-data safety"
+    assert view.study_label == "Support-data safety"
     assert {item.id: item.label for item in view.harnesses} == {
         "codex": "Codex",
         "claude-code": "Claude Code",

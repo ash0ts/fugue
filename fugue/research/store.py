@@ -41,6 +41,7 @@ from fugue.research.contracts import (
     study_from_dict,
 )
 from fugue.research.database import connect_database
+from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     build_design_view,
     build_evaluation_view,
@@ -57,7 +58,7 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 2
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 4
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 5
 
 
 class StudyStore:
@@ -1598,8 +1599,12 @@ class StudyStore:
             for row in rows:
                 record = experiment_record_from_dict(json.loads(row["record_json"]))
                 existing = published_views.get(record.id, {})
-                view = build_design_view(
+                projection_preview = preview_with_governed_display_labels(
+                    self.repo_root,
                     record.preview,
+                )
+                view = build_design_view(
+                    projection_preview,
                     approval_state=(
                         "approved" if record.approval else "awaiting_approval"
                     ),
@@ -1645,8 +1650,10 @@ class StudyStore:
                     )
                     created += 1
                 if record.outcome:
+                    projection_record = self._experiment_projection_record(record)
+                    projection_record["preview"] = projection_preview
                     view = build_evaluation_view(
-                        self._experiment_projection_record(record)
+                        projection_record
                     )
                     view_digest = stable_digest(view.to_dict())
                     if view_digest not in existing.get("evaluation", set()):
@@ -1783,20 +1790,39 @@ class StudyStore:
         return rows
 
     def pending_research_log_events(
-        self, sink_id: str, *, limit: int = 100
+        self,
+        sink_id: str,
+        *,
+        limit: int = 100,
+        research_ids: Iterable[str] = (),
     ) -> tuple[ResearchLogEventV1, ...]:
         if not sink_id or len(sink_id) > 300:
             raise ValueError("sink id must contain 1 to 300 characters")
         if limit < 1 or limit > 1000:
             raise ValueError("research log limit must be between 1 and 1000")
+        selected_ids = tuple(
+            str(value).strip() for value in research_ids if str(value).strip()
+        )
+        query = (
+            "SELECT events.event_json FROM research_log_events AS events "
+            "LEFT JOIN research_record_deliveries AS deliveries "
+            "ON deliveries.sequence=events.sequence AND deliveries.sink_id=? "
+            "WHERE (deliveries.state IS NULL OR deliveries.state!='delivered') "
+        )
+        parameters: list[Any] = [sink_id]
+        if selected_ids:
+            query += (
+                "AND json_extract(events.event_json, '$.research_id') IN ("
+                + ",".join("?" for _ in selected_ids)
+                + ") "
+            )
+            parameters.extend(selected_ids)
+        query += "ORDER BY events.sequence LIMIT ?"
+        parameters.append(limit)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT events.event_json FROM research_log_events AS events "
-                "LEFT JOIN research_record_deliveries AS deliveries "
-                "ON deliveries.sequence=events.sequence AND deliveries.sink_id=? "
-                "WHERE deliveries.state IS NULL OR deliveries.state!='delivered' "
-                "ORDER BY events.sequence LIMIT ?",
-                (sink_id, limit),
+                query,
+                parameters,
             ).fetchall()
         return tuple(research_log_event_from_dict(json.loads(row[0])) for row in rows)
 
