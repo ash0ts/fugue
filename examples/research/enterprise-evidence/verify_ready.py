@@ -81,10 +81,7 @@ def main() -> int:
         raise RuntimeError(
             "Fugue did not resolve exactly four reviewed enterprise traces"
         )
-    markers = {
-        str(item["source_markers"].get("demo.outcome", ""))
-        for item in records
-    }
+    markers = {str(item["source_markers"].get("demo.outcome", "")) for item in records}
     if markers != {"evidence-not-used"}:
         raise RuntimeError("resolved enterprise traces do not match the reviewed class")
     print(
