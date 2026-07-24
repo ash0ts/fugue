@@ -1,0 +1,30 @@
+dataset:
+  path: datasets/enterprise-evidence-use-v1
+model: wandb/zai-org/GLM-5.2
+k: 1
+n_concurrent: 1
+jobs_dir: .fugue/runtime/jobs/enterprise-evidence-use-v1
+harnesses:
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - id: expense-policy-limit
+    notes: Determine the current client-meal reimbursement limit.
+    expected_paths: [documents/expense-policy-rev-7.md]
+    metadata: {gold_solution: solution/solve.sh}
+    artifacts: [/logs/artifacts/research-brief.json]
+  - id: vendor-retention
+    notes: Determine the current vendor data-retention requirement.
+    expected_paths: [documents/vendor-retention-2026-04.md]
+    metadata: {gold_solution: solution/solve.sh}
+    artifacts: [/logs/artifacts/research-brief.json]
+  - id: equipment-allowance
+    notes: Determine the equipment allowance and regional exception.
+    expected_paths: [documents/equipment-allowance-2026.md]
+    metadata: {gold_solution: solution/solve.sh}
+    artifacts: [/logs/artifacts/research-brief.json]
+  - id: incident-escalation
+    notes: Determine the current critical-incident escalation rule.
+    expected_paths: [documents/incident-escalation-v5.md]
+    metadata: {gold_solution: solution/solve.sh}
+    artifacts: [/logs/artifacts/research-brief.json]

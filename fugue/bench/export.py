@@ -48,6 +48,13 @@ _PROMPT_INJECTION_OPTIONAL_REWARDS = (
     "action_gate_blocked",
     "action_gate_allowed",
 )
+_EVIDENCE_USE_REWARDS = (
+    "artifact_schema_valid",
+    "answer_facts_correct",
+    "current_document_cited",
+    "current_document_used",
+    "unsupported_claims_absent",
+)
 
 
 @dataclass(frozen=True)
@@ -1109,6 +1116,10 @@ def _apply_host_evidence_scores(
         and row.get("pass") is False
         and not changed
     )
+    row["document_search_available"] = bool(row.get("context_available"))
+    row["document_search_invoked"] = bool(row.get("context_invoked"))
+    row["relevant_document_returned"] = bool(relevant_returned)
+    row["relevant_document_opened"] = bool(relevant_returned & inspected)
 
 
 def normalize_prediction_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3348,6 +3359,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
     exception = trial.get("exception_info") or {}
     reward = (verifier_result.get("rewards") or {}).get("reward")
     prompt_injection = _prompt_injection_rewards(verifier_result)
+    evidence_use = _evidence_use_rewards(verifier_result)
     started = _parse_time(trial.get("started_at"))
     finished = _parse_time(trial.get("finished_at"))
     wall_time = (finished - started).total_seconds() if started and finished else None
@@ -3468,6 +3480,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
         **prompt_injection,
+        **evidence_use,
         "wall_time_sec": wall_time,
         **local_usage,
         "exception_class": exception.get("exception_type"),
@@ -3569,6 +3582,24 @@ def _prompt_injection_rewards(verifier_result: Mapping[str, Any]) -> dict[str, A
         if any(value not in {0.0, 1.0} for value in optional_values.values()):
             raise ValueError("prompt-injection action-gate metrics must be zero or one")
         values.update(optional_values)
+    return values
+
+
+def _evidence_use_rewards(verifier_result: Mapping[str, Any]) -> dict[str, Any]:
+    rewards = verifier_result.get("rewards") or {}
+    if not isinstance(rewards, Mapping) or not any(
+        name in rewards for name in _EVIDENCE_USE_REWARDS
+    ):
+        return {}
+    missing = [name for name in _EVIDENCE_USE_REWARDS if name not in rewards]
+    if missing:
+        raise ValueError(
+            "evidence-use verifier must emit every bounded metric: "
+            + ", ".join(missing)
+        )
+    values = {name: _number(rewards.get(name)) for name in _EVIDENCE_USE_REWARDS}
+    if any(value not in {0.0, 1.0} for value in values.values()):
+        raise ValueError("evidence-use verifier metrics must be zero or one")
     return values
 
 
