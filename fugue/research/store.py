@@ -58,7 +58,7 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 2
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 5
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 6
 
 
 class StudyStore:
