@@ -31,6 +31,7 @@ def governed_display_labels(
         "research": f"Agent eval · {experiment.title}",
         "study": experiment.title,
         "harness": "Harness",
+        "variant": "Loop design",
         "loop design": "Loop design",
     }
     defaults.update(

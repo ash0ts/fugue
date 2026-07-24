@@ -151,7 +151,7 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
     factors = {item.name: item.levels for item in view.varied_factors}
     assert factors == {
         "harness": ("codex", "claude-code"),
-        "loop design": ("baseline", "warning-only", "action-gate"),
+        "variant": ("baseline", "warning-only", "action-gate"),
     }
     labels = {item.name: item for item in view.varied_factors}
     assert labels["harness"].label == "Harness"
@@ -159,7 +159,8 @@ def test_support_study_design_is_an_exact_six_cell_matrix() -> None:
         "codex": "Codex",
         "claude-code": "Claude Code",
     }
-    assert labels["loop design"].level_labels == {
+    assert labels["variant"].label == "Loop design"
+    assert labels["variant"].level_labels == {
         "baseline": "Current behavior",
         "warning-only": "Add a reminder",
         "action-gate": "Check risky actions",
@@ -236,7 +237,7 @@ def test_design_normalizes_plain_language_dimension_names() -> None:
     view = build_design_view(preview)
 
     assert {item.name: item.levels for item in view.varied_factors} == {
-        "loop design": ("baseline", "warning-only", "action-gate"),
+        "variant": ("baseline", "warning-only", "action-gate"),
         "harness": ("codex", "claude-code"),
     }
     assert {item.name for item in view.fixed_conditions} == {
