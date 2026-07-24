@@ -470,6 +470,72 @@ def test_jsonl_publication_is_ordered_idempotent_and_restart_safe(
     assert status["deliveries"][0]["state"] == "delivered"
 
 
+def test_operator_replay_republishes_delivered_events_without_new_operations(
+    tmp_path: Path,
+) -> None:
+    class RecordingSink:
+        sink_id = "projection-console"
+
+        def __init__(self) -> None:
+            self.events = []
+
+        def publish(self, event: object) -> None:
+            self.events.append(event)
+
+    store = _store(tmp_path)
+    store.record_approval_request(_preview(), operation_id="request-1")
+    before = store.get_study("research-1")
+    sink = RecordingSink()
+    publisher = ResearchRecordPublisher(store, [sink])
+
+    assert publisher.flush() == {"delivered": 2, "failed": 0}
+    sink.events.clear()
+    assert publisher.replay(research_id="research-1") == {
+        "delivered": 2,
+        "failed": 0,
+    }
+
+    assert [event.sequence for event in sink.events] == [1, 2]
+    assert store.get_study("research-1") == before
+    assert store.research_publication_status()["event_count"] == 2
+
+
+def test_publication_scope_filters_live_flush_and_operator_replay(
+    tmp_path: Path,
+) -> None:
+    class RecordingSink:
+        sink_id = "projection-console"
+
+        def __init__(self) -> None:
+            self.events = []
+
+        def publish(self, event: object) -> None:
+            self.events.append(event)
+
+    store = _store(tmp_path)
+    store.create_study(
+        study_id="research-2",
+        title="Another Study",
+        campaign_id="campaign-1",
+        question="Another question",
+        operation_id="create-research-2",
+    )
+    sink = RecordingSink()
+    publisher = ResearchRecordPublisher(
+        store,
+        [sink],
+        research_ids=("research-1",),
+    )
+
+    assert publisher.flush() == {"delivered": 1, "failed": 0}
+    assert [event.research_id for event in sink.events] == ["research-1"]
+    sink.events.clear()
+    assert publisher.replay() == {"delivered": 1, "failed": 0}
+    assert [event.research_id for event in sink.events] == ["research-1"]
+    with pytest.raises(ValueError, match="outside the configured scope"):
+        publisher.replay(research_id="research-2")
+
+
 def test_jsonl_publication_recovers_a_missing_index_and_serializes_writers(
     tmp_path: Path,
 ) -> None:

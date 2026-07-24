@@ -34,6 +34,7 @@ from fugue.research.contracts import (
     sign_preview,
     sign_record,
 )
+from fugue.research.display_labels import governed_display_labels
 from fugue.research.records import ResearchRecordPublisher
 from fugue.research.store import StudyStore
 from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
@@ -193,6 +194,19 @@ class ResearchService:
         try:
             study = self.store.get_study(study_id)
             draft = experiment_draft_from_dict(draft.to_dict())
+            display_labels = governed_display_labels(
+                self.repo_root,
+                draft.to_dict(),
+            )
+            if display_labels != draft.display_labels:
+                draft = experiment_draft_from_dict(
+                    {
+                        **draft.to_dict(),
+                        "display_labels": display_labels,
+                        "draft_digest": "",
+                    },
+                    require_digest=False,
+                )
             self.candidate_sources.validate_draft(draft)
             if draft.study_id != study.id or draft.campaign_id != study.campaign_id:
                 raise ResearchError(

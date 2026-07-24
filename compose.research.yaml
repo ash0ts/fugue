@@ -35,6 +35,7 @@ services:
       WF_TRACE_SERVER_URL: ${WF_TRACE_SERVER_URL:-}
       FUGUE_RESEARCH_RECORD_HTTP_URL: ${FUGUE_RESEARCH_RECORD_HTTP_URL:-}
       FUGUE_RESEARCH_RECORD_TOKEN_FILE: /run/secrets/research_record_ingest_key
+      FUGUE_RESEARCH_RECORD_RESEARCH_IDS: ${FUGUE_RESEARCH_RECORD_RESEARCH_IDS:-}
     secrets:
       - research_api_key
       - trace_wandb_api_key
@@ -101,6 +102,7 @@ services:
       WANDB_API_KEY_FILE: /run/secrets/wandb_api_key
       FUGUE_RESEARCH_RECORD_HTTP_URL: ${FUGUE_RESEARCH_RECORD_HTTP_URL:-}
       FUGUE_RESEARCH_RECORD_TOKEN_FILE: /run/secrets/research_record_ingest_key
+      FUGUE_RESEARCH_RECORD_RESEARCH_IDS: ${FUGUE_RESEARCH_RECORD_RESEARCH_IDS:-}
     secrets:
       - wandb_api_key
       - research_record_ingest_key
@@ -138,6 +140,11 @@ services:
     working_dir: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}
     environment:
       HOME: ${FUGUE_HOST_REPO_ROOT:?run fugue research bootstrap first}/.fugue/home
+      FUGUE_RESEARCH_RECORD_HTTP_URL: ${FUGUE_RESEARCH_RECORD_HTTP_URL:-}
+      FUGUE_RESEARCH_RECORD_TOKEN_FILE: /run/secrets/research_record_ingest_key
+      FUGUE_RESEARCH_RECORD_RESEARCH_IDS: ${FUGUE_RESEARCH_RECORD_RESEARCH_IDS:-}
+    secrets:
+      - research_record_ingest_key
     command: ["--help"]
     depends_on:
       fugue-init:
