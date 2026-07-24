@@ -67,6 +67,7 @@ def _preview() -> dict[str, object]:
                 "provenance": {
                     "trace_audit_id": "audit-1",
                     "trace_audit_digest": _A,
+                    "project": "team/support",
                     "selected_call_ids": ["call-1", "call-2", "call-3"],
                 }
             },
@@ -280,6 +281,7 @@ def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> N
         "outcome",
         "evaluation",
         "analysis",
+        "source_call",
     }
     summaries = {item.id: item for item in view.outcome_summaries}
     assert summaries["deterministic_task"].status == "failed"
@@ -343,6 +345,22 @@ def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None
     )["ref"] == ("team/evaluations/call/call-0")
     serialized = json.dumps(view.to_dict())
     assert "agent_response" not in serialized
+    assert "tool_output" not in serialized
+
+
+def test_evaluation_links_reviewed_source_calls_without_copying_trace_bodies() -> None:
+    view = build_evaluation_view(_record())
+
+    source_calls = [
+        link for link in view.evidence_links if link["kind"] == "source_call"
+    ]
+    assert [link["ref"] for link in source_calls] == [
+        "team/support/call/call-1",
+        "team/support/call/call-2",
+        "team/support/call/call-3",
+    ]
+    serialized = json.dumps(view.to_dict())
+    assert "trace_body" not in serialized
     assert "tool_output" not in serialized
 
 

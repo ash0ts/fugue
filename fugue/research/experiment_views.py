@@ -1085,6 +1085,24 @@ def _record_reserved_cost(record: Mapping[str, Any]) -> float | None:
 
 def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
     links: list[dict[str, str]] = []
+    preview = _mapping_or_empty(record.get("preview"))
+    draft = _mapping_or_empty(preview.get("draft"))
+    recipe = _mapping_or_empty(draft.get("task_recipe_preview"))
+    provenance = _mapping_or_empty(recipe.get("provenance"))
+    project = str(provenance.get("project") or "")
+    if (
+        len(project.split("/")) == 2
+        and all(project.split("/"))
+    ):
+        for call_id in provenance.get("selected_call_ids") or ():
+            if isinstance(call_id, str) and call_id:
+                links.append(
+                    {
+                        "system": "weave",
+                        "kind": "source_call",
+                        "ref": f"{project}/call/{call_id}",
+                    }
+                )
     run_id = str(record.get("run_id") or "")
     if run_id:
         links.append({"system": "fugue", "kind": "run", "ref": run_id})
