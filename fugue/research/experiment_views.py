@@ -1283,19 +1283,31 @@ def _mechanism_funnel(
                 id=stage_id,
                 label=label,
                 eligible=len(eligible_rows),
-                reached=sum(row.get(source_key) is True for row in eligible_rows),
+                reached=sum(
+                    _measure_reached(row.get(source_key)) for row in eligible_rows
+                ),
                 by_arm=tuple(
                     ExperimentMechanismArmV1(
                         arm=arm,
                         harness=harness,
                         eligible=len(arm_rows),
-                        reached=sum(row.get(source_key) is True for row in arm_rows),
+                        reached=sum(
+                            _measure_reached(row.get(source_key)) for row in arm_rows
+                        ),
                     )
                     for (arm, harness), arm_rows in sorted(grouped.items())
                 ),
             )
         )
     return tuple(stages)
+
+
+def _measure_reached(value: Any) -> bool:
+    return value is True or (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and float(value) == 1.0
+    )
 
 
 def _attempt_scores(

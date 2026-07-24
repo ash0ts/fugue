@@ -454,7 +454,7 @@ def test_factorial_results_publish_arm_definitions_and_mechanism_funnel() -> Non
     for row in raw["outcome"]["row_refs"]:
         search_available = row["variant_id"] == "action-gate"
         row["document_search_available"] = search_available
-        row["relevant_document_opened"] = search_available
+        row["relevant_document_opened"] = float(search_available)
 
     view = build_evaluation_view(raw)
 
