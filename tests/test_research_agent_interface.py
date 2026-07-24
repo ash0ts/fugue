@@ -510,7 +510,7 @@ def test_research_api_enforces_scopes_hosts_limits_and_security_headers(
     )
     with TestClient(app, base_url="http://127.0.0.1") as client:
         ready = client.get("/readyz")
-        assert ready.json() == {"status": "ready"}
+        assert ready.json() == {"status": "ready", "trace_source_count": 0}
         assert ready.headers["x-content-type-options"] == "nosniff"
         assert ready.headers["content-security-policy"].startswith("default-src")
         assert (
@@ -582,6 +582,10 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert all("docker.sock" not in value for value in control["volumes"])
     assert control["environment"]["WANDB_API_KEY_FILE"] == (
         "/run/secrets/trace_wandb_api_key"
+    )
+    assert control["environment"]["FUGUE_RESEARCH_TRUSTED_HOSTS"] == (
+        "${FUGUE_RESEARCH_TRUSTED_HOSTS:-127.0.0.1,localhost,[::1],"
+        "fugue-research.wandb.test}"
     )
     assert control["secrets"] == [
         "research_api_key",
