@@ -107,7 +107,7 @@ _ENTERPRISE_EVIDENCE_RECIPE = ReviewedTaskRecipeV1(
         ),
     },
     experiment_binding={
-        "campaign_id": "enterprise-evidence-use-v1",
+        "campaign_id": "enterprise-evidence-use-demo-v2",
         "stage_id": "canary",
         "experiment_id": "enterprise-evidence-use-v1",
         "model": "wandb/zai-org/GLM-5.2",
