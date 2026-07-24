@@ -769,7 +769,7 @@ def _dimension_label(name: str) -> str:
     if "harness" in words or {"codex", "claude"}.issubset(words):
         return "harness"
     if "loop" in words or "variant" in words:
-        return "loop design"
+        return "variant"
     if "model" in words:
         return "model and sampling"
     if "task" in words:
