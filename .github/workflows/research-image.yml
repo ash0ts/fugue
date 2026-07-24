@@ -39,6 +39,7 @@ jobs:
           printf '%s\n' 'ci-unused-wandb-token' > .fugue/secrets/wandb_api_key
           {
             printf 'FUGUE_DOCKER_GID="%s"\n' "$(stat -c '%g' /var/run/docker.sock)"
+            printf 'FUGUE_DOCKER_SOCKET="%s"\n' /var/run/docker.sock
             printf 'FUGUE_GIT_COMMON_DIR="%s/.git"\n' "$GITHUB_WORKSPACE"
             printf 'FUGUE_HOST_GID="%s"\n' "$(id -g)"
             printf 'FUGUE_HOST_REPO_ROOT="%s"\n' "$GITHUB_WORKSPACE"
