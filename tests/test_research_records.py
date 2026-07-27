@@ -198,6 +198,37 @@ def test_preview_is_unpublished_until_approval_request(tmp_path: Path) -> None:
     assert store.get_latest_approval_preview("research-1") == preview
 
 
+def test_approval_design_is_reprojected_without_starting_an_experiment(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    preview = _preview()
+    store.record_approval_request(preview, operation_id="request-approval")
+    with store._connect() as conn:
+        conn.execute(
+            "DELETE FROM research_log_events "
+            "WHERE json_extract(event_json, '$.study_id')=?",
+            (preview.experiment_id,),
+        )
+        conn.execute(
+            "DELETE FROM experiment_view_projection_state WHERE experiment_id=?",
+            (preview.experiment_id,),
+        )
+
+    assert store.ensure_experiment_view_projection_events() == 1
+    [projected] = [
+        event
+        for event in store.research_log_events()
+        if event.study_id == preview.experiment_id
+    ]
+    assert ":approval-view-design-v13-" in projected.producer_event_id
+    assert projected.state == "awaiting_approval"
+    assert projected.summary["experiment_view"]["kind"] == "design"
+    assert projected.summary["experiment_view"]["approval_state"] == "awaiting_approval"
+    assert store.list_experiments("research-1") == ()
+    assert store.ensure_experiment_view_projection_events() == 0
+
+
 def test_approval_preview_recovery_backfills_an_existing_request(
     tmp_path: Path,
 ) -> None:
