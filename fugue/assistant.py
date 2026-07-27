@@ -11,10 +11,13 @@ import httpx
 
 from fugue.model_plane import (
     ModelRoute,
+    provider_api_key,
+    provider_api_key_env,
     provider_request_headers,
     resolve_model_route,
     select_model,
     structured_assistant_options,
+    trace_api_key,
     trace_project_slug,
 )
 from fugue.redaction import redact_value
@@ -116,10 +119,10 @@ class AssistantModelClient:
         max_tokens: int = 4_096,
         temperature: float = 0,
     ) -> AssistantResponse:
-        api_key = self.env.get(self.route.api_key_env, "").strip()
+        api_key = provider_api_key(self.route, self.env)
         if not api_key:
             raise RuntimeError(
-                f"{self.route.api_key_env} is required for assistant model "
+                f"{provider_api_key_env(self.route)} is required for assistant model "
                 f"{self.route.display_model}"
             )
         async with httpx.AsyncClient(
@@ -656,7 +659,7 @@ class _AssistantTrace:
 
     def start(self, user_message: str) -> None:
         if (
-            not self.env.get("WANDB_API_KEY", "").strip()
+            not trace_api_key(self.env)
             or self.env.get("FUGUE_DISABLE_WEAVE") == "1"
         ):
             return

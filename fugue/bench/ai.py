@@ -59,7 +59,14 @@ from fugue.bench.scoring import (
     write_treatment_selection_lock,
 )
 from fugue.bench.sources import list_skill_source_ids, load_skill_source
-from fugue.model_plane import resolve_model_route, select_model, trace_project_slug
+from fugue.model_plane import (
+    provider_api_key,
+    provider_api_key_env,
+    resolve_model_route,
+    select_model,
+    trace_api_key,
+    trace_project_slug,
+)
 from fugue.redaction import redact_value
 
 if TYPE_CHECKING:
@@ -234,8 +241,10 @@ class ExperimentComposer:
             env=env,
         )
         route = resolve_model_route(selected_model, env)
-        if not env.get(route.api_key_env, "").strip():
-            raise RuntimeError(f"{route.api_key_env} is required for the composer")
+        if not provider_api_key(route, env):
+            raise RuntimeError(
+                f"{provider_api_key_env(route)} is required for the composer"
+            )
         client = self.client_factory(selected_model, env)
         tools = self._tools(base)
         agent = AssistantAgent(
@@ -529,8 +538,8 @@ class ExperimentComposer:
             routes[role] = {
                 "model": route.display_model,
                 "provider": route.provider,
-                "key_env": route.api_key_env,
-                "key_present": bool(env.get(route.api_key_env, "").strip()),
+                "key_env": provider_api_key_env(route),
+                "key_present": bool(provider_api_key(route, env)),
             }
         return {
             "experiments": experiments,
@@ -553,7 +562,7 @@ class ExperimentComposer:
             "harnesses": ["hermes", "openclaw", "claude-code", "codex"],
             "model_prefixes": ["wandb/", "openai/", "anthropic/"],
             "routes": routes,
-            "trace_key_present": bool(env.get("WANDB_API_KEY", "").strip()),
+            "trace_key_present": bool(trace_api_key(env)),
             "evaluation_sources": [
                 item.public()
                 for item in source_catalog(
@@ -1827,8 +1836,8 @@ def _validate_experiment_references(
         if not model:
             continue
         route = resolve_model_route(model, env)
-        if not env.get(route.api_key_env, "").strip():
-            raise RuntimeError(f"{route.api_key_env} is required for {model}")
+        if not provider_api_key(route, env):
+            raise RuntimeError(f"{provider_api_key_env(route)} is required for {model}")
 
 
 def _client_factory(model: str, env: Mapping[str, str]) -> AssistantModelClient:

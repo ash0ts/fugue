@@ -6,15 +6,19 @@ from fugue.model_plane import (
     DEFAULT_MODEL,
     DEFAULT_WANDB_ENTITY,
     DEFAULT_WANDB_PROJECT,
+    inference_project_slug,
     missing_model_env,
     missing_trace_env,
     model_route_identity,
+    provider_api_key,
     provider_client_env,
     provider_request_headers,
     resolve_harness_model_route,
     resolve_model_route,
     select_model,
     structured_assistant_options,
+    trace_api_key,
+    trace_destination_identity,
     trace_entity_project,
     trace_env_defaults,
     trace_project_slug,
@@ -210,21 +214,77 @@ def test_trace_project_defaults_to_wandb_shared_project() -> None:
     )
 
 
-def test_wandb_model_requests_use_the_trace_project_for_billing() -> None:
+def test_wandb_model_requests_use_an_independent_inference_project() -> None:
     wandb = resolve_model_route("wandb/zai-org/GLM-5.2", {})
-    env = {"WEAVE_PROJECT": "team/experiment-project"}
+    env = {
+        "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/fugue-experiments",
+        "FUGUE_WEAVE_PROJECT": "team/experiment-project",
+    }
 
     assert provider_request_headers(wandb, env) == {
-        "OpenAI-Project": "team/experiment-project"
+        "OpenAI-Project": "wandb/fugue-experiments"
     }
     assert provider_client_env(wandb, env) == {
-        "OPENAI_PROJECT": "team/experiment-project",
-        "OPENAI_PROJECT_ID": "team/experiment-project",
+        "OPENAI_PROJECT": "wandb/fugue-experiments",
+        "OPENAI_PROJECT_ID": "wandb/fugue-experiments",
+    }
+    assert inference_project_slug(env) == "wandb/fugue-experiments"
+    assert trace_project_slug(env) == "team/experiment-project"
+
+
+def test_wandb_inference_and_weave_credentials_are_independent() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {
+        "FUGUE_WANDB_INFERENCE_API_KEY": "cloud-model-key",
+        "FUGUE_WEAVE_API_KEY": "local-trace-key",
+        "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/fugue-experiments",
+        "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
+        "FUGUE_WEAVE_BASE_URL": "http://api.wandb.test",
+    }
+
+    assert provider_api_key(route, env) == "cloud-model-key"
+    assert trace_api_key(env) == "local-trace-key"
+    assert trace_destination_identity(env) == {
+        "entity": "ashah-weights-biases",
+        "project": "loop-engineering-demo",
+        "project_slug": "ashah-weights-biases/loop-engineering-demo",
+        "base_url": "http://api.wandb.test",
     }
 
     openai = resolve_model_route("openai/gpt-5", {})
     assert provider_request_headers(openai, env) == {}
     assert provider_client_env(openai, env) == {}
+
+
+def test_local_evidence_tls_mode_is_explicitly_propagated() -> None:
+    env = {
+        "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
+        "FUGUE_WEAVE_BASE_URL": "https://api.wandb.test",
+        "FUGUE_WEAVE_TRACE_SERVER_URL": "http://host.docker.internal:6345",
+        "WANDB_INSECURE_DISABLE_SSL": "true",
+        "WEAVE_INSECURE_DISABLE_SSL": "true",
+    }
+
+    assert trace_env_defaults(env) == {
+        "WANDB_ENTITY": "ashah-weights-biases",
+        "WANDB_PROJECT": "loop-engineering-demo",
+        "WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
+        "WANDB_BASE_URL": "https://api.wandb.test",
+        "WF_TRACE_SERVER_URL": "http://host.docker.internal:6345",
+        "WANDB_INSECURE_DISABLE_SSL": "true",
+        "WEAVE_INSECURE_DISABLE_SSL": "true",
+    }
+
+
+def test_split_evidence_configuration_disables_legacy_inference_key_fallback() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {
+        "WANDB_API_KEY": "local-evidence-key",
+        "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
+    }
+
+    assert provider_api_key(route, env) == ""
+    assert missing_model_env(route, env) == ["FUGUE_WANDB_INFERENCE_API_KEY"]
 
 
 def test_weave_agents_otel_headers_route_without_exposing_plain_key() -> None:

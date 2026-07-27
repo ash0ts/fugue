@@ -90,6 +90,16 @@ class ExperimentDescriptorV1:
 
 
 @dataclass(frozen=True)
+class ExperimentEvidenceScopeV1:
+    entity: str
+    project: str
+    evidence_types: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self))
+
+
+@dataclass(frozen=True)
 class ExperimentFactorV1:
     name: str
     levels: tuple[str, ...]
@@ -303,6 +313,7 @@ class ExperimentViewV1:
     outcome_summaries: tuple[ExperimentOutcomeSummaryV1, ...] = ()
     score_summaries: tuple[ExperimentScoreSummaryV1, ...] = ()
     evidence_eligible: bool | None = None
+    evidence_scope: ExperimentEvidenceScopeV1 | None = None
     limitations: tuple[str, ...] = ()
     evidence_links: tuple[dict[str, str], ...] = ()
 
@@ -417,6 +428,7 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         evidence_eligible=_optional_bool(
             raw.get("evidence_eligible"), "evidence_eligible"
         ),
+        evidence_scope=_optional_evidence_scope(raw.get("evidence_scope")),
         limitations=tuple(
             _text(item, "limitation", 1000)
             for item in _sequence(raw.get("limitations"), "limitations")
@@ -606,6 +618,7 @@ def build_design_view(
             approval_state=approval_state,
             cell_limit=matrix_size,
             reserved_cost_usd=float(preview.get("estimated_cost_usd") or 0.0),
+            evidence_scope=_optional_evidence_scope(preview.get("evidence_scope")),
             cells=display_cells,
             omitted_cells=max(0, len(cells) - len(display_cells)),
         ).to_dict()
@@ -774,6 +787,7 @@ def build_progress_view(
             ),
             completed_cells=completed,
             state_counts=state_counts,
+            evidence_scope=_optional_evidence_scope(preview.get("evidence_scope")),
             cells=displayed,
             omitted_cells=max(0, len(cells) - len(displayed)),
         ).to_dict()
@@ -838,6 +852,7 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
         if run_status in {"cancelled", "interrupted"}
         else "unavailable"
     )
+    record_links = _record_evidence_links(record)
     return experiment_view_from_dict(
         ExperimentViewV1(
             schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
@@ -871,8 +886,12 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
             ),
             score_summaries=_score_summaries(cells),
             evidence_eligible=bool(outcome.get("eligible")),
+            evidence_scope=(
+                _evidence_scope(rows, record_links)
+                or _optional_evidence_scope(preview.get("evidence_scope"))
+            ),
             limitations=limitations,
-            evidence_links=_record_evidence_links(record),
+            evidence_links=record_links,
         ).to_dict()
     )
 
@@ -1792,6 +1811,52 @@ def _record_reserved_cost(record: Mapping[str, Any]) -> float | None:
     return _optional_float(value)
 
 
+def _evidence_scope(
+    rows: Sequence[Mapping[str, Any]],
+    links: Sequence[Mapping[str, str]],
+) -> ExperimentEvidenceScopeV1 | None:
+    projects = {
+        str(item.get("trace_project") or "")
+        for item in rows
+        if str(item.get("trace_project") or "").count("/") == 1
+    }
+    projects.discard("")
+    if len(projects) != 1:
+        return None
+    project_slug = next(iter(projects))
+    entity, project = project_slug.split("/", 1)
+    evidence_types = tuple(
+        sorted(
+            {
+                str(item.get("kind") or "")
+                for item in links
+                if item.get("system") in {"wandb", "weave"} and item.get("kind")
+            }
+            | {
+                "agent_conversation"
+                for row in rows
+                if row.get("weave_prediction_call_id")
+                or row.get("weave_conversation_ids")
+            }
+            | {
+                "prediction_and_score"
+                for row in rows
+                if row.get("eval_predict_and_score_call_id")
+            }
+            | {
+                "evaluation_attempt"
+                for row in rows
+                if row.get("eval_predict_and_score_call_id")
+            }
+        )
+    )
+    return ExperimentEvidenceScopeV1(
+        entity=entity,
+        project=project,
+        evidence_types=evidence_types,
+    )
+
+
 def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
     links: list[dict[str, str]] = []
     preview = _mapping_or_empty(record.get("preview"))
@@ -2006,6 +2071,27 @@ def _reject_cross_kind_values(view: ExperimentViewV1, fields: Sequence[str]) -> 
         value = getattr(view, name)
         if value is not None and value not in ((), {}):
             raise ValueError(f"{view.kind} view cannot contain {name}")
+
+
+def _optional_evidence_scope(raw: Any) -> ExperimentEvidenceScopeV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "evidence_scope")
+    _reject_unknown(
+        value,
+        {"entity", "project", "evidence_types"},
+        "evidence_scope",
+    )
+    return ExperimentEvidenceScopeV1(
+        entity=_text(value.get("entity"), "evidence_scope.entity", 200),
+        project=_text(value.get("project"), "evidence_scope.project", 300),
+        evidence_types=tuple(
+            _text(item, "evidence_scope.evidence_type", 120)
+            for item in _sequence(
+                value.get("evidence_types"), "evidence_scope.evidence_types"
+            )
+        ),
+    )
 
 
 def _optional_task_design(raw: Any) -> ExperimentTaskDesignV1 | None:

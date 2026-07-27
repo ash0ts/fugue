@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -73,6 +74,7 @@ from fugue.model_plane import (
     resolve_harness_model_route,
     resolve_model_route,
     select_model,
+    trace_destination_identity,
 )
 from fugue.preflight import HARBOR_VERSION
 
@@ -391,7 +393,7 @@ def _build_jobs(
                         if agent_runtime_spec(harness.name) is not None
                         else harness.agent
                     ),
-                    model_route=_candidate_model_route(route),
+                    model_route=_candidate_model_route(route, env),
                     prompt_digest=next(iter(content_hashes["prompts"].values()), None),
                     skills=[item.provenance() for item in resolved_skills],
                     context={
@@ -414,6 +416,7 @@ def _build_jobs(
                         },
                         "trace_content": experiment.trace_content,
                         "instrumentation": "weave",
+                        "evidence_destination": trace_destination_identity(env),
                         "scheduling_seed": scheduling_seed,
                         "sandbox_policy_version": SANDBOX_POLICY_VERSION,
                         "fugue_source": selected_source_provenance,
@@ -966,6 +969,13 @@ def _job_env(
     env.update(
         {
             "FUGUE_EXPERIMENT_ID": experiment.id,
+            "FUGUE_WANDB_RESEARCH_ID": base_env.get(
+                "FUGUE_WANDB_RESEARCH_ID", ""
+            ),
+            "FUGUE_WANDB_STUDY_ID": base_env.get("FUGUE_WANDB_STUDY_ID", ""),
+            "FUGUE_RESEARCH_EXPERIMENT_ID": base_env.get(
+                "FUGUE_RESEARCH_EXPERIMENT_ID", ""
+            ),
             "FUGUE_RUN_ID": run_id,
             "FUGUE_WORKLOAD_ID": workload_id,
             "FUGUE_PRESET_ID": preset_id or "",
@@ -1559,8 +1569,10 @@ def _identity_configuration(value: Any) -> Any:
     return value
 
 
-def _candidate_model_route(route: ModelRoute) -> dict[str, Any]:
-    return model_route_identity(route)
+def _candidate_model_route(
+    route: ModelRoute, env: Mapping[str, str]
+) -> dict[str, Any]:
+    return model_route_identity(route, env)
 
 
 def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -> str:

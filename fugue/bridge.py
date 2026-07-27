@@ -17,6 +17,7 @@ from fugue.model_plane import (
     BRIDGE_MASTER_KEY_ENV,
     ModelRoute,
     model_route_identity,
+    provider_api_key_env,
     provider_request_headers,
     resolve_model_route,
 )
@@ -55,7 +56,7 @@ def _litellm_params(
             if concrete
             else route.litellm_model
         ),
-        "api_key": f"os.environ/{route.api_key_env}",
+        "api_key": f"os.environ/{provider_api_key_env(route)}",
     }
     if route.provider in {"wandb", "openai"} and route.chat_base_url:
         params["api_base"] = route.chat_base_url
@@ -111,7 +112,10 @@ def docker_compose_for_route(
     judge_route: ModelRoute | None = None,
 ) -> dict[str, Any]:
     routes = (route, builder_route or route, judge_route or route)
-    provider_env = {item.api_key_env: f"${{{item.api_key_env}}}" for item in routes}
+    provider_env = {
+        provider_api_key_env(item): f"${{{provider_api_key_env(item)}}}"
+        for item in routes
+    }
     return {
         "services": {
             "bridge": {
@@ -154,7 +158,7 @@ def bridge_runtime_lock_for_route(
         "schema_version": 1,
         "image": LITELLM_IMAGE,
         "config_sha256": _json_digest(config),
-        "target_route": model_route_identity(route),
+        "target_route": model_route_identity(route, env),
     }
 
 

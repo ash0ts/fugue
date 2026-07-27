@@ -1628,7 +1628,7 @@ class FugueApp(App[None]):
         if not status.model_key_present:
             blockers.append(f"Model credentials are missing: {status.model_key_env}")
         if not status.trace_key_present:
-            blockers.append("Weave tracing requires WANDB_API_KEY")
+            blockers.append("Weave tracing requires FUGUE_WEAVE_API_KEY")
         generated_scoring = any(
             any(
                 not scorer_reference(scorer).startswith("builtin:")

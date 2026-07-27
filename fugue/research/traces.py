@@ -14,6 +14,7 @@ import yaml
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.library import validate_id
+from fugue.model_plane import WEAVE_API_KEY_ENV, trace_api_key
 from fugue.research.agent_contracts import (
     TraceAuditDraftV1,
     TraceAuditPreviewV1,
@@ -456,9 +457,12 @@ class WeaveTraceSource:
         return tuple(dict(item) for item in rows)
 
     def _api_key(self) -> str:
-        api_key = self.env.get("WANDB_API_KEY", "").strip()
+        api_key = trace_api_key(self.env)
         if not api_key:
-            key_file = self.env.get("WANDB_API_KEY_FILE", "").strip()
+            key_file = (
+                self.env.get(f"{WEAVE_API_KEY_ENV}_FILE", "").strip()
+                or self.env.get("WANDB_API_KEY_FILE", "").strip()
+            )
             if key_file:
                 try:
                     api_key = Path(key_file).read_text(encoding="utf-8").strip()
@@ -467,7 +471,7 @@ class WeaveTraceSource:
         if not api_key:
             raise ResearchError(
                 "trace_credentials_unavailable",
-                "the registered Weave source has no runtime credentials",
+                "the registered Weave source has no evidence credential",
                 category="evidence",
                 retryable=True,
             )

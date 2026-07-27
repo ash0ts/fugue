@@ -606,6 +606,53 @@ def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None
     assert "tool_output" not in serialized
 
 
+def test_evaluation_projects_one_explicit_evidence_workspace() -> None:
+    raw = _record()
+    for index, row in enumerate(raw["outcome"]["row_refs"]):
+        row.update(
+            {
+                "trace_project": "ashah-weights-biases/loop-engineering-demo",
+                "weave_prediction_call_id": f"prediction-call-{index}",
+                "eval_predict_and_score_call_id": f"evaluation-call-{index}",
+            }
+        )
+
+    view = build_evaluation_view(raw)
+
+    assert view.evidence_scope is not None
+    assert view.evidence_scope.entity == "ashah-weights-biases"
+    assert view.evidence_scope.project == "loop-engineering-demo"
+    assert set(view.evidence_scope.evidence_types) == {
+        "agent_conversation",
+        "evaluation_attempt",
+        "prediction_and_score",
+        "source_call",
+    }
+
+
+def test_evaluation_does_not_merge_multiple_evidence_workspaces() -> None:
+    raw = _record()
+    raw["preview"]["evidence_scope"] = {
+        "entity": "ashah-weights-biases",
+        "project": "loop-engineering-demo",
+        "evidence_types": ["agent_conversation"],
+    }
+    for index, row in enumerate(raw["outcome"]["row_refs"]):
+        row["trace_project"] = (
+            "ashah-weights-biases/loop-engineering-demo"
+            if index < 5
+            else "wandb/fugue-experiments"
+        )
+
+    view = build_evaluation_view(raw)
+
+    # A mixed row cohort is not relabelled as one workspace. The immutable
+    # preview remains the declared destination for navigation.
+    assert view.evidence_scope is not None
+    assert view.evidence_scope.entity == "ashah-weights-biases"
+    assert view.evidence_scope.project == "loop-engineering-demo"
+
+
 def test_evaluation_links_reviewed_source_calls_without_copying_trace_bodies() -> None:
     view = build_evaluation_view(_record())
 

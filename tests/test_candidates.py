@@ -119,6 +119,28 @@ def test_execution_policy_changes_fingerprint_not_candidate_identity() -> None:
     assert first.execution_fingerprint != second.execution_fingerprint
 
 
+def test_inference_project_is_candidate_behavior_and_evidence_project_is_execution() -> None:
+    original = _candidate_inputs()
+    original["model_route"]["inference_project"] = "wandb/fugue-experiments"
+    original["execution"]["evidence_destination"] = {
+        "project_slug": "team/evidence-a",
+    }
+
+    changed_evidence = deepcopy(original)
+    changed_evidence["execution"]["evidence_destination"] = {
+        "project_slug": "team/evidence-b",
+    }
+    first = resolve_candidate(**original)
+    second = resolve_candidate(**changed_evidence)
+    assert first.candidate_id == second.candidate_id
+    assert first.execution_fingerprint != second.execution_fingerprint
+
+    changed_inference = deepcopy(original)
+    changed_inference["model_route"]["inference_project"] = "other/billing"
+    third = resolve_candidate(**changed_inference)
+    assert first.candidate_id != third.candidate_id
+
+
 def test_context_runtime_topology_changes_only_execution_identity() -> None:
     original = _candidate_inputs()
     original["execution"]["context_runtime"] = {

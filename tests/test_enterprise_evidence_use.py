@@ -39,12 +39,12 @@ def test_enterprise_compose_trace_source_profile_is_loadable() -> None:
     registry = TraceSourceRegistry.from_file(
         REPO_ROOT
         / "examples/research/enterprise-evidence/trace-sources.compose.yaml",
-        env={"WANDB_ENTITY": "wb-agent-test-user"},
+        env={"FUGUE_WEAVE_PROJECT": COHORT["project"]},
     )
     source = registry.get("enterprise-evidence-agent")
 
     assert source.config.allowed_projects == (
-        "wb-agent-test-user/enterprise-evidence-agent",
+        "ashah-weights-biases/loop-engineering-demo",
     )
     assert source.config.include_review_feedback is True
     assert source.config.reviewed_cohort_manifest_digest == COHORT["manifest_digest"]

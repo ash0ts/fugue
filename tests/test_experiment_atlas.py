@@ -164,6 +164,7 @@ def _snapshot(rows):
     route_identity = {
         key: value for key, value in model_route.items() if key != "api_key_env"
     }
+    route_identity["inference_project"] = "wandb/fugue-experiments"
     value = {
         "schema_version": 1,
         "snapshot_sha256": "",

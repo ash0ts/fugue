@@ -337,6 +337,7 @@ class ExperimentPreviewV1:
     estimated_cost_usd: float
     eligible: bool
     blockers: tuple[str, ...]
+    evidence_scope: dict[str, Any] | None = None
     preview_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -898,11 +899,34 @@ def experiment_preview_from_dict(raw: Mapping[str, Any]) -> ExperimentPreviewV1:
         ),
         eligible=_strict_bool(raw.get("eligible"), "preview eligible"),
         blockers=_texts(raw.get("blockers"), "preview blocker", allow_empty=True),
+        evidence_scope=_preview_evidence_scope(raw.get("evidence_scope")),
         preview_digest=_required_digest(raw.get("preview_digest"), "preview digest"),
     )
     _verify_digest(preview.to_dict(), "preview_digest", "experiment preview")
     experiment_draft_from_dict(preview.draft)
     return preview
+
+
+def _preview_evidence_scope(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "evidence scope")
+    _reject_unknown(
+        value,
+        {"entity", "project", "evidence_types"},
+        "evidence scope",
+    )
+    return {
+        "entity": _text(value.get("entity"), "evidence entity", 200),
+        "project": _text(value.get("project"), "evidence project", 300),
+        "evidence_types": list(
+            _texts(
+                value.get("evidence_types"),
+                "evidence type",
+                allow_empty=True,
+            )
+        ),
+    }
 
 
 def experiment_record_from_dict(raw: Mapping[str, Any]) -> ExperimentRecordV1:

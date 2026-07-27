@@ -998,7 +998,7 @@ def test_authored_auxiliary_model_routes_fail_preflight_without_keys() -> None:
         ("task judge model", False),
     ]
     assert "OPENAI_API_KEY" in missing[0].detail
-    assert "WANDB_API_KEY" in missing[1].detail
+    assert "FUGUE_WANDB_INFERENCE_API_KEY" in missing[1].detail
 
     ready = _auxiliary_model_preflight_checks(
         components,

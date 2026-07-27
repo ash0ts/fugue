@@ -187,7 +187,7 @@ def test_preflight_attests_bridge_for_selected_native_protocol(
     assert captured["route"].display_model == "wandb/zai-org/GLM-5.2"
 
 
-def test_wandb_preflight_attributes_inference_to_trace_project(
+def test_wandb_preflight_attributes_inference_to_locked_billing_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured_headers: dict[str, str] = {}
@@ -206,11 +206,12 @@ def test_wandb_preflight_attributes_inference_to_trace_project(
     checks = run_preflight(
         "wandb/zai-org/GLM-5.2",
         repo_root=tmp_path,
-        env={
-            "WANDB_API_KEY": "test-only",
-            "WANDB_ENTITY": "team",
-            "WANDB_PROJECT": "billing-project",
-        },
+            env={
+                "FUGUE_WANDB_INFERENCE_API_KEY": "test-only",
+                "FUGUE_WANDB_INFERENCE_PROJECT": "team/billing-project",
+                "FUGUE_WEAVE_API_KEY": "trace-only",
+                "FUGUE_WEAVE_PROJECT": "team/evidence-project",
+            },
         live=True,
     )
 

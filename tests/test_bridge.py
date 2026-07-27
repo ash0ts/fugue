@@ -20,13 +20,14 @@ from fugue.model_plane import resolve_model_route
 def test_wandb_bridge_config_keeps_nebius_mapping() -> None:
     route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
     config = litellm_config_for_route(
-        route, env={"WANDB_ENTITY": "wandb", "WANDB_PROJECT": "billing-project"}
+        route,
+        env={"FUGUE_WANDB_INFERENCE_PROJECT": "wandb/billing-project"},
     )
 
     params = config["model_list"][0]["litellm_params"]
     assert params["model"] == "nebius/*"
     assert params["api_base"] == "https://api.inference.wandb.ai/v1"
-    assert params["api_key"] == "os.environ/WANDB_API_KEY"
+    assert params["api_key"] == "os.environ/FUGUE_WANDB_INFERENCE_API_KEY"
     assert params["extra_headers"] == {"OpenAI-Project": "wandb/billing-project"}
 
 

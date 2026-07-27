@@ -12,7 +12,12 @@ import httpx
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.evaluations import _post_judge
-from fugue.model_plane import model_route_identity, resolve_model_route
+from fugue.model_plane import (
+    model_route_identity,
+    provider_api_key,
+    provider_api_key_env,
+    resolve_model_route,
+)
 
 _MAX_TRANSCRIPT_BYTES = 48_000
 _MAX_TURN_BYTES = 16_000
@@ -153,9 +158,11 @@ class TaskInteractionController:
         if not self.plan.model:
             raise ValueError("model interaction has no locked model route")
         route = resolve_model_route(self.plan.model, self.env)
-        api_key = str(self.env.get(route.api_key_env) or "").strip()
+        api_key = provider_api_key(route, self.env)
         if not api_key:
-            raise RuntimeError(f"{route.api_key_env} is required for interactor calls")
+            raise RuntimeError(
+                f"{provider_api_key_env(route)} is required for interactor calls"
+            )
         payload = {
             "directions": list(self.plan.directions),
             "turn": index + 1,
@@ -200,7 +207,7 @@ class TaskInteractionController:
             "role": "interactor",
             "profile_id": self.plan.profile_id,
             "profile_digest": self.plan.profile_digest,
-            "route": model_route_identity(route),
+            "route": model_route_identity(route, self.env),
             "usage": usage,
             "cost_usd": cost,
             "trace_scope": "separate_from_agent",

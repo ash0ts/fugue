@@ -15,9 +15,12 @@ from fugue.model_plane import (
     ModelRoute,
     missing_model_env,
     missing_trace_env,
+    provider_api_key,
+    provider_api_key_env,
     provider_request_headers,
     resolve_harness_model_route,
     resolve_model_route,
+    trace_api_key,
     trace_project_slug,
 )
 from fugue.weave_support import resolved_weave_trace_server_url
@@ -162,7 +165,7 @@ def _append_env_checks(
         PreflightCheck(
             "model env",
             not model_missing,
-            f"{route.api_key_env} present"
+            f"{provider_api_key_env(route)} present"
             if not model_missing
             else "missing " + ", ".join(model_missing),
         )
@@ -244,7 +247,7 @@ def _check_provider_metadata(
     route: ModelRoute, env: Mapping[str, str], timeout_sec: float = 20.0
 ) -> PreflightCheck:
     headers = {
-        "Authorization": f"Bearer {env.get(route.api_key_env, '')}",
+        "Authorization": f"Bearer {provider_api_key(route, env)}",
         **provider_request_headers(route, env),
     }
     if route.provider == "anthropic":
@@ -273,7 +276,7 @@ def _check_weave_endpoint(
     env: Mapping[str, str], timeout_sec: float = 20.0
 ) -> PreflightCheck:
     endpoint = resolved_weave_trace_server_url(env)
-    token = base64.b64encode(f"api:{env.get('WANDB_API_KEY', '')}".encode()).decode()
+    token = base64.b64encode(f"api:{trace_api_key(env)}".encode()).decode()
     try:
         response = httpx.get(
             f"{endpoint}/server_info",

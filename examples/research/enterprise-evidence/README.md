@@ -54,7 +54,7 @@ Paid work requires a separate operator approval bound to the exact preview:
 
 ```bash
 fugue research approve PREVIEW_DIGEST \
-  --max-usd 200 \
+  --max-usd 45 \
   --max-cells 8 \
   --approved-by "$USER"
 ```
@@ -75,21 +75,21 @@ a treatment from the canary.
 The Study supports a bounded implementation decision. It does not prove that
 one harness or retrieval strategy is universally better.
 
-## Replay the qualified Study in the full local demo
+## Run the cohesive local demo
 
-The default presentation replays the existing immutable eight-attempt Study.
-It does not call a model or approve new spend. Core/Aria is an unchanged
-external dependency; the launcher points it at a clean Fugue `main` worktree
-and the reviewed Study Console branch.
+The demo writes every local evidence object to one project:
+`ashah-weights-biases/loop-engineering-demo`. That includes six optimizer W&B
+Runs, 24 source conversations, Fugue Agent attempts, prediction-and-score
+calls, the Dataset, the Evaluation, and scores. GLM-5.2 inference remains
+separately billed through `wandb/fugue-experiments`.
 
 ```bash
 cd /Users/ashah/Documents/GitHub/core-aria-fugue-study-loop
 
-export FUGUE_DEMO_REPO_ROOT=/Users/ashah/Documents/GitHub/fugue-main-demo
-export STUDY_CONSOLE_REPO_ROOT=/Users/ashah/Documents/GitHub/study-console-minimal-dashboard
+export FUGUE_DEMO_REPO_ROOT=/Users/ashah/Documents/GitHub/fugue-split-inference-evidence-routing
+export STUDY_CONSOLE_REPO_ROOT=/Users/ashah/Documents/GitHub/study-console-unified-autoresearch
 DEMO=services/wb_agent/examples/loop-engineering-demo/demo.sh
 
-$DEMO --profile enterprise-evidence doctor
 $DEMO --profile enterprise-evidence up
 ```
 
@@ -100,7 +100,8 @@ $DEMO --profile enterprise-evidence status --open
 $DEMO --profile enterprise-evidence console
 ```
 
-The replay should show:
+After the exact preview is approved and the local qualification completes, the
+demo should show:
 
 1. the four exact reviewed Weave Calls and their safe review status;
 2. the locked search × source-inspection design before execution;
@@ -118,5 +119,6 @@ Stop the local stack with:
 $DEMO --profile enterprise-evidence down
 ```
 
-Running a fresh canary or primary is intentionally not part of this runbook. A
-new run requires a new exact preview and separate operator approval.
+The eight-attempt qualification has its own exact-digest approval and a $45
+cap. A primary is intentionally not part of this runbook and always requires a
+different preview and separate operator approval.
