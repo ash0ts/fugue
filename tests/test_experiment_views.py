@@ -218,6 +218,10 @@ def test_design_projects_declared_factorial_treatment_arms() -> None:
 
     view = build_design_view(preview)
 
+    assert {factor.name: factor.levels for factor in view.varied_factors} == {
+        "harness": ("codex", "claude-code"),
+        "variant": ("baseline", "warning-only", "action-gate"),
+    }
     assert [(arm.id, arm.label, arm.factor_levels) for arm in view.treatment_arms] == [
         (
             "baseline",
@@ -235,6 +239,42 @@ def test_design_projects_declared_factorial_treatment_arms() -> None:
             {"repository-search": "on", "source-inspection": "required"},
         ),
     ]
+
+
+def test_design_projects_factorial_arm_levels_into_planned_cells() -> None:
+    preview = _preview()
+    preview["draft"]["varied_dimensions"] = [
+        "harness",
+        "repository search",
+        "source-inspection requirement",
+    ]
+    preview["draft"]["research_view"]["arm_factor_levels"] = {
+        "baseline": {"repository-search": "off", "source-inspection": "standard"},
+        "warning-only": {
+            "repository-search": "off",
+            "source-inspection": "required",
+        },
+        "action-gate": {
+            "repository-search": "on",
+            "source-inspection": "required",
+        },
+    }
+
+    view = build_design_view(preview)
+
+    assert {factor.name: factor.levels for factor in view.varied_factors} == {
+        "harness": ("codex", "claude-code"),
+        "repository search": ("off", "on"),
+        "source-inspection requirement": ("standard", "required"),
+    }
+    assert {
+        (
+            cell.factor_levels["repository search"],
+            cell.factor_levels["source-inspection requirement"],
+        )
+        for cell in view.cells
+        if cell.factor_levels["harness"] == "codex"
+    } == {("off", "standard"), ("off", "required"), ("on", "required")}
 
 
 @pytest.mark.parametrize(

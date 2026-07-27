@@ -483,6 +483,11 @@ def test_historical_experiment_views_are_backfilled_without_execution(
     projected = [
         event for event in store.research_log_events() if event.study_id == record.id
     ]
+    assert all(
+        ":experiment-view-" in event.producer_event_id
+        and "-v13-" in event.producer_event_id
+        for event in projected
+    )
     assert [event.summary["experiment_view"]["kind"] for event in projected] == [
         "design",
         "evaluation",

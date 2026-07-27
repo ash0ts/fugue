@@ -58,7 +58,10 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 3
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 12
+# V13 reprojects factorial arm levels into every planned cell. Older projections
+# could show synthetic "fixed" values even though the immutable treatment map
+# contained the real factor levels.
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 13
 
 
 class StudyStore:
