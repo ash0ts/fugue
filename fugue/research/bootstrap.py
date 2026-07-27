@@ -47,12 +47,19 @@ def bootstrap_container_secrets(
         _make_compose_readable(record_token)
 
     wandb_token = secret_dir / "wandb_api_key"
-    if not wandb_token.exists():
+    explicit_value: str | None = None
+    if env_file is not None:
+        explicit_value = _read_env_value(env_file, "WANDB_API_KEY")
+    if wandb_api_key_file is not None:
+        explicit_value = _read_secret_file(wandb_api_key_file)
+    if explicit_value is not None:
+        if not explicit_value:
+            raise RuntimeError(
+                "the explicit W&B credential source contains no WANDB_API_KEY"
+            )
+        _sync_secret(wandb_token, explicit_value)
+    elif not wandb_token.exists():
         value = os.environ.get("WANDB_API_KEY", "").strip()
-        if env_file is not None:
-            value = _read_env_value(env_file, "WANDB_API_KEY")
-        if wandb_api_key_file is not None:
-            value = _read_secret_file(wandb_api_key_file)
         if not value:
             raise RuntimeError(
                 "WANDB_API_KEY, --env-file, or --wandb-api-key-file is required "
@@ -209,6 +216,26 @@ def _write_secret(path: Path, value: str) -> None:
     finally:
         os.close(descriptor)
     path.chmod(0o444)
+
+
+def _sync_secret(path: Path, value: str) -> None:
+    """Atomically make an explicitly supplied credential authoritative."""
+
+    if path.exists():
+        current = _read_secret_file(path)
+        if hmac.compare_digest(current, value):
+            _make_compose_readable(path)
+            return
+    elif path.is_symlink():
+        raise RuntimeError(f"container secret must not be a symlink: {path}")
+
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        _write_secret(temporary, value)
+        os.replace(temporary, path)
+        path.chmod(0o444)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _make_compose_readable(path: Path) -> None:
