@@ -202,6 +202,7 @@ def test_enterprise_recipe_uses_fresh_versioned_demo_campaign() -> None:
     assert stages["canary"].max_proposals == 1
     assert stages["primary"].max_proposals == 1
     assert campaign.limits.max_total_cells == 72
+    assert campaign.limits.initial_cell_reserve_usd == 5
     assert campaign.limits.max_concurrent == 1
 
 
