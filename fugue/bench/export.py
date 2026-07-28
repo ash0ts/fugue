@@ -27,7 +27,12 @@ from fugue.bench.reproducibility import (
     read_evaluation_asset_lock,
 )
 from fugue.bench.scoring import latency_summary, score_evidence_paths
-from fugue.model_plane import trace_project_slug
+from fugue.model_plane import (
+    inference_project_slug,
+    trace_api_key,
+    trace_destination_identity,
+    trace_project_slug,
+)
 from fugue.redaction import redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
 
@@ -153,8 +158,10 @@ class LiveEvaluationCoordinator:
         trace_timeout_sec: float | None = None,
         cancellation_event: threading.Event | None = None,
     ) -> None:
-        if not env.get("WANDB_API_KEY", "").strip():
-            raise RuntimeError("WANDB_API_KEY is required for live evaluations")
+        if not trace_api_key(env):
+            raise RuntimeError(
+                "FUGUE_WEAVE_API_KEY is required for live evaluations"
+            )
         self.repo_root = repo_root
         self.project = project
         self.env = dict(env)
@@ -752,12 +759,16 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "source_commit": cell.source_commit or None,
         "model_provider": cell.model_provider,
         "model": cell.model,
-        "trace_project": env.get("WEAVE_PROJECT")
-        or (
-            f"{env.get('WANDB_ENTITY')}/{env.get('WANDB_PROJECT')}"
-            if env.get("WANDB_ENTITY") and env.get("WANDB_PROJECT")
+        "inference_project": (
+            inference_project_slug(env)
+            if cell.model_provider == "wandb"
             else None
         ),
+        "trace_project": trace_project_slug(env),
+        "trace_receipt": trace_destination_identity(env),
+        "wandb_research_id": env.get("FUGUE_WANDB_RESEARCH_ID"),
+        "wandb_study_id": env.get("FUGUE_WANDB_STUDY_ID"),
+        "research_experiment_id": env.get("FUGUE_RESEARCH_EXPERIMENT_ID"),
         "trace_content": env.get("FUGUE_TRACE_CONTENT", "full"),
         "context_assigned": cell.context_system_id != "none",
         "evaluation_case": cell.evaluation_case,
@@ -2089,6 +2100,9 @@ def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "fugue.workload_id": row.get("workload_id"),
             "fugue.dataset": row.get("dataset"),
             "fugue.record_type": row.get("record_type"),
+            "wandb.research_id": row.get("wandb_research_id"),
+            "wandb.study_id": row.get("wandb_study_id"),
+            "fugue.research_experiment_id": row.get("research_experiment_id"),
         }
     )
 
@@ -2114,6 +2128,9 @@ def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "fugue.model": row.get("model"),
             "fugue.run_ids": "|".join(run_ids),
             "fugue.run_name": row.get("run_name"),
+            "wandb.research_id": row.get("wandb_research_id"),
+            "wandb.study_id": row.get("wandb_study_id"),
+            "fugue.research_experiment_id": row.get("research_experiment_id"),
             "fugue.tags": "|".join(str(x) for x in row.get("tags") or []),
         }
     )
@@ -2412,13 +2429,17 @@ def fetch_weave_summaries(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     values = env if env is not None else os.environ
-    api_key = values.get("WANDB_API_KEY")
+    api_key = trace_api_key(values)
     if not api_key:
-        raise RuntimeError("WANDB_API_KEY is required to fetch Weave spans")
-    base_url = (values.get("WF_TRACE_SERVER_URL") or WEAVE_AGENTS_BASE_URL).rstrip("/")
-    agents_base_url = values.get("WEAVE_AGENTS_BASE_URL", WEAVE_AGENTS_BASE_URL).rstrip(
-        "/"
-    )
+        raise RuntimeError("FUGUE_WEAVE_API_KEY is required to fetch Weave spans")
+    base_url = (
+        values.get("FUGUE_WEAVE_TRACE_SERVER_URL")
+        or values.get("WF_TRACE_SERVER_URL")
+        or WEAVE_AGENTS_BASE_URL
+    ).rstrip("/")
+    agents_base_url = (
+        values.get("WEAVE_AGENTS_BASE_URL") or base_url
+    ).rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     summaries: dict[str, dict[str, Any]] = {}
     with httpx.Client(timeout=timeout_sec, headers=headers) as client:
@@ -3466,6 +3487,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "base_commit": meta.get("base_commit"),
         "manifest_path": meta.get("manifest_path"),
         "model_provider": meta.get("model_provider"),
+        "inference_project": meta.get("inference_project"),
         "model_transport": meta.get("model_transport"),
         "builder_model": meta.get("builder_model"),
         "judge_model": meta.get("judge_model"),
@@ -3477,6 +3499,10 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
             if meta.get("weave_entity") and meta.get("weave_project")
             else None
         ),
+        "trace_receipt": meta.get("trace_receipt"),
+        "wandb_research_id": meta.get("wandb_research_id"),
+        "wandb_study_id": meta.get("wandb_study_id"),
+        "research_experiment_id": meta.get("research_experiment_id"),
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
         **prompt_injection,

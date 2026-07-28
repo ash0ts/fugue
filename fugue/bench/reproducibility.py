@@ -17,7 +17,7 @@ from fugue.bench.context import (
 from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
 from fugue.bench.sources import resolve_skill
-from fugue.model_plane import resolve_harness_model_route
+from fugue.model_plane import provider_api_key_env, resolve_harness_model_route
 
 if TYPE_CHECKING:
     from fugue.bench.execution import PlannedCell
@@ -166,7 +166,7 @@ def build_run_snapshot(
         )
         context = get_context_system(job.context_system_id, repo_root)
         candidate_required_env: set[str] = {
-            job.route.api_key_env,
+            provider_api_key_env(job.route),
             *context.required_env,
         }
         if job.prompt_id:

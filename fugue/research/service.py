@@ -19,6 +19,7 @@ from fugue.bench.task_authoring import (
     task_suite_draft_from_dict,
     task_suite_preview_from_dict,
 )
+from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.candidate_sources import CandidateSourceRegistry
 from fugue.research.contracts import (
@@ -291,6 +292,10 @@ class ResearchService:
         except CampaignError as exc:
             raise self._research_error(exc) from exc
         record_id = self._record_id(study.id, draft.proposal_id)
+        operator = getattr(self.campaign, "operator", None)
+        evidence_destination = trace_destination_identity(
+            getattr(operator, "env", {})
+        )
         unsigned = ExperimentPreviewV1(
             schema_version=RESEARCH_SCHEMA_VERSION,
             study_id=study.id,
@@ -306,6 +311,16 @@ class ResearchService:
             estimated_cost_usd=estimated_cost_usd,
             eligible=not blockers,
             blockers=tuple(blockers),
+            evidence_scope={
+                "entity": evidence_destination["entity"],
+                "project": evidence_destination["project"],
+                "evidence_types": [
+                    "agent_conversation",
+                    "prediction_and_score",
+                    "dataset",
+                    "evaluation",
+                ],
+            },
         )
         return sign_preview(unsigned)
 
@@ -619,7 +634,15 @@ class ResearchService:
             admission = admission_receipt_from_dict(record.admission)
 
         lease.check()
-        status = self.campaign.launch(admission, self._operation(record.id, "launch"))
+        status = self.campaign.launch(
+            admission,
+            self._operation(record.id, "launch"),
+            research_attributes={
+                "FUGUE_WANDB_RESEARCH_ID": record.study_id,
+                "FUGUE_WANDB_STUDY_ID": record.id,
+                "FUGUE_RESEARCH_EXPERIMENT_ID": record.id,
+            },
+        )
         run_id = self._run_id(status.to_dict(), draft.proposal_id)
         return self._save(
             record,

@@ -305,6 +305,11 @@ def _parser() -> FugueArgumentParser:
     bootstrap.add_argument("--repo-root", type=Path, default=Path.cwd())
     bootstrap.add_argument("--wandb-api-key-file", type=Path)
     bootstrap.add_argument(
+        "--trace-wandb-api-key-file",
+        type=Path,
+        help="Use a separate W&B credential for Weave evidence publication",
+    )
+    bootstrap.add_argument(
         "--env-file",
         type=Path,
         help="Read only allowlisted credentials from a dotenv file",
@@ -386,6 +391,7 @@ def _research(args: argparse.Namespace) -> int:
         values = bootstrap_container_secrets(
             args.repo_root,
             wandb_api_key_file=args.wandb_api_key_file,
+            trace_wandb_api_key_file=args.trace_wandb_api_key_file,
             env_file=args.env_file,
         )
         print(json.dumps(values, indent=2, sort_keys=True))

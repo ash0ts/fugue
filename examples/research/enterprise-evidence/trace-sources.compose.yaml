@@ -2,9 +2,9 @@ version: 1
 sources:
   - id: enterprise-evidence-agent
     adapter: weave
-    allowed_projects: ["${WANDB_ENTITY}/enterprise-evidence-agent"]
+    allowed_projects: ["${FUGUE_WEAVE_PROJECT}"]
     include_review_feedback: true
-    reviewed_cohort_manifest_digest: f39116677235b040536471cb8663f9cdea34e59921d89d787e8a99be8554e5c8
+    reviewed_cohort_manifest_digest: c2ade9cea7530534699df75e6f62cc422b7e1324b902359666b18a7be9e5b034
     allowed_fields: [status, operation, errors, tools, latency, conversation]
     allowed_filters: [run_id, status]
     redactions: [credentials, hidden_reasoning, prompt_instructions, document_content]

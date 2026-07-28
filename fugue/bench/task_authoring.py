@@ -22,6 +22,7 @@ from fugue.bench.files import atomic_write_json
 from fugue.bench.integrations import load_integration
 from fugue.bench.library import validate_id
 from fugue.bench.manifest import BenchmarkManifest
+from fugue.model_plane import provider_api_key, provider_api_key_env
 
 TASK_AUTHORING_SCHEMA_VERSION = 1
 TASK_PROFILE_PATH = Path("configs/fugue/task-authoring/profiles.yaml")
@@ -2873,9 +2874,11 @@ def _judge_request(
     from fugue.model_plane import model_route_identity, resolve_model_route
 
     route = resolve_model_route(profile.model, env)
-    api_key = str(env.get(route.api_key_env) or "").strip()
+    api_key = provider_api_key(route, env)
     if not api_key:
-        raise RuntimeError(f"{route.api_key_env} is required for task judging")
+        raise RuntimeError(
+            f"{provider_api_key_env(route)} is required for task judging"
+        )
     prompt = (
         profile.prompt
         + "\nReturn only JSON with score (0..1) and reason.\n"
@@ -2902,7 +2905,7 @@ def _judge_request(
             "role": "judge",
             "profile_id": profile.id,
             "profile_digest": profile.profile_digest,
-            "route": model_route_identity(route),
+            "route": model_route_identity(route, env),
             "blind_fields": list(profile.blind_fields),
             "usage": usage,
             "trace_scope": "separate_from_agent",

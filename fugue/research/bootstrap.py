@@ -22,9 +22,30 @@ def bootstrap_container_secrets(
     repo_root: Path,
     *,
     wandb_api_key_file: Path | None = None,
+    trace_wandb_api_key_file: Path | None = None,
     env_file: Path | None = None,
 ) -> dict[str, str]:
     root = repo_root.resolve()
+    explicit_value: str | None = None
+    if env_file is not None:
+        explicit_value = _read_env_value(env_file, "WANDB_API_KEY")
+    if wandb_api_key_file is not None:
+        explicit_value = _read_secret_file(wandb_api_key_file)
+    explicit_trace_value = (
+        _read_secret_file(trace_wandb_api_key_file)
+        if trace_wandb_api_key_file is not None
+        else None
+    )
+    if trace_wandb_api_key_file is not None and not explicit_trace_value:
+        raise RuntimeError("the explicit Weave credential file is empty")
+    if (
+        explicit_value
+        and explicit_trace_value
+        and hmac.compare_digest(explicit_value, explicit_trace_value)
+    ):
+        raise RuntimeError(
+            "the cloud inference key and local evidence key must be different"
+        )
     secret_dir = root / ".fugue" / "secrets"
     secret_dir.mkdir(parents=True, exist_ok=True)
     secret_dir.chmod(0o700)
@@ -47,11 +68,6 @@ def bootstrap_container_secrets(
         _make_compose_readable(record_token)
 
     wandb_token = secret_dir / "wandb_api_key"
-    explicit_value: str | None = None
-    if env_file is not None:
-        explicit_value = _read_env_value(env_file, "WANDB_API_KEY")
-    if wandb_api_key_file is not None:
-        explicit_value = _read_secret_file(wandb_api_key_file)
     if explicit_value is not None:
         if not explicit_value:
             raise RuntimeError(
@@ -69,8 +85,39 @@ def bootstrap_container_secrets(
     else:
         _make_compose_readable(wandb_token)
 
+    trace_token = secret_dir / "trace_wandb_api_key"
+    trace_value = (
+        explicit_trace_value
+        if explicit_trace_value is not None
+        else os.environ.get("FUGUE_WEAVE_API_KEY", "").strip()
+    )
+    inference_value = _read_secret_file(wandb_token)
+    if trace_wandb_api_key_file is not None and hmac.compare_digest(
+        inference_value, trace_value
+    ):
+        raise RuntimeError(
+            "the cloud inference key and local evidence key must be different"
+        )
+    if trace_value:
+        _sync_secret(trace_token, trace_value)
+    elif not trace_token.exists():
+        # Preserve the single-key local experience for existing users. The
+        # demo supplies an explicit local trace credential and therefore never
+        # copies the hosted inference key into its evidence runtime.
+        _write_secret(trace_token, _read_secret_file(wandb_token))
+    else:
+        _make_compose_readable(trace_token)
+
     compose_environment = root / ".fugue" / "compose.env"
     _write_compose_environment(compose_environment, root)
+    credential_routing_receipt = root / ".fugue" / "credential-routing.json"
+    _write_credential_routing_receipt(
+        credential_routing_receipt,
+        credentials_distinct=not hmac.compare_digest(
+            _read_secret_file(wandb_token),
+            _read_secret_file(trace_token),
+        ),
+    )
 
     return {
         "compose_environment_file": str(compose_environment),
@@ -78,8 +125,80 @@ def bootstrap_container_secrets(
         "research_access_grants_file": str(access_grants),
         "research_record_ingest_key_file": str(record_token),
         "wandb_api_key_file": str(wandb_token),
+        "trace_wandb_api_key_file": str(trace_token),
+        "credential_routing_receipt": str(credential_routing_receipt),
         "trace_data_directory": str(root / ".fugue" / "trace-data"),
     }
+
+
+def _write_credential_routing_receipt(
+    path: Path,
+    *,
+    credentials_distinct: bool,
+) -> None:
+    inference_project = os.environ.get(
+        "FUGUE_WANDB_INFERENCE_PROJECT", "wandb/fugue-experiments"
+    ).strip()
+    evidence_project = os.environ.get(
+        "FUGUE_WEAVE_PROJECT", "wandb/fugue-experiments"
+    ).strip()
+    receipt = {
+        "schema_version": 1,
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "inference": {
+            "credential": "wandb_api_key",
+            "base_url": os.environ.get(
+                "FUGUE_WANDB_INFERENCE_BASE_URL",
+                "https://api.inference.wandb.ai/v1",
+            ).strip(),
+            "project": inference_project,
+            "required_model": os.environ.get(
+                "FUGUE_WANDB_INFERENCE_REQUIRED_MODEL", "zai-org/GLM-5.2"
+            ).strip(),
+        },
+        "evidence": {
+            "credential": "trace_wandb_api_key",
+            "base_url": os.environ.get(
+                "FUGUE_WEAVE_BASE_URL", "https://api.wandb.ai"
+            ).strip(),
+            "project": evidence_project,
+        },
+        "credentials_distinct": credentials_distinct,
+    }
+    validation_time = os.environ.get(
+        "FUGUE_WANDB_INFERENCE_VALIDATED_AT", ""
+    ).strip()
+    model_available = os.environ.get(
+        "FUGUE_WANDB_INFERENCE_MODEL_AVAILABLE", ""
+    ).strip()
+    if validation_time:
+        receipt["inference"]["validated_at"] = validation_time
+    if model_available:
+        if model_available not in {"true", "false"}:
+            raise RuntimeError(
+                "FUGUE_WANDB_INFERENCE_MODEL_AVAILABLE must be true or false"
+            )
+        receipt["inference"]["model_available"] = model_available == "true"
+    evidence_validation_time = os.environ.get(
+        "FUGUE_WEAVE_VALIDATED_AT", ""
+    ).strip()
+    if evidence_validation_time:
+        receipt["evidence"]["validated_at"] = evidence_validation_time
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            os.write(
+                descriptor,
+                (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode(),
+            )
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_compose_environment(path: Path, repo_root: Path) -> None:
@@ -153,32 +272,43 @@ def _ensure_access_grants(path: Path, token_path: Path, repo_root: Path) -> None
     instance_id = _read_secret_file(instance_path)
     if path.exists():
         raw = json.loads(_read_secret_file(path))
-        digests = {
-            str(item.get("token_digest") or "")
-            for item in raw.get("grants", [])
-            if isinstance(item, dict)
-        }
-        if not any(
-            hmac.compare_digest(value, token_digest(token)) for value in digests
-        ):
+        grants = [item for item in raw.get("grants", []) if isinstance(item, dict)]
+        matching = next(
+            (
+                item
+                for item in grants
+                if hmac.compare_digest(
+                    str(item.get("token_digest") or ""), token_digest(token)
+                )
+            ),
+            None,
+        )
+        if matching is None:
             raise RuntimeError(
                 "research access grants do not match the existing Agent credential"
             )
-        _make_compose_readable(path)
+        configured_ids = _agent_research_ids()
+        merged_ids = sorted(
+            {
+                *(
+                    str(value)
+                    for value in matching.get("research_ids", [])
+                    if str(value).strip()
+                ),
+                *configured_ids,
+            }
+        )
+        if merged_ids != matching.get("research_ids"):
+            matching["research_ids"] = merged_ids
+            _sync_secret(
+                path,
+                json.dumps(raw, sort_keys=True, separators=(",", ":")),
+            )
+        else:
+            _make_compose_readable(path)
         return
     expires = (datetime.now(UTC) + timedelta(days=366)).isoformat()
-    configured_ids = os.environ.get("FUGUE_RESEARCH_AGENT_RESEARCH_IDS", "").strip()
-    research_ids = (
-        tuple(
-            validate_id(value.strip(), kind="research access id")
-            for value in configured_ids.split(",")
-            if value.strip()
-        )
-        if configured_ids
-        else _DEFAULT_AGENT_RESEARCH_IDS
-    )
-    if not research_ids or len(set(research_ids)) != len(research_ids):
-        raise RuntimeError("Agent Research IDs must be a unique non-empty list")
+    research_ids = _agent_research_ids()
     value = {
         "schema_version": 1,
         "instance_id": instance_id,
@@ -195,6 +325,22 @@ def _ensure_access_grants(path: Path, token_path: Path, repo_root: Path) -> None
         ],
     }
     _write_secret(path, json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def _agent_research_ids() -> tuple[str, ...]:
+    configured = os.environ.get("FUGUE_RESEARCH_AGENT_RESEARCH_IDS", "").strip()
+    values = (
+        tuple(
+            validate_id(value.strip(), kind="research access id")
+            for value in configured.split(",")
+            if value.strip()
+        )
+        if configured
+        else _DEFAULT_AGENT_RESEARCH_IDS
+    )
+    if not values or len(set(values)) != len(values):
+        raise RuntimeError("Agent Research IDs must be a unique non-empty list")
+    return values
 
 
 def _dotenv_value(value: str) -> str:

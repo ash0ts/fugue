@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--trace-api-key-file", type=Path, required=True)
     parser.add_argument("--trace-server-url", required=True)
     parser.add_argument("--entity")
+    parser.add_argument("--project")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--research-id", required=True)
     args = parser.parse_args()
@@ -46,11 +47,15 @@ def main() -> int:
         entity = _env_value(args.env_file, "WANDB_ENTITY")
     if not entity:
         parser.error("--entity or an --env-file containing WANDB_ENTITY is required")
-    project = f"{entity}/enterprise-evidence-agent"
+    project_name = str(args.project or "loop-engineering-demo").strip()
+    if not project_name or "/" in project_name:
+        parser.error("--project must be one W&B project name")
+    project = f"{entity}/{project_name}"
     registry = TraceSourceRegistry.from_file(
         args.trace_sources_file,
         env={
             "WANDB_ENTITY": entity,
+            "FUGUE_WEAVE_PROJECT": project,
             "WANDB_API_KEY_FILE": str(args.trace_api_key_file),
             "WF_TRACE_SERVER_URL": args.trace_server_url,
         },

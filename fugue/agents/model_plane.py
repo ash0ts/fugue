@@ -52,11 +52,17 @@ from fugue.codex_mcp import render_codex_mcp_toml
 from fugue.model_plane import (
     ModelRoute,
     bridge_master_key,
+    inference_project_slug,
     model_protocol_endpoint,
+    provider_api_key,
+    provider_api_key_env,
     provider_client_env,
     resolve_harness_model_route,
     resolve_model_route,
+    trace_api_key,
+    trace_destination_identity,
     trace_entity_project,
+    trace_env_defaults,
 )
 from fugue.registration import (
     context_registration_digest,
@@ -72,7 +78,7 @@ from fugue.tool_policy import (
     tool_result_guard_install_command,
 )
 from fugue.weave_support import (
-    WEAVE_AGENTS_OTEL_ENDPOINT,
+    weave_agents_otel_endpoint,
     weave_agents_otel_headers,
 )
 
@@ -92,11 +98,23 @@ def _require_env(key_name: str, purpose: str) -> str:
 
 
 def _require_trace_key() -> str:
-    return _require_env("WANDB_API_KEY", "Weave tracing")
+    key = trace_api_key(os.environ)
+    if not key:
+        raise ValueError(
+            "FUGUE_WEAVE_API_KEY is not set. Configure the evidence credential "
+            "for Weave tracing."
+        )
+    return key
 
 
 def _require_model_key(route: ModelRoute) -> str:
-    return _require_env(route.api_key_env, f"{route.display_model} model calls")
+    key = provider_api_key(route, os.environ)
+    if not key:
+        raise ValueError(
+            f"{provider_api_key_env(route)} is not set. Configure the model "
+            f"credential for {route.display_model} calls."
+        )
+    return key
 
 
 def _weave_entity_project() -> tuple[str, str]:
@@ -188,7 +206,7 @@ def _chat_base_url(route: ModelRoute) -> str:
 
 
 def _chat_key_env(route: ModelRoute) -> str:
-    return route.api_key_env if route.chat_base_url else "LITELLM_MASTER_KEY"
+    return provider_api_key_env(route) if route.chat_base_url else "LITELLM_MASTER_KEY"
 
 
 def _chat_key(route: ModelRoute) -> str:
@@ -686,6 +704,11 @@ done
             "tags": tags,
             "model_provider": route.provider,
             "model": route.display_model,
+            "inference_project": (
+                inference_project_slug(os.environ)
+                if route.provider == "wandb"
+                else None
+            ),
             "model_transport": model_transport,
             "tool_result_modalities": list(route.tool_result_modalities),
             "builder_model": os.environ.get("FUGUE_BUILDER_MODEL"),
@@ -735,6 +758,12 @@ done
             "weave_entity": entity,
             "weave_project": project,
             "trace_project": f"{entity}/{project}",
+            "trace_receipt": trace_destination_identity(os.environ),
+            "wandb_research_id": os.environ.get("FUGUE_WANDB_RESEARCH_ID"),
+            "wandb_study_id": os.environ.get("FUGUE_WANDB_STUDY_ID"),
+            "research_experiment_id": os.environ.get(
+                "FUGUE_RESEARCH_EXPERIMENT_ID"
+            ),
             "weave_agent_name": stable_agent_name(harness),
             "weave_conversation_key": self.conversation_key,
             "weave_conversation_id": self.trace_conversation_id,
@@ -1029,6 +1058,11 @@ done
             "fugue.run_group": _run_group(),
             "fugue.job_name": self.job_name,
             "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
+            "wandb.research_id": os.environ.get("FUGUE_WANDB_RESEARCH_ID", ""),
+            "wandb.study_id": os.environ.get("FUGUE_WANDB_STUDY_ID", ""),
+            "fugue.research_experiment_id": os.environ.get(
+                "FUGUE_RESEARCH_EXPERIMENT_ID", ""
+            ),
             "fugue.workload_id": os.environ.get("FUGUE_WORKLOAD_ID", ""),
             "fugue.preset_id": os.environ.get("FUGUE_PRESET_ID", ""),
             "fugue.harness": harness,
@@ -1104,6 +1138,7 @@ done
 
     def _trace_environment(self, harness: str, route: ModelRoute) -> dict[str, str]:
         return {
+            **trace_env_defaults(os.environ),
             "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(harness, route),
             "FUGUE_TRACE_ATTRIBUTES_JSON": json.dumps(
                 {
@@ -1407,7 +1442,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 {
                     "type": "otlp",
                     "name": "W&B Weave",
-                    "endpoint": WEAVE_AGENTS_OTEL_ENDPOINT,
+                    "endpoint": weave_agents_otel_endpoint(os.environ),
                     "metrics": False,
                 },
             ],

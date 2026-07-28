@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "project": "wb-agent-test-user/enterprise-evidence-agent",
+  "project": "ashah-weights-biases/loop-engineering-demo",
   "dataset_id": "enterprise-evidence-agent-v1",
   "dataset_digest": "35c345ad3af3cc3babcceda8061d93f95dd28e2943c6f5631c6a05785ad99976",
   "calls": [
@@ -35,5 +35,5 @@
       "synthetic": true
     }
   },
-  "manifest_digest": "f39116677235b040536471cb8663f9cdea34e59921d89d787e8a99be8554e5c8"
+  "manifest_digest": "c2ade9cea7530534699df75e6f62cc422b7e1324b902359666b18a7be9e5b034"
 }

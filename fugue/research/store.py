@@ -30,6 +30,7 @@ from fugue.research.contracts import (
     StudyV1,
     brief_from_dict,
     experiment_event_from_dict,
+    experiment_preview_from_dict,
     experiment_record_from_dict,
     now,
     resource_from_dict,
@@ -58,7 +59,10 @@ from fugue.research.records import (
 )
 
 _RESULT_PROJECTION_VERSION = 3
-_EXPERIMENT_VIEW_PROJECTION_VERSION = 12
+# V13 reprojects factorial arm levels into every planned cell. Older projections
+# could show synthetic "fixed" values even though the immutable treatment map
+# contained the real factor levels.
+_EXPERIMENT_VIEW_PROJECTION_VERSION = 13
 
 
 class StudyStore:
@@ -1626,14 +1630,87 @@ class StudyStore:
 
         Older Fugue records can contain a complete, immutable experiment while
         their publication events predate ``summary.experiment_view``.  This
-        migration emits only the missing public projections through the same
-        append-only outbox used by live transitions.  It never updates the
-        experiment, claims a worker lease, or invokes the campaign executor.
+        includes approval requests that have not started an experiment yet.
+        This migration emits only the missing public projections through the
+        same append-only outbox used by live transitions.  It never updates an
+        accepted preview or experiment, claims a worker lease, or invokes the
+        campaign executor.
         """
 
         created = 0
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            published_views = self._published_experiment_view_digests(conn)
+            approval_rows = conn.execute(
+                "SELECT preview_digest, research_id, study_id, preview_json, "
+                "created_at FROM approval_requests "
+                "LEFT JOIN experiment_view_projection_state AS projection "
+                "ON projection.experiment_id=approval_requests.study_id "
+                "WHERE approval_requests.preview_json IS NOT NULL "
+                "AND (projection.record_updated_at IS NULL "
+                "OR projection.record_updated_at!=('approval:' || preview_digest) "
+                "OR projection.projection_version<?) "
+                "ORDER BY approval_requests.created_at, approval_requests.study_id",
+                (_EXPERIMENT_VIEW_PROJECTION_VERSION,),
+            ).fetchall()
+            for row in approval_rows:
+                preview = experiment_preview_from_dict(json.loads(row["preview_json"]))
+                projection_preview = preview_with_governed_display_labels(
+                    self.repo_root,
+                    preview.to_dict(),
+                )
+                view = build_design_view(
+                    projection_preview,
+                    approval_state="awaiting_approval",
+                )
+                view_digest = stable_digest(view.to_dict())
+                existing = published_views.setdefault(preview.experiment_id, {})
+                design_digests = existing.setdefault("design", set())
+                if view_digest not in design_digests:
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=(
+                            f"fugue:{preview.study_id}:{preview.experiment_id}:"
+                            f"approval-view-design-v"
+                            f"{_EXPERIMENT_VIEW_PROJECTION_VERSION}-{view_digest}"
+                        ),
+                        research_id=preview.study_id,
+                        study_id=preview.experiment_id,
+                        classification="decision",
+                        state="awaiting_approval",
+                        message=(
+                            "Replayed the immutable approval design into the "
+                            "decision-ready projection."
+                        ),
+                        reserved_cost_usd=preview.estimated_cost_usd,
+                        evidence=(
+                            ResearchEvidenceRefV1(
+                                kind="artifact",
+                                ref=f"preview:{preview.preview_digest}",
+                                system="fugue",
+                                digest=preview.preview_digest,
+                            ),
+                        ),
+                        summary={
+                            "campaign_id": preview.campaign_id,
+                            "planned_cells": preview.estimated_cells,
+                            "estimated_calls": preview.estimated_calls,
+                            "experiment_view": view.to_dict(),
+                        },
+                    )
+                    design_digests.add(view_digest)
+                    created += 1
+                conn.execute(
+                    "INSERT INTO experiment_view_projection_state VALUES (?, ?, ?) "
+                    "ON CONFLICT(experiment_id) DO UPDATE SET "
+                    "record_updated_at=excluded.record_updated_at, "
+                    "projection_version=excluded.projection_version",
+                    (
+                        preview.experiment_id,
+                        f"approval:{preview.preview_digest}",
+                        _EXPERIMENT_VIEW_PROJECTION_VERSION,
+                    ),
+                )
             rows = conn.execute(
                 "SELECT experiments.record_json, experiments.updated_at "
                 "FROM experiments "
@@ -1645,7 +1722,6 @@ class StudyStore:
                 "ORDER BY experiments.created_at, experiments.experiment_id",
                 (_EXPERIMENT_VIEW_PROJECTION_VERSION,),
             ).fetchall()
-            published_views = self._published_experiment_view_digests(conn)
             for row in rows:
                 record = experiment_record_from_dict(json.loads(row["record_json"]))
                 existing = published_views.get(record.id, {})

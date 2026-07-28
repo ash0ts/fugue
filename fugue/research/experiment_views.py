@@ -90,6 +90,16 @@ class ExperimentDescriptorV1:
 
 
 @dataclass(frozen=True)
+class ExperimentEvidenceScopeV1:
+    entity: str
+    project: str
+    evidence_types: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self))
+
+
+@dataclass(frozen=True)
 class ExperimentFactorV1:
     name: str
     levels: tuple[str, ...]
@@ -303,6 +313,7 @@ class ExperimentViewV1:
     outcome_summaries: tuple[ExperimentOutcomeSummaryV1, ...] = ()
     score_summaries: tuple[ExperimentScoreSummaryV1, ...] = ()
     evidence_eligible: bool | None = None
+    evidence_scope: ExperimentEvidenceScopeV1 | None = None
     limitations: tuple[str, ...] = ()
     evidence_links: tuple[dict[str, str], ...] = ()
 
@@ -417,6 +428,7 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
         evidence_eligible=_optional_bool(
             raw.get("evidence_eligible"), "evidence_eligible"
         ),
+        evidence_scope=_optional_evidence_scope(raw.get("evidence_scope")),
         limitations=tuple(
             _text(item, "limitation", 1000)
             for item in _sequence(raw.get("limitations"), "limitations")
@@ -440,6 +452,8 @@ def build_design_view(
     fixed_names = tuple(str(item) for item in draft.get("fixed_dimensions") or ())
     varied_names = tuple(str(item) for item in draft.get("varied_dimensions") or ())
     labels = _display_labels(draft.get("display_labels"))
+    research_view = _mapping_or_empty(draft.get("research_view"))
+    arm_factor_levels = _mapping_or_empty(research_view.get("arm_factor_levels"))
     fixed = tuple(
         ExperimentFactorV1(
             name=_dimension_label(name),
@@ -452,15 +466,30 @@ def build_design_view(
     varied = tuple(
         ExperimentFactorV1(
             name=_dimension_label(name),
-            levels=_levels_for(name, draft, cells),
+            levels=_varied_levels_for(
+                name,
+                draft,
+                cells,
+                arm_factor_levels=arm_factor_levels,
+            ),
             label=labels.get(_dimension_label(name), labels.get(name)),
-            level_labels=_factor_level_labels(name, draft, cells, labels),
+            level_labels=_varied_factor_level_labels(
+                name,
+                draft,
+                cells,
+                labels,
+                arm_factor_levels=arm_factor_levels,
+            ),
         )
         for name in varied_names
     )
     matrix_size = int(preview.get("estimated_cells") or len(cells))
     display_cells = tuple(
-        _planned_cell(item, tuple(factor.name for factor in varied))
+        _planned_cell(
+            item,
+            tuple(factor.name for factor in varied),
+            arm_factor_levels=arm_factor_levels,
+        )
         for item in cells[:EXPERIMENT_VIEW_CELL_LIMIT]
     )
     task_count = draft.get("n_tasks")
@@ -523,7 +552,6 @@ def build_design_view(
             },
         )
     context = str(draft.get("decision_rationale") or "").strip() or None
-    research_view = _mapping_or_empty(draft.get("research_view"))
     task_design = _research_task_design(research_view, recipe)
     prompt_design = _research_prompt_design(research_view)
     evaluation_design = _research_evaluation_design(research_view)
@@ -606,6 +634,7 @@ def build_design_view(
             approval_state=approval_state,
             cell_limit=matrix_size,
             reserved_cost_usd=float(preview.get("estimated_cost_usd") or 0.0),
+            evidence_scope=_optional_evidence_scope(preview.get("evidence_scope")),
             cells=display_cells,
             omitted_cells=max(0, len(cells) - len(display_cells)),
         ).to_dict()
@@ -774,6 +803,7 @@ def build_progress_view(
             ),
             completed_cells=completed,
             state_counts=state_counts,
+            evidence_scope=_optional_evidence_scope(preview.get("evidence_scope")),
             cells=displayed,
             omitted_cells=max(0, len(cells) - len(displayed)),
         ).to_dict()
@@ -838,6 +868,7 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
         if run_status in {"cancelled", "interrupted"}
         else "unavailable"
     )
+    record_links = _record_evidence_links(record)
     return experiment_view_from_dict(
         ExperimentViewV1(
             schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
@@ -871,22 +902,48 @@ def build_evaluation_view(record: Mapping[str, Any]) -> ExperimentViewV1:
             ),
             score_summaries=_score_summaries(cells),
             evidence_eligible=bool(outcome.get("eligible")),
+            evidence_scope=(
+                _evidence_scope(rows, record_links)
+                or _optional_evidence_scope(preview.get("evidence_scope"))
+            ),
             limitations=limitations,
-            evidence_links=_record_evidence_links(record),
+            evidence_links=record_links,
         ).to_dict()
     )
 
 
 def _planned_cell(
-    raw: Mapping[str, Any], varied_names: Sequence[str]
+    raw: Mapping[str, Any],
+    varied_names: Sequence[str],
+    *,
+    arm_factor_levels: Mapping[str, Any],
 ) -> ExperimentCellViewV1:
     cell_id = _opaque_cell_id(raw)
+    variant_id = str(raw.get("variant_id") or "")
+    configured_arm = arm_factor_levels.get(variant_id)
+    configured_levels = (
+        {
+            _normalized_dimension_key(str(key)): str(value)
+            for key, value in configured_arm.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if isinstance(configured_arm, Mapping)
+        else {}
+    )
+    factor_levels: dict[str, str] = {}
+    for name in varied_names:
+        direct_value = _value_for_dimension(name, raw)
+        configured_value = configured_levels.get(_normalized_dimension_key(name), "")
+        value = direct_value or configured_value
+        if not value:
+            raise ValueError(
+                f"planned cell {cell_id} does not resolve varied factor {name!r}"
+            )
+        factor_levels[name] = value
     return ExperimentCellViewV1(
         cell_id=cell_id,
         task_label=_reviewed_task_label(raw),
-        factor_levels={
-            name: (_value_for_dimension(name, raw) or "fixed") for name in varied_names
-        },
+        factor_levels=factor_levels,
         attempt=max(1, int(raw.get("trial_index") or 1)),
         execution_status=(
             "queued" if bool(raw.get("applicable", True)) else "not_applicable"
@@ -1185,6 +1242,55 @@ def _factor_level_labels(
         for level in _levels_for(name, draft, cells)
         if level in labels
     }
+
+
+def _varied_levels_for(
+    name: str,
+    draft: Mapping[str, Any],
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    arm_factor_levels: Mapping[str, Any],
+) -> tuple[str, ...]:
+    values = list(_levels_for(name, draft, cells))
+    normalized_name = _normalized_dimension_key(name)
+    for raw_levels in arm_factor_levels.values():
+        if not isinstance(raw_levels, Mapping):
+            continue
+        for raw_name, raw_value in raw_levels.items():
+            if (
+                isinstance(raw_name, str)
+                and isinstance(raw_value, str)
+                and _normalized_dimension_key(raw_name) == normalized_name
+            ):
+                values.append(raw_value)
+    return tuple(_ordered_values(values))
+
+
+def _varied_factor_level_labels(
+    name: str,
+    draft: Mapping[str, Any],
+    cells: Sequence[Mapping[str, Any]],
+    labels: Mapping[str, str],
+    *,
+    arm_factor_levels: Mapping[str, Any],
+) -> dict[str, str]:
+    return {
+        level: labels[level]
+        for level in _varied_levels_for(
+            name,
+            draft,
+            cells,
+            arm_factor_levels=arm_factor_levels,
+        )
+        if level in labels
+    }
+
+
+def _normalized_dimension_key(value: str) -> str:
+    normalized = value.lower().replace("-", "_").replace(" ", "_")
+    if normalized.endswith("_requirement"):
+        return normalized.removesuffix("_requirement")
+    return normalized
 
 
 def _display_labels(raw: Any) -> dict[str, str]:
@@ -1792,6 +1898,52 @@ def _record_reserved_cost(record: Mapping[str, Any]) -> float | None:
     return _optional_float(value)
 
 
+def _evidence_scope(
+    rows: Sequence[Mapping[str, Any]],
+    links: Sequence[Mapping[str, str]],
+) -> ExperimentEvidenceScopeV1 | None:
+    projects = {
+        str(item.get("trace_project") or "")
+        for item in rows
+        if str(item.get("trace_project") or "").count("/") == 1
+    }
+    projects.discard("")
+    if len(projects) != 1:
+        return None
+    project_slug = next(iter(projects))
+    entity, project = project_slug.split("/", 1)
+    evidence_types = tuple(
+        sorted(
+            {
+                str(item.get("kind") or "")
+                for item in links
+                if item.get("system") in {"wandb", "weave"} and item.get("kind")
+            }
+            | {
+                "agent_conversation"
+                for row in rows
+                if row.get("weave_prediction_call_id")
+                or row.get("weave_conversation_ids")
+            }
+            | {
+                "prediction_and_score"
+                for row in rows
+                if row.get("eval_predict_and_score_call_id")
+            }
+            | {
+                "evaluation_attempt"
+                for row in rows
+                if row.get("eval_predict_and_score_call_id")
+            }
+        )
+    )
+    return ExperimentEvidenceScopeV1(
+        entity=entity,
+        project=project,
+        evidence_types=evidence_types,
+    )
+
+
 def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], ...]:
     links: list[dict[str, str]] = []
     preview = _mapping_or_empty(record.get("preview"))
@@ -2006,6 +2158,27 @@ def _reject_cross_kind_values(view: ExperimentViewV1, fields: Sequence[str]) -> 
         value = getattr(view, name)
         if value is not None and value not in ((), {}):
             raise ValueError(f"{view.kind} view cannot contain {name}")
+
+
+def _optional_evidence_scope(raw: Any) -> ExperimentEvidenceScopeV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "evidence_scope")
+    _reject_unknown(
+        value,
+        {"entity", "project", "evidence_types"},
+        "evidence_scope",
+    )
+    return ExperimentEvidenceScopeV1(
+        entity=_text(value.get("entity"), "evidence_scope.entity", 200),
+        project=_text(value.get("project"), "evidence_scope.project", 300),
+        evidence_types=tuple(
+            _text(item, "evidence_scope.evidence_type", 120)
+            for item in _sequence(
+                value.get("evidence_types"), "evidence_scope.evidence_types"
+            )
+        ),
+    )
 
 
 def _optional_task_design(raw: Any) -> ExperimentTaskDesignV1 | None:

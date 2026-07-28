@@ -9,7 +9,7 @@ import signal
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -137,9 +137,13 @@ from fugue.bridge import (
 )
 from fugue.model_plane import (
     model_route_identity,
+    provider_api_key,
+    provider_api_key_env,
     resolve_harness_model_route,
     resolve_model_route,
     select_model,
+    trace_api_key,
+    trace_destination_identity,
     trace_env_defaults,
     trace_project_slug,
 )
@@ -487,7 +491,13 @@ class OperatorService:
         trace_content = (
             request.trace_content if request else None
         ) or selected.trace_content
-        key_names = ("WANDB_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        key_names = (
+            "FUGUE_WANDB_INFERENCE_API_KEY",
+            "FUGUE_WEAVE_API_KEY",
+            "WANDB_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        )
         preset = select_preset(selected, request.preset if request else None)
         workloads = select_workloads(
             selected,
@@ -532,9 +542,9 @@ class OperatorService:
             links=self.deep_links(),
             model=route.display_model,
             model_provider=route.provider,
-            model_key_env=route.api_key_env,
-            model_key_present=bool(env.get(route.api_key_env, "").strip()),
-            trace_key_present=bool(env.get("WANDB_API_KEY", "").strip()),
+            model_key_env=provider_api_key_env(route),
+            model_key_present=bool(provider_api_key(route, env)),
+            trace_key_present=bool(trace_api_key(env)),
             docker_present=shutil.which("docker") is not None,
             harbor_present=shutil.which("harbor") is not None,
             bridge_ready=bool(bridge.get("ok")),
@@ -592,11 +602,11 @@ class OperatorService:
                 continue
             try:
                 route = resolve_model_route(model, env)
-                present = bool(env.get(route.api_key_env, "").strip())
+                present = bool(provider_api_key(route, env))
                 detail = (
-                    f"{route.display_model} can use {route.api_key_env}"
+                    f"{route.display_model} can use {provider_api_key_env(route)}"
                     if present
-                    else f"{route.display_model} requires {route.api_key_env}"
+                    else f"{route.display_model} requires {provider_api_key_env(route)}"
                 )
             except ValueError as exc:
                 present = False
@@ -1791,7 +1801,7 @@ class OperatorService:
             resolved_candidate = resolve_candidate(
                 harness=direct_harness,
                 harness_version=f"fugue-{workload.runner}@1",
-                model_route=model_route_identity(route),
+                model_route=model_route_identity(route, direct_env),
                 prompt_digest=None,
                 skills=(),
                 context={
@@ -1806,6 +1816,7 @@ class OperatorService:
                     "runner": workload.runner,
                     "n_attempts": attempts,
                     "trace_content": experiment.trace_content,
+                    "evidence_destination": trace_destination_identity(direct_env),
                     "scheduling_seed": preset.scheduling_seed,
                     "fugue_source": source_provenance,
                 },
@@ -2054,7 +2065,7 @@ class OperatorService:
             observability_error = None
             if (
                 cells
-                and run_env.get("WANDB_API_KEY", "").strip()
+                and trace_api_key(run_env)
                 and run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
                 not in {"1", "true", "yes"}
             ):
@@ -2193,6 +2204,7 @@ class OperatorService:
         *,
         experiment: ExperimentSpec | None = None,
         run_id: str | None = None,
+        env_overrides: Mapping[str, str] | None = None,
     ) -> RunSummary:
         run_id = validate_id(run_id or new_run_id(), kind="run id")
         selected = experiment or self.experiment(request.experiment_id)
@@ -2215,6 +2227,8 @@ class OperatorService:
             run_id,
         ]
         env = self.env
+        if env_overrides:
+            env.update({str(key): str(value) for key, value in env_overrides.items()})
         existing_path = env.get("PYTHONPATH")
         env["PYTHONPATH"] = (
             self.repo_root.as_posix()
@@ -2530,8 +2544,8 @@ class OperatorService:
             role=role,
             model=route.display_model,
             provider=route.provider,
-            key_env=route.api_key_env,
-            key_present=bool(env.get(route.api_key_env, "").strip()),
+            key_env=provider_api_key_env(route),
+            key_present=bool(provider_api_key(route, env)),
         )
 
     def _summarize_run(self, run: ManagedRun) -> RunSummary:

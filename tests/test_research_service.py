@@ -156,7 +156,18 @@ class FakeCampaignService:
             }
         )
 
-    def launch(self, _: Any, operation_id: str) -> Artifact:
+    def launch(
+        self,
+        _: Any,
+        operation_id: str,
+        *,
+        research_attributes: dict[str, str] | None = None,
+    ) -> Artifact:
+        assert research_attributes == {
+            "FUGUE_WANDB_RESEARCH_ID": "study-1",
+            "FUGUE_WANDB_STUDY_ID": "study-1.proposal-1",
+            "FUGUE_RESEARCH_EXPERIMENT_ID": "study-1.proposal-1",
+        }
         self.launches += 1
         return Artifact(
             {

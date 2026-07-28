@@ -6,6 +6,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from threading import Lock
 from typing import Any
 
+from fugue.model_plane import (
+    WEAVE_BASE_URL_ENV,
+    WEAVE_TRACE_SERVER_URL_ENV,
+    trace_api_key,
+)
+
 _INITIALIZED_PROJECTS: set[str] = set()
 _LOCK = Lock()
 
@@ -26,6 +32,15 @@ _WEAVE_ENV_KEYS = (
 def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
     if env is None:
         return
+    trace_key = trace_api_key(env)
+    if trace_key:
+        os.environ["WANDB_API_KEY"] = trace_key
+    base_url = env.get(WEAVE_BASE_URL_ENV, "").strip()
+    if base_url:
+        os.environ["WANDB_BASE_URL"] = base_url
+    trace_server_url = env.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
+    if trace_server_url:
+        os.environ["WF_TRACE_SERVER_URL"] = trace_server_url
     for key in _WEAVE_ENV_KEYS:
         value = env.get(key)
         if value is not None:
@@ -54,14 +69,20 @@ def weave_agents_otel_headers(project: str, api_key: str) -> str:
 def resolved_weave_trace_server_url(env: Mapping[str, str]) -> str:
     """Resolve the same trace endpoint as the pinned Weave SDK without mutating env."""
 
-    explicit = env.get("WF_TRACE_SERVER_URL", "").strip()
+    explicit = (
+        env.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
+        or env.get("WF_TRACE_SERVER_URL", "").strip()
+    )
     if explicit:
         return explicit.rstrip("/")
     public = env.get("WANDB_PUBLIC_BASE_URL", "").strip()
     if public:
         base_url = public.rstrip("/")
     else:
-        configured = env.get("WANDB_BASE_URL", "").strip()
+        configured = (
+            env.get(WEAVE_BASE_URL_ENV, "").strip()
+            or env.get("WANDB_BASE_URL", "").strip()
+        )
         if configured:
             base_url = configured.rstrip("/")
         else:
@@ -78,6 +99,13 @@ def resolved_weave_trace_server_url(env: Mapping[str, str]) -> str:
     )
 
 
+def weave_agents_otel_endpoint(env: Mapping[str, str]) -> str:
+    """Resolve the Agent OTLP endpoint from the evidence destination."""
+
+    trace_server = resolved_weave_trace_server_url(env)
+    return f"{trace_server.rstrip('/')}/agents/otel/v1/traces"
+
+
 async def trace_async_operation(
     name: str,
     metadata: dict[str, Any],
@@ -85,7 +113,7 @@ async def trace_async_operation(
     operation: Callable[[], Awaitable[Any]],
     summarize: Callable[[Any], Any],
 ) -> Any:
-    if not env.get("WANDB_API_KEY", "").strip():
+    if not trace_api_key(env):
         return await operation()
     from fugue.model_plane import trace_project_slug
 

@@ -379,7 +379,7 @@ def _model_route_env(deployment: dict[str, Any]) -> dict[str, str]:
     route = (deployment.get("candidate") or {}).get("model_route") or {}
     provider = route.get("provider")
     mapping = {
-        "wandb": ("WANDB_INFERENCE_BASE_URL", route.get("chat_base_url")),
+        "wandb": ("FUGUE_WANDB_INFERENCE_BASE_URL", route.get("chat_base_url")),
         "openai": ("OPENAI_BASE_URL", route.get("responses_base_url")),
         "anthropic": ("ANTHROPIC_BASE_URL", route.get("messages_base_url")),
     }

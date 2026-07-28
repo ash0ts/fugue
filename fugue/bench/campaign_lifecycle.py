@@ -109,6 +109,8 @@ from fugue.bench.task_authoring import (
 )
 from fugue.model_plane import (
     model_route_identity,
+    provider_api_key,
+    provider_api_key_env,
     resolve_harness_model_route,
     resolve_model_route,
 )
@@ -726,7 +728,7 @@ class CampaignService:
                     category="validation",
                     details={"error": str(exc)},
                 ) from exc
-            identity = model_route_identity(route)
+            identity = model_route_identity(route, self.operator.env)
             models.append(
                 {
                     "id": model,
@@ -1613,15 +1615,21 @@ class CampaignService:
             return receipt
 
     def launch(
-        self, admission_receipt: AdmissionReceiptV1, operation_id: str
+        self,
+        admission_receipt: AdmissionReceiptV1,
+        operation_id: str,
+        *,
+        research_attributes: Mapping[str, str] | None = None,
     ) -> CampaignStatusV1:
         operation_id = self._operation_id(operation_id)
         self._verify_admission(admission_receipt)
         campaign_id = admission_receipt.campaign_id
+        runtime_attributes = _research_runtime_attributes(research_attributes)
         operation_input = stable_digest(
             {
                 "action": "launch",
                 "admission_digest": admission_receipt.admission_digest,
+                "research_attributes": runtime_attributes,
             }
         )
         with self._operation_lock(campaign_id, operation_id):
@@ -1771,7 +1779,13 @@ class CampaignService:
                 )
 
             try:
-                self.operator.launch(request, experiment=experiment, run_id=run_id)
+                launch_options: dict[str, Any] = {
+                    "experiment": experiment,
+                    "run_id": run_id,
+                }
+                if runtime_attributes:
+                    launch_options["env_overrides"] = runtime_attributes
+                self.operator.launch(request, **launch_options)
             except Exception as exc:
                 with self._campaign_lock(campaign_id):
                     ledger = self._ledger(campaign_id, policy)
@@ -3440,6 +3454,33 @@ def _safe_diagnostic(value: Any, secrets: Sequence[str]) -> str:
     return normalized[:1000]
 
 
+def _research_runtime_attributes(
+    values: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Validate public correlation attributes allowed into an admitted run."""
+
+    if not values:
+        return {}
+    allowed = {
+        "FUGUE_WANDB_RESEARCH_ID",
+        "FUGUE_WANDB_STUDY_ID",
+        "FUGUE_RESEARCH_EXPERIMENT_ID",
+    }
+    unknown = set(values) - allowed
+    if unknown:
+        raise CampaignError(
+            "research_attributes_invalid",
+            "campaign launch contains unsupported research attributes",
+            category="validation",
+            details={"fields": sorted(unknown)},
+        )
+    return {
+        key: validate_id(str(value), kind="research correlation id")
+        for key, value in values.items()
+        if str(value).strip()
+    }
+
+
 def _prepared_route_locks(
     cells: Sequence[Mapping[str, Any]], env: Mapping[str, str]
 ) -> tuple[dict[str, Any], ...]:
@@ -3460,7 +3501,7 @@ def _prepared_route_locks(
             )
         try:
             route = resolve_model_route(model, env)
-            route_identity = model_route_identity(route)
+            route_identity = model_route_identity(route, env)
             transport = resolve_harness_model_route(route, harness)
         except ValueError as exc:
             raise CampaignError(
@@ -3478,6 +3519,11 @@ def _prepared_route_locks(
             "model": model,
             "provider": route.provider,
             "model_id": route.model_id,
+            **(
+                {"inference_project": route_identity["inference_project"]}
+                if route_identity.get("inference_project")
+                else {}
+            ),
             "route_configuration_sha256": stable_digest(route_identity),
             "transport": _json_value(transport),
             "route_lock_sha256": "",
@@ -3526,11 +3572,12 @@ def _auxiliary_model_preflight_checks(
                 continue
             try:
                 route = resolve_model_route(str(model), env)
-                present = bool(str(env.get(route.api_key_env) or "").strip())
+                present = bool(provider_api_key(route, env))
                 detail = (
-                    f"{route.display_model} can use {route.api_key_env}"
+                    f"{route.display_model} can use {provider_api_key_env(route)}"
                     if present
-                    else f"{route.display_model} requires {route.api_key_env}"
+                    else f"{route.display_model} requires "
+                    f"{provider_api_key_env(route)}"
                 )
             except ValueError as exc:
                 present = False
@@ -3546,6 +3593,7 @@ def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
         "model",
         "provider",
         "model_id",
+        "inference_project",
         "route_configuration_sha256",
         "transport",
         "route_lock_sha256",
@@ -3571,6 +3619,17 @@ def _route_lock_from_dict(raw: Mapping[str, Any]) -> dict[str, Any]:
         "model": _bounded_text(raw.get("model"), "route lock model", 300),
         "provider": validate_id(raw.get("provider") or "", kind="route lock provider"),
         "model_id": _bounded_text(raw.get("model_id"), "route lock model id", 300),
+        **(
+            {
+                "inference_project": _bounded_text(
+                    raw.get("inference_project"),
+                    "route lock inference project",
+                    300,
+                )
+            }
+            if raw.get("inference_project")
+            else {}
+        ),
         "route_configuration_sha256": _required_digest(
             raw.get("route_configuration_sha256"), "route configuration digest"
         ),

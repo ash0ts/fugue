@@ -29,6 +29,8 @@ from fugue.bench.library import (
 from fugue.bench.manifest import BenchmarkManifest
 from fugue.model_plane import (
     ModelRoute,
+    provider_api_key,
+    provider_api_key_env,
     provider_request_headers,
     resolve_model_route,
 )
@@ -678,9 +680,11 @@ def _generated_judge_request(
     deterministic: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     route = resolve_model_route(model, env)
-    api_key = env.get(route.api_key_env, "").strip()
+    api_key = provider_api_key(route, env)
     if not api_key:
-        raise RuntimeError(f"{route.api_key_env} is required for evaluation judging")
+        raise RuntimeError(
+            f"{provider_api_key_env(route)} is required for evaluation judging"
+        )
     prompt = (
         "Evaluate one capability task. Return only JSON with a scores object and "
         "a reasons object keyed by the requested dimension ids. Each score must be "

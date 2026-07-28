@@ -580,7 +580,7 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     assert control["user"] == expected_user
     assert control["environment"]["HOME"] == expected_home
     assert all("docker.sock" not in value for value in control["volumes"])
-    assert control["environment"]["WANDB_API_KEY_FILE"] == (
+    assert control["environment"]["FUGUE_WEAVE_API_KEY_FILE"] == (
         "/run/secrets/trace_wandb_api_key"
     )
     assert control["environment"]["FUGUE_RESEARCH_TRUSTED_HOSTS"] == (
@@ -605,8 +605,17 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
     ]
     assert "ports" not in worker
     assert "research_api_key" not in worker.get("secrets", [])
-    assert worker["environment"]["WANDB_API_KEY_FILE"] == ("/run/secrets/wandb_api_key")
-    assert worker["secrets"] == ["wandb_api_key", "research_record_ingest_key"]
+    assert worker["environment"]["FUGUE_WANDB_INFERENCE_API_KEY_FILE"] == (
+        "/run/secrets/wandb_api_key"
+    )
+    assert worker["environment"]["FUGUE_WEAVE_API_KEY_FILE"] == (
+        "/run/secrets/trace_wandb_api_key"
+    )
+    assert worker["secrets"] == [
+        "wandb_api_key",
+        "trace_wandb_api_key",
+        "research_record_ingest_key",
+    ]
     assert "FUGUE_RESEARCH_API_KEY_FILE" not in worker.get("environment", {})
     assert operator["user"] == expected_user
     assert worker["environment"]["HOME"] == expected_home
@@ -631,6 +640,7 @@ def test_research_image_ci_materializes_every_compose_secret() -> None:
     assert ".fugue/secrets/research_access_grants.json" in workflow
     assert ".fugue/secrets/research_record_ingest_key" in workflow
     assert ".fugue/secrets/wandb_api_key" in workflow
+    assert ".fugue/secrets/trace_wandb_api_key" in workflow
 
 
 def test_compose_preserves_host_checkout_path_for_harbor_bind_mounts() -> None:
@@ -704,7 +714,7 @@ def test_container_bootstrap_repairs_secret_modes_for_non_root_compose(
     secret_dir = tmp_path / ".fugue" / "secrets"
     secret_dir.mkdir(parents=True)
     secret_dir.chmod(0o755)
-    for name in ("research_api_key", "wandb_api_key"):
+    for name in ("research_api_key", "wandb_api_key", "trace_wandb_api_key"):
         path = secret_dir / name
         path.write_text(f"{name}-fixture\n", encoding="utf-8")
         path.chmod(0o600)
@@ -715,7 +725,7 @@ def test_container_bootstrap_repairs_secret_modes_for_non_root_compose(
     assert secret_dir.stat().st_mode & 0o777 == 0o700
     assert all(
         (secret_dir / name).stat().st_mode & 0o777 == 0o444
-        for name in ("research_api_key", "wandb_api_key")
+        for name in ("research_api_key", "wandb_api_key", "trace_wandb_api_key")
     )
 
 
@@ -761,6 +771,96 @@ def test_container_bootstrap_refreshes_explicit_wandb_credential_atomically(
     assert secret_path.stat().st_ino != first_inode
     assert secret_path.stat().st_mode & 0o777 == 0o444
     assert not list(secret_path.parent.glob(f".{secret_path.name}.*.tmp"))
+
+
+def test_container_bootstrap_keeps_inference_and_trace_credentials_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inference = tmp_path / "inference.env"
+    inference.write_text("WANDB_API_KEY=cloud-inference-key\n", encoding="utf-8")
+    trace = tmp_path / "local-trace-key"
+    trace.write_text("local-evidence-key\n", encoding="utf-8")
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    monkeypatch.delenv("FUGUE_WEAVE_API_KEY", raising=False)
+
+    values = bootstrap_container_secrets(
+        tmp_path / "repo",
+        env_file=inference,
+        trace_wandb_api_key_file=trace,
+    )
+
+    assert (
+        Path(values["wandb_api_key_file"]).read_text(encoding="utf-8").strip()
+        == "cloud-inference-key"
+    )
+    assert (
+        Path(values["trace_wandb_api_key_file"])
+        .read_text(encoding="utf-8")
+        .strip()
+        == "local-evidence-key"
+    )
+    receipt = json.loads(
+        Path(values["credential_routing_receipt"]).read_text(encoding="utf-8")
+    )
+    assert receipt["inference"]["project"] == "wandb/fugue-experiments"
+    assert receipt["evidence"]["project"] == "wandb/fugue-experiments"
+    assert receipt["credentials_distinct"] is True
+    assert "cloud-inference-key" not in json.dumps(receipt)
+    assert "local-evidence-key" not in json.dumps(receipt)
+
+
+def test_container_bootstrap_rejects_explicitly_reused_cloud_and_local_key(
+    tmp_path: Path,
+) -> None:
+    inference = tmp_path / "inference.env"
+    inference.write_text("WANDB_API_KEY=reused-key\n", encoding="utf-8")
+    trace = tmp_path / "local-trace-key"
+    trace.write_text("reused-key\n", encoding="utf-8")
+
+    repository = tmp_path / "repo"
+    with pytest.raises(RuntimeError, match="must be different"):
+        bootstrap_container_secrets(
+            repository,
+            env_file=inference,
+            trace_wandb_api_key_file=trace,
+        )
+    assert not (repository / ".fugue").exists()
+
+
+def test_container_bootstrap_labels_single_key_compatibility_honestly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WANDB_API_KEY", "single-local-key")
+
+    values = bootstrap_container_secrets(tmp_path / "repo")
+
+    receipt = json.loads(
+        Path(values["credential_routing_receipt"]).read_text(encoding="utf-8")
+    )
+    assert receipt["credentials_distinct"] is False
+
+
+def test_container_bootstrap_extends_existing_agent_grant_for_selected_research(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repo"
+    monkeypatch.setenv("WANDB_API_KEY", "cloud-key")
+    bootstrap_container_secrets(repository)
+    monkeypatch.setenv(
+        "FUGUE_RESEARCH_AGENT_RESEARCH_IDS",
+        "aria-enterprise-evidence-use-v1,aria-loop-engineering-demo-v1",
+    )
+
+    values = bootstrap_container_secrets(repository)
+
+    grants = json.loads(
+        Path(values["research_access_grants_file"]).read_text(encoding="utf-8")
+    )
+    [grant] = grants["grants"]
+    assert "aria-loop-engineering-demo-v1" in grant["research_ids"]
 
 
 def test_container_bootstrap_rejects_empty_explicit_wandb_credential(

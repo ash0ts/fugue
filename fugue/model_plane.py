@@ -14,6 +14,13 @@ DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
 DEFAULT_WANDB_PROJECT = "fugue-experiments"
 WANDB_INFERENCE_BASE_URL = "https://api.inference.wandb.ai/v1"
+WANDB_INFERENCE_API_KEY_ENV = "FUGUE_WANDB_INFERENCE_API_KEY"
+WANDB_INFERENCE_BASE_URL_ENV = "FUGUE_WANDB_INFERENCE_BASE_URL"
+WANDB_INFERENCE_PROJECT_ENV = "FUGUE_WANDB_INFERENCE_PROJECT"
+WEAVE_API_KEY_ENV = "FUGUE_WEAVE_API_KEY"
+WEAVE_BASE_URL_ENV = "FUGUE_WEAVE_BASE_URL"
+WEAVE_PROJECT_ENV = "FUGUE_WEAVE_PROJECT"
+WEAVE_TRACE_SERVER_URL_ENV = "FUGUE_WEAVE_TRACE_SERVER_URL"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 BRIDGE_BASE_URL_HOST = "http://127.0.0.1:4000"
@@ -87,7 +94,11 @@ def resolve_model_route(
     provider = provider_raw.lower()
 
     if provider == "wandb":
-        base_url = values.get("WANDB_INFERENCE_BASE_URL", WANDB_INFERENCE_BASE_URL)
+        base_url = (
+            values.get(WANDB_INFERENCE_BASE_URL_ENV)
+            or values.get("WANDB_INFERENCE_BASE_URL")
+            or WANDB_INFERENCE_BASE_URL
+        )
         return ModelRoute(
             provider="wandb",
             model_id=model_id,
@@ -131,8 +142,10 @@ def resolve_model_route(
     )
 
 
-def model_route_identity(route: ModelRoute) -> dict[str, object]:
-    return {
+def model_route_identity(
+    route: ModelRoute, env: Mapping[str, str] | None = None
+) -> dict[str, object]:
+    identity: dict[str, object] = {
         "provider": route.provider,
         "model_id": route.model_id,
         "display_model": route.display_model,
@@ -142,6 +155,9 @@ def model_route_identity(route: ModelRoute) -> dict[str, object]:
         "litellm_model": route.litellm_model,
         "tool_result_modalities": list(route.tool_result_modalities),
     }
+    if route.provider == "wandb":
+        identity["inference_project"] = inference_project_slug(env)
+    return identity
 
 
 def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, object]:
@@ -216,17 +232,82 @@ def missing_model_env(
     route: ModelRoute, env: Mapping[str, str] | None = None
 ) -> list[str]:
     values = env if env is not None else os.environ
-    return [] if values.get(route.api_key_env, "").strip() else [route.api_key_env]
+    return (
+        []
+        if provider_api_key(route, values)
+        else [
+            WANDB_INFERENCE_API_KEY_ENV
+            if route.provider == "wandb"
+            else route.api_key_env
+        ]
+    )
 
 
 def missing_trace_env(env: Mapping[str, str] | None = None) -> list[str]:
     values = env if env is not None else os.environ
-    return [key for key in ("WANDB_API_KEY",) if not values.get(key, "").strip()]
+    return [] if trace_api_key(values) else [WEAVE_API_KEY_ENV]
+
+
+def provider_api_key_env(route: ModelRoute) -> str:
+    """Return the provider-only credential name used by isolated runtimes."""
+
+    return (
+        WANDB_INFERENCE_API_KEY_ENV
+        if route.provider == "wandb"
+        else route.api_key_env
+    )
+
+
+def provider_api_key(
+    route: ModelRoute, env: Mapping[str, str] | None = None
+) -> str:
+    """Resolve a model credential without treating a trace key as authoritative."""
+
+    values = env if env is not None else os.environ
+    if route.provider == "wandb":
+        explicit = values.get(WANDB_INFERENCE_API_KEY_ENV, "").strip()
+        if explicit:
+            return explicit
+        split_evidence_configured = any(
+            values.get(name, "").strip()
+            for name in (
+                WEAVE_API_KEY_ENV,
+                WEAVE_PROJECT_ENV,
+                WEAVE_BASE_URL_ENV,
+                WEAVE_TRACE_SERVER_URL_ENV,
+            )
+        )
+        if split_evidence_configured:
+            return ""
+    return values.get(route.api_key_env, "").strip()
+
+
+def trace_api_key(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the evidence credential, retaining WANDB_API_KEY compatibility."""
+
+    values = env if env is not None else os.environ
+    return (
+        values.get(WEAVE_API_KEY_ENV, "").strip()
+        or values.get("WANDB_API_KEY", "").strip()
+    )
+
+
+def inference_project_slug(env: Mapping[str, str] | None = None) -> str:
+    """Return the immutable W&B Inference billing scope."""
+
+    values = env if env is not None else os.environ
+    return (
+        values.get(WANDB_INFERENCE_PROJECT_ENV, "").strip()
+        or f"{DEFAULT_WANDB_ENTITY}/{DEFAULT_WANDB_PROJECT}"
+    )
 
 
 def trace_entity_project(env: Mapping[str, str] | None = None) -> tuple[str, str]:
     values = env if env is not None else os.environ
-    slug = values.get("WEAVE_PROJECT", "").strip()
+    slug = (
+        values.get(WEAVE_PROJECT_ENV, "").strip()
+        or values.get("WEAVE_PROJECT", "").strip()
+    )
     if slug and "/" in slug:
         entity, project = slug.split("/", 1)
         return entity, project
@@ -242,10 +323,57 @@ def trace_project_slug(env: Mapping[str, str] | None = None) -> str:
 
 def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
     entity, project = trace_entity_project(env)
-    return {
+    values = env if env is not None else os.environ
+    result = {
         "WANDB_ENTITY": entity,
         "WANDB_PROJECT": project,
         "WEAVE_PROJECT": f"{entity}/{project}",
+    }
+    base_url = (
+        values.get(WEAVE_BASE_URL_ENV, "").strip()
+        or values.get("WANDB_BASE_URL", "").strip()
+    )
+    trace_server_url = (
+        values.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
+        or values.get("WF_TRACE_SERVER_URL", "").strip()
+    )
+    if base_url:
+        result["WANDB_BASE_URL"] = base_url
+    if trace_server_url:
+        result["WF_TRACE_SERVER_URL"] = trace_server_url
+    for key in ("WANDB_INSECURE_DISABLE_SSL", "WEAVE_INSECURE_DISABLE_SSL"):
+        value = values.get(key, "").strip()
+        if value:
+            result[key] = value
+    return result
+
+
+def trace_destination_identity(
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a secret-free identity for the evidence publication destination."""
+
+    values = env if env is not None else os.environ
+    entity, project = trace_entity_project(values)
+    base_url = (
+        values.get(WEAVE_BASE_URL_ENV, "").strip()
+        or values.get("WANDB_BASE_URL", "").strip()
+        or "https://api.wandb.ai"
+    )
+    trace_server_url = (
+        values.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
+        or values.get("WF_TRACE_SERVER_URL", "").strip()
+    )
+    return {
+        "entity": entity,
+        "project": project,
+        "project_slug": f"{entity}/{project}",
+        "base_url": base_url.rstrip("/"),
+        **(
+            {"trace_server_url": trace_server_url.rstrip("/")}
+            if trace_server_url
+            else {}
+        ),
     }
 
 
@@ -255,7 +383,7 @@ def provider_request_headers(
     """Return non-secret headers required by the selected model provider."""
     if route.provider != "wandb":
         return {}
-    return {WANDB_INFERENCE_PROJECT_HEADER: trace_project_slug(env)}
+    return {WANDB_INFERENCE_PROJECT_HEADER: inference_project_slug(env)}
 
 
 def provider_client_env(
@@ -264,7 +392,7 @@ def provider_client_env(
     """Return SDK environment needed for provider-specific request metadata."""
     if route.provider != "wandb":
         return {}
-    project = trace_project_slug(env)
+    project = inference_project_slug(env)
     return {
         OPENAI_PROJECT_ENV: project,
         OPENAI_PROJECT_ID_ENV: project,
