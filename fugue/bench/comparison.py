@@ -111,9 +111,10 @@ class ComparisonExecutionPolicyV1:
     reserve_per_attempt_usd: float
     approval_required: bool
     trace_content: Literal["full", "metadata"]
+    environment: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return _drop_empty(asdict(self), preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,11 @@ class ComparisonSpecV1:
     spec_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        execution = value.get("execution")
+        if isinstance(execution, dict) and not execution.get("environment"):
+            execution.pop("environment", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -667,6 +672,7 @@ def compile_comparison(
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
             "trace_content": spec.execution.trace_content,
+            "environment": spec.execution.environment,
             "research_view": {
                 "observation": spec.question,
                 "rationale": "Test one declared Agent-system change on aligned tasks.",
@@ -778,7 +784,12 @@ def analyze_comparison_rows(
     for (task, harness, attempt), pair in sorted(pairs.items()):
         base = pair.get("baseline")
         candidate = pair.get("candidate")
-        if base is None or candidate is None:
+        if (
+            base is None
+            or candidate is None
+            or base.get("wandb_serverless_eligible") is False
+            or candidate.get("wandb_serverless_eligible") is False
+        ):
             status = "incomplete"
             incomplete += 1
         elif base.get("pass") is False and candidate.get("pass") is True:
@@ -1609,6 +1620,8 @@ def _operational_summary(
     output_tokens = 0
     usage_rows = 0
     infrastructure_failures = 0
+    wandb_rows = 0
+    wandb_eligible = 0
     for row in rows:
         status = str(
             row.get("status")
@@ -1626,6 +1639,9 @@ def _operational_summary(
             "exception_class"
         ):
             infrastructure_failures += 1
+        if "wandb_serverless_eligible" in row:
+            wandb_rows += 1
+            wandb_eligible += row.get("wandb_serverless_eligible") is True
         cost = row.get("accounted_cost_usd", row.get("cost_usd"))
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
@@ -1640,7 +1656,7 @@ def _operational_summary(
             input_tokens += row_input
             output_tokens += row_output
             usage_rows += 1
-    return {
+    result = {
         "execution_states": dict(sorted(execution.items())),
         "evidence_states": dict(sorted(evidence.items())),
         "infrastructure_failures": infrastructure_failures,
@@ -1652,6 +1668,13 @@ def _operational_summary(
         "output_tokens": output_tokens if usage_rows else None,
         "usage_rows": usage_rows,
     }
+    if wandb_rows:
+        result["wandb_serverless"] = {
+            "rows": wandb_rows,
+            "eligible": wandb_eligible,
+            "ineligible": wandb_rows - wandb_eligible,
+        }
+    return result
 
 
 def _comparison_scorer_names(spec: ComparisonSpecV1) -> tuple[str, ...]:
@@ -1933,6 +1956,7 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
             "reserve_per_attempt_usd",
             "approval_required",
             "trace_content",
+            "environment",
         },
         "execution policy",
     )
@@ -1957,6 +1981,9 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
         ),
         approval_required=bool(value.get("approval_required", True)),
         trace_content=trace_content,  # type: ignore[arg-type]
+        environment=dict(
+            _mapping(value.get("environment") or {}, "execution environment")
+        ),
     )
 
 

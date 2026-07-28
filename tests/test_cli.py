@@ -40,6 +40,7 @@ def test_public_command_surface_is_intentionally_small() -> None:
         "approve",
         "result",
         "demo",
+        "sandbox",
         "mcp",
         "skills",
         "taskset",

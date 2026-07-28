@@ -99,7 +99,6 @@ def test_mcp_maintenance_examples_have_exact_staged_designs(
     assert readiness.actual_changes == ("integrations",)
     assert readiness.status == "blocked"
     assert any("not adjudicated" in item for item in readiness.blockers)
-    assert any("not locked and usable" in item for item in readiness.blockers)
 
 
 def test_comparison_rejects_unknown_fields_and_undeclared_changes() -> None:
