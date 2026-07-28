@@ -738,6 +738,47 @@ def test_container_bootstrap_reads_only_allowlisted_dotenv_value(
     assert "must-not-copy" not in secret
 
 
+def test_container_bootstrap_refreshes_explicit_wandb_credential_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    first_credentials = tmp_path / "first.env"
+    first_credentials.write_text("WANDB_API_KEY=first-key\n", encoding="utf-8")
+    second_credentials = tmp_path / "second.env"
+    second_credentials.write_text("WANDB_API_KEY=second-key\n", encoding="utf-8")
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    first = bootstrap_container_secrets(repository, env_file=first_credentials)
+    secret_path = Path(first["wandb_api_key_file"])
+    first_inode = secret_path.stat().st_ino
+    bootstrap_container_secrets(repository, env_file=first_credentials)
+    assert secret_path.stat().st_ino == first_inode
+
+    second = bootstrap_container_secrets(repository, env_file=second_credentials)
+
+    assert second == first
+    assert secret_path.read_text(encoding="utf-8").strip() == "second-key"
+    assert secret_path.stat().st_ino != first_inode
+    assert secret_path.stat().st_mode & 0o777 == 0o444
+    assert not list(secret_path.parent.glob(f".{secret_path.name}.*.tmp"))
+
+
+def test_container_bootstrap_rejects_empty_explicit_wandb_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repo"
+    monkeypatch.setenv("WANDB_API_KEY", "ambient-must-not-win")
+    bootstrap_container_secrets(repository)
+    empty_credentials = tmp_path / "empty.env"
+    empty_credentials.write_text("ANTHROPIC_API_KEY=unrelated\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="explicit W&B credential"):
+        bootstrap_container_secrets(repository, env_file=empty_credentials)
+
+    secret_path = repository / ".fugue" / "secrets" / "wandb_api_key"
+    assert secret_path.read_text(encoding="utf-8").strip() == "ambient-must-not-win"
+
+
 def test_non_local_bootstrap_requires_explicit_rootless_docker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
