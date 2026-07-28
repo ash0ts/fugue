@@ -383,6 +383,7 @@ def _execution_runtime_lock(
         "context_runtime": execution.get("context_runtime"),
         "agent_runtime": execution.get("agent_runtime"),
         "task_runtime": execution.get("task_runtime"),
+        "sandbox_runtime": execution.get("sandbox_runtime"),
     }
     return {**lock, "configuration_sha256": stable_digest(lock)}
 

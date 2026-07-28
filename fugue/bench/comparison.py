@@ -13,6 +13,11 @@ from typing import Any, Literal
 import yaml
 
 from fugue.bench.candidates import stable_digest
+from fugue.bench.coreweave import (
+    COREWEAVE_LOCK_PATH,
+    comparison_environment,
+    read_coreweave_lock,
+)
 from fugue.bench.files import atomic_write_json
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
 from fugue.bench.operator import (
@@ -107,6 +112,10 @@ class ComparisonExecutionPolicyV1:
     reserve_per_attempt_usd: float
     approval_required: bool
     trace_content: Literal["full", "metadata"]
+    backend: Literal["local", "coreweave"] = "local"
+    sandbox_profile: str | None = None
+    network: Literal["none", "gateway"] | None = None
+    max_lifetime_seconds: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -291,6 +300,7 @@ def check_comparison(
     labels = _load_private_labels(repo_root / spec.taskset.private_labels)
     actual_changes, blockers = _comparison_identity_issues(spec)
     warnings: list[str] = []
+    blockers.extend(_execution_policy_issues(spec, repo_root))
     task_ids = tuple(str(item["id"]) for item in tasks)
     blockers.extend(_task_label_issues(task_ids, labels))
     for candidate_name, candidate in (
@@ -572,6 +582,7 @@ def compile_comparison(
             for index, row in enumerate(public_rows)
         ],
     }
+    environment = _comparison_execution_environment(spec, repo_root)
     experiment = experiment_from_data(
         {
             "id": spec.id,
@@ -590,6 +601,7 @@ def compile_comparison(
             "n_concurrent": spec.execution.concurrency,
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
+            "environment": environment,
             "trace_content": spec.execution.trace_content,
             "research_view": {
                 "observation": spec.question,
@@ -698,7 +710,12 @@ def analyze_comparison_rows(
     for (task, harness, attempt), pair in sorted(pairs.items()):
         base = pair.get("baseline")
         candidate = pair.get("candidate")
-        if base is None or candidate is None:
+        if (
+            base is None
+            or candidate is None
+            or not _comparison_row_complete(base)
+            or not _comparison_row_complete(candidate)
+        ):
             status = "incomplete"
             incomplete += 1
         elif base.get("pass") is False and candidate.get("pass") is True:
@@ -758,6 +775,14 @@ def analyze_comparison_rows(
         unsigned,
         result_digest=_artifact_digest(unsigned.to_dict(), "result_digest"),
     )
+
+
+def _comparison_row_complete(row: Mapping[str, Any]) -> bool:
+    if row.get("coreweave_sandbox_eligible") is False:
+        return False
+    if row.get("status") not in {None, "passed", "failed", "not_applicable"}:
+        return False
+    return row.get("pass") in {True, False}
 
 
 def write_comparison_result(
@@ -1662,6 +1687,10 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
             "reserve_per_attempt_usd",
             "approval_required",
             "trace_content",
+            "backend",
+            "sandbox_profile",
+            "network",
+            "max_lifetime_seconds",
         },
         "execution policy",
     )
@@ -1672,6 +1701,26 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
     trace_content = str(value.get("trace_content") or "full")
     if trace_content not in {"full", "metadata"}:
         raise ValueError("trace_content must be full or metadata")
+    backend = str(value.get("backend") or "local")
+    if backend not in {"local", "coreweave"}:
+        raise ValueError("execution backend must be local or coreweave")
+    sandbox_profile = str(value.get("sandbox_profile") or "") or None
+    network = str(value.get("network") or "") or None
+    lifetime = value.get("max_lifetime_seconds")
+    if backend == "coreweave":
+        if not sandbox_profile:
+            raise ValueError("CoreWeave execution requires sandbox_profile")
+        if network not in {"none", "gateway"}:
+            raise ValueError("CoreWeave network must be none or gateway")
+        if lifetime is None:
+            raise ValueError(
+                "CoreWeave execution requires max_lifetime_seconds"
+            )
+    elif sandbox_profile or network or lifetime is not None:
+        raise ValueError(
+            "sandbox_profile, network, and max_lifetime_seconds require "
+            "backend: coreweave"
+        )
     return ComparisonExecutionPolicyV1(
         model=_text(value.get("model"), "execution model", 300),
         harnesses=harnesses,
@@ -1686,6 +1735,67 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
         ),
         approval_required=bool(value.get("approval_required", True)),
         trace_content=trace_content,  # type: ignore[arg-type]
+        backend=backend,  # type: ignore[arg-type]
+        sandbox_profile=sandbox_profile,
+        network=network,  # type: ignore[arg-type]
+        max_lifetime_seconds=(
+            _positive_int(lifetime, "maximum sandbox lifetime")
+            if lifetime is not None
+            else None
+        ),
+    )
+
+
+def _execution_policy_issues(
+    spec: ComparisonSpecV1, repo_root: Path
+) -> list[str]:
+    if spec.execution.backend != "coreweave":
+        return []
+    lock_path = repo_root / COREWEAVE_LOCK_PATH
+    if not lock_path.is_file():
+        return [
+            "CoreWeave execution requires "
+            f"{COREWEAVE_LOCK_PATH.as_posix()}"
+        ]
+    try:
+        lock = read_coreweave_lock(lock_path)
+    except ValueError as exc:
+        return [f"CoreWeave sandbox lock is invalid: {exc}"]
+    issues: list[str] = []
+    if lock.profile_name != spec.execution.sandbox_profile:
+        issues.append(
+            "CoreWeave sandbox_profile differs from the operator lock"
+        )
+    if lock.network.selected_mode != spec.execution.network:
+        issues.append("CoreWeave network differs from the operator lock")
+    if lock.max_lifetime_seconds != spec.execution.max_lifetime_seconds:
+        issues.append(
+            "CoreWeave max_lifetime_seconds differs from the operator lock"
+        )
+    if spec.execution.concurrency != 1:
+        issues.append(
+            "CoreWeave technical-preview comparisons require concurrency: 1"
+        )
+    return issues
+
+
+def _comparison_execution_environment(
+    spec: ComparisonSpecV1, repo_root: Path
+) -> dict[str, Any]:
+    if spec.execution.backend == "local":
+        return {}
+    lock = read_coreweave_lock(repo_root / COREWEAVE_LOCK_PATH)
+    if (
+        spec.execution.network is None
+        or spec.execution.max_lifetime_seconds is None
+    ):
+        raise ValueError(
+            "CoreWeave execution requires network and max_lifetime_seconds"
+        )
+    return comparison_environment(
+        lock,
+        network=spec.execution.network,
+        max_lifetime_seconds=spec.execution.max_lifetime_seconds,
     )
 
 

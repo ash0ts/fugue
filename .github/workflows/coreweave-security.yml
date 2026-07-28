@@ -1,0 +1,144 @@
+name: CoreWeave Sandbox security
+
+on:
+  pull_request:
+    paths:
+      - "fugue/bench/coreweave.py"
+      - "fugue/bench/comparison.py"
+      - "fugue/bench/execution.py"
+      - "fugue/bench/export.py"
+      - "fugue/bench/integrations.py"
+      - "fugue/bench/job_config.py"
+      - "fugue/bench/operator.py"
+      - "fugue/connectivity_gateway.py"
+      - "deploy/coreweave/**"
+      - "tests/test_coreweave.py"
+      - "tests/test_connectivity_gateway.py"
+      - ".github/workflows/coreweave-security.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: Run the protected CoreWeave doctor
+        type: boolean
+        default: false
+      comparison:
+        description: Optional repository-relative CoreWeave comparison YAML
+        type: string
+        required: false
+      run_comparison:
+        description: Approve and run the exact comparison in the protected environment
+        type: boolean
+        default: false
+      max_usd:
+        description: Maximum approved comparison cost
+        type: string
+        default: "40"
+      max_cells:
+        description: Maximum approved comparison cells
+        type: number
+        default: 64
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Contract and adversarial tests
+        run: >-
+          uv run --frozen --extra dev --extra coreweave pytest -q
+          tests/test_coreweave.py
+          tests/test_connectivity_gateway.py
+          tests/test_comparison.py
+          tests/test_execution.py
+          tests/test_skill.py
+      - name: Static checks
+        run: |
+          uv run --frozen --extra dev ruff check fugue tests
+          uv run --frozen python -W error -m compileall -q fugue
+
+  live-doctor:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_live
+    needs: contracts
+    runs-on: ubuntu-latest
+    environment: coreweave-sandbox-security
+    env:
+      CWSANDBOX_API_KEY: ${{ secrets.CWSANDBOX_API_KEY }}
+      FUGUE_GATEWAY_SIGNING_KEY: ${{ secrets.FUGUE_GATEWAY_SIGNING_KEY }}
+      FUGUE_WEAVE_API_KEY: ${{ secrets.FUGUE_WEAVE_API_KEY }}
+      COREWEAVE_PROFILE_LOCK_B64: ${{ secrets.COREWEAVE_PROFILE_LOCK_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Materialize exact protected profile lock
+        run: |
+          uv run python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ.get("COREWEAVE_PROFILE_LOCK_B64", "")
+          if not encoded:
+              raise SystemExit("COREWEAVE_PROFILE_LOCK_B64 is required")
+          destination = Path(".fugue/coreweave-profile.lock.json")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_bytes(base64.b64decode(encoded, validate=True))
+          destination.chmod(0o600)
+          PY
+      - name: CoreWeave disposable security probe
+        run: >-
+          uv run --frozen --extra coreweave fugue sandbox coreweave doctor
+          --lock .fugue/coreweave-profile.lock.json
+      - name: Verify optional comparison readiness
+        if: inputs.comparison != ''
+        env:
+          COMPARISON_PATH: ${{ inputs.comparison }}
+        run: |
+          uv run --frozen fugue check "$COMPARISON_PATH" --json
+          uv run --frozen fugue compare "$COMPARISON_PATH" --preview --json \
+            > /tmp/coreweave-preview.json
+      - name: Approve and run the exact protected comparison
+        if: inputs.comparison != '' && inputs.run_comparison
+        env:
+          COMPARISON_PATH: ${{ inputs.comparison }}
+          MAX_USD: ${{ inputs.max_usd }}
+          MAX_CELLS: ${{ inputs.max_cells }}
+        run: |
+          PREVIEW_DIGEST="$(python -c \
+            'import json; print(json.load(open("/tmp/coreweave-preview.json"))["preview_digest"])')"
+          uv run --frozen fugue approve "$PREVIEW_DIGEST" \
+            --max-usd "$MAX_USD" \
+            --max-cells "$MAX_CELLS" \
+            --approved-by github-protected-environment \
+            > /tmp/coreweave-approval.json
+          APPROVAL_DIGEST="$(python -c \
+            'import json; print(json.load(open("/tmp/coreweave-approval.json"))["approval_digest"])')"
+          uv run --frozen --extra coreweave fugue compare "$COMPARISON_PATH" \
+            --run \
+            --approval "$APPROVAL_DIGEST" \
+            --json
+      - name: Upload security attestations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coreweave-security-attestations
+          if-no-files-found: error
+          path: |
+            .fugue/coreweave-profile.lock.json
+            **/coreweave-sandbox-attestation.json
+            **/coreweave-operation.json
+            **/coreweave-failure.json
+            .fugue/results/**

@@ -266,6 +266,7 @@ def bind_integrations(
                 "config_hash": spec.config_hash,
                 "selection_config_hash": _stable_hash(selection.config),
                 "runtime_type": spec.runtime.type,
+                "runtime_digest": spec.runtime.digest,
                 "image": spec.runtime.image,
                 "instruction_assets": list(instruction_assets),
                 "allowed_tools": {
@@ -625,6 +626,7 @@ def _mcp_server(
             "transport": "stdio",
             "command": runtime.command[0],
             "args": list(runtime.command[1:]),
+            "integration_id": spec.id,
         }
     url = _interface_url(spec, interface)
     if not url:
@@ -633,6 +635,7 @@ def _mcp_server(
         "name": interface.name,
         "transport": interface.transport,
         "url": url,
+        "integration_id": spec.id,
     }
 
 

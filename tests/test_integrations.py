@@ -279,6 +279,7 @@ interfaces:
             "transport": "stdio",
             "command": "python",
             "args": ["-m", "example_server"],
+            "integration_id": "stdio",
             "fugue_allowed_tools": ["search", "read"],
         },
     )

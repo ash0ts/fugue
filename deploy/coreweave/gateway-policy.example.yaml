@@ -1,0 +1,51 @@
+schema_version: 1
+max_token_lifetime_seconds: 1800
+routes:
+  - id: model
+    upstream: https://api.inference.wandb.ai
+    methods:
+      - GET
+      - POST
+    path_prefixes:
+      - /v1
+    content_types:
+      - application/json
+    static_headers:
+      openai-project: wandb/fugue-experiments
+    credential_env: FUGUE_WANDB_INFERENCE_API_KEY
+    credential_header: authorization
+    credential_prefix: "Bearer "
+    credential_encoding: plain
+    max_request_bytes: 8388608
+    max_response_bytes: 67108864
+  - id: wandb-api
+    upstream: https://api.wandb.ai
+    methods:
+      - POST
+    path_prefixes:
+      - /graphql
+    content_types:
+      - application/json
+    credential_env: FUGUE_WEAVE_API_KEY
+    credential_header: authorization
+    credential_prefix: "Basic "
+    credential_encoding: wandb-basic
+    max_request_bytes: 1048576
+    max_response_bytes: 8388608
+  - id: weave
+    upstream: https://trace.wandb.ai
+    methods:
+      - POST
+    path_prefixes:
+      - /calls
+      - /files
+      - /tables
+    content_types:
+      - application/json
+      - application/octet-stream
+    credential_env: FUGUE_WEAVE_API_KEY
+    credential_header: authorization
+    credential_prefix: "Basic "
+    credential_encoding: wandb-basic
+    max_request_bytes: 8388608
+    max_response_bytes: 67108864

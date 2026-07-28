@@ -109,7 +109,8 @@ flowchart TB
   bound to one preview digest, cell limit, and spend ceiling.
 - **Isolated execution.** Each cell runs through Harbor without access to the
   Docker socket, host paths, dependency installation, downloads, builds, or
-  service startup.
+  service startup. Local Docker remains the default; the optional CoreWeave
+  backend runs the same Harbor cell in a locked, attested remote Sandbox.
 - **Durable recovery.** Operation IDs, leases, and immutable run identities
   make control-plane retries safe. An already-launched trial is reconciled,
   never silently launched again.
@@ -293,6 +294,22 @@ global Codex, Claude Code, MCP, or Skill configuration.
 
 This remains a technical preview. The package is still named `fugue`; no new
 distribution or container is being released from this work.
+
+### Optional CoreWeave execution
+
+CoreWeave Sandboxes are an opt-in technical-preview execution policy for teams
+that need CI-friendly remote isolation. They do not change the Agent candidate
+or introduce another executor: Harbor uses a Fugue-owned CoreWeave environment,
+and the exact runner, profile, Kata runtime, image digest, resources, lifetime,
+and egress policy become part of the execution fingerprint. Connected attempts
+can reach only Fugue's locked application gateway; broad internet access and
+ingress are ineligible. A strict image manifest binds every prepared Agent,
+MCP, Skill, context, task, and Fugue runtime asset before the comparison can
+be admitted.
+
+See [`docs/coreweave-sandboxes.md`](docs/coreweave-sandboxes.md) for the
+administrator profile, gateway, lock, doctor, CI, recovery, and current
+public-preview limitations.
 
 ## Choose an interface
 

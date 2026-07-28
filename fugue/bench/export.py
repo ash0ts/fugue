@@ -19,6 +19,12 @@ from filelock import FileLock
 
 from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
+from fugue.bench.coreweave import (
+    COREWEAVE_FAILURE_NAME,
+    COREWEAVE_OPERATION_NAME,
+    coreweave_failure_from_dict,
+    effective_attestation_from_dict,
+)
 from fugue.bench.evaluations import apply_generated_evaluation
 from fugue.bench.execution import CellOutcome, PlannedCell
 from fugue.bench.files import atomic_write_json
@@ -3393,6 +3399,11 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         trial_dir,
         changed_paths=meta.get("changed_paths") or [],
     )
+    coreweave_attestation = _coreweave_sandbox_attestation(
+        trial_dir,
+        meta.get("harbor_environment"),
+        meta.get("coreweave_sandbox_lock_sha256"),
+    )
     trajectory_activity = _trajectory_activity(trial_dir)
     inspected_paths = trajectory_activity["inspected_paths"]
     changed_paths = list(
@@ -3480,6 +3491,12 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "harbor_config": meta.get("harbor_config"),
         "harbor_environment": meta.get("harbor_environment"),
         "harbor_resources": meta.get("harbor_resources", {}),
+        "coreweave_sandbox_attestation": coreweave_attestation,
+        "coreweave_sandbox_eligible": (
+            coreweave_attestation.get("eligible")
+            if coreweave_attestation is not None
+            else None
+        ),
         "agent_config_hash": meta.get("agent_config_hash"),
         "tags": meta.get("tags", []),
         "dataset": meta.get("dataset"),
@@ -3562,6 +3579,116 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "agent_response_bytes": len(agent_response.encode()) if agent_response else 0,
         "trial_dir": trial_dir.as_posix(),
     }
+
+
+def _coreweave_sandbox_attestation(
+    trial_dir: Path,
+    harbor_environment: Any,
+    expected_lock_sha256: Any,
+) -> dict[str, Any] | None:
+    if "FugueCoreWeaveEnvironment" not in str(harbor_environment or ""):
+        return None
+    path = trial_dir / "artifacts" / "coreweave-sandbox-attestation.json"
+    if not path.is_file():
+        failure = _coreweave_failure_record(trial_dir)
+        return {
+            "schema_version": 1,
+            "eligible": False,
+            "failures": [
+                "CoreWeave sandbox attestation is missing",
+                *(
+                    [str(failure["detail"])]
+                    if failure is not None
+                    else []
+                ),
+            ],
+            **({"failure": failure} if failure is not None else {}),
+        }
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise ValueError("attestation is not an object")
+        attestation = effective_attestation_from_dict(value)
+        expected_lock = str(expected_lock_sha256 or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_lock):
+            raise ValueError("expected sandbox lock digest is missing")
+        if attestation.lock_sha256 != expected_lock:
+            raise ValueError("attestation does not bind the expected sandbox lock")
+        if not attestation.stopped_at or not attestation.deleted:
+            raise ValueError("sandbox cleanup is not attested")
+        operation = _coreweave_operation_record(
+            trial_dir, expected_lock=expected_lock, sandbox_id=attestation.sandbox_id
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return {
+            "schema_version": 1,
+            "eligible": False,
+            "failures": [
+                f"CoreWeave sandbox evidence is invalid: {exc}"
+            ],
+        }
+    return {**attestation.to_dict(), "operation": operation}
+
+
+def _coreweave_failure_record(trial_dir: Path) -> dict[str, Any] | None:
+    path = trial_dir / "artifacts" / COREWEAVE_FAILURE_NAME
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"category": "execution", "detail": "failure record is invalid"}
+    if not isinstance(raw, Mapping):
+        return {"category": "execution", "detail": "failure record is invalid"}
+    try:
+        return coreweave_failure_from_dict(raw).to_dict()
+    except ValueError:
+        return {"category": "execution", "detail": "failure record is invalid"}
+
+
+def _coreweave_operation_record(
+    trial_dir: Path, *, expected_lock: str, sandbox_id: str
+) -> dict[str, Any]:
+    path = trial_dir / "artifacts" / COREWEAVE_OPERATION_NAME
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping):
+        raise ValueError("operation record is not an object")
+    allowed = {
+        "schema_version",
+        "operation_id",
+        "state",
+        "sandbox_id",
+        "lock_sha256",
+        "profile_id",
+        "runner_id",
+        "tags",
+        "recorded_at",
+        "record_sha256",
+    }
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(
+            "operation record has unknown fields: " + ", ".join(unknown)
+        )
+    record = {str(key): value for key, value in raw.items()}
+    supplied = str(record.pop("record_sha256", ""))
+    if supplied != _stable_digest(record):
+        raise ValueError("operation record digest does not match")
+    if record.get("schema_version") != 1 or record.get("state") != "deleted":
+        raise ValueError("operation did not reach deleted state")
+    if record.get("lock_sha256") != expected_lock:
+        raise ValueError("operation does not bind the expected sandbox lock")
+    if record.get("sandbox_id") != sandbox_id:
+        raise ValueError("operation and attestation sandbox ids differ")
+    tags = record.get("tags")
+    if (
+        not isinstance(tags, list)
+        or len(tags) != 5
+        or "fugue" not in tags
+        or not any(str(tag).startswith("fi-") for tag in tags)
+    ):
+        raise ValueError("operation tags are missing")
+    return {**record, "record_sha256": supplied}
 
 
 def _prompt_injection_rewards(verifier_result: Mapping[str, Any]) -> dict[str, Any]:

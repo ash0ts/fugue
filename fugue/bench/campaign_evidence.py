@@ -105,6 +105,10 @@ def _row_eligibility_failures(
         failures.append(f"row {index} lacks equivalent runtime evidence")
     if row.get("runtime_drift") is True:
         failures.append(f"row {index} reports runtime drift")
+    if row.get("coreweave_sandbox_eligible") is False:
+        failures.append(
+            f"row {index} lacks an eligible CoreWeave sandbox attestation"
+        )
     return failures
 
 
@@ -344,6 +348,7 @@ _SAFE_PREDICTION_FIELDS = (
     "weave_trace_ids",
     "runtime_equivalence_status",
     "runtime_drift",
+    "coreweave_sandbox_eligible",
     "context_registration_status",
     "context_invoked",
     "localization_recall_at_5",

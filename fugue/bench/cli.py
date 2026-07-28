@@ -219,6 +219,66 @@ def _parser() -> FugueArgumentParser:
         action_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
         action_parser.set_defaults(handler=_component_skills)
 
+    sandbox = subparsers.add_parser(
+        "sandbox", help="Manage governed remote execution backends"
+    )
+    sandbox_backends = sandbox.add_subparsers(
+        dest="sandbox_backend", metavar="BACKEND", required=True
+    )
+    coreweave = sandbox_backends.add_parser(
+        "coreweave", help="Lock and qualify CoreWeave Sandbox execution"
+    )
+    coreweave_actions = coreweave.add_subparsers(
+        dest="coreweave_action", metavar="ACTION", required=True
+    )
+    lock_profile = coreweave_actions.add_parser(
+        "lock-profile", help="Validate and lock one administrator-owned profile"
+    )
+    lock_profile.add_argument("--runner", required=True)
+    lock_profile.add_argument("--profile", required=True)
+    lock_profile.add_argument("--profile-id", required=True)
+    lock_profile.add_argument(
+        "--profile-document",
+        type=Path,
+        default=Path("deploy/coreweave/fugue-untrusted-ci-v1.yaml"),
+    )
+    lock_profile.add_argument(
+        "--runtime-manifest",
+        type=Path,
+        default=Path("deploy/coreweave/runtime-manifest.example.json"),
+    )
+    lock_profile.add_argument("--image")
+    lock_profile.add_argument("--network", choices=("none", "gateway"), default="none")
+    lock_profile.add_argument("--gateway-policy", type=Path)
+    lock_profile.add_argument("--gateway-base-url")
+    lock_profile.add_argument("--gateway-certificate", type=Path)
+    lock_profile.add_argument("--gateway-cidr", action="append", default=[])
+    lock_profile.add_argument("--gateway-host", action="append", default=[])
+    lock_profile.add_argument("--max-lifetime-seconds", type=int, default=1800)
+    lock_profile.add_argument(
+        "--output",
+        type=Path,
+        default=Path(".fugue/coreweave-profile.lock.json"),
+    )
+    lock_profile.add_argument("--repo-root", type=Path, default=Path.cwd())
+    lock_profile.set_defaults(handler=_coreweave_lock_profile)
+    doctor = coreweave_actions.add_parser(
+        "doctor", help="Launch and delete one disposable security probe"
+    )
+    doctor.add_argument(
+        "--lock",
+        type=Path,
+        default=Path(".fugue/coreweave-profile.lock.json"),
+    )
+    doctor.add_argument("--repo-root", type=Path, default=Path.cwd())
+    doctor.set_defaults(handler=_coreweave_doctor)
+    sweep = coreweave_actions.add_parser(
+        "sweep-orphans", help="Delete expired sandboxes for one Fugue instance"
+    )
+    sweep.add_argument("--instance-id", required=True)
+    sweep.add_argument("--older-than-seconds", type=int, default=3600)
+    sweep.set_defaults(handler=_coreweave_sweep)
+
     plan = subparsers.add_parser("plan", help="Plan an experiment with Fugue AI")
     plan.add_argument("request", nargs="+")
     plan.add_argument("--from", dest="base_experiment", default="pilot")
@@ -775,6 +835,138 @@ def _comparison_demo(args: argparse.Namespace) -> int:
         CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
         CONSOLE.print(f"\nResult JSON: {json_path}")
     return 0 if not result.incomplete else 3
+
+
+def _coreweave_lock_profile(args: argparse.Namespace) -> int:
+    import hashlib
+
+    import yaml
+
+    from fugue.bench.coreweave import (
+        CoreWeaveGatewayLockV1,
+        build_coreweave_lock,
+        read_runtime_manifest,
+        write_coreweave_lock,
+    )
+    from fugue.connectivity_gateway import load_gateway_policy
+
+    root = args.repo_root.resolve()
+    profile_path = (
+        args.profile_document.resolve()
+        if args.profile_document.is_absolute()
+        else (root / args.profile_document).resolve()
+    )
+    if not profile_path.is_relative_to(root):
+        raise ValueError("CoreWeave profile document must stay within the checkout")
+    profile_body = profile_path.read_bytes()
+    manifest_path = (
+        args.runtime_manifest.resolve()
+        if args.runtime_manifest.is_absolute()
+        else (root / args.runtime_manifest).resolve()
+    )
+    if not manifest_path.is_relative_to(root):
+        raise ValueError("CoreWeave runtime manifest must stay within the checkout")
+    runtime_manifest = read_runtime_manifest(manifest_path)
+    profile = yaml.safe_load(profile_body)
+    if not isinstance(profile, Mapping) or not isinstance(
+        profile.get("spec"), Mapping
+    ):
+        raise ValueError("CoreWeave profile document is invalid")
+    image = args.image or str(profile["spec"].get("container_image") or "")
+    gateway = None
+    if args.network == "gateway":
+        if not (
+            args.gateway_policy
+            and args.gateway_base_url
+            and args.gateway_certificate
+            and args.gateway_cidr
+            and args.gateway_host
+        ):
+            raise ValueError(
+                "gateway mode requires --gateway-policy, --gateway-base-url, "
+                "--gateway-certificate, --gateway-cidr, and --gateway-host"
+            )
+        policy_path = (
+            args.gateway_policy.resolve()
+            if args.gateway_policy.is_absolute()
+            else (root / args.gateway_policy).resolve()
+        )
+        certificate_path = (
+            args.gateway_certificate.resolve()
+            if args.gateway_certificate.is_absolute()
+            else (root / args.gateway_certificate).resolve()
+        )
+        if not policy_path.is_relative_to(root) or not certificate_path.is_relative_to(
+            root
+        ):
+            raise ValueError("gateway policy and certificate must stay in checkout")
+        policy = load_gateway_policy(policy_path)
+        gateway = CoreWeaveGatewayLockV1(
+            base_url=args.gateway_base_url,
+            policy_sha256=policy.policy_sha256,
+            route_ids=tuple(route.id for route in policy.routes),
+            certificate_sha256=hashlib.sha256(
+                certificate_path.read_bytes()
+            ).hexdigest(),
+        )
+    lock = build_coreweave_lock(
+        runner_id=args.runner,
+        profile_id=args.profile_id,
+        profile_name=args.profile,
+        profile_document=profile_body,
+        image=image,
+        runtime_manifest=runtime_manifest,
+        network=args.network,
+        gateway=gateway,
+        gateway_cidrs=args.gateway_cidr,
+        gateway_hosts=args.gateway_host,
+        max_lifetime_seconds=args.max_lifetime_seconds,
+    )
+    output = (
+        args.output.resolve()
+        if args.output.is_absolute()
+        else (root / args.output).resolve()
+    )
+    if not output.is_relative_to(root):
+        raise ValueError("CoreWeave profile lock must stay within the checkout")
+    written = write_coreweave_lock(output, lock)
+    print(json.dumps(written.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def _coreweave_doctor(args: argparse.Namespace) -> int:
+    from fugue.bench.coreweave import coreweave_doctor, read_coreweave_lock
+
+    root = args.repo_root.resolve()
+    lock_path = (
+        args.lock.resolve() if args.lock.is_absolute() else (root / args.lock).resolve()
+    )
+    if not lock_path.is_relative_to(root):
+        raise ValueError("CoreWeave profile lock must stay within the checkout")
+    print(
+        json.dumps(
+            coreweave_doctor(read_coreweave_lock(lock_path)),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _coreweave_sweep(args: argparse.Namespace) -> int:
+    from fugue.bench.coreweave import sweep_coreweave_orphans
+
+    print(
+        json.dumps(
+            sweep_coreweave_orphans(
+                instance_id=args.instance_id,
+                older_than_seconds=args.older_than_seconds,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _print_comparison_readiness(readiness: Any) -> None:

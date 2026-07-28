@@ -293,6 +293,41 @@ def test_zero_row_comparison_cannot_succeed() -> None:
         )
 
 
+def test_ineligible_coreweave_attestation_makes_aligned_pair_incomplete() -> None:
+    rows = [
+        {
+            "variant_id": "baseline",
+            "task_id": "task-1",
+            "harness": "codex",
+            "trial_index": 1,
+            "prediction_id": "base-1",
+            "status": "passed",
+            "pass": True,
+            "coreweave_sandbox_eligible": True,
+        },
+        {
+            "variant_id": "candidate",
+            "task_id": "task-1",
+            "harness": "codex",
+            "trial_index": 1,
+            "prediction_id": "candidate-1",
+            "status": "passed",
+            "pass": True,
+            "coreweave_sandbox_eligible": False,
+        },
+    ]
+
+    result = analyze_comparison_rows(
+        comparison_id="sandbox-evidence",
+        preview_digest="0" * 64,
+        rows=rows,
+        source="test",
+    )
+
+    assert result.incomplete == 1
+    assert result.unchanged == 0
+
+
 def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)

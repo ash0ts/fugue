@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "python_version": "3.13",
+  "assets": [
+    {
+      "kind": "fugue",
+      "id": "source",
+      "digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "path": "/fugue-src/fugue"
+    },
+    {
+      "kind": "agent",
+      "id": "codex",
+      "digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "path": "/opt/fugue/agents/codex"
+    }
+  ],
+  "manifest_sha256": ""
+}

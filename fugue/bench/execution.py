@@ -37,6 +37,7 @@ EventCallback = Callable[[dict[str, Any]], None]
 ExecutionKind = Literal["agent", "provider_diagnostic"]
 BenchmarkOutcome = Literal["passed", "failed", "unscored", "not_applicable"]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
+CellEnvironmentCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
 
 
@@ -221,13 +222,14 @@ def schedule_cells(
     )
 
 
-def execute_cells(
+def execute_cells(  # noqa: C901
     cells: list[PlannedCell],
     *,
     repo_root: Path,
     max_workers: int,
     runner: Callable[..., Any] | None = None,
     event_callback: EventCallback | None = None,
+    cell_environment: CellEnvironmentCallback | None = None,
     cell_started: CellStartedCallback | None = None,
     cell_finished: CellFinishedCallback | None = None,
     cancellation_event: threading.Event | None = None,
@@ -307,10 +309,31 @@ def execute_cells(
             )
             store.append_event("cell_state", cell=cell, status="failed", message=error)
             return outcome
+        execution_env = dict(cell.env)
+        if cell_environment is not None:
+            try:
+                execution_env.update(cell_environment(cell) or {})
+            except Exception as exc:
+                error = (
+                    "execution admission failed before Agent start: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                outcome = CellOutcome(cell.id, "failed", error=error)
+                store.append_cell(
+                    cell.record(
+                        "failed",
+                        error=error,
+                        benchmark_outcome="unscored",
+                        ended_at=datetime.now(UTC).isoformat(),
+                    )
+                )
+                store.append_event(
+                    "cell_state", cell=cell, status="failed", message=error
+                )
+                return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
-        execution_env = dict(cell.env)
         cell_started_called = False
         if cell_started is not None and not (
             cancellation_event is not None and cancellation_event.is_set()

@@ -22,6 +22,7 @@ from fugue.bench.candidates import (
     ResolvedCandidate,
     comparison_example_id,
     resolve_candidate,
+    stable_digest,
 )
 from fugue.bench.context import (
     DEFAULT_CACHE_ROOT,
@@ -41,6 +42,15 @@ from fugue.bench.context_contracts import (
     ContextCapability,
     ContextDelivery,
     resolve_context_capabilities,
+)
+from fugue.bench.coreweave import (
+    COREWEAVE_ATTESTATION_NAME,
+    bind_coreweave_job,
+    coreweave_execution_identity,
+    coreweave_gateway_environment,
+    coreweave_gateway_mcp_servers,
+    coreweave_lock_from_dict,
+    require_coreweave_runtime_assets,
 )
 from fugue.bench.evaluations import load_cases, scorer_bundle
 from fugue.bench.harness_contracts import harness_capabilities
@@ -298,6 +308,13 @@ def _build_jobs(
                     task_id=tasks[0].id,
                     trial_index=trial_index,
                 )
+                coreweave_execution = coreweave_execution_identity(
+                    experiment.environment
+                )
+                local_bridge_required = (
+                    coreweave_execution is None
+                    and _bridge_required(route, harness.name)
+                )
                 binding, cache_keys, cache_ready = _context_binding(
                     spec=spec,
                     variant=variant,
@@ -310,17 +327,18 @@ def _build_jobs(
                     runtime_root=runtime_root,
                     job_name=job_name,
                     write=write_configs,
-                    bridge_required=_bridge_required(route, harness.name),
+                    bridge_required=local_bridge_required,
                 )
-                trial_policy = _render_trial_policy_compose(
-                    runtime_root,
-                    job_name,
-                    write=write_configs,
-                )
-                binding = replace(
-                    binding,
-                    compose_files=(*binding.compose_files, trial_policy),
-                )
+                if coreweave_execution is None:
+                    trial_policy = _render_trial_policy_compose(
+                        runtime_root,
+                        job_name,
+                        write=write_configs,
+                    )
+                    binding = replace(
+                        binding,
+                        compose_files=(*binding.compose_files, trial_policy),
+                    )
                 integration_binding = bind_integrations(
                     effective_selections(experiment.integrations, variant.integrations),
                     repo_root=repo_root,
@@ -363,7 +381,7 @@ def _build_jobs(
                     binding,
                     variant.context.delivery,
                     repo_root,
-                    bridge_required=_bridge_required(route, harness.name),
+                    bridge_required=local_bridge_required,
                 )
                 comparison_example_id = _comparison_example_id(
                     dataset_id=manifest.dataset.harbor_ref,
@@ -419,6 +437,11 @@ def _build_jobs(
                         "evidence_destination": trace_destination_identity(env),
                         "scheduling_seed": scheduling_seed,
                         "sandbox_policy_version": SANDBOX_POLICY_VERSION,
+                        **(
+                            {"sandbox_runtime": coreweave_execution}
+                            if coreweave_execution is not None
+                            else {}
+                        ),
                         "fugue_source": selected_source_provenance,
                         **(
                             {"context_runtime": context_runtime}
@@ -473,6 +496,7 @@ def _build_jobs(
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
                     execution_fingerprint=resolved_candidate.execution_fingerprint,
+                    instance_id=env.get("FUGUE_INSTANCE_ID") or "fugue-local",
                     applicable=applicable,
                     skip_reason=skip_reason,
                     collect_evidence=bool(required_capabilities),
@@ -481,11 +505,10 @@ def _build_jobs(
                 )
                 config_path = config_dir / f"{job_name}.json"
                 if write_configs:
-                    bridge_required = _bridge_required(route, harness.name)
                     config["fugue"]["sandbox_attestation"] = attest_harbor_job(
                         config,
                         repo_root=repo_root,
-                        bridge_required=bridge_required,
+                        bridge_required=local_bridge_required,
                         require_files=True,
                     ).to_dict()
                     config_path.write_text(
@@ -605,6 +628,7 @@ def _job_config(
     comparison_example_id: str,
     candidate_id: str,
     execution_fingerprint: str,
+    instance_id: str,
     applicable: bool,
     skip_reason: str | None,
     collect_evidence: bool,
@@ -614,10 +638,29 @@ def _job_config(
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     task_architecture = _task_architecture(tasks[0])
     environment = _merge_dicts(experiment.environment, variant.environment)
-    prepared_agent_mount = agent_runtime_mount(
-        harness.name,
-        repo_root,
-        task_architecture,
+    coreweave_execution = coreweave_execution_identity(environment)
+    if coreweave_execution is not None:
+        require_coreweave_runtime_assets(
+            coreweave_lock_from_dict(coreweave_execution["lock"]),
+            _coreweave_runtime_requirements(
+                harness=harness,
+                tasks=tasks,
+                resolved_skills=resolved_skills,
+                integration_binding=integration_binding,
+                context_binding=context_binding,
+                context_spec=context_spec,
+                manifest=manifest,
+                repo_root=repo_root,
+            ),
+        )
+    prepared_agent_mount = (
+        None
+        if coreweave_execution is not None
+        else agent_runtime_mount(
+            harness.name,
+            repo_root,
+            task_architecture,
+        )
     )
     if prepared_agent_mount is not None:
         environment["mounts"] = [
@@ -639,23 +682,34 @@ def _job_config(
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in integration_binding.compose_files],
         ]
-    if integration_binding.mounts:
+    if integration_binding.mounts and coreweave_execution is None:
         environment["mounts"] = [
             *environment.get("mounts", []),
             *integration_binding.mounts,
         ]
+    if coreweave_execution is not None and (
+        environment.get("mounts") or environment.get("extra_docker_compose")
+    ):
+        raise ValueError(
+            "CoreWeave execution requires a single prebuilt runtime image; "
+            "host mounts and Docker Compose sidecars must be materialized "
+            "during preparation"
+        )
     selected_mcp_servers = [
         *context_binding.mcp_servers,
         *integration_binding.mcp_servers,
     ]
     if _needs_mcp_proxy(selected_mcp_servers):
-        mounts = list(environment.get("mounts", []))
-        if not any(
-            isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
-            for item in mounts
-        ):
-            mounts.append(_read_only_mount(repo_root / "fugue", "/fugue-src/fugue"))
-        environment["mounts"] = mounts
+        if coreweave_execution is None:
+            mounts = list(environment.get("mounts", []))
+            if not any(
+                isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
+                for item in mounts
+            ):
+                mounts.append(
+                    _read_only_mount(repo_root / "fugue", "/fugue-src/fugue")
+                )
+            environment["mounts"] = mounts
     expected_artifacts = _dedupe_values(
         [
             *(variant.artifacts or experiment.artifacts),
@@ -694,6 +748,13 @@ def _job_config(
             prompt_ids=prompt_ids,
         ),
     }
+    environment = bind_coreweave_job(
+        environment,
+        instance_id=instance_id,
+        run_id=run_id,
+        job_name=job_name,
+        execution_fingerprint=execution_fingerprint,
+    )
     _set_if(config, "environment", environment)
     _set_if(config, "artifacts", artifacts)
     _set_if(config, "verifier", _merge_dicts(experiment.verifier, variant.verifier))
@@ -755,6 +816,16 @@ def _job_config(
         "expected_artifact_paths": artifact_source_paths(expected_artifacts),
         "task_authoring": _task_authoring_metadata(tasks[0]),
     }
+    if coreweave_execution is not None:
+        config["fugue"]["coreweave_sandbox_lock"] = coreweave_execution
+        config["fugue"]["expected_artifact_paths"] = list(
+            dict.fromkeys(
+                [
+                    *config["fugue"]["expected_artifact_paths"],
+                    COREWEAVE_ATTESTATION_NAME,
+                ]
+            )
+        )
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
     return rendered
@@ -831,11 +902,18 @@ def _agent_config(
         *binding.mcp_servers,
         *integration_binding.mcp_servers,
     ]
+    selected_mcp_servers = coreweave_gateway_mcp_servers(
+        experiment.environment,
+        selected_mcp_servers,
+    )
     agent_env = _merge_dicts(
         _merge_dicts(
             _merge_dicts(experiment.agent_env, variant.agent_env), binding.env
         ),
         integration_binding.env,
+    )
+    agent_env = _merge_dicts(
+        agent_env, coreweave_gateway_environment(experiment.environment)
     )
     if _needs_mcp_proxy(selected_mcp_servers):
         current_pythonpath = str(agent_env.get("PYTHONPATH") or "").strip()
@@ -856,6 +934,7 @@ def _agent_config(
             harness.name,
             selected_mcp_servers,
             integration_binding.allowed_hosts,
+            environment=experiment.environment,
         ),
     }
     if _looks_like_import_path(harness.agent):
@@ -870,7 +949,17 @@ def _agent_allowed_hosts(
     harness: str,
     mcp_servers: list[dict[str, Any]],
     integration_hosts: tuple[str, ...],
+    *,
+    environment: Mapping[str, Any],
 ) -> list[str]:
+    coreweave_gateway = coreweave_gateway_environment(environment)
+    if coreweave_gateway:
+        hostname = urlparse(
+            coreweave_gateway["FUGUE_MODEL_GATEWAY_BASE_URL"]
+        ).hostname
+        if not hostname:
+            raise ValueError("CoreWeave gateway has no valid hostname")
+        return [hostname]
     bridge_required = _bridge_required(route, harness)
     values = [
         "api.wandb.ai",
@@ -1013,9 +1102,19 @@ def _job_env(
             ),
             "FUGUE_HARBOR_CONFIG": config_path.as_posix(),
             "FUGUE_AGENT_CONFIG_HASH": agent_config_hash,
-            "FUGUE_HARBOR_ENVIRONMENT": str(experiment.environment.get("type") or ""),
+            "FUGUE_HARBOR_ENVIRONMENT": str(
+                experiment.environment.get("import_path")
+                or experiment.environment.get("type")
+                or ""
+            ),
             "FUGUE_HARBOR_RESOURCES": json.dumps(
                 _resource_summary(experiment.environment), sort_keys=True
+            ),
+            "FUGUE_COREWEAVE_LOCK_SHA256": str(
+                (
+                    coreweave_execution_identity(experiment.environment) or {}
+                ).get("lock_sha256")
+                or ""
             ),
             "FUGUE_RUN_NAME": run_name,
             "FUGUE_RUN_GROUP": env_group(base_env, run_name),
@@ -1543,11 +1642,16 @@ def _agent_config_hash(
 def _candidate_agent_configuration(
     experiment: ExperimentSpec, variant: FeatureVariant
 ) -> dict[str, Any]:
+    base_environment = (
+        {}
+        if coreweave_execution_identity(experiment.environment) is not None
+        else experiment.environment
+    )
     return _identity_configuration(
         {
             "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
             "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
-            "environment": _merge_dicts(experiment.environment, variant.environment),
+            "environment": _merge_dicts(base_environment, variant.environment),
         }
     )
 
@@ -1593,6 +1697,7 @@ def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]
     names: set[str] = set()
     for value in values:
         server = dict(value)
+        server.pop("integration_id", None)
         allowed_tools = [str(item) for item in server.pop("fugue_allowed_tools", [])]
         command = server.get("command")
         name = str(server.get("name") or command or "")
@@ -1718,6 +1823,79 @@ def _resource_summary(environment: dict[str, Any]) -> dict[str, Any]:
 def _set_if(config: dict[str, Any], key: str, value: Any) -> None:
     if value not in (None, {}, []):
         config[key] = value
+
+
+def _coreweave_runtime_requirements(
+    *,
+    harness: HarnessSpec,
+    tasks: list[TaskSpec],
+    resolved_skills: list[ResolvedSkill],
+    integration_binding: IntegrationBinding,
+    context_binding: ContextBinding,
+    context_spec: ContextSystemSpec,
+    manifest: BenchmarkManifest,
+    repo_root: Path,
+) -> list[dict[str, str]]:
+    requirements: list[dict[str, str]] = []
+    agent_runtime = read_agent_runtime_lock(
+        harness.name,
+        repo_root,
+        _task_architecture(tasks[0]),
+    )
+    if agent_runtime is not None:
+        requirements.append(
+            {
+                "kind": "agent",
+                "id": harness.name,
+                "digest": str(agent_runtime["recipe_sha256"]),
+            }
+        )
+    for skill in resolved_skills:
+        requirements.append(
+            {
+                "kind": "skill",
+                "id": skill.declared_name,
+                "digest": skill.digest,
+            }
+        )
+    for integration in integration_binding.provenance:
+        digest = str(integration.get("runtime_digest") or "")
+        if integration.get("runtime_type") == "managed" and digest:
+            requirements.append(
+                {
+                    "kind": "mcp",
+                    "id": str(integration["id"]),
+                    "digest": digest,
+                }
+            )
+    if _needs_mcp_proxy(
+        [*context_binding.mcp_servers, *integration_binding.mcp_servers]
+    ):
+        requirements.append(
+            {
+                "kind": "fugue",
+                "id": "source",
+                "digest": stable_digest(resolve_fugue_source_provenance(repo_root)),
+            }
+        )
+    if context_binding.runtime_descriptor is not None:
+        requirements.append(
+            {
+                "kind": "context",
+                "id": context_spec.id,
+                "digest": stable_digest(context_binding.runtime_descriptor),
+            }
+        )
+    task_runtime = read_task_runtime_lock(manifest, tasks[0], repo_root)
+    if task_runtime is not None:
+        requirements.append(
+            {
+                "kind": "task",
+                "id": tasks[0].repo or tasks[0].id,
+                "digest": str(task_runtime["recipe_sha256"]),
+            }
+        )
+    return requirements
 
 
 def _drop_empty(value: Any) -> Any:

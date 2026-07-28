@@ -404,6 +404,8 @@ def validate_skill_bundle(
             if path.suffix.casefold() not in _SAFE_REFERENCE_SUFFIXES:
                 errors.append(f"{relative}: unsupported reference file type")
             continue
+        if relative.parts == ("agents", "openai.yaml"):
+            continue
         if relative.name == "SKILL.md" or relative.name.startswith(
             ("LICENSE", "COPYING", "NOTICE")
         ):

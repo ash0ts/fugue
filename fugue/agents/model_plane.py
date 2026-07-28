@@ -750,6 +750,9 @@ done
             "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
             "harbor_environment": os.environ.get("FUGUE_HARBOR_ENVIRONMENT"),
             "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
+            "coreweave_sandbox_lock_sha256": os.environ.get(
+                "FUGUE_COREWEAVE_LOCK_SHA256"
+            ),
             "agent_config_hash": os.environ.get("FUGUE_AGENT_CONFIG_HASH"),
             "dataset": os.environ.get("FUGUE_DATASET"),
             "repository": os.environ.get("FUGUE_REPOSITORY"),

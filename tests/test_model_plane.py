@@ -9,6 +9,7 @@ from fugue.model_plane import (
     inference_project_slug,
     missing_model_env,
     missing_trace_env,
+    model_protocol_endpoint,
     model_route_identity,
     provider_api_key,
     provider_client_env,
@@ -158,6 +159,31 @@ def test_harness_model_route_is_explicit_and_provider_aware(
         "host.docker.internal" if receipt["bridge_required"] else receipt["upstream_host"]
     ) == endpoint_host
     assert receipt["bridge_required"] is (endpoint_kind == "fugue_bridge")
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [
+        ("chat_completions", "https://gateway.example/routes/model/v1"),
+        ("responses", "https://gateway.example/routes/model/v1"),
+        ("messages", "https://gateway.example/routes/model"),
+    ],
+)
+def test_locked_gateway_overrides_provider_endpoints_inside_a_cell(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, expected: str
+) -> None:
+    monkeypatch.setenv(
+        "FUGUE_MODEL_GATEWAY_BASE_URL",
+        "https://gateway.example/routes/model/",
+    )
+
+    endpoint, mediated = model_protocol_endpoint(
+        resolve_model_route("openai/gpt-5", {}),
+        protocol,  # type: ignore[arg-type]
+    )
+
+    assert endpoint == expected
+    assert mediated is True
 
 
 @pytest.mark.parametrize("model", ["gpt-5", "local/foo", "openai/"])

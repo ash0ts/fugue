@@ -181,6 +181,10 @@ def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, ob
 def model_protocol_endpoint(
     route: ModelRoute, protocol: ModelWireProtocol
 ) -> tuple[str, bool]:
+    gateway = os.environ.get("FUGUE_MODEL_GATEWAY_BASE_URL", "").rstrip("/")
+    if gateway:
+        endpoint = gateway if protocol == "messages" else f"{gateway}/v1"
+        return endpoint, True
     direct = {
         "chat_completions": route.chat_base_url,
         "messages": route.messages_base_url,

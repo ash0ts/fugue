@@ -9,7 +9,7 @@ import pytest
 
 from fugue.agent_tracing import agent_conversation_id
 from fugue.bench import export, operator
-from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
+from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, stable_digest
 from fugue.bench.execution import CellOutcome, PlannedCell, write_run_manifest
 from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
@@ -169,6 +169,123 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     out = tmp_path / "pilot.jsonl"
     write_jsonl(rows, out)
     assert "bridge-check__abc123" in out.read_text()
+
+
+def test_export_requires_deleted_content_addressed_coreweave_evidence(
+    tmp_path: Path,
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    trial = next(jobs.rglob("result.json")).parent
+    meta_path = trial / "agent" / "fugue-meta.json"
+    meta = json.loads(meta_path.read_text())
+    lock_sha = "d" * 64
+    meta.update(
+        {
+            "harbor_environment": (
+                "fugue.bench.coreweave:FugueCoreWeaveEnvironment"
+            ),
+            "coreweave_sandbox_lock_sha256": lock_sha,
+        }
+    )
+    meta_path.write_text(json.dumps(meta))
+    artifacts = trial / "artifacts"
+    artifacts.mkdir()
+    attestation = {
+        "schema_version": 1,
+        "sandbox_id": "sandbox-1",
+        "runner_id": "runner-1",
+        "profile_id": "profile-1",
+        "applied_egress_mode": "deny-all",
+        "applied_ingress_mode": None,
+        "resource_requests": {"cpu": "2", "memory": "4Gi"},
+        "resource_limits": {"cpu": "2", "memory": "4Gi"},
+        "image": "ghcr.io/example/fugue@sha256:" + "a" * 64,
+        "runtime_class": "kata-qemu",
+        "profile_document_sha256": "b" * 64,
+        "runtime_manifest_sha256": "c" * 64,
+        "started_at": "2026-07-28T12:00:00+00:00",
+        "stopped_at": "2026-07-28T12:01:00+00:00",
+        "deleted": True,
+        "lock_sha256": lock_sha,
+        "eligible": True,
+        "failures": [],
+        "attestation_sha256": "",
+    }
+    attestation["attestation_sha256"] = stable_digest(attestation)
+    (artifacts / "coreweave-sandbox-attestation.json").write_text(
+        json.dumps(attestation)
+    )
+    operation = {
+        "schema_version": 1,
+        "operation_id": "operation-1",
+        "state": "deleted",
+        "sandbox_id": "sandbox-1",
+        "lock_sha256": lock_sha,
+        "profile_id": "profile-1",
+        "runner_id": "runner-1",
+        "tags": ["fugue", "fi-one", "fr-one", "fc-one", "fx-one"],
+        "recorded_at": "2026-07-28T12:01:00+00:00",
+    }
+    (artifacts / "coreweave-operation.json").write_text(
+        json.dumps({**operation, "record_sha256": stable_digest(operation)})
+    )
+
+    [row] = export_rows([jobs])
+
+    assert row["coreweave_sandbox_eligible"] is True
+    assert row["coreweave_sandbox_attestation"]["sandbox_id"] == "sandbox-1"
+    assert row["coreweave_sandbox_attestation"]["operation"]["state"] == "deleted"
+
+    operation["state"] = "ready_for_agent"
+    (artifacts / "coreweave-operation.json").write_text(
+        json.dumps({**operation, "record_sha256": stable_digest(operation)})
+    )
+    [row] = export_rows([jobs])
+    assert row["coreweave_sandbox_eligible"] is False
+    assert "did not reach deleted" in row["coreweave_sandbox_attestation"][
+        "failures"
+    ][0]
+
+
+def test_export_marks_missing_coreweave_attestation_ineligible(
+    tmp_path: Path,
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    trial = next(jobs.rglob("result.json")).parent
+    meta_path = trial / "agent" / "fugue-meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["harbor_environment"] = (
+        "fugue.bench.coreweave:FugueCoreWeaveEnvironment"
+    )
+    meta["coreweave_sandbox_lock_sha256"] = "d" * 64
+    meta_path.write_text(json.dumps(meta))
+    artifacts = trial / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "coreweave-failure.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "category": "startup",
+                "operation": "start",
+                "retryable_before_agent_start": True,
+                "detail": "runner scheduling failed",
+                "sandbox_id": None,
+            }
+        )
+    )
+
+    [row] = export_rows([jobs])
+
+    assert row["coreweave_sandbox_eligible"] is False
+    assert "missing" in row["coreweave_sandbox_attestation"]["failures"][0]
+    assert row["coreweave_sandbox_attestation"]["failure"] == {
+        "schema_version": 1,
+        "category": "startup",
+        "operation": "start",
+        "retryable_before_agent_start": True,
+        "detail": "runner scheduling failed",
+        "sandbox_id": None,
+    }
 
 
 def test_export_marks_unattributed_harbor_zero_usage_unavailable(

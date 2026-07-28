@@ -82,6 +82,15 @@ Preserve these invariants across code, configuration, presentation, and tests.
   pull, start services, access the Docker socket, or mutate the checkout.
   Require architecture-qualified runtime locks, a read-only task repository,
   and isolated writable adapter state.
+- A remote scheduler may retrieve only the digest-pinned image qualified during
+  preparation; this is infrastructure placement, not Agent permission to pull.
+  Remote backends belong only to the execution fingerprint. Require the locked
+  runner, profile, runtime class, image, resources, lifetime, no ingress, and
+  `none` or gateway-only egress. Bind a strict runtime manifest for every
+  prepared Agent, MCP, Skill, context, task, and Fugue asset in that image,
+  then reconcile an effective attestation before the Agent starts. Profile,
+  network, gateway, image, runtime-asset, or attestation drift makes evidence
+  ineligible. Never put backend state in candidate identity.
 - `OperatorService.execute_run` owns the snapshot-before-execution transaction:
   resolve the exact plan, persist the resolved experiment, materialize and
   verify jobs and cells, write host-only evaluation assets, atomically commit

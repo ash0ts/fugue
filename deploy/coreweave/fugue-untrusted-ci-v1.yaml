@@ -1,0 +1,82 @@
+display_name: fugue-untrusted-ci-v1
+description: Fugue technical-preview profile for untrusted Agent comparison cells
+spec:
+  # Replace this example with the exact digest produced by the protected
+  # runtime-image workflow. The image must contain its matching
+  # /etc/fugue/runtime-manifest.json before creating or locking the profile.
+  container_image: ghcr.io/ash0ts/fugue-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  runtime_class: kata-qemu
+  resource_defaults:
+    cpuRequest: 500m
+    cpuLimit: "2"
+    memoryRequest: 512Mi
+    memoryLimit: 4Gi
+  namespace:
+    strategy: per-user
+    namespacePrefix: fugue-
+    autoCreate: true
+  network:
+    egress:
+      default: deny-all
+      modes:
+        deny-all:
+          type: none
+        # Replace this documentation address with the gateway's stable private
+        # CIDR. Fugue locks and compares the exact administrator document.
+        fugue-gateway:
+          type: allowlist
+          cidrs:
+            - 192.0.2.10/32
+  pod:
+    spec:
+      automountServiceAccountToken: false
+      hostIPC: false
+      hostNetwork: false
+      hostPID: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: main
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: tmp
+              mountPath: /tmp
+            - name: artifacts
+              mountPath: /logs
+            - name: tests
+              mountPath: /tests
+            - name: solution
+              mountPath: /solution
+            - name: harbor
+              mountPath: /harbor
+      volumes:
+        - name: workspace
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: artifacts
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: tests
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: solution
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: harbor
+          emptyDir:
+            sizeLimit: 512Mi

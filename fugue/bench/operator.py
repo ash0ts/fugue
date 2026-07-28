@@ -40,6 +40,10 @@ from fugue.bench.context import (
     prepare_context as build_context,
 )
 from fugue.bench.context_contracts import resolve_context_capabilities
+from fugue.bench.coreweave import (
+    coreweave_cell_environment,
+    coreweave_execution_identity,
+)
 from fugue.bench.datasets import materialize_manifest_dataset
 from fugue.bench.evaluation_assets import (
     attach_evaluation_assets,
@@ -2092,6 +2096,13 @@ class OperatorService:
                 repo_root=self.repo_root,
                 max_workers=max_workers,
                 runner=cell_runner,
+                cell_environment=lambda cell: coreweave_cell_environment(
+                    config_path=cell.config_path,
+                    cell_id=cell.id,
+                    run_id=cell.run_id,
+                    execution_fingerprint=cell.execution_fingerprint,
+                    worker_env=self.env,
+                ),
                 cell_started=live.begin_cell if live is not None else None,
                 cell_finished=(
                     live.finish_cell
@@ -2881,6 +2892,7 @@ def _resolved_bridge_runtime(
         for job in jobs
         if job.applicable
         and job.execution_kind == "agent"
+        and coreweave_execution_identity(job.config.get("environment") or {}) is None
         and resolve_harness_model_route(job.route, job.harness)["bridge_required"]
     ]
     if not bridged:

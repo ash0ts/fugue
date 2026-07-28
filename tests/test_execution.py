@@ -240,6 +240,31 @@ def test_cell_lifecycle_overlays_env_without_changing_outcome(tmp_path: Path) ->
     assert finished == [(cell.id, "passed")]
 
 
+def test_execution_admission_failure_never_starts_the_agent(tmp_path: Path) -> None:
+    cell = _cell("run-admission", "blocked")
+    called = False
+
+    def runner(command, **kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(returncode=0)
+
+    [outcome] = execute_cells(
+        [cell],
+        repo_root=tmp_path,
+        max_workers=1,
+        runner=runner,
+        cell_environment=lambda _: (_ for _ in ()).throw(
+            RuntimeError("capability unavailable")
+        ),
+    )
+
+    assert called is False
+    assert outcome.status == "failed"
+    assert outcome.benchmark_outcome == "unscored"
+    assert "execution admission failed before Agent start" in str(outcome.error)
+
+
 def test_cancellation_terminates_active_process_and_never_opens_queued_cell(
     tmp_path: Path,
 ) -> None:
