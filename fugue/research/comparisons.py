@@ -23,6 +23,12 @@ from fugue.research.contracts import (
     ResearchError,
     StudyUpdateV1,
 )
+from fugue.research.experiment_views import (
+    build_comparison_design_view,
+    build_comparison_evaluation_view,
+    build_comparison_progress_view,
+)
+from fugue.research.records import ResearchEvidenceRefV1
 from fugue.research.store import StudyStore
 
 if TYPE_CHECKING:
@@ -240,6 +246,29 @@ class ComparisonControlService:
                 ),
                 operation_id=idempotency_key,
             )
+        view = build_comparison_design_view(preview.to_dict())
+        self.store.record_experiment_view_event(
+            research_id=study_id,
+            experiment_id=_comparison_experiment_id(preview.preview_digest),
+            producer_event_id=(
+                f"fugue:{study_id}:{_comparison_experiment_id(preview.preview_digest)}:"
+                f"comparison-design-{preview.preview_digest}"
+            ),
+            classification="decision",
+            state="awaiting_approval",
+            message="Exact comparison preview is awaiting operator approval.",
+            reserved_cost_usd=float(readiness["estimated_cost_usd"]),
+            evidence=(
+                ResearchEvidenceRefV1(
+                    kind="artifact",
+                    ref=f"comparison-preview:{preview.preview_digest}",
+                    system="fugue",
+                    digest=preview.preview_digest,
+                ),
+            ),
+            view=view,
+            attribution=_service_attribution(),
+        )
         return {
             **self._public_preview(study_id, entry, preview),
             "approval_state": "awaiting_approval",
@@ -553,6 +582,33 @@ class ComparisonControlService:
             ),
             operation_id=f"{idempotency_key}-project",
         )
+        view = build_comparison_progress_view(preview.to_dict(), phase="running")
+        self.store.record_experiment_view_event(
+            research_id=study_id,
+            experiment_id=_comparison_experiment_id(preview.preview_digest),
+            producer_event_id=(
+                f"fugue:{study_id}:{_comparison_experiment_id(preview.preview_digest)}:"
+                f"comparison-progress-{preview.preview_digest}"
+            ),
+            classification="lifecycle",
+            state="running",
+            message="Approved comparison execution started.",
+            progress={
+                "completed": 0,
+                "total": int(preview.readiness["estimated_cells"]),
+            },
+            reserved_cost_usd=float(preview.readiness["estimated_cost_usd"]),
+            evidence=(
+                ResearchEvidenceRefV1(
+                    kind="artifact",
+                    ref=f"comparison-preview:{preview.preview_digest}",
+                    system="fugue",
+                    digest=preview.preview_digest,
+                ),
+            ),
+            view=view,
+            attribution=_service_attribution(),
+        )
 
 
 def run_comparison_worker(input_path: Path) -> int:
@@ -728,6 +784,38 @@ def _project_result(
         ),
         operation_id=f"comparison-result-{result.result_digest[:20]}",
     )
+    result_ref = json_path.relative_to(repo_root).as_posix()
+    view = build_comparison_evaluation_view(
+        result.to_dict(),
+        result_ref=result_ref,
+    )
+    store.record_experiment_view_event(
+        research_id=study_id,
+        experiment_id=_comparison_experiment_id(result.preview_digest),
+        producer_event_id=(
+            f"fugue:{study_id}:{_comparison_experiment_id(result.preview_digest)}:"
+            f"comparison-evaluation-{result.result_digest}"
+        ),
+        classification="result",
+        state="completed",
+        message="Comparison result reconciled into the canonical Study view.",
+        progress={"completed": result.rows, "total": result.rows},
+        observed_cost_usd=(
+            float(result.operational_summary["observed_cost_usd"])
+            if result.operational_summary.get("observed_cost_usd") is not None
+            else None
+        ),
+        evidence=(
+            ResearchEvidenceRefV1(
+                kind="artifact",
+                ref=result_ref,
+                system="fugue",
+                digest=result.result_digest,
+            ),
+        ),
+        view=view,
+        attribution=_service_attribution(),
+    )
 
 
 def _project_failure(
@@ -755,6 +843,41 @@ def _project_failure(
         ),
         operation_id=f"comparison-failed-{preview.preview_digest[:20]}",
     )
+    view = build_comparison_progress_view(
+        preview.to_dict(),
+        phase="failed",
+        state_counts={"failed": 1},
+    )
+    store.record_experiment_view_event(
+        research_id=study_id,
+        experiment_id=_comparison_experiment_id(preview.preview_digest),
+        producer_event_id=(
+            f"fugue:{study_id}:{_comparison_experiment_id(preview.preview_digest)}:"
+            f"comparison-failed-{preview.preview_digest}"
+        ),
+        classification="limitation",
+        state="failed",
+        message="Comparison execution failed before a terminal evaluation was available.",
+        progress={
+            "completed": 0,
+            "total": int(preview.readiness["estimated_cells"]),
+        },
+        reserved_cost_usd=float(preview.readiness["estimated_cost_usd"]),
+        evidence=(
+            ResearchEvidenceRefV1(
+                kind="artifact",
+                ref=f"comparison-preview:{preview.preview_digest}",
+                system="fugue",
+                digest=preview.preview_digest,
+            ),
+        ),
+        view=view,
+        attribution=_service_attribution(),
+    )
+
+
+def _comparison_experiment_id(preview_digest: str) -> str:
+    return f"comparison-{preview_digest[:20]}"
 
 
 def _read_state(path: Path) -> dict[str, Any]:
