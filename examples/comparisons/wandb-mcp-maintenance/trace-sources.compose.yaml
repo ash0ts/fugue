@@ -1,0 +1,10 @@
+version: 1
+sources:
+  - id: wandb-mcp-release-hosted-evidence
+    adapter: weave
+    allowed_projects: ["${FUGUE_WEAVE_PROJECT}"]
+    include_review_feedback: true
+    reviewed_cohort_manifest_digest: 6625cc5b59624d792d1f48b283aa0dbfd6a0a2c5721900b1da145d15a461587c
+    allowed_fields: [status, operation, errors, tools, latency, conversation]
+    allowed_filters: [run_id, status]
+    redactions: [credentials, hidden_reasoning, prompt_instructions, document_content]
