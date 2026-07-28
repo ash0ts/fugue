@@ -1112,8 +1112,28 @@ def _scan_image(image: str, path: Path) -> None:
         timeout=900,
     )
     if result.returncode != 0:
+        finding_summary = ""
+        if path.is_file():
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+                matches = report.get("matches") if isinstance(report, Mapping) else []
+                if isinstance(matches, list):
+                    severities = [
+                        str(item.get("vulnerability", {}).get("severity") or "")
+                        for item in matches
+                        if isinstance(item, Mapping)
+                        and isinstance(item.get("vulnerability"), Mapping)
+                    ]
+                    finding_summary = (
+                        f" ({severities.count('Critical')} Critical, "
+                        f"{severities.count('High')} High; report {path})"
+                    )
+            except (OSError, json.JSONDecodeError):
+                pass
         raise RuntimeError(
-            "W&B runtime vulnerability scan failed at severity high: "
+            "W&B runtime vulnerability scan failed at severity high"
+            + finding_summary
+            + ": "
             + (result.stderr.strip() or result.stdout.strip() or "unknown error")
         )
 
