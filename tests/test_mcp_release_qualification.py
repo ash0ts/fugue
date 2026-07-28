@@ -13,6 +13,7 @@ from fugue.bench.mcp_release_qualification import (
     qualification_seed_digest,
     validate_evidence_lock,
 )
+from fugue.research.traces import TraceSourceRegistry
 
 EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
 
@@ -117,9 +118,7 @@ def test_existing_lock_must_validate_before_idempotent_reuse(
 
 
 def test_checked_in_hosted_lock_is_exact_and_contains_no_credentials() -> None:
-    lock = json.loads(
-        (EXAMPLE / "evidence.lock.json").read_text(encoding="utf-8")
-    )
+    lock = json.loads((EXAMPLE / "evidence.lock.json").read_text(encoding="utf-8"))
 
     assert validate_evidence_lock(lock) == lock
     serialized = json.dumps(lock, sort_keys=True)
@@ -179,8 +178,7 @@ def test_public_tasks_lock_evidence_without_private_label_leakage() -> None:
         == [
             {
                 "locked_relative": (
-                    "examples/comparisons/wandb-mcp-maintenance/"
-                    "evidence.lock.json"
+                    "examples/comparisons/wandb-mcp-maintenance/evidence.lock.json"
                 ),
                 "sha256": task["attachments"][0]["sha256"],
                 "target": "/workspace/resources/evidence.lock.json",
@@ -215,3 +213,21 @@ def test_judge_calibration_is_balanced_and_truthfully_pending() -> None:
     assert report["judge_profile"] == "anthropic/claude-sonnet-5"
     assert report["review_status"] == "pending_human_review"
     assert report["passed"] is False
+
+
+def test_hosted_trace_source_is_exact_and_credential_indirect() -> None:
+    registry = TraceSourceRegistry.from_file(
+        EXAMPLE / "trace-sources.compose.yaml",
+        env={
+            "FUGUE_WEAVE_PROJECT": QUALIFICATION_PROJECT,
+            "WANDB_API_KEY_FILE": "/operator/secrets/wandb_api_key",
+            "WF_TRACE_SERVER_URL": "https://trace.wandb.ai",
+        },
+    )
+    source = registry.get("wandb-mcp-release-hosted-evidence").source.to_dict()
+
+    assert source["source_id"] == "wandb-mcp-release-hosted-evidence"
+    assert len(source["source_digest"]) == 64
+    serialized = json.dumps(source, sort_keys=True)
+    assert "wandb_api_key" not in serialized
+    assert "ANTHROPIC_API_KEY" not in serialized
