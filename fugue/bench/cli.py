@@ -174,6 +174,7 @@ def _parser() -> FugueArgumentParser:
     mcp_import.add_argument("--config", type=Path, required=True)
     mcp_import.add_argument("--server", required=True)
     mcp_import.add_argument("--as", dest="import_id", required=True)
+    mcp_import.add_argument("--allow-host", action="append", default=[])
     mcp_import.add_argument("--repo-root", type=Path, default=Path.cwd())
     mcp_import.set_defaults(handler=_component_mcp)
     mcp_add = mcp_actions.add_parser(
@@ -181,6 +182,7 @@ def _parser() -> FugueArgumentParser:
     )
     mcp_add.add_argument("import_id")
     mcp_add.add_argument("--required-env", action="append", default=[])
+    mcp_add.add_argument("--allow-host", action="append", default=[])
     mcp_add.add_argument("--repo-root", type=Path, default=Path.cwd())
     mcp_add.add_argument("argv", nargs=argparse.REMAINDER)
     mcp_add.set_defaults(handler=_component_mcp)
@@ -659,7 +661,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
     else:
         CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
         CONSOLE.print(f"\nResult JSON: {json_path}")
-    if result.incomplete:
+    if result.incomplete or result.required_evaluations_incomplete:
         return 3
     return 1 if result.regressed else 0
 
@@ -1286,6 +1288,7 @@ def _component_mcp(args: argparse.Namespace) -> int:
             server=args.server,
             import_id=args.import_id,
             repo_root=root,
+            allowed_hosts=tuple(args.allow_host),
         )
         payload = value.to_dict()
     elif args.mcp_action == "add":
@@ -1297,6 +1300,7 @@ def _component_mcp(args: argparse.Namespace) -> int:
             argv,
             repo_root=root,
             required_env=tuple(args.required_env),
+            allowed_hosts=tuple(args.allow_host),
         )
         payload = value.to_dict()
     elif args.mcp_action == "inspect":

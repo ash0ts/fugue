@@ -39,6 +39,7 @@ args = ["other@1.0.0"]
         server="wandb",
         import_id="wandb-0-3-7",
         repo_root=tmp_path,
+        allowed_hosts=("api.wandb.test", "trace.wandb.test"),
     )
 
     assert draft.command == (
@@ -48,6 +49,7 @@ args = ["other@1.0.0"]
         "wandb-mcp-server",
     )
     assert draft.required_env == ("WANDB_API_KEY",)
+    assert draft.allowed_hosts == ("api.wandb.test", "trace.wandb.test")
     assert "other" not in json.dumps(draft.to_dict())
 
 
@@ -79,6 +81,18 @@ def test_mcp_import_rejects_literal_credentials_and_shells(tmp_path: Path) -> No
         )
     with pytest.raises(ValueError, match="shell-backed"):
         add_mcp_command("bad", ["sh", "-c", "server"], repo_root=tmp_path)
+    with pytest.raises(ValueError, match="exact lowercase hostnames"):
+        add_mcp_command(
+            "bad-host",
+            [
+                "uvx",
+                "--from",
+                "wandb-mcp-server==0.3.7",
+                "wandb_mcp_server",
+            ],
+            repo_root=tmp_path,
+            allowed_hosts=("*.wandb.test",),
+        )
 
 
 def test_package_mcp_lock_materializes_read_only_runtime(
@@ -158,6 +172,34 @@ def test_package_mcp_lock_materializes_read_only_runtime(
             job_name="test",
             env={},
             write=False,
+        )
+
+
+def test_mcp_add_accepts_public_git_source_at_full_commit(tmp_path: Path) -> None:
+    commit = "a2bae7271323ac43262ffb73454b0aff01ddc808"
+    draft = add_mcp_command(
+        "wandb-0-4",
+        [
+            "uvx",
+            "--from",
+            "git+https://github.com/wandb/wandb-mcp-server@" + commit,
+            "wandb-mcp-server",
+        ],
+        repo_root=tmp_path,
+    )
+
+    assert draft.command[2].endswith("@" + commit)
+
+    with pytest.raises(ValueError, match="exact name==version|full commit"):
+        add_mcp_command(
+            "wandb-moving",
+            [
+                "uvx",
+                "--from",
+                "git+https://github.com/wandb/wandb-mcp-server@main",
+                "wandb-mcp-server",
+            ],
+            repo_root=tmp_path,
         )
 
 

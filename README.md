@@ -226,6 +226,74 @@ Fugue does not host your application, edit its writable checkout, invent the
 next hypothesis, approve its own spend, copy raw Weave traces, or turn a small
 study into a general capability claim.
 
+## Technical preview: validate one Agent change
+
+The smallest useful Fugue workflow has five concepts:
+
+| Concept | Meaning |
+| --- | --- |
+| **Taskset** | The cases the Agent must handle |
+| **Baseline** | The current Agent system |
+| **Candidate** | The proposed change |
+| **Evaluator** | The checks that define “better” |
+| **Execution policy** | Harness, runtime, attempts, approval, limits, and required evidence |
+
+The command surface is deliberately smaller than Fugue’s internal lifecycle:
+
+```bash
+uv sync --extra research-worker
+
+# No key or model call: replay immutable example rows.
+uv run fugue demo source-use
+
+# Inspect a real Skill comparison before any spend.
+uv run fugue check \
+  examples/comparisons/source-use-skill/comparison.yaml
+uv run fugue compare \
+  examples/comparisons/source-use-skill/comparison.yaml --preview
+```
+
+`check` reproduces intended failures, verifies known-good outputs, resolves the
+actual baseline/candidate diff, checks required components and judge
+calibration, and computes the exact attempt and cost bounds. It can answer
+`ready`, `needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
+unnecessary comparison does not run.
+
+Paid execution remains an explicit operator action tied to the immutable
+preview:
+
+```bash
+uv run fugue approve PREVIEW_DIGEST --max-usd 40 --max-cells 32
+uv run fugue compare comparison.yaml \
+  --run --approval APPROVAL_DIGEST
+uv run fugue result latest
+```
+
+The result separates deterministic task outcomes, blind-judge dimensions,
+mechanism evidence, infrastructure health, and evidence completeness. CI uses
+distinct exit codes for a passed gate (`0`), a completed regression (`1`), an
+invalid comparison (`2`), and incomplete required evidence (`3`).
+
+Normal MCP configurations and standard Agent Skills are candidate inputs, not
+special experiment types:
+
+```bash
+uv run fugue mcp import \
+  --config mcp.json --server wandb --as wandb-baseline
+uv run fugue mcp lock wandb-baseline --acknowledge-package-code
+
+uv run fugue skills import ./skills/verify-current-source
+uv run fugue skills lock verify-current-source
+```
+
+Fugue imports only the selected component, strips secret values, resolves
+mutable package work during preparation, records a content-addressed lock, and
+mounts the reviewed runtime read-only into an isolated attempt. It never edits
+global Codex, Claude Code, MCP, or Skill configuration.
+
+This remains a technical preview. The package is still named `fugue`; no new
+distribution or container is being released from this work.
+
 ## Choose an interface
 
 Use the operator CLI or TUI when a human is directly designing and running a

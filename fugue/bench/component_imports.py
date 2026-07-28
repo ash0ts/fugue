@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -38,6 +38,10 @@ _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _PYTHON_PACKAGE_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*$"
 )
+_PYTHON_GIT_RE = re.compile(
+    r"^git\+https://github\.com/"
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?@[0-9a-f]{40}$"
+)
 _NPM_PACKAGE_RE = re.compile(
     r"^(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+@[A-Za-z0-9][A-Za-z0-9_.+-]*$"
 )
@@ -56,6 +60,7 @@ class MCPImportDraftV1:
     command: tuple[str, ...] = ()
     url: str | None = None
     required_env: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
     source: str = "manual"
     server_name: str | None = None
     version_identity: str | None = None
@@ -65,6 +70,7 @@ class MCPImportDraftV1:
         value = asdict(self)
         value["command"] = list(self.command)
         value["required_env"] = list(self.required_env)
+        value["allowed_hosts"] = list(self.allowed_hosts)
         value["allowed_tools"] = list(self.allowed_tools)
         return value
 
@@ -81,6 +87,7 @@ class MCPImportLockV1:
     url: str | None = None
     version_identity: str | None = None
     required_env: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()
     tool_manifest: tuple[dict[str, Any], ...] = ()
     tool_manifest_digest: str | None = None
@@ -91,6 +98,7 @@ class MCPImportLockV1:
         value = asdict(self)
         value["command"] = list(self.command)
         value["required_env"] = list(self.required_env)
+        value["allowed_hosts"] = list(self.allowed_hosts)
         value["allowed_tools"] = list(self.allowed_tools)
         value["tool_manifest"] = list(self.tool_manifest)
         return value
@@ -136,6 +144,7 @@ def import_mcp_config(
     server: str,
     import_id: str,
     repo_root: Path,
+    allowed_hosts: tuple[str, ...] = (),
 ) -> MCPImportDraftV1:
     _validate_id(import_id)
     if not config_path.is_file():
@@ -155,6 +164,17 @@ def import_mcp_config(
         source=config_path.resolve().as_posix(),
         server_name=server,
     )
+    if allowed_hosts:
+        _validate_allowed_hosts(allowed_hosts)
+        draft = MCPImportDraftV1(
+            **{
+                **draft.to_dict(),
+                "command": draft.command,
+                "required_env": draft.required_env,
+                "allowed_hosts": tuple(allowed_hosts),
+                "allowed_tools": draft.allowed_tools,
+            }
+        )
     _write_json(_mcp_draft_path(repo_root, import_id), draft.to_dict())
     return draft
 
@@ -165,16 +185,20 @@ def add_mcp_command(
     *,
     repo_root: Path,
     required_env: tuple[str, ...] = (),
+    allowed_hosts: tuple[str, ...] = (),
 ) -> MCPImportDraftV1:
     _validate_id(import_id)
     _validate_argv(command)
+    _classify_stdio_command(command)
     _validate_env_names(required_env)
+    _validate_allowed_hosts(allowed_hosts)
     draft = MCPImportDraftV1(
         schema_version=1,
         id=import_id,
         transport="stdio",
         command=tuple(command),
         required_env=tuple(required_env),
+        allowed_hosts=tuple(allowed_hosts),
         source="argv",
         server_name=import_id,
     )
@@ -202,6 +226,7 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
             "command",
             "url",
             "required_env",
+            "allowed_hosts",
             "source",
             "server_name",
             "version_identity",
@@ -213,8 +238,10 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
         raise ValueError(f"{path}: unsupported or mismatched MCP draft")
     command = _string_tuple(raw.get("command"))
     required_env = _string_tuple(raw.get("required_env"))
+    allowed_hosts = _string_tuple(raw.get("allowed_hosts"))
     allowed_tools = _string_tuple(raw.get("allowed_tools"))
     _validate_env_names(required_env)
+    _validate_allowed_hosts(allowed_hosts)
     transport = str(raw.get("transport") or "")
     if transport == "stdio":
         _validate_argv(list(command))
@@ -227,6 +254,7 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
         command=command,
         url=str(raw["url"]) if raw.get("url") else None,
         required_env=required_env,
+        allowed_hosts=allowed_hosts,
         source=str(raw.get("source") or ""),
         server_name=str(raw["server_name"]) if raw.get("server_name") else None,
         version_identity=(
@@ -245,7 +273,29 @@ def lock_mcp_import(
     draft = load_mcp_draft(import_id, repo_root)
     source_digest = _stable_digest(draft.to_dict())
     if draft.transport == "stdio":
-        manifest, server_info = _probe_stdio_manifest(draft)
+        kind, _, _, _ = _classify_stdio_command(list(draft.command))
+        if kind in {"python", "node"} and not acknowledge_package_code:
+            raise ValueError(
+                "locking a package-backed MCP server requires "
+                "--acknowledge-package-code"
+            )
+        runtime_digest, command = _materialize_stdio_runtime(
+            draft,
+            repo_root,
+            acknowledge_package_code=acknowledge_package_code,
+        )
+        runtime_source = (
+            repo_root
+            / MANAGED_MCP_RUNTIME_ROOT
+            / import_id
+            / runtime_digest.removeprefix("sha256:")
+        )
+        manifest, server_info = _probe_stdio_manifest(
+            replace(
+                draft,
+                command=((runtime_source / "bin" / "server").as_posix(),),
+            )
+        )
         discovered = tuple(str(item["name"]) for item in manifest)
         missing = sorted(set(draft.allowed_tools) - set(discovered))
         if missing:
@@ -254,11 +304,6 @@ def lock_mcp_import(
             )
         allowed_tools = draft.allowed_tools or discovered
         manifest_digest = _stable_digest(list(manifest))
-        runtime_digest, command = _materialize_stdio_runtime(
-            draft,
-            repo_root,
-            acknowledge_package_code=acknowledge_package_code,
-        )
         support = "supported"
         runtime = {
             "type": "managed",
@@ -305,6 +350,7 @@ def lock_mcp_import(
         url=draft.url,
         version_identity=draft.version_identity,
         required_env=draft.required_env,
+        allowed_hosts=draft.allowed_hosts,
         allowed_tools=allowed_tools,
         tool_manifest=manifest,
         tool_manifest_digest=manifest_digest,
@@ -324,7 +370,7 @@ def lock_mcp_import(
         "allowed_hosts": (
             [str(urlparse(draft.url or "").hostname)]
             if draft.transport != "stdio"
-            else []
+            else list(draft.allowed_hosts)
         ),
     }
     integration_path = repo_root / IMPORTED_INTEGRATION_ROOT / f"{import_id}.yaml"
@@ -595,6 +641,7 @@ def _draft_from_server(
         "type",
         "version",
         "allowed_tools",
+        "allowed_hosts",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -628,8 +675,11 @@ def _draft_from_server(
             raise ValueError("stdio MCP requires command as a string and args as an array")
         command = (executable, *(str(value) for value in args))
         _validate_argv(list(command))
+        _classify_stdio_command(list(command))
         transport = "stdio"
     allowed_tools = _string_tuple(raw.get("allowed_tools"))
+    allowed_hosts = _string_tuple(raw.get("allowed_hosts"))
+    _validate_allowed_hosts(allowed_hosts)
     return MCPImportDraftV1(
         schema_version=1,
         id=import_id,
@@ -637,6 +687,7 @@ def _draft_from_server(
         command=command,
         url=url,
         required_env=tuple(sorted(env_names)),
+        allowed_hosts=allowed_hosts,
         source=source,
         server_name=server_name,
         version_identity=str(raw["version"]) if raw.get("version") else None,
@@ -695,10 +746,19 @@ def _classify_stdio_command(
     executable = PurePosixPath(command[0]).name
     if executable == "uvx":
         if len(command) < 4 or command[1] != "--from":
-            raise ValueError("uvx MCP declarations must use: uvx --from PACKAGE==VERSION COMMAND")
+            raise ValueError(
+                "uvx MCP declarations must use: "
+                "uvx --from PACKAGE==VERSION COMMAND"
+            )
         package = command[2]
-        if not _PYTHON_PACKAGE_RE.fullmatch(package):
-            raise ValueError("uvx MCP packages must use an exact name==version")
+        if not (
+            _PYTHON_PACKAGE_RE.fullmatch(package)
+            or _PYTHON_GIT_RE.fullmatch(package)
+        ):
+            raise ValueError(
+                "uvx MCP packages must use an exact name==version or a public "
+                "GitHub source pinned to a full commit SHA"
+            )
         return "python", package, command[3], command[4:]
     if executable == "npx":
         values = command[1:]
@@ -717,6 +777,36 @@ def _classify_stdio_command(
 def _install_python_tool(package: str, executable: str, destination: Path) -> None:
     site = destination / "site"
     site.mkdir()
+    install_source = package
+
+    def cleanup() -> None:
+        return None
+
+    if _PYTHON_GIT_RE.fullmatch(package):
+        install_source, cleanup = _build_exact_git_wheel(package)
+    try:
+        _install_python_distribution(install_source, site)
+    finally:
+        cleanup()
+    entrypoint = _python_entrypoint(site, executable)
+    bin_dir = destination / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "server"
+    module, function = entrypoint
+    launcher.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'site'))\n"
+        f"from {module} import {function} as _entry\n"
+        "raise SystemExit(_entry())\n",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o555)
+    _make_tree_read_only(destination)
+
+
+def _install_python_distribution(package: str, site: Path) -> None:
     subprocess.run(
         [
             "uv",
@@ -735,22 +825,60 @@ def _install_python_tool(package: str, executable: str, destination: Path) -> No
         check=True,
         timeout=180,
     )
-    entrypoint = _python_entrypoint(site, executable)
-    bin_dir = destination / "bin"
-    bin_dir.mkdir()
-    launcher = bin_dir / "server"
-    module, function = entrypoint
-    launcher.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "sys.path.insert(0, '/fugue-components/"
-        f"{destination.parent.name}/site')\n"
-        f"from {module} import {function} as _entry\n"
-        "raise SystemExit(_entry())\n",
-        encoding="utf-8",
-    )
-    launcher.chmod(0o555)
-    _make_tree_read_only(destination)
+
+
+def _build_exact_git_wheel(source: str) -> tuple[str, Any]:
+    raw = source.removeprefix("git+")
+    url, separator, commit = raw.rpartition("@")
+    if (
+        not separator
+        or not _SHA_RE.fullmatch(commit)
+        or not _PYTHON_GIT_RE.fullmatch(source)
+    ):
+        raise ValueError("Python Git packages require an exact public GitHub commit")
+    temporary = Path(tempfile.mkdtemp(prefix="fugue-mcp-source-"))
+    checkout = temporary / "source"
+    wheels = temporary / "wheels"
+    try:
+        subprocess.run(
+            ["git", "clone", "--filter=blob:none", "--no-checkout", url, checkout],
+            check=True,
+            timeout=120,
+        )
+        subprocess.run(
+            ["git", "-C", checkout.as_posix(), "checkout", "--detach", commit],
+            check=True,
+            timeout=60,
+        )
+        resolved = subprocess.run(
+            ["git", "-C", checkout.as_posix(), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        if resolved != commit:
+            raise ValueError("Git MCP source did not resolve to the requested commit")
+        subprocess.run(
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--no-sources",
+                "--out-dir",
+                wheels.as_posix(),
+                checkout.as_posix(),
+            ],
+            check=True,
+            timeout=180,
+        )
+        built = sorted(wheels.glob("*.whl"))
+        if len(built) != 1:
+            raise ValueError("Git MCP source must build exactly one wheel")
+        return built[0].as_posix(), lambda: shutil.rmtree(temporary)
+    except Exception:
+        shutil.rmtree(temporary)
+        raise
 
 
 def _python_entrypoint(site: Path, executable: str) -> tuple[str, str]:
@@ -820,8 +948,9 @@ def _install_node_tool(package: str, executable: str, destination: Path) -> None
     launcher = bin_dir / "server"
     launcher.write_text(
         "#!/bin/sh\n"
-        f"exec node /fugue-components/{destination.parent.name}/package/"
-        f"node_modules/{package_name}/{PurePosixPath(relative).as_posix()} \"$@\"\n",
+        'root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\n'
+        f'exec node "$root/package/node_modules/{package_name}/'
+        f'{PurePosixPath(relative).as_posix()}" "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(0o555)
@@ -982,6 +1111,25 @@ def _validate_env_names(values: tuple[str, ...]) -> None:
     for name in values:
         if not _ENV_RE.fullmatch(name):
             raise ValueError(f"invalid MCP environment name: {name!r}")
+
+
+def _validate_allowed_hosts(values: tuple[str, ...]) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError("allowed MCP hosts must be unique")
+    for value in values:
+        if (
+            value != value.lower()
+            or "*" in value
+            or "://" in value
+            or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                value,
+            )
+        ):
+            raise ValueError(
+                f"allowed MCP hosts must be exact lowercase hostnames: {value!r}"
+            )
 
 
 def _is_env_reference(value: Any, name: str) -> bool:
