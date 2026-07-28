@@ -10,6 +10,7 @@ import webbrowser
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -817,24 +818,35 @@ def _comparison_demo(args: argparse.Namespace) -> int:
     )
 
     root = args.repo_root.resolve()
-    demo_root = root / "examples" / "comparisons" / "source-use-replay"
-    spec = load_comparison(demo_root / "comparison.yaml", repo_root=root)
-    preview = preview_comparison(
-        spec,
-        repo_root=root,
-        operator=OperatorService(root),
-    )
-    source_rows = [
-        json.loads(line)
-        for line in (demo_root / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    rows = score_comparison_rows(spec, source_rows, repo_root=root)
+    resource = files("fugue").joinpath("resources", "source-use-replay")
+    with as_file(resource) as extracted:
+        demo_root = Path(extracted)
+        spec = load_comparison(
+            demo_root / "comparison.yaml",
+            repo_root=demo_root,
+        )
+        preview = preview_comparison(
+            spec,
+            repo_root=demo_root,
+            operator=OperatorService(demo_root),
+        )
+        source_rows = [
+            json.loads(line)
+            for line in (demo_root / "attempts.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        rows = score_comparison_rows(
+            spec,
+            source_rows,
+            repo_root=demo_root,
+        )
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
         rows=rows,
-        source="immutable-replay",
+        source="bundled-replay",
     )
     destination = (
         args.out.resolve()

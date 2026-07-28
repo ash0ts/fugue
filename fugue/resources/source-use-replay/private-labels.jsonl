@@ -1,0 +1,4 @@
+{"base_output":{"amount":100,"source":"expense-policy-v3.md"},"expected":{"amount":125,"source":"expense-policy-v4.md"},"gold_output":{"amount":125,"source":"expense-policy-v4.md"},"id":"expense-limit"}
+{"base_output":{"days":45,"source":"vendor-contract-draft.md"},"expected":{"days":30,"source":"vendor-contract-v2.md"},"gold_output":{"days":30,"source":"vendor-contract-v2.md"},"id":"retention-window"}
+{"base_output":{"amount":500,"source":"equipment-policy-2025.md"},"expected":{"amount":750,"source":"equipment-policy-2026.md"},"gold_output":{"amount":750,"source":"equipment-policy-2026.md"},"id":"equipment-allowance"}
+{"base_output":{"minutes":60,"source":"incident-runbook-v2.md"},"expected":{"minutes":30,"source":"incident-runbook-v3.md"},"gold_output":{"minutes":30,"source":"incident-runbook-v3.md"},"id":"incident-escalation"}
