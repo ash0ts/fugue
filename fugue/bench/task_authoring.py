@@ -1523,6 +1523,8 @@ def run_inline_scorer(
             docker,
             "run",
             "--rm",
+            "--pull",
+            "never",
             "--network",
             "none",
             "--read-only",
@@ -1556,7 +1558,7 @@ def run_inline_scorer(
             raise ValueError("inline scorer output exceeds the configured limit")
         if completed.returncode != 0:
             raise RuntimeError(
-                "inline scorer failed: " + (completed.stderr or "unknown error")[-1000:]
+                f"inline scorer failed with exit code {completed.returncode}"
             )
         payload = json.loads(completed.stdout)
         if not isinstance(payload, dict):

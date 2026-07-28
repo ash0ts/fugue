@@ -25,6 +25,17 @@ outputs, tool results, artifacts, or error messages.
 
 - `fugue_study_preview`: resolve inline or locked tasks through the campaign
   catalog and return the exact matrix and conservative cost estimate.
+- Express an Agent-change comparison as one Taskset, one baseline, one candidate,
+  one evaluator set, and one execution policy. The Study draft may use an inline
+  public task suite, but private labels and scorer references must already be
+  registered on the Fugue side.
+- Treat MCP servers and Agent Skills as candidate components. Select only immutable
+  component digests returned by the catalog. Component import, dependency
+  resolution, and locking are operator preparation actions and are intentionally
+  unavailable through the Agent MCP surface.
+- Require the preview to reproduce intended baseline failures and known-good passes
+  before requesting approval. A zero-cell, saturated, drifted, or unqualified
+  comparison should stop with a readiness explanation.
 - Bind changed application code through an immutable candidate reference copied from
   the operator source catalog. A pinned but unregistered repository is not accepted.
 - `fugue_study_request_approval`: durably publish the exact preview and reserved
@@ -38,6 +49,11 @@ outputs, tool results, artifacts, or error messages.
   optional bounded long polling.
 - `fugue_study_cancel`: stop work without granting any new capability.
 - Read `fugue://research-studies/{id}/outcome` only after the Study is terminal.
+
+When interpreting the outcome, keep deterministic task pass, blind-judge
+dimensions, component mechanism evidence, infrastructure health, evidence
+reconciliation, latency, tokens, and observed cost separate. Do not average them
+into one opaque winner score.
 
 Never retry with a new idempotency key merely because a response was lost. Inspect the
 existing Study first.

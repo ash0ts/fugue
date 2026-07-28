@@ -259,6 +259,23 @@ calibration, and computes the exact attempt and cost bounds. It can answer
 `ready`, `needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
 unnecessary comparison does not run.
 
+Simple tasksets can be written as strict JSONL, built through
+`SimpleTasksetBuilder`, or imported from one immutable Weave Dataset:
+
+```bash
+uv run fugue taskset schema --destination schemas/fugue
+uv run fugue taskset import-weave \
+  --dataset 'weave:///ENTITY/PROJECT/object/TASKS:VERSION' \
+  --as source-use-holdout
+```
+
+Agent-visible task inputs and host-only labels remain different files. A
+custom deterministic scorer uses the stable
+`score(task, output, evidence) -> dict[str, bool | float]` interface and runs
+in Fugue's pinned, no-network scorer sandbox. Its declared dimensions are
+qualified against base and gold fixtures before spend; the private expected
+values never enter the Agent cell or Weave task inputs.
+
 Paid execution remains an explicit operator action tied to the immutable
 preview:
 
@@ -270,9 +287,11 @@ uv run fugue result latest
 ```
 
 The result separates deterministic task outcomes, blind-judge dimensions,
-mechanism evidence, infrastructure health, and evidence completeness. CI uses
-distinct exit codes for a passed gate (`0`), a completed regression (`1`), an
-invalid comparison (`2`), and incomplete required evidence (`3`).
+mechanism evidence, infrastructure health, and evidence completeness. Live
+comparison scores are attached to the attempt's existing Weave
+prediction-and-score call rather than published as a second prediction.
+CI uses distinct exit codes for a passed gate (`0`), a completed regression
+(`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:
@@ -286,10 +305,13 @@ uv run fugue skills import ./skills/verify-current-source
 uv run fugue skills lock verify-current-source
 ```
 
-Fugue imports only the selected component, strips secret values, resolves
-mutable package work during preparation, records a content-addressed lock, and
-mounts the reviewed runtime read-only into an isolated attempt. It never edits
-global Codex, Claude Code, MCP, or Skill configuration.
+Fugue imports only the selected component, strips secret values, resolves the
+exact source and dependency closure for the Harbor platform during
+preparation, records the tool manifest and built-wheel hashes in a
+content-addressed lock, and mounts that runtime read-only into an isolated
+attempt. Non-secret process settings may be locked explicitly; credentials
+remain runtime references. Fugue never edits global Codex, Claude Code, MCP,
+or Skill configuration.
 
 This remains a technical preview. The package is still named `fugue`; no new
 distribution or container is being released from this work.

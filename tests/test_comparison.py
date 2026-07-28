@@ -181,6 +181,18 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
     assert result.incomplete == 0
     assert result.judge_summary == {"status": "not_used"}
     assert result.deterministic_summary["candidate"]["passed"] == 6
+    assert result.operational_summary == {
+        "execution_states": {"unknown": 16},
+        "evidence_states": {"unknown": 16},
+        "infrastructure_failures": 0,
+        "observed_cost_usd": None,
+        "cost_rows": 0,
+        "latency_ms": None,
+        "latency_rows": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "usage_rows": 0,
+    }
 
 
 def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -> None:
@@ -224,7 +236,7 @@ def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -
     raw["taskset"] = {"tasks": "tasks.jsonl", "private_labels": "labels.jsonl"}
     spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
 
-    _, _, public = compile_comparison(spec, repo_root=tmp_path)
+    experiment, manifest, public = compile_comparison(spec, repo_root=tmp_path)
 
     assert public[0]["attachments"] == [
         {
@@ -234,6 +246,14 @@ def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -
         }
     ]
     assert "@sha256:" in public[0]["environment"]["base_image"]
+    evaluator_digest = next(
+        iter(check_comparison(spec, repo_root=tmp_path).evaluator_digests.values())
+    )
+    assert manifest["tasks"][0]["metadata"]["task_authoring"]["profile_digests"] == {
+        "comparison-evaluator:fact-and-source": evaluator_digest
+    }
+    assert experiment.research_view is not None
+    assert experiment.research_view.scorers[0].revision == evaluator_digest
 
 
 def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> None:
@@ -355,6 +375,89 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
         copied.unlink(missing_ok=True)
 
 
+def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    scorer_path = root / ".fugue" / "test-comparison-scorer.py"
+    scorer_path.parent.mkdir(parents=True, exist_ok=True)
+    scorer_path.write_text(
+        "def score(task, output, evidence):\n"
+        "    return {'fact_correct': output == evidence['expected']}\n"
+    )
+    observed: dict[str, object] = {}
+
+    def fake_runner(*, source, evidence, reference, profile, limits):
+        observed.update(
+            source=source,
+            evidence=evidence,
+            reference=reference,
+            profile=profile,
+            limits=limits,
+        )
+        passed = reference["output"] == reference["expected"]
+        return {
+            "score": 1.0 if passed else 0.0,
+            "reason": "custom deterministic scorer",
+            "details": {"fact_correct": passed},
+        }
+
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer", fake_runner
+    )
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    evaluator = replace(
+        spec.evaluators[0],
+        checks=(),
+        scorer=scorer_path.relative_to(root).as_posix(),
+        runtime="python312-sandbox-v1",
+        dimensions=("fact_correct",),
+    )
+    custom = replace(spec, evaluators=(evaluator,))
+    try:
+        rows = score_comparison_rows(
+            custom,
+            [
+                {
+                    "task_id": "expense-limit",
+                    "variant_id": "candidate",
+                    "harness": "codex",
+                    "trial_index": 1,
+                    "answer": {
+                        "amount": 125,
+                        "source": "expense-policy-v4.md",
+                    },
+                }
+            ],
+            repo_root=root,
+        )
+    finally:
+        scorer_path.unlink(missing_ok=True)
+
+    assert rows[0]["pass"] is True
+    assert rows[0]["comparison_deterministic_scores"] == {
+        "fact-and-source.fact_correct": True
+    }
+    assert observed["reference"] == {
+        "task": {
+            "id": "expense-limit",
+            "input": {
+                "question": (
+                    "Return JSON containing the current expense amount "
+                    "and its source."
+                )
+            },
+            "resources": [],
+            "tags": ["policy"],
+            "partition": "holdout",
+        },
+        "output": {"amount": 125, "source": "expense-policy-v4.md"},
+        "expected": {"amount": 125, "source": "expense-policy-v4.md"},
+    }
+    assert observed["evidence"] == {}
+    assert "--network" not in str(observed["source"])
+
+
 def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -436,6 +539,17 @@ def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:
     destination = tmp_path / "comparison"
     scaffold_comparison(destination)
     assert (destination / "comparison.yaml").is_file()
-    assert (destination / "skills/verify-current-source/SKILL.md").is_file()
+    assert (
+        destination
+        / "configs/fugue/skills/verify-current-source/SKILL.md"
+    ).is_file()
+    spec = load_comparison(
+        destination / "comparison.yaml",
+        repo_root=destination,
+    )
+    preview = preview_comparison(spec, repo_root=destination)
+    assert preview.readiness["status"] == "ready"
+    assert preview.matrix["estimated_trials"] == 4
+    assert not (destination / ".fugue").exists()
     with pytest.raises(FileExistsError, match="non-empty"):
         scaffold_comparison(destination)
