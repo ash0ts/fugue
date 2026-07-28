@@ -1,0 +1,45 @@
+schema_version: 1
+id: wandb-mcp-maintenance-discovery-v1
+question: Does the exact 0.4 candidate change how Agents investigate the discovery cohort compared with the exact 0.3.7 baseline?
+taskset:
+  tasks: discovery-tasks.jsonl
+  private_labels: discovery-private-labels.jsonl
+baseline:
+  label: W&B MCP 0.3.7 exact revision
+  integrations: [wandb-mcp-0-3-7]
+candidate:
+  label: W&B MCP 0.4 candidate exact revision
+  integrations: [wandb-mcp-0-4]
+changed: [integrations]
+evaluators:
+  - id: maintenance-facts
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+  - id: maintainer-quality
+    type: llm_judge
+    required: true
+    profile: wandb/openai/gpt-oss-120b
+    calibration: judge-calibration.json
+    rubric: >-
+      Score only evidence grounding, usefulness to a maintainer, prioritization
+      and actionability, and calibration about incomplete investigation. A
+      confident completeness claim without inspected support is a critical
+      failure. Do not reward verbosity or familiarity with a particular MCP
+      revision.
+    dimensions:
+      - evidence_grounding
+      - maintainer_usefulness
+      - prioritization
+      - uncertainty_calibration
+    evidence: [tool_names]
+    reserve_cost_usd: 0.10
+execution:
+  model: wandb/zai-org/GLM-5.2
+  harnesses: [codex, claude-code]
+  attempts: 1
+  concurrency: 1
+  max_cost_usd: 40
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  trace_content: full
