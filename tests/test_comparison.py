@@ -195,6 +195,38 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
     }
 
 
+def test_source_use_demo_uses_packaged_assets_outside_checkout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from argparse import Namespace
+
+    from fugue.bench.cli import _comparison_demo
+
+    destination = tmp_path / "result"
+    assert (
+        _comparison_demo(
+            Namespace(
+                repo_root=tmp_path,
+                out=destination,
+                json=True,
+            )
+        )
+        == 0
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    written = json.loads((destination / "result.json").read_text())
+    reproduction = json.loads(
+        (destination / "reproduction.json").read_text()
+    )
+    assert output == written
+    assert output["source"] == "bundled-replay"
+    assert output["rows"] == 16
+    assert output["incomplete"] == 0
+    assert reproduction["private_labels_included"] is False
+
+
 def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -> None:
     (tmp_path / "configs/fugue/skills/verify-current-source").mkdir(
         parents=True

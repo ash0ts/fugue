@@ -85,7 +85,14 @@ conflicts = [
 include = ["fugue*", "tools*"]
 
 [tool.setuptools.package-data]
-fugue = ["resources/agent-skills/**/*.md", "resources/agent-skills/**/*.yaml"]
+fugue = [
+    "resources/agent-skills/**/*.md",
+    "resources/agent-skills/**/*.yaml",
+    "resources/source-use-replay/*.jsonl",
+    "resources/source-use-replay/*.yaml",
+    "resources/source-use-replay/configs/fugue/context-systems/*.yaml",
+    "resources/source-use-replay/configs/fugue/skills/*/*.md",
+]
 
 [tool.ruff]
 line-length = 88
