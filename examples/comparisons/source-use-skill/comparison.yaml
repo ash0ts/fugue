@@ -1,0 +1,26 @@
+schema_version: 1
+id: source-use-skill-v1
+question: Does a reviewed source-verification Skill improve use of the current authoritative document?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Current Agent
+candidate:
+  label: Current Agent + verify-current-source Skill
+  skills: [verify-current-source]
+changed: [skills]
+evaluators:
+  - id: current-source-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: wandb/zai-org/GLM-5.2
+  harnesses: [codex]
+  attempts: 2
+  concurrency: 1
+  max_cost_usd: 40
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  trace_content: full
