@@ -77,6 +77,7 @@ def test_runtime_build_context_uses_frozen_lock_and_locked_agent_id(
     assert "uv sync --frozen --no-dev --no-editable" in dockerfile
     assert "FROM fugue-agent-claude-code:locked AS agent-runtime" in dockerfile
     assert "python -m pip install --no-cache-dir /fugue-src" not in dockerfile
+    assert "curl git jq procps ripgrep" not in dockerfile
     assert {item["kind"] for item in assets} == {
         "fugue-source",
         "dependency-lock",

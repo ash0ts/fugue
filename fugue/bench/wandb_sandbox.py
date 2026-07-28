@@ -1013,7 +1013,7 @@ def _write_build_context(
         f"FROM {agent_image} AS agent-runtime\n"
         f"FROM {_BASE_IMAGE}\n"
         "RUN apt-get update && apt-get install -y --no-install-recommends "
-        "bash ca-certificates curl git jq procps ripgrep && "
+        "bash ca-certificates && "
         "rm -rf /var/lib/apt/lists/*\n"
         f"COPY --from=agent-runtime {AGENT_RUNTIME_MOUNT} {AGENT_RUNTIME_MOUNT}\n"
         "COPY --from=fugue-builder /fugue-src /fugue-src\n"
