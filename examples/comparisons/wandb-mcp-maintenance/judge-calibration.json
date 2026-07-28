@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "review_status": "pending_human_review",
+  "reviewers_per_example": 0,
+  "disagreements_adjudicated": false,
+  "judge_profile": "wandb/openai/gpt-oss-120b",
+  "rubric_digest": null,
+  "examples": 0,
+  "true_positive_rate": 0.0,
+  "true_negative_rate": 0.0,
+  "critical_false_passes": 0,
+  "note": "Paid execution stays blocked until 48 balanced examples are double-reviewed, disagreements are adjudicated, and the locked rubric passes its thresholds."
+}

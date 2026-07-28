@@ -91,7 +91,8 @@ jobs:
           tests/test_research_service.py tests/test_research_transports.py
           tests/test_research_agent_interface.py tests/test_research_records.py
           tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
-          tests/test_experiment_views.py
+          tests/test_experiment_views.py tests/test_comparison.py
+          tests/test_component_imports.py
 
   quality:
     name: Quality, build, and command smoke
@@ -131,6 +132,8 @@ jobs:
           uv run fugue run pilot --preview --json
           uv run fugue runs --json
           uv run fugue research --help
+          uv run fugue check examples/comparisons/source-use-skill/comparison.yaml
+          uv run fugue demo source-use --out /tmp/fugue-source-use-replay --json
       - name: Render README Mermaid diagrams
         run: >-
           npx --yes -p @mermaid-js/mermaid-cli@11.16.0
