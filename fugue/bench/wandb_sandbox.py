@@ -177,9 +177,10 @@ def build_wandb_runtime(
             )
         runtime = agent_runtime_spec(harness)
         assert runtime is not None
-        local_image = str(agent_lock.get("image_id") or "")
+        local_image = str(agent_lock.get("image") or "")
+        locked_image_id = str(agent_lock.get("image_id") or "")
         inspected = _inspect_image(local_image)
-        if inspected.get("Id") != local_image:
+        if inspected.get("Id") != locked_image_id:
             raise RuntimeError(f"{harness} Agent runtime image drifted from its lock")
         target = _harness_image_tag(image, harness)
         with tempfile.TemporaryDirectory(
@@ -191,6 +192,7 @@ def build_wandb_runtime(
                 repo_root=root,
                 harness=harness,
                 agent_image=local_image,
+                agent_image_id=locked_image_id,
                 integrations=integrations,
             )
             metadata = context / "build-metadata.json"
@@ -936,6 +938,7 @@ def _write_build_context(
     repo_root: Path,
     harness: str,
     agent_image: str,
+    agent_image_id: str,
     integrations: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, str]]:
     source = context / "source"
@@ -968,7 +971,7 @@ def _write_build_context(
     assets.append(
         {
             "kind": "agent-runtime",
-            "source": agent_image,
+            "source": agent_image_id,
             "target": AGENT_RUNTIME_MOUNT,
             "sha256": agent_digest,
         }
