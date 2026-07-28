@@ -1,9 +1,9 @@
 schema_version: 1
-id: wandb-mcp-maintenance-primary-v1
-question: Does the exact 0.4 candidate improve Claude's evidence investigation and maintenance recommendations compared with the exact 0.3.7 baseline?
+id: wandb-mcp-maintenance-discovery-wandb-v1
+question: Does the exact 0.4 candidate change how a W&B Inference Agent investigates the frozen discovery evidence compared with the exact 0.3.7 baseline?
 taskset:
-  tasks: tasks.jsonl
-  private_labels: private-labels.jsonl
+  tasks: discovery-tasks.jsonl
+  private_labels: discovery-private-labels.jsonl
 baseline:
   label: W&B MCP 0.3.7 exact revision
   integrations: [wandb-mcp-0-3-7]
@@ -35,11 +35,11 @@ evaluators:
     evidence: [tool_names]
     reserve_cost_usd: 0.10
 execution:
-  model: anthropic/claude-sonnet-5
-  harnesses: [claude-code]
-  attempts: 2
+  model: wandb/deepseek-ai/DeepSeek-V4-Flash
+  harnesses: [openclaw]
+  attempts: 1
   concurrency: 1
-  max_cost_usd: 80
+  max_cost_usd: 20
   reserve_per_attempt_usd: 1.25
   approval_required: true
   trace_content: full

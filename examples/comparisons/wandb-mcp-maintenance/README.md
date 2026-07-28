@@ -1,56 +1,82 @@
-# W&B MCP release-maintenance comparison
+# W&B MCP release-maintenance qualification
 
-This is the advanced Fugue technical-preview example. It asks a real
-maintenance question:
+This is the real-evidence Fugue qualification workflow:
 
-> Does the exact W&B MCP 0.4 candidate improve how an Agent investigates W&B
-> evidence compared with the exact 0.3.7 baseline?
+> Does the exact W&B MCP 0.4 revision improve how an Agent investigates
+> bounded W&B and Weave maintenance evidence compared with exact 0.3.7?
 
-It is a comparison of two complete Agent candidates, not a special “MCP eval”
-mode. The model, task, prompt base, runtime, and harness are fixed. Only the
-locked MCP integration revision changes.
+It compares two complete Agent candidates. The task, model, harness, runtime,
+attempt policy, and evidence snapshot are fixed inside each comparison. Only
+the locked MCP integration revision changes.
 
-No result is checked in and no paid run has been performed under this example.
-The current judge calibration is deliberately marked pending. `fugue check`
-must block paid execution until a real 48-example, double-reviewed calibration
-passes.
+The active path uses:
 
-## Evidence project
+- W&B Serverless Sandboxes through Harbor's `wandb` environment;
+- W&B API and W&B Inference credentials;
+- Anthropic credentials for Claude Code and the blind judge;
+- `anthropic/claude-sonnet-5` for Claude discovery and primary;
+- `wandb/deepseek-ai/DeepSeek-V4-Flash` for OpenClaw discovery and
+  replication.
 
-The tasks target the coherent demo project:
+It does not require CoreWeave or OpenAI. Local Harbor is the behavioral parity
+baseline; W&B Serverless is the remote execution policy.
 
-`ashah-weights-biases/loop-engineering-demo`
+## Real hosted evidence
 
-Before running, that project must contain the immutable demo evidence described
-in the task labels: six W&B Runs, 24 source conversations, eight evaluated
-Agent attempts, a Weave Dataset, and a Weave Evaluation. Use the existing
-loop-engineering demo seeder; do not edit labels to match an incomplete
-workspace.
+The immutable lock in `evidence.lock.json` points to the dedicated,
+non-sensitive hosted project:
 
-Set the local evidence endpoint and key without writing either value into an
-MCP declaration:
+`wandb/fugue-mcp-release-qualification-v1`
+
+The checked-in lock contains:
+
+- six genuine W&B Runs with configuration, three-step histories, summaries,
+  and versioned evidence artifacts;
+- 24 standardized Weave Agent conversations and 48 tool spans;
+- one versioned eight-row Weave Dataset;
+- two versioned Weave Evaluations with eight aligned rows each;
+- 16 Evaluation prediction rows;
+- one observed latency anomaly, one missing-cost case, and one deliberately
+  incomplete-evaluation case.
+
+These deterministic objects are seeded prior evidence for investigating the
+MCP behavior. They are not the result of the MCP comparison and are not
+customer data.
+
+Recreate or validate the snapshot idempotently:
 
 ```bash
-export WANDB_BASE_URL=https://api.wandb.test
-export WANDB_API_KEY
+uv sync --python 3.13 --frozen --extra dev --extra research-worker
+
+uv run python \
+  examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
+  --project wandb/fugue-mcp-release-qualification-v1 \
+  --env-file /Users/ashah/Documents/common_tools/.env \
+  --output \
+  examples/comparisons/wandb-mcp-maintenance/evidence.lock.json
 ```
 
-Cloud Agent and judge inference remain separately routed and billed by Fugue’s
-normal inference configuration.
+The preparation command loads only the required W&B value into its child
+process and never writes a credential into the lock. An existing lock must
+validate exactly before it is reused. Drift in counts, versions, seed identity,
+or content is an error; do not edit private labels to match drifted data.
 
-## Import ordinary MCP configurations
+## Import and lock exact MCP revisions
 
-The included `mcp.json` is a normal `mcpServers` document. Each selected server
-is pinned to one full Git commit:
+The ordinary `mcp.json` declaration pins:
 
-- 0.3.7 baseline:
-  `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`
-- 0.4 candidate:
-  `a2bae7271323ac43262ffb73454b0aff01ddc808`
+- 0.3.7: `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`
+- 0.4: `a2bae7271323ac43262ffb73454b0aff01ddc808`
 
-Import and inspect only those two declarations:
+Load credentials into the trusted operator shell without printing them. The
+declaration references environment variable names only:
 
 ```bash
+set -a
+source /Users/ashah/Documents/common_tools/.env
+set +a
+export WANDB_BASE_URL=https://api.wandb.ai
+
 uv run fugue mcp import \
   --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
   --server wandb-0-3-7 \
@@ -63,111 +89,96 @@ uv run fugue mcp import \
 
 uv run fugue mcp inspect wandb-mcp-0-3-7
 uv run fugue mcp inspect wandb-mcp-0-4
-```
 
-Locking explicitly acknowledges that preparation executes package code. Fugue
-checks out the exact revision, honors its dependency lock, builds any missing
-wheels inside the pinned target-platform Python image, initializes the MCP
-server in an isolated probe, captures its tool schemas, and materializes a
-read-only runtime. The checked-in `MCP_ANALYTICS_LOG_STREAM=stderr` setting is
-public process configuration, not a credential; it keeps stdio JSON-RPC clean
-and is part of both candidate locks:
-
-```bash
 uv run fugue mcp lock wandb-mcp-0-3-7 \
   --acknowledge-package-code
 uv run fugue mcp lock wandb-mcp-0-4 \
   --acknowledge-package-code
 ```
 
-The resulting Harbor attempts use the prepared runtime. They do not run `uvx`,
-clone Git repositories, install packages, or edit a user-global Agent
-configuration.
+The lock operation prepares the exact target-platform MCP runtime and captures
+its initialized tool manifest. Agent attempts do not clone repositories or
+install MCP package code.
 
 ## Calibrate the blind judge
 
-Deterministic facts are the primary gate. The blind judge separately measures:
+`judge-calibration-cases.jsonl` contains 48 authored, balanced examples: 24
+passes and 24 failures, including critical unsupported-completeness failures.
+Authored references are not human reviews.
 
-- evidence grounding;
-- usefulness to a maintainer;
-- prioritization and actionability;
-- calibration about incomplete investigation.
-
-The judge sees the public task, final response, permitted tool names, and public
-rubric. It does not see the MCP revision, baseline/candidate identity, harness,
-deterministic result, private expected values, receipts, or internal IDs.
-
-Replace `judge-calibration-cases.jsonl` with 48 balanced reviewed examples.
-Every example needs two reviewers; disagreements must be adjudicated. Then
-write the measured confusion matrix and locked rubric digest to
-`judge-calibration.json`. Required thresholds are:
-
-- at least 0.85 true-positive rate;
-- at least 0.85 true-negative rate;
-- zero false passes on critical unsupported-completeness examples.
-
-Until that is true, this is the expected result:
+Each example requires two distinct human reviewers. Disagreements require
+adjudication. Add the blinded judge result, then regenerate the report:
 
 ```bash
-uv run fugue check \
-  examples/comparisons/wandb-mcp-maintenance/discovery.yaml
-# Status: blocked — calibration is not adjudicated
+uv run python \
+  examples/comparisons/wandb-mcp-maintenance/validate_judge_calibration.py \
+  --cases \
+  examples/comparisons/wandb-mcp-maintenance/judge-calibration-cases.jsonl \
+  --report \
+  examples/comparisons/wandb-mcp-maintenance/judge-calibration.json
 ```
 
-This is intentional. A plausible rubric is not the same thing as a calibrated
-evaluator.
+Paid execution remains blocked until the report has:
 
-## Run the study in stages
+- 48 reviewed examples and two reviewers per example;
+- adjudication for every disagreement;
+- true-positive and true-negative rates of at least 0.85;
+- zero false passes on critical unsupported-completeness cases.
 
-Once the imported integrations and judge are qualified:
+## Exact 80-cell study
+
+The full staged study is:
+
+| Stage | Agent route | Tasks × revisions × attempts | Cells |
+|---|---|---:|---:|
+| Claude discovery | Claude Code + Anthropic Sonnet 5 | 4 × 2 × 1 | 8 |
+| W&B discovery | OpenClaw + W&B DeepSeek V4 Flash | 4 × 2 × 1 | 8 |
+| Claude primary | Claude Code + Anthropic Sonnet 5 | 8 × 2 × 2 | 32 |
+| W&B replication | OpenClaw + W&B DeepSeek V4 Flash | 8 × 2 × 2 | 32 |
+| Total | two direct provider routes | | 80 |
+
+Preview and approve each immutable digest separately:
 
 ```bash
-# Four discovery tasks × two revisions × two harnesses × one attempt = 16
 uv run fugue compare \
   examples/comparisons/wandb-mcp-maintenance/discovery.yaml \
   --preview
-```
 
-Use discordant discovery traces to write a maintainer note. Do not change the
-holdout tasks or scorer from discovery observations.
+uv run fugue compare \
+  examples/comparisons/wandb-mcp-maintenance/discovery-wandb.yaml \
+  --preview
 
-The primary confirmation is:
-
-```bash
-# Eight holdouts × two revisions × Codex × two attempts = 32
 uv run fugue compare \
   examples/comparisons/wandb-mcp-maintenance/primary.yaml \
   --preview
-```
 
-Approve only the exact returned digest in a trusted terminal:
-
-```bash
-uv run fugue approve PREVIEW_DIGEST --max-usd 80 --max-cells 32
 uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/primary.yaml \
-  --run --approval APPROVAL_DIGEST
-```
-
-Only after interpreting the Codex primary should the separate Claude Code
-replication be previewed. Never pool away a harness reversal:
-
-```bash
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/claude-replication.yaml \
+  examples/comparisons/wandb-mcp-maintenance/wandb-replication.yaml \
   --preview
 ```
 
-## Read the result
+Use each preview's exact digest with `fugue approve`, including an explicit
+cell and dollar cap, before `fugue compare --run --approval ...`. Do not pool
+away a reversal between Claude and the W&B Inference Agent.
+
+The full study remains blocked until judge calibration, both MCP runtime locks,
+W&B Serverless organization access, and the public runtime-image lock pass.
+The current credential can prepare W&B/Weave evidence, but the organization
+must separately enable Serverless Sandboxes.
+
+## Evidence and claims
 
 Fugue reports four layers separately:
 
-1. MCP preparation and infrastructure conformance.
-2. Deterministic task pass.
-3. Blind-judge quality dimensions.
-4. Tool behavior, trace links, latency, tokens, and available observed cost.
+1. MCP initialization and infrastructure conformance.
+2. Deterministic task outcomes.
+3. Calibrated blind-judge dimensions.
+4. Mechanism evidence: selected tools, projected and broad reads, sources
+   returned/opened/used, structured errors, latency, tokens, observed cost,
+   traces, and Evaluation reconciliation.
 
-It does not average them into one quality number. A missing required judge
-returns CI exit code `3`; it never turns a completed Agent attempt into a task
-failure. A null difference is not evidence that the two revisions are
-equivalent.
+The study may support a whole-release recommendation only within the locked
+models, Agents, tasks, attempts, runtimes, and dates. It may not attribute an
+outcome to an individual MCP feature. A null or harness-reversing result is
+valid but not presentation-ready, and missing required evidence is exit code
+`3`, never a zero score.
