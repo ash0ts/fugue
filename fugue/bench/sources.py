@@ -523,6 +523,11 @@ def resolve_skill(skill_id: str, repo_root: Path) -> ResolvedSkill:
             digest=digest,
             license_status="project-owned",
         )
+    from fugue.bench.component_imports import resolve_imported_skill
+
+    imported = resolve_imported_skill(skill_id, repo_root)
+    if imported is not None:
+        return imported
     spec = load_skill_source(skill_id, repo_root)
     entry = load_skill_lock(repo_root).get(skill_id)
     if entry is None:

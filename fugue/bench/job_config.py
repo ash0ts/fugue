@@ -639,6 +639,11 @@ def _job_config(
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in integration_binding.compose_files],
         ]
+    if integration_binding.mounts:
+        environment["mounts"] = [
+            *environment.get("mounts", []),
+            *integration_binding.mounts,
+        ]
     selected_mcp_servers = [
         *context_binding.mcp_servers,
         *integration_binding.mcp_servers,
