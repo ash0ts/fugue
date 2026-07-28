@@ -41,7 +41,11 @@ from fugue.research.display_labels import (
 )
 from fugue.research.records import ResearchRecordPublisher
 from fugue.research.store import StudyStore
-from fugue.research.task_recipes import TaskRecipeService, validate_recipe_binding
+from fugue.research.task_recipes import (
+    TaskRecipeService,
+    reviewed_task_recipe_ids,
+    validate_recipe_binding,
+)
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
 
 _RUN_TERMINAL = frozenset({"passed", "failed", "cancelled", "interrupted"})
@@ -168,6 +172,7 @@ class ResearchService:
             "campaign": self.campaign.catalog(study.campaign_id).to_dict(),
             "trace_sources": list(self.trace_registry.catalog()),
             "candidate_sources": list(self.candidate_sources.catalog()),
+            "task_recipes": list(reviewed_task_recipe_ids()),
         }
 
     def request_study_approval(

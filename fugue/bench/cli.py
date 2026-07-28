@@ -74,7 +74,6 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = _normalize_runs_argv(raw_argv)
     parser = _parser()
     args = parser.parse_args(raw_argv)
-    args._raw_argv = raw_argv
     if args.command is None:
         return _command_center(parser)
     return int(args.handler(args))

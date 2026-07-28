@@ -114,9 +114,8 @@ jobs:
       - run: uv run ruff check .
       - name: Reject high-confidence dead production code
         run: uv run vulture fugue --min-confidence 80
-      - name: Report advisory dead-code candidates
-        continue-on-error: true
-        run: uv run vulture fugue --min-confidence 60
+      - name: Reject unreviewed 60%-confidence dead production code
+        run: uv run vulture fugue vulture_whitelist.py --min-confidence 60
       - name: Validate dependency declarations
         run: uv run deptry fugue
       - name: Compile with warnings as errors

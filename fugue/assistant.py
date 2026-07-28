@@ -62,7 +62,6 @@ class AssistantResponse:
     text: str
     tool_calls: tuple[AssistantToolCall, ...] = ()
     usage: AssistantUsage = field(default_factory=AssistantUsage)
-    raw_id: str | None = None
     finish_reason: str | None = None
 
 
@@ -559,7 +558,6 @@ def _parse_chat(body: dict[str, Any]) -> AssistantResponse:
         text=str(message.get("content") or ""),
         tool_calls=calls,
         usage=AssistantUsage(usage.get("prompt_tokens"), usage.get("completion_tokens")),
-        raw_id=body.get("id"),
         finish_reason=choice.get("finish_reason"),
     )
 
@@ -584,7 +582,6 @@ def _parse_responses(body: dict[str, Any]) -> AssistantResponse:
         text="\n".join(texts),
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
-        raw_id=body.get("id"),
         finish_reason=(body.get("incomplete_details") or {}).get("reason")
         or body.get("status"),
     )
@@ -609,7 +606,6 @@ def _parse_messages(body: dict[str, Any]) -> AssistantResponse:
         text="\n".join(texts),
         tool_calls=tuple(calls),
         usage=AssistantUsage(usage.get("input_tokens"), usage.get("output_tokens")),
-        raw_id=body.get("id"),
         finish_reason=body.get("stop_reason"),
     )
 

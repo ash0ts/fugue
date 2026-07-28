@@ -16,7 +16,6 @@ _INITIALIZED_PROJECTS: set[str] = set()
 _LOCK = Lock()
 
 WEAVE_AGENTS_BASE_URL = "https://trace.wandb.ai"
-WEAVE_AGENTS_OTEL_ENDPOINT = f"{WEAVE_AGENTS_BASE_URL}/agents/otel/v1/traces"
 DEFAULT_WANDB_BASE_URL = "https://api.wandb.ai"
 
 
