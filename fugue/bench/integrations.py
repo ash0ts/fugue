@@ -14,6 +14,8 @@ import yaml
 from fugue.bench.library import IntegrationSelection
 
 INTEGRATION_ROOT = Path("configs") / "fugue" / "integrations"
+IMPORTED_INTEGRATION_ROOT = Path(".fugue") / "imports" / "integrations"
+MANAGED_MCP_RUNTIME_ROOT = Path(".fugue") / "runtime" / "mcp"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SUPPORT_LEVELS = {"supported", "experimental", "not_applicable", "disabled"}
@@ -28,6 +30,8 @@ class IntegrationRuntime:
     port: int | None = None
     url: str | None = None
     command: tuple[str, ...] = ()
+    source: str | None = None
+    digest: str | None = None
     healthcheck: dict[str, Any] = field(default_factory=dict)
     resources: dict[str, Any] = field(default_factory=dict)
 
@@ -68,6 +72,7 @@ class IntegrationBinding:
     identity: tuple[dict[str, Any], ...] = ()
     mcp_servers: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
+    mounts: tuple[dict[str, Any], ...] = ()
     instruction_paths: tuple[Path, ...] = ()
     artifacts: tuple[dict[str, Any], ...] = ()
     env: dict[str, str] = field(default_factory=dict)
@@ -79,9 +84,19 @@ class IntegrationBinding:
 
 def load_integration(integration_id: str, repo_root: Path) -> IntegrationSpec:
     _validate_id(integration_id, "integration id")
-    path = repo_root / INTEGRATION_ROOT / f"{integration_id}.yaml"
-    if not path.is_file():
+    paths = [
+        repo_root / INTEGRATION_ROOT / f"{integration_id}.yaml",
+        repo_root / IMPORTED_INTEGRATION_ROOT / f"{integration_id}.yaml",
+    ]
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
         raise FileNotFoundError(f"integration not found: {integration_id}")
+    if len(existing) > 1:
+        raise ValueError(
+            f"integration {integration_id!r} is defined by both the repository "
+            "and an imported lock"
+        )
+    path = existing[0]
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: integration must be a mapping")
@@ -184,10 +199,17 @@ def declared_mcp_servers(
 
 
 def list_integrations(repo_root: Path) -> list[IntegrationSpec]:
-    root = repo_root / INTEGRATION_ROOT
-    if not root.is_dir():
-        return []
-    return [load_integration(path.stem, repo_root) for path in sorted(root.glob("*.yaml"))]
+    ids: list[str] = []
+    for relative_root in (INTEGRATION_ROOT, IMPORTED_INTEGRATION_ROOT):
+        root = repo_root / relative_root
+        if root.is_dir():
+            ids.extend(path.stem for path in sorted(root.glob("*.yaml")))
+    duplicates = sorted({value for value in ids if ids.count(value) > 1})
+    if duplicates:
+        raise ValueError(
+            "repository and imported integration ids collide: " + ", ".join(duplicates)
+        )
+    return [load_integration(value, repo_root) for value in sorted(ids)]
 
 
 def bind_integrations(
@@ -205,6 +227,7 @@ def bind_integrations(
     ids: list[str] = []
     servers: list[dict[str, Any]] = []
     compose_files: list[Path] = []
+    mounts: list[dict[str, Any]] = []
     instruction_paths: list[Path] = []
     artifacts: list[dict[str, Any]] = []
     binding_env: dict[str, str] = {}
@@ -277,6 +300,28 @@ def bind_integrations(
         allowed_hosts.extend(spec.allowed_hosts)
         instruction_paths.extend(selected_instruction_paths)
         artifacts.extend(spec.artifacts)
+        if spec.runtime.type == "managed":
+            assert spec.runtime.source and spec.runtime.digest
+            source = (repo_root / spec.runtime.source).resolve()
+            expected_root = (repo_root / MANAGED_MCP_RUNTIME_ROOT).resolve()
+            if expected_root not in source.parents:
+                raise ValueError(
+                    f"integration {spec.id}: managed runtime escaped {expected_root}"
+                )
+            actual_digest = _directory_digest(source)
+            if actual_digest != spec.runtime.digest:
+                raise ValueError(
+                    f"integration {spec.id}: managed runtime digest changed"
+                )
+            mounts.append(
+                {
+                    "type": "bind",
+                    "source": source.as_posix(),
+                    "target": f"/fugue-components/{spec.id}",
+                    "read_only": True,
+                    "bind": {"create_host_path": False},
+                }
+            )
         for interface in spec.interfaces:
             if interface.name in names:
                 raise ValueError(f"duplicate integration interface name: {interface.name}")
@@ -314,6 +359,7 @@ def bind_integrations(
         identity=tuple(identities),
         mcp_servers=tuple(servers),
         compose_files=tuple(compose_files),
+        mounts=tuple(mounts),
         instruction_paths=tuple(instruction_paths),
         artifacts=tuple(artifacts),
         env=binding_env,
@@ -380,18 +426,24 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
         "port",
         "url",
         "command",
+        "source",
+        "digest",
         "healthcheck",
         "resources",
     }
     _reject_unknown(raw, allowed, path, "runtime")
     runtime_type = str(raw.get("type") or "")
-    if runtime_type not in {"compose", "external", "builtin"}:
-        raise ValueError(f"{path}: runtime.type must be compose, external, or builtin")
+    if runtime_type not in {"compose", "external", "builtin", "managed"}:
+        raise ValueError(
+            f"{path}: runtime.type must be compose, external, builtin, or managed"
+        )
     image = str(raw["image"]) if raw.get("image") else None
     service = str(raw.get("service") or "") or None
     port = int(raw["port"]) if raw.get("port") is not None else None
     url = str(raw["url"]) if raw.get("url") else None
     command = tuple(_string_list(raw.get("command")))
+    source = str(raw["source"]) if raw.get("source") else None
+    digest = str(raw["digest"]) if raw.get("digest") else None
     if any(not item.strip() for item in command):
         raise ValueError(f"{path}: runtime command entries may not be empty")
     healthcheck = _healthcheck(raw.get("healthcheck"), path)
@@ -413,12 +465,40 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
             raise ValueError(
                 f"{path}: external runtime accepts only type and url fields"
             )
-    else:
+    elif runtime_type == "builtin":
         if not command:
             raise ValueError(f"{path}: builtin runtime requires a reviewed command")
-        if any((image, service, port, url, healthcheck, resources)):
+        if any((image, service, port, url, healthcheck, resources, source, digest)):
             raise ValueError(
                 f"{path}: builtin runtime accepts only type and command fields"
+            )
+    else:
+        if not source or not digest or not command:
+            raise ValueError(
+                f"{path}: managed runtime requires source, digest, and command"
+            )
+        relative = PurePosixPath(source)
+        expected = PurePosixPath(MANAGED_MCP_RUNTIME_ROOT)
+        if (
+            relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.parts[: len(expected.parts)] != expected.parts
+        ):
+            raise ValueError(
+                f"{path}: managed runtime source must be under {MANAGED_MCP_RUNTIME_ROOT}"
+            )
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ValueError(f"{path}: managed runtime digest must be sha256-pinned")
+        expected_prefix = f"/fugue-components/{PurePosixPath(path).stem}/"
+        if not PurePosixPath(command[0]).is_absolute() or not command[0].startswith(
+            expected_prefix
+        ):
+            raise ValueError(
+                f"{path}: managed command must be inside {expected_prefix}"
+            )
+        if any((image, service, port, url, healthcheck, resources)):
+            raise ValueError(
+                f"{path}: managed runtime accepts only type, source, digest, and command"
             )
     return IntegrationRuntime(
         type=runtime_type,
@@ -427,6 +507,8 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
         port=port,
         url=url,
         command=command,
+        source=source,
+        digest=digest,
         healthcheck=dict(healthcheck),
         resources=dict(resources),
     )
@@ -518,7 +600,7 @@ def _validate_runtime_interfaces(
         elif runtime.type == "external":
             if interface.transport == "stdio":
                 raise ValueError(f"{path}: external runtime may not use stdio MCP")
-        else:
+        elif runtime.type in {"builtin", "managed"}:
             if interface.type != "mcp" or interface.transport != "stdio":
                 raise ValueError(
                     f"{path}: builtin runtime supports only stdio MCP interfaces"
@@ -534,7 +616,7 @@ def _mcp_server(
 ) -> dict[str, Any]:
     runtime = spec.runtime
     if interface.transport == "stdio":
-        if runtime.type != "builtin" or not runtime.command:
+        if runtime.type not in {"builtin", "managed"} or not runtime.command:
             raise ValueError(
                 f"integration {spec.id}: stdio requires a reviewed builtin command"
             )
@@ -744,7 +826,16 @@ def _sensitive_name(value: str) -> bool:
 
 
 def _instruction_path(repo_root: Path, integration_id: str, value: str) -> Path:
-    root = repo_root / INTEGRATION_ROOT / integration_id
+    roots = [
+        repo_root / INTEGRATION_ROOT / integration_id,
+        repo_root / IMPORTED_INTEGRATION_ROOT / integration_id,
+    ]
+    matching = [root for root in roots if root.is_dir()]
+    if len(matching) != 1:
+        raise ValueError(
+            f"integration {integration_id} instruction root is missing or ambiguous"
+        )
+    root = matching[0]
     path = root / value
     cursor = root
     if root.is_symlink():
@@ -805,6 +896,27 @@ def _join_url(base: str, path: str | None) -> str:
 def _stable_hash(value: Any) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _directory_digest(root: Path) -> str:
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError(f"managed runtime must be a real directory: {root}")
+    hasher = hashlib.sha256()
+    found = False
+    for path in sorted(root.rglob("*"), key=lambda value: value.relative_to(root).as_posix()):
+        if path.is_symlink():
+            raise ValueError(f"managed runtime may not contain symlinks: {path}")
+        if not path.is_file():
+            continue
+        found = True
+        relative = path.relative_to(root).as_posix()
+        content = path.read_bytes()
+        mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+        hasher.update(f"{relative}\0{mode}\0{len(content)}\0".encode())
+        hasher.update(content)
+    if not found:
+        raise ValueError(f"managed runtime is empty: {root}")
+    return f"sha256:{hasher.hexdigest()}"
 
 
 def _string_list(value: Any) -> list[str]:
