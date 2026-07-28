@@ -40,9 +40,10 @@ WANDB_ENVIRONMENT_IMPORT = (
     "fugue.bench.wandb_sandbox:FugueWandbEnvironment"
 )
 _BASE_IMAGE = (
-    "python:3.12.10-slim-bookworm@"
-    "sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+    "python:3.13.14-slim-trixie@"
+    "sha256:6771159cd4fa5d9bba1258caf0b82e6b73458c694d178ad97c5e925c2d0e1a91"
 )
+_UV_VERSION = "0.11.27"
 _IMAGE_DIGEST = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -943,7 +944,7 @@ def _write_build_context(
 ) -> list[dict[str, str]]:
     source = context / "source"
     source.mkdir()
-    for name in ("pyproject.toml", "README.md"):
+    for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE"):
         shutil.copy2(repo_root / name, source / name)
     shutil.copytree(repo_root / "fugue", source / "fugue")
     integration_root = context / "integrations"
@@ -954,7 +955,19 @@ def _write_build_context(
             "source": "fugue",
             "target": "/fugue-src/fugue",
             "sha256": _tree_digest(repo_root / "fugue"),
-        }
+        },
+        {
+            "kind": "dependency-lock",
+            "source": "uv.lock",
+            "target": "/fugue-src/uv.lock",
+            "sha256": _file_digest(repo_root / "uv.lock"),
+        },
+        {
+            "kind": "project-metadata",
+            "source": "pyproject.toml",
+            "target": "/fugue-src/pyproject.toml",
+            "sha256": _file_digest(repo_root / "pyproject.toml"),
+        },
     ]
     for item in integrations:
         destination = integration_root / str(item["id"])
@@ -991,17 +1004,22 @@ def _write_build_context(
         ]
     )
     dockerfile = (
+        f"FROM {_BASE_IMAGE} AS fugue-builder\n"
+        "COPY source /fugue-src\n"
+        f'RUN python -m pip install --no-cache-dir "uv=={_UV_VERSION}" && '
+        "cd /fugue-src && "
+        "uv sync --frozen --no-dev --no-editable "
+        "--python /usr/local/bin/python\n"
         f"FROM {agent_image} AS agent-runtime\n"
         f"FROM {_BASE_IMAGE}\n"
         "RUN apt-get update && apt-get install -y --no-install-recommends "
         "bash ca-certificates curl git jq procps ripgrep && "
         "rm -rf /var/lib/apt/lists/*\n"
         f"COPY --from=agent-runtime {AGENT_RUNTIME_MOUNT} {AGENT_RUNTIME_MOUNT}\n"
-        "COPY source /fugue-src\n"
-        "RUN python -m pip install --no-cache-dir /fugue-src\n"
+        "COPY --from=fugue-builder /fugue-src /fugue-src\n"
         f"{copies}\n"
+        'ENV PATH="/fugue-src/.venv/bin:$PATH" PYTHONPATH=/fugue-src\n'
         f"RUN {probes}\n"
-        "ENV PYTHONPATH=/fugue-src\n"
         "WORKDIR /workspace\n"
     )
     (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
