@@ -7,7 +7,7 @@ import os
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
@@ -37,12 +37,16 @@ _HARNESS_AGENTS = {
 _READINESS = frozenset(
     {"ready", "needs_review", "blocked", "no_comparison_justified"}
 )
-_PUBLIC_TASK_FIELDS = frozenset({"id", "input", "tags", "partition"})
+_PUBLIC_TASK_FIELDS = frozenset({"id", "input", "resources", "tags", "partition"})
 _PRIVATE_LABEL_FIELDS = frozenset(
     {"id", "expected", "base_output", "gold_output"}
 )
 _PRIVATE_WORDS = frozenset(
     {"expected", "gold", "reference_answer", "private", "answer_key"}
+)
+_COMPARISON_BASE_IMAGE = (
+    "python:3.12.10-slim-bookworm@"
+    "sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
 )
 
 
@@ -177,6 +181,10 @@ class ComparisonResultV1:
     regressed: int
     unchanged: int
     incomplete: int
+    deterministic_summary: dict[str, Any]
+    judge_summary: dict[str, Any]
+    mechanism_summary: dict[str, Any]
+    evidence_links: tuple[dict[str, str], ...]
     paired_cases: tuple[dict[str, Any], ...]
     limitations: tuple[str, ...]
     result_digest: str = ""
@@ -488,7 +496,7 @@ def compile_comparison(
 ) -> tuple[ExperimentSpec, dict[str, Any], list[dict[str, Any]]]:
     tasks = _load_public_tasks(repo_root / spec.taskset.tasks)
     public_rows = [
-        _public_case(task, spec=spec, index=index)
+        _public_case(task, spec=spec, index=index, repo_root=repo_root)
         for index, task in enumerate(tasks)
     ]
     public_text = _jsonl(public_rows)
@@ -714,6 +722,10 @@ def analyze_comparison_rows(
         regressed=regressed,
         unchanged=unchanged,
         incomplete=incomplete,
+        deterministic_summary=_deterministic_summary(normalized),
+        judge_summary=_judge_summary(normalized),
+        mechanism_summary=_mechanism_summary(normalized),
+        evidence_links=_comparison_evidence_links(normalized),
         paired_cases=tuple(paired_cases),
         limitations=tuple(limitations),
     )
@@ -891,8 +903,297 @@ def score_comparison_rows(
                     label["expected"],
                 ),
             }
+            row["comparison_mechanism"] = _comparison_mechanism(
+                row,
+                expected=label["expected"],
+                passed=passed,
+                candidate_skill_ids=spec.candidate.skills,
+            )
         scored.append(row)
     return scored
+
+
+def _comparison_mechanism(
+    row: Mapping[str, Any],
+    *,
+    expected: Any,
+    passed: bool,
+    candidate_skill_ids: tuple[str, ...],
+) -> dict[str, str]:
+    variant = str(row.get("variant_id") or "")
+    skill_applicable = variant == "candidate" and bool(candidate_skill_ids)
+    assigned = {
+        str(value)
+        for value in (
+            row.get("skills_assigned") or row.get("skill_ids") or []
+        )
+    }
+    registered = {str(value) for value in row.get("skills_registered") or []}
+    registration_status = str(row.get("skill_registration_status") or "")
+    invocation = row.get("skill_invocation_evidence") or {}
+    invocation_status = (
+        str(invocation.get("status") or "")
+        if isinstance(invocation, Mapping)
+        else ""
+    )
+    invoked = (
+        {str(value) for value in invocation.get("skills_invoked") or []}
+        if isinstance(invocation, Mapping)
+        else set()
+    )
+    expected_skills = set(candidate_skill_ids)
+    source = (
+        str(expected.get("source") or expected.get("source_document") or "")
+        if isinstance(expected, Mapping)
+        else ""
+    )
+    returned_paths = _row_paths(
+        row,
+        "context_result_paths",
+        "retrieved_paths",
+        "search_result_paths",
+    )
+    opened_paths = _row_paths(
+        row,
+        "inspected_paths",
+        "opened_paths",
+        "context_result_opened_paths",
+    )
+    source_returned = _path_observed(source, returned_paths)
+    source_opened = _path_observed(source, opened_paths)
+    output = (
+        row.get("final_output")
+        if row.get("final_output") is not None
+        else row.get("answer")
+    )
+    parsed = json.loads(output) if isinstance(output, str) and _is_json(output) else output
+    source_used = bool(
+        source
+        and source_opened
+        and isinstance(parsed, Mapping)
+        and (
+            parsed.get("source") == source
+            or parsed.get("source_document") == source
+        )
+    )
+    return {
+        "skill_assigned": _mechanism_state(
+            applicable=skill_applicable,
+            available=bool(assigned) or not skill_applicable,
+            reached=expected_skills <= assigned,
+        ),
+        "skill_registered": _mechanism_state(
+            applicable=skill_applicable,
+            available=registration_status
+            not in {"", "unavailable"}
+            or bool(registered),
+            reached=(
+                registration_status == "registered"
+                and (not registered or expected_skills <= registered)
+            ),
+        ),
+        "skill_invoked": _mechanism_state(
+            applicable=skill_applicable,
+            available=invocation_status
+            not in {"", "unavailable"},
+            reached=invocation_status == "observed"
+            and expected_skills <= invoked,
+        ),
+        "relevant_source_returned": _mechanism_state(
+            applicable=bool(returned_paths),
+            available=bool(returned_paths),
+            reached=source_returned,
+        ),
+        "relevant_source_opened": _mechanism_state(
+            applicable=bool(source),
+            available=bool(opened_paths),
+            reached=source_opened,
+        ),
+        "relevant_source_used": _mechanism_state(
+            applicable=bool(source),
+            available=bool(opened_paths) and output is not None,
+            reached=source_used,
+        ),
+        "task_passed": "observed" if passed else "not_observed",
+    }
+
+
+def _mechanism_state(
+    *, applicable: bool, available: bool, reached: bool
+) -> str:
+    if not applicable:
+        return "not_applicable"
+    if not available:
+        return "unavailable"
+    return "observed" if reached else "not_observed"
+
+
+def _row_paths(row: Mapping[str, Any], *keys: str) -> set[str]:
+    result: set[str] = set()
+    for key in keys:
+        value = row.get(key) or []
+        if isinstance(value, str):
+            result.add(value)
+        elif isinstance(value, list | tuple | set):
+            result.update(str(item) for item in value)
+    return result
+
+
+def _path_observed(expected: str, observed: set[str]) -> bool:
+    return bool(
+        expected
+        and any(
+            value == expected or PurePosixPath(value).name == PurePosixPath(expected).name
+            for value in observed
+        )
+    )
+
+
+def _deterministic_summary(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for variant in ("baseline", "candidate"):
+        selected = [
+            row for row in rows if str(row.get("variant_id") or "") == variant
+        ]
+        dimensions = sorted(
+            {
+                str(key)
+                for row in selected
+                for key in (
+                    row.get("comparison_deterministic_scores") or {}
+                )
+            }
+        )
+        result[variant] = {
+            "passed": sum(row.get("pass") is True for row in selected),
+            "evaluated": sum(
+                row.get("comparison_evaluation_status") == "scored"
+                for row in selected
+            ),
+            "dimensions": {
+                dimension: {
+                    "passed": sum(
+                        (row.get("comparison_deterministic_scores") or {}).get(
+                            dimension
+                        )
+                        is True
+                        for row in selected
+                    ),
+                    "evaluated": sum(
+                        dimension
+                        in (row.get("comparison_deterministic_scores") or {})
+                        for row in selected
+                    ),
+                }
+                for dimension in dimensions
+            },
+        }
+    return result
+
+
+def _judge_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    scored = [
+        row
+        for row in rows
+        if isinstance(row.get("comparison_judge_scores"), Mapping)
+    ]
+    if not scored:
+        return {"status": "not_used"}
+    dimensions = sorted(
+        {
+            str(key)
+            for row in scored
+            for key in (row.get("comparison_judge_scores") or {})
+        }
+    )
+    by_variant: dict[str, Any] = {}
+    for variant in ("baseline", "candidate"):
+        selected = [
+            row for row in scored if str(row.get("variant_id") or "") == variant
+        ]
+        by_variant[variant] = {
+            dimension: _numeric_summary(
+                [
+                    (row.get("comparison_judge_scores") or {}).get(dimension)
+                    for row in selected
+                ]
+            )
+            for dimension in dimensions
+        }
+    return {"status": "scored", "by_variant": by_variant}
+
+
+def _numeric_summary(values: Sequence[Any]) -> dict[str, Any]:
+    numeric = [
+        float(value)
+        for value in values
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    ]
+    return {
+        "evaluated": len(numeric),
+        "mean": round(sum(numeric) / len(numeric), 6) if numeric else None,
+    }
+
+
+def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    stages = sorted(
+        {
+            str(key)
+            for row in rows
+            for key in (row.get("comparison_mechanism") or {})
+        }
+    )
+    return {
+        stage: {
+            variant: {
+                "observed": sum(
+                    (row.get("comparison_mechanism") or {}).get(stage)
+                    == "observed"
+                    for row in rows
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "applicable": sum(
+                    (row.get("comparison_mechanism") or {}).get(stage)
+                    not in {None, "not_applicable"}
+                    for row in rows
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "unavailable": sum(
+                    (row.get("comparison_mechanism") or {}).get(stage)
+                    == "unavailable"
+                    for row in rows
+                    if str(row.get("variant_id") or "") == variant
+                ),
+            }
+            for variant in ("baseline", "candidate")
+        }
+        for stage in stages
+    }
+
+
+def _comparison_evidence_links(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, str], ...]:
+    fields = {
+        "agent_url": "Agent trace",
+        "weave_agent_url": "Agent trace",
+        "evaluation_url": "Evaluation",
+        "weave_evaluation_url": "Evaluation",
+        "dataset_url": "Dataset",
+        "weave_dataset_url": "Dataset",
+    }
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in rows:
+        for field_name, label in fields.items():
+            value = str(row.get(field_name) or "")
+            if not value.startswith("https://") or value in seen:
+                continue
+            seen.add(value)
+            result.append({"label": label, "url": value})
+    return tuple(result)
 
 
 def execute_comparison(
@@ -1101,7 +1402,11 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
 
 
 def _public_case(
-    task: Mapping[str, Any], *, spec: ComparisonSpecV1, index: int
+    task: Mapping[str, Any],
+    *,
+    spec: ComparisonSpecV1,
+    index: int,
+    repo_root: Path,
 ) -> dict[str, Any]:
     task_id = str(task["id"])
     input_value = task["input"]
@@ -1119,17 +1424,17 @@ def _public_case(
         "id": task_id,
         "title": task_id.replace("-", " ").title(),
         "instruction": instruction,
-        "attachments": [],
+        "attachments": _task_attachments(task, repo_root),
         "environment": {
             "profile_id": "artifact-python-v1",
             "profile_digest": stable_digest(
                 {
                     "id": "artifact-python-v1",
-                    "image": "python:3.12.10-slim-bookworm",
+                    "image": _COMPARISON_BASE_IMAGE,
                 }
             ),
             "kind": "artifact",
-            "base_image": "python:3.12.10-slim-bookworm",
+            "base_image": _COMPARISON_BASE_IMAGE,
             "cpus": 2,
             "memory_mb": 4096,
             "storage_mb": 10240,
@@ -1161,9 +1466,70 @@ def _public_case(
         "partition": str(task.get("partition") or "holdout"),
         "source_index": index,
         "task_definition_digest": stable_digest(
-            {"comparison_id": spec.id, "task_id": task_id, "input": input_value}
+            {
+                "comparison_id": spec.id,
+                "task_id": task_id,
+                "public_task": dict(task),
+            }
         ),
     }
+
+
+def _task_attachments(
+    task: Mapping[str, Any], repo_root: Path
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(task.get("resources") or [], start=1):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"public task {task['id']} resource {index} must be an object"
+            )
+        _reject_unknown(
+            raw,
+            {"path", "target"},
+            f"public task {task['id']} resource {index}",
+        )
+        relative = _safe_resource_relative_path(
+            raw.get("path"),
+            label=f"public task {task['id']} resource {index}",
+        )
+        source = repo_root / relative
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(
+                f"public task {task['id']} resource is not a regular file: {relative}"
+            )
+        target = str(raw.get("target") or "")
+        target_path = PurePosixPath(target)
+        allowed_root = PurePosixPath("/workspace/resources")
+        if (
+            not target_path.is_absolute()
+            or any(part in {"", ".", ".."} for part in target_path.parts)
+            or target_path.parts[: len(allowed_root.parts)] != allowed_root.parts
+        ):
+            raise ValueError(
+                f"public task {task['id']} resource target must be under "
+                "/workspace/resources"
+            )
+        result.append(
+            {
+                "locked_relative": relative,
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "target": target_path.as_posix(),
+            }
+        )
+    return result
+
+
+def _safe_resource_relative_path(value: Any, *, label: str) -> str:
+    text = str(value or "")
+    path = PurePosixPath(text)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"{label} path must be a safe repository-relative file")
+    return path.as_posix()
 
 
 def _variant_dict(variant_id: str, value: ComparisonCandidateV1) -> dict[str, Any]:
@@ -1245,9 +1611,27 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
         tags = row.get("tags") or []
         if not isinstance(tags, list) or not all(isinstance(item, str) for item in tags):
             raise ValueError(f"public task {task_id} tags must be strings")
+        resources = row.get("resources") or []
+        if not isinstance(resources, list):
+            raise ValueError(f"public task {task_id} resources must be an array")
+        for resource_index, resource in enumerate(resources, start=1):
+            if not isinstance(resource, dict):
+                raise ValueError(
+                    f"public task {task_id} resource {resource_index} must be an object"
+                )
+            _reject_unknown(
+                resource,
+                {"path", "target"},
+                f"public task {task_id} resource {resource_index}",
+            )
+            _safe_resource_relative_path(
+                resource.get("path"),
+                label=f"public task {task_id} resource {resource_index}",
+            )
         row["id"] = task_id
         row["partition"] = partition
         row["tags"] = tags
+        row["resources"] = resources
     return rows
 
 
@@ -1356,6 +1740,21 @@ def _preview_dict(value: PreviewSummary) -> dict[str, Any]:
 
 
 def _result_markdown(result: ComparisonResultV1) -> str:
+    mechanism = "".join(
+        (
+            f"- {stage.replace('_', ' ').title()}: "
+            f"baseline {values['baseline']['observed']}/"
+            f"{values['baseline']['applicable']}; "
+            f"candidate {values['candidate']['observed']}/"
+            f"{values['candidate']['applicable']}\n"
+        )
+        for stage, values in result.mechanism_summary.items()
+    )
+    judge = (
+        "No blind judge was used.\n"
+        if result.judge_summary.get("status") == "not_used"
+        else "Blind-judge dimensions are available in `result.json`.\n"
+    )
     return (
         f"# {result.comparison_id}\n\n"
         f"- Rows: {result.rows}\n"
@@ -1365,6 +1764,11 @@ def _result_markdown(result: ComparisonResultV1) -> str:
         f"- Regressed pairs: {result.regressed}\n"
         f"- Unchanged pairs: {result.unchanged}\n"
         f"- Incomplete pairs: {result.incomplete}\n\n"
+        "## Mechanism evidence\n\n"
+        + (mechanism or "No mechanism evidence was available.\n")
+        + "\n## Blind judge\n\n"
+        + judge
+        + "\n"
         "## Limitations\n\n"
         + "".join(f"- {item}\n" for item in result.limitations)
     )
