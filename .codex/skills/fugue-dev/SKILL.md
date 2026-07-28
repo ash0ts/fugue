@@ -35,10 +35,28 @@ Preserve these invariants across code, configuration, presentation, and tests.
 
 ## Experiments and extensions
 
+- Treat the public comparison surface as an experiment compiler over the
+  canonical lifecycle, never as a second runner. Its five concepts are
+  taskset, baseline, candidate, evaluator, and execution policy. Compile them
+  into strict Fugue artifacts and compute the actual candidate diff; reject
+  every undeclared behavioral change.
+- Keep comparison preview and readiness pure. They may parse public tasks and
+  private labels, validate base-fail/gold-pass evidence, calculate coordinates
+  and cost, and explain blockers, but may not write, fetch, prepare, call a
+  model, create research state, or request approval.
+- Keep public tasks and answer-bearing labels in separate inputs. Compile
+  labels into the private host-only evaluation lock. Result bundles expose
+  derived scores and safe references, never expected values or private paths.
 - Keep experiment YAML strict: `skills`, required `context.delivery`, additive
   typed integrations, typed scorers, and typed immutable `repository` task
   sources. Reject raw public MCP configuration and removed compatibility
-  fields.
+  fields. Standard MCP JSON, Codex TOML, stdio argv, packages, Git sources,
+  images, and URLs enter only through an explicit import boundary that emits a
+  reviewed typed integration; experiment YAML references its immutable ID.
+- Accept standard Agent Skills only through explicit import and review.
+  Validate `SKILL.md`, assets, links, size, source identity, and executable
+  content, then bind the immutable reviewed digest. Never inherit a user's
+  global MCP configuration, skill directories, or harness home.
 - Resolve typed capabilities for the exact workload, context system, delivery,
   harness, and provider route before binding. Preserve portable and native MCP
   as distinct interfaces; unsupported coordinates become `not_applicable`
@@ -93,6 +111,11 @@ Preserve these invariants across code, configuration, presentation, and tests.
 - Record assigned and confirmed skill/context registration separately. A
   required treatment does not execute when registration failed. Invocation
   evidence stays explicit and may remain unavailable; assignment is not use.
+- Keep deterministic task outcomes, authored criteria, and blind-judge results
+  separate. A judge must have a locked rubric, model route, evidence view,
+  blinded treatment fields, revision, and reviewed calibration result. Judge
+  failure means evaluation unavailable and never converts Agent execution into
+  task failure or a zero score.
 - Agent cells open the Weave evaluation prediction before execution, then bind
   exactly one observed native conversation and `invoke_agent` root matching
   the evaluation call and canonical cell identity. Native integrations own
@@ -120,6 +143,14 @@ Preserve these invariants across code, configuration, presentation, and tests.
 
 ## Release safety
 
+- Keep the adaptable comparison surface a technical preview until unfamiliar
+  users can import normal MCP servers and standard Agent Skills, author tasks,
+  understand aligned results, and reproduce a bundle. Do not rename or publish
+  the distribution, bump a public release, or ship an OCI image without an
+  explicit release request and completed usability gate.
+- A zero-task, zero-cell, or zero-row comparison can never succeed. CI exit
+  states must distinguish a completed policy failure, invalid readiness, and
+  incomplete infrastructure/evaluation/evidence.
 - Package a candidate only when every applicable cell is terminal and at least
   one deterministic outcome passed. Terminal unscored cells are permitted but
   cannot satisfy the pass requirement; failures require explicit override.

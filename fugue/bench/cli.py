@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import webbrowser
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -101,6 +102,65 @@ def _parser() -> FugueArgumentParser:
         description="Plan, run, and analyze Harbor agent experiments in W&B Weave.",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    init = subparsers.add_parser(
+        "init", help="Scaffold an Agent-change comparison"
+    )
+    init.add_argument(
+        "--template", choices=("agent-change",), default="agent-change"
+    )
+    init.add_argument("destination", nargs="?", type=Path, default=Path("comparison"))
+    init.add_argument("--force", action="store_true")
+    init.set_defaults(handler=_comparison_init)
+
+    check = subparsers.add_parser(
+        "check", help="Validate comparison readiness without spending or writing"
+    )
+    check.add_argument("comparison", type=Path)
+    _add_common_args(check, json_output=True)
+    check.set_defaults(handler=_comparison_check)
+
+    compare = subparsers.add_parser(
+        "compare", help="Preview or run one baseline-versus-candidate comparison"
+    )
+    compare.add_argument("comparison", type=Path)
+    action = compare.add_mutually_exclusive_group(required=True)
+    action.add_argument("--preview", action="store_true")
+    action.add_argument("--run", action="store_true")
+    compare.add_argument("--approval")
+    compare.add_argument("--fetch-weave", action="store_true")
+    _add_common_args(compare, json_output=True)
+    compare.set_defaults(handler=_comparison_compare)
+
+    approve = subparsers.add_parser(
+        "approve", help="Approve one exact comparison preview"
+    )
+    approve.add_argument("preview_digest")
+    approve.add_argument("--max-usd", type=float, required=True)
+    approve.add_argument("--max-cells", type=int)
+    approve.add_argument("--approved-by", default="operator")
+    approve.add_argument("--expires-in", type=int, default=3600)
+    approve.add_argument("--operation-id")
+    approve.add_argument("--repo-root", type=Path, default=Path.cwd())
+    approve.set_defaults(handler=_comparison_approve)
+
+    result = subparsers.add_parser(
+        "result", help="Read an exported comparison result"
+    )
+    result.add_argument("comparison", nargs="?", default="latest")
+    result.add_argument("--json", action="store_true")
+    result.add_argument("--open", action="store_true", dest="open_result")
+    result.add_argument("--repo-root", type=Path, default=Path.cwd())
+    result.set_defaults(handler=_comparison_result)
+
+    demo = subparsers.add_parser(
+        "demo", help="Run a deterministic no-key comparison replay"
+    )
+    demo.add_argument("demo", choices=("source-use",))
+    demo.add_argument("--out", type=Path)
+    demo.add_argument("--json", action="store_true")
+    demo.add_argument("--repo-root", type=Path, default=Path.cwd())
+    demo.set_defaults(handler=_comparison_demo)
 
     plan = subparsers.add_parser("plan", help="Plan an experiment with Fugue AI")
     plan.add_argument("request", nargs="+")
@@ -478,6 +538,224 @@ def _research(args: argparse.Namespace) -> int:
         path = export_skill(args.destination)
         print(path)
     return 0
+
+
+def _comparison_init(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import scaffold_comparison
+
+    path = scaffold_comparison(args.destination, force=args.force)
+    CONSOLE.print(f"[fugue.success]Created[/] {path}")
+    return 0
+
+
+def _comparison_check(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import check_comparison, load_comparison
+
+    root = args.repo_root.resolve()
+    spec = load_comparison(args.comparison, repo_root=root)
+    readiness = check_comparison(spec, repo_root=root)
+    if args.json:
+        print(json.dumps(readiness.to_dict(), indent=2, sort_keys=True))
+    else:
+        _print_comparison_readiness(readiness)
+    return 0 if readiness.status == "ready" else 2
+
+
+def _comparison_compare(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import (
+        execute_comparison,
+        load_comparison,
+        preview_comparison,
+    )
+
+    root = args.repo_root.resolve()
+    spec = load_comparison(args.comparison, repo_root=root)
+    preview = preview_comparison(
+        spec,
+        repo_root=root,
+        operator=OperatorService(root, args.env_file),
+    )
+    if args.preview:
+        if args.json:
+            print(json.dumps(preview.to_dict(), indent=2, sort_keys=True))
+        else:
+            _print_comparison_readiness_dict(preview.readiness)
+            CONSOLE.print(
+                Panel(
+                    f"[bold]{preview.preview_digest}[/]\n"
+                    f"{preview.matrix['estimated_trials']} aligned attempts",
+                    title="Exact preview",
+                    border_style="fugue.cyan",
+                )
+            )
+        status = str(preview.readiness["status"])
+        return 0 if status == "ready" else 2
+    if not args.approval:
+        raise ValueError("--run requires --approval APPROVAL_DIGEST")
+    result, json_path, markdown_path = execute_comparison(
+        preview,
+        approval_digest=args.approval,
+        repo_root=root,
+        env_file=args.env_file,
+        fetch_weave=args.fetch_weave,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+        CONSOLE.print(f"\nResult JSON: {json_path}")
+    if result.incomplete:
+        return 3
+    return 1 if result.regressed else 0
+
+
+def _comparison_approve(args: argparse.Namespace) -> int:
+    from fugue.research.approvals import ApprovalLedger
+    from fugue.research.store import StudyStore
+
+    if args.max_cells is not None and args.max_cells < 1:
+        raise ValueError("--max-cells must be positive")
+    store = StudyStore(args.repo_root.resolve())
+    operation_id = args.operation_id or f"approve-{args.preview_digest[:20]}"
+    approval = ApprovalLedger(store.path).approve(
+        subject_kind="experiment",
+        preview_digest=args.preview_digest,
+        maximum_cost_usd=args.max_usd,
+        maximum_cells=args.max_cells,
+        approved_by=args.approved_by,
+        operation_id=operation_id,
+        expires_in_seconds=args.expires_in,
+    )
+    print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def _comparison_result(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import COMPARISON_RESULT_ROOT
+
+    root = args.repo_root.resolve()
+    result_root = root / COMPARISON_RESULT_ROOT
+    if args.comparison == "latest":
+        pointer_path = result_root / "latest.json"
+        if not pointer_path.is_file():
+            raise FileNotFoundError("no comparison result has been recorded")
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        result_path = root / str(pointer["result"])
+        markdown_path = root / str(pointer["markdown"])
+    else:
+        candidates = sorted(result_root.glob("*/result.json"))
+        result_path = next(
+            (
+                path
+                for path in candidates
+                if json.loads(path.read_text(encoding="utf-8")).get("comparison_id")
+                == args.comparison
+            ),
+            None,
+        )
+        if result_path is None:
+            raise FileNotFoundError(
+                f"comparison result not found: {args.comparison}"
+            )
+        markdown_path = result_path.with_name("result.md")
+    if args.open_result:
+        webbrowser.open(markdown_path.resolve().as_uri())
+    if args.json:
+        print(result_path.read_text(encoding="utf-8"), end="")
+    else:
+        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+    return 0
+
+
+def _comparison_demo(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import (
+        analyze_comparison_rows,
+        load_comparison,
+        preview_comparison,
+        score_comparison_rows,
+        write_comparison_result,
+    )
+
+    root = args.repo_root.resolve()
+    demo_root = root / "examples" / "comparisons" / "source-use-replay"
+    spec = load_comparison(demo_root / "comparison.yaml", repo_root=root)
+    preview = preview_comparison(
+        spec,
+        repo_root=root,
+        operator=OperatorService(root),
+    )
+    source_rows = [
+        json.loads(line)
+        for line in (demo_root / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rows = score_comparison_rows(spec, source_rows, repo_root=root)
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source="immutable-replay",
+    )
+    destination = (
+        args.out.resolve()
+        if args.out
+        else root / "artifacts" / "source-use-replay"
+    )
+    json_path, markdown_path = write_comparison_result(
+        result, destination=destination
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(
+            Panel(
+                "This is an immutable replay. It demonstrates Fugue's comparison "
+                "and result workflow; it is not a new live experiment.",
+                title="No-key replay",
+                border_style="fugue.gold",
+            )
+        )
+        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+        CONSOLE.print(f"\nResult JSON: {json_path}")
+    return 0 if not result.incomplete else 3
+
+
+def _print_comparison_readiness(readiness: Any) -> None:
+    _print_comparison_readiness_dict(readiness.to_dict())
+
+
+def _print_comparison_readiness_dict(value: Mapping[str, Any]) -> None:
+    status = str(value["status"])
+    color = {
+        "ready": "fugue.success",
+        "needs_review": "fugue.gold",
+        "blocked": "fugue.coral",
+        "no_comparison_justified": "fugue.gold",
+    }[status]
+    table = Table(box=box.SIMPLE, show_header=False)
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Question", str(value["question"]))
+    table.add_row("Tasks", str(value["task_count"]))
+    table.add_row("Changed", ", ".join(value["actual_changes"]) or "none")
+    table.add_row(
+        "Base check",
+        f"{value['base_failures']}/{value['task_count']} intended failures",
+    )
+    table.add_row(
+        "Gold check",
+        f"{value['gold_passes']}/{value['task_count']} known-good passes",
+    )
+    judges = value.get("judge_evaluators") or []
+    table.add_row("Judge", ", ".join(judges) if judges else "not used")
+    table.add_row("Attempts", str(value["estimated_cells"]))
+    table.add_row("Estimated cost", f"${float(value['estimated_cost_usd']):.2f}")
+    table.add_row("Status", f"[{color}]{status}[/]")
+    CONSOLE.print(table)
+    for blocker in value.get("blockers") or []:
+        CONSOLE.print(f"[fugue.coral]Blocked:[/] {blocker}")
+    for warning in value.get("warnings") or []:
+        CONSOLE.print(f"[fugue.gold]Review:[/] {warning}")
 
 
 def _normalize_runs_argv(argv: list[str]) -> list[str]:
