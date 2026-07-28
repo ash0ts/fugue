@@ -149,12 +149,18 @@ def access_scope(method: str, path: str) -> str:
         return "trace:preview"
     if path.endswith("/trace-audits"):
         return "trace:run"
-    if "task-suites:derive-preview" in path or path.endswith("experiments:preview"):
+    if (
+        "task-suites:derive-preview" in path
+        or path.endswith("experiments:preview")
+        or path.endswith("comparisons:preview")
+    ):
         return "study:preview"
     if path.endswith("studies:preview"):
         return "study:preview"
     if path.endswith(":cancel"):
         return "study:cancel"
+    if path.endswith(":start") and "/comparisons/" in path:
+        return "study:start-approved"
     if path.endswith("/experiments") or (
         path.startswith("/v1/research/") and path.endswith("/studies")
     ):

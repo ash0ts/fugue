@@ -129,14 +129,28 @@ does not expose the
 operator, raw environment, shell commands, credentials, or experimental MCP
 Tasks.
 
+Reviewed comparison specifications may be registered in
+`configs/fugue/research/comparisons.yaml` by stable ID, repository-relative path,
+and exact spec digest. MCP and HTTP can list that allowlist, check readiness,
+create an immutable preview, request operator approval, start an exact digest
+that is already approved, watch it, and read its safe result. They do not accept
+arbitrary paths or changes to candidates, tasks, execution policy, or an accepted
+preview. Public preview artifacts omit private-label content and digests. Design,
+execution, and result updates use the existing Study event contract.
+
+The comparison control deliberately exposes no approve, cancel, retry, or
+follow-up operation. An Agent may propose the next question, but a new comparison
+identity and operator approval are required before it can run.
+
 Use the `advance_research_cycle` MCP prompt for autoresearch-style handoffs. One
 cycle may reconcile a terminal parent, record a sourced Result, and produce one
 lineage-bound child preview. It always stops before approving or starting that
 child, which keeps adaptive research useful without turning it into an unbounded
 spend loop.
 
-Approvals are deliberately absent from REST and MCP. After reviewing a preview,
-the operator approves its exact digest and a hard spend cap from a trusted shell:
+Approval issuance is deliberately absent from REST and MCP. Those surfaces may
+record an approval request, but only the operator can approve an exact digest and
+hard spend cap from a trusted shell:
 
 ```bash
 fugue research approve PREVIEW_DIGEST --max-usd 200 --max-cells 8

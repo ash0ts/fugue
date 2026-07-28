@@ -1,0 +1,14 @@
+schema_version: 1
+comparisons:
+  - id: source-use-skill-v1
+    path: examples/comparisons/source-use-skill/comparison.yaml
+    digest: 6188a5088685e9ac898ef07a092e8bab4645d0e7f5425194fb40b18b81d18322
+  - id: wandb-mcp-maintenance-discovery-v1
+    path: examples/comparisons/wandb-mcp-maintenance/discovery.yaml
+    digest: 061e18b28b677e4201f1a3b7fedb487ed91043a9c7438c29efde0e9db92a03f2
+  - id: wandb-mcp-maintenance-primary-v1
+    path: examples/comparisons/wandb-mcp-maintenance/primary.yaml
+    digest: 557eb2e05628f4509e1b6597cf1ccfb6dfef53f18487567c05494b40cd0cf591
+  - id: wandb-mcp-maintenance-claude-replication-v1
+    path: examples/comparisons/wandb-mcp-maintenance/claude-replication.yaml
+    digest: 0b64d38a96aa1aac4452a62c94aecfbccdf8bb9598829cbd9f0b39f572c98a10

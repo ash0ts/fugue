@@ -26,6 +26,12 @@ already represented by an immutable catalog digest, stop and ask the operator to
 import and lock the normal component before previewing it. Never turn a mutable
 package declaration into a live candidate from the Agent interface.
 
+For an already-authored comparison, call `fugue_comparison_catalog` and select its
+stable ID. Check readiness, then create its immutable preview. The comparison
+interface never accepts a path, candidate override, execution-policy override, or
+private label. It can request human approval and start only a digest already
+approved in the operator ledger; it cannot issue an approval.
+
 Use `fugue_study_preview` to compile those five concepts into the existing governed
 Study lifecycle. Before requesting approval, report the concrete failure, exact
 baseline/candidate difference, intended base failures, known-good passes, cell
@@ -95,6 +101,9 @@ the workflow into an unbounded experiment generator.
 - Modify application code outside Fugue, commit it, and submit only an immutable
   registered reference for evaluation.
 - Ask the user before spending. The Agent cannot approve its own preview.
+- Do not retry comparison attempts or launch a follow-up from the comparison
+  interface. Watch the durable execution and leave follow-up work as a proposal
+  requiring a new comparison identity and approval.
 
 Read [MCP workflow](references/mcp-workflow.md) when calling the container interface.
 Read [analysis contract](references/analysis-contract.md) before designing tasks or

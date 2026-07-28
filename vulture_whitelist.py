@@ -139,6 +139,13 @@ create_research
 get_research
 get_catalog
 get_research_catalog
+comparison_catalog
+comparison_readiness
+comparison_preview
+comparison_request_approval
+comparison_start
+comparison_watch
+comparison_result
 get_study_context
 get_research_context
 update_research
@@ -164,6 +171,13 @@ ag_ui
 
 # MCP tools/resources/prompts registered by FastMCP decorators.
 fugue_catalog
+fugue_comparison_catalog
+fugue_comparison_readiness
+fugue_comparison_preview
+fugue_comparison_request_approval
+fugue_comparison_start
+fugue_comparison_watch
+fugue_comparison_result
 fugue_research_catalog
 fugue_study_create
 fugue_research_create
