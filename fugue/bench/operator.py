@@ -1933,6 +1933,8 @@ class OperatorService:
         experiment: ExperimentSpec | None = None,
         cell_runner: Any = None,
         cancellation_event: threading.Event | None = None,
+        host_evaluator: Callable[[dict[str, Any]], None] | None = None,
+        host_scorer_names: tuple[str, ...] = (),
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
@@ -2076,15 +2078,23 @@ class OperatorService:
                         project=trace_project_slug(run_env),
                         env=run_env,
                         cancellation_event=cancel_event,
+                        host_evaluator=host_evaluator,
+                        host_scorer_names=host_scorer_names,
                     )
                 except Exception as exc:
                     observability_error = f"{type(exc).__name__}: {exc}"
             local = (
                 GeneratedEvaluationCoordinator(
-                    cells, repo_root=self.repo_root, env=run_env
+                    cells,
+                    repo_root=self.repo_root,
+                    env=run_env,
+                    host_evaluator=host_evaluator,
                 )
                 if live is None
-                and any(cell.evaluation_case is not None for cell in cells)
+                and (
+                    host_evaluator is not None
+                    or any(cell.evaluation_case is not None for cell in cells)
+                )
                 else None
             )
             outcomes = execute_cells(

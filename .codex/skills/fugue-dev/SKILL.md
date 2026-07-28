@@ -47,6 +47,10 @@ Preserve these invariants across code, configuration, presentation, and tests.
 - Keep public tasks and answer-bearing labels in separate inputs. Compile
   labels into the private host-only evaluation lock. Result bundles expose
   derived scores and safe references, never expected values or private paths.
+- Keep simple JSONL, Python builders, and immutable Weave Dataset imports as
+  adapters to `TaskSuiteDraftV1`, not alternate task identities. Dataset
+  imports accept only public fields and an immutable object revision; generated
+  schemas and builders must produce the same strict contract.
 - Keep experiment YAML strict: `skills`, required `context.delivery`, additive
   typed integrations, typed scorers, and typed immutable `repository` task
   sources. Reject raw public MCP configuration and removed compatibility
@@ -82,6 +86,13 @@ Preserve these invariants across code, configuration, presentation, and tests.
   pull, start services, access the Docker socket, or mutate the checkout.
   Require architecture-qualified runtime locks, a read-only task repository,
   and isolated writable adapter state.
+- A package version or Git commit is not a complete component identity when
+  its dependencies can float. Managed MCP preparation must honor a checked-in
+  dependency lock when present, resolve for the actual Harbor platform, build
+  missing wheels only in the pinned target-platform image, and record both the
+  dependency file and built-wheel hashes in the runtime digest. Probe the
+  materialized runtime—not the host environment—and keep stdio open for the
+  complete JSON-RPC handshake.
 - `OperatorService.execute_run` owns the snapshot-before-execution transaction:
   resolve the exact plan, persist the resolved experiment, materialize and
   verify jobs and cells, write host-only evaluation assets, atomically commit
@@ -116,10 +127,17 @@ Preserve these invariants across code, configuration, presentation, and tests.
   blinded treatment fields, revision, and reviewed calibration result. Judge
   failure means evaluation unavailable and never converts Agent execution into
   task failure or a zero score.
+- Run user-defined deterministic scorers only through the pinned no-network
+  scorer sandbox. Bind source, runtime, declared dimensions, base/gold
+  qualification, and limits into readiness. Host-side private labels may
+  produce scores, but never become Weave inputs or Agent-visible task data.
 - Agent cells open the Weave evaluation prediction before execution, then bind
   exactly one observed native conversation and `invoke_agent` root matching
   the evaluation call and canonical cell identity. Native integrations own
   nested chat and tool spans; do not create duplicate wrapper roots.
+- Attach comparison scorer dimensions to that already-open prediction before
+  it closes. Do not create a second post-hoc Agent prediction merely to add
+  deterministic or judge scores.
 - Direct diagnostics remain ordinary Weave operations. Direct diagnostics
   never synthesize Agent identity, conversations, roots, or deep links.
   Preserve unavailable usage instead of zero.

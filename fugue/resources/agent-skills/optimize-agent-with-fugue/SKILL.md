@@ -9,6 +9,30 @@ Use Fugue as the laboratory. Remain the researcher: choose the question, propose
 intervention, and decide what the evidence means. Fugue governs task definition,
 locking, admission, Harbor execution, evaluation, and evidence reconciliation.
 
+## Start with one comparison
+
+For a known taskset and proposed Agent change, begin with five concepts:
+
+- **Taskset:** the aligned work both systems must do.
+- **Baseline:** the current complete Agent system.
+- **Candidate:** the proposed complete Agent system.
+- **Evaluator:** the deterministic checks and any separately calibrated judge.
+- **Execution policy:** harness, runtime, attempts, limits, approval, and required
+  evidence.
+
+Ask `fugue_research_catalog` for registered task, candidate, integration, Skill,
+evaluator, harness, and runtime capabilities. If an MCP server or Skill is not
+already represented by an immutable catalog digest, stop and ask the operator to
+import and lock the normal component before previewing it. Never turn a mutable
+package declaration into a live candidate from the Agent interface.
+
+Use `fugue_study_preview` to compile those five concepts into the existing governed
+Study lifecycle. Before requesting approval, report the concrete failure, exact
+baseline/candidate difference, intended base failures, known-good passes, cell
+count, cost bound, and evidence requirements. If there is no intended baseline
+failure, the cohort is saturated, or the evaluator is not qualified, recommend
+fixing the evaluation instead of running it.
+
 ## Workflow
 
 1. Read `fugue://research/{research_id}/context` and call
@@ -35,6 +59,10 @@ locking, admission, Harbor execution, evaluation, and evidence reconciliation.
 10. Interpret aligned task-level outcomes. Keep benchmark outcome, authored
     criteria, behavior, latency, tokens, and cost separate. Record a scoped Result
     with exact sources, exclusions, uncertainty, and limitations.
+
+Skip trace-audit steps 3–5 when the user has already supplied a reviewed failure
+cohort and locked taskset. Do not invent production evidence merely to make the
+longer workflow apply.
 
 ## One bounded research cycle
 

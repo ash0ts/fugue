@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -157,6 +158,8 @@ class LiveEvaluationCoordinator:
         summary_fetcher: Callable[..., dict[str, dict[str, Any]]] | None = None,
         trace_timeout_sec: float | None = None,
         cancellation_event: threading.Event | None = None,
+        host_evaluator: Callable[[dict[str, Any]], None] | None = None,
+        host_scorer_names: tuple[str, ...] = (),
     ) -> None:
         if not trace_api_key(env):
             raise RuntimeError(
@@ -175,6 +178,7 @@ class LiveEvaluationCoordinator:
         self._prediction_lock = threading.Lock()
         self._terminal_cells: set[str] = set()
         self._cancellation_event = cancellation_event or threading.Event()
+        self._host_evaluator = host_evaluator
         self._summary_fetcher = summary_fetcher or fetch_weave_summaries
         configured_timeout = self.env.get("FUGUE_WEAVE_LINK_TIMEOUT_SEC")
         self.trace_timeout_sec = (
@@ -192,6 +196,8 @@ class LiveEvaluationCoordinator:
             for cell in cells
             if cell.applicable and cell.execution_kind == "agent"
         ]
+        for row in planned:
+            row["host_scorer_names"] = list(host_scorer_names)
         candidates = _publication_candidates(planned)
         datasets: dict[str, Any] = {}
         self._datasets = datasets
@@ -344,6 +350,7 @@ class LiveEvaluationCoordinator:
                     row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
             self._raise_if_cancelled()
             _set_adapter_outcome(row)
+            self._apply_host_evaluator(row)
             if not self._pop_prediction(cell.id, active):
                 return
             owns_prediction = True
@@ -375,6 +382,7 @@ class LiveEvaluationCoordinator:
             row["trace_link_status"] = "failed"
             row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
             _set_adapter_outcome(row)
+            self._apply_host_evaluator(row)
             try:
                 active.prediction.output = _evaluation_output(row)
                 with active.session.lock:
@@ -392,6 +400,23 @@ class LiveEvaluationCoordinator:
                     error=row["trace_link_error"],
                     eval_predict_and_score_call_id=call_id,
                 )
+
+    def _apply_host_evaluator(self, row: dict[str, Any]) -> None:
+        if self._host_evaluator is None:
+            return
+        try:
+            self._host_evaluator(row)
+        except Exception as exc:
+            row.update(
+                {
+                    "comparison_evaluation_status": "unavailable",
+                    "comparison_evaluation_reason": (
+                        "host evaluation failed: "
+                        f"{type(exc).__name__}"
+                    ),
+                    "comparison_required_evaluation_complete": False,
+                }
+            )
 
     def cancel_open_predictions(self, reason: str) -> None:
         self._cancellation_event.set()
@@ -663,9 +688,11 @@ class GeneratedEvaluationCoordinator:
         *,
         repo_root: Path,
         env: Mapping[str, str],
+        host_evaluator: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.repo_root = repo_root
         self.env = dict(env)
+        self._host_evaluator = host_evaluator
         self.path = (
             repo_root
             / ".fugue"
@@ -677,7 +704,7 @@ class GeneratedEvaluationCoordinator:
         self._lock = threading.Lock()
 
     def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
-        if cell.evaluation_case is None:
+        if cell.evaluation_case is None and self._host_evaluator is None:
             return
         row = _completed_evaluation_row(
             cell,
@@ -685,15 +712,30 @@ class GeneratedEvaluationCoordinator:
             _planned_evaluation_row(cell),
         )
         row["evaluation_publication_mode"] = "local"
-        apply_generated_evaluation(
-            row,
-            case=cell.evaluation_case,
-            rubrics=cell.evaluation_rubrics,
-            judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
-            env=self.env,
-            trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
-        )
+        if cell.evaluation_case is not None:
+            apply_generated_evaluation(
+                row,
+                case=cell.evaluation_case,
+                rubrics=cell.evaluation_rubrics,
+                judge_model=str(cell.env.get("FUGUE_JUDGE_MODEL") or ""),
+                env=self.env,
+                trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
+            )
         _set_adapter_outcome(row)
+        if self._host_evaluator is not None:
+            try:
+                self._host_evaluator(row)
+            except Exception as exc:
+                row.update(
+                    {
+                        "comparison_evaluation_status": "unavailable",
+                        "comparison_evaluation_reason": (
+                            "host evaluation failed: "
+                            f"{type(exc).__name__}"
+                        ),
+                        "comparison_required_evaluation_complete": False,
+                    }
+                )
         with self._lock:
             with self.path.open("a") as handle:
                 handle.write(
@@ -2309,6 +2351,20 @@ def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
         key = f"evaluation_{dimension}"
         if row.get(key) is not None:
             scores[key] = row[key]
+    for source, prefix in (
+        ("comparison_deterministic_scores", "comparison.deterministic"),
+        ("comparison_judge_scores", "comparison.judge"),
+    ):
+        values = row.get(source)
+        if not isinstance(values, Mapping):
+            continue
+        for name, value in values.items():
+            if isinstance(value, bool) or (
+                isinstance(value, int | float)
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                scores[f"{prefix}.{name}"] = value
     return {key: value for key, value in scores.items() if value is not None}
 
 
@@ -2316,6 +2372,7 @@ def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
     values = set(_COMMON_SCORERS)
     for row in rows:
         values.update(_evaluation_scores(row))
+        values.update(str(value) for value in row.get("host_scorer_names") or [])
         case = row.get("evaluation_case") or {}
         for dimension in case.get("scorer_dimensions") or []:
             values.add(f"evaluation_{dimension}")
