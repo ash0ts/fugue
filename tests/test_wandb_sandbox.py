@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import fugue.bench.wandb_sandbox as wandb_sandbox
 from fugue.bench.candidates import resolve_candidate, stable_digest
 from fugue.bench.cli import _parser
 from fugue.bench.comparison import (
@@ -20,6 +21,7 @@ from fugue.bench.job_config import _candidate_agent_configuration
 from fugue.bench.wandb_sandbox import (
     WANDB_ENVIRONMENT_IMPORT,
     _remote_secret_env,
+    _write_build_context,
     bind_wandb_job_environment,
     lock_wandb_runtime,
     read_wandb_runtime_lock,
@@ -31,6 +33,57 @@ from fugue.bench.wandb_sandbox import (
 EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
 SHA256 = "a" * 64
 GIT_SHA = "b" * 40
+
+
+def test_runtime_build_context_uses_frozen_lock_and_locked_agent_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    context = tmp_path / "context"
+    runtime = repo / ".fugue" / "runtime" / "mcp" / "wandb" / "runtime"
+    (repo / "fugue").mkdir(parents=True)
+    context.mkdir()
+    runtime.mkdir(parents=True)
+    (repo / "fugue" / "__init__.py").write_text("")
+    (runtime / "server").write_text("runtime")
+    for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE"):
+        (repo / name).write_text(name)
+    monkeypatch.setattr(
+        wandb_sandbox,
+        "_tree_digest_from_image",
+        lambda image, path: SHA256,
+    )
+
+    assets = _write_build_context(
+        context,
+        repo_root=repo,
+        harness="claude-code",
+        agent_image="fugue-agent-claude-code:locked",
+        agent_image_id="sha256:" + SHA256,
+        integrations=(
+            {
+                "id": "wandb",
+                "source": runtime,
+                "digest": SHA256,
+            },
+        ),
+    )
+
+    dockerfile = (context / "Dockerfile").read_text()
+    assert "uv==0.11.27" in dockerfile
+    assert "uv sync --frozen --no-dev --no-editable" in dockerfile
+    assert "FROM fugue-agent-claude-code:locked AS agent-runtime" in dockerfile
+    assert "python -m pip install --no-cache-dir /fugue-src" not in dockerfile
+    assert {item["kind"] for item in assets} == {
+        "fugue-source",
+        "dependency-lock",
+        "project-metadata",
+        "mcp-runtime",
+        "agent-runtime",
+    }
+    agent_asset = next(item for item in assets if item["kind"] == "agent-runtime")
+    assert agent_asset["source"] == "sha256:" + SHA256
 
 
 def _manifest() -> dict[str, object]:
