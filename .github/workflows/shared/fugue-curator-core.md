@@ -185,6 +185,11 @@ Run all of the following after implementation:
 uv run --extra dev python -m compileall fugue
 uv run --extra dev python -m ruff check .
 uv run --extra dev python -m pytest
+uv run --extra dev python -m fugue.bench.curation validate-proposal \
+  --candidate /tmp/gh-aw/agent/candidate.json \
+  --source <exact-added-source-path> \
+  --experiment <exact-added-experiment-path> \
+  --repo-root .
 git diff --check
 git status --short
 ```

@@ -359,10 +359,6 @@ class HarborWorkerBackend:
         )
 
 
-def render_conversation(messages: tuple[dict[str, str], ...]) -> str:
-    return ConversationRequest.normalized(messages).render_json()
-
-
 def _read_worker_result(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))

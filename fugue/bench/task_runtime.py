@@ -259,11 +259,6 @@ def task_architecture(task: TaskSpec) -> str:
     return architecture
 
 
-def task_runtime_requires_gold_verification(manifest: BenchmarkManifest) -> bool:
-    """Return whether the manifest's runtime contract requires SWE gold verification."""
-    return _requires_gold_verification(manifest)
-
-
 def task_runtime_requires_verification(
     manifest: BenchmarkManifest, task: TaskSpec
 ) -> bool:

@@ -7,7 +7,6 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +48,6 @@ class CatalogStatus:
     path: str
     experiments: int
     records: int
-    local_records: int
-    refreshed_at: str | None
     revision: str | None
 
 
@@ -72,12 +69,7 @@ class ExperimentCatalog:
         with self._connect() as connection:
             self._create_schema(connection)
             self._refresh_local(connection)
-            now = datetime.now(UTC).isoformat()
             revision = self._revision(connection)
-            connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES('refreshed_at', ?)",
-                (now,),
-            )
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('revision', ?)",
                 (revision,),
@@ -87,7 +79,7 @@ class ExperimentCatalog:
 
     def status(self) -> CatalogStatus:
         if not self.path.is_file():
-            return CatalogStatus(self.path.as_posix(), 0, 0, 0, None, None)
+            return CatalogStatus(self.path.as_posix(), 0, 0, None)
         with self._connect() as connection:
             self._create_schema(connection)
             experiments = int(
@@ -99,8 +91,6 @@ class ExperimentCatalog:
             path=self.path.as_posix(),
             experiments=experiments,
             records=records,
-            local_records=records,
-            refreshed_at=metadata.get("refreshed_at"),
             revision=metadata.get("revision"),
         )
 

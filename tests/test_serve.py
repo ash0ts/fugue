@@ -23,7 +23,6 @@ from fugue.serve.runtime import (
     ConversationRequest,
     HarborWorkerBackend,
     WorkerRequest,
-    render_conversation,
 )
 from fugue.serve.worker import extract_final_answer
 from fugue.weave_support import trace_async_operation
@@ -695,13 +694,13 @@ def test_weave_initialization_failure_executes_candidate_exactly_once(
 
 
 def test_history_rendering_and_native_final_answer_extraction(tmp_path: Path) -> None:
-    rendered = render_conversation(
+    rendered = ConversationRequest.normalized(
         (
             {"role": "user", "content": "first"},
             {"role": "assistant", "content": "second"},
             {"role": "user", "content": "third"},
         )
-    )
+    ).render_json()
     assert rendered.index("first") < rendered.index("second") < rendered.index("third")
 
     job_dir = tmp_path / "job"

@@ -90,13 +90,6 @@ _CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
 _CONTAINER_TRIAL_POLICY_ROOT = PurePosixPath("/tmp/fugue-trial-policy")
 
 
-def _require_env(key_name: str, purpose: str) -> str:
-    key = os.environ.get(key_name, "").strip()
-    if not key:
-        raise ValueError(f"{key_name} is not set. Source the repo .env for {purpose}.")
-    return key
-
-
 def _require_trace_key() -> str:
     key = trace_api_key(os.environ)
     if not key:
