@@ -253,3 +253,7 @@ _.action_run
 _.analysis_result
 _.display
 _.disabled
+
+# Serialized runtime-manifest field and Harbor's dynamic ``--env`` import.
+_.required_secrets
+FugueWandbEnvironment

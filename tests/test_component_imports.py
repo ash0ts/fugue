@@ -8,6 +8,7 @@ import pytest
 
 import fugue.bench.component_imports as component_imports
 from fugue.bench.component_imports import (
+    _mcp_process_environment,
     add_mcp_command,
     import_mcp_config,
     import_skill,
@@ -54,6 +55,31 @@ args = ["other@1.0.0"]
     assert draft.fixed_env == (("MCP_ANALYTICS_LOG_STREAM", "stderr"),)
     assert draft.allowed_hosts == ("api.wandb.test", "trace.wandb.test")
     assert "other" not in json.dumps(draft.to_dict())
+
+
+def test_mcp_probe_inherits_only_operating_env_and_declared_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/tmp/unit-home")
+    monkeypatch.setenv("WANDB_API_KEY", "declared-value")
+    monkeypatch.setenv("UNRELATED_API_TOKEN", "must-not-cross-boundary")
+    draft = component_imports.MCPImportDraftV1(
+        schema_version=1,
+        id="wandb",
+        transport="stdio",
+        command=("uvx", "wandb-mcp-server"),
+        required_env=("WANDB_API_KEY",),
+        fixed_env=(("MCP_ANALYTICS_LOG_STREAM", "stderr"),),
+    )
+
+    environment = _mcp_process_environment(draft)
+
+    assert environment["PATH"] == "/usr/bin"
+    assert environment["HOME"] == "/tmp/unit-home"
+    assert environment["WANDB_API_KEY"] == "declared-value"
+    assert environment["MCP_ANALYTICS_LOG_STREAM"] == "stderr"
+    assert "UNRELATED_API_TOKEN" not in environment
 
 
 def test_mcp_import_rejects_literal_credentials_and_shells(tmp_path: Path) -> None:
@@ -138,7 +164,12 @@ def test_package_mcp_lock_materializes_read_only_runtime(
     )
     monkeypatch.setattr(
         "fugue.bench.component_imports._managed_python_probe_command",
-        lambda runtime_source, *, runtime_platform, required_env, fixed_env: (
+        lambda runtime_source,
+        *,
+        runtime_platform,
+        required_env,
+        fixed_env,
+        allowed_hosts: (
             "/usr/bin/docker",
             "probe",
         ),
@@ -228,6 +259,15 @@ def test_python_mcp_probe_is_pinned_isolated_and_secret_safe(
     assert "MCP_ANALYTICS_LOG_STREAM=stderr" in command
     assert "technical-preview" not in joined
     assert "@sha256:" in joined
+
+    live_command = component_imports._managed_python_probe_command(
+        tmp_path,
+        runtime_platform="linux/arm64",
+        required_env=("WANDB_API_KEY",),
+        fixed_env=(),
+        allowed_hosts=("api.wandb.ai",),
+    )
+    assert "--network bridge" in " ".join(live_command)
 
 
 def test_python_mcp_runtime_installs_only_from_locked_wheelhouse(

@@ -319,6 +319,16 @@ class _TrialMetaMixin:
         secret_env = {**getattr(self, "_fugue_secret_env", {}), **secret_env}
         if not secret_env:
             return command, public_env or None
+        prepare_managed = getattr(
+            environment,
+            "prepare_managed_secret_environment",
+            None,
+        )
+        if callable(prepare_managed):
+            managed_env, exports = prepare_managed(secret_env)
+            if exports:
+                command = " && ".join([*exports, command])
+            return command, {**public_env, **managed_env} or None
         path = await self._stage_exec_secrets(environment, secret_env)
         return f". {shlex.quote(path)}; {command}", public_env or None
 
@@ -743,6 +753,7 @@ done
             "harbor_config": os.environ.get("FUGUE_HARBOR_CONFIG"),
             "harbor_environment": os.environ.get("FUGUE_HARBOR_ENVIRONMENT"),
             "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
+            "sandbox_runtime": _json_env("FUGUE_SANDBOX_RUNTIME"),
             "agent_config_hash": os.environ.get("FUGUE_AGENT_CONFIG_HASH"),
             "dataset": os.environ.get("FUGUE_DATASET"),
             "repository": os.environ.get("FUGUE_REPOSITORY"),

@@ -25,6 +25,7 @@ _TRANSPORTS = {"stdio", "sse", "streamable-http"}
 @dataclass(frozen=True)
 class IntegrationRuntime:
     type: str
+    platform: str | None = None
     image: str | None = None
     service: str | None = None
     port: int | None = None
@@ -62,7 +63,9 @@ class IntegrationSpec:
 
     @property
     def config_hash(self) -> str:
-        payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        value = asdict(self)
+        value["runtime"] = _runtime_identity(self.runtime)
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -377,7 +380,7 @@ def _integration_identity(
     behavior = {
         "id": spec.id,
         "version": spec.version,
-        "runtime": asdict(spec.runtime),
+        "runtime": _runtime_identity(spec.runtime),
         "interfaces": [asdict(interface) for interface in spec.interfaces],
         "capabilities": list(spec.capabilities),
         "required_env": list(spec.required_env),
@@ -401,6 +404,14 @@ def _integration_identity(
     }
 
 
+def _runtime_identity(runtime: IntegrationRuntime) -> dict[str, Any]:
+    """Preserve pre-platform identities for runtimes that do not declare one."""
+    value = asdict(runtime)
+    if value["platform"] is None:
+        del value["platform"]
+    return value
+
+
 def effective_selections(
     experiment: list[IntegrationSelection],
     variant: list[IntegrationSelection],
@@ -421,6 +432,7 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
         raise ValueError(f"{path}: runtime must be a mapping")
     allowed = {
         "type",
+        "platform",
         "image",
         "service",
         "port",
@@ -438,6 +450,7 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
             f"{path}: runtime.type must be compose, external, builtin, or managed"
         )
     image = str(raw["image"]) if raw.get("image") else None
+    platform = _runtime_platform(raw.get("platform"), runtime_type, path)
     service = str(raw.get("service") or "") or None
     port = int(raw["port"]) if raw.get("port") is not None else None
     url = str(raw["url"]) if raw.get("url") else None
@@ -498,10 +511,12 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
             )
         if any((image, service, port, url, healthcheck, resources)):
             raise ValueError(
-                f"{path}: managed runtime accepts only type, source, digest, and command"
+                f"{path}: managed runtime accepts only type, platform, source, "
+                "digest, and command"
             )
     return IntegrationRuntime(
         type=runtime_type,
+        platform=platform,
         image=image,
         service=service,
         port=port,
@@ -512,6 +527,18 @@ def _runtime(raw: Any, path: Path) -> IntegrationRuntime:
         healthcheck=dict(healthcheck),
         resources=dict(resources),
     )
+
+
+def _runtime_platform(value: Any, runtime_type: str, path: Path) -> str | None:
+    platform = str(value) if value else None
+    if platform and (
+        runtime_type != "managed"
+        or platform not in {"linux/amd64", "linux/arm64"}
+    ):
+        raise ValueError(
+            f"{path}: platform is supported only for managed Linux runtimes"
+        )
+    return platform
 
 
 def _healthcheck(raw: Any, path: Path) -> dict[str, Any]:
