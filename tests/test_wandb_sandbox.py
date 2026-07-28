@@ -4,6 +4,7 @@ import base64
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from fugue.bench.job_config import _candidate_agent_configuration
 from fugue.bench.wandb_sandbox import (
     WANDB_ENVIRONMENT_IMPORT,
     _remote_secret_env,
+    _scan_image,
     _write_build_context,
     bind_wandb_job_environment,
     lock_wandb_runtime,
@@ -84,6 +86,35 @@ def test_runtime_build_context_uses_frozen_lock_and_locked_agent_id(
     }
     agent_asset = next(item for item in assets if item["kind"] == "agent-runtime")
     assert agent_asset["source"] == "sha256:" + SHA256
+
+
+def test_failed_runtime_scan_reports_critical_and_high_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = tmp_path / "scan.json"
+
+    def failed_scan(*args, **kwargs):
+        report.write_text(
+            json.dumps(
+                {
+                    "matches": [
+                        {"vulnerability": {"severity": "Critical"}},
+                        {"vulnerability": {"severity": "High"}},
+                        {"vulnerability": {"severity": "Medium"}},
+                    ]
+                }
+            )
+        )
+        return SimpleNamespace(returncode=1, stderr="threshold", stdout="")
+
+    monkeypatch.setattr(wandb_sandbox.subprocess, "run", failed_scan)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"1 Critical, 1 High; report .*scan\.json",
+    ):
+        _scan_image("example@sha256:" + SHA256, report)
 
 
 def _manifest() -> dict[str, object]:
