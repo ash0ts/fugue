@@ -493,6 +493,20 @@ wheels = [
 ]
 
 [[package]]
+name = "cwsandbox"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "googleapis-common-protos", marker = "python_full_version >= '3.13'" },
+    { name = "grpcio", marker = "python_full_version >= '3.13'" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ef/d9/540f20685c878f86f8588bff841618e1a125bfb13c8ba4071fe9e041477d/cwsandbox-0.26.0.tar.gz", hash = "sha256:541fbef6fd5cf7b70e2692bf3f35a2ae8f2a577e5caf29162dececb42e973616", size = 489383, upload-time = "2026-06-11T13:09:00.329Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/67/61/ac962e3c59d3c349046d204a67c5f301b10ebab4c413b079862fd234a7d5/cwsandbox-0.26.0-py3-none-any.whl", hash = "sha256:88143a5959a93f1a0145a7897d57caabe9c488051e287f185da1a83451896105", size = 178221, upload-time = "2026-06-11T13:08:58.751Z" },
+]
+
+[[package]]
 name = "deprecation"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -800,18 +814,19 @@ research = [
 research-worker = [
     { name = "fastapi" },
     { name = "fastembed" },
-    { name = "harbor", marker = "python_full_version >= '3.13'" },
+    { name = "harbor", extra = ["wandb"], marker = "(python_full_version >= '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "lancedb" },
     { name = "mcp" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "uvicorn" },
+    { name = "wandb", marker = "python_full_version >= '3.13'" },
 ]
 serve = [
     { name = "ag-ui-protocol" },
     { name = "fastapi" },
     { name = "fastembed" },
-    { name = "harbor", marker = "python_full_version >= '3.13'" },
+    { name = "harbor", extra = ["wandb"], marker = "(python_full_version >= '3.13' and extra == 'extra-5-fugue-serve') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
     { name = "lancedb" },
     { name = "mcp" },
     { name = "uvicorn" },
@@ -829,8 +844,8 @@ requires-dist = [
     { name = "fastembed", marker = "extra == 'serve'", specifier = "==0.8.0" },
     { name = "filelock", specifier = "==3.29.7" },
     { name = "graphiti-core", marker = "extra == 'context'", specifier = "==0.29.2" },
-    { name = "harbor", marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.18.0" },
-    { name = "harbor", marker = "python_full_version >= '3.13' and extra == 'serve'", specifier = "==0.18.0" },
+    { name = "harbor", extras = ["wandb"], marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.18.0" },
+    { name = "harbor", extras = ["wandb"], marker = "python_full_version >= '3.13' and extra == 'serve'", specifier = "==0.18.0" },
     { name = "httpx" },
     { name = "lancedb", marker = "extra == 'context'", specifier = "==0.34.0" },
     { name = "lancedb", marker = "extra == 'research-worker'", specifier = "==0.34.0" },
@@ -857,6 +872,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'research-worker'", specifier = ">=0.34,<1" },
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.34,<1" },
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
+    { name = "wandb", marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.28.1" },
     { name = "weave", specifier = "==0.53.1" },
 ]
 provides-extras = ["dev", "context", "serve", "research", "research-worker"]
@@ -866,8 +882,8 @@ name = "googleapis-common-protos"
 version = "1.75.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-research-worker' or extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b5/c8/f439cffde755cffa462bfbb156278fa6f9d09119719af9814b858fd4f81f/googleapis_common_protos-1.75.0.tar.gz", hash = "sha256:53a062ff3c32552fbd62c11fe23768b78e4ddf0494d5e5fd97d3f4689c75fbbd", size = 151035, upload-time = "2026-05-07T08:04:49.423Z" }
 wheels = [
@@ -1002,7 +1018,7 @@ name = "grpcio"
 version = "1.82.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/90/bc/656b89387d6f4ed7e0686c7b64c2ae7e554a759aa58122c8e5fb99392c32/grpcio-1.82.1.tar.gz", hash = "sha256:707b24abd90fcb1e45bcc080577da1dbf9971d107490589b9539af8e1e77b4b5", size = 13187300, upload-time = "2026-07-08T12:36:16.588Z" }
 wheels = [
@@ -1090,6 +1106,12 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/38/24/7222433d3b9f665db1759456c281a9c136b921300be5d7af269f183ee59e/harbor-0.18.0.tar.gz", hash = "sha256:9b918b99ec38b4e16db7e0b797dcebf92bfc8be9d9ba22a2d2ed6ebb8feb38df", size = 1535447, upload-time = "2026-07-07T20:29:46.878Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e8/81/b5d4f3119b131ee4a41e7036c7c1315e13c27849ffb59c3364875768132a/harbor-0.18.0-py3-none-any.whl", hash = "sha256:e436f04fca35bb3705be603b8c123d0472418d10120cfd7e5ba8dc902e56bc32", size = 1735449, upload-time = "2026-07-07T20:29:45.064Z" },
+]
+
+[package.optional-dependencies]
+wandb = [
+    { name = "cwsandbox", marker = "python_full_version >= '3.13'" },
+    { name = "wandb", marker = "python_full_version >= '3.13'" },
 ]
 
 [[package]]
@@ -1865,8 +1887,8 @@ dependencies = [
     { name = "flatbuffers" },
     { name = "numpy" },
     { name = "packaging" },
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-research-worker' or extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/b7/dd3a524ed93a820dff1af902d0412957ab12499953333e9daa01af5bc480/onnxruntime-1.27.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:a14c2ce45312def86b77aea651f46565e45960cf5f0721bfdff449165086ab76", size = 18433506, upload-time = "2026-06-15T22:43:47.026Z" },
@@ -1986,8 +2008,8 @@ name = "opentelemetry-proto"
 version = "1.43.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-context'" },
-    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-fugue-research-worker' or extra == 'extra-5-fugue-serve' or extra != 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e0/b9/d357faefb40bda1d4799913e6af611171ff22a2dedcb93576bc92242d056/opentelemetry_proto-1.43.0.tar.gz", hash = "sha256:224778df17e1f3fafeaaa21d874236ca5f6ffc2f86e0899298ec7351aac27924", size = 46481, upload-time = "2026-06-24T15:20:07.625Z" }
 wheels = [
@@ -2307,9 +2329,17 @@ name = "protobuf"
 version = "5.29.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
-    "python_full_version == '3.13.*'",
-    "python_full_version < '3.13'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
+    "python_full_version < '3.13' and extra == 'extra-5-fugue-context' and extra != 'extra-5-fugue-research-worker' and extra != 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version >= '3.14' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32' and extra != 'extra-5-fugue-context' and extra != 'extra-5-fugue-serve'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7e/57/394a763c103e0edf87f0938dafcd918d53b4c011dfc5c8ae80f3b0452dbb/protobuf-5.29.6.tar.gz", hash = "sha256:da9ee6a5424b6b30fd5e45c5ea663aef540ca95f9ad99d1e887e819cdf9b8723", size = 425623, upload-time = "2026-02-04T22:54:40.584Z" }
 wheels = [
@@ -2326,10 +2356,6 @@ name = "protobuf"
 version = "7.35.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform != 'win32'",
     "python_full_version < '3.13'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/01/9ef0afd7999eb9badb3a768b4aedd78c86d4c65cfaf1958ab276199e76b4/protobuf-7.35.1.tar.gz", hash = "sha256:ce115a26fe0c39a2c29973d914d327e516a6455464489fe3cd1e51a1b354f81a", size = 458717, upload-time = "2026-06-11T21:55:40.257Z" }
@@ -3471,6 +3497,34 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/66/3e/4d08c5903b2c0c70cad583c170cc4a663fc6a61e2ad00b711fcda61358cd/vulture-2.16.tar.gz", hash = "sha256:f8d9f6e2af03011664a3c6c240c9765b3f392917d3135fddca6d6a68d359f717", size = 52680, upload-time = "2026-03-25T14:41:27.141Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f5/be/f935130312330614811dae2ea9df3f395f6d63889eb6c2e68c14507152ee/vulture-2.16-py3-none-any.whl", hash = "sha256:6e0f1c312cef1c87856957e5c2ca9608834a7c794c2180477f30bf0e4cc58eee", size = 26993, upload-time = "2026-03-25T14:41:26.21Z" },
+]
+
+[[package]]
+name = "wandb"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click", marker = "python_full_version >= '3.13'" },
+    { name = "packaging", marker = "python_full_version >= '3.13'" },
+    { name = "platformdirs", marker = "python_full_version >= '3.13'" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
+    { name = "pydantic", marker = "python_full_version >= '3.13'" },
+    { name = "pyyaml", marker = "python_full_version >= '3.13'" },
+    { name = "requests", marker = "python_full_version >= '3.13'" },
+    { name = "sentry-sdk", marker = "python_full_version >= '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.13'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/fb/8d3f96a8b143060d6fa145462d0785981373e04694e4152555ccb5d23939/wandb-0.28.1.tar.gz", hash = "sha256:870ccb1a01238b0ac07c6fd96a0810a1f79090aba04ea29f4ee012ac8327705d", size = 40578119, upload-time = "2026-07-16T18:47:05.413Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/21/8df50164d07623cfcefec19bbf9327d9be84b637a827cea1f0c06db005fd/wandb-0.28.1-py3-none-macosx_12_0_arm64.whl", hash = "sha256:da909a76e65c64c0d93acc485d2a19f66e336f1e3f725f1c98a070883e084943", size = 24277925, upload-time = "2026-07-16T18:46:42.383Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/18/6c3da7e6cb215ad363324db8dc4d83b93626f5e339822b05b1c38a6097fd/wandb-0.28.1-py3-none-macosx_12_0_x86_64.whl", hash = "sha256:3da3db219c54bfd1082c00e9061c8ea894ba43e42733b5af00bb10c09d7158fe", size = 25480852, upload-time = "2026-07-16T18:46:45.102Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/1a/d15bcfb4417fa69edcaa33db8ea012db733da1057e193b047e3f69fdd671/wandb-0.28.1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:ae9ae6fb29e2e2b1d097ed8b75c0c0240c778c2a8cad1d996dee870a1e401c2c", size = 24832138, upload-time = "2026-07-16T18:46:47.433Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/da/49924c7df2952dfd82c86c3779c339c0c3d6f6439387c03d97d0470c3658/wandb-0.28.1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:8cfb898b6a6c884d9c9294b02764e88bce65049f027a124d6bee53fe722469b6", size = 26486533, upload-time = "2026-07-16T18:46:49.839Z" },
+    { url = "https://files.pythonhosted.org/packages/11/c0/06b23518e29690784f1b3081e39c7679ca076cb0af094cb9b4bb309150f5/wandb-0.28.1-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:cf2b1533945395e4fdbe6182b272bb0ca8a02c10b3086a395e2d57686ae3ed0d", size = 25022635, upload-time = "2026-07-16T18:46:52.376Z" },
+    { url = "https://files.pythonhosted.org/packages/23/30/6de2f7995a8a6eecbd03d24c79a139a734c0168f5520cf4c7ccb43c1dbbc/wandb-0.28.1-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:7233061080507a4b4098bed1ccb381ce6f890c60397cd4153d060285bcb267bd", size = 27008895, upload-time = "2026-07-16T18:46:55.025Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/83/49deab9447687625371435ca21b6da82f223f1c7d014d77386b9cb91833c/wandb-0.28.1-py3-none-win32.whl", hash = "sha256:4bc461cda3ce23a19d8df5e42981a664d95fa3231efb10fd1e85d9d4824c7d29", size = 24418398, upload-time = "2026-07-16T18:46:57.43Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/6f/ed6616b11ea15b8ceabedcaa567286c1c9ec65fa50563230a90bfb627cc5/wandb-0.28.1-py3-none-win_amd64.whl", hash = "sha256:d98a10370162b1e970850237114c56e9c4c58f3cb701e4b8cb38f36f6749fd52", size = 24418404, upload-time = "2026-07-16T18:47:00.427Z" },
+    { url = "https://files.pythonhosted.org/packages/07/78/75b6827a6665337a715c5347c5edbd84eca660f7a0f48d8d6d24d1f66bee/wandb-0.28.1-py3-none-win_arm64.whl", hash = "sha256:4aa07f13dd3bcac2c0524c8d0f49f76e83ab5c1054fd09f3b1a436cfcde146a6", size = 22299006, upload-time = "2026-07-16T18:47:02.71Z" },
 ]
 
 [[package]]

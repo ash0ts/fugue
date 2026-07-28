@@ -2167,8 +2167,15 @@ def _research_scorer(
         "revision": revision,
         "model": value.profile,
         "rubric_summary": "Use only permitted evidence and remain calibrated about coverage.",
-        "rubric": value.rubric,
-        "dimensions": list(value.dimensions),
+        "dimensions": [
+            {
+                "id": dimension.replace("_", "-"),
+                "label": dimension.replace("_", " ").title(),
+                "source_key": dimension,
+                "primary": dimension == "evidence_grounding",
+            }
+            for dimension in value.dimensions
+        ],
         "blind_fields": [
             "harness",
             "model",

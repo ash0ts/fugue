@@ -93,6 +93,7 @@ jobs:
           tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
           tests/test_experiment_views.py tests/test_comparison.py
           tests/test_component_imports.py tests/test_tasksets.py
+          tests/test_mcp_release_qualification.py
 
   quality:
     name: Quality, build, and command smoke
