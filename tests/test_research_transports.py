@@ -13,6 +13,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from fugue.research.access import (
     AccessGrantV1,
     ResearchAccessAuthorizer,
+    access_scope,
     token_digest,
 )
 from fugue.research.contracts import (
@@ -368,6 +369,13 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
     names = {tool.name for tool in tools}
     assert names == {
         "fugue_catalog",
+        "fugue_comparison_catalog",
+        "fugue_comparison_preview",
+        "fugue_comparison_readiness",
+        "fugue_comparison_request_approval",
+        "fugue_comparison_result",
+        "fugue_comparison_start",
+        "fugue_comparison_watch",
         "fugue_research_catalog",
         "fugue_research_context",
         "fugue_research_create",
@@ -395,6 +403,28 @@ def test_mcp_exposes_only_high_level_research_operations(tmp_path: Path) -> None
     }
     templates = asyncio.run(server.list_resource_templates())
     assert len(templates) == 7
+    assert not any(name.startswith("fugue_comparison_approve") for name in names)
+
+
+def test_comparison_http_routes_have_bounded_scopes() -> None:
+    root = "/v1/research/study-1/comparisons"
+
+    assert access_scope("GET", root) == "research:read"
+    assert access_scope("GET", f"{root}/registered/readiness") == "research:read"
+    assert access_scope("POST", f"{root}:preview") == "study:preview"
+    assert (
+        access_scope("POST", f"{root}:request-approval")
+        == "approval:request"
+    )
+    assert (
+        access_scope("POST", f"{root}/registered:start")
+        == "study:start-approved"
+    )
+    assert access_scope("GET", f"{root}/registered/digest") == "research:read"
+    assert (
+        access_scope("GET", f"{root}/registered/digest/result")
+        == "research:read"
+    )
 
 
 def test_mcp_operations_enforce_object_scope_and_operator_cancellation(
