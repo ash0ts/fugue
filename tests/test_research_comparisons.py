@@ -113,6 +113,22 @@ def test_public_preview_and_study_resource_exclude_private_labels(
     assert resource.digest == artifact_digest
     assert resource.version == digest
     assert Path(resource.uri).resolve() == public_path.resolve()
+    [event] = [
+        item
+        for item in store.research_log_events()
+        if item.summary.get("experiment_view", {}).get("kind") == "design"
+    ]
+    view = event.summary["experiment_view"]
+    assert event.study_id == f"comparison-{digest[:20]}"
+    assert view["question"] == registry_question(service)
+    assert view["matrix_size"] == preview["readiness"]["estimated_cells"]
+    assert view["taskset"]["digest"] == preview["readiness"]["taskset_digest"]
+    assert view["runtime"]["id"] == "harbor"
+    assert {item["id"] for item in view["treatment_arms"]} == {
+        "baseline",
+        "candidate",
+    }
+    assert "private_labels" not in json.dumps(event.to_dict(), sort_keys=True)
 
 
 def test_exact_approval_is_required_and_launch_is_idempotent(
@@ -166,6 +182,16 @@ def test_exact_approval_is_required_and_launch_is_idempotent(
     worker_input = json.loads(launches[0].read_text(encoding="utf-8"))
     assert len(str(worker_input["approval_digest"])) == 64
     assert stat.S_IMODE(launches[0].stat().st_mode) == 0o600
+    [progress] = [
+        item
+        for item in service.store.research_log_events()
+        if item.summary.get("experiment_view", {}).get("kind") == "progress"
+    ]
+    assert progress.state == "running"
+    assert progress.progress == {
+        "completed": 0,
+        "total": preview["readiness"]["estimated_cells"],
+    }
 
 
 def test_approval_limits_are_checked_before_worker_launch(tmp_path: Path) -> None:
@@ -235,6 +261,23 @@ def test_result_projection_is_safe_and_result_digest_is_verified(
     assert study.results[-1].sample_size == 2
     assert study.results[-1].estimate.value == 1
     assert study.resources[-1].digest == result.result_digest
+    [evaluation] = [
+        item
+        for item in store.research_log_events()
+        if item.summary.get("experiment_view", {}).get("kind") == "evaluation"
+    ]
+    view = evaluation.summary["experiment_view"]
+    assert evaluation.study_id == f"comparison-{digest[:20]}"
+    assert view["matrix_size"] == 2
+    assert view["aligned_comparisons"][0]["pairs"] == 1
+    assert view["arm_totals"][1]["passed"] == 1
+    assert view["infrastructure_health"] == "healthy"
+    assert view["evidence_eligible"] is False
+    assert any(
+        item["id"] == "judge-evidence" and item["status"] == "not_applicable"
+        for item in view["outcome_summaries"]
+    )
+    assert any(item["kind"] == "comparison_result" for item in view["evidence_links"])
 
     result_service = ComparisonControlService(
         tmp_path,
@@ -279,3 +322,9 @@ def test_result_projection_is_safe_and_result_digest_is_verified(
     with pytest.raises(ResearchError) as drift:
         result_service.result("study-1", _COMPARISON_ID, digest)
     assert drift.value.code == "comparison_result_drift"
+
+
+def registry_question(service: ComparisonControlService) -> str:
+    return next(
+        item["question"] for item in service.catalog() if item["id"] == _COMPARISON_ID
+    )
