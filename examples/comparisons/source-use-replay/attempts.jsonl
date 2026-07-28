@@ -1,0 +1,16 @@
+{"answer":{"amount":100,"source":"expense-policy-v3.md"},"harness":"codex","prediction_id":"replay-expense-b1","task_id":"expense-limit","trial_index":1,"variant_id":"baseline"}
+{"answer":{"amount":125,"source":"expense-policy-v4.md"},"harness":"codex","prediction_id":"replay-expense-c1","task_id":"expense-limit","trial_index":1,"variant_id":"candidate"}
+{"answer":{"amount":100,"source":"expense-policy-v3.md"},"harness":"codex","prediction_id":"replay-expense-b2","task_id":"expense-limit","trial_index":2,"variant_id":"baseline"}
+{"answer":{"amount":125,"source":"expense-policy-v4.md"},"harness":"codex","prediction_id":"replay-expense-c2","task_id":"expense-limit","trial_index":2,"variant_id":"candidate"}
+{"answer":{"days":45,"source":"vendor-contract-draft.md"},"harness":"codex","prediction_id":"replay-retention-b1","task_id":"retention-window","trial_index":1,"variant_id":"baseline"}
+{"answer":{"days":30,"source":"vendor-contract-v2.md"},"harness":"codex","prediction_id":"replay-retention-c1","task_id":"retention-window","trial_index":1,"variant_id":"candidate"}
+{"answer":{"days":30,"source":"vendor-contract-v2.md"},"harness":"codex","prediction_id":"replay-retention-b2","task_id":"retention-window","trial_index":2,"variant_id":"baseline"}
+{"answer":{"days":30,"source":"vendor-contract-v2.md"},"harness":"codex","prediction_id":"replay-retention-c2","task_id":"retention-window","trial_index":2,"variant_id":"candidate"}
+{"answer":{"amount":500,"source":"equipment-policy-2025.md"},"harness":"codex","prediction_id":"replay-equipment-b1","task_id":"equipment-allowance","trial_index":1,"variant_id":"baseline"}
+{"answer":{"amount":750,"source":"equipment-policy-2026.md"},"harness":"codex","prediction_id":"replay-equipment-c1","task_id":"equipment-allowance","trial_index":1,"variant_id":"candidate"}
+{"answer":{"amount":500,"source":"equipment-policy-2025.md"},"harness":"codex","prediction_id":"replay-equipment-b2","task_id":"equipment-allowance","trial_index":2,"variant_id":"baseline"}
+{"answer":{"amount":500,"source":"equipment-policy-2025.md"},"harness":"codex","prediction_id":"replay-equipment-c2","task_id":"equipment-allowance","trial_index":2,"variant_id":"candidate"}
+{"answer":{"minutes":60,"source":"incident-runbook-v2.md"},"harness":"codex","prediction_id":"replay-incident-b1","task_id":"incident-escalation","trial_index":1,"variant_id":"baseline"}
+{"answer":{"minutes":30,"source":"incident-runbook-v3.md"},"harness":"codex","prediction_id":"replay-incident-c1","task_id":"incident-escalation","trial_index":1,"variant_id":"candidate"}
+{"answer":{"minutes":30,"source":"incident-runbook-v3.md"},"harness":"codex","prediction_id":"replay-incident-b2","task_id":"incident-escalation","trial_index":2,"variant_id":"baseline"}
+{"answer":{"minutes":60,"source":"incident-runbook-v2.md"},"harness":"codex","prediction_id":"replay-incident-c2","task_id":"incident-escalation","trial_index":2,"variant_id":"candidate"}
