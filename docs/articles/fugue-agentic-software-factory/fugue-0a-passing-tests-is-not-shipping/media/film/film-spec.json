@@ -1,0 +1,68 @@
+{
+  "slug": "fugue-0a-passing-tests-is-not-shipping",
+  "title": "Passing Tests Is Not Shipping",
+  "width": 1280,
+  "height": 720,
+  "duration": 84,
+  "fps": 15,
+  "posterScene": "ownership-cost",
+  "reducedMotionScene": "ownership-cost",
+  "posterTime": 19.36,
+  "reducedMotionTime": 19.36,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "the-patch-and-the-trajectory",
+    "a-review-burden-is-an-output",
+    "necessary-tests-insufficient-evidence",
+    "garbage-collection-belongs-in-done"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "garbage-collection-belongs-in-done",
+    "after_label": "Garbage collection belongs in “done”",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Track one passing patch as local success turns into repository ownership and removal cost."
+  },
+  "checkpoints": [
+    {
+      "name": "passing-patch",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "ownership-cost",
+      "time": 19.36
+    },
+    {
+      "name": "quality-ladder",
+      "time": 32.36
+    },
+    {
+      "name": "review-output",
+      "time": 44.64
+    },
+    {
+      "name": "acceptance-gates",
+      "time": 56.64
+    },
+    {
+      "name": "ci-boundary",
+      "time": 68.64
+    },
+    {
+      "name": "series-context",
+      "time": 80.64
+    }
+  ]
+}

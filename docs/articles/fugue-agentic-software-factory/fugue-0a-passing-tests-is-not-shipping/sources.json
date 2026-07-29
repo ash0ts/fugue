@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "metr-maintainer",
+      "author": "METR",
+      "title": "Many SWE-bench-passing PRs would not be merged",
+      "publication": "METR Research Notes",
+      "date": "2026-03-10",
+      "url": "https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/",
+      "supports": "Measured gap between automated task success and maintainer acceptance."
+    },
+    {
+      "id": "metr-research-update",
+      "author": "METR",
+      "title": "Research update: towards reconciling slowdown with time horizons",
+      "publication": "METR",
+      "date": "2025-08-12",
+      "url": "https://metr.org/blog/2025-08-12-research-update-towards-reconciling-slowdown-with-time-horizons/",
+      "supports": "Maintainer review failure classes in a small audited patch sample."
+    },
+    {
+      "id": "dudycz-end-coding",
+      "author": "Oskar Dudycz",
+      "title": "The End of Coding? Wrong Question",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/the_end_of_coding_wrong_question/",
+      "supports": "Outcome-over-output framing for AI-assisted software work."
+    },
+    {
+      "id": "dudycz-subtraction",
+      "author": "Oskar Dudycz",
+      "title": "Addition by Subtraction in Software Design",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/addition-by-subtraction-in-software-design/",
+      "supports": "Removal and conceptual compression as deliberate design work."
+    },
+    {
+      "id": "hamel-eval-smell",
+      "author": "Hamel Husain",
+      "title": "It’s Hard to Eval Is a Product Smell",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/eval-smell/",
+      "supports": "Evaluation ambiguity as a signal of underspecified product behavior."
+    },
+    {
+      "id": "openai-harness",
+      "author": "OpenAI",
+      "title": "Harness engineering: leveraging Codex in an agent-first world",
+      "publication": "OpenAI",
+      "date": "2026",
+      "url": "https://openai.com/index/harness-engineering/",
+      "supports": "Operational account of recurring cleanup in an agent-generated codebase."
+    }
+  ]
+}

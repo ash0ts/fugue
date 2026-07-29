@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "wandb-sandboxes",
+      "author": "Weights & Biases",
+      "title": "Serverless Sandboxes",
+      "publication": "W&B Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/sandboxes",
+      "supports": "Required remote execution product contract."
+    },
+    {
+      "id": "wandb-secrets",
+      "author": "Weights & Biases",
+      "title": "Sandbox secrets",
+      "publication": "W&B Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/sandboxes/secrets",
+      "supports": "Named secret injection and credential boundary."
+    },
+    {
+      "id": "wandb-runs",
+      "author": "Weights & Biases",
+      "title": "Runs",
+      "publication": "W&B Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/models/runs",
+      "supports": "Official Run evidence object contract."
+    },
+    {
+      "id": "weave-tracing",
+      "author": "Weights & Biases",
+      "title": "Trace your application",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/tracking/tracing",
+      "supports": "Official Calls and trace evidence contract."
+    },
+    {
+      "id": "weave-datasets",
+      "author": "Weights & Biases",
+      "title": "Datasets",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/datasets",
+      "supports": "Official versioned Dataset contract."
+    },
+    {
+      "id": "weave-evaluations",
+      "author": "Weights & Biases",
+      "title": "Evaluations",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/evaluations",
+      "supports": "Official Evaluation, prediction, and scorer contract."
+    }
+  ]
+}

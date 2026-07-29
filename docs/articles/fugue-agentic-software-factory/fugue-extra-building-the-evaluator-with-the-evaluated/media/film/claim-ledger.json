@@ -1,0 +1,172 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
+  "audience": "Agent-first engineering teams and maintainers",
+  "question": "What does Agent-assisted evaluator development prove—and what does it not prove?",
+  "intended_takeaway": "Auditable co-development improves the process; external boundaries establish evaluator trust.",
+  "out_of_scope": "Agent productivity and PR volume do not validate the evaluator.",
+  "placement": {
+    "after_heading": "rejected-work-is-durable-input",
+    "after_label": "Rejected work is durable input",
+    "bridge_to_heading": "a-copyable-co-development-ledger",
+    "bridge_to_label": "A copyable co-development ledger",
+    "what_to_watch": "Inspect the public PR stack, the defects and cleanup decisions it records, and the external boundaries that prevent the evaluator from grading its own homework."
+  },
+  "poster_scene": "public-stack",
+  "reduced_motion_scene": "public-stack",
+  "source_heading_ids": [
+    "the-stack-as-research-evidence",
+    "case-study-1-identity-became-code",
+    "case-study-2-exact-tree-preparation-found-a-real-runtime-defect",
+    "case-study-3-garbage-collection-needed-judgment",
+    "separation-despite-shared-agents",
+    "what-we-can-quantify",
+    "rejected-work-is-durable-input"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "public-stack",
+      "scene": "public-stack",
+      "claim": "Four public heads record distinct integration layers.",
+      "support": [
+        "#42 cleanup; #43 control; #44 qualification; #45 Serverless.",
+        "The stack is process evidence, not evaluator validation."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#the-stack-as-research-evidence",
+      "visual_relationship": "pr_stack",
+      "displayed_values": [
+        "#42",
+        "04152c2",
+        "20",
+        "350",
+        "91",
+        "#43",
+        "397b918",
+        "14",
+        "2298",
+        "12",
+        "#44",
+        "68c8b9d",
+        "24",
+        "2020",
+        "196",
+        "#45",
+        "2f6453e",
+        "32",
+        "3047",
+        "117"
+      ],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "identity-case",
+      "scene": "identity-case",
+      "claim": "A label stopped standing in for candidate identity.",
+      "support": [
+        "Behavior-changing inputs became explicit fingerprints.",
+        "The same resolved identity must reach render, run, snapshot, and result."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#case-study-1-identity-became-code",
+      "visual_relationship": "pipeline",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "qualification-defect",
+      "scene": "qualification-defect",
+      "claim": "Qualification found a runtime defect before the claim shipped.",
+      "support": [
+        "The exact candidate tree—not a nearby branch—was exercised.",
+        "The defect report remains development evidence until publicly linked."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#case-study-2-exact-tree-preparation-found-a-real-runtime-defect",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "cleanup-case",
+      "scene": "cleanup-case",
+      "claim": "Static findings became an adjudication queue, not a delete command.",
+      "support": [
+        "Remove, prove a caller, or document dynamic use.",
+        "Persisted readers and registered callbacks require ownership evidence."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#case-study-3-garbage-collection-needed-judgment",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "division-of-labor",
+      "scene": "division-of-labor",
+      "claim": "Agents implement and inspect; humans set claims and approval.",
+      "support": [
+        "Repository-local plans, schemas, locks, and tests make work legible.",
+        "Authorship does not grant evaluation authority."
+      ],
+      "kind": "cited background",
+      "source": "article.md#separation-despite-shared-agents",
+      "visual_relationship": "swimlane",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "recursion-boundary",
+      "scene": "recursion-boundary",
+      "claim": "The evaluated system cannot rewrite its holdout or approve itself.",
+      "support": [
+        "External evaluation and private facts stay outside the candidate.",
+        "A human remains the release authority."
+      ],
+      "kind": "cited background",
+      "source": "article.md#separation-despite-shared-agents",
+      "visual_relationship": "boundary",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "evidence-boundary",
+      "scene": "evidence-boundary",
+      "claim": "Public commits and checks are auditable; local anecdotes remain bounded.",
+      "support": [
+        "Files, additions, deletions, tests, and head identities can be reopened.",
+        "Productivity and evaluator validity remain separate ledgers."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#what-we-can-quantify",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Co-development can improve the factory without validating its evaluator.",
+      "support": [
+        "Agent legibility strengthens design and maintenance.",
+        "Holdout evidence and approval still bound the final decision."
+      ],
+      "kind": "cited background",
+      "source": "article.md#rejected-work-is-durable-input",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "Agent productivity and PR volume do not validate the evaluator."
+    }
+  ]
+}

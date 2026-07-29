@@ -1,0 +1,151 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-4a-telemetry-is-not-evaluation",
+  "audience": "Loop-engineering and autoresearch architects",
+  "question": "What authority boundaries turn observations into reversible engineering?",
+  "intended_takeaway": "A learning loop requires immutable proposals, external evaluation, and reversible decisions.",
+  "out_of_scope": "More telemetry alone does not create an evaluator or approval authority.",
+  "placement": {
+    "after_heading": "accept-reject-or-learn",
+    "after_label": "Accept, reject, or learn?",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow an authority failure into a governed Study state machine with separate proposal, approval, execution, evaluation, retry, and rollback powers."
+  },
+  "poster_scene": "authority-lanes",
+  "reduced_motion_scene": "authority-lanes",
+  "source_heading_ids": [
+    "why-telemetry-alone-cannot-drive-the-loop",
+    "the-governed-cycle",
+    "the-division-of-labor",
+    "immutable-study-state",
+    "reversibility-is-part-of-the-hypothesis",
+    "failure-drills-before-autonomy",
+    "accept-reject-or-learn"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "authority-failure",
+      "scene": "authority-failure",
+      "claim": "The proposer sees a weak result and edits the experiment.",
+      "support": [
+        "One more retry and a narrower taskset appear locally reasonable.",
+        "Together they optimize against the evaluator."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#why-telemetry-alone-cannot-drive-the-loop",
+      "visual_relationship": "swimlane",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "governed-cycle",
+      "scene": "governed-cycle",
+      "claim": "Observation becomes a new proposal, not a hidden retry.",
+      "support": [
+        "Observe → hypothesize → preregister → approve.",
+        "Execute → evaluate → interpret → decide."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-governed-cycle",
+      "visual_relationship": "pipeline",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "authority-lanes",
+      "scene": "authority-lanes",
+      "claim": "Proposer, approver, executor, and evaluator do different work.",
+      "support": [
+        "Aria may select and explain a registered comparison.",
+        "It may not approve, retry, or rewrite accepted meaning."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-division-of-labor",
+      "visual_relationship": "swimlane",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "study-state",
+      "scene": "study-state",
+      "claim": "Accepted meaning moves forward; it is never edited in place.",
+      "support": [
+        "A changed candidate, task, cap, or retry policy creates a new Study.",
+        "Every coordinate reaches an explicit terminal state."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#immutable-study-state",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "retry-rollback",
+      "scene": "retry-rollback",
+      "claim": "Recovery cannot silently add evidence after approval.",
+      "support": [
+        "Retry rules are part of the accepted plan.",
+        "Rollback names the candidate and data boundary to restore."
+      ],
+      "kind": "cited background",
+      "source": "article.md#reversibility-is-part-of-the-hypothesis",
+      "visual_relationship": "timeline",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "failure-drills",
+      "scene": "failure-drills",
+      "claim": "Digest mismatch, missing evidence, and cleanup failure block progress.",
+      "support": [
+        "They remain visible in durable Study state.",
+        "The loop does not manufacture a low score or a success."
+      ],
+      "kind": "cited background",
+      "source": "article.md#failure-drills-before-autonomy",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "null-memory",
+      "scene": "null-memory",
+      "claim": "Reject, accept, and learn are distinct terminal decisions.",
+      "support": [
+        "A null result remains durable research evidence.",
+        "It can motivate a new question without launching it."
+      ],
+      "kind": "cited background",
+      "source": "article.md#accept-reject-or-learn",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Governance closes the evidence loop without closing inquiry.",
+      "support": [
+        "Authority boundaries protect the current decision.",
+        "A new hypothesis begins a new locked cycle."
+      ],
+      "kind": "cited background",
+      "source": "article.md#accept-reject-or-learn",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+    }
+  ]
+}

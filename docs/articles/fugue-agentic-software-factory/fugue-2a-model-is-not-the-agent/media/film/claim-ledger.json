@@ -1,0 +1,161 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-2a-model-is-not-the-agent",
+  "audience": "Agent researchers and platform engineers",
+  "question": "What exactly is the treatment when the same model runs through different harnesses?",
+  "intended_takeaway": "Report locked model–harness–environment candidates, not a model leaderboard.",
+  "out_of_scope": "The preregistration contains no observed winner or causal harness result.",
+  "placement": {
+    "after_heading": "valid-results-including-nulls",
+    "after_label": "Valid results, including nulls",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "See how candidate identity, paired assignment, ordering, and reporting rules prevent a harness comparison from becoming a model leaderboard."
+  },
+  "poster_scene": "candidate-lattice",
+  "reduced_motion_scene": "candidate-lattice",
+  "source_heading_ids": [
+    "the-candidate-lattice",
+    "assignment-ordering-and-attempts",
+    "the-bounded-question",
+    "reversals-and-the-no-pooling-rule",
+    "threats-we-will-check-before-interpretation",
+    "valid-results-including-nulls"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "candidate-lattice",
+      "scene": "candidate-lattice",
+      "claim": "One model can produce several behavioral candidates.",
+      "support": [
+        "Harness, environment, tools, and stopping policy change observable behavior.",
+        "The model name alone is not the reporting unit."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-candidate-lattice",
+      "visual_relationship": "candidate_assembly",
+      "displayed_values": [],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "paired-assignment",
+      "scene": "paired-assignment",
+      "claim": "Each harness candidate receives the same locked task coordinates.",
+      "support": [
+        "Task identity and attempt index align the comparison.",
+        "A missing coordinate remains missing."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#assignment-ordering-and-attempts",
+      "visual_relationship": "matrix",
+      "displayed_values": [
+        "TASK 1 / A1",
+        "TASK 1 / A2",
+        "TASK 2 / A1",
+        "TASK 2 / A2"
+      ],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "balanced-order",
+      "scene": "balanced-order",
+      "claim": "Counterbalance execution order before observing outcomes.",
+      "support": [
+        "Half the blocks begin with A; half begin with B.",
+        "Warm caches and temporal drift cannot become the treatment by accident."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#assignment-ordering-and-attempts",
+      "visual_relationship": "timeline",
+      "displayed_values": [
+        "BLOCK 1",
+        "BLOCK 2"
+      ],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "estimand",
+      "scene": "estimand",
+      "claim": "Estimate paired candidate differences under locked conditions.",
+      "support": [
+        "The reporting unit is model–harness–environment.",
+        "The design does not estimate a universal model ranking."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-bounded-question",
+      "visual_relationship": "boundary",
+      "displayed_values": [],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "harness-reversal",
+      "scene": "harness-reversal",
+      "claim": "A reversal is a result, not a reason to pool.",
+      "support": [
+        "Candidate A can lead on one task family while B leads on another.",
+        "Separate reporting preserves the interaction."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#reversals-and-the-no-pooling-rule",
+      "visual_relationship": "interaction_plot",
+      "displayed_values": [
+        "0.75",
+        "0.35"
+      ],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "invalid-claims",
+      "scene": "invalid-claims",
+      "claim": "Protocol differences can prevent a pure harness claim.",
+      "support": [
+        "If adapters or tool semantics differ, report the full candidates.",
+        "Do not subtract away behavior-changing preparation."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#threats-we-will-check-before-interpretation",
+      "visual_relationship": "dependency_stack",
+      "displayed_values": [],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "valid-null",
+      "scene": "valid-null",
+      "claim": "No difference and harness reversal are both publishable outcomes.",
+      "support": [
+        "The design is useful even when there is no winner.",
+        "Incomplete infrastructure can still make the study uninterpretable."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#valid-results-including-nulls",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Harness identity belongs inside experimental design.",
+      "support": [
+        "It travels with the candidate through execution and evidence.",
+        "The final claim remains bounded to that locked system."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#valid-results-including-nulls",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "The preregistration contains no observed winner or causal harness result."
+    }
+  ]
+}

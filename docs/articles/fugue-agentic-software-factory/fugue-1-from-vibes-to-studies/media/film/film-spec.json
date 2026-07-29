@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-1-from-vibes-to-studies",
+  "title": "From Vibes to Studies",
+  "width": 1280,
+  "height": 720,
+  "duration": 96,
+  "fps": 15,
+  "posterScene": "observed-replay",
+  "reducedMotionScene": "observed-replay",
+  "posterTime": 70.64,
+  "reducedMotionTime": 70.64,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "expansion-makes-the-experiment-concrete",
+    "scope-and-terms",
+    "pure-preview-is-a-security-property",
+    "approval-grants-execution-not-authorship",
+    "one-service-several-doors",
+    "the-no-key-replay",
+    "the-unfamiliar-maintainer-test"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "the-unfamiliar-maintainer-test",
+    "after_label": "The unfamiliar-maintainer test",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result."
+  },
+  "checkpoints": [
+    {
+      "name": "expand-matrix",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "coordinate-identity",
+      "time": 19.36
+    },
+    {
+      "name": "preview-digest",
+      "time": 33.08
+    },
+    {
+      "name": "approval-boundary",
+      "time": 46.36
+    },
+    {
+      "name": "one-service",
+      "time": 58.64
+    },
+    {
+      "name": "observed-replay",
+      "time": 70.64
+    },
+    {
+      "name": "smoke-boundary",
+      "time": 82.64
+    },
+    {
+      "name": "series-context",
+      "time": 93.2
+    }
+  ]
+}

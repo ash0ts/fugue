@@ -1,0 +1,177 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
+  "audience": "MCP maintainers and Agent-integration teams",
+  "question": "What must be locked before an MCP release can receive a behavioral recommendation?",
+  "intended_takeaway": "Qualify exact MCP revisions as whole Agent-facing releases.",
+  "out_of_scope": "Prepared evidence and planned cells are not an observed release result.",
+  "placement": {
+    "after_heading": "the-maintainer-memo",
+    "after_label": "The maintainer memo",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Track exact revisions through manifest qualification, genuine evidence, the staged 80-cell design, judge calibration, and the still-blocked decision."
+  },
+  "poster_scene": "staged-study",
+  "reduced_motion_scene": "staged-study",
+  "source_heading_ids": [
+    "lock-the-two-mcp-candidates",
+    "the-interface-an-agent-experiences",
+    "genuine-evidence-deliberately-seeded",
+    "the-80-cell-sequence",
+    "judge-calibration-before-paid-work",
+    "four-outcome-layers",
+    "the-maintainer-memo"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "exact-revisions",
+      "scene": "exact-revisions",
+      "claim": "The comparison begins with exact MCP revisions.",
+      "support": [
+        "Baseline: 80252b3…",
+        "Candidate: a2bae72…"
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#lock-the-two-mcp-candidates",
+      "visual_relationship": "revision_compare",
+      "displayed_values": [
+        "W&B MCP 0.3.7",
+        "80252b3aa23ae3c1fdde089ce2b7dfb106dafb38",
+        "W&B MCP 0.4",
+        "a2bae7271323ac43262ffb73454b0aff01ddc808",
+        "linux/amd64"
+      ],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "manifest-contract",
+      "scene": "manifest-contract",
+      "claim": "Descriptions, projections, pagination, and errors are behavioral inputs.",
+      "support": [
+        "Target-platform probes record the exact tool manifest.",
+        "Protocol compatibility alone cannot establish Agent compatibility."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-interface-an-agent-experiences",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "prepared-evidence",
+      "scene": "prepared-evidence",
+      "claim": "Genuine W&B objects seed the maintainer questions.",
+      "support": [
+        "6 Runs, 24 conversations, 48 tool spans.",
+        "8 Dataset rows, 2 Evaluations, 16 prediction rows."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#genuine-evidence-deliberately-seeded",
+      "visual_relationship": "evidence_graph",
+      "displayed_values": [
+        "6",
+        "24",
+        "48",
+        "8",
+        "2",
+        "16"
+      ],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "staged-study",
+      "scene": "staged-study",
+      "claim": "Discovery precedes untouched primary and replication cohorts.",
+      "support": [
+        "8 Claude + 8 W&B Inference discovery.",
+        "32 Claude primary + 32 W&B Inference replication."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-80-cell-sequence",
+      "visual_relationship": "staged_study",
+      "displayed_values": [
+        "8",
+        "32",
+        "80 PLANNED CELLS"
+      ],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "judge-gate",
+      "scene": "judge-gate",
+      "claim": "Forty-eight double-reviewed cases must qualify the judge.",
+      "support": [
+        "TPR and TNR must each reach at least 0.85.",
+        "Zero critical false passes are permitted."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#judge-calibration-before-paid-work",
+      "visual_relationship": "review_gate",
+      "displayed_values": [
+        "48",
+        "24 ACCEPTABLE",
+        "24 UNACCEPTABLE",
+        "TPR ≥ .85",
+        "TNR ≥ .85",
+        "0 CRITICAL FP"
+      ],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "four-outcomes",
+      "scene": "four-outcomes",
+      "claim": "Four outcome layers remain independently inspectable.",
+      "support": [
+        "Conformance, deterministic, judgment, and mechanism answer different questions.",
+        "A release memo cannot hide failure in an aggregate."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#four-outcome-layers",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    },
+    {
+      "id": "blocked-status",
+      "scene": "blocked-status",
+      "claim": "Prepared evidence does not unlock a release recommendation.",
+      "support": [
+        "Evidence, candidate, taskset, judge, preview, and runtime locks must all exist.",
+        "The 80 cells and reconciliation remain unobserved."
+      ],
+      "kind": "pending result",
+      "source": "article.md#the-maintainer-memo",
+      "visual_relationship": "state_machine",
+      "displayed_values": [
+        "80 CELLS REQUIRED"
+      ],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "An MCP release spans design, execution, evidence, and decision.",
+      "support": [
+        "The whole locked release is the treatment.",
+        "No individual 0.4 feature receives causal credit."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-maintainer-memo",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "Prepared evidence and planned cells are not an observed release result."
+    }
+  ]
+}

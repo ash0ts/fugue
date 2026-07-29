@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "dudycz-end-coding",
+      "author": "Oskar Dudycz",
+      "title": "The End of Coding? Wrong Question",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/the_end_of_coding_wrong_question/",
+      "supports": "Outcome-over-output framing for agent-assisted engineering."
+    },
+    {
+      "id": "dudycz-subtraction",
+      "author": "Oskar Dudycz",
+      "title": "Addition by Subtraction in Software Design",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/addition-by-subtraction-in-software-design/",
+      "supports": "Removal and conceptual compression as design outcomes."
+    },
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "publication": "Lil’Log",
+      "date": "2026-07-04",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "supports": "Recursive-improvement patterns and evaluator risks."
+    },
+    {
+      "id": "auto-evals",
+      "author": "Shreya Shankar and Hamel Husain",
+      "title": "Do Automated Evals Work?",
+      "publication": "Parlance Labs",
+      "date": "2025",
+      "url": "https://parlance-labs.com/blog/posts/auto-evals/index.html",
+      "supports": "Human-guided validation limits for automated analysis."
+    },
+    {
+      "id": "fugue-pr42",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete Fugue surfaces",
+      "publication": "GitHub pull request #42",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/42",
+      "supports": "Public exact-head cleanup diff and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr43",
+      "author": "Fugue maintainers",
+      "title": "Govern registered comparisons",
+      "publication": "GitHub pull request #43",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/43",
+      "supports": "Public exact-head Research control diff and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr44",
+      "author": "Fugue maintainers",
+      "title": "Add real W&B MCP evidence study",
+      "publication": "GitHub pull request #44",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/44",
+      "supports": "Public exact-head qualification assets and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr45",
+      "author": "Fugue maintainers",
+      "title": "Qualify MCP studies on W&B Serverless",
+      "publication": "GitHub pull request #45",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/45",
+      "supports": "Public exact-head Serverless boundary and GitHub diff statistics."
+    }
+  ]
+}

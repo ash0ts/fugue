@@ -1,4 +1,5 @@
 import index from "../public/data/index.json";
+import product from "../public/data/product.json";
 
 const modules = import.meta.glob("../public/data/experiments/*.json", {
   eager: true,
@@ -19,4 +20,8 @@ export function allExperiments() {
 
 export function experimentById(id) {
   return experiments.get(id);
+}
+
+export function productInfo() {
+  return product;
 }

@@ -1,0 +1,1470 @@
+{
+  "schema_version": 3,
+  "series_spine": [
+    "MAINTENANCE PROBLEM",
+    "EXPERIMENTAL DESIGN",
+    "IMMUTABLE APPROVAL",
+    "ISOLATED EXECUTION",
+    "RECONCILED EVIDENCE",
+    "BOUNDED DECISION",
+    "GOVERNED IMPROVEMENT"
+  ],
+  "films": [
+    {
+      "slug": "fugue-0a-passing-tests-is-not-shipping",
+      "title": "Passing Tests Is Not Shipping",
+      "part": "FUGUE 0A",
+      "status": "PUBLISHED / ILLUSTRATIVE CASE",
+      "audience": "Staff engineers and maintainers",
+      "question": "What does a green task verifier leave unanswered about a patch?",
+      "takeaway": "A passing patch can still make the next change harder.",
+      "out_of_scope": "This does not argue that tests are weak or that every patch needs a study.",
+      "duration": 84,
+      "poster_scene": "ownership-cost",
+      "reduced_motion_scene": "ownership-cost",
+      "placement": {
+        "after_heading": "garbage-collection-belongs-in-done",
+        "after_label": "Garbage collection belongs in “done”",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Track one passing patch as local success turns into repository ownership and removal cost."
+      },
+      "scenes": [
+        {
+          "id": "passing-patch",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / ILLUSTRATIVE",
+          "headline": "The verifier sees the outcome, not the trajectory.",
+          "support": ["The bounded task passes.", "Three repository costs remain outside that verdict."],
+          "kind": "illustrative example",
+          "source": "article.md#the-patch-and-the-trajectory",
+          "visual": {
+            "type": "patch",
+            "before": ["shared resolver", "boundary test", "owned API"],
+            "after": ["duplicate resolver", "happy-path test", "compatibility shim"],
+            "flags": ["DUPLICATION", "BOUNDARY GAP", "NO OWNER"]
+          }
+        },
+        {
+          "id": "ownership-cost",
+          "duration": 13,
+          "eyebrow": "THE COST ARRIVES LATER",
+          "headline": "Every surviving surface creates another ownership obligation.",
+          "support": ["The patch is cheap to generate.", "Understanding, correcting, owning, and removing it are not."],
+          "kind": "illustrative example",
+          "source": "article.md#a-review-burden-is-an-output",
+          "visual": {
+            "type": "trajectory",
+            "x_label": "FUTURE CHANGES",
+            "y_label": "MAINTENANCE BURDEN",
+            "series": [
+              {"label": "SMALL / OWNED", "values": [1, 1.2, 1.4, 1.6, 1.8], "role": "verified"},
+              {"label": "PASSING / UNOWNED", "values": [1, 2, 3.4, 5.2, 7.4], "role": "failure"}
+            ]
+          }
+        },
+        {
+          "id": "quality-ladder",
+          "duration": 13,
+          "eyebrow": "FOUR DIFFERENT CLAIMS",
+          "headline": "Generated, correct, mergeable, and maintainable are not synonyms.",
+          "support": ["Each rung needs additional evidence.", "A lower rung cannot stand in for a higher one."],
+          "kind": "cited background",
+          "source": "article.md#the-patch-and-the-trajectory",
+          "visual": {
+            "type": "stack",
+            "layers": [
+              {"label": "GENERATED", "detail": "output exists"},
+              {"label": "FUNCTIONALLY CORRECT", "detail": "bounded task passes"},
+              {"label": "MERGEABLE", "detail": "repository contract holds"},
+              {"label": "MAINTAINABLE", "detail": "future burden stays bounded"}
+            ]
+          }
+        },
+        {
+          "id": "review-output",
+          "duration": 12,
+          "eyebrow": "COUNT THE DOWNSTREAM WORK",
+          "headline": "Review burden is part of the patch’s output.",
+          "support": ["Two candidates may solve the same tasks.", "The one requiring less repair leaves more capacity for the next change."],
+          "kind": "cited background",
+          "source": "article.md#a-review-burden-is-an-output",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "UNDERSTAND", "left": "small diff", "right": "duplicated path"},
+              {"label": "CORRECT", "left": "boundary covered", "right": "missing edge case"},
+              {"label": "OWN", "left": "named surface", "right": "compatibility guess"},
+              {"label": "REMOVE", "left": "none", "right": "future cleanup"}
+            ],
+            "columns": ["LOWER BURDEN", "HIGHER BURDEN"]
+          }
+        },
+        {
+          "id": "acceptance-gates",
+          "duration": 12,
+          "eyebrow": "USE THE CHEAPEST DECISIVE CONTROL",
+          "headline": "Different gates answer different acceptance questions.",
+          "support": ["Compiler and tests reject known deterministic defects.", "Review and cleanup examine ownership and trajectory."],
+          "kind": "cited background",
+          "source": "article.md#necessary-tests-insufficient-evidence",
+          "visual": {
+            "type": "pipeline",
+            "nodes": [
+              {"label": "COMPILE", "detail": "can it run?", "state": "verified"},
+              {"label": "TEST", "detail": "does task pass?", "state": "verified"},
+              {"label": "ANALYZE", "detail": "what is unused?", "state": "evidence"},
+              {"label": "REVIEW", "detail": "does it belong?", "state": "decision"},
+              {"label": "CLEAN", "detail": "what should leave?", "state": "decision"}
+            ]
+          }
+        },
+        {
+          "id": "ci-boundary",
+          "duration": 12,
+          "eyebrow": "THE PRACTICAL BOUNDARY",
+          "headline": "Known defects belong in CI; disagreement belongs in review.",
+          "support": ["Do not experimentalize a compiler error.", "Do not pretend a green check settled architectural ownership."],
+          "kind": "cited background",
+          "source": "article.md#necessary-tests-insufficient-evidence",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "DETERMINISTIC", "items": ["compile", "types", "focused tests"], "state": "verified"},
+            "right": {"label": "JUDGMENT", "items": ["boundaries", "ownership", "removal cost"], "state": "decision"},
+            "rule": "EVIDENCE TYPES MAY DISAGREE"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE",
+          "headline": "Maintainability frames both the question and the final decision.",
+          "support": ["The workflow begins with a repository problem.", "It ends only when evidence supports a bounded acceptance decision."],
+          "kind": "cited background",
+          "source": "article.md#garbage-collection-belongs-in-done",
+          "visual": {
+            "type": "series_map",
+            "highlight": [0, 5, 6],
+            "avoid": "A passing verifier proves maintainability."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-0b-eval-problem-is-not-scoring",
+      "title": "The Eval Problem Is Not Scoring",
+      "part": "FUGUE 0B",
+      "status": "WORKING DRAFT / NUMERICAL EXAMPLE",
+      "audience": "AI product engineers and eval owners",
+      "question": "How can an aggregate winner be an artifact of missing coordinates?",
+      "takeaway": "Denominators and independent evidence gates come before a winner.",
+      "out_of_scope": "This does not combine incompatible evidence into a new synthetic score.",
+      "duration": 96,
+      "poster_scene": "pooled-reversal",
+      "reduced_motion_scene": "pooled-reversal",
+      "placement": {
+        "after_heading": "the-artifact-a-four-ledger-result",
+        "after_label": "The artifact: a four-ledger result",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Watch unequal completion reverse the pooled result, then see how missing cells and four separate gates restore the planned decision."
+      },
+      "scenes": [
+        {
+          "id": "within-strata",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / ILLUSTRATIVE",
+          "headline": "Candidate B wins inside both task strata.",
+          "support": ["Easy: 95% versus 90%.", "Hard: 20% versus 10%."],
+          "kind": "illustrative example",
+          "source": "article.md#how-a-treatment-wins-without-improving",
+          "visual": {
+            "type": "denominator_bars",
+            "groups": [
+              {"label": "EASIER", "left": {"n": 90, "d": 100}, "right": {"n": 19, "d": 20}},
+              {"label": "HARDER", "left": {"n": 1, "d": 10}, "right": {"n": 8, "d": 40}}
+            ],
+            "columns": ["BASELINE", "CANDIDATE B"],
+            "unit": "PASS / PLANNED"
+          }
+        },
+        {
+          "id": "pooled-reversal",
+          "duration": 14,
+          "eyebrow": "THE POOL CHANGES THE QUESTION",
+          "headline": "Unequal denominators make the baseline appear to win.",
+          "support": ["Baseline: 91/110 = 82.7%.", "Candidate B: 27/60 = 45%."],
+          "kind": "illustrative example",
+          "source": "article.md#how-a-treatment-wins-without-improving",
+          "visual": {
+            "type": "denominator_bars",
+            "groups": [
+              {"label": "NAIVE POOLED TOTAL", "left": {"n": 91, "d": 110}, "right": {"n": 27, "d": 60}}
+            ],
+            "columns": ["BASELINE", "CANDIDATE B"],
+            "unit": "OBSERVED PASS / OBSERVED ROWS",
+            "warning": "DIFFERENT TASK MIXTURES"
+          }
+        },
+        {
+          "id": "missing-coordinates",
+          "duration": 14,
+          "eyebrow": "RESTORE THE PLAN",
+          "headline": "Fifty missing easy-task coordinates stay visible.",
+          "support": ["They are missing behavioral evidence.", "They are neither failures nor permission to shrink the denominator."],
+          "kind": "illustrative example",
+          "source": "article.md#how-a-treatment-wins-without-improving",
+          "visual": {
+            "type": "matrix",
+            "rows": ["BASELINE", "CANDIDATE B"],
+            "columns": ["EASY OBSERVED", "HARD OBSERVED", "EASY MISSING"],
+            "cells": [
+              ["100", "10", "0"],
+              ["20", "40", "50 MISSING"]
+            ],
+            "legend": ["OBSERVED", "MISSING"],
+            "unit": "TASK COORDINATES"
+          }
+        },
+        {
+          "id": "missing-not-zero",
+          "duration": 12,
+          "eyebrow": "PRESERVE THE FAILURE TYPE",
+          "headline": "Infrastructure failure is not a low-quality answer.",
+          "support": ["A failed Sandbox yields no behavioral observation.", "Scoring it zero silently changes the estimand."],
+          "kind": "cited background",
+          "source": "article.md#missing-is-not-zero",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "PLANNED CELL", "state": "evidence"},
+              {"label": "ANSWER OBSERVED", "state": "verified"},
+              {"label": "TASK FAIL", "state": "failure"},
+              {"label": "INFRA FAILURE", "state": "missing"}
+            ],
+            "edges": [[0, 1, "runtime worked"], [1, 2, "task verdict"], [0, 3, "no answer"]],
+            "forbidden": "INFRA FAILURE → SCORE 0"
+          }
+        },
+        {
+          "id": "four-gates",
+          "duration": 12,
+          "eyebrow": "NO FIFTH SCORE",
+          "headline": "Four ledgers must each support the bounded decision.",
+          "support": ["Infrastructure, task outcome, judgment, and mechanism can disagree.", "Their values remain separate."],
+          "kind": "cited background",
+          "source": "article.md#four-ledgers-no-synthetic-winner",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "INFRASTRUCTURE", "left": "complete?", "right": "gate"},
+              {"label": "DETERMINISTIC", "left": "regression bound?", "right": "gate"},
+              {"label": "JUDGMENT", "left": "validated?", "right": "gate"},
+              {"label": "MECHANISM", "left": "reconciled?", "right": "gate"}
+            ],
+            "columns": ["QUESTION", "DECISION ROLE"]
+          }
+        },
+        {
+          "id": "confounder-map",
+          "duration": 12,
+          "eyebrow": "A WIN CAN BE BORROWED",
+          "headline": "Task drift, retries, runtime, and judge leakage move results.",
+          "support": ["These variables belong in the comparison lock.", "They do not belong in an interpretive footnote."],
+          "kind": "cited background",
+          "source": "article.md#a-confounder-map-before-a-scorecard",
+          "visual": {
+            "type": "dependency_stack",
+            "target": "APPARENT WINNER",
+            "inputs": [
+              {"label": "TASK MIX", "state": "failure"},
+              {"label": "RETRIES", "state": "failure"},
+              {"label": "RUNTIME", "state": "failure"},
+              {"label": "JUDGE VIEW", "state": "failure"}
+            ],
+            "lock": "CANDIDATE + TASKSET + RUNTIME + EVIDENCE + EVALUATOR"
+          }
+        },
+        {
+          "id": "bounded-decision",
+          "duration": 12,
+          "eyebrow": "THE DECISION SHAPE",
+          "headline": "Passing all gates authorizes one bounded statement.",
+          "support": ["Discordance remains visible.", "Missing or invalid evidence blocks interpretation rather than lowering a score."],
+          "kind": "cited background",
+          "source": "article.md#the-artifact-a-four-ledger-result",
+          "visual": {
+            "type": "reconciliation",
+            "inputs": ["INFRASTRUCTURE", "DETERMINISTIC", "JUDGMENT", "MECHANISM"],
+            "output": "BOUNDED DECISION",
+            "blocked": ["MISSING", "INVALID", "DISCORDANT"]
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 10,
+          "eyebrow": "THE BIGGER PICTURE",
+          "headline": "Experimental design protects the path from evidence to decision.",
+          "support": ["Arithmetic summarizes observations.", "Locks and ledgers determine what those observations can support."],
+          "kind": "cited background",
+          "source": "article.md#the-artifact-a-four-ledger-result",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 4, 5],
+            "avoid": "One aggregate score is the evaluation."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-1-from-vibes-to-studies",
+      "title": "From Vibes to Studies",
+      "part": "FUGUE 1",
+      "status": "WORKING DRAFT / OBSERVED REPLAY",
+      "audience": "Agent builders and eval owners",
+      "question": "How does one readable comparison become exact, approved work?",
+      "takeaway": "The same coordinates must survive preview, approval, execution, and result.",
+      "out_of_scope": "The no-key replay proves installation and result shape, not Agent efficacy.",
+      "duration": 96,
+      "poster_scene": "observed-replay",
+      "reduced_motion_scene": "observed-replay",
+      "placement": {
+        "after_heading": "the-unfamiliar-maintainer-test",
+        "after_label": "The unfamiliar-maintainer test",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result."
+      },
+      "scenes": [
+        {
+          "id": "expand-matrix",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / DECLARED DESIGN",
+          "headline": "A compact comparison expands into 32 terminal obligations.",
+          "support": ["8 tasks × 2 candidates × 1 harness × 2 attempts.", "Every coordinate must end in an explicit terminal state."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#expansion-makes-the-experiment-concrete",
+          "visual": {
+            "type": "matrix",
+            "rows": ["BASELINE", "CANDIDATE"],
+            "columns": ["TASKS 1–4 / A1", "TASKS 5–8 / A1", "TASKS 1–4 / A2", "TASKS 5–8 / A2"],
+            "cells": [["4", "4", "4", "4"], ["4", "4", "4", "4"]],
+            "legend": ["32 PLANNED"],
+            "unit": "CELLS"
+          }
+        },
+        {
+          "id": "coordinate-identity",
+          "duration": 13,
+          "eyebrow": "ONE CELL, FULL IDENTITY",
+          "headline": "A cell is more than a row number.",
+          "support": ["Task, candidate, harness, attempt, runtime, and evidence lock define it.", "Changing one coordinate changes the planned work."],
+          "kind": "cited background",
+          "source": "article.md#scope-and-terms",
+          "visual": {
+            "type": "dependency_stack",
+            "target": "CELL 17",
+            "inputs": [
+              {"label": "TASK 05", "state": "evidence"},
+              {"label": "CANDIDATE B", "state": "variable"},
+              {"label": "HARNESS H", "state": "execution"},
+              {"label": "ATTEMPT 1", "state": "execution"}
+            ],
+            "lock": "RUNTIME + EVIDENCE + EVALUATOR"
+          }
+        },
+        {
+          "id": "preview-digest",
+          "duration": 14,
+          "eyebrow": "PURE PREVIEW",
+          "headline": "Resolve and digest the plan before execution exists.",
+          "support": ["Preview performs no model call, preparation, or run-state write.", "The digest names accepted meaning, not screen formatting."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#pure-preview-is-a-security-property",
+          "visual": {
+            "type": "pipeline",
+            "nodes": [
+              {"label": "RESOLVE", "detail": "identities", "state": "evidence"},
+              {"label": "EXPAND", "detail": "32 cells", "state": "evidence"},
+              {"label": "CAP", "detail": "$40 / 32", "state": "approval"},
+              {"label": "DIGEST", "detail": "sha256", "state": "approval"},
+              {"label": "NO RUN", "detail": "pure", "state": "missing"}
+            ]
+          }
+        },
+        {
+          "id": "approval-boundary",
+          "duration": 13,
+          "eyebrow": "HUMAN AUTHORITY",
+          "headline": "Approval grants execution, not authorship.",
+          "support": ["The accepted digest binds scope and spend.", "Any edit creates a new digest and requires new approval."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#approval-grants-execution-not-authorship",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "PREVIEW d1", "state": "evidence"},
+              {"label": "APPROVED d1", "state": "approval"},
+              {"label": "EXECUTE d1", "state": "execution"},
+              {"label": "EDIT → d2", "state": "failure"}
+            ],
+            "edges": [[0, 1, "human"], [1, 2, "exact match"], [0, 3, "meaning changed"]],
+            "forbidden": "APPROVED d1 → EXECUTE d2"
+          }
+        },
+        {
+          "id": "one-service",
+          "duration": 12,
+          "eyebrow": "MANY DOORS, ONE PLAN",
+          "headline": "CLI, Python, REST, MCP, and Aria converge on one service.",
+          "support": ["Each interface must return the same preview digest.", "No interface owns a private execution path."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#one-service-several-doors",
+          "visual": {
+            "type": "reconciliation",
+            "inputs": ["CLI", "PYTHON", "REST", "MCP", "ARIA"],
+            "output": "CANONICAL COMPARISON SERVICE",
+            "blocked": ["DIGEST DRIFT"]
+          }
+        },
+        {
+          "id": "observed-replay",
+          "duration": 12,
+          "eyebrow": "OBSERVED NO-KEY REPLAY",
+          "headline": "Sixteen aligned rows make the result contract tangible.",
+          "support": ["Baseline 2/8; candidate 6/8.", "Five improved, one regressed, two unchanged."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#the-no-key-replay",
+          "visual": {
+            "type": "paired_rows",
+            "summary": ["BASELINE 2/8", "CANDIDATE 6/8"],
+            "rows": [
+              {"label": "IMPROVED", "value": 5, "state": "verified"},
+              {"label": "REGRESSED", "value": 1, "state": "failure"},
+              {"label": "UNCHANGED", "value": 2, "state": "evidence"}
+            ],
+            "unit": "ALIGNED TASK PAIRS"
+          }
+        },
+        {
+          "id": "smoke-boundary",
+          "duration": 12,
+          "eyebrow": "DO NOT OVERCLAIM",
+          "headline": "Replay evidence is smoke evidence, not efficacy evidence.",
+          "support": ["It checks packaging, parsing, and result projection.", "Mechanism remains unavailable; no live Agent or Serverless runtime ran."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#the-no-key-replay",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "OBSERVED", "items": ["install", "16 rows", "result shape"], "state": "verified"},
+            "right": {"label": "NOT OBSERVED", "items": ["live Agent", "mechanism", "Serverless"], "state": "missing"},
+            "rule": "SMOKE ≠ EFFICACY"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 10,
+          "eyebrow": "THE BIGGER PICTURE",
+          "headline": "Primitives preserve identity across the control plane.",
+          "support": ["Design becomes approved execution without changing meaning.", "Evidence returns to the same declared coordinates."],
+          "kind": "cited background",
+          "source": "article.md#the-unfamiliar-maintainer-test",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 2, 3, 4],
+            "avoid": "A replay demonstrates live Agent efficacy."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-2a-model-is-not-the-agent",
+      "title": "The Model Is Not the Agent",
+      "part": "FUGUE 2A",
+      "status": "DRAFT DESIGN / NO RESULT YET",
+      "audience": "Agent researchers and platform engineers",
+      "question": "What exactly is the treatment when the same model runs through different harnesses?",
+      "takeaway": "Report locked model–harness–environment candidates, not a model leaderboard.",
+      "out_of_scope": "The preregistration contains no observed winner or causal harness result.",
+      "duration": 98,
+      "poster_scene": "candidate-lattice",
+      "reduced_motion_scene": "candidate-lattice",
+      "placement": {
+        "after_heading": "valid-results-including-nulls",
+        "after_label": "Valid results, including nulls",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "See how candidate identity, paired assignment, ordering, and reporting rules prevent a harness comparison from becoming a model leaderboard."
+      },
+      "scenes": [
+        {
+          "id": "candidate-lattice",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / PLANNED",
+          "headline": "One model can produce several behavioral candidates.",
+          "support": ["Harness, environment, tools, and stopping policy change observable behavior.", "The model name alone is not the reporting unit."],
+          "kind": "preregistered design",
+          "source": "article.md#the-candidate-lattice",
+          "visual": {
+            "type": "candidate_assembly",
+            "fixed": ["MODEL ROUTE", "ENVIRONMENT", "TOOLS"],
+            "lanes": [
+              {"label": "CANDIDATE A", "varied": "HARNESS A", "policy": "RECOVERY A"},
+              {"label": "CANDIDATE B", "varied": "HARNESS B", "policy": "RECOVERY B"}
+            ],
+            "unit": "MODEL–HARNESS–ENVIRONMENT"
+          }
+        },
+        {
+          "id": "paired-assignment",
+          "duration": 13,
+          "eyebrow": "PAIR THE TASKS",
+          "headline": "Each harness candidate receives the same locked task coordinates.",
+          "support": ["Task identity and attempt index align the comparison.", "A missing coordinate remains missing."],
+          "kind": "preregistered design",
+          "source": "article.md#assignment-ordering-and-attempts",
+          "visual": {
+            "type": "matrix",
+            "rows": ["HARNESS A", "HARNESS B"],
+            "columns": ["TASK 1 / A1", "TASK 1 / A2", "TASK 2 / A1", "TASK 2 / A2"],
+            "cells": [["planned", "planned", "planned", "planned"], ["planned", "planned", "planned", "planned"]],
+            "legend": ["PAIRED", "PLANNED"],
+            "unit": "LOCKED COORDINATES"
+          }
+        },
+        {
+          "id": "balanced-order",
+          "duration": 14,
+          "eyebrow": "ORDER IS A CONTROL",
+          "headline": "Counterbalance execution order before observing outcomes.",
+          "support": ["Half the blocks begin with A; half begin with B.", "Warm caches and temporal drift cannot become the treatment by accident."],
+          "kind": "preregistered design",
+          "source": "article.md#assignment-ordering-and-attempts",
+          "visual": {
+            "type": "timeline",
+            "lanes": [
+              {"label": "BLOCK 1", "events": ["A", "B", "A", "B"]},
+              {"label": "BLOCK 2", "events": ["B", "A", "B", "A"]}
+            ],
+            "unit": "PREDECLARED ORDER",
+            "status": "PLANNED"
+          }
+        },
+        {
+          "id": "estimand",
+          "duration": 13,
+          "eyebrow": "NAME THE QUESTION",
+          "headline": "Estimate paired candidate differences under locked conditions.",
+          "support": ["The reporting unit is model–harness–environment.", "The design does not estimate a universal model ranking."],
+          "kind": "preregistered design",
+          "source": "article.md#the-bounded-question",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "ESTIMAND", "items": ["paired task difference", "locked runtime", "declared attempts"], "state": "evidence"},
+            "right": {"label": "NOT ESTIMATED", "items": ["all repositories", "all harnesses", "model rank"], "state": "missing"},
+            "rule": "CANDIDATE ≠ MODEL NAME"
+          }
+        },
+        {
+          "id": "harness-reversal",
+          "duration": 12,
+          "eyebrow": "VALID DISCORDANCE / ILLUSTRATIVE",
+          "headline": "A reversal is a result, not a reason to pool.",
+          "support": ["Candidate A can lead on one task family while B leads on another.", "Separate reporting preserves the interaction."],
+          "kind": "illustrative example",
+          "source": "article.md#reversals-and-the-no-pooling-rule",
+          "visual": {
+            "type": "interaction_plot",
+            "families": ["TASK FAMILY X", "TASK FAMILY Y"],
+            "series": [
+              {"label": "CANDIDATE A", "values": [0.75, 0.35], "state": "variable"},
+              {"label": "CANDIDATE B", "values": [0.35, 0.75], "state": "decision"}
+            ],
+            "unit": "DIRECTION ONLY / NO RESULT"
+          }
+        },
+        {
+          "id": "invalid-claims",
+          "duration": 12,
+          "eyebrow": "CAUSAL BOUNDARY",
+          "headline": "Protocol differences can prevent a pure harness claim.",
+          "support": ["If adapters or tool semantics differ, report the full candidates.", "Do not subtract away behavior-changing preparation."],
+          "kind": "preregistered design",
+          "source": "article.md#threats-we-will-check-before-interpretation",
+          "visual": {
+            "type": "dependency_stack",
+            "target": "OBSERVED DIFFERENCE",
+            "inputs": [
+              {"label": "HARNESS", "state": "variable"},
+              {"label": "ADAPTER", "state": "failure"},
+              {"label": "TOOLS", "state": "failure"},
+              {"label": "PREPARATION", "state": "failure"}
+            ],
+            "lock": "ATTRIBUTE ONLY WHAT THE LOCKED CONTRAST SUPPORTS"
+          }
+        },
+        {
+          "id": "valid-null",
+          "duration": 12,
+          "eyebrow": "A NULL IS ALLOWED",
+          "headline": "No difference and harness reversal are both publishable outcomes.",
+          "support": ["The design is useful even when there is no winner.", "Incomplete infrastructure can still make the study uninterpretable."],
+          "kind": "preregistered design",
+          "source": "article.md#valid-results-including-nulls",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "NO DIFFERENCE", "state": "evidence"},
+              {"label": "REVERSAL", "state": "decision"},
+              {"label": "BOUNDED EFFECT", "state": "verified"},
+              {"label": "INCOMPLETE", "state": "missing"}
+            ],
+            "edges": [],
+            "forbidden": "PICK A WINNER AFTER SEEING RESULTS"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE / NO RESULT",
+          "headline": "Harness identity belongs inside experimental design.",
+          "support": ["It travels with the candidate through execution and evidence.", "The final claim remains bounded to that locked system."],
+          "kind": "preregistered design",
+          "source": "article.md#valid-results-including-nulls",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 3, 4, 5],
+            "avoid": "This design identifies a best model or harness."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-2b-memory-is-not-context",
+      "title": "Memory Is Not Context",
+      "part": "FUGUE 2B",
+      "status": "DRAFT DESIGN / NO RESULT YET",
+      "audience": "Context, retrieval, MCP, and developer-tool teams",
+      "question": "What can a retrieval trace honestly establish about evidence use?",
+      "takeaway": "Returned, opened, used, and successful are separate events with separate denominators.",
+      "out_of_scope": "Mechanism evidence does not by itself prove that memory caused task success.",
+      "duration": 104,
+      "poster_scene": "mechanism-funnel",
+      "reduced_motion_scene": "mechanism-funnel",
+      "placement": {
+        "after_heading": "privacy-and-leakage",
+        "after_label": "Privacy and leakage",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Follow evidence through the mechanism funnel, inspect one aligned row, then place those observations inside the planned 2×2 intervention."
+      },
+      "scenes": [
+        {
+          "id": "mechanism-funnel",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / ILLUSTRATIVE",
+          "headline": "Most returned evidence never becomes used evidence.",
+          "support": ["12 sources returned; 3 opened; 1 used.", "Across four attempts, 0 tasks passed."],
+          "kind": "illustrative example",
+          "source": "article.md#primary-and-secondary-outcomes",
+          "visual": {
+            "type": "mechanism_funnel",
+            "sources": [
+              {"label": "RETURNED", "value": 12, "denominator": 12},
+              {"label": "OPENED", "value": 3, "denominator": 12},
+              {"label": "USED", "value": 1, "denominator": 12}
+            ],
+            "outcome": {"label": "TASKS PASSED", "value": 0, "denominator": 4},
+            "unit": "EXPLICIT COUNTS"
+          }
+        },
+        {
+          "id": "aligned-row",
+          "duration": 15,
+          "eyebrow": "ONE ALIGNED ROW",
+          "headline": "The Agent opened the evidence but did not satisfy the declared use relation.",
+          "support": ["Assigned 1/1; returned 1/1; opened 1/1; used 0/1.", "The official task still passed."],
+          "kind": "illustrative example",
+          "source": "article.md#what-used-can-honestly-mean",
+          "visual": {
+            "type": "paired_row",
+            "identity": "task-07 / harness-H / attempt-2 / arm-D",
+            "stages": [
+              {"label": "ASSIGNED", "value": "1/1", "state": "evidence"},
+              {"label": "RETURNED", "value": "1/1", "state": "evidence"},
+              {"label": "OPENED", "value": "1/1", "state": "verified"},
+              {"label": "USED", "value": "0/1", "state": "missing"},
+              {"label": "OUTCOME", "value": "PASS", "state": "verified"}
+            ]
+          }
+        },
+        {
+          "id": "causal-boundary",
+          "duration": 15,
+          "eyebrow": "OBSERVATION ≠ CAUSATION",
+          "headline": "The row supports an audit statement, not a causal story.",
+          "support": ["Supported: the locked source was returned and opened.", "Unsupported: memory caused the pass."],
+          "kind": "preregistered design",
+          "source": "article.md#what-used-can-honestly-mean",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "SUPPORTED", "items": ["source returned", "source opened", "task passed"], "state": "verified"},
+            "right": {"label": "NOT SUPPORTED", "items": ["source changed answer", "memory caused pass", "path implies use"], "state": "failure"},
+            "rule": "MECHANISM SIGNAL ≠ TREATMENT EFFECT"
+          }
+        },
+        {
+          "id": "factorial-design",
+          "duration": 14,
+          "eyebrow": "THE PLANNED 2 × 2",
+          "headline": "Separate memory from the evidence-use policy.",
+          "support": ["Two interventions produce four legal arms.", "Their interaction is estimated rather than assumed."],
+          "kind": "preregistered design",
+          "source": "article.md#the-22-intervention",
+          "visual": {
+            "type": "matrix",
+            "rows": ["STANDARD POLICY", "EVIDENCE-USE POLICY"],
+            "columns": ["NO MEMORY", "MEMORY"],
+            "cells": [["CONTROL", "MEMORY ONLY"], ["POLICY ONLY", "MEMORY + POLICY"]],
+            "legend": ["PLANNED", "NO RESULT"],
+            "unit": "INTERVENTION ARMS"
+          }
+        },
+        {
+          "id": "fallback-detection",
+          "duration": 13,
+          "eyebrow": "FALLBACK CHANGES THE ARM",
+          "headline": "A vector failure cannot silently become vector success.",
+          "support": ["Fallback is a structured failure or a distinct candidate.", "The explicit BM25 arm keeps its own identity."],
+          "kind": "preregistered design",
+          "source": "article.md#failure-and-fallback-semantics",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "VECTOR ASSIGNED", "state": "variable"},
+              {"label": "VECTOR RETURNED", "state": "verified"},
+              {"label": "VECTOR FAILED", "state": "failure"},
+              {"label": "BM25 ARM", "state": "evidence"}
+            ],
+            "edges": [[0, 1, "observed"], [0, 2, "structured error"]],
+            "forbidden": "VECTOR FAILED → SILENT BM25 → VECTOR SUCCESS"
+          }
+        },
+        {
+          "id": "context-displacement",
+          "duration": 13,
+          "eyebrow": "CONTEXT HAS A BUDGET",
+          "headline": "More retrieved text can displace instructions or task evidence.",
+          "support": ["Delivery policy belongs in candidate identity.", "Usage and latency are secondary outcomes, not free capacity."],
+          "kind": "preregistered design",
+          "source": "article.md#context-budget-and-displacement",
+          "visual": {
+            "type": "budget_bar",
+            "label": "FIXED CONTEXT WINDOW",
+            "segments": [
+              {"label": "INSTRUCTIONS", "value": 30, "state": "evidence"},
+              {"label": "TASK", "value": 30, "state": "variable"},
+              {"label": "MEMORY", "value": 30, "state": "decision"},
+              {"label": "HEADROOM", "value": 10, "state": "missing"}
+            ],
+            "warning": "BROAD RETRIEVAL CAN DISPLACE TASK CONTEXT"
+          }
+        },
+        {
+          "id": "decision-policy",
+          "duration": 12,
+          "eyebrow": "USEFUL NULLS",
+          "headline": "Localization can improve without completion improving.",
+          "support": ["Policy may help without memory helping.", "Cost can rise without any evidence uptake."],
+          "kind": "preregistered design",
+          "source": "article.md#analysis-and-useful-nulls",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "LOCALIZATION", "left": "may improve", "right": "secondary"},
+              {"label": "OPEN / USE", "left": "may not move", "right": "mechanism"},
+              {"label": "TASK PASS", "left": "may not move", "right": "primary"},
+              {"label": "COST", "left": "may rise", "right": "secondary"}
+            ],
+            "columns": ["POSSIBLE NULL", "ROLE"]
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE / NO RESULT",
+          "headline": "Mechanism evidence explains where a treatment reached—not why it won.",
+          "support": ["The funnel strengthens evidence integrity.", "The controlled comparison still determines the outcome claim."],
+          "kind": "preregistered design",
+          "source": "article.md#privacy-and-leakage",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 4, 5],
+            "avoid": "A retrieved path proves evidence use or causation."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
+      "title": "API Compatibility Is Not Agent Compatibility",
+      "part": "FUGUE 3",
+      "status": "DRAFT DESIGN / NO RESULT YET",
+      "audience": "MCP maintainers and Agent-integration teams",
+      "question": "What must be locked before an MCP release can receive a behavioral recommendation?",
+      "takeaway": "Qualify exact MCP revisions as whole Agent-facing releases.",
+      "out_of_scope": "Prepared evidence and planned cells are not an observed release result.",
+      "duration": 110,
+      "poster_scene": "staged-study",
+      "reduced_motion_scene": "staged-study",
+      "placement": {
+        "after_heading": "the-maintainer-memo",
+        "after_label": "The maintainer memo",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Track exact revisions through manifest qualification, genuine evidence, the staged 80-cell design, judge calibration, and the still-blocked decision."
+      },
+      "scenes": [
+        {
+          "id": "exact-revisions",
+          "duration": 11,
+          "eyebrow": "VISUAL SYNTHESIS / PLANNED",
+          "headline": "The comparison begins with exact MCP revisions.",
+          "support": ["Baseline: 80252b3…", "Candidate: a2bae72…"],
+          "kind": "preregistered design",
+          "source": "article.md#lock-the-two-mcp-candidates",
+          "visual": {
+            "type": "revision_compare",
+            "left": {"label": "W&B MCP 0.3.7", "revision": "80252b3aa23ae3c1fdde089ce2b7dfb106dafb38"},
+            "right": {"label": "W&B MCP 0.4", "revision": "a2bae7271323ac43262ffb73454b0aff01ddc808"},
+            "fixed": ["linux/amd64", "model route", "taskset", "runtime policy"]
+          }
+        },
+        {
+          "id": "manifest-contract",
+          "duration": 15,
+          "eyebrow": "AGENTS EXPERIENCE THE MANIFEST",
+          "headline": "Descriptions, projections, pagination, and errors are behavioral inputs.",
+          "support": ["Target-platform probes record the exact tool manifest.", "Protocol compatibility alone cannot establish Agent compatibility."],
+          "kind": "preregistered design",
+          "source": "article.md#the-interface-an-agent-experiences",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "DESCRIPTION", "left": "tool choice", "right": "behavior"},
+              {"label": "PROJECTION", "left": "visible fields", "right": "behavior"},
+              {"label": "PAGINATION", "left": "coverage", "right": "behavior"},
+              {"label": "ERROR SHAPE", "left": "recovery", "right": "behavior"}
+            ],
+            "columns": ["AGENT EFFECT", "IDENTITY ROLE"]
+          }
+        },
+        {
+          "id": "prepared-evidence",
+          "duration": 15,
+          "eyebrow": "PREPARED EVIDENCE / NOT RESULTS",
+          "headline": "Genuine W&B objects seed the maintainer questions.",
+          "support": ["6 Runs, 24 conversations, 48 tool spans.", "8 Dataset rows, 2 Evaluations, 16 prediction rows."],
+          "kind": "preregistered design",
+          "source": "article.md#genuine-evidence-deliberately-seeded",
+          "visual": {
+            "type": "evidence_graph",
+            "nodes": [
+              {"label": "RUNS", "value": 6},
+              {"label": "CONVERSATIONS", "value": 24},
+              {"label": "TOOL SPANS", "value": 48},
+              {"label": "DATASET ROWS", "value": 8},
+              {"label": "EVALUATIONS", "value": 2},
+              {"label": "PREDICTIONS", "value": 16}
+            ],
+            "output": "EVIDENCE LOCK",
+            "status": "PREPARED / NOT STUDY OUTCOME"
+          }
+        },
+        {
+          "id": "staged-study",
+          "duration": 15,
+          "eyebrow": "THE 80-CELL DESIGN",
+          "headline": "Discovery precedes untouched primary and replication cohorts.",
+          "support": ["8 Claude + 8 W&B Inference discovery.", "32 Claude primary + 32 W&B Inference replication."],
+          "kind": "preregistered design",
+          "source": "article.md#the-80-cell-sequence",
+          "visual": {
+            "type": "staged_study",
+            "stages": [
+              {"label": "CLAUDE DISCOVERY", "cells": 8, "state": "variable"},
+              {"label": "W&B DISCOVERY", "cells": 8, "state": "decision"},
+              {"label": "CLAUDE PRIMARY", "cells": 32, "state": "variable"},
+              {"label": "W&B REPLICATION", "cells": 32, "state": "decision"}
+            ],
+            "unit": "80 PLANNED CELLS",
+            "status": "ORDERED / NO RESULT"
+          }
+        },
+        {
+          "id": "judge-gate",
+          "duration": 15,
+          "eyebrow": "JUDGE BEFORE PAID COHORT",
+          "headline": "Forty-eight double-reviewed cases must qualify the judge.",
+          "support": ["TPR and TNR must each reach at least 0.85.", "Zero critical false passes are permitted."],
+          "kind": "preregistered design",
+          "source": "article.md#judge-calibration-before-paid-work",
+          "visual": {
+            "type": "review_gate",
+            "cases": 48,
+            "balance": ["24 ACCEPTABLE", "24 UNACCEPTABLE"],
+            "reviewers": ["REVIEWER A", "REVIEWER B"],
+            "gates": ["TPR ≥ .85", "TNR ≥ .85", "0 CRITICAL FP"],
+            "status": "PLANNED / NOT CALIBRATED"
+          }
+        },
+        {
+          "id": "four-outcomes",
+          "duration": 14,
+          "eyebrow": "RECONCILE WITHOUT POOLING",
+          "headline": "Four outcome layers remain independently inspectable.",
+          "support": ["Conformance, deterministic, judgment, and mechanism answer different questions.", "A release memo cannot hide failure in an aggregate."],
+          "kind": "preregistered design",
+          "source": "article.md#four-outcome-layers",
+          "visual": {
+            "type": "reconciliation",
+            "inputs": ["MCP CONFORMANCE", "TASK OUTCOME", "MAINTAINER JUDGE", "MECHANISM"],
+            "output": "WHOLE-RELEASE MEMO",
+            "blocked": ["MISSING TRACE", "CRITICAL REGRESSION", "ATTESTATION GAP"]
+          }
+        },
+        {
+          "id": "blocked-status",
+          "duration": 13,
+          "eyebrow": "CURRENT STATUS / REQUIRED",
+          "headline": "Prepared evidence does not unlock a release recommendation.",
+          "support": ["Evidence, candidate, taskset, judge, preview, and runtime locks must all exist.", "The 80 cells and reconciliation remain unobserved."],
+          "kind": "pending result",
+          "source": "article.md#the-maintainer-memo",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "EVIDENCE PREPARED", "state": "verified"},
+              {"label": "LOCKS REQUIRED", "state": "missing"},
+              {"label": "80 CELLS REQUIRED", "state": "missing"},
+              {"label": "MEMO BLOCKED", "state": "failure"}
+            ],
+            "edges": [[0, 1, "next"], [1, 2, "after approval"], [2, 3, "not observed"]],
+            "forbidden": "PREPARED EVIDENCE → RELEASE WINNER"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE / NO RESULT",
+          "headline": "An MCP release spans design, execution, evidence, and decision.",
+          "support": ["The whole locked release is the treatment.", "No individual 0.4 feature receives causal credit."],
+          "kind": "preregistered design",
+          "source": "article.md#the-maintainer-memo",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 2, 3, 4, 5],
+            "avoid": "One MCP feature caused an improvement."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-4a-telemetry-is-not-evaluation",
+      "title": "Telemetry Is Not Evaluation",
+      "part": "FUGUE 4A",
+      "status": "WORKING DRAFT / GOVERNANCE CONTRACT",
+      "audience": "Loop-engineering and autoresearch architects",
+      "question": "What authority boundaries turn observations into reversible engineering?",
+      "takeaway": "A learning loop requires immutable proposals, external evaluation, and reversible decisions.",
+      "out_of_scope": "More telemetry alone does not create an evaluator or approval authority.",
+      "duration": 98,
+      "poster_scene": "authority-lanes",
+      "reduced_motion_scene": "authority-lanes",
+      "placement": {
+        "after_heading": "accept-reject-or-learn",
+        "after_label": "Accept, reject, or learn?",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Follow an authority failure into a governed Study state machine with separate proposal, approval, execution, evaluation, retry, and rollback powers."
+      },
+      "scenes": [
+        {
+          "id": "authority-failure",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / FAILURE",
+          "headline": "The proposer sees a weak result and edits the experiment.",
+          "support": ["One more retry and a narrower taskset appear locally reasonable.", "Together they optimize against the evaluator."],
+          "kind": "illustrative example",
+          "source": "article.md#why-telemetry-alone-cannot-drive-the-loop",
+          "visual": {
+            "type": "swimlane",
+            "lanes": ["PROPOSER", "APPROVER", "EXECUTOR", "EVALUATOR"],
+            "events": [
+              {"lane": 0, "label": "observe weak result", "step": 0, "state": "evidence"},
+              {"lane": 0, "label": "edit taskset", "step": 1, "state": "failure"},
+              {"lane": 0, "label": "retry", "step": 2, "state": "failure"}
+            ],
+            "forbidden": "PROPOSER MUTATES ACCEPTED STUDY"
+          }
+        },
+        {
+          "id": "governed-cycle",
+          "duration": 13,
+          "eyebrow": "THE OUTER LOOP",
+          "headline": "Observation becomes a new proposal, not a hidden retry.",
+          "support": ["Observe → hypothesize → preregister → approve.", "Execute → evaluate → interpret → decide."],
+          "kind": "cited background",
+          "source": "article.md#the-governed-cycle",
+          "visual": {
+            "type": "pipeline",
+            "nodes": [
+              {"label": "OBSERVE", "detail": "trace", "state": "evidence"},
+              {"label": "HYPOTHESIZE", "detail": "bounded", "state": "variable"},
+              {"label": "LOCK", "detail": "study", "state": "approval"},
+              {"label": "EXECUTE", "detail": "isolated", "state": "execution"},
+              {"label": "EVALUATE", "detail": "external", "state": "decision"}
+            ]
+          }
+        },
+        {
+          "id": "authority-lanes",
+          "duration": 14,
+          "eyebrow": "SEPARATE POWERS",
+          "headline": "Proposer, approver, executor, and evaluator do different work.",
+          "support": ["Aria may select and explain a registered comparison.", "It may not approve, retry, or rewrite accepted meaning."],
+          "kind": "cited background",
+          "source": "article.md#the-division-of-labor",
+          "visual": {
+            "type": "swimlane",
+            "lanes": ["ARIA", "HUMAN", "SERVERLESS", "FUGUE / WEAVE"],
+            "events": [
+              {"lane": 0, "label": "propose", "step": 0, "state": "variable"},
+              {"lane": 1, "label": "approve digest", "step": 1, "state": "approval"},
+              {"lane": 2, "label": "execute cells", "step": 2, "state": "execution"},
+              {"lane": 3, "label": "reconcile", "step": 3, "state": "evidence"}
+            ],
+            "forbidden": "FORBIDDEN: ONE ROLE OWNS ALL FOUR STEPS"
+          }
+        },
+        {
+          "id": "study-state",
+          "duration": 13,
+          "eyebrow": "IMMUTABLE STUDY STATE",
+          "headline": "Accepted meaning moves forward; it is never edited in place.",
+          "support": ["A changed candidate, task, cap, or retry policy creates a new Study.", "Every coordinate reaches an explicit terminal state."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#immutable-study-state",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "DRAFT", "state": "variable"},
+              {"label": "PREVIEWED", "state": "evidence"},
+              {"label": "APPROVED", "state": "approval"},
+              {"label": "RUNNING", "state": "execution"},
+              {"label": "TERMINAL", "state": "verified"}
+            ],
+            "edges": [[0, 1, "resolve"], [1, 2, "human"], [2, 3, "exact digest"], [3, 4, "reconcile"]],
+            "forbidden": "APPROVED → EDITED IN PLACE"
+          }
+        },
+        {
+          "id": "retry-rollback",
+          "duration": 12,
+          "eyebrow": "RETRY AND ROLLBACK ARE DESIGNED",
+          "headline": "Recovery cannot silently add evidence after approval.",
+          "support": ["Retry rules are part of the accepted plan.", "Rollback names the candidate and data boundary to restore."],
+          "kind": "cited background",
+          "source": "article.md#reversibility-is-part-of-the-hypothesis",
+          "visual": {
+            "type": "timeline",
+            "lanes": [
+              {"label": "STUDY", "events": ["APPROVE", "ATTEMPT", "TERMINAL"]},
+              {"label": "RECOVERY", "events": ["POLICY", "ROLLBACK", "NEW STUDY"]}
+            ],
+            "unit": "PREDECLARED TRANSITIONS",
+            "status": "NO HIDDEN RETRY"
+          }
+        },
+        {
+          "id": "failure-drills",
+          "duration": 12,
+          "eyebrow": "FAILURE IS A STATE",
+          "headline": "Digest mismatch, missing evidence, and cleanup failure block progress.",
+          "support": ["They remain visible in durable Study state.", "The loop does not manufacture a low score or a success."],
+          "kind": "cited background",
+          "source": "article.md#failure-drills-before-autonomy",
+          "visual": {
+            "type": "reconciliation",
+            "inputs": ["DIGEST", "CELL STATE", "TRACE", "CLEANUP"],
+            "output": "ELIGIBLE DECISION",
+            "blocked": ["MISMATCH", "MISSING", "ORPHAN"]
+          }
+        },
+        {
+          "id": "null-memory",
+          "duration": 12,
+          "eyebrow": "NULL RESULTS ARE MEMORY",
+          "headline": "Reject, accept, and learn are distinct terminal decisions.",
+          "support": ["A null result remains durable research evidence.", "It can motivate a new question without launching it."],
+          "kind": "cited background",
+          "source": "article.md#accept-reject-or-learn",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "ACCEPT", "state": "verified"},
+              {"label": "REJECT", "state": "failure"},
+              {"label": "LEARN / NULL", "state": "evidence"},
+              {"label": "NEW PROPOSAL", "state": "variable"}
+            ],
+            "edges": [[2, 3, "human-authorized follow-up"]],
+            "forbidden": "NULL → QUIETLY RETRY"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE",
+          "headline": "Governance closes the evidence loop without closing inquiry.",
+          "support": ["Authority boundaries protect the current decision.", "A new hypothesis begins a new locked cycle."],
+          "kind": "cited background",
+          "source": "article.md#accept-reject-or-learn",
+          "visual": {
+            "type": "series_map",
+            "highlight": [1, 2, 3, 4, 5, 6],
+            "avoid": "More telemetry makes a self-governing evaluator."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-4b-trace-to-release-decision",
+      "title": "From a Trace to a Release Decision",
+      "part": "FUGUE 4B",
+      "status": "DRAFT DESIGN / NO RESULT YET",
+      "audience": "Teams evaluating the complete Aria–Fugue workflow",
+      "question": "What receipts must exist before a live workflow supports a release decision?",
+      "takeaway": "A credible workflow links genuine evidence, exact approval, remote work, reconciliation, and cleanup.",
+      "out_of_scope": "No completed 80-cell Study, live follow-up, or release memo is claimed.",
+      "duration": 110,
+      "poster_scene": "qualification-gates",
+      "reduced_motion_scene": "qualification-gates",
+      "placement": {
+        "after_heading": "qualification-checklist",
+        "after_label": "Qualification checklist",
+        "bridge_to_heading": "try-this-in-15-minutes",
+        "bridge_to_label": "Try this in 15 minutes",
+        "what_to_watch": "Treat the workflow as a qualification contract: prepared evidence and approval are real boundaries, while remote execution and the final memo remain required and unobserved."
+      },
+      "scenes": [
+        {
+          "id": "evidence-scene",
+          "duration": 11,
+          "eyebrow": "VISUAL SYNTHESIS / PREPARED",
+          "headline": "The story begins with genuine evidence, not a stage script.",
+          "support": ["Runs, conversations, Dataset, and Evaluations exist before the comparison.", "They seed the question; they are not the 80-cell result."],
+          "kind": "preregistered design",
+          "source": "article.md#the-evidence-scene",
+          "visual": {
+            "type": "evidence_graph",
+            "nodes": [
+              {"label": "W&B RUNS", "value": 6},
+              {"label": "CONVERSATIONS", "value": 24},
+              {"label": "DATASET", "value": 8},
+              {"label": "EVALUATIONS", "value": 2}
+            ],
+            "output": "BOUNDED QUESTION",
+            "status": "PREPARED EVIDENCE"
+          }
+        },
+        {
+          "id": "approval-card",
+          "duration": 15,
+          "eyebrow": "HUMAN BOUNDARY",
+          "headline": "The approval card binds exact meaning and spend.",
+          "support": ["Candidate and runtime identities, 80 cells, judge, mechanism, and budget are visible.", "Digest mismatch refuses execution."],
+          "kind": "preregistered design",
+          "source": "article.md#the-approval-card",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "REGISTERED STUDY", "state": "evidence"},
+              {"label": "PREVIEW DIGEST", "state": "evidence"},
+              {"label": "HUMAN APPROVAL", "state": "approval"},
+              {"label": "SERVERLESS START", "state": "execution"}
+            ],
+            "edges": [[0, 1, "resolve"], [1, 2, "inspect"], [2, 3, "exact match"]],
+            "forbidden": "CHANGED DIGEST → START"
+          }
+        },
+        {
+          "id": "attempt-lifecycle",
+          "duration": 15,
+          "eyebrow": "REMOTE WORK / REQUIRED",
+          "headline": "Each approved cell needs one complete Serverless lifecycle.",
+          "support": ["Create, attest, execute, publish, and delete.", "One conversation, root, prediction, Evaluation row, and receipt must reconcile."],
+          "kind": "pending result",
+          "source": "article.md#what-the-audience-sees-while-cells-run",
+          "visual": {
+            "type": "attempt_lifecycle",
+            "lifecycle": ["CREATE", "ATTEST", "EXECUTE", "PUBLISH", "DELETE"],
+            "evidence": ["CONVERSATION", "ROOT", "PREDICTION", "EVALUATION"],
+            "cleanup": "DELETION RECEIPT",
+            "unit": "ONE ATTEMPT",
+            "status": "REQUIRED / NOT YET OBSERVED"
+          }
+        },
+        {
+          "id": "failure-branches",
+          "duration": 15,
+          "eyebrow": "FAILURE IS PART OF THE CONTRACT",
+          "headline": "Mismatch, missing evidence, null outcome, and orphan cleanup stop the story.",
+          "support": ["None becomes an improvised success.", "The audience sees the blocked state and its receipt."],
+          "kind": "pending result",
+          "source": "article.md#failure-is-part-of-the-runbook",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "DIGEST MISMATCH", "state": "failure"},
+              {"label": "EVIDENCE MISSING", "state": "missing"},
+              {"label": "NULL RESULT", "state": "evidence"},
+              {"label": "ORPHAN", "state": "failure"}
+            ],
+            "edges": [],
+            "forbidden": "ANY FAILURE → POLISHED RELEASE MEMO"
+          }
+        },
+        {
+          "id": "evidence-reconcile",
+          "duration": 15,
+          "eyebrow": "RECONCILIATION / REQUIRED",
+          "headline": "Weave and Study rows must agree before interpretation.",
+          "support": ["Every aggregate opens aligned baseline and candidate evidence.", "Missing trace, Evaluation, usage, or cleanup evidence blocks eligibility."],
+          "kind": "pending result",
+          "source": "article.md#build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed",
+          "visual": {
+            "type": "reconciliation",
+            "inputs": ["AGENT TRACE", "PREDICTION", "EVALUATION", "ATTESTATION", "CLEANUP"],
+            "output": "ALIGNED STUDY ROW",
+            "blocked": ["MISSING LINK", "COUNT DRIFT", "ORPHAN"]
+          }
+        },
+        {
+          "id": "qualification-gates",
+          "duration": 14,
+          "eyebrow": "GO / NO-GO",
+          "headline": "The flagship exists only after every qualification gate passes.",
+          "support": ["Exact identities, calibrated judge, 80 reconciled cells, and clean-clone rehearsals.", "A null or incomplete Study is valid but not presentation-ready."],
+          "kind": "pending result",
+          "source": "article.md#qualification-checklist",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "IDENTITIES", "left": "required", "right": "unobserved"},
+              {"label": "JUDGE", "left": "required", "right": "unobserved"},
+              {"label": "80 CELLS", "left": "required", "right": "unobserved"},
+              {"label": "CLEANUP", "left": "required", "right": "unobserved"}
+            ],
+            "columns": ["GATE", "CURRENT STATUS"]
+          }
+        },
+        {
+          "id": "bounded-memo",
+          "duration": 13,
+          "eyebrow": "FINAL OUTPUT / BLOCKED",
+          "headline": "A maintainer memo is the last artifact, not the first narrative.",
+          "support": ["It needs improved, regressed, and unchanged cases plus direct evidence links.", "It must state limitations and leave the next question unexecuted."],
+          "kind": "pending result",
+          "source": "article.md#presentation-sequence",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "MEMO REQUIRES", "items": ["aligned cases", "evidence links", "limitations"], "state": "evidence"},
+            "right": {"label": "CURRENTLY", "items": ["80 cells absent", "rehearsal absent", "memo blocked"], "state": "missing"},
+            "rule": "REQUIRED ≠ OBSERVED"
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE / NO RESULT",
+          "headline": "The flagship is the whole evidence chain—or it is not ready.",
+          "support": ["Approval, remote execution, evidence, decision, and cleanup stay linked.", "No stage prop substitutes for a receipt."],
+          "kind": "preregistered design",
+          "source": "article.md#qualification-checklist",
+          "visual": {
+            "type": "series_map",
+            "highlight": [0, 1, 2, 3, 4, 5, 6],
+            "avoid": "Prepared evidence proves the live workflow completed."
+          }
+        }
+      ]
+    },
+    {
+      "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
+      "title": "Building the Evaluator with the Evaluated",
+      "part": "FUGUE EXTRA",
+      "status": "WORKING DRAFT / AUDITED PUBLIC EVIDENCE",
+      "audience": "Agent-first engineering teams and maintainers",
+      "question": "What does Agent-assisted evaluator development prove—and what does it not prove?",
+      "takeaway": "Auditable co-development improves the process; external boundaries establish evaluator trust.",
+      "out_of_scope": "Agent productivity and PR volume do not validate the evaluator.",
+      "duration": 100,
+      "poster_scene": "public-stack",
+      "reduced_motion_scene": "public-stack",
+      "placement": {
+        "after_heading": "rejected-work-is-durable-input",
+        "after_label": "Rejected work is durable input",
+        "bridge_to_heading": "a-copyable-co-development-ledger",
+        "bridge_to_label": "A copyable co-development ledger",
+        "what_to_watch": "Inspect the public PR stack, the defects and cleanup decisions it records, and the external boundaries that prevent the evaluator from grading its own homework."
+      },
+      "scenes": [
+        {
+          "id": "public-stack",
+          "duration": 10,
+          "eyebrow": "VISUAL SYNTHESIS / PUBLIC EVIDENCE",
+          "headline": "Four public heads record distinct integration layers.",
+          "support": ["#42 cleanup; #43 control; #44 qualification; #45 Serverless.", "The stack is process evidence, not evaluator validation."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#the-stack-as-research-evidence",
+          "visual": {
+            "type": "pr_stack",
+            "prs": [
+              {"pr": "#42", "sha": "04152c2", "files": 20, "plus": 350, "minus": 91, "label": "CLEANUP"},
+              {"pr": "#43", "sha": "397b918", "files": 14, "plus": 2298, "minus": 12, "label": "CONTROL"},
+              {"pr": "#44", "sha": "68c8b9d", "files": 24, "plus": 2020, "minus": 196, "label": "QUALIFY"},
+              {"pr": "#45", "sha": "2f6453e", "files": 32, "plus": 3047, "minus": 117, "label": "SERVERLESS"}
+            ]
+          }
+        },
+        {
+          "id": "identity-case",
+          "duration": 13,
+          "eyebrow": "CASE 1 / IDENTITY BECAME CODE",
+          "headline": "A label stopped standing in for candidate identity.",
+          "support": ["Behavior-changing inputs became explicit fingerprints.", "The same resolved identity must reach render, run, snapshot, and result."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#case-study-1-identity-became-code",
+          "visual": {
+            "type": "pipeline",
+            "nodes": [
+              {"label": "RESOLVE", "detail": "candidate", "state": "evidence"},
+              {"label": "RENDER", "detail": "job", "state": "execution"},
+              {"label": "RUN", "detail": "attempt", "state": "execution"},
+              {"label": "SNAPSHOT", "detail": "evidence", "state": "evidence"},
+              {"label": "RESULT", "detail": "same ID", "state": "verified"}
+            ]
+          }
+        },
+        {
+          "id": "qualification-defect",
+          "duration": 14,
+          "eyebrow": "CASE 2 / EXACT TREE",
+          "headline": "Qualification found a runtime defect before the claim shipped.",
+          "support": ["The exact candidate tree—not a nearby branch—was exercised.", "The defect report remains development evidence until publicly linked."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#case-study-2-exact-tree-preparation-found-a-real-runtime-defect",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "PR HEAD", "state": "evidence"},
+              {"label": "PREPARE EXACT TREE", "state": "execution"},
+              {"label": "RUNTIME DEFECT", "state": "failure"},
+              {"label": "FIX + REQUALIFY", "state": "approval"}
+            ],
+            "edges": [[0, 1, "checkout"], [1, 2, "observed"], [2, 3, "new evidence"]],
+            "forbidden": "QUALIFY NEARBY TREE → CLAIM EXACT HEAD"
+          }
+        },
+        {
+          "id": "cleanup-case",
+          "duration": 13,
+          "eyebrow": "CASE 3 / GARBAGE COLLECTION",
+          "headline": "Static findings became an adjudication queue, not a delete command.",
+          "support": ["Remove, prove a caller, or document dynamic use.", "Persisted readers and registered callbacks require ownership evidence."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#case-study-3-garbage-collection-needed-judgment",
+          "visual": {
+            "type": "state_machine",
+            "states": [
+              {"label": "STATIC FINDING", "state": "evidence"},
+              {"label": "REMOVE", "state": "verified"},
+              {"label": "REAL CALLER", "state": "execution"},
+              {"label": "DYNAMIC EXCEPTION", "state": "decision"}
+            ],
+            "edges": [[0, 1, "dead"], [0, 2, "used"], [0, 3, "proven"]],
+            "forbidden": "FINDING → BLIND DELETE"
+          }
+        },
+        {
+          "id": "division-of-labor",
+          "duration": 13,
+          "eyebrow": "SHARED WORK, SEPARATE AUTHORITY",
+          "headline": "Agents implement and inspect; humans set claims and approval.",
+          "support": ["Repository-local plans, schemas, locks, and tests make work legible.", "Authorship does not grant evaluation authority."],
+          "kind": "cited background",
+          "source": "article.md#separation-despite-shared-agents",
+          "visual": {
+            "type": "swimlane",
+            "lanes": ["HUMAN", "AGENT", "EXTERNAL EVAL", "APPROVAL"],
+            "events": [
+              {"lane": 0, "label": "intent + invariant", "step": 0, "state": "approval"},
+              {"lane": 1, "label": "implement + test", "step": 1, "state": "execution"},
+              {"lane": 2, "label": "holdout verdict", "step": 2, "state": "evidence"},
+              {"lane": 3, "label": "release decision", "step": 3, "state": "decision"}
+            ],
+            "forbidden": "AUTHOR → SELF-APPROVE"
+          }
+        },
+        {
+          "id": "recursion-boundary",
+          "duration": 12,
+          "eyebrow": "INTERRUPT THE RECURSION",
+          "headline": "The evaluated system cannot rewrite its holdout or approve itself.",
+          "support": ["External evaluation and private facts stay outside the candidate.", "A human remains the release authority."],
+          "kind": "cited background",
+          "source": "article.md#separation-despite-shared-agents",
+          "visual": {
+            "type": "boundary",
+            "left": {"label": "DEVELOPMENT LOOP", "items": ["agent changes code", "tests run", "evidence prepared"], "state": "execution"},
+            "right": {"label": "EXTERNAL BOUNDARY", "items": ["private holdout", "evaluator", "human approval"], "state": "approval"},
+            "rule": "CANDIDATE CANNOT REWRITE THE RIGHT SIDE"
+          }
+        },
+        {
+          "id": "evidence-boundary",
+          "duration": 13,
+          "eyebrow": "WHAT CAN BE QUANTIFIED",
+          "headline": "Public commits and checks are auditable; local anecdotes remain bounded.",
+          "support": ["Files, additions, deletions, tests, and head identities can be reopened.", "Productivity and evaluator validity remain separate ledgers."],
+          "kind": "audited Fugue observation",
+          "source": "article.md#what-we-can-quantify",
+          "visual": {
+            "type": "ledgers",
+            "rows": [
+              {"label": "PUBLIC PR HEADS", "left": "auditable", "right": "process"},
+              {"label": "TEST RECEIPTS", "left": "auditable", "right": "process"},
+              {"label": "LOCAL DEFECT", "left": "bounded", "right": "case study"},
+              {"label": "EVALUATOR VALIDITY", "left": "external", "right": "separate"}
+            ],
+            "columns": ["EVIDENCE STATUS", "SUPPORTED CLAIM"]
+          }
+        },
+        {
+          "id": "series-context",
+          "duration": 12,
+          "eyebrow": "THE BIGGER PICTURE",
+          "headline": "Co-development can improve the factory without validating its evaluator.",
+          "support": ["Agent legibility strengthens design and maintenance.", "Holdout evidence and approval still bound the final decision."],
+          "kind": "cited background",
+          "source": "article.md#rejected-work-is-durable-input",
+          "visual": {
+            "type": "series_map",
+            "highlight": [0, 1, 5, 6],
+            "avoid": "Building the evaluator proves the evaluator is correct."
+          }
+        }
+      ]
+    }
+  ]
+}

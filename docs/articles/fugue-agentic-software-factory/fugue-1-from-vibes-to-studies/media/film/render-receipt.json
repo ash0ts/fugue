@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-1-from-vibes-to-studies",
+  "html_digest": "sha256:29ab42395a168e958dded093cbd1bfda0e87bb1517f7a88b10388c1e5212ce4a",
+  "mp4_digest": "sha256:3662ddaadd6f2aff3d55c5bdf06fa7439c5f53d374d521784aa0625ff04dde12",
+  "poster_digest": "sha256:c80185e14c890366e3d7a9240cbd38ced50cd257fd1795368d033ce954285cb7",
+  "contact_sheet_digest": "sha256:3b10ea00f0efd2ba65d338e651d6982c01cde29ec2f16744e8c398b5fc38f26d",
+  "checkpoint_frame_digests": {
+    "expand-matrix": "sha256:d35696dd1006060bc82ff9800ae01d687fc8b1a5f8298399ebe9c00b0485b588",
+    "coordinate-identity": "sha256:0aad7722f2d4ebfece7033fb741ac569893303f20175b5cd6857a0e76b9864d2",
+    "preview-digest": "sha256:d624bb3b977848e1430c09a4b30d5e25c01bc26599885ce59f714807793b3923",
+    "approval-boundary": "sha256:104c6c758612e9d7a48f47b11fd47dfa146de3d487d87d0cdd0d830463ad9db8",
+    "one-service": "sha256:27c2eeb0be51365829415dd7fc29da261f62409979d5ff7de8b96dd0967dc17c",
+    "observed-replay": "sha256:c80185e14c890366e3d7a9240cbd38ced50cd257fd1795368d033ce954285cb7",
+    "smoke-boundary": "sha256:bfe1bf79cf452fd16dff048f55e2b8892b8637f4a5b81a04cd854aac64893d44",
+    "series-context": "sha256:06dc6d410bd2b442ad759c0146022f33465956d30172beb521e0840408ccef5e"
+  },
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "side_data_list": [
+      {}
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
+  "html_digest": "sha256:371447962b0b38c1bd08bdf2d0c592edfa02eed9eb7cddf602a7063624bd124e",
+  "mp4_digest": "sha256:61a61cdbe2826aab63c00afdaaba68d46778e15562f4c268cec42f1e8c053437",
+  "poster_digest": "sha256:fe61de34a98022ad7988a2c386faef02c2ee583a6370cc47844f46db37be180a",
+  "contact_sheet_digest": "sha256:c1b934dab22e25fd9b12098e3847ca41d643f7a4a7cf755d9ba29bb84c28fde7",
+  "checkpoint_frame_digests": {
+    "public-stack": "sha256:fe61de34a98022ad7988a2c386faef02c2ee583a6370cc47844f46db37be180a",
+    "identity-case": "sha256:c3c952756560706b5ad331ada834b57109887f2cd0b6060d31b1496397959b99",
+    "qualification-defect": "sha256:c2683c4f20f659f6453063aaffbe02161e7b66a42edb70a79c28a7d9c99045e0",
+    "cleanup-case": "sha256:1bd7e18c01fb7d66fdda76f29377f27aaf747fdc7d4e9ef3ac215d5e52eccbd9",
+    "division-of-labor": "sha256:6f95a6b83162c6e5235d9f4bbd63b5b44aa9acb218e441f8d206ca86182a78e6",
+    "recursion-boundary": "sha256:c13e590ad6fbe528ae63d8ccb063404ebf6f572d0e457f75ce6c3a9f39cddd85",
+    "evidence-boundary": "sha256:57b8752318e440d7ca9884a4f3c020c4cde747568389e427b477305d3ed859bc",
+    "series-context": "sha256:b5f0647d412db984bca316156572c49f2688542a8acd699daec17fe659b1d965"
+  },
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "side_data_list": [
+      {}
+    ]
+  }
+}

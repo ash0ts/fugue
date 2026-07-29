@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-4b-trace-to-release-decision",
+  "html_digest": "sha256:781df6bf832e8f3196685833c986157f992d0051cbffb467f28f9be38b2e3493",
+  "mp4_digest": "sha256:5e034e37cbba95b2e25208955552f44a45ba22c77965afdd63ed4ad2eb0845f2",
+  "poster_digest": "sha256:f074c5c4c1220783a18018fd0b27f2297bb4974b383e5e0afea74933090f5cc5",
+  "contact_sheet_digest": "sha256:59b81be859939049d877919a6c02afca115780d2314a852b13617c565b102075",
+  "checkpoint_frame_digests": {
+    "evidence-scene": "sha256:972ea05de20141ddbf1c9a1ee3f0788f9ef12cb901f8bcbe9e946329dc3b3ea5",
+    "approval-card": "sha256:c03c3ec454929fbeb227e9f56d899f529244919c4269f798474072e8ca134ef8",
+    "attempt-lifecycle": "sha256:04efadce765f2abefaef80b99e582bdac326143d5dfe7f63c1be8d9c84f510ea",
+    "failure-branches": "sha256:40e89f14a6e6cca534f7cfdc99d0a479da966d5ccd9997d9ddae751f391ec2f6",
+    "evidence-reconcile": "sha256:d76487b6f449d18e644858c78c8cf9d32d2d26be7601c485e10fcb56adecf7b3",
+    "qualification-gates": "sha256:f074c5c4c1220783a18018fd0b27f2297bb4974b383e5e0afea74933090f5cc5",
+    "bounded-memo": "sha256:e4e9ea50b4ce7797005ff2da93ebd06d4cfad8a215634379d16a35aa330950ce",
+    "series-context": "sha256:c049d74c30a9028687e6fbdd6b53e4ff03827596f67bf97879e61ee6c72c1793"
+  },
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "side_data_list": [
+      {}
+    ]
+  }
+}

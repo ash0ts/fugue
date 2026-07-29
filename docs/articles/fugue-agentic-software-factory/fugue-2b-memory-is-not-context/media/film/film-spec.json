@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-2b-memory-is-not-context",
+  "title": "Memory Is Not Context",
+  "width": 1280,
+  "height": 720,
+  "duration": 104,
+  "fps": 15,
+  "posterScene": "mechanism-funnel",
+  "reducedMotionScene": "mechanism-funnel",
+  "posterTime": 7.199999999999999,
+  "reducedMotionTime": 7.199999999999999,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "primary-and-secondary-outcomes",
+    "what-used-can-honestly-mean",
+    "the-22-intervention",
+    "failure-and-fallback-semantics",
+    "context-budget-and-displacement",
+    "analysis-and-useful-nulls",
+    "privacy-and-leakage"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "privacy-and-leakage",
+    "after_label": "Privacy and leakage",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow evidence through the mechanism funnel, inspect one aligned row, then place those observations inside the planned 2×2 intervention."
+  },
+  "checkpoints": [
+    {
+      "name": "mechanism-funnel",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "aligned-row",
+      "time": 20.799999999999997
+    },
+    {
+      "name": "causal-boundary",
+      "time": 35.8
+    },
+    {
+      "name": "factorial-design",
+      "time": 50.08
+    },
+    {
+      "name": "fallback-detection",
+      "time": 63.36
+    },
+    {
+      "name": "context-displacement",
+      "time": 76.36
+    },
+    {
+      "name": "decision-policy",
+      "time": 88.64
+    },
+    {
+      "name": "series-context",
+      "time": 100.64
+    }
+  ]
+}

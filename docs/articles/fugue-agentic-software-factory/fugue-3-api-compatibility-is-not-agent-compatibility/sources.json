@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "mcp-lifecycle",
+      "author": "Model Context Protocol",
+      "title": "Lifecycle",
+      "publication": "MCP Specification 2025-06-18",
+      "date": "2025-06-18",
+      "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle",
+      "supports": "Official initialization, capability negotiation, and operation contract."
+    },
+    {
+      "id": "mcp-baseline",
+      "author": "Weights & Biases",
+      "title": "wandb-mcp-server baseline revision 80252b3",
+      "publication": "GitHub",
+      "date": "2026",
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/80252b3aa23ae3c1fdde089ce2b7dfb106dafb38",
+      "supports": "Exact public source identity for the 0.3.7 candidate."
+    },
+    {
+      "id": "mcp-candidate",
+      "author": "Weights & Biases",
+      "title": "wandb-mcp-server candidate revision a2bae72",
+      "publication": "GitHub",
+      "date": "2026",
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/a2bae7271323ac43262ffb73454b0aff01ddc808",
+      "supports": "Exact public source identity for the 0.4 candidate."
+    },
+    {
+      "id": "wandb-runs",
+      "author": "Weights & Biases",
+      "title": "Runs",
+      "publication": "W&B Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/models/runs",
+      "supports": "Official Run configuration, metric, and artifact object contract."
+    },
+    {
+      "id": "weave-tracing",
+      "author": "Weights & Biases",
+      "title": "Trace your application",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/tracking/tracing",
+      "supports": "Official Weave Call and trace contract."
+    },
+    {
+      "id": "weave-datasets",
+      "author": "Weights & Biases",
+      "title": "Datasets",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/datasets",
+      "supports": "Official versioned Dataset contract."
+    },
+    {
+      "id": "weave-evaluations",
+      "author": "Weights & Biases",
+      "title": "Evaluations",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/evaluations",
+      "supports": "Official Evaluation and scorer contract."
+    },
+    {
+      "id": "fugue-mcp-draft",
+      "author": "Fugue maintainers",
+      "title": "MCP release qualification integration",
+      "publication": "GitHub pull request #44 head",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/tree/68c8b9d9867562286be411f788e69a147b505635/examples/comparisons/wandb-mcp-maintenance",
+      "supports": "Accessible draft Fugue comparison, evidence preparation, and qualification sources."
+    }
+  ]
+}

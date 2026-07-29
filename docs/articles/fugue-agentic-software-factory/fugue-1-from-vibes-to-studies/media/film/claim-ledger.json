@@ -1,0 +1,180 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-1-from-vibes-to-studies",
+  "audience": "Agent builders and eval owners",
+  "question": "How does one readable comparison become exact, approved work?",
+  "intended_takeaway": "The same coordinates must survive preview, approval, execution, and result.",
+  "out_of_scope": "The no-key replay proves installation and result shape, not Agent efficacy.",
+  "placement": {
+    "after_heading": "the-unfamiliar-maintainer-test",
+    "after_label": "The unfamiliar-maintainer test",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result."
+  },
+  "poster_scene": "observed-replay",
+  "reduced_motion_scene": "observed-replay",
+  "source_heading_ids": [
+    "expansion-makes-the-experiment-concrete",
+    "scope-and-terms",
+    "pure-preview-is-a-security-property",
+    "approval-grants-execution-not-authorship",
+    "one-service-several-doors",
+    "the-no-key-replay",
+    "the-unfamiliar-maintainer-test"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "expand-matrix",
+      "scene": "expand-matrix",
+      "claim": "A compact comparison expands into 32 terminal obligations.",
+      "support": [
+        "8 tasks × 2 candidates × 1 harness × 2 attempts.",
+        "Every coordinate must end in an explicit terminal state."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#expansion-makes-the-experiment-concrete",
+      "visual_relationship": "matrix",
+      "displayed_values": [
+        "TASKS 1–4 / A1",
+        "TASKS 5–8 / A1",
+        "TASKS 1–4 / A2",
+        "TASKS 5–8 / A2",
+        "4",
+        "32 PLANNED"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "coordinate-identity",
+      "scene": "coordinate-identity",
+      "claim": "A cell is more than a row number.",
+      "support": [
+        "Task, candidate, harness, attempt, runtime, and evidence lock define it.",
+        "Changing one coordinate changes the planned work."
+      ],
+      "kind": "cited background",
+      "source": "article.md#scope-and-terms",
+      "visual_relationship": "dependency_stack",
+      "displayed_values": [
+        "CELL 17",
+        "TASK 05",
+        "ATTEMPT 1"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "preview-digest",
+      "scene": "preview-digest",
+      "claim": "Resolve and digest the plan before execution exists.",
+      "support": [
+        "Preview performs no model call, preparation, or run-state write.",
+        "The digest names accepted meaning, not screen formatting."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#pure-preview-is-a-security-property",
+      "visual_relationship": "pipeline",
+      "displayed_values": [
+        "32 cells",
+        "$40 / 32",
+        "sha256"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "approval-boundary",
+      "scene": "approval-boundary",
+      "claim": "Approval grants execution, not authorship.",
+      "support": [
+        "The accepted digest binds scope and spend.",
+        "Any edit creates a new digest and requires new approval."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#approval-grants-execution-not-authorship",
+      "visual_relationship": "state_machine",
+      "displayed_values": [
+        "PREVIEW d1",
+        "APPROVED d1",
+        "EXECUTE d1",
+        "EDIT → d2",
+        "APPROVED d1 → EXECUTE d2"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "one-service",
+      "scene": "one-service",
+      "claim": "CLI, Python, REST, MCP, and Aria converge on one service.",
+      "support": [
+        "Each interface must return the same preview digest.",
+        "No interface owns a private execution path."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#one-service-several-doors",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "observed-replay",
+      "scene": "observed-replay",
+      "claim": "Sixteen aligned rows make the result contract tangible.",
+      "support": [
+        "Baseline 2/8; candidate 6/8.",
+        "Five improved, one regressed, two unchanged."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#the-no-key-replay",
+      "visual_relationship": "paired_rows",
+      "displayed_values": [
+        "BASELINE 2/8",
+        "CANDIDATE 6/8",
+        "5",
+        "1",
+        "2"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "smoke-boundary",
+      "scene": "smoke-boundary",
+      "claim": "Replay evidence is smoke evidence, not efficacy evidence.",
+      "support": [
+        "It checks packaging, parsing, and result projection.",
+        "Mechanism remains unavailable; no live Agent or Serverless runtime ran."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#the-no-key-replay",
+      "visual_relationship": "boundary",
+      "displayed_values": [
+        "16 rows"
+      ],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Primitives preserve identity across the control plane.",
+      "support": [
+        "Design becomes approved execution without changing meaning.",
+        "Evidence returns to the same declared coordinates."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-unfamiliar-maintainer-test",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "anthropic-demystifying",
+      "author": "Anthropic",
+      "title": "Demystifying evals for AI agents",
+      "publication": "Anthropic Engineering",
+      "date": "2025",
+      "url": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents",
+      "supports": "Task, trial, grader, and human-calibration distinctions."
+    },
+    {
+      "id": "hamel-evals-skills",
+      "author": "Hamel Husain",
+      "title": "Evals Skills for Coding Agents",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/evals-skills/",
+      "supports": "Copyable eval workflows grounded in concrete coding-agent behavior."
+    },
+    {
+      "id": "hamel-field-guide",
+      "author": "Hamel Husain",
+      "title": "A Field Guide to Rapidly Improving AI Products",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/field-guide/",
+      "supports": "Trace-first progression from inspection to automation."
+    },
+    {
+      "id": "dudycz-ooda",
+      "author": "Oskar Dudycz",
+      "title": "Vibing, Harness and OODA Loop",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/vibing_harness_and_ooda_loops/",
+      "supports": "Operational separation of observation, orientation, decision, and action."
+    },
+    {
+      "id": "fugue-replay",
+      "author": "Fugue maintainers",
+      "title": "Replay and source-use Skill study implementation",
+      "publication": "GitHub pull request #36 head",
+      "date": "2026-07-27",
+      "url": "https://github.com/ash0ts/fugue/tree/a9d1a0ef6b3172d06f7a55a2bb9b55a81f1df4d0",
+      "supports": "Publicly reachable implementation revision for the deterministic no-key replay."
+    }
+  ]
+}

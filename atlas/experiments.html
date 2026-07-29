@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Fugue studies: controlled Agent comparisons and their evidence.">
+    <title>Studies · Fugue</title>
+  </head>
+  <body data-page="studies">
+    <a class="skip-link" href="#main">Skip to studies</a>
+    <header class="site-header">
+      <a class="wordmark" href="./">Fugue <span>Evidence Atlas</span></a>
+      <nav aria-label="Primary navigation">
+        <a href="./">Product</a>
+        <a aria-current="page" href="./experiments.html">Studies</a>
+        <a href="./articles/">Articles</a>
+        <a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </header>
+    <main id="main">
+      <section class="page-intro ruled studies-intro">
+        <p class="eyebrow">Controlled evidence, not a leaderboard</p>
+        <h1>Studies answer one engineering question at a time.</h1>
+        <p class="lede">Inspect the exact comparison, denominator, supported finding, and limitation. Active work stays unresolved until its planned evidence reconciles.</p>
+      </section>
+      <section class="study-filters" aria-labelledby="filter-title">
+        <div>
+          <p class="eyebrow">Find a study</p>
+          <h2 id="filter-title">Filter by question or evidence state</h2>
+        </div>
+        <label>
+          <span>Search</span>
+          <input id="study-search" type="search" placeholder="Harness, memory, routing…" autocomplete="off">
+        </label>
+        <label>
+          <span>Status</span>
+          <select id="status-filter">
+            <option value="all">All statuses</option>
+            <option value="results">Results available</option>
+            <option value="contract">Contract qualification</option>
+            <option value="incomplete">Active or incomplete</option>
+          </select>
+        </label>
+        <label>
+          <span>Evidence tier</span>
+          <select id="tier-filter">
+            <option value="all">All evidence tiers</option>
+          </select>
+        </label>
+      </section>
+      <p id="study-filter-summary" class="filter-summary" aria-live="polite"></p>
+      <div id="study-groups" class="study-library"></div>
+    </main>
+    <footer>
+      <span>Fugue Evidence Atlas</span>
+      <span><a href="./methods.html">Evidence policy</a> · <a href="https://github.com/ash0ts/fugue">GitHub</a></span>
+    </footer>
+    <script type="module" src="/src/studies.js"></script>
+  </body>
+</html>

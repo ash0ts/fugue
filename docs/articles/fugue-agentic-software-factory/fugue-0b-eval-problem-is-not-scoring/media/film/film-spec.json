@@ -1,0 +1,73 @@
+{
+  "slug": "fugue-0b-eval-problem-is-not-scoring",
+  "title": "The Eval Problem Is Not Scoring",
+  "width": 1280,
+  "height": 720,
+  "duration": 96,
+  "fps": 15,
+  "posterScene": "pooled-reversal",
+  "reducedMotionScene": "pooled-reversal",
+  "posterTime": 20.08,
+  "reducedMotionTime": 20.08,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "how-a-treatment-wins-without-improving",
+    "missing-is-not-zero",
+    "four-ledgers-no-synthetic-winner",
+    "a-confounder-map-before-a-scorecard",
+    "the-artifact-a-four-ledger-result"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "the-artifact-a-four-ledger-result",
+    "after_label": "The artifact: a four-ledger result",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Watch unequal completion reverse the pooled result, then see how missing cells and four separate gates restore the planned decision."
+  },
+  "checkpoints": [
+    {
+      "name": "within-strata",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "pooled-reversal",
+      "time": 20.08
+    },
+    {
+      "name": "missing-coordinates",
+      "time": 34.08
+    },
+    {
+      "name": "missing-not-zero",
+      "time": 46.64
+    },
+    {
+      "name": "four-gates",
+      "time": 58.64
+    },
+    {
+      "name": "confounder-map",
+      "time": 70.64
+    },
+    {
+      "name": "bounded-decision",
+      "time": 82.64
+    },
+    {
+      "name": "series-context",
+      "time": 93.2
+    }
+  ]
+}

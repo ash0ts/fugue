@@ -1,0 +1,172 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-0b-eval-problem-is-not-scoring",
+  "audience": "AI product engineers and eval owners",
+  "question": "How can an aggregate winner be an artifact of missing coordinates?",
+  "intended_takeaway": "Denominators and independent evidence gates come before a winner.",
+  "out_of_scope": "This does not combine incompatible evidence into a new synthetic score.",
+  "placement": {
+    "after_heading": "the-artifact-a-four-ledger-result",
+    "after_label": "The artifact: a four-ledger result",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Watch unequal completion reverse the pooled result, then see how missing cells and four separate gates restore the planned decision."
+  },
+  "poster_scene": "pooled-reversal",
+  "reduced_motion_scene": "pooled-reversal",
+  "source_heading_ids": [
+    "how-a-treatment-wins-without-improving",
+    "missing-is-not-zero",
+    "four-ledgers-no-synthetic-winner",
+    "a-confounder-map-before-a-scorecard",
+    "the-artifact-a-four-ledger-result"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "within-strata",
+      "scene": "within-strata",
+      "claim": "Candidate B wins inside both task strata.",
+      "support": [
+        "Easy: 95% versus 90%.",
+        "Hard: 20% versus 10%."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#how-a-treatment-wins-without-improving",
+      "visual_relationship": "denominator_bars",
+      "displayed_values": [
+        "90",
+        "100",
+        "19",
+        "20",
+        "1",
+        "10",
+        "8",
+        "40"
+      ],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "pooled-reversal",
+      "scene": "pooled-reversal",
+      "claim": "Unequal denominators make the baseline appear to win.",
+      "support": [
+        "Baseline: 91/110 = 82.7%.",
+        "Candidate B: 27/60 = 45%."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#how-a-treatment-wins-without-improving",
+      "visual_relationship": "denominator_bars",
+      "displayed_values": [
+        "91",
+        "110",
+        "27",
+        "60"
+      ],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "missing-coordinates",
+      "scene": "missing-coordinates",
+      "claim": "Fifty missing easy-task coordinates stay visible.",
+      "support": [
+        "They are missing behavioral evidence.",
+        "They are neither failures nor permission to shrink the denominator."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#how-a-treatment-wins-without-improving",
+      "visual_relationship": "matrix",
+      "displayed_values": [
+        "100",
+        "10",
+        "0",
+        "20",
+        "40",
+        "50 MISSING"
+      ],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "missing-not-zero",
+      "scene": "missing-not-zero",
+      "claim": "Infrastructure failure is not a low-quality answer.",
+      "support": [
+        "A failed Sandbox yields no behavioral observation.",
+        "Scoring it zero silently changes the estimand."
+      ],
+      "kind": "cited background",
+      "source": "article.md#missing-is-not-zero",
+      "visual_relationship": "state_machine",
+      "displayed_values": [
+        "INFRA FAILURE → SCORE 0"
+      ],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "four-gates",
+      "scene": "four-gates",
+      "claim": "Four ledgers must each support the bounded decision.",
+      "support": [
+        "Infrastructure, task outcome, judgment, and mechanism can disagree.",
+        "Their values remain separate."
+      ],
+      "kind": "cited background",
+      "source": "article.md#four-ledgers-no-synthetic-winner",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "confounder-map",
+      "scene": "confounder-map",
+      "claim": "Task drift, retries, runtime, and judge leakage move results.",
+      "support": [
+        "These variables belong in the comparison lock.",
+        "They do not belong in an interpretive footnote."
+      ],
+      "kind": "cited background",
+      "source": "article.md#a-confounder-map-before-a-scorecard",
+      "visual_relationship": "dependency_stack",
+      "displayed_values": [],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "bounded-decision",
+      "scene": "bounded-decision",
+      "claim": "Passing all gates authorizes one bounded statement.",
+      "support": [
+        "Discordance remains visible.",
+        "Missing or invalid evidence blocks interpretation rather than lowering a score."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-artifact-a-four-ledger-result",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Experimental design protects the path from evidence to decision.",
+      "support": [
+        "Arithmetic summarizes observations.",
+        "Locks and ledgers determine what those observations can support."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-artifact-a-four-ledger-result",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "This does not combine incompatible evidence into a new synthetic score."
+    }
+  ]
+}
