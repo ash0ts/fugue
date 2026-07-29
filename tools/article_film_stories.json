@@ -333,15 +333,15 @@
         "after_label": "The unfamiliar-maintainer test",
         "bridge_to_heading": "try-this-in-15-minutes",
         "bridge_to_label": "Try this in 15 minutes",
-        "what_to_watch": "Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result."
+        "what_to_watch": "Follow one declared comparison as it expands into 32 cells, receives a digest, crosses human approval, and becomes a reconciled result."
       },
       "scenes": [
         {
           "id": "expand-matrix",
           "duration": 10,
           "eyebrow": "VISUAL SYNTHESIS / DECLARED DESIGN",
-          "headline": "A compact comparison expands into 32 terminal obligations.",
-          "support": ["8 tasks × 2 candidates × 1 harness × 2 attempts.", "Every coordinate must end in an explicit terminal state."],
+          "headline": "A compact comparison expands into 32 cells.",
+          "support": ["8 tasks × 2 candidates × 1 harness × 2 attempts.", "Every cell must end in an explicit terminal state."],
           "kind": "audited Fugue observation",
           "source": "article.md#expansion-makes-the-experiment-concrete",
           "visual": {
@@ -1241,7 +1241,7 @@
           "headline": "Weave and Study rows must agree before interpretation.",
           "support": ["Every aggregate opens aligned baseline and candidate evidence.", "Missing trace, Evaluation, usage, or cleanup evidence blocks eligibility."],
           "kind": "pending result",
-          "source": "article.md#build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed",
+          "source": "article.md#build-the-evidence-wall-first-required-not-yet-observed",
           "visual": {
             "type": "reconciliation",
             "inputs": ["AGENT TRACE", "PREDICTION", "EVALUATION", "ATTESTATION", "CLEANUP"],

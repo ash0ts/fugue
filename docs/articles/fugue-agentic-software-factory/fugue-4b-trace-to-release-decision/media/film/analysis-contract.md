@@ -28,7 +28,7 @@ pending study contains no implied result.
 | approval-card | 15s | The approval card binds exact meaning and spend. | article.md#the-approval-card | state machine |
 | attempt-lifecycle | 15s | Each approved cell needs one complete Serverless lifecycle. | article.md#what-the-audience-sees-while-cells-run | attempt lifecycle |
 | failure-branches | 15s | Mismatch, missing evidence, null outcome, and orphan cleanup stop the story. | article.md#failure-is-part-of-the-runbook | state machine |
-| evidence-reconcile | 15s | Weave and Study rows must agree before interpretation. | article.md#build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed | reconciliation |
+| evidence-reconcile | 15s | Weave and Study rows must agree before interpretation. | article.md#build-the-evidence-wall-first-required-not-yet-observed | reconciliation |
 | qualification-gates | 14s | The flagship exists only after every qualification gate passes. | article.md#qualification-checklist | ledgers |
 | bounded-memo | 13s | A maintainer memo is the last artifact, not the first narrative. | article.md#presentation-sequence | boundary |
 | series-context | 12s | The flagship is the whole evidence chain—or it is not ready. | article.md#qualification-checklist | series map |

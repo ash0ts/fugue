@@ -2,8 +2,14 @@
 
 Unpublished working notes.
 
-- The opening failure now governs every authority transition in the article.
-- OODA, self-harness research, trace-first error analysis, and automated-eval limits are connected without collapsing them.
-- Retry, rollback, null-result memory, and conflicts of authority remain inspectable.
-- Remaining review: test the authority map against one real rejected proposal and one cleanup failure.
-- Isolation test: a reader should identify the smallest case where a deterministic test is better than an outer loop.
+- Voice pass (2026-07-29): opens with the loop-with-no-authority-boundary
+  story; the two-loop split, governed-cycle table, five-component division,
+  state diagram, rollback YAML, failure drills, and handoff artifact are
+  unchanged. The eight Goodhart brakes are now a prose argument closed by
+  the OODA observation/decision boundary, per the reference framing.
+- Evidence boundary: no efficacy claims added; the flagship run stays
+  preregistered; Weng and Dudycz motivate the pattern without predicting
+  Fugue's result.
+- Isolation test: a reader should be able to name proposer, approver,
+  executor, evaluator, retry authority, and rollback owner for their own
+  loop after reading.

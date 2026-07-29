@@ -28,13 +28,13 @@ The same coordinates must survive preview, approval, execution, and result.
 
 The no-key replay proves installation and result shape, not Agent efficacy.
 
-## 01 — A compact comparison expands into 32 terminal obligations.
+## 01 — A compact comparison expands into 32 cells.
 
 **Time:** 00:00–00:10
 
 **Visual relationship:** matrix
 
-**On-screen support:** 8 tasks × 2 candidates × 1 harness × 2 attempts. Every coordinate must end in an explicit terminal state.
+**On-screen support:** 8 tasks × 2 candidates × 1 harness × 2 attempts. Every cell must end in an explicit terminal state.
 
 **Evidence status:** audited Fugue observation
 

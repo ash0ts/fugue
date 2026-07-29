@@ -19,7 +19,7 @@
     "the-approval-card",
     "what-the-audience-sees-while-cells-run",
     "failure-is-part-of-the-runbook",
-    "build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed",
+    "build-the-evidence-wall-first-required-not-yet-observed",
     "qualification-checklist",
     "presentation-sequence"
   ],
@@ -105,7 +105,7 @@
         "Missing trace, Evaluation, usage, or cleanup evidence blocks eligibility."
       ],
       "kind": "pending result",
-      "source": "article.md#build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed",
+      "source": "article.md#build-the-evidence-wall-first-required-not-yet-observed",
       "visual_relationship": "reconciliation",
       "displayed_values": [],
       "caveat": "Required evidence is not yet observed."

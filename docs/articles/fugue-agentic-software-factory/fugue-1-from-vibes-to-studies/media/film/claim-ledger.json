@@ -10,7 +10,7 @@
     "after_label": "The unfamiliar-maintainer test",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result."
+    "what_to_watch": "Follow one declared comparison as it expands into 32 cells, receives a digest, crosses human approval, and becomes a reconciled result."
   },
   "poster_scene": "observed-replay",
   "reduced_motion_scene": "observed-replay",
@@ -38,10 +38,10 @@
     {
       "id": "expand-matrix",
       "scene": "expand-matrix",
-      "claim": "A compact comparison expands into 32 terminal obligations.",
+      "claim": "A compact comparison expands into 32 cells.",
       "support": [
         "8 tasks × 2 candidates × 1 harness × 2 attempts.",
-        "Every coordinate must end in an explicit terminal state."
+        "Every cell must end in an explicit terminal state."
       ],
       "kind": "audited Fugue observation",
       "source": "article.md#expansion-makes-the-experiment-concrete",

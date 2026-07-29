@@ -2,38 +2,35 @@
 
 > **Fugue: Evals for the Agentic Software Factory · Part 4B**  
 > A standalone qualification runbook for maintainers evaluating a real agent
-> workflow. **Status:** draft preregistration; no result and remote qualification not yet observed. **Reading time:**
-> about 16 minutes.
+> workflow. **Status:** draft preregistration; no result and remote
+> qualification not yet observed. **Reading time:** about 12 minutes.
 
 All products, evidence objects, approval boundaries, and presentation gates
-are introduced here. The runbook is useful without reading the architectural
-essay that precedes it.
+are introduced here—the runbook is useful without the architectural essay
+that precedes it.
 
-The misconception is that a polished replay is enough to demonstrate an
-evaluation system.
+The failure that shaped it was a demo that never risked discovering
+anything. The tasks were fixtures, the outcome was known, execution was
+local, and the approval gesture could not change what ran. It was reliable on
+stage because we had removed the boundaries the product claimed to govern.
 
-Our concrete failure was a demo that never risked discovering anything. The
-tasks were fixtures, the outcome was known, execution was local, and the
-approval gesture could not change what ran. It was reliable on stage because
-we had removed the boundaries the product claimed to govern.
-
-Our falsifiable thesis is:
+The claim this runbook holds itself to:
 
 > The flagship is credible only if it begins with genuine evidence, requires
 > human approval, performs real remote work, and ends in an evidence-linked
 > bounded decision.
 
-The demo fails this thesis if its evidence references do not open, if the
+The demo fails that claim if its evidence references do not open, if the
 approved digest differs from execution, if Serverless cells are replayed, if
 attempts do not reconcile to Weave Evaluations, or if the final memo claims
 more than the locked Study supports.
 
-**Status:** draft preregistration. This is a qualification contract, not a
-record of a completed demo. No accepted preview, completed 80-cell Study,
-Serverless receipt set, or final memo is claimed here. Do not present the
-flagship until an actionable, final-head result and two clean-clone rehearsals
-exist. A null or incomplete Study is publishable, but it is not silently
-replaced with a victorious demo.
+To be explicit about status: this is a qualification contract, not a record
+of a completed demo. No accepted preview, completed 80-cell Study, Serverless
+receipt set, or final memo is claimed here. The flagship is not presented
+until an actionable final-head result and two clean-clone rehearsals exist. A
+null or incomplete Study is publishable—it is never silently replaced with a
+victorious demo.
 
 ## Scope and terms
 
@@ -41,21 +38,21 @@ replaced with a victorious demo.
 question. **Fugue** freezes the comparison, approval digest, execution, and
 result contract. **W&B Serverless Sandboxes** run isolated cells. **Weave**
 stores native calls and Evaluations. **Study Console** projects safe Study
-state. A **qualification** is the evidence that these boundaries operated on
-one exact final tree; a replay is only an installation smoke test.
+state. A **qualification** is evidence that these boundaries operated on one
+exact final tree; a replay is only an installation smoke test.
 
 The runbook demonstrates governance and evidence flow. It cannot manufacture
-an actionable MCP result, and it must be postponed when the completed Study is
-null, incomplete, or unreconciled.
+an actionable MCP result, and it must be postponed when the completed Study
+is null, incomplete, or unreconciled.
 
-Official object contracts matter because the qualification must open native
+Object contracts matter here because the qualification must open native
 evidence rather than screenshots: W&B Runs carry training or application
-state, Weave Calls form trace trees, Datasets version examples, and
-Evaluations connect predictions and scorers. [@wandb-runs] [@weave-tracing]
-[@weave-datasets] [@weave-evaluations] W&B Serverless and its named-secret
-boundary are the required remote execution mechanism; availability and
-receipts remain unobserved until the final run. [@wandb-sandboxes]
-[@wandb-secrets]
+state [@wandb-runs], Weave Calls form trace trees [@weave-tracing], Datasets
+version examples [@weave-datasets], and Evaluations connect predictions to
+scorers [@weave-evaluations]. W&B Serverless is the required remote execution
+mechanism [@wandb-sandboxes], with named secrets as the only credential path
+into a Sandbox [@wandb-secrets]. Availability and receipts remain unobserved
+until the final run.
 
 ## What the audience should believe
 
@@ -74,23 +71,18 @@ must be able to support five narrow statements:
    mechanism from outcome, and names its limitations.
 
 The audience should **not** leave believing that 0.4 is universally better,
-that one MCP feature caused an effect, that the judge is a maintainer, or that
-the eight live cells reproduce the full 80-cell estimate.
+that one MCP feature caused an effect, that the judge is a maintainer, or
+that eight live cells reproduce the full 80-cell estimate.
 
 ## The story begins before the stage
 
-A useful live demo is the last step of a real Study, not the first.
-
-Before any presentation, the qualification contract requires:
-
-- eight Claude Code discovery cells;
-- eight OpenClaw + W&B Inference discovery cells;
-- 32 untouched Claude Code primary cells;
-- 32 OpenClaw + W&B Inference replication cells.
-
-We inspect aligned discordant pairs, reconcile every required object, and
-freeze the full result. Only then may Aria propose an eight-cell follow-up
-selected from that completed evidence:
+A useful live demo is the last step of a real Study, not the first. Before
+any presentation, the qualification contract requires eight Claude Code
+discovery cells, eight OpenClaw + W&B Inference discovery cells, 32 untouched
+Claude Code primary cells, and 32 OpenClaw + W&B Inference replication cells.
+The team inspects aligned discordant pairs, reconciles every required object,
+and freezes the full result. Only then may Aria propose an eight-cell
+follow-up selected from that completed evidence:
 
 ```text
 2 reviewed tasks × 2 MCP revisions × 2 native harness routes × 1 attempt
@@ -98,8 +90,8 @@ selected from that completed evidence:
 ```
 
 The follow-up receives its own tasks, spec, preview digest, approval, Study
-identity, and $20 maximum. It does not retroactively become another attempt in
-the 80-cell Study.
+identity, and $20 maximum. It does not retroactively become another attempt
+in the 80-cell Study.
 
 ```mermaid
 flowchart LR
@@ -111,7 +103,7 @@ flowchart LR
 ```
 
 If the full Study is null or non-discriminating, we publish the null and
-postpone the flagship. We may create a new harder preregistration. We do not
+postpone the flagship. We may write a new, harder preregistration. We do not
 select two convenient rows and call them a product result.
 
 ## The evidence scene
@@ -122,76 +114,58 @@ The dedicated project is:
 wandb/fugue-mcp-release-qualification-v1
 ```
 
-The presenter opens, live:
+The presenter opens, live: one of the six W&B Runs with configuration,
+history, summary, and evidence artifact; one Weave Agent conversation with
+nested tool spans; the versioned eight-row Dataset; both aligned Evaluations
+with selected prediction rows; and the locked latency anomaly and
+incomplete-evidence case.
 
-- one of the six W&B Runs with configuration, history, summary, and evidence
-  artifact;
-- one Weave Agent conversation with nested tool spans;
-- the versioned eight-row Dataset;
-- both aligned Evaluations and selected prediction rows;
-- the locked latency anomaly and incomplete-evidence case.
-
-The evidence lock supplies immutable references and content digests. The
-presenter does not browse “latest” and hope the same objects appear. The seed
-receipt identifies which objects were deliberately prepared.
-
-The narration is precise:
+The evidence lock supplies immutable references and content digests—the
+presenter does not browse “latest” and hope the same objects appear. The
+seed receipt identifies which objects were deliberately prepared, and the
+narration is precise:
 
 > These are genuine hosted objects created to model a non-sensitive
 > maintenance situation. They are the evidence the Agents inspect. They are
 > not results produced by the comparison.
 
-That sentence preserves realism without pretending the task fixture is an
-organic customer incident.
+That sentence preserves realism without pretending the fixture is an organic
+customer incident.
 
 ## The useful question for Aria
 
-We do not ask, “Which MCP is better?” That invites a broad answer from names
-and priors.
+We do not ask, “Which MCP is better?” That invites a broad answer assembled
+from names and priors. We ask:
 
-We ask:
+> In the reviewed traces and Evaluations for this locked project, what
+> bounded failure pattern is supported strongly enough to qualify a release
+> against it? Cite what you opened, distinguish missing from negative
+> evidence, and stop after proposing one registered comparison.
 
-> In the reviewed traces and Evaluations for this locked project, what bounded
-> failure pattern is supported strongly enough to qualify a release against
-> it? Cite what you opened, distinguish missing from negative evidence, and
-> stop after proposing one registered comparison.
+Aria should identify a pattern such as unsupported completeness around
+partial Evaluation coverage, broad reads that obscure a latency/cost anomaly,
+or weak reconciliation of aligned records—with direct evidence references and
+limitations.
 
-Aria should identify a pattern such as unsupported completeness around partial
-Evaluation coverage, broad reads that obscure a latency/cost anomaly, or weak
-reconciliation of aligned records. Its answer includes direct evidence
-references and limitations.
-
-The demo operator then asks:
-
-> Explain the comparison you selected. Show the exact revisions, fixed
-> conditions, task and cell counts, deterministic gate, judge calibration,
-> mechanism measures, Serverless policy, and maximum spend. Do not request
-> approval yet if any readiness gate is missing.
-
-This prompt makes the governance legible. It also gives the system a chance to
-refuse.
+The operator then asks Aria to explain the comparison it selected: exact
+revisions, fixed conditions, task and cell counts, deterministic gate, judge
+calibration, mechanism measures, Serverless policy, and maximum spend—and to
+hold off requesting approval if any readiness gate is missing. That prompt
+makes the governance legible. It also gives the system a chance to refuse.
 
 ## The approval card
 
 The approval card is not a “Run experiment” button. It is a review of one
 digest.
 
-It displays:
-
-- registered comparison ID and spec digest;
-- baseline revision
-  `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`;
-- candidate revision
-  `a2bae7271323ac43262ffb73454b0aff01ddc808`;
-- exact model routes and native harnesses;
-- task, private-label, evidence, judge, MCP, and runtime-lock digests;
-- declared treatment and fixed dimensions;
-- all eight cell coordinates;
-- deterministic and maintainer-judge gates;
-- mechanism measures;
-- W&B Serverless resource and deletion policy;
-- hard $20 and eight-cell caps;
-- expiration and approval issuer.
+It displays the registered comparison ID and spec digest; baseline revision
+`80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`; candidate revision
+`a2bae7271323ac43262ffb73454b0aff01ddc808`; exact model routes and native
+harnesses; task, private-label, evidence, judge, MCP, and runtime-lock
+digests; the declared treatment and fixed dimensions; all eight cell
+coordinates; deterministic and maintainer-judge gates; mechanism measures;
+the W&B Serverless resource and deletion policy; hard $20 and eight-cell
+caps; and the expiration and approval issuer.
 
 ```mermaid
 flowchart TD
@@ -203,9 +177,9 @@ flowchart TD
     ADMIT -->|yes| RUN["Eight Serverless cells"]
 ```
 
-Aria may request the card. It cannot press approval through its MCP authority.
-If the UI fallback is not qualified, a trusted operator shell issues the same
-digest-bound grant:
+Aria may request the card. It cannot press approval through its MCP
+authority. If the UI fallback is not qualified, a trusted operator shell
+issues the same digest-bound grant:
 
 ```bash
 uv run fugue approve PREVIEW_DIGEST \
@@ -328,8 +302,8 @@ requests:
 | `fugue-anthropic-api-key` | `ANTHROPIC_API_KEY` |
 
 No command displays their values. W&B’s documented secret mechanism injects
-requested secret names as environment variables without placing values in the
-Sandbox configuration
+requested secret names as environment variables without placing values in
+the Sandbox configuration
 ([Sandbox secrets](https://docs.wandb.ai/sandboxes/secrets)).
 
 Qualify creation, startup, embedded runtimes, deletion, and zero orphans:
@@ -370,61 +344,48 @@ Repeat with the W&B discovery spec only after the first stage reconciles.
 Proceed to the 32-cell Claude primary only if discovery is informative and
 safe. Freeze the primary result before the 32-cell W&B Inference replication.
 
-For every stage require:
-
-- nonzero planned, admitted, started, and eligible rows;
-- the exact candidate and runtime identities;
-- complete deterministic and required judge evidence;
-- no critical evidence-honesty regression;
-- private labels and credential values absent everywhere;
-- one Agent conversation, root, prediction, and Evaluation per attempt;
-- a matching Serverless lifecycle attestation;
-- deletion receipts and zero remaining matching Sandboxes.
+Every stage must show nonzero planned, admitted, started, and eligible rows;
+the exact candidate and runtime identities; complete deterministic and
+required judge evidence; no critical evidence-honesty regression; private
+labels and credential values absent everywhere; one Agent conversation, root,
+prediction, and Evaluation per attempt; a matching Serverless lifecycle
+attestation; and deletion receipts with zero remaining matching Sandboxes.
 
 Do not pool a Claude/OpenClaw reversal. Do not replace a failed cell with a
 successful retry under the same coordinate.
 
-## Build the evidence wall before selecting the live pair — required, not yet observed
+## Build the evidence wall first — required, not yet observed
 
 The full Study is not summarized by one green or red card. Before selecting
-the follow-up, the team assembles an evidence wall with four columns:
+the live follow-up, the team assembles an evidence wall with four columns:
 
 | Deterministic                          | Maintainer judgment                               | Mechanism                                           | Infrastructure/integrity                       |
 | -------------------------------------- | ------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------- |
 | aligned expected facts and task passes | blinded dimensions, disagreements, critical cases | tool choice, reads, sources, errors, latency, usage | manifests, attestations, missing rows, cleanup |
 
 Every displayed aggregate links to its aligned baseline/candidate rows. Every
-row links to attempts. Every attempt links to its Agent conversation, verified
-root, prediction, Evaluation, and Serverless attestation. A count that cannot
-be traversed is not stage evidence.
+row links to attempts. Every attempt links to its Agent conversation,
+verified root, prediction, Evaluation, and Serverless attestation. A count
+that cannot be traversed is not stage evidence.
 
-The team reviews at least:
-
-- one candidate improvement;
-- one candidate regression, if any;
-- one unchanged pair;
-- every critical judge case;
-- every infrastructure or evidence exclusion;
-- the largest latency and observed-cost deltas;
-- any Claude/OpenClaw directional disagreement.
+The team reviews at least one candidate improvement, one regression if any
+exists, one unchanged pair, every critical judge case, every infrastructure
+or evidence exclusion, the largest latency and observed-cost deltas, and any
+Claude/OpenClaw directional disagreement.
 
 The live tasks are selected from this review under a written rule: they must
 represent the supported maintenance observation or its most important
 uncertainty, remain safe and bounded for the presentation, and include no
-unresolved private or customer data. Selection does not use audience appeal
-as a hidden outcome criterion.
-
-The selection receipt records candidate task IDs, reason, reviewers by role,
-parent Study identity, and digest of the frozen result. If a result changes,
-the follow-up is stale.
+unresolved private or customer data. Audience appeal is not a hidden outcome
+criterion. The selection receipt records candidate task IDs, reason,
+reviewers by role, parent Study identity, and the digest of the frozen
+result. If a result changes, the follow-up is stale.
 
 ## Rehearsal without consuming the moment
 
 Two clean-clone rehearsals validate the system, but the final presentation
-approval must remain real. We separate reusable qualification from the
-unconsumed operation.
-
-In rehearsal we:
+approval must remain real. So we separate reusable qualification from the
+unconsumed operation. In rehearsal we:
 
 1. run the complete flow with a rehearsal Study identity and separately
    approved cells;
@@ -434,34 +395,31 @@ In rehearsal we:
 5. create a new presentation follow-up preview with a new digest;
 6. confirm that no approval or operation exists for that digest.
 
-We do not delete rehearsal evidence. It remains labeled by Study identity and
-cannot appear in the presentation result. We do not reuse the rehearsal
-approval because approval is bound to a digest and operation.
+Rehearsal evidence is never deleted—it stays labeled by Study identity and
+cannot appear in the presentation result. The rehearsal approval is never
+reused, because approval binds to a digest and operation.
 
 The second rehearsal starts from another clean clone, not the same prepared
 working directory. Runtime images may be reused only by immutable digest and
 only if the source tree and locks match. The boot receipt must detect a stale
 Fugue tree, Study Console tree, evidence lock, or image.
 
-Three unfamiliar engineers participate in the final readiness review. One
-drives the runbook, one interprets the evidence wall, and one attempts
-recovery from a documented failure. Their questions become launch defects if
-the public artifacts cannot answer them.
+Three unfamiliar engineers participate in the final readiness review: one
+drives the runbook, one interprets the evidence wall, one attempts recovery
+from a documented failure. Their questions become launch defects if the
+public artifacts cannot answer them.
 
 ## Freeze the live follow-up
 
-After the full result and maintainer review, Aria proposes two tasks that make
-the observed difference or uncertainty legible. The tasks must be reviewed,
-not cherry-picked by aggregate score alone.
+After the full result and maintainer review, Aria proposes two tasks that
+make the observed difference or uncertainty legible. The tasks are reviewed,
+not cherry-picked by aggregate score.
 
-Good live tasks have:
-
-- a maintenance question that requires opening more than one object;
-- a known incomplete-evidence boundary;
-- an answer that can be useful whether baseline or candidate wins;
-- bounded runtime below the presentation envelope;
-- no customer data or private-label exposure;
-- a direct relation to the completed Study’s supported insight.
+Good live tasks have a maintenance question that requires opening more than
+one object; a known incomplete-evidence boundary; an answer that is useful
+whether baseline or candidate wins; bounded runtime below the presentation
+envelope; no customer data or private-label exposure; and a direct relation
+to the completed Study’s supported insight.
 
 The follow-up spec locks:
 
@@ -488,33 +446,29 @@ planned → admitted → sandbox creating → agent running
 → evidence publishing → deleting → reconciled
 ```
 
-For the selected cell it shows:
-
-- task, revision, harness, route, and attempt identity;
-- immutable runtime-image digest;
-- Sandbox identity and bounded resource policy;
-- current lifecycle transition;
-- safe Agent conversation link when available;
-- prediction and Evaluation link after publication;
-- deletion state and orphan reconciliation.
+For the selected cell it shows the task, revision, harness, route, and
+attempt identity; the immutable runtime-image digest; Sandbox identity and
+bounded resource policy; the current lifecycle transition; a safe Agent
+conversation link when available; prediction and Evaluation links after
+publication; and deletion state with orphan reconciliation.
 
 It does not stream private labels, full environment, credentials, hidden
-reasoning, or unsafe raw logs. A structured failure remains visible with its
-origin. The presenter can explain why a task answer is unavailable without
+reasoning, or unsafe raw logs. A structured failure stays visible with its
+origin, so the presenter can explain why a task answer is unavailable without
 turning an SDK exception into theater.
 
 The eight cells run at the concurrency accepted in the preview, not at an
-on-stage override. If the wall-clock duration exceeds the slot, we continue
-the real operation and end the presentation with an explicit incomplete state.
-We do not swap in prerecorded outcomes. A later dated appendix can link the
+on-stage override. If the wall clock exceeds the slot, the real operation
+continues and the presentation ends with an explicit incomplete state. We do
+not swap in prerecorded outcomes. A later dated appendix can link the
 terminal result.
 
 ## Presentation sequence
 
 ### 1. Establish reality
 
-Open the hosted project, one Run history, one Agent trace, the Dataset, and the
-aligned Evaluations. Show the evidence-lock identity beside them.
+Open the hosted project, one Run history, one Agent trace, the Dataset, and
+the aligned Evaluations. Show the evidence-lock identity beside them.
 
 ### 2. Ask the bounded question
 
@@ -523,20 +477,21 @@ citations and uncertainty.
 
 ### 3. Explain the preregistration
 
-Have Aria show exact revisions, routes, harnesses, fixed controls, cell count,
-judge calibration receipt, mechanism measures, Serverless runtime digest, and
-budget.
+Have Aria show exact revisions, routes, harnesses, fixed controls, cell
+count, judge calibration receipt, mechanism measures, Serverless runtime
+digest, and budget.
 
 ### 4. Show the completed Study, only after receipts exist
 
-Open the four ledgers separately. Start with planned/completed reconciliation,
-then deterministic outcomes, blind judgment, mechanism, and infrastructure.
+Open the four ledgers separately. Start with planned/completed
+reconciliation, then deterministic outcomes, blind judgment, mechanism, and
+infrastructure.
 
 ### 5. Inspect discordant pairs
 
-Open baseline and candidate traces for at least one improved and one regressed
-or unchanged pair. Show what each Agent actually opened. Do not narrate only
-the winner.
+Open baseline and candidate traces for at least one improved and one
+regressed or unchanged pair. Show what each Agent actually opened. Do not
+narrate only the winner.
 
 ### 6. Show the follow-up preview
 
@@ -564,14 +519,9 @@ stage timing.
 
 ### 10. End with a bounded memo
 
-Aria updates:
-
-- what improved, regressed, or remained unchanged;
-- three to five evidence links;
-- mechanism observations;
-- the release or maintenance recommendation;
-- limitations;
-- one next question it does not launch.
+Aria updates: what improved, regressed, or remained unchanged; three to five
+evidence links; mechanism observations; the release or maintenance
+recommendation; limitations; and one next question it does not launch.
 
 Then stop the integration environment and verify no Serverless Sandboxes
 remain.
@@ -603,20 +553,19 @@ If a Sandbox fails to start, the UI shows infrastructure failure and the
 missing behavioral row. If deletion cannot be proven, the result is
 ineligible and the operator performs incident cleanup outside the Study. If
 the approval expires, the run refuses to start. If W&B Inference is
-unavailable, the affected cells remain missing rather than using another
+unavailable, the affected cells stay missing rather than borrowing another
 model. If the eight-cell follow-up is null, Aria says so.
 
-The presentation should never respond to failure by switching to the no-key
-replay without labeling the change. The replay can demonstrate package
-installation after an incident, but it cannot complete the flagship claim.
+The presentation never responds to failure by switching to the no-key replay
+without labeling the change. The replay can demonstrate package installation
+after an incident; it cannot complete the flagship claim.
 
 After the session, the operator exports a presentation receipt containing the
 boot identity, approved digest, operation and Study IDs, eight terminal
 coordinates, evidence-reconciliation status, and cleanup result. The receipt
-contains safe references rather than copied trace content. It lets an audience
-member revisit the claim after the transient UI is gone.
-
-The receipt also marks the no-key replay as unrelated smoke evidence.
+carries safe references rather than copied trace content, so an audience
+member can revisit the claim after the transient UI is gone. It also marks
+the no-key replay as unrelated smoke evidence.
 
 ## Qualification checklist
 
@@ -627,7 +576,7 @@ Before inviting an audience:
 - fresh wheel and source installs pass on Linux and macOS, Python 3.12 and
   3.13;
 - public `init`, `check`, `compare`, `approve`, and `result` flows pass;
-- no-key replay is repeatable and labeled as smoke evidence;
+- the no-key replay is repeatable and labeled as smoke evidence;
 - both exact MCP revisions initialize on `linux/amd64`;
 - judge calibration has 48 double-reviewed, adjudicated examples and meets
   its thresholds;
@@ -655,10 +604,10 @@ Any difference requires another live qualification.
 
 Download the separate
 [draft qualification runbook](/fugue/articles/fugue-4b-trace-to-release-decision/runbook.md),
-choose one required receipt, and
-trace it from preview identity to remote attempt, Weave evidence, Evaluation
-row, deletion receipt, and final memo. Mark every absent hop `not yet
-observed`; do not replace it with a screenshot.
+choose one required receipt, and trace it from preview identity to remote
+attempt, Weave evidence, Evaluation row, deletion receipt, and final memo.
+Mark every absent hop `not yet observed`; do not replace it with a
+screenshot.
 
 Then rehearse the digest-mismatch failure. The expected behavior is a blocked
 launch, not a warning beside a running cell.
@@ -687,7 +636,7 @@ The human approval does not certify the methodology. The calibrated judge
 does not replace maintainer review. A successful stage demo does not
 guarantee a future service level.
 
-At the time of writing, the runbook is not presentation-ready because the
+At the time of writing, the runbook is not presentation-ready, because the
 full result and final integration qualification do not exist. That limitation
 is a result of the same contract the demo is meant to show.
 
@@ -711,17 +660,17 @@ supported claims and limitations:
 
 No screenshot substitutes for the underlying object link.
 
-## The bridge: who built the evaluator?
+## Next: who built the evaluator?
 
 The flagship makes agents subjects of evaluation. Fugue itself was also
 co-developed with agents working across tasks, worktrees, tests, and stacked
 pull requests. That recursion is useful and dangerous.
 
-In the final installment, **Fugue Extra**, we audit
-what agent co-development can legitimately show: implementation throughput,
-defects caught, invariants encoded, and obsolete code removed. We also draw
-the boundary it cannot cross. An evaluator does not become correct because an
-evaluated system helped build it.
+In the final installment, **Fugue Extra**, we audit what agent co-development
+can legitimately show—implementation throughput, defects caught, invariants
+encoded, obsolete code removed—and draw the boundary it cannot cross. An
+evaluator does not become correct because an evaluated system helped build
+it.
 
 ## References
 

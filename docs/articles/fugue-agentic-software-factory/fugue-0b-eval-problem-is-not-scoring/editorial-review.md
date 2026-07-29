@@ -2,8 +2,17 @@
 
 Unpublished working notes.
 
-- The numerical reversal now exposes denominators instead of gesturing at Simpson’s paradox.
-- Independent gates produce a decision without a synthetic fifth score.
-- Judge validity is bounded by held-out human review and critical-failure criteria.
-- Remaining review: ask an eval practitioner to recompute the table and challenge every exclusion rule.
-- Isolation test: a new reader should distinguish benchmark, product eval, regression test, telemetry, evidence, and experiment without another installment.
+- Voice pass (2026-07-29): opens with the almost-shipped comparison instead
+  of the misconception template; the six inflation paths, pooled-reversal
+  table, and four ledgers are unchanged. Citations moved next to the ideas
+  they support (Weng at denominators, Hamel at trace-first, Anthropic at the
+  grader taxonomy and noise measurement, validators/judge guides at the
+  calibration recursion).
+- Evidence boundary: the pooled-reversal numbers stay labeled as constructed
+  arithmetic; the Anthropic six-point figure stays scoped to its setting and
+  cited in-paragraph.
+- Honesty check: the judge-calibration section still states plainly that the
+  48 cases exist and the two-reviewer calibration does not, so the study is
+  blocked.
+- Isolation test: a reader should leave able to name the four ledgers and
+  explain why missing evidence is not a zero.

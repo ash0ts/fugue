@@ -2,8 +2,16 @@
 
 Unpublished working notes.
 
-- Every primitive should remain derivable from the opening interface-divergence failure.
-- The no-key output was executed on the review tree; its observed counts are labeled smoke evidence, not a product result.
-- The exercise tests expansion, identity, and limitation comprehension in fifteen minutes.
-- Remaining review: re-run every CLI command after the integration stack lands and replace the draft source link with a merged-main permalink.
-- Isolation test: a new reader should explain task, candidate, cell, preview, approval, evidence lock, and result without learning Fugue first.
+- Voice pass (2026-07-29): removed "terminal obligations," "monotonic
+  authority," and "deliberately verb-like"; the authority ladder and the
+  32-cell expansion keep their content in plain language. The primitives
+  table now carries only the nouns not already defined in prose. Citations
+  woven at point of use: Anthropic vocabulary mapping in Scope and terms,
+  Dudycz OODA at the approval boundary, Hamel evals-skills at the replay,
+  Hamel field guide at result inspection, replay implementation at the
+  observed numbers.
+- Evidence boundary: replay numbers (2/8, 6/8, five improved, one regressed,
+  two unchanged) unchanged and still tied to the reviewed tree; mechanism
+  fields stay `unavailable`, never inferred.
+- Isolation test: an unfamiliar engineer should be able to run the ten-step
+  rehearsal from this article alone and state what approval does not permit.

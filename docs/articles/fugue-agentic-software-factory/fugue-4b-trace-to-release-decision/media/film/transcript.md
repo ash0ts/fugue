@@ -94,7 +94,7 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Evidence status:** pending result
 
-**Source:** `article.md#build-the-evidence-wall-before-selecting-the-live-pair-required-not-yet-observed`
+**Source:** `article.md#build-the-evidence-wall-first-required-not-yet-observed`
 
 **Displayed values:** none
 

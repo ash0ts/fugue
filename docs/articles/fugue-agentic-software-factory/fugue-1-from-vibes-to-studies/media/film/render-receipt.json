@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "slug": "fugue-1-from-vibes-to-studies",
-  "html_digest": "sha256:29ab42395a168e958dded093cbd1bfda0e87bb1517f7a88b10388c1e5212ce4a",
-  "mp4_digest": "sha256:3662ddaadd6f2aff3d55c5bdf06fa7439c5f53d374d521784aa0625ff04dde12",
+  "html_digest": "sha256:45a65e2161a3e2efa83ef4f483371ff59cfbe4effcc5151d0c6e256093dd888b",
+  "mp4_digest": "sha256:2feb7e794eed1f02e3f653e56737158ab652e703a1d8a2e5c46bed1dc2f6ef1a",
   "poster_digest": "sha256:c80185e14c890366e3d7a9240cbd38ced50cd257fd1795368d033ce954285cb7",
-  "contact_sheet_digest": "sha256:3b10ea00f0efd2ba65d338e651d6982c01cde29ec2f16744e8c398b5fc38f26d",
+  "contact_sheet_digest": "sha256:7d7f339f23c3821f0c5ff8ffb4e08beba246dc34d0f31f68ab7a9ac692a8b701",
   "checkpoint_frame_digests": {
-    "expand-matrix": "sha256:d35696dd1006060bc82ff9800ae01d687fc8b1a5f8298399ebe9c00b0485b588",
+    "expand-matrix": "sha256:dc73b1e501a39aa49a50aa072cf0d282f36bd0a506241fd6eebe9b70b90bbc4b",
     "coordinate-identity": "sha256:0aad7722f2d4ebfece7033fb741ac569893303f20175b5cd6857a0e76b9864d2",
     "preview-digest": "sha256:d624bb3b977848e1430c09a4b30d5e25c01bc26599885ce59f714807793b3923",
     "approval-boundary": "sha256:104c6c758612e9d7a48f47b11fd47dfa146de3d487d87d0cdd0d830463ad9db8",

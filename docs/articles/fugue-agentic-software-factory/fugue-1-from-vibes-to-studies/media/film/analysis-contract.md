@@ -11,7 +11,7 @@
 
 - **Synthesizes:** the cited article sections through The unfamiliar-maintainer test
 - **Bridges to:** Try this in 15 minutes
-- **What to watch:** Follow one declared comparison as it expands into 32 obligations, receives a digest, crosses human approval, and becomes a reconciled result.
+- **What to watch:** Follow one declared comparison as it expands into 32 cells, receives a digest, crosses human approval, and becomes a reconciled result.
 
 ## Evidence boundary
 
@@ -24,7 +24,7 @@ pending study contains no implied result.
 
 | Scene | Read time | Takeaway | Evidence | Visual relationship |
 | --- | ---: | --- | --- | --- |
-| expand-matrix | 10s | A compact comparison expands into 32 terminal obligations. | article.md#expansion-makes-the-experiment-concrete | matrix |
+| expand-matrix | 10s | A compact comparison expands into 32 cells. | article.md#expansion-makes-the-experiment-concrete | matrix |
 | coordinate-identity | 13s | A cell is more than a row number. | article.md#scope-and-terms | dependency stack |
 | preview-digest | 14s | Resolve and digest the plan before execution exists. | article.md#pure-preview-is-a-security-property | pipeline |
 | approval-boundary | 13s | Approval grants execution, not authorship. | article.md#approval-grants-execution-not-authorship | state machine |

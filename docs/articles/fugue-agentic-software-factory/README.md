@@ -3,15 +3,15 @@
 > A nine-part field guide to measuring, changing, and governing agent
 > behavior.
 
-Coding agents made plausible patches inexpensive. They did not make deciding
-whether those patches belong in a living software system inexpensive. These
+Coding agents made plausible patches cheap. They did not make it cheap to
+decide whether those patches belong in a living software system. These
 standalone field notes document the experiments, locks, approvals, evidence,
 and cleanup boundaries we added while building Fugue.
 
-Each installment defines its own vocabulary, begins with a concrete failure,
-states a falsifiable thesis, includes a copyable artifact, and bounds what its
-evidence does not show. Reading earlier installments adds context but is never
-required.
+Each installment defines its own vocabulary, opens with a concrete failure,
+states a claim you could prove wrong, includes a copyable artifact, and says
+plainly what its evidence does not show. Reading earlier installments adds
+context but is never required.
 
 ## Publication sequence
 
@@ -41,7 +41,7 @@ https://ash0ts.github.io/fugue/articles/
 
 Every empirical appendix names the exact source tree, candidate, taskset,
 evidence snapshot, runtime, planned cells, terminal cells, exclusions, and
-canonical Weave or Study references. Results remain separated into:
+canonical Weave or Study references. Results stay separated into:
 
 1. infrastructure and protocol conformance;
 2. deterministic task outcomes;
@@ -49,21 +49,22 @@ canonical Weave or Study references. Results remain separated into:
 4. mechanism and evidence integrity.
 
 Missing evidence is never converted to a zero. Preregistered article text and
-base films are content-hashed and append-only; later evidence is added under a
-dated result file and a separate result-coda film.
+base films are content-hashed and append-only; later evidence is added under
+a dated result file and a separate result-coda film.
 
 ## Runtime boundary
 
-The flagship workflow uses W&B Serverless Sandboxes, W&B Inference, Anthropic,
-W&B Runs, and Weave Calls, Datasets, and Evaluations. It contains credential
-names only, never values. Local Harbor is a parity baseline. OpenAI and direct
-CoreWeave operation are not part of the runtime instructions.
+The flagship workflow uses W&B Serverless Sandboxes, W&B Inference,
+Anthropic, W&B Runs, and Weave Calls, Datasets, and Evaluations. It contains
+credential names only, never values. Local Harbor is a parity baseline.
+OpenAI and direct CoreWeave operation are not part of the runtime
+instructions.
 
 ## Editorial influences
 
-The series uses operational distinction and myth testing associated with
-Oskar Dudycz, the taxonomy and limitation discipline found in Lilian Weng’s
-research surveys, and the copyable practitioner workflows used by Hamel
+The series borrows the operational distinctions and myth testing of Oskar
+Dudycz, the taxonomy and limitation discipline of Lilian Weng’s research
+surveys, and the trace-first, copyable practitioner workflows of Hamel
 Husain. The voice, examples, claims, and visual language remain Fugue’s own.
-Background research sharpens questions; only locked Fugue evidence can answer
-Fugue-specific ones.
+Background research sharpens questions; only locked Fugue evidence can
+answer Fugue-specific ones.

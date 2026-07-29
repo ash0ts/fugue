@@ -2,8 +2,14 @@
 
 Unpublished working notes.
 
-- Public PR/head links replace local-only commit citations.
-- PR statistics were re-read from GitHub and are labeled stacked-diff scope, never productivity.
-- The runtime defect remains a candidate case study until its fix and qualification receipt are public.
-- Process evidence, evaluator validity, and release authority stay separate.
-- Remaining review: replace PR links with merged-main permalinks and rerun all statistics after landing.
+- Voice pass (2026-07-29): opens with the recursive-confidence story; the
+  responsibility table, three case studies with exact heads and GitHub
+  metadata, the stack table, the co-development ledger, and the closing
+  design commitments are unchanged. "Exact-tree qualification" is defined
+  plainly at first use and kept as the working term. Dudycz/Weng/Hamel
+  citations attach per clause.
+- Evidence boundary: PR #42–#45 numbers stay beside their [@fugue-pr*]
+  citations and keep the 2026-07-28 metadata date and stacked-diff caveat;
+  the unpublished BuildKit fix remains explicitly non-citable.
+- Isolation test: a reader should be able to say what the stack history
+  proves (process) and what it cannot prove (evaluator validity).
