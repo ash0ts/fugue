@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,10 @@ from fugue.bench.operator import (
     TaskRuntimePreparation,
 )
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.scoring import (
+    build_intervention_selection_lock,
+    write_intervention_selection_lock,
+)
 from fugue.bench.task_authoring import (
     scoring_revision_from_dict,
     task_profile_catalog_from_dict,
@@ -190,6 +195,70 @@ scorer_runtimes: []
         "WANDB_API_KEY=trace-secret\n"
         "WANDB_ENTITY=team\n"
         "WANDB_PROJECT=fugue-experiments\n"
+    )
+
+
+def _selection_campaign_repo(tmp_path: Path) -> None:
+    _campaign_repo(tmp_path)
+    (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
+        """
+id: demo
+title: Selection-locked campaign
+manifest: datasets/demo.yaml
+model: openai/gpt-5
+harnesses: [codex]
+workloads:
+  - id: holdout
+    runner: harbor
+    manifest: datasets/demo.yaml
+    systems: [none]
+    variants: [production, candidate]
+default_preset: discovery
+presets:
+  discovery:
+    workloads: [holdout]
+    n_tasks: 1
+    n_attempts: 1
+  holdout:
+    workloads: [holdout]
+    n_tasks: 1
+    n_attempts: 1
+    selection_lock_required: true
+    selection_lock_kind: intervention
+variants:
+  - {id: production, label: Production, context: {system_id: none, delivery: portable}}
+  - {id: candidate, label: Candidate, context: {system_id: none, delivery: portable}}
+n_attempts: 1
+n_concurrent: 1
+jobs_dir: jobs/demo
+trace_content: full
+"""
+    )
+    campaign_path = tmp_path / "configs/fugue/campaigns/demo.yaml"
+    campaign_path.write_text(
+        campaign_path.read_text()
+        .replace("workloads: [harbor]", "workloads: [holdout]")
+        .replace("variants: [baseline]", "variants: [production, candidate]")
+        .replace("max_cells: 1", "max_cells: 2")
+        .replace("max_cells_per_proposal: 1", "max_cells_per_proposal: 2")
+    )
+    (tmp_path / "source-marker.txt").write_text("locked source\n")
+    (tmp_path / ".gitignore").write_text(".fugue/\njobs/\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue Tests",
+            "-c",
+            "user.email=fugue-tests@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
     )
 
 
@@ -932,6 +1001,164 @@ def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
     )
     assert analysis.evaluation_digest == evaluation.evaluation_digest
     assert analysis.task_results[0]["criteria_passes"] == 1
+
+
+def test_authored_holdout_preserves_preset_and_binds_intervention_lock(
+    tmp_path: Path,
+) -> None:
+    _selection_campaign_repo(tmp_path)
+    service = CampaignService(
+        tmp_path,
+        tmp_path / ".env",
+        operator=FakeCampaignOperator(tmp_path),
+    )
+    catalog = service.catalog("demo")
+    discovery = service.operator.rendered_jobs(
+        ExperimentRequest(experiment_id="demo", preset="discovery"),
+        run_id="discovery",
+        write_configs=False,
+    )
+    candidate_by_variant = {
+        job.variant_id: job.candidate_id for job in discovery
+    }
+    source = resolve_fugue_source_provenance(tmp_path)
+    selection = build_intervention_selection_lock(
+        experiment_id="demo",
+        source_commit=str(source["commit"]),
+        source_tree=str(source["tree"]),
+        source_dirty_digest="",
+        analysis_snapshot_sha256="a" * 64,
+        discovery_run_snapshot_sha256s=("b" * 64,),
+        comparison_example_ids=("c" * 64,),
+        baseline_variant_id="production",
+        selected_variant_id="candidate",
+        rankings=tuple(
+            {
+                "variant_id": variant_id,
+                "candidate_digest": candidate_by_variant[variant_id],
+            }
+            for variant_id in ("production", "candidate")
+        ),
+        decision="recommend",
+        rationale="candidate passed the preregistered discovery gate",
+    )
+    selection_path = write_intervention_selection_lock(
+        tmp_path / ".fugue/selection.json", selection
+    )
+    draft = task_suite_draft_from_dict(
+        {
+            "schema_version": 1,
+            "id": "locked-holdout",
+            "title": "Locked holdout",
+            "objective": "Confirm the frozen intervention.",
+            "stage_id": "qualification",
+            "tasks": [
+                {
+                    "id": "holdout-one",
+                    "title": "Verify the evidence",
+                    "prompt": [
+                        {"type": "text", "text": "Verify the supplied evidence."}
+                    ],
+                    "environment": {"profile_id": "artifact-v1"},
+                    "interaction": {
+                        "type": "single_turn",
+                        "max_user_turns": 1,
+                        "max_agent_turns": 1,
+                        "timeout_sec": 300,
+                    },
+                    "criteria_set_id": "deterministic",
+                    "tags": ["holdout"],
+                    "partition": "qualification",
+                }
+            ],
+            "scenarios": [
+                {
+                    "id": "holdout",
+                    "title": "Holdout",
+                    "tasks": [
+                        {
+                            "task_id": "holdout-one",
+                            "weight": 1,
+                            "must_pass": True,
+                        }
+                    ],
+                }
+            ],
+            "criteria_sets": [
+                {
+                    "id": "deterministic",
+                    "title": "Deterministic outcome",
+                    "pass_threshold": 1,
+                    "criteria": [
+                        {
+                            "id": "benchmark",
+                            "description": "The benchmark passes.",
+                            "evaluator": {
+                                "type": "benchmark_outcome",
+                                "config": {},
+                            },
+                            "evidence": ["benchmark"],
+                            "weight": 1,
+                            "threshold": 1,
+                            "required": True,
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    task_preview = service.preview_task_suite(
+        "demo", catalog.catalog_digest, draft
+    )
+    task_lock = service.lock_task_suite(task_preview, "lock-holdout")
+
+    proposal_args = {
+        "proposal_id": "locked-holdout",
+        "campaign_id": "demo",
+        "catalog_digest": catalog.catalog_digest,
+        "stage_id": "qualification",
+        "research_question": "Does the frozen candidate hold on new tasks?",
+        "hypothesis": "The candidate preserves the discovery improvement.",
+        "fixed_dimensions": ("model", "task", "runtime"),
+        "varied_dimensions": ("variant",),
+        "measured_dimensions": ("benchmark",),
+        "experiment_id": "demo",
+        "preset_id": "holdout",
+        "model": "openai/gpt-5",
+        "n_attempts": 1,
+        "n_tasks": 1,
+        "n_concurrent": 1,
+        "task_suite_digest": task_lock.suite_digest,
+    }
+    without_lock = build_experiment_proposal(**proposal_args)
+    with pytest.raises(CampaignError, match="requires an immutable selection lock"):
+        service.preview(without_lock)
+
+    proposal = build_experiment_proposal(
+        **proposal_args,
+        selection_lock=".fugue/selection.json",
+    )
+    plan = service.preview(proposal)
+    assert plan.cell_count == 2
+    assert {cell["variant_id"] for cell in plan.cells} == {
+        "production",
+        "candidate",
+    }
+    assert {cell["workload_id"] for cell in plan.cells} == {"holdout"}
+    assert plan.request["preset"] == "holdout"
+    assert plan.request["selection_lock"] == ".fugue/selection.json"
+    assert len(plan.component_digests["selection_lock"]) == 64
+
+    source_marker = tmp_path / "source-marker.txt"
+    original_source_marker = source_marker.read_text()
+    source_marker.write_text(original_source_marker + "drift\n")
+    with pytest.raises(CampaignError, match="catalog digest"):
+        service.preview(proposal)
+    source_marker.write_text(original_source_marker)
+
+    selection_path.write_text(selection_path.read_text() + "\n")
+    with pytest.raises(CampaignError, match="current resolved plan differs"):
+        service.prepare(plan, "prepare-drifted-selection")
 
 
 def test_authored_auxiliary_model_routes_fail_preflight_without_keys() -> None:

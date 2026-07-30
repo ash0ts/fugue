@@ -321,6 +321,7 @@ def build_experiment_proposal(
     n_tasks: int | None = None,
     trace_content: str = "full",
     task_suite_digest: str | None = None,
+    selection_lock: str | Path | None = None,
     analysis_ids: Sequence[str] = (),
     parent_outcome_id: str | None = None,
     decision_rationale: str = "",
@@ -348,6 +349,9 @@ def build_experiment_proposal(
         "n_concurrent": n_concurrent,
         "trace_content": trace_content,
         "task_suite_digest": task_suite_digest,
+        "selection_lock": (
+            Path(selection_lock).as_posix() if selection_lock is not None else None
+        ),
         "analysis_ids": list(analysis_ids),
         "parent_outcome_id": parent_outcome_id,
         "decision_rationale": decision_rationale,
@@ -522,6 +526,7 @@ def _proposal_from_dict(
         "n_concurrent",
         "trace_content",
         "task_suite_digest",
+        "selection_lock",
         "analysis_ids",
         "parent_outcome_id",
         "decision_rationale",
@@ -569,6 +574,11 @@ def _proposal_from_dict(
         task_suite_digest=(
             _required_digest(raw["task_suite_digest"], "task suite digest")
             if raw.get("task_suite_digest")
+            else None
+        ),
+        selection_lock=(
+            _repo_relative_path(raw["selection_lock"], "selection lock")
+            if raw.get("selection_lock")
             else None
         ),
         analysis_ids=_id_tuple(raw.get("analysis_ids"), "analysis", allow_empty=True),
@@ -2556,6 +2566,30 @@ class CampaignService:
                 "adaptive proposals must explain why the next experiment was selected",
                 category="validation",
             )
+        experiment = get_experiment(proposal.experiment_id, self.repo_root)
+        preset = next(
+            (item for item in experiment.presets if item.id == proposal.preset_id),
+            None,
+        )
+        if proposal.preset_id is not None and preset is None:
+            raise CampaignError(
+                "unknown_preset",
+                f"campaign proposal selects unknown preset {proposal.preset_id!r}",
+                category="validation",
+            )
+        if preset is not None and preset.selection_lock_required:
+            if proposal.selection_lock is None:
+                raise CampaignError(
+                    "selection_lock_required",
+                    f"campaign preset {preset.id!r} requires an immutable selection lock",
+                    category="validation",
+                )
+        elif proposal.selection_lock is not None:
+            raise CampaignError(
+                "selection_lock_not_applicable",
+                "campaign proposal supplied a selection lock for a preset that does not require one",
+                category="validation",
+            )
         if proposal.task_suite_digest:
             authoring = self._task_authoring_policy(policy)
             lock = read_task_suite_lock(
@@ -2585,16 +2619,19 @@ class CampaignService:
                     "authored task suites must run their exact locked task set",
                     category="validation",
                 )
-            if proposal.preset_id is not None:
-                raise CampaignError(
-                    "task_suite_preset_unsupported",
-                    "authored task suites cannot inherit a registered preset",
-                    category="validation",
-                )
-            if proposal.workloads not in {(), ("harbor",)}:
+            if proposal.preset_id is None and proposal.workloads not in {
+                (),
+                ("harbor",),
+            }:
                 raise CampaignError(
                     "task_suite_workload_unsupported",
                     "authored task suites execute through the Harbor workload",
+                    category="validation",
+                )
+            if proposal.preset_id is not None and proposal.workloads:
+                raise CampaignError(
+                    "task_suite_preset_workload_conflict",
+                    "an authored task suite with a preset must let the preset select its workload",
                     category="validation",
                 )
             if lock.parent_outcome_id != proposal.parent_outcome_id:
@@ -2685,6 +2722,39 @@ class CampaignService:
             self.repo_root, proposal.campaign_id, proposal.task_suite_digest
         )
         base = get_experiment(proposal.experiment_id, self.repo_root)
+        if proposal.preset_id is not None:
+            preset = next(
+                item for item in base.presets if item.id == proposal.preset_id
+            )
+            selected_workloads = set(preset.workloads) or {
+                item.id for item in base.workloads
+            }
+            workloads = [
+                (
+                    replace(
+                        item,
+                        manifest=Path(lock.manifest_path),
+                        dataset=None,
+                        n_tasks=lock.task_count,
+                    )
+                    if item.id in selected_workloads
+                    else item
+                )
+                for item in base.workloads
+            ]
+            return replace(
+                base,
+                manifest=Path(lock.manifest_path),
+                run_name=f"{proposal.campaign_id}-{proposal.proposal_id}",
+                tags=[*base.tags, f"task-suite:{lock.suite_digest}"],
+                n_tasks=lock.task_count,
+                workloads=workloads,
+                evaluation_generation=None,
+                integrations=[
+                    IntegrationSelection(id=integration_id)
+                    for integration_id in lock.integration_ids
+                ],
+            )
         return replace(
             base,
             manifest=Path(lock.manifest_path),
@@ -2726,7 +2796,7 @@ class CampaignService:
         )
         return ExperimentRequest(
             experiment_id=proposal.experiment_id,
-            preset=None if task_lock else proposal.preset_id,
+            preset=proposal.preset_id,
             workloads=() if task_lock else proposal.workloads,
             harnesses=proposal.harnesses,
             systems=proposal.context_systems,
@@ -2743,6 +2813,11 @@ class CampaignService:
             ),
             trace_content=proposal.trace_content,
             cohort_id=f"{proposal.campaign_id}:{proposal.proposal_id}",
+            selection_lock=(
+                Path(proposal.selection_lock)
+                if proposal.selection_lock is not None
+                else None
+            ),
         )
 
     def _task_authoring_policy(
@@ -3803,7 +3878,7 @@ def _safe_request(request: ExperimentRequest) -> dict[str, Any]:
             "campaign requests may not contain manifest or jobs-directory overrides",
             category="validation",
         )
-    return {
+    value = {
         "experiment_id": request.experiment_id,
         "preset": request.preset,
         "workloads": list(request.workloads),
@@ -3819,6 +3894,9 @@ def _safe_request(request: ExperimentRequest) -> dict[str, Any]:
         "trace_content": request.trace_content,
         "cohort_id": request.cohort_id,
     }
+    if request.selection_lock is not None:
+        value["selection_lock"] = request.selection_lock.as_posix()
+    return value
 
 
 def _request_from_safe(raw: Mapping[str, Any]) -> ExperimentRequest:
@@ -3839,6 +3917,7 @@ def _request_from_safe(raw: Mapping[str, Any]) -> ExperimentRequest:
             "tags",
             "trace_content",
             "cohort_id",
+            "selection_lock",
         },
         "campaign request",
     )
@@ -3857,6 +3936,11 @@ def _request_from_safe(raw: Mapping[str, Any]) -> ExperimentRequest:
         tags=_text_tuple(raw.get("tags"), "tag", allow_empty=True),
         trace_content=(str(raw["trace_content"]) if raw.get("trace_content") else None),
         cohort_id=str(raw["cohort_id"]) if raw.get("cohort_id") else None,
+        selection_lock=(
+            Path(_repo_relative_path(raw["selection_lock"], "selection lock"))
+            if raw.get("selection_lock")
+            else None
+        ),
     )
 
 
@@ -4502,6 +4586,20 @@ def _safe_runtime_path(value: Any) -> str:
         or candidate.parts[0] != ".fugue"
     ):
         raise ValueError("outcome export path must remain inside .fugue")
+    return candidate.as_posix()
+
+
+def _repo_relative_path(value: Any, label: str) -> str:
+    path = str(value or "").strip()
+    candidate = Path(path)
+    if (
+        not path
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or not candidate.parts
+        or candidate.parts[0] != ".fugue"
+    ):
+        raise ValueError(f"{label} must be a repository-relative path inside .fugue")
     return candidate.as_posix()
 
 
