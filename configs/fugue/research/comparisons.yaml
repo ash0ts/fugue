@@ -5,4 +5,4 @@ comparisons:
     digest: 6188a5088685e9ac898ef07a092e8bab4645d0e7f5425194fb40b18b81d18322
   - id: mcp-main-vs-0-4-natural-maintainer-canary-v3
     path: examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
-    digest: d29ea104f7548fd01439b5f50797952d4f90a165468ff7e46d66b875644a152a
+    digest: 79b91d283dd1d51bb2d794e8539fa9c4cd0704e52330e244ab5402fdccea2584

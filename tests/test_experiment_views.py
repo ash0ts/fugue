@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import fugue.research.experiment_views as experiment_views_module
 from fugue.bench.candidates import attempt_id
 from fugue.bench.library import get_experiment
 from fugue.research.display_labels import preview_with_governed_display_labels
@@ -35,6 +36,162 @@ def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
     normalized = json.loads(json.dumps(parsed.to_dict()))
 
     assert normalized == payload
+
+
+def test_v3_judge_summary_is_safe_and_invalid_integrity_suppresses_it() -> None:
+    scored = {
+        "status": "scored",
+        "claim_status": "advisory_uncalibrated",
+        "judges": [
+            {
+                "judge_id": "maintainer-actionability",
+                "profile": "wandb/zai-org/GLM-5.2",
+                "contract_digest": "1" * 64,
+                "dimensions": ["bounded_next_step"],
+                "calibration": {
+                    "status": "pending_human_review",
+                    "report_sha256": "2" * 64,
+                    "cases_digest": "3" * 64,
+                    "passed": False,
+                },
+            }
+        ],
+        "by_variant": {
+            "baseline": {
+                "maintainer-actionability.bounded_next_step": {
+                    "evaluated": 2,
+                    "mean": 0.4,
+                }
+            },
+            "candidate": {
+                "maintainer-actionability.bounded_next_step": {
+                    "evaluated": 2,
+                    "mean": 0.8,
+                }
+            },
+        },
+        "unavailable_attempts": 0,
+    }
+
+    assert (
+        experiment_views_module._safe_judge_summary(
+            scored,
+            integrity_status="reconciled",
+            attempts=4,
+        )
+        == scored
+    )
+    assert experiment_views_module._safe_judge_summary(
+        scored,
+        integrity_status="invalid",
+        attempts=4,
+    ) == {
+        **scored,
+        "status": "unavailable",
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 4,
+    }
+
+
+def test_v3_judge_summary_rejects_forged_qualification_and_dimensions() -> None:
+    scored = {
+        "status": "scored",
+        "claim_status": "advisory_uncalibrated",
+        "judges": [
+            {
+                "judge_id": "maintainer-actionability",
+                "profile": "wandb/zai-org/GLM-5.2",
+                "contract_digest": "1" * 64,
+                "dimensions": ["bounded_next_step"],
+                "calibration": {
+                    "status": "pending_human_review",
+                    "report_sha256": "2" * 64,
+                    "cases_digest": "3" * 64,
+                    "passed": False,
+                },
+            }
+        ],
+        "by_variant": {
+            "baseline": {
+                "other-judge.bounded_next_step": {
+                    "evaluated": 1,
+                    "mean": 0.5,
+                }
+            },
+            "candidate": {
+                "other-judge.bounded_next_step": {
+                    "evaluated": 1,
+                    "mean": 0.5,
+                }
+            },
+        },
+        "unavailable_attempts": 0,
+    }
+    with pytest.raises(ValueError, match="lacks matching provenance"):
+        experiment_views_module._safe_judge_summary(
+            scored,
+            integrity_status="reconciled",
+            attempts=2,
+        )
+
+    scored["by_variant"] = {"baseline": {}, "candidate": {}}
+    scored["claim_status"] = "calibrated"
+    with pytest.raises(ValueError, match="calibration provenance"):
+        experiment_views_module._safe_judge_summary(
+            scored,
+            integrity_status="reconciled",
+            attempts=2,
+        )
+
+
+def test_v3_judge_summary_rejects_impossible_evaluated_counts() -> None:
+    scored = {
+        "status": "scored",
+        "claim_status": "advisory_uncalibrated",
+        "judges": [
+            {
+                "judge_id": "maintainer-actionability",
+                "profile": "wandb/zai-org/GLM-5.2",
+                "contract_digest": "1" * 64,
+                "dimensions": ["bounded_next_step"],
+                "calibration": {
+                    "status": "pending_human_review",
+                    "report_sha256": "2" * 64,
+                    "cases_digest": "3" * 64,
+                    "passed": False,
+                },
+            }
+        ],
+        "by_variant": {
+            arm: {
+                "maintainer-actionability.bounded_next_step": {
+                    "evaluated": 999,
+                    "mean": 0.5,
+                }
+            }
+            for arm in ("baseline", "candidate")
+        },
+        "unavailable_attempts": 0,
+    }
+
+    with pytest.raises(ValueError, match="exceeds canonical arm attempts"):
+        experiment_views_module._safe_judge_summary(
+            scored,
+            integrity_status="reconciled",
+            attempts=4,
+            arm_attempts={"baseline": 2, "candidate": 2},
+        )
+
+
+def test_v3_view_rejects_published_judge_rationale() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    key = "comparison.judge.maintainer-actionability.maintenance_actionability"
+    payload["paired_cases"][0]["candidate"]["score_explanations"][key] = (
+        "Private expected values made this look correct."
+    )
+
+    with pytest.raises(ValueError, match="must not publish rationale"):
+        experiment_view_from_dict(payload)
 
 
 def test_v3_view_rejects_attempt_identity_mismatch() -> None:

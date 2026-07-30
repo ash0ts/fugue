@@ -309,15 +309,18 @@ def _safe_response_evidence(
         "successful": True,
     }
     for key, aliases in (
-        ("returned_count", ("returned_count", "returnedCount")),
+        ("returned_count", ("returned_count", "returnedCount", "resolved")),
         (
             "total_count",
             (
                 "total_count",
                 "totalCount",
+                "run_count",
                 "runCount",
                 "total_matching_count",
                 "totalMatchingCount",
+                "total_requested",
+                "totalRequested",
             ),
         ),
         ("rows_scanned", ("rows_scanned", "rowsScanned")),
@@ -341,7 +344,17 @@ def _safe_response_evidence(
     if "returned_count" not in evidence:
         derived = _unique_list_count(
             objects,
-            ("items", "rows", "runs", "edges", "traces", "calls", "evaluations"),
+            (
+                "items",
+                "rows",
+                "runs",
+                "edges",
+                "traces",
+                "calls",
+                "evaluations",
+                "versions",
+                "artifacts",
+            ),
         )
         if derived is not None:
             evidence["returned_count"] = derived
@@ -360,10 +373,21 @@ def _safe_response_evidence(
     for key, aliases in (
         ("has_more", ("has_more", "hasMore", "hasNextPage")),
         ("project_exhaustive", ("project_exhaustive", "projectExhaustive")),
+        ("digest_match", ("digest_match", "digestMatch")),
     ):
         value = _unique_bool(objects, aliases)
         if value is not None:
             evidence[key] = value
+    artifact_digest = _unique_string(
+        objects,
+        ("artifact_digest", "artifactDigest", "digest"),
+    )
+    if artifact_digest is not None:
+        evidence["artifact_digest"] = artifact_digest
+    returned_trace_ids = _unique_strings(objects, ("trace_id", "traceId"))
+    if returned_trace_ids:
+        evidence["returned_trace_ids_digest"] = _stable_digest(list(returned_trace_ids))
+        evidence["returned_trace_ids_count"] = len(returned_trace_ids)
     if (
         evidence.get("project_exhaustive") is None
         and evidence.get("has_more") is False
@@ -404,6 +428,11 @@ _PROJECT_REF_KEYS = (
     "project_ref",
     "project_slug",
     "entity_project",
+)
+_ARTIFACT_REF_KEYS = (
+    "artifact_name",
+    "artifact_name_a",
+    "artifact_name_b",
 )
 _PARENT_ID_KEYS = frozenset(
     {
@@ -458,7 +487,25 @@ def _requested_projects(raw: Mapping[str, Any]) -> set[str]:
             reference = value.get(key)
             if isinstance(reference, str) and reference.strip():
                 projects.add(reference.strip())
+        for key in _ARTIFACT_REF_KEYS:
+            reference = value.get(key)
+            project = _qualified_artifact_project(reference)
+            if project:
+                projects.add(project)
     return projects
+
+
+def _qualified_artifact_project(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    parts = raw.strip().split("/")
+    if (
+        len(parts) != 3
+        or any(not part or part in {".", ".."} for part in parts)
+        or ":" not in parts[2]
+    ):
+        return None
+    return f"{parts[0]}/{parts[1]}"
 
 
 def _nested_mappings(raw: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -604,6 +651,7 @@ def _response_objects(value: Any, *, depth: int = 0) -> list[Mapping[str, Any]]:
         "metadata",
         "calls",
         "evaluations",
+        "artifact",
     ):
         if key in value:
             result.extend(_response_objects(value[key], depth=depth + 1))
@@ -726,6 +774,33 @@ def _unique_bool(
         if type(value.get(key)) is bool
     }
     return next(iter(observed)) if len(observed) == 1 else None
+
+
+def _unique_string(
+    values: list[Mapping[str, Any]], keys: tuple[str, ...]
+) -> str | None:
+    observed = {
+        value[key].strip()
+        for value in values
+        for key in keys
+        if isinstance(value.get(key), str) and value[key].strip()
+    }
+    return next(iter(observed)) if len(observed) == 1 else None
+
+
+def _unique_strings(
+    values: list[Mapping[str, Any]], keys: tuple[str, ...]
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                value[key].strip()
+                for value in values
+                for key in keys
+                if isinstance(value.get(key), str) and value[key].strip()
+            }
+        )
+    )
 
 
 def _unique_list_count(

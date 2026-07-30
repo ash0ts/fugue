@@ -31,6 +31,32 @@ evaluators:
       bounded_evidence: safety_gate
       evidence_honesty: outcome
       release_mechanism_used: mechanism
+  - id: maintainer-actionability
+    type: llm_judge
+    required: false
+    profile: wandb/zai-org/GLM-5.2
+    calibration: maintainer-actionability-judge-calibration.json
+    rubric: >-
+      Judge only whether the maintainer memo turns the response's stated
+      evidence into a concrete maintain, advance, or block recommendation;
+      traces that action to the stated evidence; proposes one bounded feasible
+      next step with a success or stop condition; and calibrates uncertainty to
+      the inspected cohort. Do not rescore factual correctness, tool mechanics,
+      revision identity, verbosity, cost, or latency; the deterministic scorer
+      owns those. Unsupported causal, completeness, or release-wide claims are
+      critical failures.
+    dimensions:
+      - maintenance_actionability
+      - evidence_to_action_traceability
+      - bounded_next_step
+      - uncertainty_calibration
+    dimension_roles:
+      maintenance_actionability: outcome
+      evidence_to_action_traceability: outcome
+      bounded_next_step: outcome
+      uncertainty_calibration: outcome
+    evidence: [tool_names]
+    reserve_cost_usd: 0.10
 execution:
   source_evidence_project: wandb/fugue-mcp-release-source-v2
   source_evidence_destination:
@@ -61,7 +87,7 @@ execution:
   attempts: 2
   concurrency: 1
   evidence_checkpoint_cells: 1
-  max_cost_usd: 20
+  max_cost_usd: 22
   reserve_per_attempt_usd: 1.25
   approval_required: true
   preparation_required: true

@@ -64,6 +64,48 @@ _MCP_RELEASE_CANDIDATES = (
     ),
 )
 
+_MCP_PROJECT_TASK_TOOLS: dict[str, tuple[str, ...]] = {
+    "maintainer-source-inventory": (
+        "probe_project_tool",
+        "query_wandb_tool",
+    ),
+    "maintainer-run-triage": (
+        "compare_runs_tool",
+        "diagnose_run_tool",
+        "get_run_history_tool",
+    ),
+    "maintainer-evaluation-trace-topology": (
+        "count_weave_traces_tool",
+        "infer_trace_schema_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "summarize_evaluation_tool",
+    ),
+    "maintainer-artifact-provenance": (
+        "compare_artifact_versions_tool",
+        "get_artifact_details_tool",
+        "list_artifact_versions_tool",
+    ),
+}
+_MCP_ZERO_MODEL_TOOLS: dict[str, str] = {
+    "list_entities_tool": (
+        "Account-scoped discovery is mutable and is checked by exact manifest "
+        "and schema conformance, not a locked-project outcome task."
+    ),
+    "query_wandb_entity_projects": (
+        "Entity-wide project discovery would exceed the immutable source scope."
+    ),
+    "list_registries_tool": ("Registry discovery is organization-scoped and mutable."),
+    "list_registry_collections_tool": (
+        "Registry collections are outside the locked project cohort."
+    ),
+    "list_wandb_automations_tool": ("Automations are mutable account configuration."),
+    "list_wandb_integrations_tool": ("Integrations are mutable account configuration."),
+    "search_wandb_docs_tool": (
+        "Documentation search targets an external mutable corpus."
+    ),
+}
+
 
 def _qualification_endpoint_binding(
     env: Mapping[str, str],
@@ -746,6 +788,14 @@ async def _run_mcp_release_observations(
                     )
         profile_probes: dict[str, Any] = {}
         if import_id == "wandb-mcp-0-4-staging":
+            profile_probes["package_default"] = await _probe_tool_profile(
+                runtime_source=runtime_source,
+                lock=raw,
+                runtime_env=runtime_env,
+                overrides={},
+                unset_fixed_env=("WANDB_MCP_READ_ONLY",),
+                use_package_entrypoint=True,
+            )
             profile_probes["read_only"] = await _probe_tool_profile(
                 runtime_source=runtime_source,
                 lock=raw,
@@ -760,6 +810,10 @@ async def _run_mcp_release_observations(
                 mutation_probe=True,
             )
         server = getattr(initialized, "serverInfo", None)
+        initialized_tool_schemas = _initialized_tool_schema_contract(
+            initialized_tools.tools
+        )
+        locked_tool_schemas = _locked_tool_schema_contract(raw.get("tool_manifest"))
         observations.append(
             {
                 "id": import_id,
@@ -773,10 +827,17 @@ async def _run_mcp_release_observations(
                 "initialized_tools": sorted(
                     str(tool.name) for tool in initialized_tools.tools
                 ),
+                "initialized_tool_schema_digest": stable_digest(
+                    initialized_tool_schemas
+                ),
                 "locked_tools": sorted(
                     str(item.get("name") or "")
                     for item in raw.get("tool_manifest", [])
                     if isinstance(item, Mapping) and item.get("name")
+                ),
+                "locked_tool_schema_digest": stable_digest(locked_tool_schemas),
+                "initialized_schema_matches_lock": (
+                    initialized_tool_schemas == locked_tool_schemas
                 ),
                 "release_capabilities": _release_capabilities(raw.get("tool_manifest")),
                 "calls": calls,
@@ -793,6 +854,8 @@ async def _probe_tool_profile(
     lock: Mapping[str, Any],
     runtime_env: Mapping[str, str],
     overrides: Mapping[str, str],
+    unset_fixed_env: tuple[str, ...] = (),
+    use_package_entrypoint: bool = False,
     mutation_probe: bool = False,
 ) -> dict[str, Any]:
     from mcp import ClientSession, StdioServerParameters
@@ -800,8 +863,11 @@ async def _probe_tool_profile(
 
     from fugue.bench.component_imports import _managed_python_probe_command
 
-    fixed_env = dict(lock["fixed_env"])
-    fixed_env.update(overrides)
+    fixed_env = _profile_fixed_env(
+        lock,
+        overrides=overrides,
+        unset_fixed_env=unset_fixed_env,
+    )
     command = _managed_python_probe_command(
         runtime_source,
         runtime_platform=str(lock["runtime_platform"]),
@@ -809,6 +875,20 @@ async def _probe_tool_profile(
         fixed_env=tuple(sorted(fixed_env.items())),
         allowed_hosts=tuple(lock["allowed_hosts"]),
     )
+    if use_package_entrypoint:
+        # The managed wrapper deliberately bakes in the experiment's reviewed
+        # fixed environment. Package-default conformance must bypass only that
+        # wrapper while executing the exact same locked package tree.
+        command = (
+            *command[:-1],
+            "-c",
+            (
+                "import sys;"
+                "sys.path.insert(0, '/fugue-component/site');"
+                "from wandb_mcp_server.server import cli;"
+                "raise SystemExit(cli())"
+            ),
+        )
     process_env = {
         key: value
         for key, value in os.environ.items()
@@ -829,6 +909,7 @@ async def _probe_tool_profile(
                 timeout=90,
             )
             names = sorted(str(tool.name) for tool in initialized_tools.tools)
+            tool_schemas = _initialized_tool_schema_contract(initialized_tools.tools)
             if mutation_probe:
                 mutation = await _call_mcp_json(
                     session,
@@ -837,10 +918,62 @@ async def _probe_tool_profile(
                 )
     return {
         "overrides": dict(sorted(overrides.items())),
+        "unset_fixed_env": sorted(unset_fixed_env),
+        "entrypoint": "package" if use_package_entrypoint else "locked_wrapper",
         "initialized_tools": names,
+        "tool_schemas": tool_schemas,
+        "tool_schema_digest": stable_digest(tool_schemas),
         "tool_manifest_digest": stable_digest(names),
         "mutation_probe": mutation,
     }
+
+
+def _profile_fixed_env(
+    lock: Mapping[str, Any],
+    *,
+    overrides: Mapping[str, str],
+    unset_fixed_env: tuple[str, ...],
+) -> dict[str, str]:
+    fixed_env = {str(key): str(value) for key, value in dict(lock["fixed_env"]).items()}
+    for name in unset_fixed_env:
+        fixed_env.pop(name, None)
+    fixed_env.update({str(key): str(value) for key, value in overrides.items()})
+    return fixed_env
+
+
+def _initialized_tool_schema_contract(tools: Sequence[Any]) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {
+                "name": str(getattr(tool, "name", "") or ""),
+                "input_schema": json.loads(
+                    json.dumps(
+                        getattr(tool, "inputSchema", {}) or {},
+                        sort_keys=True,
+                    )
+                ),
+            }
+            for tool in tools
+            if str(getattr(tool, "name", "") or "")
+        ),
+        key=lambda item: item["name"],
+    )
+
+
+def _locked_tool_schema_contract(raw: Any) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {
+                "name": str(item.get("name") or ""),
+                "input_schema": json.loads(
+                    json.dumps(item.get("input_schema") or {}, sort_keys=True)
+                ),
+            }
+            for item in (raw or ())
+            if isinstance(item, Mapping) and str(item.get("name") or "")
+        ),
+        key=lambda item: item["name"],
+    )
 
 
 async def _call_mcp_json(
@@ -959,9 +1092,19 @@ def _mcp_release_qualification_receipt(
             "server": dict(raw["server"]),
             "initialized_tools": list(raw.get("initialized_tools") or []),
             "locked_tools": list(raw.get("locked_tools") or []),
+            "initialized_tool_schema_digest": str(
+                raw.get("initialized_tool_schema_digest") or ""
+            ),
+            "locked_tool_schema_digest": str(
+                raw.get("locked_tool_schema_digest") or ""
+            ),
             "initialized_manifest_matches_lock": (
                 list(raw.get("initialized_tools") or [])
                 == list(raw.get("locked_tools") or [])
+                and raw.get("initialized_schema_matches_lock") is True
+            ),
+            "initialized_schema_matches_lock": (
+                raw.get("initialized_schema_matches_lock") is True
             ),
             "release_capabilities": dict(raw.get("release_capabilities") or {}),
             "tool_calls_ok": tool_calls_ok,
@@ -1061,24 +1204,50 @@ def _mcp_release_qualification_receipt(
 def _infrastructure_conformance(
     candidate: Mapping[str, Any],
 ) -> dict[str, Any]:
-    default_manifest = (
+    experiment_manifest = (
         "passed"
         if candidate.get("initialized_manifest_matches_lock") is True
         else "failed"
     )
-    default_tools = set(candidate.get("initialized_tools") or ())
+    experiment_tools = set(candidate.get("initialized_tools") or ())
     profiles = dict(candidate.get("profile_probes") or {})
+    package_default = dict(profiles.get("package_default") or {})
     read_only = dict(profiles.get("read_only") or {})
     raw_graphql = dict(profiles.get("raw_graphql") or {})
+    package_default_tools = set(package_default.get("initialized_tools") or ())
     read_only_tools = set(read_only.get("initialized_tools") or ())
     raw_graphql_tools = set(raw_graphql.get("initialized_tools") or ())
+    package_default_schemas = _profile_tool_schema_map(package_default)
+    read_only_schemas = _profile_tool_schema_map(read_only)
+    raw_graphql_schemas = _profile_tool_schema_map(raw_graphql)
+    locked_schema_digest = str(candidate.get("locked_tool_schema_digest") or "")
+    read_only_schema_digest = str(read_only.get("tool_schema_digest") or "")
     write_tools = {"create_wandb_report_tool", "log_analysis_to_wandb"}
+    package_default_status = (
+        "passed"
+        if (
+            package_default_tools
+            and package_default_tools == experiment_tools | write_tools
+            and package_default_tools & write_tools == write_tools
+            and {name: package_default_schemas.get(name) for name in experiment_tools}
+            == {name: read_only_schemas.get(name) for name in experiment_tools}
+            and all(
+                _valid_tool_input_schema(package_default_schemas.get(name))
+                for name in write_tools
+            )
+        )
+        else "failed"
+        if package_default_tools
+        else "unavailable"
+    )
     read_only_status = (
         "passed"
         if (
             read_only_tools
-            and read_only_tools == default_tools - write_tools
+            and read_only_tools == experiment_tools
             and not read_only_tools & write_tools
+            and locked_schema_digest
+            and read_only_schema_digest == locked_schema_digest
         )
         else "failed"
         if read_only_tools
@@ -1088,7 +1257,12 @@ def _infrastructure_conformance(
         "passed"
         if (
             raw_graphql_tools
-            and raw_graphql_tools == default_tools | {"query_wandb_graphql_tool"}
+            and raw_graphql_tools == experiment_tools | {"query_wandb_graphql_tool"}
+            and {name: raw_graphql_schemas.get(name) for name in experiment_tools}
+            == {name: read_only_schemas.get(name) for name in experiment_tools}
+            and _valid_tool_input_schema(
+                raw_graphql_schemas.get("query_wandb_graphql_tool")
+            )
         )
         else "failed"
         if raw_graphql_tools
@@ -1114,9 +1288,19 @@ def _infrastructure_conformance(
     )
     gates = [
         {
+            "id": "experiment-read-only-tool-manifest",
+            "status": experiment_manifest,
+            "evidence": (
+                "initialized experiment MCP manifest versus its exact read-only lock"
+            ),
+        },
+        {
             "id": "default-tool-manifest",
-            "status": default_manifest,
-            "evidence": "initialized MCP manifest versus exact lock",
+            "status": package_default_status,
+            "evidence": (
+                "exact candidate runtime initialized with package-default "
+                "write-tool registration"
+            ),
         },
         {
             "id": "read-only-tool-manifest",
@@ -1200,6 +1384,22 @@ def _infrastructure_conformance(
             "Infrastructure conformance only; these gates are not Agent task scores."
         ),
     }
+
+
+def _profile_tool_schema_map(
+    profile: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("name") or ""): dict(item.get("input_schema") or {})
+        for item in profile.get("tool_schemas") or ()
+        if isinstance(item, Mapping)
+        and str(item.get("name") or "")
+        and isinstance(item.get("input_schema"), Mapping)
+    }
+
+
+def _valid_tool_input_schema(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("type") == "object"
 
 
 def validate_release_notes_lock(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -1480,10 +1680,12 @@ def release_note_coverage_v3(
             "maintainer-project-health",
         ),
         "bounded-history": (
+            "maintainer-run-triage",
             "maintainer-history-hotspot",
             "maintainer-project-health",
         ),
         "evaluation-prediction-reconciliation": (
+            "maintainer-evaluation-trace-topology",
             "maintainer-evaluation-reconciliation",
         ),
         "structured-query-breaking-change": (
@@ -1644,6 +1846,128 @@ def release_note_coverage_v3(
             "behavior exactly once"
         )
     return tuple(result)
+
+
+def tool_surface_coverage_v1(
+    receipt: Mapping[str, Any],
+    *,
+    task_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Classify every locked read-only MCP tool without overstating evidence.
+
+    Project-scoped tools are assigned to natural maintainer tasks. Account,
+    organization, and mutable external-corpus tools stay in exact zero-model
+    manifest/schema conformance. A canary may deliberately defer some task
+    families, but no initialized tool may disappear from the coverage receipt.
+    """
+
+    candidates = [
+        item for item in receipt.get("candidates") or () if isinstance(item, Mapping)
+    ]
+    if len(candidates) != len(_MCP_RELEASE_CANDIDATES):
+        raise ValueError("tool coverage requires both exact MCP candidates")
+    manifests = {
+        str(item.get("id") or ""): tuple(
+            sorted(str(name) for name in item.get("initialized_tools") or ())
+        )
+        for item in candidates
+    }
+    if set(manifests) != {item[0] for item in _MCP_RELEASE_CANDIDATES}:
+        raise ValueError("tool coverage candidate identities do not match")
+    schema_digests = {
+        str(item.get("id") or ""): {
+            "initialized": str(item.get("initialized_tool_schema_digest") or ""),
+            "locked": str(item.get("locked_tool_schema_digest") or ""),
+        }
+        for item in candidates
+    }
+    if any(
+        item.get("initialized_schema_matches_lock") is not True
+        or not schema_digests[str(item.get("id") or "")]["initialized"]
+        or schema_digests[str(item.get("id") or "")]["initialized"]
+        != schema_digests[str(item.get("id") or "")]["locked"]
+        for item in candidates
+    ):
+        raise ValueError(
+            "tool coverage requires initialized input schemas to match "
+            "their exact locks"
+        )
+    unique_manifests = set(manifests.values())
+    if len(unique_manifests) != 1:
+        raise ValueError("tool coverage requires identical exact tool surfaces")
+    manifest = next(iter(unique_manifests))
+    declared_task_tools = {
+        tool: task_id
+        for task_id, tools in _MCP_PROJECT_TASK_TOOLS.items()
+        for tool in tools
+    }
+    overlap = set(declared_task_tools) & set(_MCP_ZERO_MODEL_TOOLS)
+    if overlap:
+        raise ValueError(
+            "MCP tools cannot be both task and zero-model qualified: "
+            + ", ".join(sorted(overlap))
+        )
+    classified = set(declared_task_tools) | set(_MCP_ZERO_MODEL_TOOLS)
+    if set(manifest) != classified:
+        missing = sorted(set(manifest) - classified)
+        stale = sorted(classified - set(manifest))
+        raise ValueError(
+            "MCP tool coverage must classify the exact initialized surface"
+            + (f"; unclassified: {', '.join(missing)}" if missing else "")
+            + (f"; stale: {', '.join(stale)}" if stale else "")
+        )
+    available_tasks = {str(item) for item in task_ids}
+    tools: list[dict[str, Any]] = []
+    for tool in manifest:
+        task_id = declared_task_tools.get(tool)
+        if task_id is not None:
+            tools.append(
+                {
+                    "tool": tool,
+                    "qualification": "agent_task",
+                    "task_id": task_id,
+                    "status": (
+                        "assigned"
+                        if task_id in available_tasks
+                        else "confirmation_required"
+                    ),
+                    "claim_scope": (
+                        "Agent outcome and mechanism evidence only when the "
+                        "locked task records a successful invocation."
+                    ),
+                }
+            )
+        else:
+            tools.append(
+                {
+                    "tool": tool,
+                    "qualification": "zero_model_conformance",
+                    "status": "manifest_and_schema_only",
+                    "rationale": _MCP_ZERO_MODEL_TOOLS[tool],
+                    "claim_scope": (
+                        "Registration and schema conformance only; no task "
+                        "outcome or behavioral usefulness claim."
+                    ),
+                }
+            )
+    unsigned = {
+        "schema_version": 1,
+        "candidate_manifests": {
+            key: list(value) for key, value in sorted(manifests.items())
+        },
+        "candidate_schema_digests": dict(sorted(schema_digests.items())),
+        "tools": tools,
+        "agent_task_tools": len(declared_task_tools),
+        "zero_model_tools": len(_MCP_ZERO_MODEL_TOOLS),
+        "total_tools": len(manifest),
+        "taskset_comprehensive": all(
+            item["status"] != "confirmation_required" for item in tools
+        ),
+    }
+    return {
+        **unsigned,
+        "coverage_digest": stable_digest(unsigned),
+    }
 
 
 def _successful_mcp_value(raw: Any) -> dict[str, Any]:
