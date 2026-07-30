@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fugue.bench.ai import get_analysis
+from fugue.bench.ai import _intervention_component_locks, get_analysis
 from fugue.bench.analysis_contracts import (
     AlignedAnalysisV1,
     AlignedArmV1,
@@ -32,6 +32,10 @@ from fugue.bench.comparison import (
     DimensionChangeV2,
     PairedAttemptV3,
     PairedCaseV3,
+)
+from fugue.bench.intervention_provenance import (
+    build_intervention_component_lock,
+    write_intervention_component_lock,
 )
 from fugue.bench.library import get_experiment
 from fugue.bench.loop_failure import (
@@ -315,6 +319,19 @@ def _result() -> ComparisonResultV3:
         next_action="Complete package gates.",
         human_signoff_required=True,
     )
+    cohort_lineage = {
+        "schema_version": 1,
+        "source_lock_digest": source_digest,
+        "taskset_digest": "1" * 64,
+        "private_labels_digest": "2" * 64,
+        "arms": {
+            "baseline": {"behavior_digest": "3" * 64},
+            "candidate": {"behavior_digest": "4" * 64},
+        },
+        "execution": {"runtime_digest": "5" * 64},
+        "scorer_digests": {"maintainer-scorer": "b" * 64},
+    }
+    cohort_lineage["lineage_digest"] = stable_digest(cohort_lineage)
     return ComparisonResultV3(
         schema_version=3,
         comparison_id=COMPARISON_ID,
@@ -378,6 +395,7 @@ def _result() -> ComparisonResultV3:
                 digest="c" * 64,
             ),
         ),
+        cohort_lineage=cohort_lineage,
         candidate_source_revisions=(
             CandidateSourceRevisionV1(
                 kind="mcp",
@@ -594,6 +612,66 @@ def test_loop_assets_do_not_claim_old_smoke_or_fake_trace() -> None:
     assert COMPARISON_ID in text
 
 
+def test_loop_selection_resolves_only_locked_components_in_selected_arm(
+    tmp_path: Path,
+) -> None:
+    skill = build_intervention_component_lock(
+        kind="skill",
+        component_id="loop-intervention-skill",
+        lock_digest="7" * 64,
+        repository="https://github.com/wandb/fugue",
+        source_commit="8" * 40,
+        source_tree="9" * 40,
+    )
+    mcp = build_intervention_component_lock(
+        kind="mcp",
+        component_id="loop-intervention-mcp",
+        lock_digest="a" * 64,
+        repository="https://github.com/wandb/wandb-mcp-server",
+        source_commit="b" * 40,
+        source_tree="c" * 40,
+        release_target="wandb-mcp-server Python package 0.4",
+        superseded_release_candidate_sha="d" * 40,
+        release_requalification_required=True,
+    )
+    paths = (
+        write_intervention_component_lock(
+            tmp_path / ".fugue/interventions/skill.json",
+            skill,
+        ).relative_to(tmp_path),
+        write_intervention_component_lock(
+            tmp_path / ".fugue/interventions/mcp.json",
+            mcp,
+        ).relative_to(tmp_path),
+    )
+    tags = [
+        f"intervention-component-lock:{path.as_posix()}"
+        for path in paths
+    ]
+    rows = [
+        {
+            "variant_id": "combined",
+            "skill_ids": ["loop-intervention-skill"],
+            "integration_ids": ["loop-intervention-mcp"],
+            "tags": tags,
+        },
+        {
+            "variant_id": "combined",
+            "skill_ids": ["loop-intervention-skill"],
+            "integration_ids": ["loop-intervention-mcp"],
+            "tags": list(reversed(tags)),
+        },
+    ]
+
+    resolved = _intervention_component_locks(
+        rows,
+        selected_variant="combined",
+        repo_root=tmp_path,
+    )
+
+    assert resolved == (mcp, skill)
+
+
 def _verification_module():
     path = (
         REPO_ROOT
@@ -604,6 +682,33 @@ def _verification_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_loop_mcp_use_requires_host_observed_calls_from_exact_integration() -> None:
+    module = _verification_module()
+    row = {
+        "integration_ids": ["loop-intervention-mcp"],
+        "integration_ids_invoked": ["some-other-mcp"],
+        "mcp_tool_calls": [
+            {
+                "integration_id": "some-other-mcp",
+                "terminal_status": "succeeded",
+                "successful": True,
+                "response_metadata_verified": True,
+            }
+        ],
+    }
+
+    assert (
+        module._integration_use_observed(row, "loop-intervention-mcp")
+        is False
+    )
+    row["integration_ids_invoked"] = ["loop-intervention-mcp"]
+    row["mcp_tool_calls"][0]["integration_id"] = "loop-intervention-mcp"
+    assert (
+        module._integration_use_observed(row, "loop-intervention-mcp")
+        is True
+    )
 
 
 def _verification_row(
@@ -618,6 +723,12 @@ def _verification_row(
     identity = stable_digest(
         {"phase": phase, "task": task, "variant": variant}
     )
+    weave_base = f"https://wandb.ai/{LOOP_PROJECT}/weave"
+    call_base = f"weave:///{LOOP_PROJECT}/call"
+    evaluation_id = f"evaluation-{identity}"
+    predict_and_score_id = f"predict-and-score-{identity}"
+    prediction_call_id = f"prediction-call-{identity}"
+    agent_id = f"agent-{identity}"
     row: dict[str, object] = {
         "attempt_id": identity,
         "prediction_id": f"prediction-{identity}",
@@ -629,7 +740,30 @@ def _verification_row(
         "trial_index": 1,
         "pass": passed,
         "trace_project": LOOP_PROJECT,
+        "trace_receipt": {"app_base_url": "https://wandb.ai"},
         "trace_link_status": "linked",
+        "weave_evaluation_root_call_id": evaluation_id,
+        "weave_evaluation_root_ref": f"{call_base}/{evaluation_id}",
+        "weave_evaluation_root_url": f"{weave_base}/calls/{evaluation_id}",
+        "evaluation_root_object_verified": True,
+        "eval_predict_and_score_call_id": predict_and_score_id,
+        "eval_predict_and_score_ref": f"{call_base}/{predict_and_score_id}",
+        "eval_predict_and_score_url": (
+            f"{weave_base}/calls/{predict_and_score_id}"
+        ),
+        "eval_predict_and_score_object_verified": True,
+        "weave_prediction_call_id": prediction_call_id,
+        "weave_prediction_ref": f"{call_base}/{prediction_call_id}",
+        "weave_prediction_url": f"{weave_base}/calls/{prediction_call_id}",
+        "weave_prediction_object_verified": True,
+        "weave_agent_root_call_id": agent_id,
+        "weave_agent_root_ref": f"{call_base}/{agent_id}",
+        "weave_agent_root_url": f"{weave_base}/calls/{agent_id}",
+        "agent_graph_verified": True,
+        "weave_dataset_id": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",
+        "weave_dataset_ref": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",
+        "weave_dataset_url": f"{weave_base}/objects/loop-dataset/versions/v1",
+        "dataset_version_object_verified": True,
         "evaluation_publication_mode": "live",
         "harbor_environment": "local_harbor_docker",
         "harbor_conformance_status": "passed",
@@ -638,7 +772,7 @@ def _verification_row(
         "local_artifact_privacy_scan_status": "passed",
         "hosted_evidence_privacy_scan_status": "passed",
         "private_label_boundary_verified": True,
-        "harbor_cleanup_verified": True,
+        "sandbox_cleanup_verified": True,
         "orphaned_sandbox": False,
         "execution_fingerprint": stable_digest({"phase": phase}),
         "run_snapshot_sha256": "2" * 64,
@@ -649,15 +783,6 @@ def _verification_row(
         "source_tree": "4" * 40,
         "source_dirty_digest": "",
         "weave_tool_names": {"query_wandb_tool": 1},
-        "integration_provenance": [
-            {
-                "id": (
-                    "loop-intervention-mcp"
-                    if variant in {"mcp-only", "combined"}
-                    else "loop-production-mcp"
-                )
-            }
-        ],
         "skill_invocation_evidence": {
             "status": "observed",
             "skills_invoked": [
@@ -668,6 +793,54 @@ def _verification_row(
                 )
             ],
         },
+        "skill_provenance": [
+            {
+                "id": (
+                    "loop-intervention-skill"
+                    if variant in {"skill-only", "combined"}
+                    else "loop-production-skill"
+                ),
+                "digest": (
+                    "7" * 64
+                    if variant in {"skill-only", "combined"}
+                    else "8" * 64
+                ),
+            }
+        ],
+        "integration_provenance": [
+            {
+                "id": (
+                    "loop-intervention-mcp"
+                    if variant in {"mcp-only", "combined"}
+                    else "loop-production-mcp"
+                ),
+                "lock_digest": (
+                    "sha256:" + "a" * 64
+                    if variant in {"mcp-only", "combined"}
+                    else "sha256:" + "b" * 64
+                ),
+            }
+        ],
+        "integration_ids_invoked": [
+            (
+                "loop-intervention-mcp"
+                if variant in {"mcp-only", "combined"}
+                else "loop-production-mcp"
+            )
+        ],
+        "mcp_tool_calls": [
+            {
+                "tool": "query_wandb_tool",
+                "integration_id": (
+                    "loop-intervention-mcp"
+                    if variant in {"mcp-only", "combined"}
+                    else "loop-production-mcp"
+                ),
+                "terminal_status": "succeeded",
+                "successful": True,
+                "response_metadata_verified": True,
+            }
+        ],
     }
     if phase == "discovery" and variant == "production" and not passed:
         row["source_failure"] = {
@@ -750,6 +923,27 @@ def test_loop_qualification_receipt_accepts_exact_8_plus_8(
             "mcp-only",
             "combined",
         ),
+        selected_components=(
+            build_intervention_component_lock(
+                kind="skill",
+                component_id="loop-intervention-skill",
+                lock_digest="7" * 64,
+                repository="https://github.com/wandb/fugue",
+                source_commit="8" * 40,
+                source_tree="9" * 40,
+            ),
+            build_intervention_component_lock(
+                kind="mcp",
+                component_id="loop-intervention-mcp",
+                lock_digest="a" * 64,
+                repository="https://github.com/wandb/wandb-mcp-server",
+                source_commit="b" * 40,
+                source_tree="c" * 40,
+                release_target="wandb-mcp-server Python package 0.4",
+                superseded_release_candidate_sha="d" * 40,
+                release_requalification_required=True,
+            ),
+        ),
         failure_lock_sha256="1" * 64,
         discovery_suite_sha256="6" * 64,
         holdout_suite_sha256="7" * 64,
@@ -779,6 +973,22 @@ def test_loop_qualification_receipt_accepts_exact_8_plus_8(
             "dirty_digest": "",
         },
     )
+    monkeypatch.setattr(
+        module,
+        "verify_intervention_component_checkout",
+        lambda component, _path: {
+            "schema_version": 1,
+            "kind": "intervention-component-checkout-verification",
+            "component_id": component.component_id,
+            "verified": True,
+            "pr_tree_matches_qualified_tree": True,
+            "release_requalification_required": (
+                component.release_requalification_required
+            ),
+            "blockers": [],
+            "receipt_digest": "e" * 64,
+        },
+    )
 
     receipt = module.verify(
         discovery_path=discovery_path,
@@ -786,9 +996,16 @@ def test_loop_qualification_receipt_accepts_exact_8_plus_8(
         selection_lock_path=tmp_path / "selection.json",
         failure_lock_path=tmp_path / "failure.json",
         repo_root=tmp_path,
+        component_worktrees={
+            "loop-intervention-skill": tmp_path / "skill",
+            "loop-intervention-mcp": tmp_path / "mcp",
+        },
     )
 
     assert receipt["qualified"] is True
     assert receipt["discovery_candidate_improvements"] == 1
     assert receipt["holdout_regressions"] == 0
+    assert receipt["release_requalification_required"] is True
+    assert receipt["superseded_release_candidates"] == ["d" * 40]
+    assert len(receipt["component_checkout_receipts"]) == 2
     assert receipt["blockers"] == []

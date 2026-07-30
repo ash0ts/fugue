@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue.bench.candidates import attempt_id
 from fugue.bench.library import get_experiment
 from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
@@ -34,6 +35,44 @@ def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
     normalized = json.loads(json.dumps(parsed.to_dict()))
 
     assert normalized == payload
+
+
+def test_v3_view_rejects_attempt_identity_mismatch() -> None:
+    payload = json.loads(
+        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+    )
+    payload["paired_cases"][0]["candidate"]["identity"]["candidate"] = (
+        "forged-candidate"
+    )
+
+    with pytest.raises(ValueError, match="identity is not canonical"):
+        experiment_view_from_dict(payload)
+
+
+def test_v3_pair_coordinates_match_attempt_identity() -> None:
+    payload = json.loads(
+        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+    )
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["identity"]["arm"] = "baseline"
+    candidate["attempt_id"] = attempt_id(**candidate["identity"])
+
+    with pytest.raises(ValueError, match="pair coordinates"):
+        experiment_view_from_dict(payload)
+
+
+def test_v3_evidence_eligible_requires_five_resolved_links() -> None:
+    payload = json.loads(
+        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+    )
+    link = payload["paired_cases"][0]["candidate"]["evidence_links"][0]
+    link["status"] = "missing"
+    link["reason"] = "The object could not be resolved."
+    link.pop("ref")
+    link.pop("url")
+
+    with pytest.raises(ValueError, match="five resolved links"):
+        experiment_view_from_dict(payload)
 
 
 def _preview() -> dict[str, object]:
@@ -625,7 +664,7 @@ def test_outcome_summary_does_not_turn_unavailable_evaluation_into_failure() -> 
     assert summary.unavailable == 5
 
 
-def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None:
+def test_evaluation_never_turns_otel_identities_into_weave_links() -> None:
     raw = _record()
     raw["outcome"]["evidence_refs"] = []
     for index, row in enumerate(raw["outcome"]["row_refs"]):
@@ -643,24 +682,119 @@ def test_evaluation_links_opaque_weave_identities_without_trace_bodies() -> None
 
     view = build_evaluation_view(raw)
 
+    forbidden = {
+        "agent_conversation",
+        "conversation_identity",
+        "invoke_agent_root",
+        "trace",
+        "evaluation_attempt",
+    }
     assert all(
-        {
-            "agent_conversation",
-            "conversation_identity",
-            "invoke_agent_root",
-            "trace",
-            "evaluation_attempt",
-        }.issubset({link["kind"] for link in cell.evidence_links})
+        forbidden.isdisjoint({link["kind"] for link in cell.evidence_links})
         for cell in view.cells
     )
-    assert next(
-        link
-        for link in view.cells[0].evidence_links
-        if link["system"] == "weave" and link["ref"].endswith("/call/prediction-call-0")
-    )["ref"] == ("team/evaluations/call/prediction-call-0")
+    assert all(cell.evidence_status == "reconciled" for cell in view.cells)
     serialized = json.dumps(view.to_dict())
     assert "agent_response" not in serialized
     assert "tool_output" not in serialized
+
+
+def test_campaign_evaluation_uses_exact_attempt_and_five_verified_links() -> None:
+    identity = {
+        "task_id": "maintenance-task",
+        "arm": "memory-policy",
+        "harness": "claude-code",
+        "attempt": 1,
+        "candidate": "candidate-locked",
+        "runtime": "runtime-locked",
+    }
+    stable_attempt = attempt_id(**identity)
+    slots = (
+        ("prediction_and_score", "evaluation_attempt"),
+        ("prediction", "prediction"),
+        ("evaluation_root", "evaluation"),
+        ("agent_root", "agent_root"),
+        ("dataset", "dataset"),
+    )
+    links = [
+        {
+            "slot": slot,
+            "system": "weave",
+            "kind": kind,
+            "ref": (
+                "weave:///wandb/project/object/dataset:v1"
+                if slot == "dataset"
+                else f"weave:///wandb/project/call/{slot}"
+            ),
+            "uri": (
+                "https://wandb.ai/wandb/project/weave/objects/dataset/versions/v1"
+                if slot == "dataset"
+                else f"https://wandb.ai/wandb/project/weave/calls/{slot}"
+            ),
+            "verification_status": "verified",
+        }
+        for slot, kind in slots
+    ]
+    row = {
+        "prediction_id": "prediction-1",
+        "attempt_id": stable_attempt,
+        "attempt_identity": identity,
+        "run_id": "run-1",
+        "candidate_id": identity["candidate"],
+        "execution_fingerprint": identity["runtime"],
+        "comparison_example_id": identity["task_id"],
+        "task_id": identity["task_id"],
+        "task_name": "Maintenance task",
+        "variant_id": identity["arm"],
+        "harness": identity["harness"],
+        "trial_index": 1,
+        "execution_kind": "agent",
+        "status": "completed",
+        "pass": True,
+        "trace_project": "wandb/project",
+        "trace_link_status": "linked",
+        "evidence_links": links,
+        "skill_ids_invoked": ["evidence-policy"],
+        "integration_ids_invoked": ["wandb-mcp-0-4"],
+        "mcp_tool_names": ["query_wandb_tool"],
+        "mcp_queried_projects": ["wandb/source"],
+        "otel_root_span_ids": ["0123456789abcdef"],
+        "otel_trace_ids": ["0123456789abcdef0123456789abcdef"],
+    }
+    record = {
+        "preview": {"estimated_cells": 1, "draft": {}},
+        "approval": {"approved": True},
+        "outcome": {
+            "row_refs": [row],
+            "evidence_refs": [
+                {
+                    "prediction_id": "prediction-1",
+                    "attempt_id": stable_attempt,
+                    "links": links,
+                }
+            ],
+            "expected_predictions": 1,
+            "observed_predictions": 1,
+            "observed_cost_usd": 0.1,
+            "eligible": True,
+            "run_status": "passed",
+        },
+    }
+
+    view = build_evaluation_view(record)
+
+    [cell] = view.cells
+    assert cell.cell_id == stable_attempt
+    assert cell.evidence_status == "reconciled"
+    weave_links = [link for link in cell.evidence_links if link["system"] == "weave"]
+    assert len(weave_links) == 5
+    assert weave_links[0]["kind"] == "evaluation_attempt"
+    assert cell.measures["skill_ids_invoked"] == "evidence-policy"
+    assert cell.measures["integration_ids_invoked"] == "wandb-mcp-0-4"
+    assert cell.measures["mcp_tool_names"] == "query_wandb_tool"
+    assert cell.measures["mcp_queried_projects"] == "wandb/source"
+    serialized = json.dumps(cell.to_dict())
+    assert "0123456789abcdef" not in serialized
 
 
 def test_evaluation_projects_one_explicit_evidence_workspace() -> None:

@@ -2639,6 +2639,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                 {
                     "event": "mcp_tool_request",
                     "layer": "proxy",
+                    "server": "wandb-mcp-0-4",
                     "tool": "query_wandb_tool",
                     "request_id": "query-1",
                     "arguments": {
@@ -2669,6 +2670,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                 {
                     "event": "mcp_tool_request",
                     "layer": "proxy",
+                    "server": "wandb-mcp-0-4",
                     "tool": "summarize_evaluation_tool",
                     "request_id": "summary-1",
                     "arguments": {
@@ -2682,6 +2684,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                 {
                     "event": "mcp_tool_response",
                     "layer": "upstream",
+                    "server": "wandb-mcp-0-4",
                     "tool": "query_wandb_tool",
                     "request_id": "query-1",
                     "latency_ms": 12,
@@ -2697,6 +2700,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                 {
                     "event": "mcp_tool_response",
                     "layer": "upstream",
+                    "server": "wandb-mcp-0-4",
                     "tool": "summarize_evaluation_tool",
                     "request_id": "summary-1",
                     "latency_ms": 8,
@@ -2717,6 +2721,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ]
     assert summary["mcp_tool_call_count"] == 2
     assert summary["mcp_tool_error_count"] == 0
+    assert summary["integration_ids_invoked"] == ["wandb-mcp-0-4"]
     assert summary["mcp_queried_projects"] == [
         "wandb/fugue-mcp-release-qualification-v1"
     ]
@@ -3126,6 +3131,23 @@ def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
     assert hidden_gold_row["retrieval_recall_at_5"] == 0.0
     assert hidden_gold_row["relevant_retrieval_opened"] is False
     assert hidden_gold_row["premature_completion"] is True
+
+    claimed_without_opening = {
+        "context_result_paths": ["src/relevant.py"],
+        "inspected_paths": [],
+        "changed_paths": [],
+        "agent_evidence_paths": ["src/relevant.py"],
+        "agent_execution_status": "started",
+        "pass": False,
+    }
+    export._apply_host_evidence_scores(
+        claimed_without_opening,
+        ("src/relevant.py",),
+        "c" * 64,
+    )
+    assert claimed_without_opening["relevant_retrieval_returned"] is True
+    assert claimed_without_opening["relevant_retrieval_opened"] is False
+    assert claimed_without_opening["relevant_retrieval_used"] is False
 
 
 def test_trial_row_separates_runtime_completion_from_task_outcome(

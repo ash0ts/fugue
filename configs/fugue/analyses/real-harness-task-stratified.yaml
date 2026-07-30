@@ -16,3 +16,32 @@ metrics:
   - cost_usd
 source: hybrid
 include_artifacts: false
+aligned_analysis:
+  schema_version: 1
+  study_intent: task-stratified-harness-behavior
+  reference_arm: claude-code
+  arms:
+    - {id: claude-code, label: Claude Code}
+    - {id: hermes, label: Hermes}
+    - {id: openclaw, label: OpenClaw}
+    - {id: codex, label: Codex}
+  contrasts:
+    - id: hermes-vs-claude-code
+      reference_arm: claude-code
+      treatment_arms: [hermes]
+      dimensions: &harness_dimensions
+        - {id: task-success, label: Harbor task success, role: outcome, critical: true}
+        - {id: runtime-completion, label: Harness runtime completion, role: infrastructure, critical: true}
+        - {id: outer-wall-timeout, label: Outer wall-time outcome, role: infrastructure, critical: true}
+        - {id: wall-time, label: Observed wall time, role: efficiency, critical: false}
+        - {id: tool-calls, label: Tool calls, role: efficiency, critical: false}
+        - {id: observed-cost, label: Observed cost, role: efficiency, critical: false}
+    - id: openclaw-vs-claude-code
+      reference_arm: claude-code
+      treatment_arms: [openclaw]
+      dimensions: *harness_dimensions
+    - id: codex-vs-claude-code
+      reference_arm: claude-code
+      treatment_arms: [codex]
+      dimensions: *harness_dimensions
+  alignment_coordinates: [task_name, trial_index]

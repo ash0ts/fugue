@@ -5,7 +5,7 @@ import json
 import math
 import random
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
@@ -13,6 +13,10 @@ from typing import Any, Literal
 
 from fugue.bench.context import RetrievalHit, RetrievalQuery
 from fugue.bench.files import atomic_write_json
+from fugue.bench.intervention_provenance import (
+    InterventionComponentLockV1,
+    intervention_component_lock_from_dict,
+)
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,7 @@ class InterventionSelectionLockV1:
     discovery_variant_ids: tuple[str, ...]
     baseline_variant_id: str
     selected_variant_id: str
+    selected_components: tuple[InterventionComponentLockV1, ...]
     rankings: tuple[dict[str, Any], ...]
     decision: Literal["recommend", "promote"]
     rationale: str
@@ -167,6 +172,9 @@ class InterventionSelectionLockV1:
         )
         value["comparison_example_ids"] = list(self.comparison_example_ids)
         value["discovery_variant_ids"] = list(self.discovery_variant_ids)
+        value["selected_components"] = [
+            item.to_dict() for item in self.selected_components
+        ]
         value["rankings"] = list(self.rankings)
         return value
 
@@ -464,6 +472,9 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
     discovery_variant_ids: Iterable[str],
     baseline_variant_id: str,
     selected_variant_id: str,
+    selected_components: Iterable[
+        InterventionComponentLockV1 | Mapping[str, Any]
+    ],
     rankings: Iterable[Mapping[str, Any]],
     decision: str,
     rationale: str,
@@ -523,6 +534,19 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
     if len(variants) < 2 or any(not value for value in variants):
         raise ValueError(
             "intervention selection requires every discovery arm identity"
+        )
+    components = tuple(
+        intervention_component_lock_from_dict(
+            value.to_dict()
+            if isinstance(value, InterventionComponentLockV1)
+            else value
+        )
+        for value in selected_components
+    )
+    component_keys = tuple((item.kind, item.component_id) for item in components)
+    if not components or len(component_keys) != len(set(component_keys)):
+        raise ValueError(
+            "intervention selection requires unique exact selected component locks"
         )
     normalized = tuple(dict(value) for value in rankings)
     ranked_ids = [str(value.get("variant_id") or "") for value in normalized]
@@ -584,6 +608,7 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
         discovery_variant_ids=variants,
         baseline_variant_id=baseline,
         selected_variant_id=selected,
+        selected_components=components,
         rankings=normalized,
         decision=decision,  # type: ignore[arg-type]
         rationale=reason,
@@ -593,9 +618,7 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
         selection_locked_at=selection_time,
     )
     digest = _digest(base.to_dict())
-    return InterventionSelectionLockV1(
-        **{**asdict(base), "lock_sha256": digest}
-    )
+    return replace(base, lock_sha256=digest)
 
 
 def write_intervention_selection_lock(
@@ -645,6 +668,11 @@ def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
         ),
         baseline_variant_id=str(payload.get("baseline_variant_id") or ""),
         selected_variant_id=str(payload.get("selected_variant_id") or ""),
+        selected_components=tuple(
+            intervention_component_lock_from_dict(value)
+            for value in payload.get("selected_components") or ()
+            if isinstance(value, Mapping)
+        ),
         rankings=tuple(dict(value) for value in payload.get("rankings") or ()),
         decision=str(payload.get("decision") or ""),
         rationale=str(payload.get("rationale") or ""),

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from fugue.bench import campaign_lifecycle, context
 from fugue.bench.ai import get_analysis
+from fugue.bench.analysis_contracts import (
+    aligned_analysis_declaration_from_dict,
+)
 from fugue.bench.campaign_lifecycle import (
     CampaignError,
     CampaignService,
@@ -21,7 +25,7 @@ from fugue.bench.context import (
     RetrievalQuery,
     get_context_system,
 )
-from fugue.bench.library import get_experiment
+from fugue.bench.library import ExecutionLimitsV1, get_experiment
 from fugue.bench.operator import ExperimentRequest, OperatorService
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +166,27 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
     assert {job.route.display_model for job in jobs} == {GLM_5_2}
     assert {job.context_system_id for job in jobs} == {"none"}
     assert {job.config["environment"]["type"] for job in jobs} == {"docker"}
+    assert experiment.execution_limits is not None
+    assert experiment.execution_limits.wall_time_sec == 900
+    limits_digest = experiment.execution_limits.limits_digest
+    assert len(limits_digest) == 64
+    assert {job.outer_wall_time_sec for job in jobs} == {900}
+    assert {job.execution_limits_digest for job in jobs} == {limits_digest}
+    assert {
+        job.resolved_candidate.execution_definition["execution_limits"][
+            "limits_digest"
+        ]
+        for job in jobs
+    } == {limits_digest}
+    assert {
+        job.config["fugue"]["execution_limits"]["limits_digest"] for job in jobs
+    } == {limits_digest}
+    assert {
+        json.loads(job.env["FUGUE_HARBOR_RESOURCES"])[
+            "execution_limits_digest"
+        ]
+        for job in jobs
+    } == {limits_digest}
     assert set(plan.qualification_requirements) == {
         "agent_identity",
         "cost_accounting",
@@ -176,6 +201,29 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
     assert campaign.allowed_analyses == ("real-harness-task-stratified",)
     assert analysis.group_by == ("harness", "task_name", "model")
     assert analysis.selection is None
+    assert analysis.aligned_analysis is not None
+    assert analysis.aligned_analysis.reference_arm == "claude-code"
+    assert {arm.id for arm in analysis.aligned_analysis.arms} == {
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex",
+    }
+    assert analysis.aligned_analysis.alignment_coordinates == (
+        "task_name",
+        "trial_index",
+    )
+    assert "harness" not in analysis.aligned_analysis.alignment_coordinates
+    assert {
+        contrast.treatment_arms[0]
+        for contrast in analysis.aligned_analysis.contrasts
+    } == {"hermes", "openclaw", "codex"}
+    assert {
+        dimension.role
+        for contrast in analysis.aligned_analysis.contrasts
+        for dimension in contrast.dimensions
+        if dimension.id == "outer-wall-timeout"
+    } == {"infrastructure"}
     assert experiment.research_view is not None
     assert experiment.research_view.pass_rule.startswith(
         "Report Harbor verifier success"
@@ -246,6 +294,23 @@ def test_memory_lane_resolves_exact_locked_sonnet_factorial(
         "model",
     )
     assert analysis.selection is None
+    assert analysis.aligned_analysis is not None
+    assert analysis.aligned_analysis.reference_arm == "baseline"
+    assert {
+        contrast.treatment_arms[0]
+        for contrast in analysis.aligned_analysis.contrasts
+    } == {"rag-dense", "policy-only", "combined"}
+    [interaction] = analysis.aligned_analysis.interactions
+    assert interaction.cell_arms == {
+        "00": "baseline",
+        "10": "rag-dense",
+        "01": "policy-only",
+        "11": "combined",
+    }
+    assert tuple(item.id for item in interaction.factors) == (
+        "retrieval",
+        "evidence-policy",
+    )
     assert experiment.research_view is not None
     assert experiment.research_view.arm_factor_levels == {
         "baseline": {"retrieval": "off", "evidence-policy": "standard"},
@@ -253,6 +318,60 @@ def test_memory_lane_resolves_exact_locked_sonnet_factorial(
         "policy-only": {"retrieval": "off", "evidence-policy": "required"},
         "combined": {"retrieval": "dense", "evidence-policy": "required"},
     }
+
+
+def test_harness_outer_wall_changes_execution_not_behavior_identity() -> None:
+    experiment = get_experiment("real-harness-study", REPO_ROOT)
+    service = OperatorService(REPO_ROOT)
+    request = ExperimentRequest(
+        experiment_id=experiment.id,
+        preset="canary",
+        harnesses=("claude-code",),
+        n_tasks=1,
+    )
+    [original] = service.rendered_jobs(
+        request,
+        run_id="preview-harness-limit-original",
+        write_configs=False,
+        experiment=experiment,
+    )
+    changed = replace(
+        experiment,
+        execution_limits=ExecutionLimitsV1(wall_time_sec=901),
+    )
+    [revised] = service.rendered_jobs(
+        request,
+        run_id="preview-harness-limit-revised",
+        write_configs=False,
+        experiment=changed,
+    )
+
+    assert original.candidate_id == revised.candidate_id
+    assert (
+        original.resolved_candidate.execution_fingerprint
+        != revised.resolved_candidate.execution_fingerprint
+    )
+
+
+def test_real_analysis_declarations_round_trip_and_reject_tampering() -> None:
+    declaration = get_analysis(
+        "real-memory-factorial", REPO_ROOT
+    ).aligned_analysis
+    assert declaration is not None
+    payload = declaration.to_dict()
+
+    assert (
+        aligned_analysis_declaration_from_dict(payload).declaration_digest
+        == declaration.declaration_digest
+    )
+    with pytest.raises(
+        ValueError, match="aligned analysis declaration digest does not match"
+    ):
+        aligned_analysis_declaration_from_dict(
+            {**payload, "declaration_digest": "0" * 64}
+        )
+    with pytest.raises(ValueError, match="unknown aligned analysis declaration"):
+        aligned_analysis_declaration_from_dict({**payload, "winner": "combined"})
 
 
 def test_rag_dense_failure_cannot_fall_back_to_bm25(

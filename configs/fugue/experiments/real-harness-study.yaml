@@ -68,6 +68,8 @@ variants:
 n_attempts: 1
 n_concurrent: 1
 n_tasks: 2
+execution_limits:
+  wall_time_sec: 900
 jobs_dir: .fugue/runtime/jobs/real-harness-study
 trace_content: full
 environment: {type: docker}

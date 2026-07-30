@@ -7,7 +7,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from fugue.bench.campaign_evidence import verified_trace_link_set
 from fugue.bench.files import atomic_write_json
+from fugue.bench.intervention_provenance import (
+    InterventionComponentLockV1,
+    is_release_tracked_mcp_repository,
+    verify_intervention_component_checkout,
+)
 from fugue.bench.loop_failure import read_comparison_failure_lock
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
 from fugue.bench.scoring import read_intervention_selection_lock
@@ -89,6 +95,54 @@ def _integration_ids(row: Mapping[str, Any]) -> set[str]:
     return {value for value in direct if value}
 
 
+def _integration_use_observed(
+    row: Mapping[str, Any],
+    integration_id: str,
+) -> bool:
+    invoked = {
+        str(value)
+        for value in row.get("integration_ids_invoked") or ()
+        if str(value)
+    }
+    calls = row.get("mcp_tool_calls")
+    if integration_id not in invoked or not isinstance(calls, list):
+        return False
+    return any(
+        isinstance(call, Mapping)
+        and str(call.get("integration_id") or "") == integration_id
+        and call.get("terminal_status") == "succeeded"
+        and call.get("successful") is True
+        and call.get("response_metadata_verified") is True
+        for call in calls
+    )
+
+
+def _component_is_bound(
+    row: Mapping[str, Any],
+    component: InterventionComponentLockV1,
+) -> bool:
+    if component.kind == "skill":
+        provenance = row.get("skill_provenance")
+        digest_field = "digest"
+    elif component.kind == "mcp":
+        provenance = row.get("integration_provenance")
+        digest_field = "lock_digest"
+    else:
+        provenance = row.get("context_component_provenance")
+        digest_field = "lock_digest"
+    if not isinstance(provenance, list):
+        return False
+    for item in provenance:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("id") or "") != component.component_id:
+            continue
+        observed = str(item.get(digest_field) or "").removeprefix("sha256:")
+        if observed == component.lock_digest:
+            return True
+    return False
+
+
 def _source_failure(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
     direct = row.get("source_failure")
     if isinstance(direct, Mapping):
@@ -153,6 +207,13 @@ def _evidence_issues(rows: Iterable[Mapping[str, Any]]) -> list[str]:
             issues.append(f"{identity}: evidence routed outside the loop project")
         if row.get("trace_link_status") != "linked":
             issues.append(f"{identity}: native Agent root is not linked")
+        link_set = verified_trace_link_set(row)
+        for failure in link_set["failures"]:
+            issues.append(f"{identity}: {failure}")
+        if len(link_set["links"]) != 5:
+            issues.append(
+                f"{identity}: five verified Weave evidence links are required"
+            )
         if row.get("evaluation_publication_mode") != "live":
             issues.append(f"{identity}: live Weave Evaluation row is missing")
         if row.get("harbor_environment") != "local_harbor_docker":
@@ -169,7 +230,7 @@ def _evidence_issues(rows: Iterable[Mapping[str, Any]]) -> list[str]:
         ):
             issues.append(f"{identity}: privacy evidence is incomplete")
         if (
-            row.get("harbor_cleanup_verified") is not True
+            row.get("sandbox_cleanup_verified") is not True
             or row.get("orphaned_sandbox") is not False
         ):
             issues.append(f"{identity}: run-scoped cleanup is incomplete")
@@ -190,12 +251,38 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     failure_lock_path: Path,
     repo_root: Path,
     env_file: Path | None = None,
+    component_worktrees: Mapping[str, Path] | None = None,
 ) -> dict[str, Any]:
     discovery = _rows(discovery_path)
     holdout = _rows(holdout_path)
     selection = read_intervention_selection_lock(selection_lock_path)
     failure = read_comparison_failure_lock(failure_lock_path)
     blockers: list[str] = []
+    worktrees = dict(component_worktrees or {})
+    component_receipts: list[dict[str, Any]] = []
+
+    if not selection.selected_components:
+        blockers.append("selection lock has no exact intervention component locks")
+    for component in selection.selected_components:
+        worktree = worktrees.get(component.component_id)
+        if worktree is None:
+            blockers.append(
+                f"{component.component_id}: qualified component worktree is missing"
+            )
+            continue
+        try:
+            receipt = verify_intervention_component_checkout(
+                component,
+                worktree,
+            )
+        except ValueError as exc:
+            blockers.append(f"{component.component_id}: {exc}")
+            continue
+        component_receipts.append(receipt)
+        blockers.extend(
+            f"{component.component_id}: {item}"
+            for item in receipt["blockers"]
+        )
 
     if len(discovery) != 8:
         blockers.append(f"discovery requires exactly 8 rows, found {len(discovery)}")
@@ -352,6 +439,15 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     selected_rows = [
         row for row in [*discovery, *holdout] if row.get("variant_id") == selected
     ]
+    for component in selection.selected_components:
+        if any(
+            not _component_is_bound(row, component)
+            for row in selected_rows
+        ):
+            blockers.append(
+                f"{component.component_id}: selected rows differ from the "
+                "qualified component lock"
+            )
     if selected in {"skill-only", "combined"} and any(
         not _skill_use_observed(row, "loop-intervention-skill")
         for row in selected_rows
@@ -359,7 +455,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         blockers.append("selected Skill intervention use is unproven")
     if selected in {"mcp-only", "combined"} and any(
         "loop-intervention-mcp" not in _integration_ids(row)
-        or not _tool_names(row)
+        or not _integration_use_observed(row, "loop-intervention-mcp")
         for row in selected_rows
     ):
         blockers.append("selected MCP intervention use is unproven")
@@ -387,6 +483,24 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     if "news" + "-research-agent" in serialized:
         blockers.append("legacy project routing appears in loop evidence")
 
+    release_tracked_mcp_components = [
+        item
+        for item in selection.selected_components
+        if item.kind == "mcp"
+        and is_release_tracked_mcp_repository(item.repository)
+    ]
+    if any(
+        not item.release_requalification_required
+        or not item.release_target
+        or not item.superseded_release_candidate_sha
+        or item.source_commit == item.superseded_release_candidate_sha
+        for item in release_tracked_mcp_components
+    ):
+        blockers.append(
+            "a release-tracked W&B MCP intervention does not invalidate the "
+            "superseded package-release candidate"
+        )
+
     return {
         "schema_version": 1,
         "kind": "claude-loop-qualification-receipt",
@@ -400,6 +514,21 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         "holdout_suite_sha256": selection.holdout_suite_sha256,
         "source_commit": selection.source_commit,
         "source_tree": selection.source_tree,
+        "selected_components": [
+            item.to_dict() for item in selection.selected_components
+        ],
+        "component_checkout_receipts": component_receipts,
+        "release_requalification_required": any(
+            item.release_requalification_required
+            for item in selection.selected_components
+        ),
+        "superseded_release_candidates": sorted(
+            {
+                item.superseded_release_candidate_sha
+                for item in selection.selected_components
+                if item.release_requalification_required
+            }
+        ),
         "discovery_candidate_improvements": selected_improvements,
         "holdout_regressions": holdout_regressions,
         "phase_execution_fingerprints": {
@@ -424,8 +553,31 @@ def main() -> int:
     parser.add_argument("--failure-lock", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument(
+        "--component-worktree",
+        action="append",
+        default=[],
+        metavar="COMPONENT_ID=PATH",
+        help=(
+            "Exact clean source worktree for each selected Skill/MCP/memory "
+            "component; repeat once per component."
+        ),
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    component_worktrees: dict[str, Path] = {}
+    for raw in args.component_worktree:
+        component_id, separator, path = str(raw).partition("=")
+        if (
+            not separator
+            or not component_id.strip()
+            or not path.strip()
+            or component_id.strip() in component_worktrees
+        ):
+            parser.error(
+                "--component-worktree must be a unique COMPONENT_ID=PATH"
+            )
+        component_worktrees[component_id.strip()] = Path(path).resolve()
     receipt = verify(
         discovery_path=args.discovery,
         holdout_path=args.holdout,
@@ -433,6 +585,7 @@ def main() -> int:
         failure_lock_path=args.failure_lock,
         repo_root=args.repo_root.resolve(),
         env_file=args.env_file,
+        component_worktrees=component_worktrees,
     )
     atomic_write_json(args.output.resolve(), receipt, mode=0o600)
     print(

@@ -203,6 +203,131 @@ def test_hosted_privacy_receipt_scans_exact_evidence_without_raw_values(
     assert "conversation-1" not in serialized
 
 
+def test_hosted_privacy_accepts_one_pretty_json_private_bundle(
+    tmp_path: Path,
+) -> None:
+    labels = tmp_path / "private-evaluation.json"
+    labels.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "criteria_sets": [
+                    {
+                        "id": "deterministic",
+                        "criteria": [{"id": "fact", "expected": "private-fact"}],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    receipt = write_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id="run-pretty-private-bundle",
+        rows=[_hosted_row()],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        evidence_project="wandb/fugue-demo",
+        private_labels_path=labels,
+        publication_payloads={"result": {"decision": "incomplete"}},
+        fetcher=lambda **_kwargs: _hosted_snapshot(
+            ("call", {"id": "evaluation-root"}),
+            ("call", {"id": "predict-and-score"}),
+            ("call", {"id": "prediction"}),
+            ("call", {"id": "agent-root"}),
+            ("agent_span", {"conversation_id": "conversation-1"}),
+            ("dataset", {"rows": [{"input": "public"}]}),
+        ),
+    )
+
+    value = read_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id="run-pretty-private-bundle",
+    )
+    assert receipt.status == "passed"
+    assert value["private_label_record_count"] == 1
+    assert "private-fact" not in receipt.path.read_text()
+
+
+@pytest.mark.parametrize("private_input", ["missing", "malformed"])
+def test_hosted_privacy_fails_closed_without_parseable_private_truth(
+    tmp_path: Path,
+    private_input: str,
+) -> None:
+    labels = tmp_path / f"{private_input}.json"
+    if private_input == "malformed":
+        labels.write_text('{"expected":\n')
+    receipt = write_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id=f"run-{private_input}-private-truth",
+        rows=[_hosted_row()],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        evidence_project="wandb/fugue-demo",
+        private_labels_path=labels,
+        publication_payloads={"result": {"decision": "blocked"}},
+        fetcher=lambda **_kwargs: _hosted_snapshot(
+            ("call", {"id": "evaluation-root"}),
+            ("call", {"id": "predict-and-score"}),
+            ("call", {"id": "prediction"}),
+            ("call", {"id": "agent-root"}),
+            ("agent_span", {"conversation_id": "conversation-1"}),
+            ("dataset", {"rows": [{"input": "public"}]}),
+        ),
+    )
+
+    value = read_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id=f"run-{private_input}-private-truth",
+    )
+    assert receipt.status == "unavailable"
+    assert value["status"] == "unavailable"
+    assert value["private_label_record_count"] == 0
+
+
+def test_hosted_privacy_allows_explicit_no_private_corpus_but_requires_fetch(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "repo_root": tmp_path,
+        "rows": [_hosted_row()],
+        "env": {"WANDB_API_KEY": "wandb-secret-value"},
+        "evidence_project": "wandb/fugue-demo",
+        "private_labels_path": None,
+        "publication_payloads": {"result": {"decision": "incomplete"}},
+        "private_corpus_applicable": False,
+        "private_corpus_source_kind": "run_evaluation_asset_lock",
+        "private_corpus_source_lock_sha256": "a" * 64,
+        "private_corpus_reason": "verified lock contains no private corpus",
+    }
+    receipt = write_hosted_evidence_privacy_receipt(
+        **common,
+        run_id="run-private-na",
+        fetcher=lambda **_kwargs: _hosted_snapshot(
+            ("call", {"id": "evaluation-root"}),
+            ("call", {"id": "predict-and-score"}),
+            ("call", {"id": "prediction"}),
+            ("call", {"id": "agent-root"}),
+            ("agent_span", {"conversation_id": "conversation-1"}),
+            ("dataset", {"rows": [{"input": "public"}]}),
+        ),
+    )
+    value = read_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id="run-private-na",
+    )
+    assert receipt.status == "passed"
+    assert value["private_corpus_applicable"] is False
+    assert value["private_corpus_comparison_status"] == "not_applicable"
+    assert value["private_corpus_match_count"] == 0
+
+    unavailable = write_hosted_evidence_privacy_receipt(
+        **common,
+        run_id="run-private-na-no-hosted-scan",
+        fetch_hosted=False,
+    )
+    assert unavailable.status == "unavailable"
+
+
 def test_hosted_privacy_receipt_fails_on_secret_or_private_structure(
     tmp_path: Path,
 ) -> None:

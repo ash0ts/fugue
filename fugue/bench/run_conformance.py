@@ -370,8 +370,12 @@ def write_hosted_evidence_privacy_receipt(
     rows: Sequence[Mapping[str, Any]],
     env: Mapping[str, str],
     evidence_project: str,
-    private_labels_path: Path,
+    private_labels_path: Path | None,
     publication_payloads: Mapping[str, Any],
+    private_corpus_applicable: bool = True,
+    private_corpus_source_kind: str = "private_labels",
+    private_corpus_source_lock_sha256: str = "",
+    private_corpus_reason: str = "",
     fetch_hosted: bool = True,
     fetcher: Callable[..., _HostedEvidenceSnapshot] | None = None,
 ) -> HostedEvidencePrivacy:
@@ -387,22 +391,38 @@ def write_hosted_evidence_privacy_receipt(
         root / ".fugue" / "runtime" / run_id / HOSTED_EVIDENCE_PRIVACY_RECEIPT
     )
     secrets = tuple(sorted(set(secrets_from_env(env)), key=len, reverse=True))
-    labels_path = private_labels_path.resolve()
-    try:
-        labels_path.relative_to(root)
-    except ValueError:
+    source_kind = str(private_corpus_source_kind or "").strip()
+    if not source_kind:
+        raise ValueError("private corpus source kind is required")
+    if (
+        private_corpus_source_lock_sha256
+        and not _HEX_SHA256.fullmatch(private_corpus_source_lock_sha256)
+    ):
+        raise ValueError("private corpus source lock must be a SHA-256 digest")
+    if not private_corpus_applicable:
         labels_bytes = b""
         label_rows: list[Any] = []
-        private_input_status: ReceiptStatus = "unavailable"
+        private_input_status: ReceiptStatus = "not_applicable"
     else:
+        labels_path = (
+            private_labels_path.resolve()
+            if private_labels_path is not None
+            else None
+        )
         try:
+            if labels_path is None:
+                raise FileNotFoundError("private corpus path is unavailable")
+            labels_path.relative_to(root)
             labels_bytes = labels_path.read_bytes()
-            label_rows = [
-                json.loads(line)
-                for line in labels_bytes.decode("utf-8").splitlines()
-                if line.strip()
-            ]
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            label_rows = _private_label_records(labels_bytes)
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ):
             labels_bytes = b""
             label_rows = []
             private_input_status = "unavailable"
@@ -470,7 +490,10 @@ def write_hosted_evidence_privacy_receipt(
             ),
         )
     )
-    inputs_available = bool(secrets) and private_input_status == "passed"
+    inputs_available = bool(secrets) and private_input_status in {
+        "passed",
+        "not_applicable",
+    }
     if scan["match_count"]:
         status: ReceiptStatus = "failed"
     elif (
@@ -522,6 +545,11 @@ def write_hosted_evidence_privacy_receipt(
         "private_label_record_count": len(label_rows),
         "private_label_corpus_sha256": hashlib.sha256(labels_bytes).hexdigest(),
         "private_label_pattern_count": len(private_patterns),
+        "private_corpus_applicable": private_corpus_applicable,
+        "private_corpus_comparison_status": private_input_status,
+        "private_corpus_source_kind": source_kind,
+        "private_corpus_source_lock_sha256": private_corpus_source_lock_sha256,
+        "private_corpus_reason": str(private_corpus_reason or "").strip(),
         "required_call_count": snapshot.required_call_count,
         "observed_required_call_count": snapshot.observed_required_call_count,
         "descendant_call_count": snapshot.descendant_call_count,
@@ -554,6 +582,27 @@ def write_hosted_evidence_privacy_receipt(
     digest = _stable_digest(unsigned)
     atomic_write_json(receipt_path, {**unsigned, "receipt_sha256": digest})
     return HostedEvidencePrivacy(path=receipt_path, sha256=digest, status=status)
+
+
+def _private_label_records(raw: bytes) -> list[dict[str, Any]]:
+    """Read one JSON object or a nonempty JSONL mapping corpus."""
+
+    text = raw.decode("utf-8")
+    if not text.strip():
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        records = [
+            json.loads(line)
+            for line in text.splitlines()
+            if line.strip()
+        ]
+    else:
+        records = [value]
+    if not records or any(not isinstance(item, Mapping) for item in records):
+        raise TypeError("private labels must contain JSON object records")
+    return [dict(item) for item in records]
 
 
 def read_hosted_evidence_privacy_receipt(

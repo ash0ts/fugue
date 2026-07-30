@@ -273,6 +273,17 @@ def build_run_snapshot(
             "comparison_example_id": cell.comparison_example_id,
             "trial_index": cell.trial_index,
             "workload_id": cell.workload_id,
+            "workload_runner": str(
+                (
+                    (
+                        jobs_by_config.get(cell.config_path.resolve().as_posix()).config
+                        if jobs_by_config.get(cell.config_path.resolve().as_posix())
+                        else {}
+                    ).get("fugue")
+                    or {}
+                ).get("runner")
+                or ""
+            ),
             "task_id": cell.task_id,
             "harness": cell.harness,
             "variant_id": cell.variant_id,

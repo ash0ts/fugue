@@ -2395,8 +2395,11 @@ def _apply_host_evidence_scores(
     row["relevant_retrieval_observed"] = bool(relevant_returned)
     row["relevant_retrieval_returned"] = bool(relevant_returned)
     row["relevant_retrieval_opened"] = bool(relevant_returned & inspected)
+    # "Used" is deliberately stricter than assignment, return, or a claim in
+    # the Agent answer. The host must observe the relevant path returned and
+    # opened, plus either a normalized citation or an actual changed path.
     row["relevant_retrieval_used"] = bool(
-        relevant_returned & (authored | changed)
+        relevant_returned & inspected & (authored | changed)
     )
     row["relevant_retrieval_changed"] = bool(relevant_returned & changed)
     row["off_target_change_only"] = bool(changed) and not bool(expected & changed)
@@ -2490,6 +2493,21 @@ def compile_export(
         env=env,
         repo_root=repo_root,
     )
+    if repo_root is not None:
+        from fugue.bench.campaign_evidence import apply_campaign_run_conformance
+
+        for run_id in sorted(
+            {
+                str(row.get("run_id") or "")
+                for row in raw
+                if row.get("record_type") == "trial" and row.get("run_id")
+            }
+        ):
+            apply_campaign_run_conformance(
+                raw,
+                repo_root=repo_root,
+                run_id=run_id,
+            )
     predictions = tuple(normalize_prediction_rows(raw))
     measurements = tuple(
         dict(row)
@@ -5473,6 +5491,17 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         gateway_event_path=meta.get("context_gateway_events_path"),
         expected_identity=meta,
     )
+    assigned_integration_ids = {
+        str(value) for value in meta.get("integration_ids") or () if str(value)
+    }
+    context_events["unexpected_integration_ids_invoked"] = sorted(
+        {
+            str(value)
+            for value in context_events.get("integration_ids_invoked") or ()
+            if str(value)
+        }
+        - assigned_integration_ids
+    )
     evidence = _evidence_summary(
         trial_dir,
         changed_paths=meta.get("changed_paths") or [],
@@ -5568,6 +5597,19 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "skill_invocation_evidence": meta.get(
             "skill_invocation_evidence",
             {"status": "unavailable"},
+        ),
+        "skill_ids_invoked": (
+            [
+                str(value)
+                for value in (
+                    meta.get("skill_invocation_evidence") or {}
+                ).get("skills_invoked", [])
+                if value
+            ]
+            if isinstance(meta.get("skill_invocation_evidence"), Mapping)
+            and (meta.get("skill_invocation_evidence") or {}).get("status")
+            == "observed"
+            else []
         ),
         "integration_ids": meta.get("integration_ids", []),
         "integration_provenance": meta.get("integration_provenance", []),
@@ -6091,6 +6133,13 @@ def _context_event_summary(
                 if str(call.get("tool") or "")
             }
         ),
+        "integration_ids_invoked": sorted(
+            {
+                str(call["integration_id"])
+                for call in successful_mcp_calls
+                if str(call.get("integration_id") or "")
+            }
+        ),
         "mcp_tool_call_count": len(successful_mcp_calls),
         "mcp_tool_error_count": (
             len(normalized_mcp_calls) - len(successful_mcp_calls)
@@ -6319,6 +6368,10 @@ def _mcp_tool_call_evidence(
         )
         evidence = {
             "tool": tool,
+            "integration_id": str(
+                event.get("integration_id") or event.get("server") or ""
+            )
+            or None,
             "request_id": str(event.get("request_id") or "") or None,
             "argument_keys": sorted(str(key) for key in arguments),
             "queried_projects": queried_projects,

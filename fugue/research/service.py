@@ -19,7 +19,6 @@ from fugue.bench.task_authoring import (
     task_suite_draft_from_dict,
     task_suite_preview_from_dict,
 )
-from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.candidate_sources import CandidateSourceRegistry
 from fugue.research.comparisons import ComparisonControlService
@@ -271,11 +270,10 @@ class ResearchService:
             estimated_calls: dict[str, int] = {}
             if draft.scoring_revision:
                 scoring_revision_from_dict(draft.scoring_revision)
+            proposal = self._proposal(draft, catalog.catalog_digest)
             if draft.task_suite_draft is not None:
                 self._validate_inline_selection(catalog, draft)
-                self.campaign.validate_proposal(
-                    self._proposal(draft, catalog.catalog_digest)
-                )
+                self.campaign.validate_proposal(proposal)
                 task_draft = task_suite_draft_from_dict(draft.task_suite_draft)
                 if task_draft.stage_id != draft.stage_id:
                     raise ResearchError(
@@ -294,7 +292,6 @@ class ResearchService:
                 )
                 estimated_cells = task_preview.task_count * coordinate_count
             else:
-                proposal = self._proposal(draft, catalog.catalog_digest)
                 plan = self.campaign.preview(proposal)
                 estimated_cells = plan.cell_count
             estimated_cost_usd = self._estimate_preview_cost(
@@ -306,10 +303,7 @@ class ResearchService:
         except CampaignError as exc:
             raise self._research_error(exc) from exc
         record_id = self._record_id(study.id, draft.proposal_id)
-        operator = getattr(self.campaign, "operator", None)
-        evidence_destination = trace_destination_identity(
-            getattr(operator, "env", {})
-        )
+        evidence_destination = self.campaign.resolved_evidence_destination(proposal)
         unsigned = ExperimentPreviewV1(
             schema_version=RESEARCH_SCHEMA_VERSION,
             study_id=study.id,
@@ -335,6 +329,7 @@ class ResearchService:
                     "evaluation",
                 ],
             },
+            evidence_destination=evidence_destination,
         )
         return sign_preview(unsigned)
 
@@ -388,6 +383,10 @@ class ResearchService:
                 "the accepted preview no longer matches campaign policy or catalog",
                 category="policy",
             )
+        self._require_preview_evidence_destination(
+            preview,
+            self._proposal(draft, catalog.catalog_digest),
+        )
         self.store.record_approval_request(
             preview,
             operation_id=f"request-{preview.preview_digest[:20]}",
@@ -570,6 +569,7 @@ class ResearchService:
                 preview.catalog_digest,
                 task_suite_digest=task_suite_digest,
             )
+        self._require_preview_evidence_destination(preview, proposal)
 
         if record.plan is None or draft.task_suite_draft is not None:
             plan = self.campaign.preview(proposal)
@@ -833,10 +833,41 @@ class ResearchService:
             n_tasks=draft.n_tasks,
             trace_content=draft.trace_content,
             task_suite_digest=task_suite_digest or draft.task_suite_digest,
+            intervention_lock_inputs=draft.intervention_lock_inputs,
+            failure_lock=draft.failure_lock,
+            intervention_component_locks=draft.intervention_component_locks,
+            selection_lock=draft.selection_lock,
             analysis_ids=draft.analysis_ids,
             parent_outcome_id=draft.parent_outcome_id,
             decision_rationale=draft.decision_rationale,
         )
+
+    def _require_preview_evidence_destination(
+        self,
+        preview: ExperimentPreviewV1,
+        proposal: Any,
+    ) -> None:
+        accepted = dict(preview.evidence_scope or {})
+        accepted_destination = dict(preview.evidence_destination or {})
+        current = self.campaign.resolved_evidence_destination(proposal)
+        if accepted_destination:
+            drifted = any(
+                accepted_destination.get(key) != value
+                for key, value in current.items()
+            )
+        else:
+            accepted.pop("evidence_types", None)
+            drifted = not accepted or any(
+                accepted.get(key) != current.get(key)
+                for key in ("entity", "project")
+            )
+        if drifted:
+            raise ResearchError(
+                "evidence_destination_drift",
+                "the resolved experiment evidence destination differs from the "
+                "accepted preview",
+                category="policy",
+            )
 
     def _save(
         self,

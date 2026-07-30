@@ -333,6 +333,35 @@ def test_cancellation_terminates_active_process_and_never_opens_queued_cell(
         os.killpg(process_group, 0)
 
 
+def test_outer_wall_timeout_is_runtime_failure_not_task_outcome(
+    tmp_path: Path,
+) -> None:
+    cell = replace(
+        _cell("run-timeout", "timed"),
+        command=(sys.executable, "-c", "import time; time.sleep(30)"),
+        execution_kind="provider_diagnostic",
+        outer_wall_time_sec=1,
+        execution_limits_digest="a" * 64,
+    )
+
+    started = time.monotonic()
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert time.monotonic() - started < 5
+    assert outcome.status == "failed"
+    assert outcome.runtime_outcome == "timed_out"
+    assert outcome.benchmark_outcome == "unscored"
+    assert outcome.reward is None
+    assert outcome.error == "outer cell wall-time limit exceeded after 1 seconds"
+    [record] = latest_cell_records(
+        tmp_path / ".fugue/runtime/run-timeout/cells.jsonl"
+    )
+    assert record["runtime_outcome"] == "timed_out"
+    assert record["benchmark_outcome"] == "unscored"
+    assert record["outer_wall_time_sec"] == 1
+    assert record["execution_limits_digest"] == "a" * 64
+
+
 def test_concurrent_run_manifest_updates_are_atomic_and_merged(tmp_path: Path) -> None:
     barrier = threading.Barrier(3)
 
