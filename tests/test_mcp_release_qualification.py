@@ -1489,6 +1489,7 @@ def test_checked_in_hosted_lock_is_exact_and_contains_no_credentials() -> None:
 def _prerequisite_v3_result(
     monkeypatch: pytest.MonkeyPatch,
     *,
+    tmp_path: Path,
     comparison_id: str,
 ) -> ComparisonResultV3:
     source_project = QUALIFICATION_SOURCE_PROJECT
@@ -1541,6 +1542,30 @@ def _prerequisite_v3_result(
             ),
         },
     }
+    lock_paths: dict[str, Path] = {}
+    for integration_id, value in integration_locks.items():
+        lock_path = tmp_path / f"{integration_id}-cohort-lock.json"
+        lock_path.write_text(
+            json.dumps(value, sort_keys=True),
+            encoding="utf-8",
+        )
+        lock_paths[integration_id] = lock_path
+    original_safe_input = comparison_module._safe_input_path
+
+    def cohort_lock_input(path: Path, repo_root: Path, label: str) -> Path:
+        for prefix in (
+            "baseline cohort integration lock ",
+            "candidate cohort integration lock ",
+        ):
+            if label.startswith(prefix):
+                return lock_paths[label.removeprefix(prefix)]
+        return original_safe_input(path, repo_root, label)
+
+    monkeypatch.setattr(
+        comparison_module,
+        "_safe_input_path",
+        cohort_lock_input,
+    )
     rows: list[dict[str, object]] = []
     for task_id in (
         "maintainer-evaluation-reconciliation",
@@ -1766,9 +1791,14 @@ def _use_prerequisite_paths(
             return attestation_path
         if label in inputs:
             return inputs[label]
-        prefix = "prerequisite MCP lock "
-        if label.startswith(prefix):
-            return lock_paths[label.removeprefix(prefix)]
+        for prefix in (
+            "prerequisite MCP lock ",
+            "MCP release candidate lock ",
+            "baseline cohort integration lock ",
+            "candidate cohort integration lock ",
+        ):
+            if label.startswith(prefix):
+                return lock_paths[label.removeprefix(prefix)]
         return original(path, repo_root, label)
 
     monkeypatch.setattr(comparison_module, "_safe_input_path", selected)
@@ -1961,6 +1991,7 @@ def test_authorize_followup_promotes_exact_canary_for_confirmation_readiness(
 ) -> None:
     result = _prerequisite_v3_result(
         monkeypatch,
+        tmp_path=tmp_path,
         comparison_id="mcp-main-vs-0-4-natural-maintainer-canary-v3",
     )
     source_result = tmp_path / "source-result.json"
@@ -2040,6 +2071,7 @@ def test_natural_maintainer_confirmation_rejects_nonmatching_v3_result(
 ) -> None:
     result = _prerequisite_v3_result(
         monkeypatch,
+        tmp_path=tmp_path,
         comparison_id="different-natural-maintainer-canary-v3",
     )
     result_path = tmp_path / "result.json"
@@ -2075,6 +2107,7 @@ def test_natural_maintainer_confirmation_rejects_nonmatching_attestation(
 ) -> None:
     result = _prerequisite_v3_result(
         monkeypatch,
+        tmp_path=tmp_path,
         comparison_id="mcp-main-vs-0-4-natural-maintainer-canary-v3",
     )
     result_path = tmp_path / "result.json"
@@ -2133,6 +2166,7 @@ def test_natural_maintainer_confirmation_rejects_common_runtime_lineage_drift(
 ) -> None:
     result = _prerequisite_v3_result(
         monkeypatch,
+        tmp_path=tmp_path,
         comparison_id="mcp-main-vs-0-4-natural-maintainer-canary-v3",
     )
     result_path = tmp_path / "result.json"
@@ -2174,6 +2208,7 @@ def test_natural_maintainer_confirmation_binds_exact_canary_task_content(
 ) -> None:
     result = _prerequisite_v3_result(
         monkeypatch,
+        tmp_path=tmp_path,
         comparison_id="mcp-main-vs-0-4-natural-maintainer-canary-v3",
     )
     result_path = tmp_path / "result.json"
