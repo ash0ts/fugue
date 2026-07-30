@@ -116,7 +116,7 @@ def test_research_log_contract_is_strict_and_content_addressed() -> None:
         research_log_event_from_dict({**event.to_dict(), "message": "changed"})
     with pytest.raises(ValueError, match="size limit"):
         research_log_event_from_dict(
-            {**raw, "summary": {"too_large": "x" * 70_000}},
+            {**raw, "summary": {"too_large": "x" * 140_000}},
             require_digest=False,
         )
     with pytest.raises(ValueError, match="private field"):

@@ -948,6 +948,27 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             "release.factual_correctness": "outcome",
             "release.locked_project_scope": "safety_gate",
         }
+        row["comparison_judge_scores"] = {
+            "maintainer-actionability.maintenance_actionability": (
+                0.8 if variant == "candidate" else 0.6
+            )
+        }
+        row["comparison_judges"] = {
+            "maintainer-actionability": {
+                "qualification": {
+                    "judge_id": "maintainer-actionability",
+                    "profile": "wandb/zai-org/GLM-5.2",
+                    "contract_digest": "7" * 64,
+                    "dimensions": ["maintenance_actionability"],
+                    "calibration": {
+                        "status": "pending_human_review",
+                        "report_sha256": "8" * 64,
+                        "cases_digest": "9" * 64,
+                        "passed": False,
+                    },
+                }
+            }
+        }
         row["source_pre_run_drift"] = drift
         row["source_post_run_drift"] = drift
         row["prediction_id"] = f"{variant}-prediction-row"
@@ -1925,6 +1946,20 @@ def test_answer_excerpt_requires_privacy_evidence_and_redacts_json_secrets(
 
     row["hosted_evidence_privacy_scan_status"] = "unavailable"
     assert _sanitized_answer_excerpt(row) is None
+
+
+def test_answer_excerpt_respects_serialized_utf8_byte_limit() -> None:
+    row = _decision_row(variant="candidate")
+    row["agent_response"] = "é" * 1_000
+
+    excerpt = _sanitized_answer_excerpt(row)
+
+    assert excerpt is not None
+    assert len(excerpt.encode()) == 1_000
+
+    row["agent_response"] = ("a" * 999) + " " + "remainder"
+    excerpt = _sanitized_answer_excerpt(row)
+    assert excerpt == "a" * 999
 
 
 def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
