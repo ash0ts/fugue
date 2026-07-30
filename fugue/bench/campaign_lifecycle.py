@@ -3437,6 +3437,7 @@ def _safe_experiment_record(
                 "n_attempts": item.n_attempts,
                 "n_concurrent": item.n_concurrent,
                 "selection_lock_required": item.selection_lock_required,
+                "selection_lock_kind": item.selection_lock_kind,
             }
             for item in experiment.presets
         ],
