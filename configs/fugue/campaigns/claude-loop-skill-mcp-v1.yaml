@@ -1,0 +1,59 @@
+schema_version: 1
+id: claude-loop-skill-mcp-v1
+revision: v1
+title: Claude Code Skill and MCP improvement loop
+objective: Reproduce a reviewed real failure, select one independently locked Skill or MCP intervention on discovery tasks, and confirm only the frozen winner on private holdouts.
+allowed:
+  experiments: [claude-loop-skill-mcp]
+  models: [anthropic/claude-sonnet-5]
+  harnesses: [claude-code]
+  workloads: [discovery, holdout]
+  variants: [production, skill-only, mcp-only, combined]
+  context_systems: [none]
+  analyses: [claude-loop-discovery-selection]
+  trace_content: [full]
+stages:
+  - id: discovery
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+  - id: holdout
+    predecessors: [discovery]
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: true
+limits:
+  total_cost_usd: 20
+  initial_cell_reserve_usd: 1.25
+  safety_margin: 1
+  max_cells_per_proposal: 8
+  max_total_cells: 16
+  max_attempts_per_cell: 1
+  max_concurrent: 1
+  max_active_runs: 1
+task_authoring:
+  enabled_stages: [discovery, holdout]
+  allowed_partitions: [discovery, holdout]
+  allowed_environment_profiles: [artifact-python-v1, typed-service-python-v1]
+  allowed_resource_profiles: [campaign-contract-v1]
+  allowed_interactor_profiles: []
+  allowed_judge_profiles: []
+  allowed_scorer_runtimes: [python312-sandbox-v1]
+  allowed_prompt_parts: [text, file, artifact, resource]
+  adaptive_discovery: true
+  limits:
+    max_tasks: 6
+    max_scenarios: 6
+    max_prompt_bytes: 65536
+    max_authored_asset_bytes: 8388608
+    max_user_turns: 1
+    max_agent_turns: 1
+    max_interactor_calls: 0
+    max_judge_calls: 0
+    scorer_timeout_sec: 60
+    scorer_memory_mb: 512
+    scorer_cpus: 1
+    scorer_output_bytes: 32768
+evidence_scope: traces
+require_clean_source: true

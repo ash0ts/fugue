@@ -267,6 +267,11 @@ design_controlled_experiment
 interpret_experiment
 advance_research_cycle
 
+# Public loop-preparation API used by operator scripts outside the package tree.
+build_comparison_failure_lock
+write_comparison_failure_lock
+read_comparison_failure_lock
+
 # Protocol, stdlib server, FastAPI state, and Textual callback/member access.
 _.input_messages
 _.output_messages

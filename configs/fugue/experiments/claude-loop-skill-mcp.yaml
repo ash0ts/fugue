@@ -1,0 +1,82 @@
+id: claude-loop-skill-mcp
+title: Claude Code Skill and W&B MCP improvement loop
+description: Compare operator-reviewed and locked Skill and MCP interventions on a real repeated MCP canary failure, then confirm only the frozen winner.
+model: anthropic/claude-sonnet-5
+run_name: claude-loop-skill-mcp
+source_evidence_project: wandb/fugue-mcp-release-source-v1
+source_evidence_destination:
+  entity: wandb
+  project: fugue-mcp-release-source-v1
+  api_base_url: https://api.wandb.ai
+  trace_base_url: https://trace.wandb.ai
+  app_base_url: https://wandb.ai
+evidence_project: wandb/fugue-claude-loop-engineering-v1
+evidence_destination:
+  entity: wandb
+  project: fugue-claude-loop-engineering-v1
+  api_base_url: https://api.wandb.ai
+  trace_base_url: https://trace.wandb.ai
+  app_base_url: https://wandb.ai
+default_preset: discovery
+tags: [agent-eval, loop-engineering, claude-loop-engineering-v1]
+harnesses: [claude-code]
+workloads:
+  - id: discovery
+    runner: harbor
+    manifest: .fugue/loop-engineering/tasksets/discovery.yaml
+    required_capabilities: [bind]
+    systems: [none]
+    variants: [production, skill-only, mcp-only, combined]
+  - id: holdout
+    runner: harbor
+    manifest: .fugue/loop-engineering/tasksets/holdout.yaml
+    required_capabilities: [bind]
+    systems: [none]
+    variants: [production, skill-only, mcp-only, combined]
+presets:
+  discovery:
+    workloads: [discovery]
+    systems: [none]
+    harnesses: [claude-code]
+    environment: {type: docker}
+    n_attempts: 1
+    n_tasks: 2
+    n_concurrent: 1
+    scheduling_seed: claude-loop-discovery-v1
+  holdout:
+    workloads: [holdout]
+    systems: [none]
+    harnesses: [claude-code]
+    environment: {type: docker}
+    n_attempts: 1
+    n_tasks: 4
+    n_concurrent: 1
+    scheduling_seed: claude-loop-holdout-v1
+    selection_lock_required: true
+    selection_lock_kind: intervention
+variants:
+  - id: production
+    label: Locked production Skill and MCP
+    skills: [loop-production-skill]
+    integrations: [loop-production-mcp]
+    context: {system_id: none, delivery: portable}
+  - id: skill-only
+    label: Locked proposed Skill and production MCP
+    skills: [loop-intervention-skill]
+    integrations: [loop-production-mcp]
+    context: {system_id: none, delivery: portable}
+  - id: mcp-only
+    label: Production Skill and locked proposed MCP
+    skills: [loop-production-skill]
+    integrations: [loop-intervention-mcp]
+    context: {system_id: none, delivery: portable}
+  - id: combined
+    label: Locked proposed Skill and MCP
+    skills: [loop-intervention-skill]
+    integrations: [loop-intervention-mcp]
+    context: {system_id: none, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+jobs_dir: .fugue/runtime/jobs/claude-loop-skill-mcp
+trace_content: full
+environment: {type: docker}

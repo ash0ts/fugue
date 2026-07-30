@@ -1,0 +1,55 @@
+id: real-memory-study
+title: Real repository-memory intervention canary
+description: Compare no intervention, locked rag-dense retrieval, an inspect-and-verify policy, and their combination on two real maintenance tasks with Claude Code and Anthropic Sonnet 5 held fixed.
+model: anthropic/claude-sonnet-5
+run_name: real-memory-study
+evidence_project: wandb/fugue-memory-experiments-v1
+evidence_destination:
+  entity: wandb
+  project: fugue-memory-experiments-v1
+  api_base_url: https://api.wandb.ai
+  trace_base_url: https://trace.wandb.ai
+  app_base_url: https://wandb.ai
+default_preset: canary
+tags: [agent-eval, repository-memory, retrieval-to-action, real-study-lane-v1]
+harnesses: [claude-code]
+workloads:
+  - id: canary
+    runner: harbor
+    manifest: datasets/real-study-lanes/memory-canary-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, rag-dense]
+    variants: [baseline, rag-dense, policy-only, combined]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  canary:
+    workloads: [canary]
+    systems: [none, rag-dense]
+    harnesses: [claude-code]
+    environment: {type: docker}
+    n_attempts: 1
+    n_tasks: 2
+    n_concurrent: 1
+    scheduling_seed: real-memory-canary-v1
+variants:
+  - id: baseline
+    label: Standard instructions without repository retrieval
+    context: {system_id: none, delivery: portable}
+  - id: rag-dense
+    label: Locked dense repository retrieval
+    context: {system_id: rag-dense, delivery: portable}
+  - id: policy-only
+    label: Inspect-and-verify policy without retrieval
+    prompt_id: repository-evidence-gate
+    context: {system_id: none, delivery: portable}
+  - id: combined
+    label: Locked dense retrieval plus inspect-and-verify policy
+    prompt_id: repository-evidence-gate
+    context: {system_id: rag-dense, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 2
+jobs_dir: .fugue/runtime/jobs/real-memory-study
+trace_content: full
+environment: {type: docker}
