@@ -219,6 +219,62 @@ def _parser() -> FugueArgumentParser:
     )
     wandb_doctor_parser.set_defaults(handler=_wandb_sandbox)
 
+    provider = subparsers.add_parser(
+        "provider",
+        help="Validate and lock a language-neutral evaluation provider",
+    )
+    provider_actions = provider.add_subparsers(
+        dest="provider_action", metavar="ACTION", required=True
+    )
+    provider_validate = provider_actions.add_parser(
+        "validate", help="Validate a provider descriptor without writing state"
+    )
+    provider_validate.add_argument("--command", required=True)
+    provider_validate.add_argument("--timeout", type=float, default=30.0)
+    provider_validate.set_defaults(handler=_component_provider)
+    provider_lock = provider_actions.add_parser(
+        "lock", help="Lock a provider command, descriptor, source, and executable"
+    )
+    provider_lock.add_argument("--command", required=True)
+    provider_lock.add_argument("--output", type=Path, required=True)
+    provider_lock.add_argument("--timeout", type=float, default=30.0)
+    provider_lock.set_defaults(handler=_component_provider)
+    provider_schema = provider_actions.add_parser(
+        "schema", help="Write strict Provider Contract V1 JSON Schemas"
+    )
+    provider_schema.add_argument(
+        "--destination", type=Path, default=Path("schemas/fugue/providers")
+    )
+    provider_schema.set_defaults(handler=_component_provider)
+    provider_scaffold = provider_actions.add_parser(
+        "scaffold", help="Create a dependency-free Evaluation Provider V1 scaffold"
+    )
+    provider_scaffold.add_argument("destination", type=Path)
+    provider_scaffold.add_argument("--provider-id", required=True)
+    provider_scaffold.add_argument("--force", action="store_true")
+    provider_scaffold.set_defaults(handler=_component_provider)
+    provider_conformance_parser = provider_actions.add_parser(
+        "conformance",
+        help="Validate provider artifacts and lifecycle without running an experiment",
+    )
+    provider_conformance_parser.add_argument("--provider", type=Path, required=True)
+    provider_conformance_parser.add_argument("--candidate", required=True)
+    provider_conformance_parser.add_argument("--suite", required=True)
+    provider_conformance_parser.add_argument(
+        "--task",
+        action="append",
+        dest="tasks",
+        help="Inspect only this exact provider task id; repeat to select multiple tasks.",
+    )
+    provider_conformance_parser.add_argument(
+        "--exercise-run-cell",
+        action="store_true",
+        help="Exercise credential-free run-cell protocol operations locally",
+    )
+    provider_conformance_parser.add_argument("--output", type=Path)
+    provider_conformance_parser.add_argument("--timeout", type=float, default=120.0)
+    provider_conformance_parser.set_defaults(handler=_component_provider)
+
     taskset = subparsers.add_parser(
         "taskset", help="Build or import simple Agent evaluation tasksets"
     )
@@ -1463,6 +1519,53 @@ def _component_taskset(args: argparse.Namespace) -> int:
             repo_root=root,
             env=load_env(args.env_file),
         ).to_dict()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _component_provider(args: argparse.Namespace) -> int:
+    from fugue.bench.providers import (
+        lock_provider,
+        provider_conformance,
+        scaffold_provider,
+        validate_provider,
+        write_provider_schemas,
+    )
+
+    if args.provider_action == "validate":
+        payload: Any = validate_provider(args.command, timeout_sec=args.timeout)
+    elif args.provider_action == "lock":
+        payload = lock_provider(
+            args.command,
+            output=args.output,
+            timeout_sec=args.timeout,
+        ).to_dict()
+    elif args.provider_action == "conformance":
+        payload = provider_conformance(
+            provider_lock=args.provider,
+            candidate_ref=args.candidate,
+            suite_ref=args.suite,
+            exercise_run_cell=args.exercise_run_cell,
+            timeout_sec=args.timeout,
+            task_ids=args.tasks,
+        )
+        if args.output is not None:
+            from fugue.bench.files import atomic_write_json
+
+            atomic_write_json(args.output.resolve(), payload, mode=0o600)
+    elif args.provider_action == "scaffold":
+        provider_path, readme_path = scaffold_provider(
+            args.destination,
+            provider_id=args.provider_id,
+            force=args.force,
+        )
+        payload = {
+            "provider": provider_path.as_posix(),
+            "readme": readme_path.as_posix(),
+        }
+    else:
+        paths = write_provider_schemas(args.destination)
+        payload = {"schemas": [path.as_posix() for path in paths]}
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

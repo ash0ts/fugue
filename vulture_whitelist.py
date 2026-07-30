@@ -109,6 +109,27 @@ elapsed_seconds
 last_event_at
 recommended_check_seconds
 next_check_at
+# Provider V1 fields are serialized into locked JSON artifacts.
+display_name
+provider_version
+agent_config
+behavior_assets
+task_types
+input_types
+evaluator_types
+lifecycle_types
+stopping_policy
+lifecycle
+integration_config
+implementation
+evaluator_config
+frozen_references
+materialized_resources
+lifecycle_outputs
+runtime_artifacts
+cleanup_obligations
+credential_profile_names
+runtime_lock_digest
 
 # Import-string registries and provider/materializer plugins.
 EmptyContextProvider

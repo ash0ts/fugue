@@ -1,0 +1,221 @@
+{
+  "$id": "https://fugue.local/schemas/provider/candidate-bundle-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_code": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "source": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "digest",
+              "source",
+              "metadata"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "digest",
+        "files"
+      ],
+      "type": "object"
+    },
+    "agent_config": {
+      "type": "object"
+    },
+    "behavior_assets": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "kind": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "digest",
+          "source",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "bundle_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "candidate_ref": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "display_name": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "mcp_servers": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "digest",
+          "source",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "model_route": {
+      "type": "object"
+    },
+    "portability": {
+      "enum": [
+        "blocked",
+        "portable",
+        "provider_bound"
+      ]
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "required_credentials": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "skills": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "digest",
+          "source",
+          "metadata"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "candidate_ref",
+    "display_name",
+    "agent_config",
+    "model_route",
+    "behavior_assets",
+    "skills",
+    "mcp_servers",
+    "agent_code",
+    "required_credentials",
+    "portability",
+    "blockers",
+    "bundle_digest"
+  ],
+  "title": "candidate-bundle",
+  "type": "object"
+}

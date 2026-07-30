@@ -1,0 +1,484 @@
+{
+  "$id": "https://fugue.local/schemas/provider/suite-bundle-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempts": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "bundle_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "evaluators": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "config": {
+            "type": "object"
+          },
+          "evidence": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "implementation": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "runtime": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "digest": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "id": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "metadata": {
+                        "type": "object"
+                      },
+                      "source": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "digest",
+                      "source",
+                      "metadata"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "digest",
+              "runtime"
+            ],
+            "type": "object"
+          },
+          "must_pass": {
+            "type": "boolean"
+          },
+          "portability": {
+            "enum": [
+              "blocked",
+              "portable",
+              "provider_bound"
+            ]
+          },
+          "threshold": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "type": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "weight": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "implementation",
+          "config",
+          "evidence",
+          "weight",
+          "threshold",
+          "must_pass",
+          "portability",
+          "blockers"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "objective": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "scenarios": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "must_pass": {
+            "type": "boolean"
+          },
+          "parent_path": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "tasks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "must_pass": {
+                  "type": "boolean"
+                },
+                "task_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "weight": {
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                }
+              },
+              "required": [
+                "task_id",
+                "weight",
+                "must_pass"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "weight": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "parent_path",
+          "weight",
+          "must_pass",
+          "tasks"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "suite_ref": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "tasks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "credential_names": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "evaluator_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "input": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "payload": {
+                  "type": "object"
+                },
+                "type": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "payload"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "integration_config": {
+            "type": "object"
+          },
+          "interaction": {
+            "additionalProperties": false,
+            "properties": {
+              "config": {
+                "type": "object"
+              },
+              "directions": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "profile": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "turns": {
+                "items": {
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "type": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "profile",
+              "turns",
+              "directions",
+              "config"
+            ],
+            "type": "object"
+          },
+          "lifecycle": {
+            "additionalProperties": false,
+            "properties": {
+              "bootstrap": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "digest": {
+                        "pattern": "^[0-9a-f]{64}$",
+                        "type": "string"
+                      },
+                      "id": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "kind": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "metadata": {
+                        "type": "object"
+                      },
+                      "source": {
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "id",
+                      "digest",
+                      "source",
+                      "metadata"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "setup": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "args": {
+                      "type": "object"
+                    },
+                    "profile": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "profile",
+                    "args"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "teardown": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "args": {
+                      "type": "object"
+                    },
+                    "profile": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "profile",
+                    "args"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "bootstrap",
+              "setup",
+              "teardown"
+            ],
+            "type": "object"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "portability": {
+            "enum": [
+              "blocked",
+              "portable",
+              "provider_bound"
+            ]
+          },
+          "stopping_policy": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "limit": {
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                "type": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "limit"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "title": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "input",
+          "interaction",
+          "stopping_policy",
+          "lifecycle",
+          "credential_names",
+          "integration_config",
+          "evaluator_ids",
+          "metadata",
+          "portability",
+          "blockers"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "title": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "suite_ref",
+    "title",
+    "objective",
+    "attempts",
+    "tasks",
+    "scenarios",
+    "evaluators",
+    "metadata",
+    "bundle_digest"
+  ],
+  "title": "suite-bundle",
+  "type": "object"
+}

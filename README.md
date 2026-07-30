@@ -341,12 +341,14 @@ generic, public-safe research-record projection rather than copied trace bodies
 or private evaluation data.
 
 Fugue 0.1.2 supports Hermes, OpenClaw, Claude Code, and Codex as stable harness
-identities. Direct provider diagnostics remain separate from Agent cells and do
-not synthesize conversations or Agent roots.
+identities. Experimental evaluation-provider conformance is offline and is not
+an Agent cell, task outcome, or Fugue experiment.
 
 Start with:
 
 - [`docs/research.md`](docs/research.md) for the Python, REST, and MCP model;
+- [`docs/integrations/evaluation-providers.md`](docs/integrations/evaluation-providers.md)
+  for the versioned, language-neutral offline provider contract;
 - [`docs/research-container.md`](docs/research-container.md) for the isolated
   control/worker deployment;
 - [`docs/campaigns.md`](docs/campaigns.md) for the governed execution boundary;
@@ -511,8 +513,8 @@ flowchart LR
     AGENT --> LINK["Verified genai_span_ref"]
     LINK --> SCORES["Outcome, latency, usage, and errors"]
     SCORES --> SUMMARY["Evaluation summary and stable URL"]
-    PLAN --> DIRECT["Direct provider diagnostics"]
-    DIRECT --> POSTHOC["Post-hoc scored rows; Agent link N/A"]
+    PLAN --> OFFLINE["Offline provider protocol conformance"]
+    OFFLINE --> NOCELL["No prediction, score, or Agent-link claim"]
 ```
 
 ```mermaid
@@ -915,8 +917,7 @@ flowchart TD
     CHAT --> TOOL["Nested execute_tool spans"]
     TURN --> ATTR["run, candidate, example, trial, evaluation call"]
     ATTR --> LINK["Verified evaluation genai_span_ref"]
-    DIRECT["Provider diagnostic"] --> OPS["Ordinary Weave operation calls"]
-    OPS --> NOLINK["Agent linking not_applicable"]
+    OFFLINE["Provider protocol conformance"] --> NOCELL["No Agent cell or link"]
 ```
 
 ## Advanced: generated evaluations
@@ -1025,7 +1026,9 @@ compatibility run on Python 3.13. See `docs/campaigns.md` for the governed
 campaign contract, `docs/task-authoring.md` for flexible tasks, scenarios,
 judges, and meta-analysis, `docs/research.md` for the packaged outer-loop SDK,
 and `docs/extension-guide.md` for context and
-integration definitions, `docs/releases/0.1.md` for the base release, and
+integration definitions,
+`docs/integrations/evaluation-providers.md` for the external evaluation-provider
+boundary, `docs/releases/0.1.md` for the base release, and
 `docs/releases/0.1.1.md` for the original evidence hardening, and
 `docs/releases/0.1.2.md` for governed Studies, trace-grounded task authoring,
 external-Agent packaging, and research-record projection.
