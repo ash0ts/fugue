@@ -42,8 +42,11 @@ Install the trusted preparation environment:
 uv sync --python 3.13 --frozen --extra dev --extra research-worker
 ```
 
-Seed or validate the dedicated source project idempotently. The output path is
-operator-local and must not be committed:
+Seed or validate the dedicated source project idempotently. V3 preparation has
+no single-project writer: source and result must remain the exact distinct
+projects below. The output path and its adjacent
+`evidence.lock.json.progress.json` recovery receipt are operator-local and must
+not be committed:
 
 ```bash
 uv run python \
@@ -54,9 +57,28 @@ uv run python \
   --output .fugue/qualification/mcp-release-source-v1/evidence.lock.json
 ```
 
-The command never serializes credentials. Existing objects must match the
-locked identities, versions, counts, and digests exactly; it does not rewrite
-private labels to accommodate drift.
+The command never serializes credentials or invokes a model provider. Before
+any hosted write it takes two read-only inventories and rejects a changing
+snapshot, extra seeded Runs or Calls, duplicates, or content drift. It verifies
+the six Runs using exhaustive history, summary, and the downloaded exact
+artifact payload; it verifies the Dataset rows, 24 conversation roots and 48
+tool children, two immutable Evaluation objects, and each Evaluation's eight
+prediction children plus one summary child.
+
+The local progress receipt is written before each hosted mutation. On retry,
+Fugue first inventories the remote source. A visible in-flight object is
+reconciled and reused; an unresolved write outcome stops preparation instead
+of retrying and risking duplicate evidence. Deleting only the final evidence
+lock therefore reconstructs it without creating hosted objects. Deleting or
+editing both recovery artifacts is not a supported recovery procedure.
+
+W&B Runs and Weave Calls are mutable remote records rather than immutable
+object versions, so every lock reuse re-reads and hashes their selected
+terminal content. Dataset and Evaluation refs are exact content-addressed
+versions. The pinned Weave SDK does not expose a reliable public API for
+enumerating every historical object version; preparation validates the exact
+`qualification-v1` object versions plus all relevant Calls and fails on any
+ambiguity. It does not rewrite private labels to accommodate drift.
 
 The checked-in `evidence.lock.json` belongs to the earlier single-project
 study. It is retained only as historical audit input and is not the current

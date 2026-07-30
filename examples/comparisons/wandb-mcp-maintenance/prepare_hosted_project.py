@@ -21,13 +21,6 @@ def main() -> int:
         )
     )
     parser.add_argument(
-        "--project",
-        help=(
-            "Legacy single-project route. When supplied without the split "
-            "flags, source and result both use this project."
-        ),
-    )
-    parser.add_argument(
         "--source-project",
         help=(
             "Immutable hosted evidence project (default: "
@@ -45,7 +38,6 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     lock = prepare_hosted_project(
-        project=args.project,
         source_project=args.source_project,
         result_project=args.result_project,
         output=args.output,
