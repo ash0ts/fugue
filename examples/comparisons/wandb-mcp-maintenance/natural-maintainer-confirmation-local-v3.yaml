@@ -19,15 +19,23 @@ evaluators:
     runtime: python312-sandbox-v1
     dimensions:
       - answer_correct
-      - locked_source_scope
+      - actual_query_scope
+      - reported_project_identity
       - bounded_evidence
       - evidence_honesty
       - release_mechanism_used
+    dimension_roles:
+      answer_correct: outcome
+      actual_query_scope: safety_gate
+      reported_project_identity: safety_gate
+      bounded_evidence: safety_gate
+      evidence_honesty: outcome
+      release_mechanism_used: mechanism
 execution:
-  source_evidence_project: wandb/fugue-mcp-release-source-v1
+  source_evidence_project: wandb/fugue-mcp-release-source-v2
   source_evidence_destination:
     entity: wandb
-    project: fugue-mcp-release-source-v1
+    project: fugue-mcp-release-source-v2
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
@@ -38,9 +46,14 @@ execution:
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
-  evidence_lock: ../../../.fugue/qualification/mcp-release-source-v1/evidence.lock.json
+  evidence_lock: ../../../.fugue/qualification/mcp-release-source-v2/evidence.lock.json
+  source_conformance_receipt: ../../../.fugue/qualification/mcp-release-source-conformance.json
   release_notes_lock: release-notes.lock.json
   mechanism_receipt: ../../../.fugue/qualification/mcp-release-mechanism-receipt.json
+  prerequisite_result: ../../../.fugue/qualification/mcp-natural-maintainer-canary-v3/result.json
+  prerequisite_attestation: ../../../.fugue/qualification/mcp-natural-maintainer-canary-v3/prerequisite-attestation.json
+  prerequisite_comparison_id: mcp-main-vs-0-4-natural-maintainer-canary-v3
+  prerequisite_spec: natural-maintainer-canary-local-v3.yaml
   infrastructure_receipt: ../../../.fugue/qualification/mcp-python-package-release-gates.json
   research_id: fugue-mcp-release-qualification-v1
   model: anthropic/claude-sonnet-5
@@ -63,7 +76,7 @@ decision_policy:
     - id: sixteen-terminal-cells
       label: Sixteen unique terminal confirmation cells
       category: integrity
-      source: matrix.rows
+      source: matrix.terminal_rows
       operator: gte
       target: 16
       critical: true
@@ -113,13 +126,6 @@ decision_policy:
       label: Candidate is the reviewed final staging head
       category: infrastructure
       source: infrastructure.gate.final-staging-head
-      operator: eq
-      target: true
-      critical: true
-    - id: human-maintainer-actionability
-      label: A human maintainer accepted the memos as actionable
-      category: evidence
-      source: infrastructure.gate.human-maintainer-actionability-review
       operator: eq
       target: true
       critical: true

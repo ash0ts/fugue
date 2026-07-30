@@ -920,7 +920,13 @@ def _agent_config(
         ],
         "kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
         "env": agent_env,
-        "mcp_servers": _instrument_mcp_servers(selected_mcp_servers),
+        "mcp_servers": _instrument_mcp_servers(
+            selected_mcp_servers,
+            source_project=str(
+                agent_env.get("FUGUE_SOURCE_EVIDENCE_PROJECT") or ""
+            )
+            or None,
+        ),
         "extra_allowed_hosts": _agent_allowed_hosts(
             route,
             harness.name,
@@ -1735,7 +1741,11 @@ def _comparison_example_id(*, dataset_id: str, workload_id: str, task_id: str) -
     )
 
 
-def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _instrument_mcp_servers(
+    values: list[dict[str, Any]],
+    *,
+    source_project: str | None = None,
+) -> list[dict[str, Any]]:
     servers: list[dict[str, Any]] = []
     names: set[str] = set()
     for value in values:
@@ -1756,6 +1766,8 @@ def _instrument_mcp_servers(values: list[dict[str, Any]]) -> list[dict[str, Any]
         proxy_args = ["--name", str(server.get("name") or command)]
         for tool_name in allowed_tools:
             proxy_args.extend(["--allow-tool", tool_name])
+        if source_project:
+            proxy_args.extend(["--source-project", source_project])
         cwd = server.pop("cwd", None)
         if cwd:
             proxy_args.extend(["--cwd", str(cwd)])

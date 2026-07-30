@@ -15,14 +15,16 @@ import httpx
 import weave
 from filelock import FileLock
 
+from fugue.bench.analysis_contracts import EvidenceDriftCheckV1
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.operator import load_env
 from fugue.model_plane import trace_api_key
-from fugue.weave_support import WEAVE_AGENTS_BASE_URL
 
 QUALIFICATION_RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
-QUALIFICATION_SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v1"
+QUALIFICATION_SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
+QUALIFICATION_API_BASE_URL = "https://api.wandb.ai"
+QUALIFICATION_TRACE_BASE_URL = "https://trace.wandb.ai"
 # Backward-compatible name for the original single-project contract.
 QUALIFICATION_PROJECT = QUALIFICATION_RESULT_PROJECT
 MCP_RELEASE_NOTES_LOCK = Path(
@@ -42,7 +44,7 @@ _REQUIRED_COUNTS = {
     "aligned_evaluation_pairs": 8,
     "evaluation_prediction_rows": 16,
 }
-SOURCE_CONFORMANCE_SCHEMA_VERSION = 1
+SOURCE_CONFORMANCE_SCHEMA_VERSION = 2
 SOURCE_PREPARATION_PROGRESS_SCHEMA_VERSION = 1
 _SOURCE_CONFORMANCE_EXPECTATIONS = {
     "evaluation_roots": 2,
@@ -61,6 +63,40 @@ _MCP_RELEASE_CANDIDATES = (
         "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
     ),
 )
+
+
+def _qualification_endpoint_binding(
+    env: Mapping[str, str],
+) -> dict[str, str]:
+    api_override = str(env.get("WANDB_BASE_URL") or "").rstrip("/")
+    trace_overrides = {
+        str(env.get(name) or "").rstrip("/")
+        for name in (
+            "FUGUE_WEAVE_TRACE_SERVER_URL",
+            "WF_TRACE_SERVER_URL",
+        )
+        if str(env.get(name) or "").strip()
+    }
+    if api_override and api_override != QUALIFICATION_API_BASE_URL:
+        raise RuntimeError(
+            "MCP qualification WANDB_BASE_URL disagrees with the locked "
+            "public-cloud destination"
+        )
+    if trace_overrides and trace_overrides != {
+        QUALIFICATION_TRACE_BASE_URL
+    }:
+        raise RuntimeError(
+            "MCP qualification trace endpoint disagrees with the locked "
+            "public-cloud destination"
+        )
+    unsigned = {
+        "api_base_url": QUALIFICATION_API_BASE_URL,
+        "trace_base_url": QUALIFICATION_TRACE_BASE_URL,
+    }
+    return {
+        **unsigned,
+        "endpoint_digest": stable_digest(unsigned),
+    }
 
 _RUNS: tuple[dict[str, Any], ...] = (
     {
@@ -374,23 +410,55 @@ def _validate_evidence_lock_objects(
     if not isinstance(evaluations, list) or len(evaluations) != 2:
         raise ValueError("evidence lock must contain both evaluation revisions")
     dataset = objects.get("dataset")
+    _validate_evidence_lock_refs(
+        source_project=source_project,
+        runs=runs,
+        dataset=dataset,
+        conversations=conversations,
+        evaluations=evaluations,
+    )
+    snapshot_digest = raw.get("source_snapshot_digest")
+    if snapshot_digest:
+        _validate_evidence_lock_snapshot(
+            raw,
+            objects=objects,
+            runs=runs,
+            dataset=dataset,
+            conversations=conversations,
+            evaluations=evaluations,
+            snapshot_digest=snapshot_digest,
+        )
+
+
+def _validate_evidence_lock_refs(
+    *,
+    source_project: str,
+    runs: Sequence[Any],
+    dataset: Any,
+    conversations: Sequence[Any],
+    evaluations: Sequence[Any],
+) -> None:
     source_prefix = f"weave:///{source_project}/"
     if not isinstance(dataset, Mapping) or not str(dataset.get("ref") or "").startswith(
         source_prefix
     ):
         raise ValueError("evidence lock Dataset reference is not immutable")
-    for run in runs:
-        if not isinstance(run, Mapping) or not str(run.get("ref") or "").startswith(
+    if any(
+        not isinstance(run, Mapping)
+        or not str(run.get("ref") or "").startswith(
             f"wandb-run:///{source_project}/"
-        ):
-            raise ValueError("evidence lock W&B Run reference is not immutable")
-    for conversation in conversations:
-        if not isinstance(conversation, Mapping) or not str(
-            conversation.get("ref") or ""
-        ).startswith(source_prefix):
-            raise ValueError(
-                "evidence lock source conversation reference is not immutable"
-            )
+        )
+        for run in runs
+    ):
+        raise ValueError("evidence lock W&B Run reference is not immutable")
+    if any(
+        not isinstance(conversation, Mapping)
+        or not str(conversation.get("ref") or "").startswith(source_prefix)
+        for conversation in conversations
+    ):
+        raise ValueError(
+            "evidence lock source conversation reference is not immutable"
+        )
     for evaluation in evaluations:
         if not isinstance(evaluation, Mapping):
             raise ValueError("evidence lock Evaluation entry is invalid")
@@ -403,34 +471,83 @@ def _validate_evidence_lock_objects(
             raise ValueError("evidence lock Evaluation call id does not match its ref")
         if int(evaluation.get("prediction_rows") or 0) < 1:
             raise ValueError("evidence lock Evaluation has no prediction rows")
-    snapshot_digest = raw.get("source_snapshot_digest")
-    if snapshot_digest:
-        if (
-            not isinstance(snapshot_digest, str)
-            or len(snapshot_digest) != 64
-            or stable_digest(objects) != snapshot_digest
-        ):
-            raise ValueError("evidence lock source snapshot digest does not match")
-        if (
-            not isinstance(raw.get("source_inventory_digest"), str)
-            or len(str(raw["source_inventory_digest"])) != 64
-            or not isinstance(raw.get("preparation_id"), str)
-            or not raw["preparation_id"]
-        ):
-            raise ValueError("evidence lock preparation identity is incomplete")
-        content_items = [
-            *runs,
-            dataset,
-            *conversations,
-            *evaluations,
-        ]
-        if any(
+
+
+def _validate_evidence_lock_snapshot(
+    raw: Mapping[str, Any],
+    *,
+    objects: Mapping[str, Any],
+    runs: Sequence[Any],
+    dataset: Any,
+    conversations: Sequence[Any],
+    evaluations: Sequence[Any],
+    snapshot_digest: Any,
+) -> None:
+    object_versions = objects.get("weave_object_versions")
+    if (
+        not isinstance(object_versions, list)
+        or len(object_versions) != 13
+        or any(
             not isinstance(item, Mapping)
-            or not isinstance(item.get("content_digest"), str)
-            or len(str(item["content_digest"])) != 64
-            for item in content_items
-        ):
-            raise ValueError("evidence lock remote content digest is missing")
+            or item.get("kind") not in {"object", "op"}
+            or not str(item.get("object_id") or "")
+            or not str(item.get("digest") or "")
+            or not str(item.get("content_digest") or "")
+            for item in object_versions
+        )
+        or not _weave_object_versions_complete(object_versions)
+        or len(
+            {
+                (
+                    str(item["kind"]),
+                    str(item["object_id"]),
+                    str(item["digest"]),
+                )
+                for item in object_versions
+            }
+        )
+        != len(object_versions)
+    ):
+        raise ValueError(
+            "evidence lock must bind every source Weave object version"
+        )
+    if any(
+        not isinstance(evaluation, Mapping)
+        or not isinstance(evaluation.get("call_ids"), list)
+        or len(evaluation["call_ids"]) != 26
+        or evaluation.get("call_id") not in evaluation["call_ids"]
+        for evaluation in evaluations
+    ):
+        raise ValueError(
+            "evidence lock must bind every Evaluation call identity"
+        )
+    if (
+        not isinstance(snapshot_digest, str)
+        or len(snapshot_digest) != 64
+        or stable_digest(objects) != snapshot_digest
+    ):
+        raise ValueError("evidence lock source snapshot digest does not match")
+    if (
+        not isinstance(raw.get("source_inventory_digest"), str)
+        or len(str(raw["source_inventory_digest"])) != 64
+        or not isinstance(raw.get("preparation_id"), str)
+        or not raw["preparation_id"]
+    ):
+        raise ValueError("evidence lock preparation identity is incomplete")
+    content_items = [
+        *runs,
+        dataset,
+        *conversations,
+        *evaluations,
+        *object_versions,
+    ]
+    if any(
+        not isinstance(item, Mapping)
+        or not isinstance(item.get("content_digest"), str)
+        or len(str(item["content_digest"])) != 64
+        for item in content_items
+    ):
+        raise ValueError("evidence lock remote content digest is missing")
 
 
 def qualify_locked_mcp_revisions(
@@ -465,18 +582,20 @@ def qualify_locked_mcp_revisions(
     env = load_env(env_file.resolve())
     if not str(env.get("WANDB_API_KEY") or "").strip():
         raise RuntimeError("MCP qualification requires WANDB_API_KEY")
+    endpoint_binding = _qualification_endpoint_binding(env)
     runtime_env = {
         "WANDB_API_KEY": str(env["WANDB_API_KEY"]),
-        "WANDB_BASE_URL": str(env.get("WANDB_BASE_URL") or "https://api.wandb.ai"),
+        "WANDB_BASE_URL": endpoint_binding["api_base_url"],
     }
     observations = asyncio.run(_run_mcp_release_observations(root, lock, runtime_env))
     receipt = _mcp_release_qualification_receipt(
         lock,
         observations,
         release_notes=release_notes,
+        endpoint_binding=endpoint_binding,
     )
     serialized = json.dumps(receipt, sort_keys=True)
-    for secret in runtime_env.values():
+    for secret in (runtime_env["WANDB_API_KEY"],):
         if secret and secret in serialized:
             raise RuntimeError("MCP qualification receipt contains a credential")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -766,6 +885,7 @@ def _mcp_release_qualification_receipt(
     observations: Sequence[Mapping[str, Any]],
     *,
     release_notes: Mapping[str, Any] | None = None,
+    endpoint_binding: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     expected_runs = int(evidence_lock["counts"]["runs"])
     expected_rows = {
@@ -896,6 +1016,9 @@ def _mcp_release_qualification_receipt(
         "source_project": evidence_source_project(evidence_lock),
         "result_project": evidence_result_project(evidence_lock),
         "evidence_lock_digest": evidence_lock["evidence_lock_digest"],
+        "endpoint_binding": dict(
+            endpoint_binding or _qualification_endpoint_binding({})
+        ),
         "release_notes_lock": release_notes_lock,
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "candidates": candidates,
@@ -1325,6 +1448,204 @@ def _release_note_classification(
     return classified
 
 
+def release_note_coverage_v3(
+    receipt: Mapping[str, Any],
+    *,
+    task_ids: Sequence[str],
+    dimension_ids: Sequence[str],
+) -> tuple[dict[str, Any], ...]:
+    """Map every locked 0.4 behavior to bounded V3 qualification evidence."""
+
+    available_tasks = frozenset(str(item) for item in task_ids)
+    available_dimensions = frozenset(str(item) for item in dimension_ids)
+    task_map = {
+        "sdk-first-structured-query": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+        "exact-count-mode": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+        "projected-summary-and-config": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+        "explicit-coverage-metadata": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+        "selective-server-side-fields": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+        "bounded-history": (
+            "maintainer-history-hotspot",
+            "maintainer-project-health",
+        ),
+        "evaluation-prediction-reconciliation": (
+            "maintainer-evaluation-reconciliation",
+        ),
+        "structured-query-breaking-change": (
+            "maintainer-source-inventory",
+            "maintainer-project-health",
+        ),
+    }
+    dimension_map = {
+        release_note: (
+            "natural-maintainer.answer_correct",
+            "natural-maintainer.actual_query_scope",
+            "natural-maintainer.reported_project_identity",
+            "natural-maintainer.bounded_evidence",
+            "natural-maintainer.evidence_honesty",
+        )
+        for release_note in task_map
+    }
+    infrastructure_map = {
+        "raw-graphql-disabled-by-default": ("default-tool-manifest",),
+        "raw-graphql-query-only-escape-hatch": (
+            "raw-graphql-opt-in-manifest",
+            "graphql-mutation-rejection",
+        ),
+        "read-only-write-tool-omission": ("read-only-tool-manifest",),
+        "weighted-admission-server-busy": (
+            "weighted-admission-server-busy",
+        ),
+        "tool-and-sdk-timeout-boundaries": (
+            "timeout-and-bounded-response",
+        ),
+        "telemetry-attribution-and-privacy": (
+            "telemetry-attribution-and-privacy",
+        ),
+        "security-sensitive-dependency-updates": (
+            "ci-dependency-source-security",
+        ),
+        "ci-security-and-wheel-hardening": (
+            "fresh-wheel-python-3-11",
+            "fresh-wheel-python-3-12",
+            "wandb-latest",
+            "ci-dependency-source-security",
+        ),
+        "stdio-protocol-safety": ("installed-wheel-stdio-protocol",),
+        "operator-setting-defaults": ("operator-setting-defaults",),
+    }
+    not_applicable = {
+        "shared-dedicated-local-workload-profiles",
+        "dedicated-internal-api-routing",
+        "public-links-hide-internal-routing",
+        "managed-staging-and-helm-validation",
+    }
+    source_rows = receipt.get("release_note_classification")
+    if not isinstance(source_rows, list) or not source_rows:
+        raise ValueError("mechanism receipt has no release-note classification")
+    locked_notes = receipt.get("release_notes_lock")
+    locked_behaviors = (
+        locked_notes.get("behaviors")
+        if isinstance(locked_notes, Mapping)
+        else None
+    )
+    if not isinstance(locked_behaviors, list) or any(
+        not isinstance(item, str) or not item for item in locked_behaviors
+    ):
+        raise ValueError("mechanism receipt has no locked release-note behaviors")
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in source_rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("mechanism release-note classification is invalid")
+        release_note = str(raw.get("release_note") or "")
+        if not release_note or release_note in seen:
+            raise ValueError(
+                "mechanism release-note behaviors must be non-empty and unique"
+            )
+        seen.add(release_note)
+        source_status = str(raw.get("status") or "")
+        mapped_tasks = tuple(
+            task_id
+            for task_id in task_map.get(release_note, ())
+            if task_id in available_tasks
+        )
+        gates = infrastructure_map.get(release_note, ())
+        mapped_dimensions = dimension_map.get(release_note, ())
+        unknown_dimensions = sorted(
+            set(mapped_dimensions) - available_dimensions
+        )
+        if unknown_dimensions:
+            raise ValueError(
+                "release-note coverage references unknown scorer dimensions: "
+                + ", ".join(unknown_dimensions)
+            )
+        if release_note in not_applicable:
+            status = "not_applicable"
+            rationale = (
+                "This behavior belongs to managed-service or deployment "
+                "qualification, not the Python package decision."
+            )
+        elif source_status == "already_present_on_main":
+            status = "already_on_main"
+            rationale = (
+                "The exact locked manifests show this behavior on both arms."
+            )
+        elif source_status == "observed_branch_delta":
+            status = "observed_delta"
+            rationale = (
+                "The exact locked manifests or zero-model reconciliation "
+                "probe show a branch delta; mapped tasks test its usefulness."
+            )
+        elif source_status == "mechanism_probe_required":
+            status = "unqualified"
+            rationale = (
+                "The zero-model mechanism probe did not establish the "
+                "required branch behavior."
+            )
+        elif source_status == "agent_canary_required" and mapped_tasks:
+            status = "observed_delta"
+            rationale = (
+                "The behavior is mapped to a locked natural-maintainer task; "
+                "the task outcome determines whether the delta is useful."
+            )
+        elif gates:
+            status = "infrastructure_only"
+            rationale = (
+                "This behavior is qualified by a separate named "
+                "infrastructure gate, not by an Agent task score."
+            )
+        else:
+            status = "unqualified"
+            rationale = (
+                "No locked task or completed infrastructure gate currently "
+                "qualifies this behavior."
+            )
+        result.append(
+            {
+                "release_note": release_note,
+                "status": status,
+                "task_ids": list(mapped_tasks),
+                "dimensions": list(mapped_dimensions),
+                "infrastructure_gates": list(gates),
+                "rationale": rationale,
+            }
+        )
+        if status == "observed_delta" and not (
+            mapped_tasks and mapped_dimensions
+        ):
+            raise ValueError(
+                "observed release-note deltas require mapped task and "
+                "dimension evidence"
+            )
+        if status == "infrastructure_only" and not gates:
+            raise ValueError(
+                "infrastructure-only release-note coverage requires a "
+                "named gate"
+            )
+    if seen != set(locked_behaviors) or len(result) != len(locked_behaviors):
+        raise ValueError(
+            "mechanism receipt does not classify every locked release-note "
+            "behavior exactly once"
+        )
+    return tuple(result)
+
+
 def _successful_mcp_value(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping) or raw.get("ok") is not True:
         return {}
@@ -1343,6 +1664,60 @@ def _mcp_call_error(raw: Any) -> str:
     if isinstance(value, Mapping) and value.get("message"):
         return str(value["message"])[:500]
     return "MCP tool returned an error"
+
+
+def verify_private_project_topology(
+    *,
+    source_project: str,
+    result_project: str,
+    env: Mapping[str, str],
+) -> dict[str, str]:
+    """Verify both W&B projects exist and are private without writing data."""
+
+    api_key = trace_api_key(env)
+    if not api_key:
+        raise RuntimeError("private-project verification requires WANDB_API_KEY")
+    endpoint_binding = _qualification_endpoint_binding(env)
+    selected_env = {
+        "WANDB_API_KEY": api_key,
+        "WANDB_BASE_URL": endpoint_binding["api_base_url"],
+        "WANDB_SILENT": "true",
+    }
+    query = """
+    query FugueProjectAccess($entity: String!, $project: String!) {
+      project(entityName: $entity, name: $project) {
+        name
+        access
+      }
+    }
+    """
+    result: dict[str, str] = {}
+    with _temporary_environment(selected_env):
+        from wandb.apis.internal import Api
+
+        api = Api().api
+        for project_slug in (source_project, result_project):
+            entity, project = project_slug.split("/", 1)
+            response = api.execute(
+                query,
+                {"entity": entity, "project": project},
+            )
+            metadata = (
+                response.get("project")
+                if isinstance(response, Mapping)
+                else None
+            )
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("name") != project
+                or metadata.get("access") != "PRIVATE"
+            ):
+                raise RuntimeError(
+                    "Fugue qualification projects must already exist with "
+                    "PRIVATE access"
+                )
+            result[project_slug] = "PRIVATE"
+    return result
 
 
 def verify_hosted_source_conformance(
@@ -1371,11 +1746,8 @@ def verify_hosted_source_conformance(
     api_key = trace_api_key(env)
     if not api_key:
         raise RuntimeError("hosted source verification requires WANDB_API_KEY")
-    trace_base_url = str(
-        env.get("FUGUE_WEAVE_TRACE_SERVER_URL")
-        or env.get("WF_TRACE_SERVER_URL")
-        or WEAVE_AGENTS_BASE_URL
-    ).rstrip("/")
+    endpoint_binding = _qualification_endpoint_binding(env)
+    trace_base_url = endpoint_binding["trace_base_url"]
     roots, children = _fetch_hosted_source_calls(
         source_project=source_project,
         trace_base_url=trace_base_url,
@@ -1384,10 +1756,17 @@ def verify_hosted_source_conformance(
             str(item["call_id"]) for item in lock["objects"]["evaluations"]
         ],
     )
+    project_access = verify_private_project_topology(
+        source_project=source_project,
+        result_project=result_project,
+        env=env,
+    )
     receipt = build_hosted_source_conformance_receipt(
         evidence_lock=lock,
         evaluation_roots=roots,
         direct_children=children,
+        project_access=project_access,
+        endpoint_binding=endpoint_binding,
     )
     if api_key in json.dumps(receipt, sort_keys=True):
         raise RuntimeError("hosted source receipt contains a credential")
@@ -1401,6 +1780,8 @@ def build_hosted_source_conformance_receipt(
     evidence_lock: Mapping[str, Any],
     evaluation_roots: Sequence[Mapping[str, Any]],
     direct_children: Mapping[str, Sequence[Mapping[str, Any]]],
+    project_access: Mapping[str, str] | None = None,
+    endpoint_binding: Mapping[str, str] | None = None,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     """Build the fail-closed source snapshot receipt from public call metadata."""
@@ -1417,6 +1798,15 @@ def build_hosted_source_conformance_receipt(
         if str(item.get("id") or item.get("call_id") or "")
     }
     blockers: list[str] = []
+    resolved_access = {
+        str(key): str(value)
+        for key, value in (project_access or {}).items()
+    }
+    if resolved_access != {
+        source_project: "PRIVATE",
+        result_project: "PRIVATE",
+    }:
+        blockers.append("source_and_result_projects_must_be_private")
     if len(root_by_id) != len(evaluation_roots):
         blockers.append("duplicate_or_missing_evaluation_root_id")
     if set(root_by_id) != set(locked_evaluations):
@@ -1544,6 +1934,10 @@ def build_hosted_source_conformance_receipt(
         "status": "passed" if not blockers else "failed",
         "source_project": source_project,
         "result_project": result_project,
+        "project_access": dict(sorted(resolved_access.items())),
+        "endpoint_binding": dict(
+            endpoint_binding or _qualification_endpoint_binding({})
+        ),
         "evidence_lock_digest": evidence_lock["evidence_lock_digest"],
         "created_at": created_at
         or datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -1709,6 +2103,20 @@ def _source_preparation_actions() -> tuple[str, ...]:
 
 
 _SOURCE_PREPARATION_ACTIONS = frozenset(_source_preparation_actions())
+_EXPECTED_WEAVE_OBJECT_VERSION_COUNTS = {
+    ("object", "mcp-release-maintenance-cases"): 1,
+    ("object", "mcp-release-maintainer-r17"): 1,
+    ("object", "mcp-release-maintainer-r18"): 1,
+    ("object", "EvaluationResults"): 2,
+    ("op", "fugue.qualification.maintenance_agent"): 1,
+    ("op", "fugue.qualification.wandb_mcp_tool"): 1,
+    ("op", "Evaluation.evaluate"): 1,
+    ("op", "Evaluation.summarize"): 1,
+    ("op", "Evaluation.predict_and_score"): 1,
+    ("op", "fugue.qualification.evidence_alignment_scorer"): 1,
+    ("op", "fugue.qualification.baseline_evidence_model"): 1,
+    ("op", "fugue.qualification.candidate_evidence_model"): 1,
+}
 
 
 def _source_preparation_progress_path(output: Path) -> Path:
@@ -1847,6 +2255,19 @@ def _expected_source_actions(inventory: Mapping[str, Any]) -> set[str]:
     return result
 
 
+def _weave_object_versions_complete(
+    object_versions: Sequence[Mapping[str, Any]],
+) -> bool:
+    counts: dict[tuple[str, str], int] = {}
+    for item in object_versions:
+        key = (
+            str(item.get("kind") or ""),
+            str(item.get("object_id") or ""),
+        )
+        counts[key] = counts.get(key, 0) + 1
+    return counts == _EXPECTED_WEAVE_OBJECT_VERSION_COUNTS
+
+
 def _validate_source_inventory(
     inventory: Mapping[str, Any],
     *,
@@ -1874,7 +2295,17 @@ def _validate_source_inventory(
             + ", ".join(sorted(str(item) for item in drift))
         )
     present = _expected_source_actions(value)
-    expected_complete = present == _SOURCE_PREPARATION_ACTIONS
+    object_versions = value.get("weave_object_versions")
+    if not isinstance(object_versions, list) or any(
+        not isinstance(item, Mapping) for item in object_versions
+    ):
+        raise RuntimeError(
+            "hosted source Weave object-version inventory is invalid"
+        )
+    expected_complete = (
+        present == _SOURCE_PREPARATION_ACTIONS
+        and _weave_object_versions_complete(object_versions)
+    )
     if bool(value.get("complete")) is not expected_complete:
         raise RuntimeError("hosted source inventory completeness disagrees")
     supplied = str(value.get("inventory_digest") or "")
@@ -1892,6 +2323,7 @@ def _source_inventory(
     conversations: Sequence[Mapping[str, Any]],
     evaluation_objects: Mapping[str, Mapping[str, Any]],
     evaluations: Sequence[Mapping[str, Any]],
+    object_versions: Sequence[Mapping[str, Any]] = (),
     extra_objects: Sequence[str] = (),
     drift: Sequence[str] = (),
 ) -> dict[str, Any]:
@@ -1920,8 +2352,14 @@ def _source_inventory(
             key: dict(value) for key, value in sorted(evaluation_objects.items())
         },
         "evaluations": [dict(item) for item in evaluations],
+        "weave_object_versions": [
+            dict(item) for item in object_versions
+        ],
         "present_actions": sorted(present_actions),
-        "complete": set(present_actions) == _SOURCE_PREPARATION_ACTIONS,
+        "complete": (
+            set(present_actions) == _SOURCE_PREPARATION_ACTIONS
+            and _weave_object_versions_complete(object_versions)
+        ),
         "extra_objects": sorted(str(item) for item in extra_objects),
         "drift": sorted(str(item) for item in drift),
         "inventory_digest": "",
@@ -1973,6 +2411,10 @@ def _inventory_weave_receipts(
             dict(item) for item in inventory.get("source_conversations") or ()
         ],
         "evaluations": [dict(item) for item in inventory.get("evaluations") or ()],
+        "weave_object_versions": [
+            dict(item)
+            for item in inventory.get("weave_object_versions") or ()
+        ],
     }
 
 
@@ -1990,6 +2432,107 @@ def _lock_matches_source_inventory(
     return stable_digest(objects) == stable_digest(expected_objects) and lock.get(
         "source_inventory_digest"
     ) == inventory.get("inventory_digest")
+
+
+def verify_hosted_source_drift(
+    *,
+    evidence_lock: Path,
+    env: Mapping[str, str],
+) -> EvidenceDriftCheckV1:
+    """Read the complete locked source cohort twice and report safe drift state.
+
+    This verifier never initializes a result project and never publishes an
+    object. Authentication and transport failures intentionally collapse to a
+    static unavailable reason so credentials and service details cannot enter
+    attempt evidence.
+    """
+
+    try:
+        lock = validate_evidence_lock(
+            json.loads(evidence_lock.resolve().read_text(encoding="utf-8")),
+            expected_project=None,
+        )
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return EvidenceDriftCheckV1(
+            status="unavailable",
+            expected_digest="0" * 64,
+            reason="the approved evidence lock could not be verified",
+        )
+    expected_digest = str(lock["evidence_lock_digest"])
+    source_project = evidence_source_project(lock)
+    result_project = evidence_result_project(lock)
+    api_key = trace_api_key(env)
+    if not api_key:
+        return EvidenceDriftCheckV1(
+            status="unavailable",
+            expected_digest=expected_digest,
+            reason="hosted source authentication is unavailable",
+        )
+    entity, project = source_project.split("/", 1)
+    try:
+        endpoint_binding = _qualification_endpoint_binding(env)
+    except RuntimeError:
+        return EvidenceDriftCheckV1(
+            status="unavailable",
+            expected_digest=expected_digest,
+            reason="the hosted source endpoint does not match its lock",
+        )
+    selected_env = {
+        "WANDB_API_KEY": api_key,
+        "WANDB_ENTITY": entity,
+        "WANDB_PROJECT": project,
+        "WANDB_BASE_URL": endpoint_binding["api_base_url"],
+        "WANDB_MODE": "online",
+        "WANDB_RESUME": "never",
+        "WANDB_SILENT": "true",
+        "WEAVE_ALLOW_UNSAFE_CUSTOM_OBJ_DECODE": "false",
+    }
+    try:
+        verify_private_project_topology(
+            source_project=source_project,
+            result_project=result_project,
+            env=env,
+        )
+        with _temporary_environment(selected_env):
+            inventory = _stable_hosted_source_inventory(
+                entity,
+                project,
+                source_project=source_project,
+            )
+    except Exception:
+        return EvidenceDriftCheckV1(
+            status="unavailable",
+            expected_digest=expected_digest,
+            reason="the hosted source inventory could not be verified",
+        )
+    if _lock_matches_source_inventory(lock, inventory):
+        return EvidenceDriftCheckV1(
+            status="matched",
+            expected_digest=expected_digest,
+            observed_digest=expected_digest,
+        )
+    observed_digest = str(inventory.get("inventory_digest") or "")
+    if len(observed_digest) != 64:
+        observed_digest = stable_digest(
+            {
+                "source_project": source_project,
+                "inventory_state": "verified_but_not_locked",
+            }
+        )
+    if observed_digest == expected_digest:
+        observed_digest = stable_digest(
+            {
+                "source_project": source_project,
+                "inventory_digest": observed_digest,
+                "lock_match": False,
+            }
+        )
+    return EvidenceDriftCheckV1(
+        status="drifted",
+        expected_digest=expected_digest,
+        observed_digest=observed_digest,
+        reason="the hosted source inventory differs from the approved lock",
+    )
 
 
 def prepare_hosted_project(
@@ -2033,17 +2576,23 @@ def prepare_hosted_project(
     missing = [name for name in required if not str(env.get(name) or "").strip()]
     if missing:
         raise RuntimeError("hosted-project preparation requires: " + ", ".join(missing))
+    endpoint_binding = _qualification_endpoint_binding(env)
     entity, project_name = resolved_source_project.split("/", 1)
     selected_env = {
         "WANDB_API_KEY": str(env["WANDB_API_KEY"]),
         "WANDB_ENTITY": entity,
         "WANDB_PROJECT": project_name,
-        "WANDB_BASE_URL": str(env.get("WANDB_BASE_URL") or "https://api.wandb.ai"),
+        "WANDB_BASE_URL": endpoint_binding["api_base_url"],
         "WANDB_MODE": "online",
         "WANDB_RESUME": "never",
         "WANDB_SILENT": "true",
         "WEAVE_ALLOW_UNSAFE_CUSTOM_OBJ_DECODE": "false",
     }
+    verify_private_project_topology(
+        source_project=resolved_source_project,
+        result_project=resolved_result_project,
+        env=env,
+    )
     progress_path = _source_preparation_progress_path(output)
     lock_path = _source_preparation_lock_path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -2239,24 +2788,48 @@ def _expected_run_artifact_payload(
 
 
 def _canonical_run_history(run: Any) -> list[dict[str, Any]]:
+    required_keys = [key for key in _RUN_HISTORY_KEYS if key != "observed_cost_usd"]
+    cost_by_step: dict[int, float] = {}
+    for raw in run.scan_history(
+        keys=["step", "observed_cost_usd"],
+        page_size=1000,
+    ):
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("hosted W&B Run cost history row is invalid")
+        if raw.get("observed_cost_usd") is None:
+            continue
+        step = int(raw.get("step") or raw.get("_step") or 0)
+        if step <= 0 or step in cost_by_step:
+            raise RuntimeError("hosted W&B Run cost history is ambiguous")
+        cost_by_step[step] = float(raw["observed_cost_usd"])
     rows = []
-    for raw in run.scan_history(keys=list(_RUN_HISTORY_KEYS), page_size=1000):
+    for raw in run.scan_history(keys=required_keys, page_size=1000):
         if not isinstance(raw, Mapping):
             raise RuntimeError("hosted W&B Run history row is invalid")
         row = {
             key: raw[key]
-            for key in _RUN_HISTORY_KEYS
+            for key in required_keys
             if key in raw and raw[key] is not None
         }
+        step = int(row.get("step") or raw.get("_step") or 0)
+        if step in cost_by_step:
+            row["observed_cost_usd"] = cost_by_step.pop(step)
         if row:
             rows.append(row)
+    if cost_by_step:
+        raise RuntimeError("hosted W&B Run cost history has no matching step")
     return sorted(rows, key=lambda item: int(item.get("step") or 0))
 
 
 def _read_run_artifact_payload(artifact: Any) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="fugue-wandb-evidence-read-") as temp:
         entry = artifact.get_path("attempt-evidence.json")
-        downloaded = entry.download(root=temp, replace=True)
+        try:
+            downloaded = entry.download(root=temp, replace=True)
+        except TypeError as exc:
+            if "unexpected keyword argument 'replace'" not in str(exc):
+                raise
+            downloaded = entry.download(root=temp)
         path = Path(downloaded.name if hasattr(downloaded, "name") else str(downloaded))
         raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -2491,12 +3064,20 @@ def _plain_json_value(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, Mapping):
-        return {
-            str(key): _plain_json_value(item)
-            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
-        }
+        try:
+            items = sorted(value.items(), key=lambda item: str(item[0]))
+        except Exception as exc:
+            if type(exc).__name__ != "UnsafeDeserializationError":
+                raise
+            return {"_fugue_untrusted_custom_object": True}
+        return {str(key): _plain_json_value(item) for key, item in items}
     if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        return [_plain_json_value(item) for item in value]
+        try:
+            return [_plain_json_value(item) for item in value]
+        except Exception as exc:
+            if type(exc).__name__ != "UnsafeDeserializationError":
+                raise
+            return [{"_fugue_untrusted_custom_object": True}]
     if hasattr(value, "model_dump"):
         return _plain_json_value(value.model_dump(mode="json"))
     if hasattr(value, "to_dict"):
@@ -2570,6 +3151,30 @@ def _source_weave_project_exists(client: Any, project: str) -> bool:
 def _weave_object_or_none(client: Any, uri: str) -> Any | None:
     try:
         return client.get(weave.ref(uri))
+    except Exception as exc:
+        if _weave_missing_error(exc):
+            return None
+        raise
+
+
+def _raw_weave_object_or_none(
+    client: Any,
+    *,
+    project: str,
+    object_id: str,
+    digest: str,
+) -> Any | None:
+    from weave.trace_server.trace_server_interface import ObjReadReq
+
+    try:
+        return client.server.obj_read(
+            ObjReadReq(
+                project_id=project,
+                object_id=object_id,
+                digest=digest,
+                include_tags_and_aliases=True,
+            )
+        ).obj
     except Exception as exc:
         if _weave_missing_error(exc):
             return None
@@ -2844,33 +3449,48 @@ def _inspect_evaluation_objects(
     values: dict[str, dict[str, Any]] = {}
     drift = []
     for revision in ("maintainer-r17", "maintainer-r18"):
-        evaluation = _weave_object_or_none(
+        object_id = f"mcp-release-{revision}"
+        evaluation = _raw_weave_object_or_none(
             client,
-            f"weave:///{project}/object/mcp-release-{revision}:qualification-v1",
+            project=project,
+            object_id=object_id,
+            digest="qualification-v1",
         )
         if evaluation is None:
             continue
-        metadata = dict(getattr(evaluation, "metadata", {}) or {})
-        bound_dataset = getattr(evaluation, "dataset", None)
-        bound_ref = (
-            _immutable_weave_ref(bound_dataset, kind="Evaluation Dataset")
-            if bound_dataset is not None
-            else ""
+        value = getattr(evaluation, "val", None)
+        if not isinstance(value, Mapping):
+            drift.append(f"weave-evaluation-object:{revision}:shape")
+            continue
+        metadata = dict(value.get("metadata") or {})
+        bound_ref = str(value.get("dataset") or "")
+        scorers = value.get("scorers")
+        expected_scorer_prefix = (
+            f"weave:///{project}/op/fugue.qualification.evidence_alignment_scorer:"
         )
         if (
-            getattr(evaluation, "name", None) != f"mcp-release-{revision}"
+            value.get("name") != object_id
             or metadata.get("fugue_seed_digest") != seed_digest
             or metadata.get("revision") != revision
             or not dataset_ref
             or bound_ref != dataset_ref
+            or not isinstance(scorers, list)
+            or len(scorers) != 1
+            or not isinstance(scorers[0], str)
+            or not scorers[0].startswith(expected_scorer_prefix)
         ):
             drift.append(f"weave-evaluation-object:{revision}:content")
             continue
-        ref = _immutable_weave_ref(evaluation, kind="Evaluation")
+        object_digest = str(getattr(evaluation, "digest", "") or "")
+        if not object_digest:
+            drift.append(f"weave-evaluation-object:{revision}:digest")
+            continue
+        ref = f"weave:///{project}/object/{object_id}:{object_digest}"
         content = {
-            "name": str(evaluation.name),
+            "name": object_id,
             "metadata": metadata,
             "dataset_ref": bound_ref,
+            "scorer_ref": scorers[0],
         }
         values[revision] = {
             "revision": revision,
@@ -2878,6 +3498,107 @@ def _inspect_evaluation_objects(
             "content_digest": stable_digest(content),
         }
     return values, sorted(drift)
+
+
+def _inventory_weave_object_versions(
+    client: Any,
+    project: str,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    from weave.trace_server.trace_server_interface import (
+        ObjectVersionFilter,
+        ObjQueryReq,
+    )
+
+    expected_objects = {
+        object_id: count
+        for (kind, object_id), count in (
+            _EXPECTED_WEAVE_OBJECT_VERSION_COUNTS.items()
+        )
+        if kind == "object"
+    }
+    expected_ops = {
+        object_id: count
+        for (kind, object_id), count in (
+            _EXPECTED_WEAVE_OBJECT_VERSION_COUNTS.items()
+        )
+        if kind == "op"
+    }
+    rows: list[dict[str, Any]] = []
+    extras: list[str] = []
+    drift: list[str] = []
+    for is_op, expected in (
+        (False, expected_objects),
+        (True, expected_ops),
+    ):
+        response = client.server.objs_query(
+            ObjQueryReq(
+                project_id=project,
+                filter=ObjectVersionFilter(
+                    is_op=is_op,
+                    latest_only=False,
+                ),
+                limit=1_000,
+                metadata_only=True,
+                include_tags_and_aliases=True,
+            )
+        )
+        counts: dict[str, int] = {}
+        for item in response.objs:
+            object_id = str(getattr(item, "object_id", "") or "")
+            digest = str(getattr(item, "digest", "") or "")
+            counts[object_id] = counts.get(object_id, 0) + 1
+            if object_id not in expected:
+                extras.append(
+                    f"weave-{'op' if is_op else 'object'}:{object_id}"
+                )
+                continue
+            if not digest:
+                drift.append(
+                    f"weave-{'op' if is_op else 'object'}:{object_id}:digest"
+                )
+                continue
+            metadata = {
+                "kind": "op" if is_op else "object",
+                "object_id": object_id,
+                "digest": digest,
+                "base_object_class": str(
+                    getattr(item, "base_object_class", "") or ""
+                ),
+                "aliases": sorted(
+                    str(alias)
+                    for alias in getattr(item, "aliases", None) or ()
+                ),
+            }
+            rows.append(
+                {
+                    **metadata,
+                    "content_digest": stable_digest(metadata),
+                }
+            )
+        if any(
+            counts.get(object_id, 0) > expected_count
+            for object_id, expected_count in expected.items()
+        ):
+            drift.append(
+                f"weave-{'op' if is_op else 'object'}-version-set"
+            )
+    identities = {
+        (item["kind"], item["object_id"], item["digest"]) for item in rows
+    }
+    if len(identities) != len(rows):
+        drift.append("weave-object-version-duplicate")
+    return (
+        sorted(
+            rows,
+            key=lambda item: (
+                str(item["kind"]),
+                str(item["object_id"]),
+                str(item["digest"]),
+            ),
+        ),
+        sorted(extras),
+        sorted(drift),
+    )
 
 
 def _inventory_evaluation_calls(
@@ -2921,6 +3642,44 @@ def _inventory_evaluation_calls(
         operations = [str(child.get("op_name") or "") for child in children]
         prediction_count = operations.count("Evaluation.predict_and_score")
         summary_count = operations.count("Evaluation.summarize")
+        expected_model_operation = (
+            "fugue.qualification.baseline_evidence_model"
+            if revision == "maintainer-r17"
+            else "fugue.qualification.candidate_evidence_model"
+        )
+        descendant_ids: set[str] = set()
+        nested_structure_valid = True
+        for child in children:
+            child_id = str(child.get("id") or "")
+            if not child_id:
+                nested_structure_valid = False
+                continue
+            descendant_ids.add(child_id)
+            nested = list(by_parent.get(child_id, ()))
+            if child.get("op_name") == "Evaluation.predict_and_score":
+                if sorted(
+                    str(item.get("op_name") or "") for item in nested
+                ) != sorted(
+                    (
+                        expected_model_operation,
+                        "fugue.qualification.evidence_alignment_scorer",
+                    )
+                ):
+                    nested_structure_valid = False
+            elif nested:
+                nested_structure_valid = False
+            for item in nested:
+                nested_id = str(item.get("id") or "")
+                if (
+                    not nested_id
+                    or item.get("project_id") not in {"", project}
+                    or item.get("trace_id") != root.get("trace_id")
+                    or not item.get("ended_at")
+                    or item.get("exception") not in (None, "")
+                ):
+                    nested_structure_valid = False
+                else:
+                    descendant_ids.add(nested_id)
         if (
             root.get("project_id") not in {"", project}
             or not root.get("ended_at")
@@ -2928,6 +3687,8 @@ def _inventory_evaluation_calls(
             or prediction_count != len(_EVALUATION_ROWS)
             or summary_count != 1
             or len(children) != len(_EVALUATION_ROWS) + 1
+            or len(descendant_ids) != 25
+            or not nested_structure_valid
             or any(
                 child.get("project_id") not in {"", project}
                 or child.get("trace_id") != root.get("trace_id")
@@ -2953,6 +3714,7 @@ def _inventory_evaluation_calls(
                 "prediction_rows": prediction_count,
                 "direct_children": len(children),
                 "summarize_children": summary_count,
+                "call_ids": sorted({root_id, *descendant_ids}),
                 "content_digest": stable_digest(structure),
             }
         )
@@ -2970,6 +3732,7 @@ def _inventory_weave_evidence(
     list[dict[str, Any]],
     dict[str, dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
     list[str],
     list[str],
 ]:
@@ -2977,7 +3740,7 @@ def _inventory_weave_evidence(
     try:
         with _source_weave_client(project, write=False) as client:
             if not _source_weave_project_exists(client, project):
-                return None, [], {}, [], [], []
+                return None, [], {}, [], [], [], []
             calls = [_call_record(call) for call in client.get_calls(limit=None)]
             dataset = _inspect_weave_dataset(client, project)
             conversations, conversation_extras, conversation_drift = (
@@ -3001,21 +3764,64 @@ def _inventory_weave_evidence(
                     evaluation_objects=evaluation_objects,
                 )
             )
+            object_versions, object_extras, object_version_drift = (
+                _inventory_weave_object_versions(client, project)
+            )
+            expected_call_ids = {
+                *(
+                    str(item.get("call_id") or "")
+                    for item in conversations
+                ),
+                *(
+                    str(call_id)
+                    for item in conversations
+                    for call_id in item.get("tool_call_ids") or ()
+                ),
+                *(
+                    str(call_id)
+                    for item in evaluations
+                    for call_id in item.get("call_ids") or ()
+                ),
+            }
+            observed_call_ids = [
+                str(item.get("id") or "") for item in calls
+            ]
+            call_extras = [
+                f"weave-call:{call_id or '<missing-id>'}"
+                for call_id in observed_call_ids
+                if not call_id or call_id not in expected_call_ids
+            ]
+            if len(observed_call_ids) != len(set(observed_call_ids)):
+                call_extras.append("weave-call:duplicate-id")
+            missing_call_ids = expected_call_ids - set(observed_call_ids)
+            call_drift = [
+                f"weave-call-set:missing-{len(missing_call_ids)}"
+            ] if missing_call_ids else []
     except Exception as exc:
         if _weave_missing_error(exc):
-            return None, [], {}, [], [], []
+            return None, [], {}, [], [], [], []
         raise
     return (
         dataset,
         conversations,
         evaluation_objects,
         evaluations,
-        sorted({*conversation_extras, *evaluation_extras}),
+        object_versions,
+        sorted(
+            {
+                *conversation_extras,
+                *evaluation_extras,
+                *object_extras,
+                *call_extras,
+            }
+        ),
         sorted(
             {
                 *conversation_drift,
                 *object_drift,
+                *object_version_drift,
                 *evaluation_drift,
+                *call_drift,
             }
         ),
     )
@@ -3037,6 +3843,7 @@ def _inventory_hosted_source(
         conversations,
         evaluation_objects,
         evaluations,
+        object_versions,
         weave_extras,
         weave_drift,
     ) = _inventory_weave_evidence(source_project)
@@ -3047,6 +3854,7 @@ def _inventory_hosted_source(
         conversations=conversations,
         evaluation_objects=evaluation_objects,
         evaluations=evaluations,
+        object_versions=object_versions,
         extra_objects=[*run_extras, *weave_extras],
         drift=[*run_drift, *weave_drift],
     )
@@ -3170,10 +3978,16 @@ def _materialize_hosted_source(
                         aliases=["qualification-v1"],
                     ),
                 )
-            evaluation = weave.ref(
+            evaluation_ref = weave.ref(
                 f"weave:///{source_project}/object/"
                 f"mcp-release-{revision}:qualification-v1"
-            ).get()
+            )
+            evaluation = _new_evaluation(
+                dataset,
+                revision,
+                seed_digest=seed_digest,
+            )
+            evaluation.ref = evaluation_ref
             run_action_name = f"weave-evaluation-run:{revision}"
             if run_action_name not in present:
                 run_action(
@@ -3277,13 +4091,13 @@ def _seed_agent_conversation(
             turn.record(
                 messages=[
                     *turn.messages,
-                    {
-                        "role": "assistant",
-                        "content": (
+                    weave.Message(
+                        role="assistant",
+                        content=(
                             f"Observed latency {latency_ms} ms; opened "
                             f"{source_opened} of {source_returned} returned sources."
                         ),
-                    },
+                    ),
                 ]
             )
     return {
@@ -3395,6 +4209,10 @@ def _evidence_lock(
             dict(item) for item in weave_receipts["source_conversations"]
         ],
         "evaluations": [dict(item) for item in weave_receipts["evaluations"]],
+        "weave_object_versions": [
+            dict(item)
+            for item in weave_receipts.get("weave_object_versions") or ()
+        ],
     }
     rich_source_lock = source_inventory_digest is not None
     counts = (

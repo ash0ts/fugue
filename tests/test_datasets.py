@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -105,6 +107,151 @@ def test_materializer_rejects_source_drift_without_publishing(
 
     assert not destination.exists()
     assert not destination.with_name(destination.name + ".lock").exists()
+
+
+def test_cached_authored_dataset_reuses_only_byte_equivalent_materialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "public-cases.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "id": "task-one",
+                "title": "Task one",
+                "instruction": "Return one bounded answer.",
+                "attachments": [],
+                "environment": {
+                    "base_image": "python:3.12-slim",
+                    "kind": "artifact",
+                    "cpus": 1,
+                    "memory_mb": 512,
+                    "storage_mb": 1024,
+                },
+                "interaction": {"timeout_sec": 60},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    def manifest(criteria_digest: str, profile_digest: str):
+        return load_manifest(
+            tmp_path / "authored.yaml",
+            text=f"""
+dataset:
+  path: .fugue/cache/authored/{source_sha}
+  materializer: fugue.bench.task_authoring:AuthoredTaskMaterializer
+  source:
+    path: public-cases.jsonl
+    sha256: {source_sha}
+harnesses:
+  - name: claude-code
+    agent: fugue.agents:FugueClaudeCode
+tasks:
+  - id: task-one
+    metadata:
+      source_index: 0
+      task_authoring:
+        task_definition_digest: {source_sha}
+        criteria_digest: {criteria_digest}
+        profile_digests:
+          comparison-evaluator: {profile_digest}
+""",
+        )
+
+    first_manifest = manifest("a" * 64, "b" * 64)
+    destination = materialize_manifest_dataset(first_manifest, tmp_path)
+    assert destination is not None
+    instruction = destination / "task-one/instruction.md"
+    original = instruction.read_bytes()
+
+    second_manifest = manifest("c" * 64, "d" * 64)
+    assert materialize_manifest_dataset(second_manifest, tmp_path) == destination
+    assert instruction.read_bytes() == original
+    marker = json.loads((destination / DATASET_MANIFEST).read_text())
+    assert marker["fingerprint"] == datasets._dataset_fingerprint(second_manifest)
+
+    instruction.write_text("tampered\n")
+    third_manifest = manifest("e" * 64, "f" * 64)
+    with pytest.raises(ValueError, match="does not match its manifest"):
+        materialize_manifest_dataset(third_manifest, tmp_path)
+
+
+def test_materialized_dataset_rejects_symlinked_root_and_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = {
+        "repo": "fixture/repo",
+        "commit_id": "a" * 40,
+        "question": "Where is the fixture implemented?",
+        "answer": "The fixture is in src/fixture.py.",
+    }
+
+    def write_source(source: dict, destination: Path) -> None:
+        destination.write_text(json.dumps(row) + "\n")
+
+    monkeypatch.setattr(datasets, "_download_source", write_source)
+    manifest = load_manifest(_manifest(tmp_path))
+    destination = tmp_path / manifest.dataset.path
+    external = tmp_path / "external-dataset"
+    external.mkdir()
+    destination.parent.mkdir(parents=True)
+    destination.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="root may not be a symlink"):
+        materialize_manifest_dataset(manifest, tmp_path)
+
+    destination.unlink()
+    materialized = materialize_manifest_dataset(manifest, tmp_path)
+    assert materialized is not None
+    marker = materialized / DATASET_MANIFEST
+    marker_contents = marker.read_text()
+    marker.unlink()
+    external_marker = tmp_path / "external-marker.json"
+    external_marker.write_text(marker_contents)
+    marker.symlink_to(external_marker)
+
+    with pytest.raises(
+        ValueError,
+        match="root and marker must not be symlinks",
+    ):
+        materialize_manifest_dataset(manifest, tmp_path)
+
+
+def test_materialized_tree_digest_rejects_special_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataset"
+    root.mkdir()
+    fifo = root / "private-stream"
+    os.mkfifo(fifo)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="only directories and regular files",
+        ):
+            datasets._materialized_tree_digest(root)
+    finally:
+        fifo.unlink()
+
+
+def test_materialized_tree_digest_rejects_nested_symlinks(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "dataset"
+    nested = root / "task"
+    nested.mkdir(parents=True)
+    external = tmp_path / "private-reference.txt"
+    external.write_text("host-only truth\n")
+    (nested / "reference.md").symlink_to(external)
+
+    with pytest.raises(
+        ValueError,
+        match="may not contain symlinks",
+    ):
+        datasets._materialized_tree_digest(root)
 
 
 def test_gitnexus_contract_verifier_scores_every_terminal_answer(

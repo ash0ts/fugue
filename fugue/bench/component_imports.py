@@ -831,13 +831,13 @@ def _materialize_stdio_runtime(
         digest = _runtime_directory_digest(staging)
         destination = parent / digest.removeprefix("sha256:")
         if destination.exists():
-            shutil.rmtree(staging)
+            _remove_read_only_tree(staging)
         else:
             os.replace(staging, destination)
         return digest, (f"/fugue-components/{draft.id}/bin/server",)
     except Exception:
         if staging.exists():
-            shutil.rmtree(staging)
+            _remove_read_only_tree(staging)
         raise
 
 
@@ -1605,6 +1605,23 @@ def _make_tree_read_only(root: Path) -> None:
         elif path.is_dir():
             path.chmod(0o555)
     root.chmod(0o555)
+
+
+def _remove_read_only_tree(root: Path) -> None:
+    """Remove only a prepared tree after restoring owner write permission."""
+
+    if root.is_symlink():
+        root.unlink()
+        return
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            path.chmod(0o700)
+        else:
+            path.chmod(0o600)
+    root.chmod(0o700)
+    shutil.rmtree(root)
 
 
 def _validate_argv(command: list[str]) -> None:

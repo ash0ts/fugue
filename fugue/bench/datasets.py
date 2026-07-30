@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import re
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -43,9 +44,17 @@ def materialize_manifest_dataset(
     if not dataset.path:
         raise ValueError("materialized datasets require dataset.path")
     destination = _resolve(repo_root, dataset.path)
+    if destination.is_symlink():
+        raise ValueError(
+            f"materialized dataset root may not be a symlink: {destination}"
+        )
     expected = _dataset_fingerprint(manifest)
     marker = destination / DATASET_MANIFEST
     with _directory_lock(destination):
+        if destination.is_symlink() or marker.is_symlink():
+            raise ValueError(
+                "materialized dataset root and marker must not be symlinks"
+            )
         if marker.is_file() and not rebuild:
             current = json.loads(marker.read_text())
             if current.get("fingerprint") == expected:
@@ -58,9 +67,30 @@ def materialize_manifest_dataset(
                 == _legacy_dataset_fingerprint(manifest, previous_source)
             ):
                 return destination
+            if (
+                current.get("materializer") == dataset.materializer
+                and isinstance(previous_source, dict)
+                and _same_source_content(previous_source, dataset.source)
+            ):
+                metrics = _equivalent_cached_materialization(
+                    manifest,
+                    destination,
+                    repo_root,
+                )
+                if metrics is not None:
+                    _write_dataset_marker(
+                        marker,
+                        {
+                            "fingerprint": expected,
+                            "materializer": dataset.materializer,
+                            "source": _public_source_metadata(dataset.source),
+                            "metrics": metrics,
+                        },
+                    )
+                    return destination
             raise ValueError(
                 f"cached dataset at {destination} does not match its manifest; "
-                "rerun preparation with --rebuild"
+                "remove it explicitly or choose a new content-addressed path"
             )
         if destination.exists():
             raise ValueError(
@@ -88,14 +118,83 @@ def materialize_manifest_dataset(
                 "source": _public_source_metadata(dataset.source),
                 "metrics": metrics,
             }
-            (staging / DATASET_MANIFEST).write_text(
-                json.dumps(marker_payload, indent=2, sort_keys=True) + "\n"
-            )
+            _write_dataset_marker(staging / DATASET_MANIFEST, marker_payload)
             os.replace(staging, destination)
         except Exception:
             _remove_staging(staging)
             raise
     return destination
+
+
+def _equivalent_cached_materialization(
+    manifest: BenchmarkManifest,
+    destination: Path,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    """Re-render a changed manifest and reuse the cache only if bytes are identical."""
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.verify.", dir=destination.parent)
+    )
+    try:
+        source_path = staging / "_source.jsonl"
+        _stage_source(manifest.dataset.source, source_path, repo_root)
+        materializer = _load_materializer(str(manifest.dataset.materializer))
+        metrics = materializer.materialize(
+            manifest,
+            staging,
+            source_path,
+            repo_root=repo_root,
+        )
+        source_path.unlink(missing_ok=True)
+        if _materialized_tree_digest(staging) != _materialized_tree_digest(
+            destination,
+            ignored={DATASET_MANIFEST},
+        ):
+            return None
+        return metrics
+    finally:
+        _remove_staging(staging)
+
+
+def _materialized_tree_digest(
+    root: Path,
+    *,
+    ignored: set[str] | None = None,
+) -> str:
+    ignored = ignored or set()
+    if root.is_symlink():
+        raise ValueError(
+            f"materialized dataset root may not be a symlink: {root}"
+        )
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        if relative in ignored:
+            continue
+        if path.is_symlink():
+            raise ValueError(f"materialized dataset may not contain symlinks: {relative}")
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError(
+                "materialized dataset may contain only directories and regular "
+                f"files: {relative}"
+            )
+        name = relative.encode()
+        body = path.read_bytes()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update((path.stat().st_mode & 0o777).to_bytes(4, "big"))
+        digest.update(len(body).to_bytes(8, "big"))
+        digest.update(body)
+    return digest.hexdigest()
+
+
+def _write_dataset_marker(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
 
 
 class SweQaProMaterializer:

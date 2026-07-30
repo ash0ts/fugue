@@ -1,14 +1,57 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
-_SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v1"
+_SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
 _DIMENSIONS = {
     "answer_correct": False,
-    "locked_source_scope": False,
+    "actual_query_scope": False,
+    "reported_project_identity": False,
     "bounded_evidence": False,
     "evidence_honesty": False,
     "release_mechanism_used": False,
+}
+_WEAVE_OPERATION_CLASSES = (
+    "Evaluation.predict_and_score",
+    "Evaluation.summarize",
+    "other",
+)
+_FACT_KEYS = {
+    "maintainer-evaluation-reconciliation": frozenset(
+        {
+            "evaluation_root_count",
+            "direct_child_count",
+            "summary_reported_predictions",
+            "direct_prediction_rows",
+            "summary_children",
+            "summary_matches_direct",
+        }
+    ),
+    "maintainer-project-health": frozenset(
+        {
+            "run_count",
+            "evaluation_root_count",
+            "largest_latency_run",
+            "largest_latency_ms",
+            "missing_cost_run",
+        }
+    ),
+    "maintainer-source-inventory": frozenset(
+        {
+            "run_count",
+            "evaluation_root_count",
+            "summary_reported_predictions",
+        }
+    ),
+    "maintainer-history-hotspot": frozenset(
+        {
+            "run_id",
+            "step",
+            "latency_ms",
+            "broad_reads",
+        }
+    ),
 }
 
 _SCHEMAS = {
@@ -44,7 +87,7 @@ _SCHEMAS = {
         "source_project": "string",
         "run_count": "integer",
         "evaluation_root_count": "integer",
-        "direct_prediction_rows": "integer",
+        "summary_reported_predictions": "integer",
         "bounded": "boolean",
         "evidence_status": "string",
         "maintainer_memo": "memo",
@@ -174,6 +217,20 @@ def _contains(actual, expected):
     return actual == expected
 
 
+def _task_facts(task_id, expected):
+    allowed = _FACT_KEYS.get(task_id, frozenset())
+    return {
+        key: value
+        for key, value in _mapping(expected.get("facts")).items()
+        if key in allowed
+    }
+
+
+def _stable_digest(value):
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _arguments(raw):
     return _mapping(raw.get("arguments"))
 
@@ -214,18 +271,30 @@ def _projects(raw):
 
 
 def _fields(raw):
-    fields = _text_set(raw.get("projected_fields"))
-    fields.update(_text_set(raw.get("projection")))
+    raw_fields = _text_set(raw.get("projected_fields"))
+    raw_fields.update(_text_set(raw.get("projection")))
     arguments = _arguments(raw)
     for key in ("columns", "config_keys", "summary_keys", "keys"):
-        for item in _list(
-            arguments.get(key) if key in arguments else raw.get(key)
-        ):
+        for item in _list(arguments.get(key) if key in arguments else raw.get(key)):
             if isinstance(item, str) and item.strip():
-                field = item.strip()
-                fields.add(field)
-                fields.add(field.rsplit(".", 1)[-1])
-    return fields
+                raw_fields.add(item.strip())
+    return {field.rsplit(".", 1)[-1] for field in raw_fields}
+
+
+def _operation_counts(raw):
+    value = _value(raw, "operation_counts")
+    if not isinstance(value, dict) or not value:
+        return None
+    if any(
+        key not in _WEAVE_OPERATION_CLASSES or type(count) is not int or count < 0
+        for key, count in value.items()
+    ):
+        return None
+    normalized = {
+        operation: int(value.get(operation) or 0)
+        for operation in _WEAVE_OPERATION_CLASSES
+    }
+    return normalized if sum(normalized.values()) > 0 else None
 
 
 def _normalize_calls(evidence):
@@ -236,6 +305,16 @@ def _normalize_calls(evidence):
         tool = raw.get("tool") or raw.get("name")
         if not isinstance(tool, str) or not tool.strip():
             continue
+        parent_ids = _text_set(_value(raw, "parent_filter_ids")) or _text_set(
+            _value(raw, "parent_ids")
+        )
+        parent_filter_digest = _value(raw, "parent_filter_digest")
+        if not (
+            isinstance(parent_filter_digest, str) and len(parent_filter_digest) == 64
+        ):
+            parent_filter_digest = (
+                _stable_digest(sorted(parent_ids)) if parent_ids else None
+            )
         calls.append(
             {
                 "tool": tool.strip(),
@@ -249,13 +328,11 @@ def _normalize_calls(evidence):
                 "run_id": _value(raw, "run_id"),
                 "x_axis": _value(raw, "x_axis"),
                 "target_x": _value(raw, "target_x"),
-                "parent_ids": (
-                    _text_set(_value(raw, "parent_filter_ids"))
-                    or _text_set(_value(raw, "parent_ids"))
+                "parent_filter_digest": parent_filter_digest,
+                "parent_filter_count": (
+                    _integer(raw, "parent_filter_count") or len(parent_ids) or None
                 ),
-                "returned_count": _integer(
-                    raw, "returned_count", "response_count"
-                ),
+                "returned_count": _integer(raw, "returned_count", "response_count"),
                 "total_count": _integer(raw, "total_count"),
                 "prediction_count": _integer(
                     raw,
@@ -263,42 +340,45 @@ def _normalize_calls(evidence):
                     "predictions",
                     "prediction_rows",
                 ),
+                "operation_counts": _operation_counts(raw),
+                "returned_parent_filter_match": _value(
+                    raw,
+                    "returned_parent_filter_match",
+                ),
                 "has_more": _value(raw, "has_more"),
                 "project_exhaustive": _value(raw, "project_exhaustive"),
                 "truncation_applied": _value(raw, "truncation_applied"),
                 "structured_error": (
-                    _value(raw, "structured_error_code")
-                    or _value(raw, "error_code")
+                    _value(raw, "structured_error_code") or _value(raw, "error_code")
                 ),
-                "status": (
-                    _value(raw, "terminal_status")
-                    or _value(raw, "status")
-                ),
+                "status": (_value(raw, "terminal_status") or _value(raw, "status")),
             }
         )
     return calls
 
 
 def _successful(call):
-    return (
-        not call.get("structured_error")
-        and call.get("status")
-        in {"succeeded", "success", "completed", "passed"}
-    )
+    return not call.get("structured_error") and call.get("status") in {
+        "succeeded",
+        "success",
+        "completed",
+        "passed",
+    }
 
 
 def _scope_is_locked(evidence, calls, project):
-    projects = _text_set(evidence.get("mcp_queried_projects"))
-    projects.update(_text_set(evidence.get("queried_projects")))
-    for call in calls:
-        projects.update(call["projects"])
-    return bool(projects) and projects == {project}
+    declared_projects = _text_set(evidence.get("mcp_queried_projects"))
+    declared_projects.update(_text_set(evidence.get("queried_projects")))
+    successful_calls = [call for call in calls if _successful(call)]
+    return (
+        bool(successful_calls)
+        and (not declared_projects or declared_projects == {project})
+        and all(call["projects"] == {project} for call in successful_calls)
+    )
 
 
 def _calls(calls, tool):
-    return [
-        call for call in calls if _successful(call) and call["tool"] == tool
-    ]
+    return [call for call in calls if _successful(call) and call["tool"] == tool]
 
 
 def _run_calls(calls, response_mode):
@@ -311,151 +391,209 @@ def _run_calls(calls, response_mode):
 
 
 def _bounded_run_items(calls, required_fields=()):
-    return any(
-        call["limit"] is not None
-        and 0 < call["limit"] <= 50
-        and call["returned_count"] is not None
-        and call["returned_count"] <= call["limit"]
-        and call["has_more"] is False
-        and call["project_exhaustive"] is True
-        and call["truncation_applied"] is False
-        and set(required_fields) <= call["fields"]
-        and "*" not in call["fields"]
-        for call in _run_calls(calls, "items")
+    item_calls = _run_calls(calls, "items")
+    return len(item_calls) == 1 and (
+        item_calls[0]["limit"] is not None
+        and 0 < item_calls[0]["limit"] <= 50
+        and item_calls[0]["returned_count"] is not None
+        and item_calls[0]["returned_count"] <= item_calls[0]["limit"]
+        and item_calls[0]["has_more"] is False
+        and item_calls[0]["project_exhaustive"] is True
+        and item_calls[0]["truncation_applied"] is False
+        and item_calls[0]["fields"] == set(required_fields)
     )
 
 
 def _run_count(calls, expected):
-    return any(
-        call["total_count"] == expected
-        for call in _run_calls(calls, "count")
-    )
+    count_calls = _run_calls(calls, "count")
+    return len(count_calls) == 1 and count_calls[0]["total_count"] == expected
+
+
+def _has_one_run_count(calls):
+    return len(_run_calls(calls, "count")) == 1
 
 
 def _evaluation_summary(calls):
-    return [
-        call
-        for call in _calls(calls, "summarize_evaluation_tool")
-        if call["max_evals"] is not None and 0 < call["max_evals"] <= 25
-    ]
+    summaries = _calls(calls, "summarize_evaluation_tool")
+    if (
+        len(summaries) != 1
+        or summaries[0]["max_evals"] is None
+        or not 0 < summaries[0]["max_evals"] <= 25
+    ):
+        return []
+    return summaries
 
 
-def _evaluation_children(calls, expected):
+def _evaluation_child_queries(calls, expected):
     parents = set(expected.get("evaluation_parent_ids") or ())
-    if parents and len(parents) != 2:
+    if len(parents) != 2:
         return None
+    child_calls = _calls(calls, "query_weave_traces_tool")
+    if len(child_calls) != len(parents):
+        return None
+    digest_to_parent = {_stable_digest([parent]): parent for parent in sorted(parents)}
     result = {}
-    for call in _calls(calls, "query_weave_traces_tool"):
-        if len(call["parent_ids"]) != 1:
-            continue
-        parent = next(iter(call["parent_ids"]))
-        if (parents and parent not in parents) or parent in result:
-            continue
+    for call in child_calls:
+        if call["parent_filter_count"] != 1:
+            return None
+        parent = digest_to_parent.get(call["parent_filter_digest"])
+        if parent not in parents or parent in result:
+            return None
         if (
             call["limit"] is None
             or not 0 < call["limit"] <= 20
             or call["returned_count"] is None
             or call["returned_count"] > call["limit"]
             or call["truncation_applied"] is not False
-            or not {"id", "op_name", "parent_id"} <= call["fields"]
+            or call["fields"] != {"id", "op_name", "parent_id"}
+            or call["returned_parent_filter_match"] is not True
         ):
             return None
-        result[parent] = call["returned_count"]
-    if parents:
-        return result if set(result) == parents else None
-    return result if len(result) == 2 else None
+        result[parent] = call
+    return result if set(result) == parents else None
+
+
+def _evaluation_children(calls, expected):
+    parents = set(expected.get("evaluation_parent_ids") or ())
+    raw_expected_counts = _mapping(expected.get("mechanism")).get(
+        "evaluation_parent_operation_counts"
+    )
+    if len(parents) != 2 or not isinstance(raw_expected_counts, dict):
+        return None
+    expected_counts = {}
+    for parent, value in raw_expected_counts.items():
+        normalized = _operation_counts({"operation_counts": value})
+        if not isinstance(parent, str) or not parent.strip() or normalized is None:
+            return None
+        expected_counts[parent.strip()] = normalized
+    if set(expected_counts) != parents:
+        return None
+
+    child_queries = _evaluation_child_queries(calls, expected)
+    if child_queries is None:
+        return None
+    result = {}
+    for parent, call in child_queries.items():
+        operation_counts = call["operation_counts"]
+        if (
+            operation_counts is None
+            or sum(operation_counts.values()) != call["returned_count"]
+            or operation_counts != expected_counts[parent]
+        ):
+            return None
+        result[parent] = operation_counts
+    return result if set(result) == parents else None
 
 
 def _history_call(calls, expected):
     mechanism = _mapping(expected.get("mechanism"))
     required = set(mechanism.get("history_keys") or ())
-    matches = [
+    history_calls = _calls(calls, "get_run_history_tool")
+    if len(history_calls) != 1:
+        return None
+    call = history_calls[0]
+    return (
         call
-        for call in _calls(calls, "get_run_history_tool")
         if call["run_id"] == mechanism.get("history_run_id")
         and call["x_axis"] == mechanism.get("history_x_axis")
         and call["target_x"] == mechanism.get("history_target_x")
-        and required <= call["fields"]
+        and call["fields"] == required
         and call["returned_count"] == 1
         and call["truncation_applied"] is False
-    ]
-    return matches[0] if len(matches) == 1 else None
+        else None
+    )
 
 
 def _reconciliation(task_output, calls, expected):
     summaries = _evaluation_summary(calls)
+    child_queries = _evaluation_child_queries(calls, expected)
+    locked_root_count = len(set(expected.get("evaluation_parent_ids") or ()))
+    summary_root_count = (
+        summaries[0]["total_count"] if len(summaries) == 1 else None
+    )
+    bounded = (
+        task_output.get("bounded") is True
+        and len(summaries) == 1
+        and locked_root_count == 2
+        and summary_root_count == locked_root_count
+        and child_queries is not None
+    )
     children = _evaluation_children(calls, expected)
     if len(summaries) != 1 or children is None:
-        return False, False, False
+        return False, bounded, False
     summary = summaries[0]
     observed_summary = summary["prediction_count"]
     if observed_summary is None:
         observed_summary = summary["total_count"]
-    direct_predictions = int(
-        _mapping(expected.get("facts")).get("direct_prediction_rows") or 0
+    direct_predictions = sum(
+        counts["Evaluation.predict_and_score"] for counts in children.values()
     )
-    direct_children = sum(children.values())
+    summary_children = sum(
+        counts["Evaluation.summarize"] for counts in children.values()
+    )
+    unrelated_children = sum(counts["other"] for counts in children.values())
+    direct_children = sum(sum(counts.values()) for counts in children.values())
     summary_matches = observed_summary == direct_predictions
+    locked_roots_match = (
+        summary_root_count == locked_root_count == len(children)
+    )
+    reconciled = summary_matches and locked_roots_match
+    facts = _task_facts("maintainer-evaluation-reconciliation", expected)
     factual = (
-        _contains(task_output, expected.get("facts") or {})
+        _contains(task_output, facts)
+        and task_output.get("evaluation_root_count") == len(children)
+        and locked_roots_match
+        and task_output.get("direct_child_count") == direct_children
         and task_output.get("summary_reported_predictions") == observed_summary
+        and task_output.get("direct_prediction_rows") == direct_predictions
+        and task_output.get("summary_children") == summary_children
         and task_output.get("summary_matches_direct") is summary_matches
     )
     recommendation = (
-        "advance-to-qualification"
-        if summary_matches
-        else "block-and-investigate"
+        "advance-to-qualification" if reconciled else "block-and-investigate"
     )
     honest = (
         task_output.get("recommendation") == recommendation
-        and task_output.get("direct_child_count") == direct_children
-        and task_output.get("unrelated_children_excluded") is True
-        and task_output.get("evidence_status") == "reconciled"
-    )
-    bounded = (
-        task_output.get("bounded") is True
-        and direct_children == 18
-        and all(count == 9 for count in children.values())
+        and task_output.get("unrelated_children_excluded") is (unrelated_children == 0)
+        and task_output.get("evidence_status")
+        == ("reconciled" if reconciled else "conflicted")
     )
     return factual, bounded, honest
 
 
 def _source_inventory(task_output, calls, expected):
-    facts = _mapping(expected.get("facts"))
+    facts = _task_facts("maintainer-source-inventory", expected)
     summaries = _evaluation_summary(calls)
+    observed_summary = summaries[0]["prediction_count"] if len(summaries) == 1 else None
     factual = (
         _contains(task_output, facts)
         and _run_count(calls, int(facts.get("run_count") or 0))
         and len(summaries) == 1
         and summaries[0]["total_count"] == facts.get("evaluation_root_count")
-        and summaries[0]["prediction_count"]
-        == facts.get("direct_prediction_rows")
+        and observed_summary == facts.get("summary_reported_predictions")
+        and task_output.get("summary_reported_predictions") == observed_summary
     )
     bounded = (
         task_output.get("bounded") is True
         and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
+        and _has_one_run_count(calls)
+        and len(summaries) == 1
     )
-    honest = (
-        factual
-        and task_output.get("evidence_status") == "reconciled"
-    )
+    honest = task_output.get("evidence_status") == "summary-only"
     return factual, bounded, honest
 
 
 def _history(task_output, calls, expected):
-    facts = _mapping(expected.get("facts"))
+    facts = _task_facts("maintainer-history-hotspot", expected)
     history = _history_call(calls, expected)
     factual = _contains(task_output, facts)
     bounded = (
         task_output.get("bounded") is True
-        and _bounded_run_items(
-            calls, ("id", "attempt_label", "latency_ms")
-        )
+        and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
         and history is not None
     )
     honest = (
-        factual
-        and task_output.get("observed_cost_status") == "unavailable"
+        task_output.get("observed_cost_status") == "unavailable"
         and task_output.get("causal_scope") == "observed-mechanism-only"
         and task_output.get("evidence_status") == "reconciled"
     )
@@ -463,7 +601,7 @@ def _history(task_output, calls, expected):
 
 
 def _project_health(task_output, calls, expected):
-    facts = _mapping(expected.get("facts"))
+    facts = _task_facts("maintainer-project-health", expected)
     summaries = _evaluation_summary(calls)
     history = _history_call(calls, expected)
     factual = (
@@ -474,13 +612,13 @@ def _project_health(task_output, calls, expected):
     )
     bounded = (
         task_output.get("bounded") is True
-        and _bounded_run_items(
-            calls, ("id", "attempt_label", "latency_ms")
-        )
+        and _has_one_run_count(calls)
+        and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
+        and len(summaries) == 1
         and history is not None
     )
     honest = (
-        factual
+        task_output.get("coverage") == "locked-cohort-exhaustive"
         and task_output.get("recommendation") == "investigate"
         and task_output.get("causal_scope") == "observed-mechanism-only"
         and task_output.get("evidence_status") == "reconciled"
@@ -504,31 +642,23 @@ def _mechanism_used(task_id, calls, expected):
     if task_id == "maintainer-evaluation-reconciliation":
         return (
             len(_evaluation_summary(calls)) == 1
-            and _evaluation_children(calls, expected) is not None
+            and _evaluation_child_queries(calls, expected) is not None
         )
     if task_id == "maintainer-source-inventory":
-        facts = _mapping(expected.get("facts"))
         return (
-            _run_count(calls, int(facts.get("run_count") or 0))
-            and _bounded_run_items(
-                calls, ("id", "attempt_label", "latency_ms")
-            )
+            _has_one_run_count(calls)
+            and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
             and len(_evaluation_summary(calls)) == 1
         )
     if task_id == "maintainer-history-hotspot":
         return (
-            _bounded_run_items(
-                calls, ("id", "attempt_label", "latency_ms")
-            )
+            _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
             and _history_call(calls, expected) is not None
         )
     if task_id == "maintainer-project-health":
-        facts = _mapping(expected.get("facts"))
         return (
-            _run_count(calls, int(facts.get("run_count") or 0))
-            and _bounded_run_items(
-                calls, ("id", "attempt_label", "latency_ms")
-            )
+            _has_one_run_count(calls)
+            and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
             and len(_evaluation_summary(calls)) == 1
             and _history_call(calls, expected) is not None
         )
@@ -548,15 +678,14 @@ def score(task, output, evidence):
     if not isinstance(parsed, dict) or not _matches_schema(task_id, parsed):
         return {
             **_DIMENSIONS,
-            "locked_source_scope": locked_scope,
+            "actual_query_scope": locked_scope,
             "release_mechanism_used": mechanism,
         }
     factual, bounded, honest = _evaluate(task_id, parsed, calls, expected)
     return {
         "answer_correct": factual,
-        "locked_source_scope": (
-            parsed.get("source_project") == project and locked_scope
-        ),
+        "actual_query_scope": locked_scope,
+        "reported_project_identity": (parsed.get("source_project") == project),
         "bounded_evidence": bounded,
         "evidence_honesty": honest,
         "release_mechanism_used": mechanism,

@@ -519,6 +519,18 @@ def _experiment_view_v3_from_dict(
     completed_cells = _optional_non_negative_int(
         raw.get("completed_cells"), "completed_cells"
     )
+    state_counts = _count_mapping(raw.get("state_counts"), "state_counts")
+    terminal_states = {
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }
+    if set(state_counts) - terminal_states:
+        raise ValueError(
+            "V3 final evaluation state_counts may contain only terminal states"
+        )
     aligned_attempt_ids = {
         attempt_id
         for item in aligned.aligned_attempts
@@ -533,6 +545,38 @@ def _experiment_view_v3_from_dict(
     ):
         raise ValueError(
             "V3 completed_cells must equal the unique aligned attempt count"
+        )
+    if sum(state_counts.values()) != len(aligned_attempt_ids):
+        raise ValueError(
+            "V3 state_counts must reconcile every aligned terminal attempt"
+        )
+    paired_cases = tuple(
+        _canonical_paired_case_v3(item)
+        for item in _sequence(raw.get("paired_cases"), "paired_cases")
+    )
+    paired_attempt_ids = {
+        str(attempt.get("attempt_id") or "")
+        for pair in paired_cases
+        for arm in ("baseline", "candidate")
+        if isinstance((attempt := pair.get(arm)), Mapping)
+    }
+    behavioral_status = str(
+        _mapping_or_empty(raw.get("behavioral_summary")).get("status") or ""
+    )
+    integrity_status = _text(
+        raw.get("integrity_status"), "integrity_status", 80
+    )
+    if (
+        integrity_status != "invalid"
+        and behavioral_status != "invalid"
+        and paired_attempt_ids != aligned_attempt_ids
+    ):
+        raise ValueError(
+            "V3 paired cases must expose every aligned attempt"
+        )
+    if evidence_eligible and paired_attempt_ids != aligned_attempt_ids:
+        raise ValueError(
+            "V3 evidence-eligible view requires clickable paired attempts"
         )
     view = ExperimentViewV3(
         schema_version=EXPERIMENT_VIEW_V3_SCHEMA_VERSION,
@@ -549,7 +593,7 @@ def _experiment_view_v3_from_dict(
         observed_cost_usd=_optional_cost(
             raw.get("observed_cost_usd"), "observed_cost_usd"
         ),
-        state_counts=_count_mapping(raw.get("state_counts"), "state_counts"),
+        state_counts=state_counts,
         infrastructure_health=_text(
             raw.get("infrastructure_health"), "infrastructure_health", 80
         ),
@@ -561,9 +605,7 @@ def _experiment_view_v3_from_dict(
         ),
         evidence_links=_evidence_links(raw.get("evidence_links")),
         decision=_optional_mapping(raw.get("decision"), "decision"),
-        integrity_status=_text(
-            raw.get("integrity_status"), "integrity_status", 80
-        ),
+        integrity_status=integrity_status,
         evidence_grade=_text(
             raw.get("evidence_grade"), "evidence_grade", 20
         ),
@@ -588,10 +630,7 @@ def _experiment_view_v3_from_dict(
         behavioral_summary=_optional_behavioral_summary(
             raw.get("behavioral_summary")
         ),
-        paired_cases=tuple(
-            _canonical_paired_case_v3(item)
-            for item in _sequence(raw.get("paired_cases"), "paired_cases")
-        ),
+        paired_cases=paired_cases,
         backend=_optional_text(raw.get("backend"), "backend", 100),
         candidate_source_revisions=tuple(
             _candidate_source_revision(item)
@@ -1564,7 +1603,7 @@ def _build_comparison_evaluation_view_v3(
     invalid_tasks = [
         item
         for item in task_validity
-        if item["status"] != "valid"
+        if item["status"] in {"drifted", "invalid", "inconclusive"}
     ]
     if invalid_tasks:
         limitations.append(
@@ -1573,6 +1612,18 @@ def _build_comparison_evaluation_view_v3(
     source_drift_matched = (
         topology.pre_run_drift.status == "matched"
         and topology.post_run_drift.status == "matched"
+    )
+    terminal_states = {
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }
+    terminal_cells = sum(
+        count
+        for state, count in execution_states.items()
+        if state in terminal_states
     )
     evidence_eligible = (
         rows > 0
@@ -1610,7 +1661,7 @@ def _build_comparison_evaluation_view_v3(
         preview_digest=str(result.get("preview_digest") or "") or None,
         approval_state="approved",
         phase="completed",
-        completed_cells=rows,
+        completed_cells=terminal_cells,
         observed_cost_usd=_optional_float(
             operational.get("observed_cost_usd")
         ),
@@ -2385,6 +2436,16 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         {key: value[key] for key in base_allowed}
     )
     assert base is not None
+    if base["execution_status"] not in {
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }:
+        raise ValueError(
+            "V3 paired attempt execution status must be terminal"
+        )
     unknown = set(value) - set(base_allowed) - extras
     if unknown:
         raise ValueError(

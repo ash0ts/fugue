@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ from typing import Any, BinaryIO
 from fugue.mcp_evidence import (
     safe_graphql_event_arguments,
     safe_structured_error_code,
+    validated_graphql_query_shape,
 )
 from fugue.redaction import redact_text, secrets_from_env, sensitive_key
 
@@ -28,6 +30,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", required=True)
     parser.add_argument("--cwd", type=Path)
     parser.add_argument("--allow-tool", action="append", default=[])
+    parser.add_argument(
+        "--source-project",
+        default=os.environ.get("FUGUE_SOURCE_EVIDENCE_PROJECT", ""),
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -50,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     recorder = _Recorder(
         name=args.name,
         allowed_tools=set(args.allow_tool) or None,
+        source_project=str(args.source_project or "").strip() or None,
         path=Path(
             os.environ.get(
                 "FUGUE_CONTEXT_EVENTS_PATH",
@@ -77,13 +84,22 @@ def main(argv: list[str] | None = None) -> int:
 
 class _Recorder:
     def __init__(
-        self, *, name: str, path: Path, allowed_tools: set[str] | None = None
+        self,
+        *,
+        name: str,
+        path: Path,
+        allowed_tools: set[str] | None = None,
+        source_project: str | None = None,
     ) -> None:
         self.name = name
         self.path = path
         self.allowed_tools = allowed_tools
+        self.source_project = source_project
         self.started_at = time.perf_counter()
-        self.pending: dict[str, tuple[float, str | None]] = {}
+        self.pending: dict[
+            str,
+            tuple[float, str | None, tuple[str, ...]],
+        ] = {}
         self.lock = threading.Lock()
 
     def request(self, payload: dict[str, Any], size: int) -> bool:
@@ -105,16 +121,50 @@ class _Recorder:
                     }
                 )
                 return False
+        raw_arguments = (
+            (payload.get("params") or {}).get("arguments")
+            if method == "tools/call"
+            else None
+        )
+        if (
+            method == "tools/call"
+            and self.source_project is not None
+            and not _request_is_source_scoped(
+                tool=tool,
+                arguments=raw_arguments,
+                source_project=self.source_project,
+            )
+        ):
+            self.write(
+                {
+                    "event": "mcp_tool_denied",
+                    "layer": "proxy",
+                    "server": self.name,
+                    "tool": tool,
+                    "request_id": request_id,
+                    "request_bytes": size,
+                    "reason": "source_scope_policy",
+                }
+            )
+            return False
+        requested_parent_ids = _requested_parent_ids(raw_arguments)
         if request_id:
             with self.lock:
-                self.pending[request_id] = (time.perf_counter(), tool)
+                self.pending[request_id] = (
+                    time.perf_counter(),
+                    tool,
+                    requested_parent_ids,
+                )
         if method == "tools/call":
-            raw_arguments = (payload.get("params") or {}).get("arguments")
-            recorded_arguments = (
+            shaped_arguments = (
                 safe_graphql_event_arguments(raw_arguments)
                 if tool == "query_wandb_tool"
                 and isinstance(raw_arguments, Mapping)
                 else raw_arguments
+            )
+            recorded_arguments = _safe_request_arguments(
+                shaped_arguments,
+                parent_ids=requested_parent_ids,
             )
             self.write(
                 {
@@ -135,10 +185,13 @@ class _Recorder:
             pending = self.pending.pop(request_id, None) if request_id else None
         if pending is None:
             return
-        started, tool = pending
+        started, tool, expected_parent_ids = pending
         if not tool:
             return
-        response_evidence = _safe_response_evidence(payload)
+        response_evidence = _safe_response_evidence(
+            payload,
+            expected_parent_ids=expected_parent_ids,
+        )
         self.write(
             {
                 "event": "mcp_tool_response",
@@ -223,7 +276,11 @@ def _request_id(payload: dict[str, Any]) -> str | None:
     return str(value) if value is not None else None
 
 
-def _safe_response_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _safe_response_evidence(
+    payload: Mapping[str, Any],
+    *,
+    expected_parent_ids: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Summarize a tool response without persisting result content."""
 
     protocol_error = payload.get("error")
@@ -288,6 +345,18 @@ def _safe_response_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
         if derived is not None:
             evidence["returned_count"] = derived
+    operation_counts = _safe_weave_operation_counts(objects)
+    if operation_counts is not None and (
+        evidence.get("returned_count") is None
+        or sum(operation_counts.values()) == evidence["returned_count"]
+    ):
+        evidence["operation_counts"] = operation_counts
+    parent_filter_match = _safe_weave_parent_filter_match(
+        objects,
+        expected_parent_ids=expected_parent_ids,
+    )
+    if parent_filter_match is not None:
+        evidence["returned_parent_filter_match"] = parent_filter_match
     for key, aliases in (
         ("has_more", ("has_more", "hasMore", "hasNextPage")),
         ("project_exhaustive", ("project_exhaustive", "projectExhaustive")),
@@ -309,6 +378,195 @@ def _safe_response_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     if coverage_status is not None:
         evidence["coverage_status"] = coverage_status
     return evidence
+
+
+def _requested_parent_ids(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, Mapping):
+        return ()
+    values: set[str] = set()
+    for key, value in raw.items():
+        if key in _PARENT_ID_KEYS:
+            candidates = value if isinstance(value, list) else [value]
+            values.update(
+                str(item).strip()
+                for item in candidates
+                if isinstance(item, str) and item.strip()
+            )
+        elif isinstance(value, Mapping):
+            values.update(_requested_parent_ids(value))
+    return tuple(sorted(values))
+
+
+_ENTITY_KEYS = ("entity", "entity_name", "entityName", "wandb_entity")
+_PROJECT_KEYS = ("project", "project_name", "projectName", "wandb_project")
+_PROJECT_REF_KEYS = (
+    "project_path",
+    "project_ref",
+    "project_slug",
+    "entity_project",
+)
+_PARENT_ID_KEYS = frozenset(
+    {
+        "parent_id",
+        "parent_ids",
+        "parentId",
+        "parentIds",
+        "parent_call_id",
+        "parent_call_ids",
+        "parentCallId",
+        "parentCallIds",
+    }
+)
+
+
+def _request_is_source_scoped(
+    *,
+    tool: str | None,
+    arguments: Any,
+    source_project: str,
+) -> bool:
+    if not tool or not isinstance(arguments, Mapping):
+        return False
+    shaped = (
+        safe_graphql_event_arguments(arguments)
+        if tool == "query_wandb_tool"
+        else dict(arguments)
+    )
+    raw_shape = validated_graphql_query_shape(shaped.get("raw_graphql_shape"))
+    if raw_shape and (
+        raw_shape.get("graphql_operation_type") != "query"
+        or raw_shape.get("graphql_scope_resolved") is not True
+    ):
+        return False
+    return _requested_projects(shaped) == {source_project}
+
+
+def _requested_projects(raw: Mapping[str, Any]) -> set[str]:
+    projects: set[str] = set()
+    for value in _nested_mappings(raw):
+        entity = _first_text(value, _ENTITY_KEYS)
+        project = _first_text(value, _PROJECT_KEYS)
+        if project:
+            projects.add(
+                project
+                if "/" in project
+                else f"{entity}/{project}"
+                if entity
+                else f"*/{project}"
+            )
+        for key in _PROJECT_REF_KEYS:
+            reference = value.get(key)
+            if isinstance(reference, str) and reference.strip():
+                projects.add(reference.strip())
+    return projects
+
+
+def _nested_mappings(raw: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    result = [raw]
+    for value in raw.values():
+        if isinstance(value, Mapping):
+            result.extend(_nested_mappings(value))
+    return result
+
+
+def _first_text(raw: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _safe_request_arguments(
+    raw: Any,
+    *,
+    parent_ids: tuple[str, ...],
+) -> Any:
+    if not isinstance(raw, Mapping):
+        return raw
+    result = {
+        str(key): _safe_request_arguments(value, parent_ids=())
+        for key, value in raw.items()
+        if key not in _PARENT_ID_KEYS
+    }
+    if parent_ids:
+        result["parent_filter_digest"] = _stable_digest(list(parent_ids))
+        result["parent_filter_count"] = len(parent_ids)
+    return result
+
+
+def _stable_digest(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _safe_weave_parent_filter_match(
+    objects: list[Mapping[str, Any]],
+    *,
+    expected_parent_ids: tuple[str, ...],
+) -> bool | None:
+    expected = set(expected_parent_ids)
+    if not expected:
+        return None
+    observed: list[str] = []
+    for value in objects:
+        if not (
+            value.get("id")
+            or value.get("call_id")
+            or value.get("callId")
+        ):
+            continue
+        operation = value.get("op_name") or value.get("opName")
+        if not isinstance(operation, str) or not operation.strip():
+            continue
+        parent = value.get("parent_id") or value.get("parentId")
+        if not isinstance(parent, str) or not parent.strip():
+            return False
+        observed.append(parent.strip())
+    return bool(observed) and all(item in expected for item in observed)
+
+
+def _safe_weave_operation_counts(
+    objects: list[Mapping[str, Any]],
+) -> dict[str, int] | None:
+    """Count only release-relevant operation classes without persisting rows."""
+    allowed = {
+        "Evaluation.predict_and_score",
+        "Evaluation.summarize",
+    }
+    by_id: dict[str, str] = {}
+    for value in objects:
+        call_id = value.get("id") or value.get("call_id") or value.get(
+            "callId"
+        )
+        parent_id = value.get("parent_id") or value.get(
+            "parentId"
+        )
+        operation = value.get("op_name") or value.get("opName")
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (call_id, parent_id, operation)
+        ):
+            continue
+        normalized = str(operation).strip()
+        if "/op/" in normalized:
+            normalized = normalized.rsplit("/op/", 1)[-1]
+        normalized = normalized.split(":", 1)[0]
+        label = normalized if normalized in allowed else "other"
+        prior = by_id.setdefault(str(call_id), label)
+        if prior != label:
+            return None
+    if not by_id:
+        return None
+    counts: dict[str, int] = {}
+    for label in by_id.values():
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _response_objects(value: Any, *, depth: int = 0) -> list[Mapping[str, Any]]:
