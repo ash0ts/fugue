@@ -452,6 +452,32 @@ def test_future_scripted_turns_are_not_mounted_in_the_agent_environment(
     assert "Show the evidence behind that conclusion." not in rendered
 
 
+def test_materialized_instruction_names_locked_public_resource_paths(
+    tmp_path: Path,
+) -> None:
+    profiles, preview = _preview(tmp_path)
+    destination = tmp_path / ".fugue/runtime/campaigns/campaign-one/assets"
+    lock = materialize_task_suite_lock(
+        preview,
+        profiles=profiles,
+        repo_root=tmp_path,
+        destination=destination,
+        harnesses=("claude-code",),
+    )
+    task_root = tmp_path / "materialized"
+    AuthoredTaskMaterializer().materialize(
+        load_manifest(tmp_path / lock.manifest_path),
+        task_root,
+        tmp_path / lock.public_cases_path,
+        repo_root=tmp_path,
+    )
+
+    instruction = (task_root / "task-one/instruction.md").read_text()
+    assert "Locked public resources (read-only):" in instruction
+    assert "`/workspace/resources/reference.md`" in instruction
+    assert "Locked reference." not in instruction
+
+
 def test_every_task_artifact_rejects_unknown_fields_and_versions(
     tmp_path: Path,
 ) -> None:

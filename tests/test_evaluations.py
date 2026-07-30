@@ -8,7 +8,9 @@ import types
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import httpx
 import pytest
 from test_operator import make_operator_repo
 
@@ -25,6 +27,7 @@ from fugue.bench.evaluations import (
 )
 from fugue.bench.library import experiment_from_data
 from fugue.bench.manifest import load_manifest
+from fugue.model_plane import resolve_model_route
 
 
 def _experiment(*, size: int = 8):
@@ -847,3 +850,36 @@ def test_generation_discovers_only_mcp_schemas_and_explicit_resources(
     assert "search" in tools.content
     assert "mutate" not in tools.content
     assert "secret-value" not in json.dumps([source.public() for source in sources])
+
+
+class _RecordingJudgeClient:
+    def __init__(self) -> None:
+        self.request: dict[str, Any] = {}
+
+    def post(self, url: str, **kwargs: Any) -> httpx.Response:
+        self.request = {"url": url, **kwargs}
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": '{"conditions": []}'}],
+                "usage": {"input_tokens": 8, "output_tokens": 4},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+
+def test_anthropic_judge_request_omits_deprecated_temperature() -> None:
+    client = _RecordingJudgeClient()
+    route = resolve_model_route("anthropic/claude-sonnet-5", {})
+
+    payload, usage = evaluations._post_judge(
+        client,  # type: ignore[arg-type]
+        route,
+        "test-key",
+        {},
+        "Return JSON.",
+    )
+
+    assert "temperature" not in client.request["json"]
+    assert payload == {"conditions": []}
+    assert usage == {"input_tokens": 8, "output_tokens": 4}

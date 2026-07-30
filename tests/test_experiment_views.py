@@ -9,6 +9,7 @@ from fugue.bench.library import get_experiment
 from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     EXPERIMENT_VIEW_CELL_LIMIT,
+    ExperimentViewV1,
     build_design_view,
     build_evaluation_view,
     build_progress_view,
@@ -17,7 +18,22 @@ from fugue.research.experiment_views import (
 
 _A = "a" * 64
 _FIXTURE = Path(__file__).parent / "fixtures/experiment-view-v1-design.json"
+_V3_STUDY_CONSOLE_GOLDEN = (
+    Path(__file__).parent
+    / "fixtures/experiment-view-v3-study-console-golden.json"
+)
 _REPO_ROOT = Path(__file__).parents[1]
+
+
+def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
+    payload = json.loads(
+        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+    )
+
+    parsed = experiment_view_from_dict(payload)
+    normalized = json.loads(json.dumps(parsed.to_dict()))
+
+    assert normalized == payload
 
 
 def _preview() -> dict[str, object]:
@@ -451,6 +467,7 @@ def test_design_normalizes_plain_language_dimension_names() -> None:
 
 def test_evaluation_keeps_execution_task_evaluation_and_evidence_separate() -> None:
     view = build_evaluation_view(_record())
+    assert view.schema_version == 1
     assert view.infrastructure_health == "healthy"
     assert view.evidence_eligible is True
     assert len(view.cells) == 6
@@ -817,6 +834,35 @@ def test_experiment_view_union_rejects_unknown_nested_fields() -> None:
         assert "unknown fields" in str(exc)
     else:
         raise AssertionError("unknown experiment-view fields must be rejected")
+
+
+def test_provisional_v2_evaluation_records_remain_replayable() -> None:
+    view = experiment_view_from_dict(
+        {
+            "schema_version": 2,
+            "kind": "evaluation",
+            "matrix_size": 8,
+            "completed_cells": 8,
+            "cell_limit": 8,
+            "cells": [],
+            "omitted_cells": 8,
+            "arm_totals": [],
+            "aligned_comparisons": [],
+            "mechanism_funnel": [],
+            "outcome_summaries": [],
+            "score_summaries": [],
+            "infrastructure_health": "mechanism_only",
+            "evidence_eligible": False,
+            "integrity_status": "invalid",
+            "evidence_grade": "invalid",
+            "limitations": ["Historical projection; superseded by strict V2."],
+        }
+    )
+
+    assert isinstance(view, ExperimentViewV1)
+    assert view.schema_version == 2
+    assert view.matrix_size == 8
+    assert view.omitted_cells == 8
 
 
 def test_factor_labels_are_strict_and_must_name_declared_levels() -> None:

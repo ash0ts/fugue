@@ -1,0 +1,64 @@
+{
+  "approval_state": "approved",
+  "behavioral_summary": {
+    "candidate_critical_failures": 0,
+    "critical_blockers": [
+      "result mismatch"
+    ],
+    "improved_pairs": 0,
+    "incomplete_pairs": 0,
+    "limitations": [
+      "Historical operational observations are mechanism evidence only."
+    ],
+    "mixed_pairs": 0,
+    "next_action": "Create a new Study.",
+    "recommendation": "INVALID \u2014 do not use this release result.",
+    "regressed_pairs": 0,
+    "status": "invalid",
+    "unchanged_pairs": 0
+  },
+  "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "completed_cells": 2,
+  "decision": {
+    "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "critical_blockers": [
+      "result mismatch"
+    ],
+    "evidence_grade": "invalid",
+    "gates": [],
+    "human_signoff_required": true,
+    "limitations": [
+      "The historical task outcome is invalid.",
+      "Operational observations are mechanism evidence only."
+    ],
+    "next_action": "Create a new Study.",
+    "recommendation": "INVALID \u2014 do not use this release result.",
+    "release_target": "wandb-mcp-server Python package 0.4",
+    "status": "invalid"
+  },
+  "evidence_eligible": false,
+  "evidence_grade": "invalid",
+  "evidence_links": [
+    {
+      "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "kind": "comparison_result",
+      "ref": ".fugue/results/historical/result.json",
+      "system": "fugue"
+    }
+  ],
+  "infrastructure_health": "unavailable",
+  "integrity_status": "invalid",
+  "kind": "evaluation",
+  "limitations": [
+    "The historical task outcome is invalid.",
+    "Operational observations are mechanism evidence only.",
+    "2 attempts lack reconciled required evidence."
+  ],
+  "matrix_size": 2,
+  "observed_cost_usd": 1.25,
+  "paired_cases": [],
+  "phase": "completed",
+  "preview_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_target": "wandb-mcp-server Python package 0.4",
+  "schema_version": 2
+}

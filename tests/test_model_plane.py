@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fugue.model_plane import (
     DEFAULT_MODEL,
     DEFAULT_WANDB_ENTITY,
     DEFAULT_WANDB_PROJECT,
+    EVIDENCE_DESTINATION_DIGEST_ENV,
+    EVIDENCE_DESTINATION_JSON_ENV,
+    EvidenceDestinationV1,
+    evidence_destination_environment,
     inference_project_slug,
     missing_model_env,
     missing_trace_env,
@@ -21,6 +27,7 @@ from fugue.model_plane import (
     trace_destination_identity,
     trace_entity_project,
     trace_env_defaults,
+    trace_project_environment,
     trace_project_slug,
 )
 from fugue.weave_support import weave_agents_otel_headers
@@ -160,6 +167,22 @@ def test_harness_model_route_is_explicit_and_provider_aware(
     assert receipt["bridge_required"] is (endpoint_kind == "fugue_bridge")
 
 
+@pytest.mark.parametrize("harness", ["direct", "sequence"])
+def test_non_agent_workloads_have_no_model_transport(harness: str) -> None:
+    receipt = resolve_harness_model_route(
+        resolve_model_route("wandb/zai-org/GLM-5.2", {}),
+        harness,
+    )
+
+    assert receipt == {
+        "harness": harness,
+        "wire_protocol": None,
+        "endpoint_kind": "not_applicable",
+        "upstream_host": None,
+        "bridge_required": False,
+    }
+
+
 @pytest.mark.parametrize("model", ["gpt-5", "local/foo", "openai/"])
 def test_resolve_model_route_rejects_invalid_models(model: str) -> None:
     with pytest.raises(ValueError):
@@ -203,11 +226,13 @@ def test_missing_env_separates_model_and_trace_keys() -> None:
 def test_trace_project_defaults_to_wandb_shared_project() -> None:
     assert trace_entity_project({}) == (DEFAULT_WANDB_ENTITY, DEFAULT_WANDB_PROJECT)
     assert trace_project_slug({}) == "wandb/fugue-experiments"
-    assert trace_env_defaults({}) == {
-        "WANDB_ENTITY": "wandb",
-        "WANDB_PROJECT": "fugue-experiments",
-        "WEAVE_PROJECT": "wandb/fugue-experiments",
-    }
+    defaults = trace_env_defaults({})
+    assert defaults["WANDB_ENTITY"] == "wandb"
+    assert defaults["WANDB_PROJECT"] == "fugue-experiments"
+    assert defaults["WEAVE_PROJECT"] == "wandb/fugue-experiments"
+    assert defaults["WANDB_BASE_URL"] == "https://api.wandb.ai"
+    assert defaults["WF_TRACE_SERVER_URL"] == "https://trace.wandb.ai"
+    assert defaults["WANDB_APP_BASE_URL"] == "https://wandb.ai"
     assert trace_entity_project({"WEAVE_PROJECT": "custom/project"}) == (
         "custom",
         "project",
@@ -232,6 +257,63 @@ def test_wandb_model_requests_use_an_independent_inference_project() -> None:
     assert trace_project_slug(env) == "team/experiment-project"
 
 
+def test_declared_evidence_project_overrides_legacy_project_environment() -> None:
+    env = trace_project_environment(
+        "wandb/fugue-mcp-release-qualification-v1",
+        {
+            "WANDB_ENTITY": "wandb",
+            "WANDB_PROJECT": "news-research-agent",
+            "WEAVE_PROJECT": "wandb/news-research-agent",
+            "FUGUE_WEAVE_PROJECT": "wandb/news-research-agent",
+            "WANDB_API_KEY": "secret",
+        },
+    )
+
+    assert trace_project_slug(env) == (
+        "wandb/fugue-mcp-release-qualification-v1"
+    )
+    assert env["WANDB_ENTITY"] == "wandb"
+    assert env["WANDB_PROJECT"] == "fugue-mcp-release-qualification-v1"
+    assert env["WEAVE_PROJECT"] == "wandb/fugue-mcp-release-qualification-v1"
+    assert env["FUGUE_WEAVE_PROJECT"] == (
+        "wandb/fugue-mcp-release-qualification-v1"
+    )
+    assert env["WANDB_BASE_URL"] == "https://api.wandb.ai"
+    assert env["WF_TRACE_SERVER_URL"] == "https://trace.wandb.ai"
+    assert env["WANDB_APP_BASE_URL"] == "https://wandb.ai"
+    assert len(env[EVIDENCE_DESTINATION_DIGEST_ENV]) == 64
+    assert (
+        json.loads(env[EVIDENCE_DESTINATION_JSON_ENV])["project_slug"]
+        == "wandb/fugue-mcp-release-qualification-v1"
+    )
+    assert env["WANDB_API_KEY"] == "secret"
+
+
+def test_declared_destination_overrides_legacy_test_endpoints() -> None:
+    destination = EvidenceDestinationV1(
+        entity="wandb",
+        project="fugue-mcp-release-qualification-v1",
+        api_base_url="https://api.wandb.ai",
+        trace_base_url="https://trace.wandb.ai",
+        app_base_url="https://wandb.ai",
+    )
+
+    env = evidence_destination_environment(
+        destination,
+        {
+            "FUGUE_WEAVE_BASE_URL": "https://api.wandb.test",
+            "FUGUE_WEAVE_TRACE_SERVER_URL": "https://trace.wandb.test",
+            "WANDB_APP_BASE_URL": "https://app.wandb.test",
+            "FUGUE_WEAVE_PROJECT": "wandb/news-research-agent",
+        },
+    )
+
+    assert trace_destination_identity(env) == destination.to_dict()
+    assert env["FUGUE_WEAVE_BASE_URL"] == "https://api.wandb.ai"
+    assert env["FUGUE_WEAVE_TRACE_SERVER_URL"] == "https://trace.wandb.ai"
+    assert env["WANDB_APP_BASE_URL"] == "https://wandb.ai"
+
+
 def test_wandb_inference_and_weave_credentials_are_independent() -> None:
     route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
     env = {
@@ -245,10 +327,16 @@ def test_wandb_inference_and_weave_credentials_are_independent() -> None:
     assert provider_api_key(route, env) == "cloud-model-key"
     assert trace_api_key(env) == "local-trace-key"
     assert trace_destination_identity(env) == {
+        "schema_version": 1,
         "entity": "ashah-weights-biases",
         "project": "loop-engineering-demo",
         "project_slug": "ashah-weights-biases/loop-engineering-demo",
-        "base_url": "http://api.wandb.test",
+        "api_base_url": "http://api.wandb.test",
+        "trace_base_url": "http://api.wandb.test/traces",
+        "app_base_url": "https://wandb.ai",
+        "destination_digest": trace_destination_identity(env)[
+            "destination_digest"
+        ],
     }
 
     openai = resolve_model_route("openai/gpt-5", {})
@@ -266,14 +354,41 @@ def test_local_evidence_tls_mode_is_explicitly_propagated() -> None:
     }
 
     assert trace_env_defaults(env) == {
+        "FUGUE_EVIDENCE_DESTINATION_DIGEST": trace_destination_identity(env)[
+            "destination_digest"
+        ],
+        "FUGUE_EVIDENCE_DESTINATION_JSON": json.dumps(
+            trace_destination_identity(env),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "FUGUE_WEAVE_BASE_URL": "https://api.wandb.test",
+        "FUGUE_WEAVE_PROJECT": (
+            "ashah-weights-biases/loop-engineering-demo"
+        ),
+        "FUGUE_WEAVE_TRACE_SERVER_URL": (
+            "http://host.docker.internal:6345"
+        ),
         "WANDB_ENTITY": "ashah-weights-biases",
         "WANDB_PROJECT": "loop-engineering-demo",
         "WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
         "WANDB_BASE_URL": "https://api.wandb.test",
+        "WANDB_APP_BASE_URL": "https://wandb.ai",
         "WF_TRACE_SERVER_URL": "http://host.docker.internal:6345",
         "WANDB_INSECURE_DISABLE_SSL": "true",
         "WEAVE_INSECURE_DISABLE_SSL": "true",
     }
+
+
+def test_evidence_destination_rejects_credential_bearing_endpoint() -> None:
+    with pytest.raises(ValueError, match="credential-free"):
+        EvidenceDestinationV1(
+            entity="wandb",
+            project="fugue",
+            api_base_url="https://user:secret@example.test",
+            trace_base_url="https://trace.example.test",
+            app_base_url="https://app.example.test",
+        )
 
 
 def test_split_evidence_configuration_disables_legacy_inference_key_fallback() -> None:

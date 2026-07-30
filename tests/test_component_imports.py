@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,6 +55,7 @@ args = ["other@1.0.0"]
     assert draft.required_env == ("WANDB_API_KEY",)
     assert draft.fixed_env == (("MCP_ANALYTICS_LOG_STREAM", "stderr"),)
     assert draft.allowed_hosts == ("api.wandb.test", "trace.wandb.test")
+    assert draft.source == "repo://config.toml"
     assert "other" not in json.dumps(draft.to_dict())
 
 
@@ -215,6 +217,10 @@ def test_package_mcp_lock_materializes_read_only_runtime(
     assert binding.mcp_servers[0]["command"] == (
         "/fugue-components/wandb-0-3-7/bin/server"
     )
+    assert binding.provenance[0]["kind"] == "mcp"
+    assert binding.provenance[0]["version_identity"].startswith("source:sha256:")
+    assert binding.provenance[0]["runtime_digest"] == lock.runtime_digest
+    assert binding.provenance[0]["lock_digest"] == spec.version
 
     runtime = Path(binding.mounts[0]["source"])
     (runtime / "bin" / "server").chmod(0o755)
@@ -323,6 +329,147 @@ def test_python_mcp_runtime_installs_only_from_locked_wheelhouse(
     assert len(manifest[wheel.name]) == 64
 
 
+def test_python_runtime_digest_ignores_installer_local_metadata(
+    tmp_path: Path,
+) -> None:
+    digests: list[str] = []
+    for index in (1, 2):
+        runtime = tmp_path / f"runtime-{index}"
+        site = runtime / "site"
+        package = site / "example"
+        metadata = site / "example-1.0.dist-info"
+        scripts = site / "bin"
+        package.mkdir(parents=True)
+        metadata.mkdir()
+        scripts.mkdir()
+        (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+        script = scripts / "example"
+        script.write_text(
+            f"#!{tmp_path}/checkout-{index}/.venv/bin/python3\n"
+            "from example import VALUE\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        (metadata / "METADATA").write_text(
+            "Name: example\nVersion: 1.0\n",
+            encoding="utf-8",
+        )
+        (metadata / "uv_cache.json").write_text(
+            json.dumps({"timestamp": index}),
+            encoding="utf-8",
+        )
+        (metadata / "direct_url.json").write_text(
+            json.dumps({"url": f"file:///tmp/build-{index}/example.whl"}),
+            encoding="utf-8",
+        )
+        (metadata / "RECORD").write_text(
+            "bin/example,sha256=installer-local,1\n"
+            "example/__init__.py,,\n"
+            "example-1.0.dist-info/METADATA,,\n"
+            "example-1.0.dist-info/uv_cache.json,,\n"
+            "example-1.0.dist-info/direct_url.json,,\n"
+            "example-1.0.dist-info/RECORD,,\n",
+            encoding="utf-8",
+        )
+
+        component_imports._normalize_python_install_metadata(site)
+        digests.append(component_imports._runtime_directory_digest(runtime))
+
+        assert not (metadata / "uv_cache.json").exists()
+        assert not (metadata / "direct_url.json").exists()
+        assert "uv_cache.json" not in (metadata / "RECORD").read_text()
+        assert "direct_url.json" not in (metadata / "RECORD").read_text()
+        assert script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
+
+    assert digests[0] == digests[1]
+
+
+def test_mcp_lock_identity_is_portable_across_checkout_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        component_imports,
+        "_materialize_stdio_runtime",
+        lambda draft, repo_root, *, acknowledge_package_code, runtime_platform: (
+            "sha256:" + "a" * 64,
+            (f"/fugue-components/{draft.id}/bin/server",),
+        ),
+    )
+    monkeypatch.setattr(
+        component_imports,
+        "_managed_python_probe_command",
+        lambda runtime_source, *, runtime_platform, required_env, fixed_env, allowed_hosts: (
+            "/usr/bin/docker",
+            "probe",
+        ),
+    )
+    monkeypatch.setattr(
+        component_imports,
+        "_probe_stdio_manifest",
+        lambda draft: (
+            (
+                {
+                    "name": "query_wandb",
+                    "description": "Query W&B evidence.",
+                    "input_schema": {"type": "object"},
+                },
+            ),
+            {"name": "wandb", "version": "0.4.0"},
+        ),
+    )
+
+    locks = []
+    versions = []
+    for checkout_name in ("checkout-a", "checkout-b"):
+        repo_root = tmp_path / checkout_name
+        config = repo_root / "config" / "mcp.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "wandb": {
+                            "command": "uvx",
+                            "args": [
+                                "--from",
+                                "wandb-mcp-server==0.4.0",
+                                "wandb-mcp-server",
+                            ],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        draft = import_mcp_config(
+            config,
+            server="wandb",
+            import_id="wandb-0-4",
+            repo_root=repo_root,
+        )
+        assert draft.source == "repo://config/mcp.json"
+        # Existing V1 drafts recorded the checkout's absolute config path.
+        # Locking them again must migrate provenance into the portable form.
+        legacy_draft = draft.to_dict()
+        legacy_draft["source"] = config.resolve().as_posix()
+        (repo_root / component_imports.MCP_DRAFT_ROOT / "wandb-0-4.json").write_text(
+            json.dumps(legacy_draft, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        lock = lock_mcp_import(
+            "wandb-0-4",
+            repo_root,
+            acknowledge_package_code=True,
+            target_platform="linux/amd64",
+        )
+        locks.append(lock.to_dict())
+        versions.append(load_integration("wandb-0-4", repo_root).version)
+
+    assert locks[0] == locks[1]
+    assert versions[0] == versions[1]
+
+
 def test_mcp_add_accepts_public_git_source_at_full_commit(tmp_path: Path) -> None:
     commit = "a2bae7271323ac43262ffb73454b0aff01ddc808"
     draft = add_mcp_command(
@@ -348,6 +495,30 @@ def test_mcp_add_accepts_public_git_source_at_full_commit(tmp_path: Path) -> Non
                 "wandb-mcp-server",
             ],
             repo_root=tmp_path,
+        )
+
+
+def test_git_mcp_lock_reports_unpublished_commit_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise subprocess.CalledProcessError(128, command, stderr="unknown revision")
+
+    monkeypatch.setattr(component_imports.subprocess, "run", run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="push the reviewed commit before locking it",
+    ):
+        component_imports._build_exact_git_wheel(
+            "git+https://github.com/wandb/wandb-mcp-server@"
+            "571ee85eedd73e06bd414316f73d732c398535d6"
         )
 
 

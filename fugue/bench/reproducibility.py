@@ -55,7 +55,9 @@ class RunSnapshotV1:
     publication_schema_version: int = 1
     evaluation_asset_lock_sha256: str = ""
     cohort_id: str = ""
+    selection_lock_sha256: str = ""
     treatment_selection_sha256: str = ""
+    intervention_selection_sha256: str = ""
     snapshot_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,7 +92,9 @@ def build_run_snapshot(
     env: Mapping[str, str],
     bridge_runtime: Mapping[str, Any] | None = None,
     evaluation_asset_lock_sha256: str = "",
+    selection_lock_sha256: str = "",
     treatment_selection_sha256: str = "",
+    intervention_selection_sha256: str = "",
 ) -> RunSnapshotV1:
     secret_names = {
         value: name
@@ -261,6 +265,8 @@ def build_run_snapshot(
     planned_matrix = tuple(
         {
             "cell_id": cell.id,
+            "attempt_id": cell.attempt_id,
+            "attempt_identity": cell.attempt_identity,
             "candidate_id": cell.candidate_id,
             "execution_fingerprint": cell.execution_fingerprint,
             "execution_kind": cell.execution_kind,
@@ -268,6 +274,9 @@ def build_run_snapshot(
             "trial_index": cell.trial_index,
             "workload_id": cell.workload_id,
             "task_id": cell.task_id,
+            "harness": cell.harness,
+            "variant_id": cell.variant_id,
+            "context_system_id": cell.context_system_id,
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,
             "config_path": cell.config_path.as_posix(),
@@ -286,6 +295,11 @@ def build_run_snapshot(
             "planned_prediction_count": _planned_prediction_count(
                 cell,
                 jobs_by_execution.get(cell.execution_fingerprint),
+            ),
+            **(
+                {"approved_comparison": cell.approved_comparison}
+                if cell.approved_comparison
+                else {}
             ),
         }
         for cell in cells
@@ -364,7 +378,9 @@ def build_run_snapshot(
         runtime_locks=runtime_locks,
         evaluation_asset_lock_sha256=evaluation_asset_lock_sha256,
         cohort_id=str(request.get("cohort_id") or ""),
+        selection_lock_sha256=selection_lock_sha256,
         treatment_selection_sha256=treatment_selection_sha256,
+        intervention_selection_sha256=intervention_selection_sha256,
     )
     serialized = json.dumps(base.to_dict(), sort_keys=True, default=str)
     for name, value in env.items():

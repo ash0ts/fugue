@@ -178,7 +178,8 @@ def test_public_tasks_lock_evidence_without_private_label_leakage() -> None:
         == [
             {
                 "locked_relative": (
-                    "examples/comparisons/wandb-mcp-maintenance/evidence.lock.json"
+                    ".fugue/runtime/comparison-inputs/resources/"
+                    f"{task['attachments'][0]['sha256']}/evidence.lock.json"
                 ),
                 "sha256": task["attachments"][0]["sha256"],
                 "target": "/workspace/resources/evidence.lock.json",

@@ -665,9 +665,10 @@ def wandb_doctor(
                 include_stopped=True,
             ).result()
             if str(item.sandbox_id) == sandbox_id
+            and not _wandb_sandbox_is_terminal(item)
         ]
         if remaining:
-            raise RuntimeError("W&B doctor left a sandbox behind")
+            raise RuntimeError("W&B doctor left an active sandbox behind")
         return {
             "backend": "wandb-serverless",
             "lock_digest": lock.lock_digest,
@@ -795,6 +796,7 @@ class FugueWandbEnvironment(_WandbEnvironment):  # type: ignore[misc]
                             include_stopped=True,
                         ).result()
                         if str(item.sandbox_id) == sandbox_id
+                        and not _wandb_sandbox_is_terminal(item)
                     ]
                 )
                 if not remaining:
@@ -803,7 +805,7 @@ class FugueWandbEnvironment(_WandbEnvironment):  # type: ignore[misc]
                     await asyncio.sleep(1)
             if remaining:
                 raise RuntimeError(
-                    f"W&B Serverless sandbox {sandbox_id} was not deleted"
+                    f"W&B Serverless sandbox {sandbox_id} remains active"
                 )
         self._write_attestation(
             state="deleted",
@@ -842,6 +844,13 @@ class FugueWandbEnvironment(_WandbEnvironment):  # type: ignore[misc]
             self.trial_paths.artifacts_dir / WANDB_ATTESTATION_NAME,
             record,
         )
+
+
+def _wandb_sandbox_is_terminal(sandbox: Any) -> bool:
+    """Treat terminal W&B records as disposed compute, not active orphans."""
+
+    status = str(getattr(sandbox, "status", "")).strip().casefold()
+    return status in {"completed", "failed", "terminated"}
 
 
 def _remote_secret_env(

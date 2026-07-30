@@ -25,6 +25,7 @@ from fugue.bench.export import (
     write_jsonl,
 )
 from fugue.bench.operator import OperatorService
+from fugue.mcp_evidence import safe_graphql_event_arguments
 
 
 def _write_export_fixture(tmp_path: Path) -> Path:
@@ -91,6 +92,18 @@ def _write_export_fixture(tmp_path: Path) -> Path:
                     "bridge_required": False,
                 },
                 "trace_project": "test/fugue",
+                "agent_runtime": {
+                    "image": "fugue-agent:locked",
+                    "image_id": "sha256:" + "a" * 64,
+                },
+                "task_runtime": {
+                    "image": "fugue-task:locked",
+                    "image_id": "sha256:" + "b" * 64,
+                },
+                "sandbox_attestation": {
+                    "schema_version": 1,
+                    "attestation_digest": "c" * 64,
+                },
                 "weave_agent_name": "hermes-agent",
                 "weave_conversation_ids": ["session-1"],
                 "native_session_ids": ["session-1"],
@@ -154,6 +167,12 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["model_transport"]["wire_protocol"] == "chat_completions"
     assert row["model_transport"]["endpoint_kind"] == "provider_direct"
     assert row["trace_project"] == "test/fugue"
+    assert row["agent_runtime_image_id"] == "sha256:" + "a" * 64
+    assert row["task_runtime_image_id"] == "sha256:" + "b" * 64
+    assert row["sandbox_attestation_digest"] == "c" * 64
+    assert row["sandbox_attestation"]["schema_version"] == 1
+    assert "privacy_scan_complete" not in row
+    assert "sandbox_cleanup_verified" not in row
     assert row["weave_agent_name"] == "hermes-agent"
     assert row["weave_conversation_ids"] == ["session-1"]
     assert row["native_session_ids"] == ["session-1"]
@@ -248,9 +267,9 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.failed = exception
 
     fake_weave = SimpleNamespace(
-        init=lambda project: calls.append(
-            ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
-        ),
+            init=lambda project, **kwargs: calls.append(
+                ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
+            ),
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
     )
@@ -310,6 +329,8 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             "fugue.experiment_id": "memory-ab",
             "fugue.workload_id": "coding",
             "fugue.record_type": "trial",
+            "fugue.variant_id": "rag-bm25",
+            "fugue.candidate_id": "candidate-1",
         }
         assert logger.dataset.rows == [
             {
@@ -362,7 +383,10 @@ def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     monkeypatch.setitem(
         sys.modules,
         "weave",
-        SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
+        SimpleNamespace(
+            init=lambda project, **kwargs: None,
+            EvaluationLogger=FakeLogger,
+        ),
     )
     rows = [
         {
@@ -588,6 +612,7 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
         candidate_id="candidate-agent",
         name="memory | coding | agent-scope",
         examples=1,
+        project="entity/project",
         url="https://wandb.test/evaluations/live",
         agent_predictions=1,
         linked_agent_predictions=1,
@@ -597,6 +622,7 @@ def test_export_persists_direct_evaluations_without_replacing_live_agent_runs(
         candidate_id="candidate-direct",
         name="memory | continuity | direct-scope",
         examples=4,
+        project="entity/project",
         url="https://wandb.test/evaluations/direct-v1",
         evaluation_ref="weave:///direct-v1",
         direct_predictions=4,
@@ -858,6 +884,7 @@ def test_export_persists_publication_failures_without_clobbering_agent_metadata(
         candidate_id="candidate-agent",
         name="memory | coding | agent-scope",
         examples=1,
+        project="entity/project",
         url="https://wandb.test/evaluations/live",
         agent_predictions=1,
         linked_agent_predictions=1,
@@ -929,7 +956,7 @@ def test_weave_publication_shares_dataset_across_candidates(
         sys.modules,
         "weave",
         SimpleNamespace(
-            init=lambda project: None,
+            init=lambda project, **kwargs: None,
             Dataset=FakeDataset,
             EvaluationLogger=FakeLogger,
         ),
@@ -981,8 +1008,19 @@ def test_weave_publication_shares_dataset_across_candidates(
             "task_id": "task-a",
         }
     ]
-    assert loggers[0].name == loggers[1].name
-    assert loggers[0].eval_attributes == loggers[1].eval_attributes
+    assert {logger.name for logger in loggers} == {
+        "memory-ab | coding | codex | none",
+        "memory-ab | coding | codex | rag-bm25",
+    }
+    assert len(
+        {
+            logger.eval_attributes["fugue.evaluation_scope_id"]
+            for logger in loggers
+        }
+    ) == 1
+    assert {
+        logger.eval_attributes["fugue.candidate_id"] for logger in loggers
+    } == {"candidate-none", "candidate-rag"}
     assert loggers[0].scorers == loggers[1].scorers
     assert {logger.model["name"] for logger in loggers} == {
         "codex__none__test-model",
@@ -992,6 +1030,20 @@ def test_weave_publication_shares_dataset_across_candidates(
         "none",
         "rag-bm25",
     }
+
+
+def test_weave_predefined_scorer_names_match_string_scorer_normalization() -> None:
+    assert export._weave_predefined_scorer_names(
+        [
+            "comparison.deterministic.answer_present",
+            "comparison_deterministic_expected_values",
+            "3rd-party.score",
+        ]
+    ) == [
+        "comparisondeterministicanswer_present",
+        "comparison_deterministic_expected_values",
+        "C3rdpartyscore",
+    ]
 
 
 def test_weave_publication_groups_repeated_trials_under_one_example(
@@ -1025,7 +1077,7 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
         sys.modules,
         "weave",
         SimpleNamespace(
-            init=lambda project: None,
+            init=lambda project, **kwargs: None,
             Dataset=FakeDataset,
             EvaluationLogger=FakeLogger,
         ),
@@ -1069,15 +1121,34 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         def __init__(self, *, name, rows) -> None:
             self.name = name
             self.rows = rows
+            self.ref = SimpleNamespace(
+                uri="weave:///entity/project/object/tasks:dataset-v1"
+            )
 
     class FakePrediction:
-        def __init__(self, call_id: str) -> None:
+        def __init__(self, call_id: str, evaluate_call) -> None:
+            self.evaluate_call = evaluate_call
             self.predict_and_score_call = SimpleNamespace(
                 id=call_id,
                 project_id="entity/project",
+                parent_id=evaluate_call.id,
+                trace_id=evaluate_call.trace_id,
                 summary=None,
+                ref=SimpleNamespace(
+                    uri=f"weave:///entity/project/call/{call_id}"
+                ),
+                ui_url=f"https://wandb.test/calls/{call_id}",
             )
-            self.predict_call = SimpleNamespace(id=f"{call_id}-model")
+            self.predict_call = SimpleNamespace(
+                id=f"{call_id}-model",
+                project_id="entity/project",
+                parent_id=call_id,
+                trace_id=evaluate_call.trace_id,
+                ref=SimpleNamespace(
+                    uri=f"weave:///entity/project/call/{call_id}-model"
+                ),
+                ui_url=f"https://wandb.test/calls/{call_id}-model",
+            )
             self.output = None
             self.scores = {}
             self.finished = False
@@ -1092,23 +1163,39 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             self.finished = True
 
     class FakeLogger:
-        ui_url = "https://wandb.test/evaluations/live"
-
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
+            self.ui_url = None
             self._pseudo_evaluation = SimpleNamespace(
-                ref=SimpleNamespace(uri="weave:///entity/project/object/eval:shared")
+                dataset=self.dataset,
+                ref=SimpleNamespace(
+                    uri="weave:///entity/project/object/eval:shared"
+                ),
+            )
+            self._evaluate_call = SimpleNamespace(
+                id="evaluation-root-1",
+                project_id="entity/project",
+                parent_id=None,
+                trace_id="weave-trace-1",
+                inputs={"self": self._pseudo_evaluation},
+                ref=SimpleNamespace(
+                    uri="weave:///entity/project/call/evaluation-root-1"
+                ),
             )
             self.summarized = False
             loggers.append(self)
 
         def log_prediction(self, inputs):
-            prediction = FakePrediction(f"predict-{len(predictions) + 1}")
+            prediction = FakePrediction(
+                f"predict-{len(predictions) + 1}",
+                self._evaluate_call,
+            )
             predictions.append(prediction)
             return prediction
 
         def log_summary(self) -> None:
             self.summarized = True
+            self.ui_url = "https://wandb.test/evaluations/live"
 
         def fail(self, exception) -> None:
             raise AssertionError(exception)
@@ -1168,9 +1255,21 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                         "harness": "codex",
                         "task_id": "task-a",
                         "candidate_id": "candidate-a",
+                        "attempt_id": cell.attempt_id,
+                        "execution_fingerprint": "execution-a",
                         "comparison_example_id": "example-a",
                         "trial_index": 1,
                         "eval_predict_and_score_call_id": call_id,
+                        "weave_call_id": "agent-root-call-1",
+                        "weave_call_parent_id": call_id,
+                        "weave_call_project_id": "entity/project",
+                        "weave_call_trace_id": "weave-trace-1",
+                        "weave_call_ref": (
+                            "weave:///entity/project/call/agent-root-call-1"
+                        ),
+                        "weave_call_url": (
+                            "https://wandb.test/calls/agent-root-call-1"
+                        ),
                     }
                 ],
             }
@@ -1201,6 +1300,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     )
     overlay = coordinator.begin_cell(cell)
     assert overlay == {
+        "FUGUE_ATTEMPT_ID": cell.attempt_id,
         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": "predict-1",
         "FUGUE_WEAVE_EVAL_PROJECT_ID": "entity/project",
         "FUGUE_WEAVE_EVAL_NAME": loggers[0].name,
@@ -1225,7 +1325,47 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     )
     assert live_row["evaluation_prediction_latency_sec"] >= 0
     assert live_row["eval_predict_and_score_call_id"] == "predict-1"
+    assert live_row["eval_predict_and_score_ref"] == (
+        "weave:///entity/project/call/predict-1"
+    )
+    assert live_row["eval_predict_and_score_url"] == (
+        "https://wandb.ai/entity/project/weave/calls/predict-1"
+    )
     assert live_row["weave_prediction_call_id"] == "predict-1-model"
+    assert live_row["weave_prediction_ref"] == (
+        "weave:///entity/project/call/predict-1-model"
+    )
+    assert live_row["weave_prediction_url"] == (
+        "https://wandb.ai/entity/project/weave/calls/predict-1-model"
+    )
+    assert live_row["weave_evaluation_id"] == (
+        "weave:///entity/project/object/eval:shared"
+    )
+    assert live_row["weave_evaluation_url"] == (
+        "https://wandb.ai/entity/project/weave/calls/evaluation-root-1"
+    )
+    assert live_row["weave_dataset_id"] == (
+        "weave:///entity/project/object/tasks:dataset-v1"
+    )
+    assert live_row["weave_dataset_url"] == (
+        "https://wandb.ai/entity/project/weave/objects/tasks/versions/dataset-v1"
+    )
+    assert live_row["otel_trace_id"] == "a" * 32
+    assert live_row["otel_root_span_id"] == "b" * 16
+    assert live_row["weave_agent_root_call_id"] == "agent-root-call-1"
+    assert live_row["weave_agent_root_ref"] == (
+        "weave:///entity/project/call/agent-root-call-1"
+    )
+    assert live_row["weave_agent_root_url"] == (
+        "https://wandb.ai/entity/project/weave/calls/agent-root-call-1"
+    )
+    assert live_row["weave_agent_root_call_id"] != live_row["otel_root_span_id"]
+    assert live_row["evaluation_root_object_verified"] is True
+    assert live_row["dataset_version_object_verified"] is True
+    assert live_row["eval_predict_and_score_object_verified"] is True
+    assert live_row["weave_prediction_object_verified"] is True
+    assert live_row["evaluation_prediction_graph_verified"] is True
+    assert live_row["agent_graph_verified"] is True
     assert live_row["evaluation_judge_status"] == "not_requested"
     assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
     assert (
@@ -1246,6 +1386,645 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         .splitlines()
     ]
     assert statuses == ["pending", "prediction_open", "trace_linked", "finalized"]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "evaluation_input",
+        "dataset_owner",
+        "predict_and_score_parent",
+        "prediction_parent",
+        "prediction_project",
+        "prediction_trace",
+    ),
+)
+def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
+    drift: str,
+) -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(
+            uri="weave:///entity/project/object/tasks:dataset-v1"
+        )
+    )
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri="weave:///entity/project/object/eval:v1"),
+    )
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id="weave-trace",
+        inputs={"self": evaluation},
+        ref=SimpleNamespace(
+            uri="weave:///entity/project/call/evaluation-root"
+        ),
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=evaluation_call.trace_id,
+        ref=SimpleNamespace(
+            uri="weave:///entity/project/call/predict-and-score"
+        ),
+        ui_url="https://wandb.test/calls/predict-and-score",
+    )
+    predict = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=evaluation_call.trace_id,
+        ref=SimpleNamespace(uri="weave:///entity/project/call/prediction"),
+        ui_url="https://wandb.test/calls/prediction",
+    )
+    logger = SimpleNamespace(
+        _pseudo_evaluation=evaluation,
+        _evaluate_call=evaluation_call,
+        ui_url="https://wandb.test/calls/evaluation-root",
+    )
+    prediction = SimpleNamespace(
+        evaluate_call=evaluation_call,
+        predict_and_score_call=predict_and_score,
+        predict_call=predict,
+    )
+    if drift == "evaluation_input":
+        evaluation_call.inputs = {"self": SimpleNamespace(dataset=dataset)}
+    elif drift == "dataset_owner":
+        evaluation.dataset = SimpleNamespace(
+            ref=SimpleNamespace(
+                uri="weave:///entity/project/object/other-dataset:v1"
+            )
+        )
+    elif drift == "predict_and_score_parent":
+        predict_and_score.parent_id = "other-evaluation"
+    elif drift == "prediction_parent":
+        predict.parent_id = "other-prediction"
+    elif drift == "prediction_project":
+        predict.project_id = "entity/other"
+    else:
+        predict.trace_id = "other-trace"
+
+    row: dict[str, object] = {}
+    export._apply_call_evidence(
+        row,
+        prefix="eval_predict_and_score",
+        call=predict_and_score,
+        project=project,
+    )
+    export._apply_call_evidence(
+        row,
+        prefix="weave_prediction",
+        call=predict,
+        project=project,
+    )
+    export._verify_live_evaluation_graph(
+        row,
+        logger=logger,
+        dataset=dataset,
+        prediction=prediction,
+        project=project,
+    )
+
+    assert row["evaluation_prediction_graph_verified"] is False
+    assert row["evaluation_prediction_graph_error"]
+
+
+def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    prediction_call = SimpleNamespace(
+        id="prediction-call",
+        project_id=project,
+        parent_id="predict-and-score",
+        trace_id=trace_id,
+    )
+    created: list[dict[str, object]] = []
+    finished: list[tuple[object, object]] = []
+
+    class FakeClient:
+        def create_call(
+            self,
+            op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            created.append(
+                {
+                    "op": op,
+                    "inputs": inputs,
+                    "parent": parent,
+                    "attributes": attributes,
+                    "display_name": display_name,
+                    "use_stack": use_stack,
+                    "id": _call_id_override,
+                }
+            )
+            return SimpleNamespace(
+                id=_call_id_override,
+                parent_id=parent.id,
+                project_id=project,
+                trace_id=parent.trace_id,
+                ref=SimpleNamespace(
+                    uri=f"weave:///entity/project/call/{_call_id_override}"
+                ),
+                ui_url=f"https://wandb.test/calls/{_call_id_override}",
+            )
+
+        def finish_call(self, call, output=None):
+            finished.append((call, output))
+
+    client = FakeClient()
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: client)
+    cell = PlannedCell(
+        id="cell-bridge",
+        run_id="run-bridge",
+        run_name="bridge",
+        workload_id="harbor",
+        task_id="task-bridge",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-bridge",
+        candidate_id="candidate-bridge",
+        execution_fingerprint="runtime-bridge",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+    )
+    row: dict[str, object] = {}
+    bridge, bridge_client, traceparent = coordinator._open_agent_bridge(
+        cell=cell,
+        row=row,
+        prediction=SimpleNamespace(predict_call=prediction_call),
+    )
+
+    assert bridge_client is client
+    assert created[0]["parent"] is prediction_call
+    assert created[0]["use_stack"] is False
+    assert len(str(created[0]["id"])) == 16
+    assert traceparent == f"00-{trace_id}-{bridge.id}-01"
+    assert row["weave_agent_bridge_parent_id"] == prediction_call.id
+    assert row["weave_agent_bridge_trace_id"] == trace_id
+    assert row["weave_agent_bridge_object_verified"] is True
+
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(),
+        bridge_call=bridge,
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+    terminal_row: dict[str, object] = {}
+    coordinator._finish_agent_bridge(
+        active,
+        status="linked",
+        terminal_row=terminal_row,
+    )
+    coordinator._finish_agent_bridge(
+        active,
+        status="linked",
+        terminal_row=terminal_row,
+    )
+    assert finished == [(bridge, {"status": "linked"})]
+    assert row["weave_agent_bridge_close_status"] == "linked"
+    assert row["weave_agent_bridge_closed_verified"] is True
+    assert terminal_row["weave_agent_bridge_close_status"] == "linked"
+    assert terminal_row["weave_agent_bridge_closed_verified"] is True
+
+    class FailingClient:
+        @staticmethod
+        def finish_call(call, output=None):
+            raise RuntimeError("transport unavailable")
+
+    failed_row: dict[str, object] = {}
+    failed_active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(),
+        bridge_call=bridge,
+        bridge_client=FailingClient(),
+        row=failed_row,
+        opened_monotonic=0.0,
+    )
+    coordinator._finish_agent_bridge(failed_active, status="cancelled")
+    assert failed_row["weave_agent_bridge_closed_verified"] is False
+    assert failed_row["weave_agent_bridge_close_error"] == "RuntimeError"
+
+
+def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
+    project = "entity/project"
+    weave_trace_id = "019fb117-8955-7662-8225-67228a32b976"
+    prediction_call = SimpleNamespace(
+        id="prediction-call",
+        project_id=project,
+        parent_id="predict-and-score",
+        trace_id=weave_trace_id,
+    )
+
+    class FakeClient:
+        def create_call(
+            self,
+            op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            return SimpleNamespace(
+                id=_call_id_override,
+                parent_id=parent.id,
+                project_id=project,
+                trace_id=parent.trace_id,
+                ref=SimpleNamespace(
+                    uri=f"weave:///{project}/call/{_call_id_override}"
+                ),
+            )
+
+        @staticmethod
+        def finish_call(call, output=None):
+            return None
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=FakeClient)
+    cell = PlannedCell(
+        id="cell-uuid-bridge",
+        run_id="run-uuid-bridge",
+        run_name="uuid-bridge",
+        workload_id="harbor",
+        task_id="task-uuid-bridge",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-uuid-bridge",
+        candidate_id="candidate-uuid-bridge",
+        execution_fingerprint="runtime-uuid-bridge",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+    )
+    row: dict[str, object] = {}
+
+    bridge, _, traceparent = coordinator._open_agent_bridge(
+        cell=cell,
+        row=row,
+        prediction=SimpleNamespace(predict_call=prediction_call),
+    )
+
+    compact = weave_trace_id.replace("-", "")
+    assert traceparent == f"00-{compact}-{bridge.id}-01"
+    assert row["weave_agent_bridge_trace_id"] == weave_trace_id
+    assert row["weave_agent_bridge_otel_trace_id"] == compact
+
+
+def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
+    project = "entity/project"
+    weave_trace_id = "019fb117-8955-7662-8225-67228a32b976"
+    bridge = SimpleNamespace(
+        id="bridge123456789",
+        project_id=project,
+        parent_id="prediction",
+        trace_id=weave_trace_id,
+    )
+    created: list[dict[str, object]] = []
+    finished: list[tuple[object, object]] = []
+
+    class FakeClient:
+        def create_call(
+            self,
+            op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            created.append(
+                {
+                    "op": op,
+                    "inputs": inputs,
+                    "parent": parent,
+                    "attributes": attributes,
+                    "display_name": display_name,
+                    "use_stack": use_stack,
+                    "id": _call_id_override,
+                }
+            )
+            return SimpleNamespace(
+                id=_call_id_override,
+                parent_id=parent.id,
+                project_id=project,
+                trace_id=parent.trace_id,
+            )
+
+        def finish_call(self, call, output=None):
+            finished.append((call, output))
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "run_key": "run-a:harbor:trial:task-a:claude-code:none:candidate:t001",
+        "harness": "claude-code",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "trace_project": project,
+        "status": "passed",
+        "agent_response_sha256": "f" * 64,
+    }
+    root = {
+        "conversation_id": "native-session",
+        "trace_id": weave_trace_id.replace("-", ""),
+        "span_id": "b" * 16,
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(),
+        bridge_call=bridge,
+        bridge_client=FakeClient(),
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    coordinator._materialize_native_agent_call(
+        active=active,
+        row=row,
+        root=root,
+    )
+
+    assert created[0]["parent"] is bridge
+    assert created[0]["use_stack"] is False
+    assert created[0]["attributes"]["gen_ai.operation.name"] == "invoke_agent"
+    assert created[0]["attributes"]["fugue.attempt_id"] == "a" * 64
+    assert len(str(created[0]["id"])) == 36
+    assert str(export.uuid.UUID(str(created[0]["id"]))) == created[0]["id"]
+    assert created[0]["id"] != root["span_id"]
+    assert finished[0][0].id == created[0]["id"]
+    assert row["weave_agent_root_call_id"] == created[0]["id"]
+    assert row["weave_agent_root_call_materialization_source"] == (
+        "verified_native_otel_root_v1"
+    )
+    assert row["weave_agent_root_call_otel_span_id"] == "b" * 16
+
+
+def test_verified_native_claude_root_requires_bridge_otel_parent() -> None:
+    compact_trace = "a" * 32
+    row = {
+        "harness": "claude-code",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "planned_conversation_id": "planned",
+        "conversation_correlation_verified": True,
+        "weave_conversation_ids": ["native"],
+        "trace_id": compact_trace,
+        "root_span_id": "b" * 16,
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_bridge_otel_trace_id": compact_trace,
+        "weave_root_spans": [
+            {
+                "conversation_id": "native",
+                "trace_id": compact_trace,
+                "span_id": "b" * 16,
+                "otel_parent_span_id": "other-bridge",
+                "attempt_id": "a" * 64,
+                "execution_fingerprint": "e" * 64,
+                "eval_predict_and_score_call_id": "predict-and-score",
+            }
+        ],
+    }
+
+    assert export._verified_native_otel_root(row, "predict-and-score") is None
+    assert row["trace_link_status"] == "otel_ancestry_mismatch"
+    assert "Evaluation bridge" in row["trace_link_error"]
+
+
+def test_claude_trace_is_remotely_verified_before_evaluation_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    native_root = {
+        "conversation_id": "native-session",
+        "trace_id": "a" * 32,
+        "span_id": "b" * 16,
+        "weave_call_id": "native-call",
+    }
+
+    class FakeClient:
+        @staticmethod
+        def finish_call(call, output=None):
+            events.append("bridge-finished")
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator._wait_for_trace = lambda row, **kwargs: {}
+    coordinator._append_event = lambda *args, **kwargs: None
+    coordinator._record_verified_agent_root = (
+        lambda **kwargs: (
+            events.append("verified"),
+            kwargs["row"].update(
+                {
+                    "trace_link_status": "linked",
+                    "trace_link_error": None,
+                }
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        export,
+        "_verified_native_otel_root",
+        lambda row, call_id: native_root,
+    )
+    monkeypatch.setattr(
+        export,
+        "_verified_evaluation_root",
+        lambda row, call_id: native_root,
+    )
+    monkeypatch.setattr(
+        export,
+        "_verify_authoritative_agent_graph",
+        lambda row: row.update(
+            {"weave_authoritative_call_graph_verified": True}
+        ),
+    )
+    cell = SimpleNamespace(
+        harness="claude-code",
+        id="cell-a",
+        candidate_id="candidate-a",
+    )
+    row = {
+        "agent_execution_status": "completed",
+        "execution_kind": "agent",
+        "harness": "claude-code",
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            predict_and_score_call=SimpleNamespace(summary={})
+        ),
+        bridge_call=SimpleNamespace(id="bridge"),
+        bridge_client=FakeClient(),
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    coordinator._prepare_terminal_agent_trace(
+        active=active,
+        cell=cell,
+        row=row,
+        predict_and_score_call_id="predict-and-score",
+    )
+
+    assert events == ["bridge-finished", "verified"]
+    assert export._evaluation_output(row)["trace_link_status"] == "linked"
+    assert "remote_verification_pending" not in json.dumps(row)
+
+
+def test_live_evaluation_marks_exact_prediction_ops_eager() -> None:
+    def predict_and_score() -> None:
+        return None
+
+    def predict() -> None:
+        return None
+
+    predict_and_score.eager_call_start = False
+    predict.eager_call_start = False
+    logger_type = type("EvaluationLogger", (), {})
+    logger_type.__module__ = "weave.evaluation.eval_imperative"
+    logger = logger_type()
+    logger._pseudo_evaluation = SimpleNamespace(
+        predict_and_score=predict_and_score
+    )
+    logger._context_predict_method = predict
+
+    assert export._enable_eager_evaluation_starts(logger) is True
+    assert predict_and_score.eager_call_start is True
+    assert predict.eager_call_start is True
+
+
+def test_real_live_evaluation_fails_closed_without_eager_ops() -> None:
+    logger_type = type("EvaluationLogger", (), {})
+    logger_type.__module__ = "weave.evaluation.eval_imperative"
+    logger = logger_type()
+    logger._pseudo_evaluation = SimpleNamespace()
+    logger._context_predict_method = None
+
+    assert export._enable_eager_evaluation_starts(logger) is False
+
+
+def test_claude_begin_failure_closes_entered_prediction(
+    tmp_path: Path,
+) -> None:
+    class FakeDataset:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class FakePrediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="predict-and-score",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.exit_args = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_args.append((exc_type, exc, traceback))
+
+    prediction = FakePrediction()
+
+    class FakeLogger:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+        def log_prediction(self, inputs):
+            return prediction
+
+    cell = PlannedCell(
+        id="cell-claude-start-failure",
+        run_id="run-claude-start-failure",
+        run_name="claude start failure",
+        workload_id="coding",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/missing/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Evaluation graph is unresolved before Claude execution",
+    ):
+        coordinator.begin_cell(cell)
+
+    assert len(prediction.exit_args) == 1
+    assert prediction.exit_args[0][0] is RuntimeError
+    assert coordinator._predictions == {}
+    statuses = [
+        json.loads(line)["status"]
+        for line in (
+            tmp_path
+            / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert statuses == ["pending", "prediction_start_failed"]
 
 
 def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
@@ -1593,6 +2372,8 @@ def test_direct_diagnostic_does_not_open_or_synthesize_agent_prediction(
     assert coordinator.begin_cell(cell) is None
     assert coordinator.finalize().published == 0
     assert planned["execution_kind"] == "provider_diagnostic"
+    assert planned["applicable"] is True
+    assert planned["skip_reason"] is None
     assert planned["trace_link_status"] == "not_applicable"
     assert "weave_agent_name" not in planned
     assert "planned_conversation_id" not in planned
@@ -1845,6 +2626,403 @@ def test_gateway_event_log_rejects_paths_outside_runtime(tmp_path: Path) -> None
     assert summary["context_gateway_tool_call_count"] == 0
 
 
+def test_mcp_proxy_events_export_exact_tool_and_project_scope(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "tool": "query_wandb_tool",
+                    "request_id": "query-1",
+                    "arguments": {
+                        "entity": "wandb",
+                        "project": "fugue-mcp-release-qualification-v1",
+                        "resource": "run",
+                        "response_mode": "items",
+                        "target_x": 3,
+                        "x_axis": "_step",
+                        "max_evals": 20,
+                        "run_id": "maint-r18-06",
+                        "keys": ["_step", "latency_ms"],
+                        "samples": 5,
+                        "columns": [
+                            "id",
+                            "config.attempt_label",
+                            "summary.latency_ms",
+                        ],
+                        "filters": {
+                            "limit": 6,
+                            "parent_ids": ["evaluation-a"],
+                            "op_name_contains": "predict_and_score",
+                            "private_query": "must-not-be-exported",
+                        },
+                    },
+                },
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "tool": "summarize_evaluation_tool",
+                    "request_id": "summary-1",
+                    "arguments": {
+                        "scope": {
+                            "project_ref": (
+                                "wandb/fugue-mcp-release-qualification-v1"
+                            )
+                        }
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "tool": "query_wandb_tool",
+                    "request_id": "query-1",
+                    "latency_ms": 12,
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                    "returned_count": 6,
+                    "total_count": 6,
+                    "has_more": False,
+                    "project_exhaustive": True,
+                    "truncation_applied": False,
+                    "coverage_status": "project-exhaustive",
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "tool": "summarize_evaluation_tool",
+                    "request_id": "summary-1",
+                    "latency_ms": 8,
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+
+    assert summary["mcp_tool_names"] == [
+        "query_wandb_tool",
+        "summarize_evaluation_tool",
+    ]
+    assert summary["mcp_tool_call_count"] == 2
+    assert summary["mcp_tool_error_count"] == 0
+    assert summary["mcp_queried_projects"] == [
+        "wandb/fugue-mcp-release-qualification-v1"
+    ]
+    calls = summary["mcp_tool_calls"]
+    assert [call["tool"] for call in calls] == [
+        "query_wandb_tool",
+        "summarize_evaluation_tool",
+    ]
+    assert calls[0]["queried_project"] == (
+        "wandb/fugue-mcp-release-qualification-v1"
+    )
+    assert calls[0]["resource"] == "run"
+    assert calls[0]["response_mode"] == "items"
+    assert calls[0]["target_x"] == 3
+    assert calls[0]["x_axis"] == "_step"
+    assert calls[0]["max_evals"] == 20
+    assert calls[0]["run_id"] == "maint-r18-06"
+    assert calls[0]["keys"] == ["_step", "latency_ms"]
+    assert calls[0]["samples"] == 5
+    assert calls[0]["projection"] == [
+        "_step",
+        "attempt_label",
+        "config.attempt_label",
+        "id",
+        "latency_ms",
+        "summary.latency_ms",
+    ]
+    assert calls[0]["limit"] == 6
+    assert calls[0]["parent_filter_ids"] == ["evaluation-a"]
+    assert calls[0]["op_name_filter"] == {
+        "op_name_contains": ["predict_and_score"]
+    }
+    assert calls[0]["terminal_status"] == "succeeded"
+    assert calls[0]["successful"] is True
+    assert calls[0]["response_metadata_verified"] is True
+    assert calls[0]["returned_count"] == 6
+    assert calls[0]["total_count"] == 6
+    assert calls[0]["has_more"] is False
+    assert calls[0]["project_exhaustive"] is True
+    assert calls[0]["truncation_applied"] is False
+    assert calls[0]["coverage_status"] == "project-exhaustive"
+    assert len(calls[0]["parent_filter_digest"]) == 64
+    assert "must-not-be-exported" not in json.dumps(
+        summary["mcp_tool_calls"], sort_keys=True
+    )
+    assert export._mcp_queried_projects(
+        [
+            {
+                "event": "mcp_tool_request",
+                "tool": "query_wandb_entity_projects",
+                "arguments": {"entity": "other-team"},
+            },
+            {
+                "event": "mcp_tool_request",
+                "tool": "list_entities_tool",
+                "arguments": {},
+            },
+        ]
+    ) == ["*/*", "other-team/*"]
+
+
+def test_mcp_proxy_evidence_normalizes_raw_graphql_without_query_values(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    query = """
+query PrivateInventory($entity: String!, $project: String!) {
+  project(name: $project, entityName: $entity) {
+    runCount
+    runs(first: 50) {
+      edges {
+        node {
+          privateCustomerAlias: name
+          state
+          config
+          summaryMetrics
+        }
+      }
+    }
+  }
+}
+"""
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "main",
+                    "tool": "query_wandb_tool",
+                    "request_id": "graphql-1",
+                    "arguments": {
+                        "query": query,
+                        "variables": {
+                            "entity": "wandb",
+                            "project": "release-project",
+                            "private_filter": "customer-secret",
+                        },
+                        "max_items": 50,
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "main",
+                    "tool": "query_wandb_tool",
+                    "request_id": "graphql-1",
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                    "returned_count": 6,
+                    "total_count": 6,
+                    "has_more": False,
+                    "project_exhaustive": True,
+                    "truncation_applied": False,
+                    "coverage_status": "project-exhaustive",
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+
+    assert summary["mcp_tool_call_count"] == 1
+    assert summary["mcp_tool_error_count"] == 0
+    [call] = summary["mcp_tool_calls"]
+    assert call["raw_graphql"] is True
+    assert call["graphql_operation_type"] == "query"
+    assert call["resource"] == "runs"
+    assert call["response_modes"] == ["count", "items"]
+    assert call["projected_fields"] == [
+        "config.*",
+        "id",
+        "state",
+        "summary.*",
+    ]
+    assert call["broad_projection"] is True
+    assert call["graphql_projection_resolved"] is True
+    assert call["graphql_requested_limit"] == 50
+    assert call["graphql_limit_resolved"] is True
+    assert call["graphql_scope_resolved"] is True
+    assert call["effective_limit"] == 50
+    serialized = json.dumps(call, sort_keys=True)
+    assert "PrivateInventory" not in serialized
+    assert "privateCustomerAlias" not in serialized
+    assert "customer-secret" not in serialized
+
+
+def test_mcp_proxy_evidence_exports_fail_closed_graphql_shape(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    arguments = safe_graphql_event_arguments(
+        {
+            "query": """
+query Inventory($pageSize: Int!) {
+  project(entityName: "other-team", name: "private-project") {
+    runs(first: $pageSize) {
+      edges { node { id ...BroadRun } }
+    }
+  }
+}
+fragment BroadRun on Run { config summaryMetrics }
+""",
+            "variables": {
+                "pageSize": 6,
+                "private_filter": "customer-secret",
+            },
+        }
+    )
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "main",
+                    "tool": "query_wandb_tool",
+                    "request_id": "graphql-unresolved",
+                    "arguments": arguments,
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "main",
+                    "tool": "query_wandb_tool",
+                    "request_id": "graphql-unresolved",
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+
+    assert summary["mcp_queried_projects"] == ["*/*"]
+    [call] = summary["mcp_tool_calls"]
+    assert call["queried_projects"] == ["*/*"]
+    assert call["graphql_scope_resolved"] is False
+    assert call["graphql_projection_resolved"] is False
+    assert call["broad_projection"] is True
+    assert call["graphql_limit_resolved"] is True
+    assert call["graphql_requested_limit"] == 6
+    serialized = json.dumps(call, sort_keys=True)
+    assert "other-team" not in serialized
+    assert "private-project" not in serialized
+    assert "BroadRun" not in serialized
+    assert "customer-secret" not in serialized
+
+
+def test_mcp_proxy_evidence_keeps_errors_but_counts_only_successes(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "wandb",
+                    "tool": "get_run_history_tool",
+                    "request_id": "history-1",
+                    "arguments": {
+                        "entity_name": "wandb",
+                        "project_name": "release-project",
+                        "run_id": "run-a",
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "wandb",
+                    "tool": "get_run_history_tool",
+                    "request_id": "history-1",
+                    "terminal_status": "structured_error",
+                    "successful": False,
+                    "structured_error_code": "storage_error",
+                },
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "wandb",
+                    "tool": "query_wandb_tool",
+                    "request_id": "run-1",
+                    "arguments": {
+                        "entity_name": "wandb",
+                        "project_name": "release-project",
+                        "resource": "run",
+                        "run_id": "run-a",
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "wandb",
+                    "tool": "query_wandb_tool",
+                    "request_id": "run-1",
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+
+    assert summary["mcp_tool_call_count"] == 1
+    assert summary["mcp_tool_error_count"] == 1
+    assert summary["mcp_tool_names"] == ["query_wandb_tool"]
+    calls = summary["mcp_tool_calls"]
+    assert len(calls) == 2
+    failed = next(call for call in calls if call["tool"] == "get_run_history_tool")
+    assert failed["terminal_status"] == "structured_error"
+    assert failed["successful"] is False
+    assert failed["structured_error_code"] == "storage_error"
+    assert failed["response_metadata_verified"] is True
+
+
+def test_mcp_proxy_evidence_rejects_untrusted_error_codes() -> None:
+    normalized = export._normalized_mcp_response(
+        [
+            {
+                "tool": "query_wandb_tool",
+                "terminal_status": "structured_error",
+                "successful": False,
+                "structured_error_code": "sk-ant-api03-PRIVATE-TOKEN",
+            }
+        ],
+        tool="query_wandb_tool",
+    )
+
+    assert normalized["structured_error_code"] == "tool_error"
+    assert "PRIVATE-TOKEN" not in json.dumps(normalized, sort_keys=True)
+
+
 def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
     tmp_path: Path,
 ) -> None:
@@ -1955,6 +3133,14 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                 "attributes": {
                     "gen_ai.operation.name": "invoke_agent",
                     "gen_ai.conversation.id": "native-conversation",
+                    "fugue.run_key": "run-key",
+                    "fugue.harness": "codex",
+                    "fugue.task_id": "task-a",
+                    "fugue.candidate_id": "candidate-a",
+                    "fugue.attempt_id": "a" * 64,
+                    "fugue.execution_fingerprint": "e" * 64,
+                    "fugue.comparison_example_id": "example-a",
+                    "fugue.trial_index": 1,
                     "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
@@ -1976,22 +3162,109 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                     "gen_ai.conversation.id": "planned-conversation",
                 },
             },
-        ]
+            {
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+                "id": "agent-call",
+                "parent_id": "prediction-1",
+                "project_id": "entity/project",
+                "trace_id": "evaluation-trace",
+                "op_name": "invoke_agent",
+                "attributes": {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": "native-conversation",
+                    "fugue.run_key": "run-key",
+                    "fugue.harness": "codex",
+                    "fugue.task_id": "task-a",
+                    "fugue.candidate_id": "candidate-a",
+                    "fugue.attempt_id": "a" * 64,
+                    "fugue.execution_fingerprint": "e" * 64,
+                    "fugue.comparison_example_id": "example-a",
+                    "fugue.trial_index": 1,
+                    "weave.eval.predict_and_score_call_id": "prediction-1",
+                },
+            },
+        ],
+        project="entity/project",
     )
 
     assert summary["weave_conversation_ids"] == ["native-conversation"]
-    row = {"trace_id": trace_id, "root_span_id": root_span_id, **summary}
+    row = {
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "trace_project": "entity/project",
+        "eval_predict_and_score_trace_id": "evaluation-trace",
+        "trace_id": trace_id,
+        "root_span_id": root_span_id,
+        **summary,
+    }
     assert export._verified_evaluation_root(row, "prediction-1") is not None
+
+
+def test_agent_evidence_keeps_otel_span_and_weave_call_identities_separate() -> None:
+    attributes = {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": "codex",
+        "gen_ai.conversation.id": "native-conversation",
+        "fugue.run_key": "run-key",
+        "fugue.harness": "codex",
+        "fugue.task_id": "task-a",
+        "fugue.candidate_id": "candidate-a",
+        "fugue.attempt_id": "a" * 64,
+        "fugue.execution_fingerprint": "e" * 64,
+        "fugue.comparison_example_id": "example-a",
+        "fugue.trial_index": 1,
+        "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
+    }
+    otel_root = {
+        "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+        "span_id": "b" * 16,
+        "trace_id": "a" * 32,
+        "attributes": attributes,
+    }
+    weave_call = {
+        "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+        "id": "019fabcd-agent-root",
+        "parent_id": "prediction-and-score-1",
+        "attributes": attributes,
+    }
+
+    summary = _summarize_spans(
+        [otel_root, weave_call],
+        project="entity/project",
+    )
+
+    [root] = summary["weave_root_spans"]
+    assert summary["otel_trace_ids"] == ["a" * 32]
+    assert summary["otel_root_span_ids"] == ["b" * 16]
+    assert root["trace_id"] == "a" * 32
+    assert root["span_id"] == "b" * 16
+    assert root["weave_call_id"] == "019fabcd-agent-root"
+    assert root["weave_call_ref"] == (
+        "weave:///entity/project/call/019fabcd-agent-root"
+    )
+    assert root["weave_call_url"] == (
+        "https://wandb.ai/entity/project/weave/calls/019fabcd-agent-root"
+    )
+    assert summary["weave_call_id"] == "019fabcd-agent-root"
+    assert summary["weave_call_id"] != root["span_id"]
+
+    otel_only = _summarize_spans([otel_root], project="entity/project")
+    assert otel_only["weave_call_id"] is None
+    assert "weave_call_id" not in otel_only["weave_root_spans"][0]
 
 
 def test_live_link_rejects_split_native_conversation_identity() -> None:
     row = {
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
         "trace_id": "a" * 32,
         "root_span_id": "b" * 16,
         "weave_conversation_ids": ["native-root", "split-tool"],
         "weave_root_spans": [
             {
                 "conversation_id": "native-root",
+                "attempt_id": "a" * 64,
+                "execution_fingerprint": "e" * 64,
                 "trace_id": "a" * 32,
                 "span_id": "b" * 16,
                 "eval_predict_and_score_call_id": "prediction-1",
@@ -2006,6 +3279,290 @@ def test_live_link_rejects_split_native_conversation_identity() -> None:
     assert row["trace_link_error"] == (
         "native trace operations do not share the root conversation identity"
     )
+
+
+def test_conversation_correlation_keeps_distinct_planned_and_native_ids() -> None:
+    row = {
+        "planned_conversation_id": "planned-fugue-id",
+        "native_session_ids": ["native-claude-session"],
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+    }
+    root = {
+        "conversation_id": "native-claude-session",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+    }
+
+    export._apply_conversation_correlation(row, root)
+
+    assert row["conversation_correlation_verified"] is True
+    assert row["conversation_ids_match"] is False
+    assert row["conversation_correlation"]["status"] == "verified"
+
+
+def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() -> None:
+    destination = export.trace_destination_identity(
+        {
+            "FUGUE_WEAVE_PROJECT": (
+                "wandb/fugue-mcp-release-qualification-v1"
+            )
+        }
+    )
+    valid = {
+        "trace_receipt": destination,
+        "evaluation_root_object_verified": True,
+        "dataset_version_object_verified": True,
+        "eval_predict_and_score_object_verified": True,
+        "weave_prediction_object_verified": True,
+        "evaluation_prediction_graph_verified": True,
+        "agent_graph_verified": True,
+        "conversation_correlation_verified": True,
+        "trace_link_status": "linked",
+        "weave_agent_root_call_id": "019fabcd-agent-call",
+        "otel_root_span_id": "b" * 16,
+        "host_evaluator_status": "passed",
+        "local_cell_conformance": {
+            "status": "passed",
+            "docker_cleanup": {"status": "passed"},
+            "local_artifact_privacy_scan": {"status": "passed"},
+            "private_label_boundary": {"status": "passed"},
+        },
+        "negative_routing_receipt": {"status": "passed"},
+    }
+
+    assert (
+        export._live_evidence_checkpoint_failures(
+            valid,
+            expected_destination=destination,
+            host_evaluator_required=True,
+        )
+        == []
+    )
+
+    invalid = {**valid, "host_evaluator_status": "failed"}
+    assert "host evaluator did not complete successfully" in (
+        export._live_evidence_checkpoint_failures(
+            invalid,
+            expected_destination=destination,
+            host_evaluator_required=True,
+        )
+    )
+
+
+def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> None:
+    class Ref:
+        def __init__(self, uri: str) -> None:
+            self._uri = uri
+
+        def uri(self) -> str:
+            return self._uri
+
+    class Persisted:
+        def __init__(self, uri: str) -> None:
+            self.ref = Ref(uri)
+
+    project = "wandb/fugue-mcp-release-qualification-v1"
+    evaluation_uri = f"weave:///{project}/object/evaluation:digest"
+    dataset_uri = f"weave:///{project}/object/dataset:digest"
+    dataset = Persisted(dataset_uri)
+    evaluation = Persisted(evaluation_uri)
+    evaluation.dataset = Persisted(dataset_uri)
+    evaluation_call = SimpleNamespace(
+        id="evaluation-call",
+        project_id=project,
+        inputs={"self": Ref(evaluation_uri)},
+        ref=Ref(f"weave:///{project}/call/evaluation-call"),
+    )
+    logger = SimpleNamespace(
+        _pseudo_evaluation=evaluation,
+        _evaluate_call=evaluation_call,
+        ui_url=f"https://wandb.ai/{project}/r/call/evaluation-call",
+    )
+    row: dict[str, object] = {}
+
+    export._apply_evaluation_evidence(
+        row,
+        logger=logger,
+        dataset=dataset,
+        project=project,
+    )
+
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+    assert row["dataset_version_object_verified"] is True
+
+
+def test_native_agent_call_requires_authoritative_evaluation_ancestry() -> None:
+    row = {
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "trace_project": "entity/project",
+        "trace_id": "a" * 32,
+        "root_span_id": "b" * 16,
+        "eval_predict_and_score_trace_id": "weave-trace",
+        "weave_prediction_call_id": "prediction",
+        "weave_conversation_ids": ["native-session"],
+        "weave_root_spans": [
+            {
+                "conversation_id": "native-session",
+                "attempt_id": "a" * 64,
+                "execution_fingerprint": "e" * 64,
+                "trace_id": "a" * 32,
+                "span_id": "b" * 16,
+                "eval_predict_and_score_call_id": "predict-and-score",
+                "weave_call_id": "agent-root",
+                "weave_call_parent_id": "unrelated-call",
+                "weave_call_project_id": "entity/project",
+                "weave_call_trace_id": "weave-trace",
+            }
+        ],
+    }
+
+    root = export._verified_evaluation_root(row, "predict-and-score")
+
+    assert root is None
+    assert row["trace_link_status"] == "ancestry_mismatch"
+    assert row["trace_link_error"] == (
+        "native Agent Call is not a child of the exact evaluation prediction"
+    )
+
+
+def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
+    bridge_id = "c" * 16
+    evaluation_trace_id = "d" * 32
+    agent_call_id = "agent-root-call"
+    row = {
+        "harness": "claude-code",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "trace_project": "entity/project",
+        "trace_id": evaluation_trace_id,
+        "root_span_id": "b" * 16,
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "eval_predict_and_score_trace_id": evaluation_trace_id,
+        "weave_prediction_call_id": "prediction",
+        "weave_agent_bridge_call_id": bridge_id,
+        "weave_agent_bridge_parent_id": "prediction",
+        "weave_agent_bridge_trace_id": evaluation_trace_id,
+        "weave_agent_bridge_otel_trace_id": evaluation_trace_id,
+        "weave_agent_bridge_object_verified": True,
+        "weave_agent_bridge_closed_verified": True,
+        "weave_agent_root_call_id": agent_call_id,
+        "weave_authoritative_call_graph": [
+            {
+                "call_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "predict-and-score",
+                "parent_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "prediction",
+                "parent_id": "predict-and-score",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": bridge_id,
+                "parent_id": "prediction",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": agent_call_id,
+                "parent_id": bridge_id,
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+        ],
+        "weave_authoritative_missing_call_ids": [],
+        "weave_conversation_ids": ["native-session"],
+        "weave_root_spans": [
+            {
+                "conversation_id": "native-session",
+                "attempt_id": "a" * 64,
+                "execution_fingerprint": "e" * 64,
+                "trace_id": evaluation_trace_id,
+                "span_id": "b" * 16,
+                "otel_parent_span_id": bridge_id,
+                "eval_predict_and_score_call_id": "predict-and-score",
+                "weave_call_id": agent_call_id,
+                "weave_call_parent_id": bridge_id,
+                "weave_call_project_id": "entity/project",
+                "weave_call_trace_id": evaluation_trace_id,
+            }
+        ],
+    }
+    assert export._verified_evaluation_root(row, "predict-and-score") is None
+    assert row["trace_link_status"] == "ancestry_unresolved"
+    export._verify_authoritative_agent_graph(row)
+
+    root = export._verified_evaluation_root(row, "predict-and-score")
+
+    assert root is not None
+    assert root["weave_ancestry_verified"] is True
+    assert root["weave_parent_kind"] == "agent_execution_bridge"
+    assert row["weave_authoritative_call_graph_verified"] is True
+    row["weave_agent_bridge_parent_id"] = "other-prediction"
+    assert export._verified_evaluation_root(row, "predict-and-score") is None
+    assert row["trace_link_status"] == "ancestry_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "observed"),
+    (
+        ("attempt_id", "b" * 64),
+        ("execution_fingerprint", "f" * 64),
+    ),
+)
+def test_observed_root_rejects_attempt_or_runtime_drift(
+    field: str,
+    observed: str,
+) -> None:
+    expected = {
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+    }
+    root = {
+        "agent_name": "codex",
+        "run_key": "run-key",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "attempt_id": expected["attempt_id"],
+        "execution_fingerprint": expected["execution_fingerprint"],
+        "conversation_id": "native-session",
+        "trace_id": "a" * 32,
+        "span_id": "b" * 16,
+    }
+    root[field] = observed
+    row = {
+        **expected,
+        "weave_agent_name": "codex",
+        "run_key": "run-key",
+        "task_name": "task-a",
+        "candidate_id": "candidate-a",
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "weave_root_spans": [root],
+    }
+
+    export._apply_observed_identity(row)
+
+    assert row["trace_link_status"] == "missing"
+    assert "no matching invoke_agent root" in row["trace_link_error"]
 
 
 def test_live_link_reports_pre_agent_failure_without_disappearing_root() -> None:
@@ -2449,7 +4006,10 @@ def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) ->
     monkeypatch.setitem(
         sys.modules,
         "weave",
-        SimpleNamespace(init=lambda project: None, EvaluationLogger=FakeLogger),
+        SimpleNamespace(
+            init=lambda project, **kwargs: None,
+            EvaluationLogger=FakeLogger,
+        ),
     )
     result = publish_to_weave(
         [
@@ -2479,7 +4039,10 @@ def test_weave_publication_rejects_duplicate_candidate_examples(
     monkeypatch.setitem(
         sys.modules,
         "weave",
-        SimpleNamespace(init=lambda project: None, EvaluationLogger=object),
+        SimpleNamespace(
+            init=lambda project, **kwargs: None,
+            EvaluationLogger=object,
+        ),
     )
     row = {
         "record_type": "trial",
@@ -2592,6 +4155,41 @@ def test_calls_query_uses_current_shape_and_decodes_ndjson() -> None:
     assert payload["filter"] == {"trace_roots_only": False}
     assert "op_name" not in payload["filter"]
     assert payload["query"]["$expr"]["$eq"][1] == {"$literal": "run-key-1"}
+
+
+def test_authoritative_call_query_uses_exact_ids() -> None:
+    requests = []
+
+    class Response:
+        status_code = 200
+        text = '{"id":"evaluation"}\n{"id":"prediction"}\n'
+
+    class Client:
+        def post(self, url, *, json):
+            requests.append((url, json))
+            return Response()
+
+    calls = export._fetch_call_ids(
+        Client(),
+        "https://trace.wandb.ai",
+        "team/fugue-experiments",
+        ["evaluation", "prediction", "prediction"],
+    )
+
+    assert calls == [{"id": "evaluation"}, {"id": "prediction"}]
+    assert requests == [
+        (
+            "https://trace.wandb.ai/calls/stream_query",
+            {
+                "project_id": "team/fugue-experiments",
+                "filter": {
+                    "trace_roots_only": False,
+                    "call_ids": ["evaluation", "prediction"],
+                },
+                "limit": 2,
+            },
+        )
+    ]
 
 
 def test_calls_query_does_not_hide_transport_errors() -> None:
@@ -2717,10 +4315,41 @@ def test_agent_span_summary_counts_logical_hierarchy_once() -> None:
     assert summary["weave_tool_call_count"] == 1
     assert summary["weave_agent_names"] == ["hermes-agent"]
     assert summary["weave_conversation_ids"] == ["conversation-1"]
-    assert summary["weave_root_span_ids"] == ["turn"]
+    assert summary["otel_root_span_ids"] == ["turn"]
+    assert "weave_root_span_ids" not in summary
     assert summary["weave_input_tokens"] == 12
     assert summary["weave_output_tokens"] == 3
     assert summary["weave_usage_source"] == "chat_sum"
+
+
+def test_agent_root_accepts_external_bridge_parent_but_excludes_nested_agent() -> None:
+    summary = _summarize_spans(
+        [
+            {
+                "span_id": "a" * 16,
+                "parent_span_id": "b" * 16,
+                "trace_id": "c" * 32,
+                "attributes": {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": "conversation-1",
+                },
+            },
+            {
+                "span_id": "d" * 16,
+                "parent_span_id": "a" * 16,
+                "trace_id": "c" * 32,
+                "attributes": {
+                    "gen_ai.operation.name": "invoke_agent",
+                    "gen_ai.conversation.id": "conversation-1",
+                },
+            },
+        ]
+    )
+
+    assert summary["otel_root_span_ids"] == ["a" * 16]
+    assert [root["span_id"] for root in summary["weave_root_spans"]] == [
+        "a" * 16
+    ]
 
 
 def test_observed_identity_accepts_benchmark_task_namespace() -> None:
@@ -3136,6 +4765,8 @@ def test_agent_span_summary_verifies_flat_fugue_attributes() -> None:
         "fugue.trial_index": "1",
         "fugue.comparison_example_id": "example-a",
         "fugue.candidate_id": "candidate-a",
+        "fugue.attempt_id": "a" * 64,
+        "fugue.execution_fingerprint": "e" * 64,
         "fugue.model_provider": "wandb",
         "fugue.model": "wandb/test-model",
     }
@@ -3158,6 +4789,50 @@ def test_agent_span_summary_verifies_flat_fugue_attributes() -> None:
     assert summary["weave_attribute_status"] == "complete"
     assert summary["weave_missing_attributes"] == []
     assert summary["weave_fugue_attributes"] == fugue_attributes
+
+
+def test_agent_spans_are_authoritative_when_calls_repeat_same_activity() -> None:
+    shared_tool = {
+        "operation_name": "execute_tool",
+        "tool_name": "query_project",
+    }
+    shared_chat = {
+        "operation_name": "chat",
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_cost_usd": 0.25,
+    }
+    summary = _summarize_spans(
+        [
+                {
+                    **shared_tool,
+                    "span_id": "otel-tool",
+                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+                },
+                {
+                    **shared_tool,
+                    "id": "weave-call",
+                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+                },
+                {
+                    **shared_chat,
+                    "span_id": "otel-chat",
+                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+                },
+                {
+                    **shared_chat,
+                    "id": "weave-chat-call",
+                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+                },
+            ]
+        )
+
+    assert summary["weave_span_count"] == 2
+    assert summary["weave_tool_call_count"] == 1
+    assert summary["weave_tool_names"] == {"query_project": 1}
+    assert summary["weave_input_tokens"] == 12
+    assert summary["weave_output_tokens"] == 3
+    assert summary["weave_total_cost_usd"] == 0.25
 
 
 def test_agent_span_summary_supports_agents_api_rows() -> None:

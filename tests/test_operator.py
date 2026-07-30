@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import threading
 from dataclasses import replace
@@ -34,6 +35,10 @@ from fugue.bench.reproducibility import (
     read_evaluation_asset_lock,
     verify_snapshot,
     write_evaluation_asset_lock,
+)
+from fugue.bench.scoring import (
+    build_intervention_selection_lock,
+    write_intervention_selection_lock,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
 from fugue.model_plane import model_route_identity
@@ -122,6 +127,119 @@ evidence:
         "WANDB_PROJECT=fugue-experiments\n"
     )
     return OperatorService(tmp_path, tmp_path / ".env")
+
+
+def test_intervention_lock_freezes_two_arm_holdout_and_candidate_identity(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/experiments/loop.yaml").write_text(
+        """
+id: loop
+title: Skill and MCP loop
+manifest: datasets/demo.yaml
+model: openai/gpt-5
+harnesses: [codex]
+default_preset: discovery
+presets:
+  discovery: {n_tasks: 1, n_attempts: 1}
+  holdout:
+    n_tasks: 1
+    n_attempts: 1
+    selection_lock_required: true
+    selection_lock_kind: intervention
+variants:
+  - {id: production, label: Production, context: {system_id: none, delivery: portable}}
+  - {id: skill-only, label: Skill only, skills: [demo-skill], context: {system_id: none, delivery: portable}}
+  - {id: mcp-only, label: MCP only, prompt_id: demo-prompt, context: {system_id: none, delivery: portable}}
+  - {id: combined, label: Combined, prompt_id: demo-prompt, skills: [demo-skill], context: {system_id: none, delivery: portable}}
+"""
+    )
+    (tmp_path / ".gitignore").write_text(".fugue/\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue Tests",
+            "-c",
+            "user.email=fugue-tests@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    discovery = service.rendered_jobs(
+        ExperimentRequest(experiment_id="loop", preset="discovery"),
+        run_id="discovery",
+        write_configs=False,
+    )
+    candidate_by_variant = {job.variant_id: job.candidate_id for job in discovery}
+    lock = build_intervention_selection_lock(
+        experiment_id="loop",
+        source_commit=source_commit,
+        source_tree=source_tree,
+        source_dirty_digest="",
+        analysis_snapshot_sha256="a" * 64,
+        discovery_run_snapshot_sha256s=("b" * 64,),
+        comparison_example_ids=("c" * 64,),
+        baseline_variant_id="production",
+        selected_variant_id="combined",
+        rankings=tuple(
+            {
+                "variant_id": variant_id,
+                "candidate_digest": candidate_by_variant[variant_id],
+            }
+            for variant_id in ("production", "skill-only", "mcp-only", "combined")
+        ),
+        decision="recommend",
+        rationale="the combined arm met the preregistered discovery gate",
+    )
+    lock_path = write_intervention_selection_lock(
+        tmp_path / ".fugue/selection.json", lock
+    )
+
+    holdout = service.rendered_jobs(
+        ExperimentRequest(
+            experiment_id="loop",
+            preset="holdout",
+            selection_lock=lock_path,
+        ),
+        run_id="holdout",
+        write_configs=False,
+    )
+    assert {job.variant_id for job in holdout} == {"production", "combined"}
+
+    (tmp_path / "configs/fugue/skills/demo-skill/SKILL.md").write_text(
+        "# Demo skill\n\nThis drift occurred after discovery.\n"
+    )
+    with pytest.raises(ValueError, match="source tree differs"):
+        service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="loop",
+                preset="holdout",
+                selection_lock=lock_path,
+            ),
+            run_id="holdout-drifted",
+            write_configs=False,
+        )
 
 
 def test_managed_service_lifecycle_selects_only_requested_context_services(
@@ -515,11 +633,12 @@ def test_execute_run_persists_snapshot_before_first_cell(
                 published=1,
                 skipped=0,
                 evaluations=(
-                    PublishedEvaluation(
-                        candidate_id="candidate-a",
-                        name="Demo evaluation",
-                        examples=1,
-                        url="https://wandb.ai/team/project/r/call/eval-1",
+                        PublishedEvaluation(
+                            candidate_id="candidate-a",
+                            name="Demo evaluation",
+                            examples=1,
+                            project="team/fugue-experiments",
+                            url="https://wandb.ai/team/project/r/call/eval-1",
                         agent_predictions=1,
                         linked_agent_predictions=1,
                     ),
@@ -543,6 +662,9 @@ def test_execute_run_persists_snapshot_before_first_cell(
         assert verify_snapshot(lock)
         assert manifest is not None
         assert manifest["status"] == "running"
+        assert manifest["pid"] == os.getpid()
+        assert manifest["detached"] is False
+        assert service.supervisor.get(run_id).status == "running"
         assert manifest["snapshot_sha256"] == lock["snapshot_sha256"]
         observed.append(command[0])
         return subprocess.CompletedProcess(command, 0)
@@ -561,6 +683,12 @@ def test_execute_run_persists_snapshot_before_first_cell(
     assert manifest is not None
     assert manifest["evaluation_runs"][0]["agent_predictions"] == 1
     assert manifest["evaluation_runs"][0]["linked_agent_predictions"] == 1
+    assert manifest["harbor_conformance"]["status"] == "not_applicable"
+    assert manifest["harbor_conformance"]["enforced"] is False
+    assert (
+        tmp_path
+        / manifest["harbor_conformance"]["path"]
+    ).is_file()
 
 
 def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
@@ -841,6 +969,36 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
         experiment=experiment,
     )
     cells = plan_cells(jobs, run_id="snapshot-v2", run_name="snapshot v2")
+    expected_cells = [
+        {
+            "attempt_id": cell.attempt_id,
+            "attempt_identity": cell.attempt_identity,
+            "task_id": cell.task_id,
+            "variant_id": cell.variant_id,
+            "harness": cell.harness,
+            "trial_index": cell.trial_index,
+            "candidate_id": cell.candidate_id,
+            "execution_fingerprint": cell.execution_fingerprint,
+        }
+        for cell in cells
+    ]
+    approved_unsigned = {
+        "schema_version": 1,
+        "kind": "approved_comparison_execution",
+        "expected_cell_count": len(expected_cells),
+        "expected_cells_digest": stable_digest(expected_cells),
+        "expected_cells": expected_cells,
+    }
+    approved = {
+        **approved_unsigned,
+        "lock_digest": stable_digest(approved_unsigned),
+    }
+    cells = plan_cells(
+        jobs,
+        run_id="snapshot-v2",
+        run_name="snapshot v2",
+        approved_comparison=approved,
+    )
 
     route_identity = model_route_identity(jobs[0].route)
     bridge_runtime = {
@@ -854,7 +1012,10 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
         repo_root=tmp_path,
         run_id="snapshot-v2",
         experiment=experiment,
-        request={"experiment_id": "demo"},
+        request={
+            "experiment_id": "demo",
+            "approved_comparison": approved,
+        },
         jobs=jobs,
         cells=cells,
         env=service.env,
@@ -867,6 +1028,15 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     assert snapshot.resolved_experiment_sha256
     assert snapshot.planned_prediction_count == len(cells)
     assert len(snapshot.capability_plan) == len(cells)
+    assert {
+        item["attempt_id"] for item in snapshot.planned_matrix
+    } == {cell.attempt_id for cell in cells}
+    assert all(item["attempt_identity"] for item in snapshot.planned_matrix)
+    assert snapshot.request["approved_comparison"] == approved
+    assert all(
+        item["approved_comparison"] == approved
+        for item in snapshot.planned_matrix
+    )
     [runtime] = snapshot.candidate_runtime.values()
     assert runtime["model_transport"] == {
         "harness": "codex",

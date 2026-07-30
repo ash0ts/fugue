@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import yaml
@@ -152,7 +153,11 @@ def test_bridge_status_attests_running_image_command_and_mount(
     files = write_bridge_files(route, repo_root=tmp_path, env={})
     command = docker_compose_for_route(route)["services"]["bridge"]["command"]
     container = {
-        "Config": {"Image": LITELLM_IMAGE, "Cmd": command},
+        "Config": {
+            "Image": LITELLM_IMAGE,
+            "Cmd": command,
+            "Env": ["FUGUE_WANDB_INFERENCE_API_KEY=test-only"],
+        },
         "Image": "sha256:" + "f" * 64,
         "Mounts": [
             {
@@ -182,6 +187,49 @@ def test_bridge_status_attests_running_image_command_and_mount(
     assert status["ok"] is True
     assert status["runtime_lock"]["image"] == LITELLM_IMAGE
     assert status["resolved_image_id"] == "sha256:" + "f" * 64
+    assert status["credential_env"] == ["FUGUE_WANDB_INFERENCE_API_KEY"]
+
+
+def test_bridge_status_fails_when_running_provider_credential_is_empty(
+    monkeypatch, tmp_path
+) -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    files = write_bridge_files(route, repo_root=tmp_path, env={})
+    command = docker_compose_for_route(route)["services"]["bridge"]["command"]
+    container = {
+        "Config": {
+            "Image": LITELLM_IMAGE,
+            "Cmd": command,
+            "Env": ["FUGUE_WANDB_INFERENCE_API_KEY="],
+        },
+        "Image": "sha256:" + "f" * 64,
+        "Mounts": [
+            {
+                "Destination": "/app/config.yaml",
+                "Source": files.config_path.resolve().as_posix(),
+                "RW": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "fugue.bridge.httpx.get",
+        lambda *_args, **_kwargs: type(
+            "Response",
+            (),
+            {"status_code": 200, "json": lambda self: {"status": "ok"}},
+        )(),
+    )
+    monkeypatch.setattr(
+        "fugue.bridge.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, json.dumps([container]), ""
+        ),
+    )
+
+    status = bridge_status(repo_root=tmp_path, route=route, env={})
+
+    assert status["ok"] is False
+    assert "FUGUE_WANDB_INFERENCE_API_KEY" in status["error"]
 
 
 def test_bridge_up_reloads_generated_config(monkeypatch, tmp_path) -> None:
@@ -202,6 +250,36 @@ def test_bridge_up_reloads_generated_config(monkeypatch, tmp_path) -> None:
     command, kwargs = calls[0]
     assert command[-3:] == ["up", "-d", "--force-recreate"]
     assert kwargs["check"] is True
+
+
+def test_bridge_up_materializes_provider_alias_only_in_process_environment(
+    monkeypatch, tmp_path
+) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr("fugue.bridge.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "fugue.bridge.docker_compose_command",
+        lambda *args: ["docker", "compose", *args],
+    )
+    monkeypatch.setattr("fugue.bridge.bridge_status", lambda **_kwargs: {"ok": True})
+
+    bridge_up(
+        "wandb/zai-org/GLM-5.2",
+        repo_root=tmp_path,
+        env={"WANDB_API_KEY": "test-only"},
+    )
+
+    process_env = calls[0][1]["env"]
+    assert process_env["FUGUE_WANDB_INFERENCE_API_KEY"] == "test-only"
+    assert process_env["WANDB_API_KEY"] == "test-only"
+    assert process_env["PATH"] == os.environ["PATH"]
+    assert "test-only" not in (
+        tmp_path / ".fugue/bridge/docker-compose.yaml"
+    ).read_text(encoding="utf-8")
 
 
 def test_bridge_up_waits_for_readiness(monkeypatch, tmp_path) -> None:

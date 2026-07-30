@@ -204,6 +204,7 @@ def test_source_provenance_distinguishes_clean_and_dirty_trees(tmp_path: Path) -
     assert clean["kind"] == "git"
     assert clean["dirty"] is False
     assert len(clean["commit"]) == 40
+    assert len(clean["tree"]) == 40
     assert "dirty_digest" not in clean
     assert first_dirty["commit"] == clean["commit"]
     assert first_dirty["dirty"] is True

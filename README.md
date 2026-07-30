@@ -347,6 +347,8 @@ an Agent cell, task outcome, or Fugue experiment.
 Start with:
 
 - [`docs/research.md`](docs/research.md) for the Python, REST, and MCP model;
+- [`docs/evidence-and-analysis-v3.md`](docs/evidence-and-analysis-v3.md) for
+  source-isolated evidence, aligned contrasts, and decision contracts;
 - [`docs/integrations/evaluation-providers.md`](docs/integrations/evaluation-providers.md)
   for the versioned, language-neutral offline provider contract;
 - [`docs/research-container.md`](docs/research-container.md) for the isolated

@@ -56,8 +56,15 @@ def _main_service() -> dict[str, object]:
         "pull_policy": "never",
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
-        "deploy": {"resources": {"limits": {"cpus": "8.0", "memory": "16g"}}},
-        "pids_limit": 1024,
+        "deploy": {
+            "resources": {
+                "limits": {
+                    "cpus": "${CPUS:-8.0}",
+                    "memory": "${MEMORY:-16384M}",
+                    "pids": 1024,
+                }
+            }
+        },
     }
 
 
@@ -194,6 +201,43 @@ def test_harbor_policy_rejects_unreviewed_compose_and_bind_options(
             require_files=True,
             strict_images=True,
         )
+
+
+def test_harbor_policy_accepts_only_locked_read_only_image_mounts(
+    tmp_path: Path,
+) -> None:
+    mount = {
+        "type": "image",
+        "source": "sha256:" + "a" * 64,
+        "target": "/opt/fugue-agent-runtime",
+        "read_only": True,
+        "image": {"subpath": "opt/fugue-agent-runtime"},
+    }
+    attestation = attest_harbor_job(
+        {"environment": {"mounts": [mount]}, "fugue": {}},
+        repo_root=tmp_path,
+        bridge_required=False,
+        require_files=True,
+        strict_images=True,
+    )
+    assert attestation.services == ()
+
+    for changed, message in [
+        ({**mount, "source": "fugue-agent:latest"}, "exact image ID"),
+        ({**mount, "read_only": False}, "read-only image mounts"),
+        (
+            {**mount, "image": {"subpath": "../private"}},
+            "invalid image mount path",
+        ),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            attest_harbor_job(
+                {"environment": {"mounts": [changed]}, "fugue": {}},
+                repo_root=tmp_path,
+                bridge_required=False,
+                require_files=True,
+                strict_images=True,
+            )
 
 
 def test_harbor_policy_rejects_changed_bridge_and_invalid_limits(

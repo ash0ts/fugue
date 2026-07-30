@@ -54,8 +54,10 @@ from fugue.bench.manifest import load_manifest
 from fugue.bench.scoring import (
     CandidateSelection,
     SelectionPolicy,
+    build_intervention_selection_lock,
     build_treatment_selection_lock,
     select_candidate_configuration,
+    write_intervention_selection_lock,
     write_treatment_selection_lock,
 )
 from fugue.bench.sources import list_skill_source_ids, load_skill_source
@@ -1212,6 +1214,11 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
             "unsupported analysis selection tie breaker(s): " + ", ".join(unknown_ties)
         )
     improvement_values = {
+        "minimum_paired_pass_rate_delta": (
+            float(raw["minimum_paired_pass_rate_delta"])
+            if raw.get("minimum_paired_pass_rate_delta") is not None
+            else None
+        ),
         "minimum_pass_rate_improvement": float(
             raw.get("minimum_pass_rate_improvement", 0.05)
         ),
@@ -1220,8 +1227,11 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
             raw.get("minimum_latency_improvement", 0.15)
         ),
     }
-    if any(not 0 <= value < 1.0 for value in improvement_values.values()):
-        raise ValueError("analysis selection improvement thresholds must be in [0, 1)")
+    if any(
+        value is not None and not 0 <= value <= 1.0
+        for value in improvement_values.values()
+    ):
+        raise ValueError("analysis selection improvement thresholds must be in [0, 1]")
     return SelectionPolicy(
         selection_unit=selection_unit,  # type: ignore[arg-type]
         baseline_variant_id=(
@@ -1235,6 +1245,12 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
         ),
         require_agent_links=bool(raw.get("require_agent_links", False)),
         require_registration=bool(raw.get("require_registration", False)),
+        require_skill_invocation=bool(
+            raw.get("require_skill_invocation", False)
+        ),
+        required_any_tool_names=tuple(
+            str(value) for value in raw.get("required_any_tool_names") or ()
+        ),
         metric=metric,
         confidence=confidence,
         noninferiority_margin=margin,
@@ -1528,6 +1544,9 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
     if result.spec.id == "repo-memory-discovery-selection":
         _write_memory_treatment_lock(result)
         return
+    if result.spec.id == "claude-loop-discovery-selection":
+        _write_intervention_lock(result)
+        return
     rows = [dict(row) for row in result.snapshot.rows]
     selected_rows = [
         row
@@ -1734,6 +1753,119 @@ def _write_memory_treatment_lock(result: AnalysisResult) -> None:
     )
     write_treatment_selection_lock(
         result.report_dir / "treatment-selection-lock.json", lock
+    )
+
+
+def _write_intervention_lock(result: AnalysisResult) -> None:
+    selection = result.selection
+    assert selection is not None
+    selected_variant = selection.selected_candidate_id
+    baseline_variant = selection.policy.baseline_variant_id
+    if (
+        selected_variant is None
+        or baseline_variant is None
+        or selection.decision not in {"recommend", "promote"}
+    ):
+        return
+    rows = [dict(row) for row in result.snapshot.rows]
+    experiment_ids = _unique(rows, "experiment_id")
+    source_commits = _unique(rows, "source_commit")
+    source_trees = _unique(rows, "source_tree")
+    source_dirty_digests = {
+        str(row.get("source_dirty_digest") or "") for row in rows
+    }
+    run_snapshots = tuple(
+        sorted(
+            {
+                str(row.get("run_snapshot_sha256") or "")
+                for row in rows
+                if row.get("run_snapshot_sha256")
+            }
+        )
+    )
+    examples = tuple(
+        sorted(
+            {
+                str(row.get("comparison_example_id") or "")
+                for row in rows
+                if row.get("comparison_example_id")
+            }
+        )
+    )
+    if (
+        len(experiment_ids) != 1
+        or len(source_commits) != 1
+        or len(source_trees) != 1
+        or source_dirty_digests != {""}
+        or not run_snapshots
+        or not examples
+    ):
+        return
+    candidate_by_variant: dict[str, str] = {}
+    variant_ids = {
+        baseline_variant,
+        *(candidate.candidate_id for candidate in selection.candidates),
+    }
+    for variant_id in variant_ids:
+        candidate_ids = {
+            str(row.get("candidate_id") or "")
+            for row in rows
+            if str(row.get("variant_id") or "") == variant_id
+        }
+        if len(candidate_ids) != 1:
+            return
+        candidate_by_variant[variant_id] = next(iter(candidate_ids))
+    rankings = [
+        {
+            "rank": 0,
+            "variant_id": baseline_variant,
+            "candidate_digest": candidate_by_variant[baseline_variant],
+            "role": "baseline",
+            "eligible": True,
+            "paired_pass_rate_delta": 0.0,
+            "reasons": [],
+        }
+    ]
+    ranked_candidates = sorted(
+        selection.candidates,
+        key=lambda candidate: (
+            not candidate.eligible,
+            -(candidate.paired_pass_rate_delta or 0.0),
+            candidate.candidate_id,
+        ),
+    )
+    rankings.extend(
+        {
+            "rank": index,
+            "variant_id": candidate.candidate_id,
+            "candidate_digest": candidate_by_variant[candidate.candidate_id],
+            "role": "candidate",
+            "eligible": candidate.eligible,
+            "paired_pass_rate_delta": candidate.paired_pass_rate_delta,
+            "pass_rate": candidate.pass_rate,
+            "recoverable_error_rate": candidate.recoverable_error_rate,
+            "cost_per_success": candidate.cost_per_success,
+            "median_wall_time_sec": candidate.median_wall_time_sec,
+            "reasons": list(candidate.reasons),
+        }
+        for index, candidate in enumerate(ranked_candidates, start=1)
+    )
+    lock = build_intervention_selection_lock(
+        experiment_id=experiment_ids[0],
+        source_commit=source_commits[0],
+        source_tree=source_trees[0],
+        source_dirty_digest="",
+        analysis_snapshot_sha256=result.snapshot.digest,
+        discovery_run_snapshot_sha256s=run_snapshots,
+        comparison_example_ids=examples,
+        baseline_variant_id=baseline_variant,
+        selected_variant_id=selected_variant,
+        rankings=rankings,
+        decision=selection.decision,
+        rationale=selection.reason,
+    )
+    write_intervention_selection_lock(
+        result.report_dir / "intervention-selection-lock.json", lock
     )
 
 

@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import tempfile
 from datetime import UTC, datetime
@@ -88,6 +89,11 @@ _SECRET_ENV_NAME = re.compile(
 )
 _CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
 _CONTAINER_TRIAL_POLICY_ROOT = PurePosixPath("/tmp/fugue-trial-policy")
+
+
+def _safe_exec_failure(result: Any) -> str:
+    detail = str(result.stderr or result.stdout or "no command output").strip()
+    return f"exit {result.return_code}: {detail[:500]}"
 
 
 def _require_trace_key() -> str:
@@ -343,13 +349,21 @@ class _TrialMetaMixin:
         existing = getattr(self, "_fugue_secret_files", {}).get(digest)
         if existing:
             return existing
-        target = (_CONTAINER_SECRET_ROOT / f"{digest}.env").as_posix()
+        target = (
+            _CONTAINER_SECRET_ROOT / f"secrets-{secrets.token_hex(16)}.env"
+        ).as_posix()
+        staging = f"{target}.upload"
         owner = getattr(environment, "default_user", None)
-        await environment.exec(
-            command=f"install -d -m 0700 {_CONTAINER_SECRET_ROOT.as_posix()}",
+        directory_result = await environment.exec(
+            command=f"install -d -m 0733 {_CONTAINER_SECRET_ROOT.as_posix()}",
             user="root",
             timeout_sec=10,
         )
+        if directory_result.return_code != 0:
+            raise RuntimeError(
+                "failed to create the per-cell secret directory: "
+                + _safe_exec_failure(directory_result)
+            )
         with tempfile.TemporaryDirectory(prefix="fugue-agent-secrets-") as temporary:
             source = Path(temporary) / "environment"
             source.write_text(
@@ -358,20 +372,36 @@ class _TrialMetaMixin:
                     for name, value in sorted(values.items())
                 )
             )
-            source.chmod(0o600)
-            await environment.upload_file(source_path=source, target_path=target)
-        ownership = (
-            f"chown {shlex.quote(str(owner))} {shlex.quote(target)} && "
-            if owner is not None
-            else ""
-        )
+            # Docker Compose preserves the host UID on copy. A capability-free
+            # container root cannot chmod that file after cap_drop=ALL, so make
+            # only the random, unlistable staging path readable long enough for
+            # the actual Agent user to create its own private copy.
+            source.chmod(0o644)
+            await environment.upload_file(source_path=source, target_path=staging)
+        runtime_user = owner if owner is not None else "root"
         result = await environment.exec(
-            command=f"{ownership}chmod 0600 {shlex.quote(target)}",
+            command=(
+                f"umask 077; install -m 0600 {shlex.quote(staging)} "
+                f"{shlex.quote(target)}"
+            ),
+            user=runtime_user,
+            timeout_sec=10,
+        )
+        cleanup_result = await environment.exec(
+            command=f"rm -f {shlex.quote(staging)}",
             user="root",
             timeout_sec=10,
         )
         if result.return_code != 0:
-            raise RuntimeError("failed to stage the per-cell secret environment")
+            raise RuntimeError(
+                "failed to stage the per-cell secret environment: "
+                + _safe_exec_failure(result)
+            )
+        if cleanup_result.return_code != 0:
+            raise RuntimeError(
+                "failed to remove the per-cell secret staging file: "
+                + _safe_exec_failure(cleanup_result)
+            )
         self._fugue_secret_files[digest] = target
         return target
 
@@ -697,6 +727,11 @@ done
             "candidate_id": os.environ.get("FUGUE_CANDIDATE_ID"),
             "execution_fingerprint": os.environ.get("FUGUE_EXECUTION_FINGERPRINT"),
             "execution_kind": os.environ.get("FUGUE_EXECUTION_KIND", "agent"),
+            "applicable": (
+                os.environ.get("FUGUE_APPLICABLE", "true").strip().lower()
+                == "true"
+            ),
+            "skip_reason": os.environ.get("FUGUE_SKIP_REASON") or None,
             "identity_schema_version": int(
                 os.environ.get("FUGUE_IDENTITY_SCHEMA_VERSION", "1")
             ),
@@ -754,6 +789,9 @@ done
             "harbor_environment": os.environ.get("FUGUE_HARBOR_ENVIRONMENT"),
             "harbor_resources": _json_env("FUGUE_HARBOR_RESOURCES"),
             "sandbox_runtime": _json_env("FUGUE_SANDBOX_RUNTIME"),
+            "agent_runtime": _json_env("FUGUE_AGENT_RUNTIME"),
+            "task_runtime": _json_env("FUGUE_TASK_RUNTIME"),
+            "sandbox_attestation": _json_env("FUGUE_SANDBOX_ATTESTATION"),
             "agent_config_hash": os.environ.get("FUGUE_AGENT_CONFIG_HASH"),
             "dataset": os.environ.get("FUGUE_DATASET"),
             "repository": os.environ.get("FUGUE_REPOSITORY"),
@@ -767,6 +805,15 @@ done
             "wandb_study_id": os.environ.get("FUGUE_WANDB_STUDY_ID"),
             "research_experiment_id": os.environ.get(
                 "FUGUE_RESEARCH_EXPERIMENT_ID"
+            ),
+            "source_evidence_project": os.environ.get(
+                "FUGUE_SOURCE_EVIDENCE_PROJECT"
+            ),
+            "result_evidence_project": os.environ.get(
+                "FUGUE_RESULT_EVIDENCE_PROJECT"
+            ),
+            "study_console_backlink": os.environ.get(
+                "FUGUE_STUDY_CONSOLE_BACKLINK"
             ),
             "weave_agent_name": stable_agent_name(harness),
             "weave_conversation_key": self.conversation_key,
@@ -896,18 +943,24 @@ done
         try:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids
-            meta["weave_conversation_ids"] = list(
-                dict.fromkeys([self.trace_conversation_id, *native_ids])
-            )
+            meta["weave_conversation_ids"] = list(dict.fromkeys(native_ids))
         except (OSError, json.JSONDecodeError):
             meta["native_session_ids"] = []
-            meta["weave_conversation_ids"] = [self.trace_conversation_id]
+            meta["weave_conversation_ids"] = []
+        meta["conversation_correlation"] = {
+            "status": "pending_live_verification",
+            "planned_conversation_id": self.trace_conversation_id,
+            "native_session_ids": meta["native_session_ids"],
+        }
         registration = meta.get("skill_registration")
         if isinstance(registration, dict):
             meta["skill_invocation_evidence"] = skill_invocation_evidence(
                 self.logs_dir,
                 self.TRACE_HARNESS,
-                registration,
+                {
+                    **registration,
+                    "skill_provenance": meta.get("skill_provenance", []),
+                },
             )
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -1062,6 +1115,7 @@ done
             "fugue.run_group": _run_group(),
             "fugue.job_name": self.job_name,
             "fugue.experiment_id": os.environ.get("FUGUE_EXPERIMENT_ID", ""),
+            "fugue.attempt_id": os.environ.get("FUGUE_ATTEMPT_ID", ""),
             "wandb.research_id": os.environ.get("FUGUE_WANDB_RESEARCH_ID", ""),
             "wandb.study_id": os.environ.get("FUGUE_WANDB_STUDY_ID", ""),
             "fugue.research_experiment_id": os.environ.get(
@@ -1141,7 +1195,7 @@ done
         return ",".join(part for part in (inherited, encoded) if part)
 
     def _trace_environment(self, harness: str, route: ModelRoute) -> dict[str, str]:
-        return {
+        values = {
             **trace_env_defaults(os.environ),
             "OTEL_RESOURCE_ATTRIBUTES": self._otel_resource_attributes(harness, route),
             "FUGUE_TRACE_ATTRIBUTES_JSON": json.dumps(
@@ -1152,6 +1206,10 @@ done
                 sort_keys=True,
             ),
         }
+        traceparent = os.environ.get("FUGUE_WEAVE_TRACEPARENT", "").strip()
+        if traceparent:
+            values["FUGUE_WEAVE_TRACEPARENT"] = traceparent
+        return values
 
     def _task_artifact_name(self) -> str:
         return (
@@ -2199,7 +2257,22 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 "transcript_path:process.argv[2],reason:\"fugue_trial_finalized\"}))' "
                 '"$session_id" "$transcript" | '
                 f"bash {handler}; "
-                "done; sleep 5; "
+                "done; "
+                # SessionEnd closes the turn, but the plugin daemon intentionally
+                # remains alive for interactive reuse. A Fugue cell is terminal:
+                # ask that per-container daemon to shut down so its OTel provider
+                # flushes before Harbor removes the container.
+                "node -e 'const net=require(\"net\");"
+                "const socket=process.env.HOME+"
+                "\"/.weave-claude-code/daemon.sock\";"
+                "const client=net.createConnection(socket,()=>"
+                "client.end(JSON.stringify({command:\"shutdown\"})));"
+                "client.on(\"error\",()=>process.exit(0));"
+                "setTimeout(()=>process.exit(0),10000);' || true; "
+                "attempt=0; "
+                'while test -S "$HOME/.weave-claude-code/daemon.sock" '
+                '&& test "$attempt" -lt 100; do '
+                "attempt=$((attempt + 1)); sleep 0.1; done; "
                 "cp -R ~/.weave-claude-code/logs "
                 "/logs/agent/weave-claude-code-logs 2>/dev/null || true"
             ),
@@ -2435,7 +2508,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
             'inherit = "all"\n'
             "ignore_default_excludes = false\n"
             'exclude = ["*KEY*", "*TOKEN*", "*SECRET*", "*PASSWORD*", '
-            '"*CREDENTIAL*", "*AUTH*"]\n'
+            '"*CREDENTIAL*", "*AUTH*", "LD_LIBRARY_PATH"]\n'
             f"[model_providers.{provider}]\n"
             f'name = "Fugue {self.model_route.provider}"\n'
             f'base_url = "{_responses_base_url(self.model_route)}"\n'

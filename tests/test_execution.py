@@ -88,8 +88,16 @@ def test_cells_are_bounded_failure_isolated_and_durable(tmp_path: Path) -> None:
     }
     state_path = tmp_path / ".fugue" / "runtime" / run_id / "cells.jsonl"
     latest = {item["cell_id"]: item for item in latest_cell_records(state_path)}
+    assert all(
+        len(item["attempt_id"]) == 64
+        and item["attempt_identity"]["candidate"] == "candidate-codex-baseline"
+        for item in latest.values()
+    )
     assert latest["cell-fail"]["status"] == "failed"
+    assert latest["cell-fail"]["applicable"] is True
     assert latest["cell-skip"]["status"] == "not_applicable"
+    assert latest["cell-skip"]["applicable"] is False
+    assert latest["cell-skip"]["skip_reason"] == "unsupported"
 
     rows = export_rows([state_path.parent])
     assert {row["status"] for row in rows} == {
@@ -238,6 +246,38 @@ def test_cell_lifecycle_overlays_env_without_changing_outcome(tmp_path: Path) ->
     assert outcomes[0].status == "passed"
     assert observed["FUGUE_WEAVE_EVAL_NAME"] == cell.id
     assert finished == [(cell.id, "passed")]
+
+
+def test_required_live_evidence_start_failure_prevents_agent_execution(
+    tmp_path: Path,
+) -> None:
+    cell = _cell("run-live-required", "blocked")
+    runner_calls: list[list[str]] = []
+
+    def runner(command, **kwargs):
+        runner_calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    [outcome] = execute_cells(
+        [cell],
+        repo_root=tmp_path,
+        max_workers=1,
+        runner=runner,
+        cell_started=lambda _: (_ for _ in ()).throw(
+            RuntimeError("bridge unavailable")
+        ),
+        require_cell_started_success=True,
+    )
+
+    assert outcome.status == "failed"
+    assert "required live-evidence initialization failed" in str(outcome.error)
+    assert runner_calls == []
+    state_path = (
+        tmp_path
+        / ".fugue/runtime/run-live-required/cells.jsonl"
+    )
+    [latest] = latest_cell_records(state_path)
+    assert latest["status"] == "failed"
 
 
 def test_cancellation_terminates_active_process_and_never_opens_queued_cell(

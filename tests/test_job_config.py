@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fugue.bench import job_config as job_config_module
 from fugue.bench import services
 from fugue.bench.job_config import _job_name, render_jobs
 from fugue.bench.library import (
@@ -146,6 +147,144 @@ tasks:
     assert first.config["jobs_dir"] == "jobs/matrix/run-a"
     assert second.config["jobs_dir"] == "jobs/matrix/run-b"
     assert first.result_path != second.result_path
+
+
+def test_render_jobs_serializes_runtime_evidence_into_agent_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "runtime-evidence.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+    )
+    agent_runtime = {
+        "image": "fugue-agent-codex-amd64:locked",
+        "image_id": "sha256:" + "a" * 64,
+    }
+    task_runtime = {
+        "image": "fugue-task-task-a-amd64:locked",
+        "image_id": "sha256:" + "b" * 64,
+        "dataset_path": (tmp_path / "prepared-task-dataset").as_posix(),
+    }
+    monkeypatch.setattr(
+        job_config_module,
+        "read_agent_runtime_lock",
+        lambda *_args, **_kwargs: agent_runtime,
+    )
+    monkeypatch.setattr(
+        job_config_module,
+        "read_task_runtime_lock",
+        lambda *_args, **_kwargs: task_runtime,
+    )
+
+    [job] = render_jobs(
+        experiment=ExperimentSpec(
+            id="runtime-evidence",
+            title="Runtime evidence",
+            variants=[FeatureVariant(id="baseline", label="Baseline")],
+        ),
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="openai/gpt-5",
+        run_id="runtime-evidence",
+    )
+
+    sandbox_attestation = job.config["fugue"]["sandbox_attestation"]
+    assert json.loads(job.env["FUGUE_AGENT_RUNTIME"]) == agent_runtime
+    assert json.loads(job.env["FUGUE_TASK_RUNTIME"]) == task_runtime
+    assert (
+        json.loads(job.env["FUGUE_SANDBOX_ATTESTATION"])
+        == sandbox_attestation
+    )
+    assert sandbox_attestation["source"] == "rendered_harbor_config"
+    assert sandbox_attestation["attestation_digest"]
+
+
+def test_task_runtime_location_does_not_change_execution_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_runtime = {
+        "image": "fugue-agent-codex-amd64:locked",
+        "image_id": "sha256:" + "a" * 64,
+    }
+    monkeypatch.setattr(
+        job_config_module,
+        "read_agent_runtime_lock",
+        lambda *_args, **_kwargs: agent_runtime,
+    )
+
+    def task_runtime(_manifest, _task, repo_root):
+        return {
+            "image": "fugue-task-task-a-amd64:locked",
+            "image_id": "sha256:" + "b" * 64,
+            "dataset_path": (
+                repo_root / ".fugue/runtime/task-images/locked/dataset"
+            ).as_posix(),
+            "prepared_source_sha256": "c" * 64,
+        }
+
+    monkeypatch.setattr(
+        job_config_module,
+        "read_task_runtime_lock",
+        task_runtime,
+    )
+    jobs = []
+    for checkout in ("checkout-a", "checkout-b"):
+        repo_root = tmp_path / checkout
+        manifest_path = repo_root / "tasks.yaml"
+        manifest_path.parent.mkdir()
+        manifest_path.write_text(
+            """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: codex, agent: fugue.agents:FugueCodex}
+tasks:
+  - {id: task-a}
+"""
+        )
+        [job] = render_jobs(
+            experiment=ExperimentSpec(
+                id="portable-runtime",
+                title="Portable runtime",
+                variants=[FeatureVariant(id="baseline", label="Baseline")],
+            ),
+            manifest=load_manifest(manifest_path),
+            manifest_path=manifest_path,
+            repo_root=repo_root,
+            env={},
+            model="openai/gpt-5",
+            run_id="portable-runtime",
+            source_provenance={
+                "schema_version": 1,
+                "kind": "git",
+                "commit": "d" * 40,
+                "tree": "e" * 40,
+                "dirty": False,
+            },
+        )
+        jobs.append(job)
+
+    assert (
+        jobs[0].resolved_candidate.execution_definition
+        == jobs[1].resolved_candidate.execution_definition
+    )
+    assert (
+        jobs[0].resolved_candidate.execution_fingerprint
+        == jobs[1].resolved_candidate.execution_fingerprint
+    )
+    assert (
+        jobs[0].config["fugue"]["task_runtime"]["dataset_path"]
+        != jobs[1].config["fugue"]["task_runtime"]["dataset_path"]
+    )
 
 
 def test_graphiti_job_uses_container_uri_without_serializing_credentials(
@@ -345,7 +484,8 @@ tasks:
     assert config["fugue"]["candidate_id"] == job.candidate_id
     assert job.env["FUGUE_IDENTITY_SCHEMA_VERSION"] == "1"
     assert job.resolved_candidate.definition["harness_version"] == (
-        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
+        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+"
+        "fugue-mcp-meta.1+skill-use.1+shell-env.1"
     )
     assert job.resolved_candidate.definition["model_route"][
         "tool_result_modalities"

@@ -69,7 +69,8 @@ jobs:
           tests/test_bridge.py tests/test_codex_mcp.py
           tests/test_context.py tests/test_context_contracts.py tests/test_context_study.py
           tests/test_evaluation_assets.py tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
-          tests/test_mcp_proxy.py tests/test_operator.py tests/test_runtime_manager.py
+          tests/test_mcp_proxy.py tests/test_operator.py tests/test_run_conformance.py
+          tests/test_runtime_manager.py tests/test_weave_support.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
           tests/test_task_interaction.py
       - name: Test development and release tooling
@@ -93,7 +94,8 @@ jobs:
           tests/test_research_agent_interface.py tests/test_research_records.py
           tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
           tests/test_experiment_views.py tests/test_comparison.py
-          tests/test_component_imports.py tests/test_tasksets.py
+          tests/test_component_imports.py tests/test_research_comparisons.py
+          tests/test_tasksets.py
           tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
 
   quality:
