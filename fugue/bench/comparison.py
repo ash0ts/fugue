@@ -6090,7 +6090,7 @@ def _sanitized_answer_excerpt(row: Mapping[str, Any]) -> str | None:
     text = " ".join(text.strip().split())
     if not text:
         return None
-    return text[:1000]
+    return text.encode()[:1000].decode("utf-8", errors="ignore").rstrip()
 
 
 def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
@@ -8219,9 +8219,13 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
         score_dimensions: set[str] = set()
         if complete:
             assert pair.baseline is not None and pair.candidate is not None
-            score_dimensions = set(pair.baseline.scores) | set(
-                pair.candidate.scores
-            )
+            score_dimensions = {
+                dimension
+                for dimension in (
+                    set(pair.baseline.scores) | set(pair.candidate.scores)
+                )
+                if not dimension.startswith("comparison.judge.")
+            }
             if not score_dimensions:
                 raise ValueError(
                     "ComparisonResultV3 complete pairs require deterministic scores"
@@ -8904,7 +8908,11 @@ def _verify_v3_derived_analysis(
             "variant_id": variant,
             "pass": attempt.passed,
             "comparison_evaluation_status": attempt.evaluation_status,
-            "comparison_deterministic_scores": attempt.scores,
+            "comparison_deterministic_scores": {
+                dimension: value
+                for dimension, value in attempt.scores.items()
+                if not dimension.startswith("comparison.judge.")
+            },
         }
         for pair in result.paired_cases
         for variant, attempt in (

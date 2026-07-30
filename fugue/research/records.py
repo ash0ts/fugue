@@ -76,7 +76,10 @@ _RELATIONSHIPS = {
     "uses_evidence",
     "supersedes",
 }
-RESEARCH_LOG_MAX_BYTES = 65_536
+# A reconciled eight-cell V3 Study carries five verified evidence links per
+# attempt plus safe judge scores. Keep that canonical view in one signed event,
+# while retaining a strict bounded-publication limit.
+RESEARCH_LOG_MAX_BYTES = 131_072
 _PRIVATE_KEYS = {
     "credential",
     "credentials",
