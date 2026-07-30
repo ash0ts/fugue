@@ -175,6 +175,10 @@ AuthoredTaskMaterializer
 # Supported public analysis/builders.
 factorial_difference_in_differences
 build_trace_selection
+# Imported by the checked-in zero-model MCP qualification entrypoints under
+# examples/comparisons/wandb-mcp-maintenance/.
+qualify_locked_mcp_revisions
+verify_hosted_source_conformance
 prepare_hosted_project
 
 # HTTP handlers and framework callbacks registered by decorators/metaclasses.

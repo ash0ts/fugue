@@ -12,6 +12,11 @@ The whitelist is limited to four mechanisms Vulture cannot see statically:
 - FastAPI, FastMCP, Textual, protocol, and standard-library callback dispatch;
 - supported public analysis and reconstruction helpers.
 
+The MCP qualification functions in this category are imported by the
+checked-in zero-model entrypoints under
+`examples/comparisons/wandb-mcp-maintenance/`; Vulture does not follow those
+scripts when the gate scans the installable `fugue` package.
+
 It must not be used for ordinary private helpers.
 
 ## Retained compatibility surfaces
