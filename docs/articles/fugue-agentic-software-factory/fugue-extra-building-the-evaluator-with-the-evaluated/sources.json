@@ -72,6 +72,51 @@
       "date": "2026-07-28",
       "url": "https://github.com/ash0ts/fugue/pull/45",
       "supports": "Public exact-head Serverless boundary and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr48",
+      "author": "Fugue maintainers",
+      "title": "Generic Evaluation provider contract",
+      "publication": "GitHub draft pull request #48",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/48",
+      "supports": "Review-visible generic Evaluation provider implementation; draft source is not live qualification."
+    },
+    {
+      "id": "fugue-pr49",
+      "author": "Fugue maintainers",
+      "title": "Source-aware V3 evidence and analysis",
+      "publication": "GitHub draft pull request #49",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/49",
+      "supports": "Review-visible V3 evidence implementation; draft source is not a live result."
+    },
+    {
+      "id": "fugue-pr50",
+      "author": "Fugue maintainers",
+      "title": "Source-isolated MCP maintainer qualification",
+      "publication": "GitHub draft pull request #50",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/50",
+      "supports": "Review-visible source-isolated qualification implementation; draft source is not a launched canary or release decision."
+    },
+    {
+      "id": "fugue-pr51",
+      "author": "Fugue maintainers",
+      "title": "Real loop, harness, and memory studies",
+      "publication": "GitHub draft pull request #51",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/51",
+      "supports": "Review-visible dedicated Study definitions; draft source is not an approved preview or result."
+    },
+    {
+      "id": "fugue-pr52",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete shared demo routing",
+      "publication": "GitHub draft pull request #52",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/52",
+      "supports": "Review-visible cleanup of obsolete shared-demo routing; it does not qualify replacement Studies."
     }
   ]
 }

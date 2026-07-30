@@ -63,6 +63,33 @@
       "date": "2026-07-30",
       "url": "https://github.com/wandb/wandb-mcp-server/pull/126",
       "supports": "Review-visible repair candidate; draft status and a moving head do not establish final staging identity or behavioral qualification."
+    },
+    {
+      "id": "fugue-mcp-qualification-draft",
+      "author": "Fugue maintainers",
+      "title": "Source-isolated MCP maintainer qualification",
+      "publication": "GitHub draft pull request #50",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/50",
+      "supports": "Review-visible source-isolated MCP qualification implementation; it does not establish a launched canary, live result, or final staging decision."
+    },
+    {
+      "id": "fugue-real-studies-draft",
+      "author": "Fugue maintainers",
+      "title": "Real loop, harness, and memory studies",
+      "publication": "GitHub draft pull request #51",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/51",
+      "supports": "Review-visible dedicated Study definitions; they do not establish approved previews, launched cells, or results."
+    },
+    {
+      "id": "fugue-routing-cleanup-draft",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete shared demo routing",
+      "publication": "GitHub draft pull request #52",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/52",
+      "supports": "Review-visible removal of obsolete shared-demo routing; it does not establish qualification of the replacement Studies."
     }
   ]
 }

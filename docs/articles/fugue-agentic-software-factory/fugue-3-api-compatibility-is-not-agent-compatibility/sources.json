@@ -90,6 +90,15 @@
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/49",
       "supports": "Review-visible V3 evidence and qualification source; it does not establish a live canary, result, or release decision."
+    },
+    {
+      "id": "fugue-mcp-qualification-draft",
+      "author": "Fugue maintainers",
+      "title": "Source-isolated MCP maintainer qualification",
+      "publication": "GitHub draft pull request #50",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/50",
+      "supports": "Review-visible source-isolated MCP qualification implementation; it does not establish a launched canary, live result, or final staging decision."
     }
   ]
 }

@@ -254,6 +254,20 @@ against `main`. [@fugue-pr44] They are not productivity metrics. Insertions
 can be duplication; deletions can be damage. The table exists so a reviewer
 can open the exact public head and inspect the layer.
 
+A newer five-layer stack is also review-visible, but remains draft:
+
+| Draft source identity | Review-visible layer |
+| --- | --- |
+| #48 [@fugue-pr48] | Generic Evaluation provider contract |
+| #49 [@fugue-pr49] | Source-aware V3 evidence and analysis |
+| #50 [@fugue-pr50] | Source-isolated MCP maintainer qualification |
+| #51 [@fugue-pr51] | Dedicated loop, harness, and memory Studies |
+| #52 [@fugue-pr52] | Removal of obsolete shared-demo routing |
+
+This table records exact review URLs, not completion. None of these draft pull
+requests supplies an accepted preview, live qualification, Study result,
+final staging SHA, package decision, merge, or release.
+
 The more important sequence is dependency:
 
 ```text

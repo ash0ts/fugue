@@ -57,11 +57,20 @@ The flagship and adjacent Studies have dedicated planned W&B/Weave projects:
 These project names are destinations in planned contracts, not evidence that
 the Studies ran. No lane writes result rows into another lane’s project.
 
-The current provider and V3 evidence implementation are reviewable in Fugue
-draft pull requests #48 and #49. [@fugue-provider-draft]
-[@fugue-evidence-v3-draft] Those pull requests establish source availability
-for review, not an accepted preview, prepared runtime, launched cell, selected
-intervention, or qualified tree.
+The current Fugue implementation stack is reviewable at five exact draft pull
+requests:
+
+| Draft source identity | Review-visible layer |
+| --- | --- |
+| #48 [@fugue-provider-draft] | Generic Evaluation provider contract |
+| #49 [@fugue-evidence-v3-draft] | Source-aware V3 evidence and analysis |
+| #50 [@fugue-mcp-qualification-draft] | Source-isolated MCP maintainer qualification |
+| #51 [@fugue-real-studies-draft] | Dedicated loop, harness, and memory Studies |
+| #52 [@fugue-routing-cleanup-draft] | Removal of obsolete shared-demo routing |
+
+These pull requests establish source availability for review, not an accepted
+preview, prepared runtime, launched cell, selected intervention, live
+qualification, or qualified tree.
 
 ## What the audience should believe
 

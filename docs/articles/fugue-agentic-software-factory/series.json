@@ -175,7 +175,7 @@
       "preview_digest": null,
       "previous_id": "fugue-2b",
       "next_id": "fugue-4a",
-      "source_digest": "sha256:e469803f60b793b4f5842707f516ebac961875659ffdf9e35b9e1d30df95801f",
+      "source_digest": "sha256:c294ef22c246b1c7fd4d3de7444e5444232ce298e62f22c61e3bcb3fa7268bf6",
       "animation": {
         "html": "media/film/fugue-3-api-compatibility-is-not-agent-compatibility.html",
         "mp4": "media/film/fugue-3-api-compatibility-is-not-agent-compatibility.mp4",
@@ -237,7 +237,7 @@
       "preview_digest": null,
       "previous_id": "fugue-4a",
       "next_id": "fugue-extra",
-      "source_digest": "sha256:c3f5aa199ec97b4c88e3f9453353bf4b1078d0baad5fae925d7547c07153abfc",
+      "source_digest": "sha256:b08980442e25c64f6841c86f2cf3ed8df0d5fbd140733cd847b4d9e1db477e74",
       "animation": {
         "html": "media/film/fugue-4b-trace-to-release-decision.html",
         "mp4": "media/film/fugue-4b-trace-to-release-decision.mp4",
@@ -268,7 +268,7 @@
       "preview_digest": null,
       "previous_id": "fugue-4b",
       "next_id": null,
-      "source_digest": "sha256:aff23549777585c20f4b480be003c5c62f1c7cb4f075a397faaf69a863cb3af9",
+      "source_digest": "sha256:50426ff7d30f76e76f25fcf9fc499004081f37df703385e8189903ea56e58916",
       "animation": {
         "html": "media/film/fugue-extra-building-the-evaluator-with-the-evaluated.html",
         "mp4": "media/film/fugue-extra-building-the-evaluator-with-the-evaluated.mp4",

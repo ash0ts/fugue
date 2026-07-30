@@ -101,9 +101,10 @@ outside Agent execution, initializes each server, captures its exact manifest,
 and locks the result. Agent cells never clone an MCP repository or install
 dependencies.
 
-The review-visible Fugue provider and V3 evidence pull requests remain
-preparation source, not evidence for the pending decision.
-[@fugue-provider-draft] [@fugue-mcp-draft]
+The review-visible Fugue provider, V3 evidence, and source-isolated MCP
+qualification pull requests remain preparation source, not evidence for the
+pending decision. [@fugue-provider-draft] [@fugue-mcp-draft]
+[@fugue-mcp-qualification-draft]
 
 ## Genuine evidence, deliberately seeded
 

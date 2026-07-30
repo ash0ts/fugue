@@ -10,6 +10,8 @@ Unpublished working notes.
   citations attach per clause.
 - Evidence boundary: PR #42–#45 numbers stay beside their [@fugue-pr*]
   citations and keep the 2026-07-28 metadata date and stacked-diff caveat;
-  the unpublished BuildKit fix remains explicitly non-citable.
+  the unpublished BuildKit fix remains explicitly non-citable. Draft PRs
+  #48–#52 are enumerated separately as review-visible source identities and
+  never as live qualification, results, merges, or releases.
 - Isolation test: a reader should be able to say what the stack history
   proves (process) and what it cannot prove (evaluator validity).
