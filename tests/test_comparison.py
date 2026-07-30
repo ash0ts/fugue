@@ -16,6 +16,7 @@ from fugue.bench.comparison import (
     ComparisonSpecV1,
     DecisionAttestationV1,
     _apply_decision_attestation,
+    _canonical_decision_gate_policies,
     _comparison_qualification_digest,
     _comparison_result_digest,
     _comparison_trial_output,
@@ -2614,6 +2615,24 @@ def test_checkpoint_requires_configured_advisory_judge_to_score() -> None:
         checkpoint_index=1,
     )
     assert after_checkpoint == {}
+
+
+def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> (
+    None
+):
+    policies = _canonical_decision_gate_policies(
+        (),
+        implicit=(),
+        release_note_coverage=(
+            {
+                "release_note": "bounded-history",
+                "status": "observed_delta",
+                "infrastructure_gates": [],
+            },
+        ),
+    )
+
+    assert policies == []
 
 
 def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
