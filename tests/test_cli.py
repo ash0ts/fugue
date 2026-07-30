@@ -58,6 +58,9 @@ def test_public_command_surface_is_intentionally_small() -> None:
     }
     assert "--env-file" in subparsers.choices["run"].format_help()
     assert "--env-file" in subparsers.choices["setup"].format_help()
+    result_help = subparsers.choices["result"].format_help()
+    assert "--authorize-followup" in result_help
+    assert "--signoff-by" in result_help
     research_actions = next(
         action
         for action in subparsers.choices["research"]._actions

@@ -1,0 +1,12 @@
+{
+  "invalidated_at": "2026-07-30T09:30:03Z",
+  "kind": "hosted-source-preparation-invalidation",
+  "project": "wandb/fugue-mcp-release-source-v1",
+  "reason": "The first preparation attempt produced 24 failed conversation roots because Weave Conversation turn outputs used untyped message dictionaries. No evidence lock or behavioral result was produced.",
+  "schema_version": 1,
+  "status": "superseded",
+  "supported_claims": [
+    "Preparation diagnostics only"
+  ],
+  "superseded_by": "wandb/fugue-mcp-release-source-v2"
+}

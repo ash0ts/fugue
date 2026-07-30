@@ -10,8 +10,15 @@
       "env": {
         "WANDB_API_KEY": "${WANDB_API_KEY}",
         "WANDB_BASE_URL": "https://api.wandb.ai",
-        "MCP_ANALYTICS_LOG_STREAM": "stderr"
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
       },
+      "allowed_tools": [
+        "get_run_history_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "summarize_evaluation_tool"
+      ],
       "allowed_hosts": [
         "api.wandb.ai",
         "app.wandb.ai",
@@ -29,8 +36,15 @@
       "env": {
         "WANDB_API_KEY": "${WANDB_API_KEY}",
         "WANDB_BASE_URL": "https://api.wandb.ai",
-        "MCP_ANALYTICS_LOG_STREAM": "stderr"
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
       },
+      "allowed_tools": [
+        "get_run_history_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "summarize_evaluation_tool"
+      ],
       "allowed_hosts": [
         "api.wandb.ai",
         "app.wandb.ai",

@@ -84,6 +84,66 @@ def test_mcp_probe_inherits_only_operating_env_and_declared_credentials(
     assert "UNRELATED_API_TOKEN" not in environment
 
 
+def test_relocking_identical_read_only_runtime_cleans_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = component_imports.MCPImportDraftV1(
+        schema_version=1,
+        id="wandb",
+        transport="stdio",
+        command=(
+            "uvx",
+            "--from",
+            "wandb-mcp-server==0.4.0",
+            "wandb_mcp_server",
+        ),
+    )
+
+    def install(
+        package: str,
+        executable: str,
+        destination: Path,
+        *,
+        runtime_platform: str,
+        fixed_env: tuple[tuple[str, str], ...],
+    ) -> None:
+        assert package == "wandb-mcp-server==0.4.0"
+        assert executable == "wandb_mcp_server"
+        assert runtime_platform == "linux/amd64"
+        assert fixed_env == ()
+        launcher = destination / "bin/server"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o755)
+        component_imports._make_tree_read_only(destination)
+
+    monkeypatch.setattr(
+        component_imports,
+        "_install_python_tool",
+        install,
+    )
+
+    first = component_imports._materialize_stdio_runtime(
+        draft,
+        tmp_path,
+        acknowledge_package_code=True,
+        runtime_platform="linux/amd64",
+    )
+    second = component_imports._materialize_stdio_runtime(
+        draft,
+        tmp_path,
+        acknowledge_package_code=True,
+        runtime_platform="linux/amd64",
+    )
+
+    assert second == first
+    runtime_root = (
+        tmp_path / component_imports.MANAGED_MCP_RUNTIME_ROOT / "wandb"
+    )
+    assert not list(runtime_root.glob(".prepare-*"))
+
+
 def test_mcp_import_rejects_literal_credentials_and_shells(tmp_path: Path) -> None:
     config = tmp_path / "mcp.json"
     config.write_text(

@@ -5,8 +5,14 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 _TOKEN_PATTERNS = (
-    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"']+"),
-    re.compile(r"(?i)((?:api[_ -]?key|token|password|secret)\s*[:=]\s*)[^\s\"']+"),
+    re.compile(
+        r"(?i)(authorization\s*[:=]\s*bearer\s+)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+    ),
+    re.compile(
+        r"(?i)((?:api[_ -]?key|token|password|secret)\s*[:=]\s*)"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
+    ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
 )
 

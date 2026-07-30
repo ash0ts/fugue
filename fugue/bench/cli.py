@@ -155,7 +155,26 @@ def _parser() -> FugueArgumentParser:
     result.add_argument("comparison", nargs="?", default="latest")
     result.add_argument("--json", action="store_true")
     result.add_argument("--open", action="store_true", dest="open_result")
-    result.add_argument("--append-invalidation", type=Path)
+    result_action = result.add_mutually_exclusive_group()
+    result_action.add_argument("--append-invalidation", type=Path)
+    result_action.add_argument(
+        "--authorize-followup",
+        type=Path,
+        metavar="COMPARISON",
+        help=(
+            "Bind this exact reviewed V3 result as the declared prerequisite "
+            "for a follow-up comparison"
+        ),
+    )
+    result_action.add_argument(
+        "--signoff-by",
+        help=(
+            "Attach release-owner actionability sign-off to a "
+            "ready_for_signoff V3 result"
+        ),
+    )
+    result.add_argument("--reviewed-by")
+    result.add_argument("--reviewed-at")
     result.add_argument("--research-id")
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.set_defaults(handler=_comparison_result)
@@ -1024,8 +1043,62 @@ def _comparison_result(args: argparse.Namespace) -> int:
         return 0
     if args.research_id is not None:
         raise ValueError("--research-id requires --append-invalidation")
-    result_root = root / COMPARISON_RESULT_ROOT
-    if args.comparison == "latest":
+    result_path, markdown_path = _comparison_result_paths(
+        root,
+        args.comparison,
+        result_root=root / COMPARISON_RESULT_ROOT,
+    )
+    reviewed_at = args.reviewed_at or datetime.now(UTC).isoformat().replace(
+        "+00:00",
+        "Z",
+    )
+    if args.authorize_followup is not None:
+        from fugue.bench.comparison import authorize_comparison_followup
+
+        if not args.reviewed_by:
+            raise ValueError("--authorize-followup requires --reviewed-by")
+        receipt, canonical_result, attestation = authorize_comparison_followup(
+            result_path=result_path,
+            followup_spec_path=args.authorize_followup,
+            reviewed_by=args.reviewed_by,
+            reviewed_at=reviewed_at,
+            repo_root=root,
+        )
+        receipt["result_path"] = canonical_result.relative_to(root).as_posix()
+        receipt["attestation_path"] = attestation.relative_to(root).as_posix()
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return 0
+    if args.signoff_by is not None:
+        from fugue.bench.comparison import attest_comparison_decision
+
+        signed = attest_comparison_decision(
+            result_path=result_path,
+            signer=args.signoff_by,
+            signed_at=reviewed_at,
+        )
+        print(json.dumps(signed.to_dict(), indent=2, sort_keys=True))
+        return 0
+    if args.reviewed_by or args.reviewed_at:
+        raise ValueError(
+            "--reviewed-by/--reviewed-at require --authorize-followup or "
+            "--signoff-by"
+        )
+    if args.open_result:
+        webbrowser.open(markdown_path.resolve().as_uri())
+    if args.json:
+        print(result_path.read_text(encoding="utf-8"), end="")
+    else:
+        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+    return 0
+
+
+def _comparison_result_paths(
+    root: Path,
+    comparison: str,
+    *,
+    result_root: Path,
+) -> tuple[Path, Path]:
+    if comparison == "latest":
         pointer_path = result_root / "latest.json"
         if not pointer_path.is_file():
             raise FileNotFoundError("no comparison result has been recorded")
@@ -1039,22 +1112,16 @@ def _comparison_result(args: argparse.Namespace) -> int:
                 path
                 for path in candidates
                 if json.loads(path.read_text(encoding="utf-8")).get("comparison_id")
-                == args.comparison
+                == comparison
             ),
             None,
         )
         if result_path is None:
-            raise FileNotFoundError(
-                f"comparison result not found: {args.comparison}"
-            )
+            raise FileNotFoundError(f"comparison result not found: {comparison}")
         markdown_path = result_path.with_name("result.md")
-    if args.open_result:
-        webbrowser.open(markdown_path.resolve().as_uri())
-    if args.json:
-        print(result_path.read_text(encoding="utf-8"), end="")
-    else:
-        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
-    return 0
+    if not result_path.is_file():
+        raise FileNotFoundError(f"comparison result not found: {result_path}")
+    return result_path, markdown_path
 
 
 def _comparison_demo(args: argparse.Namespace) -> int:

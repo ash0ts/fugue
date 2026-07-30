@@ -6281,10 +6281,24 @@ def _mcp_tool_call_evidence(
             for key, values in operation_filters.items()
             if values
         }
-        parent_filter = {
-            "parent_ids": sorted(parent_ids),
-            "operations": normalized_operation_filters,
-        }
+        supplied_parent_digest = arguments.get("parent_filter_digest")
+        parent_filter_digest = (
+            str(supplied_parent_digest)
+            if isinstance(supplied_parent_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", supplied_parent_digest)
+            else _stable_digest(sorted(parent_ids))
+            if parent_ids
+            else None
+        )
+        supplied_parent_count = arguments.get("parent_filter_count")
+        parent_filter_count = (
+            supplied_parent_count
+            if type(supplied_parent_count) is int
+            and supplied_parent_count > 0
+            else len(parent_ids)
+            if parent_ids
+            else None
+        )
         evidence = {
             "tool": tool,
             "request_id": str(event.get("request_id") or "") or None,
@@ -6306,12 +6320,8 @@ def _mcp_tool_call_evidence(
                 for key, values in safe_values.items()
                 if values
             },
-            "parent_filter_ids": sorted(parent_ids),
-            "parent_filter_digest": (
-                _stable_digest(parent_filter)
-                if parent_ids or normalized_operation_filters
-                else None
-            ),
+            "parent_filter_digest": parent_filter_digest,
+            "parent_filter_count": parent_filter_count,
             "op_name_filter": normalized_operation_filters or None,
             **raw_graphql_shape,
         }
@@ -6370,10 +6380,41 @@ def _normalized_mcp_response(
         value = response.get(key)
         if type(value) is int and value >= 0:
             result[key] = value
-    for key in ("has_more", "project_exhaustive", "truncation_applied"):
+    for key in (
+        "has_more",
+        "project_exhaustive",
+        "truncation_applied",
+        "returned_parent_filter_match",
+    ):
         value = response.get(key)
         if type(value) is bool:
             result[key] = value
+    operation_counts = response.get("operation_counts")
+    if isinstance(operation_counts, Mapping):
+        normalized_operation_counts = {
+            str(key): value
+            for key, value in operation_counts.items()
+            if str(key)
+            in {
+                "Evaluation.predict_and_score",
+                "Evaluation.summarize",
+                "other",
+            }
+            and type(value) is int
+            and value >= 0
+        }
+        returned_count = result.get("returned_count")
+        if (
+            len(normalized_operation_counts) == len(operation_counts)
+            and (
+                returned_count is None
+                or sum(normalized_operation_counts.values())
+                == returned_count
+            )
+        ):
+            result["operation_counts"] = dict(
+                sorted(normalized_operation_counts.items())
+            )
     coverage_status = str(response.get("coverage_status") or "")
     if coverage_status in {
         "project-exhaustive",

@@ -7,15 +7,17 @@ the W&B MCP Python package:
 > reconcile W&B/Weave evidence and assess project health compared with the
 > exact `main` revision?
 
-The current release decision is **HOLD** until the natural-maintainer studies,
-package gates, and human sign-off all pass. A local behavioral finding does not
-certify W&B Serverless, managed-service, or Helm readiness.
+The current release posture is **HOLD** until the natural-maintainer studies,
+package gates, and human sign-off all pass. No V3 canary or confirmation result
+has been approved or executed by this branch, so there is no current V3
+behavioral conclusion. A later local behavioral finding will not certify W&B
+Serverless, managed-service, or Helm readiness.
 
 ## Locked design
 
 | Role | Locked value |
 |---|---|
-| Source evidence | `wandb/fugue-mcp-release-source-v1` |
+| Source evidence | `wandb/fugue-mcp-release-source-v2` |
 | Result evidence | `wandb/fugue-mcp-release-qualification-v1` |
 | Baseline | `wandb-mcp-main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` |
 | Candidate | [`wandb-mcp-0-4-staging` at `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`](https://github.com/wandb/wandb-mcp-server/commit/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7) |
@@ -23,13 +25,16 @@ certify W&B Serverless, managed-service, or Helm readiness.
 | Canary | 2 tasks × 2 arms × 2 attempts = 8 cells, maximum $10 |
 | Confirmation | 4 tasks × 2 arms × 2 attempts = 16 cells, maximum $20 |
 
-The checked-in candidate is the exact `staging/0.4.0` head after the reviewed
-reconciliation and STDIO protocol-safety fixes merged. Any later staging
-change invalidates every candidate, runtime, scorer, preview, and approval lock
-and requires this source lock and qualification to be regenerated.
+The checked-in candidate is the `staging/0.4.0` commit selected for this
+qualification and contains the reconciliation and STDIO protocol-safety fixes.
+The package gate must independently prove that it is still the final reviewed
+staging head. Any later staging change invalidates the candidate runtime,
+mechanism, preparation, preview, and approval locks. The source evidence lock
+may be reused only after its normal drift verification still passes.
 
-The source project contains immutable task evidence only. Agent traces,
-Evaluations, result rows, and release decisions go to the result project.
+The source project contains a locked, read-only task-evidence cohort. Agent
+traces, Evaluations, result rows, and release decisions go to the result
+project.
 Publication to the source project, source drift, or a query outside the locked
 source scope fails qualification.
 
@@ -50,10 +55,10 @@ not be committed:
 ```bash
 uv run python \
   examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
-  --source-project wandb/fugue-mcp-release-source-v1 \
+  --source-project wandb/fugue-mcp-release-source-v2 \
   --result-project wandb/fugue-mcp-release-qualification-v1 \
   --env-file /Users/ashah/Documents/common_tools/.env \
-  --output .fugue/qualification/mcp-release-source-v1/evidence.lock.json
+  --output .fugue/qualification/mcp-release-source-v2/evidence.lock.json
 ```
 
 The command never serializes credentials or invokes a model provider. Before
@@ -74,10 +79,10 @@ editing both recovery artifacts is not a supported recovery procedure.
 W&B Runs and Weave Calls are mutable remote records rather than immutable
 object versions, so every lock reuse re-reads and hashes their selected
 terminal content. Dataset and Evaluation refs are exact content-addressed
-versions. The pinned Weave SDK does not expose a reliable public API for
-enumerating every historical object version; preparation validates the exact
-`qualification-v1` object versions plus all relevant Calls and fails on any
-ambiguity. It does not rewrite private labels to accommodate drift.
+versions. Preparation exhaustively inventories all 13 expected Weave object
+and operation versions plus all 124 relevant Calls, and rejects any missing,
+duplicate, unexpected, or changed identity. It does not rewrite private labels
+to accommodate drift.
 
 The checked-in `evidence.lock.json` belongs to the earlier single-project
 study. It is retained only as historical audit input and is not the current
@@ -89,6 +94,8 @@ source lock.
 from the trusted operator boundary:
 
 ```bash
+ENV_FILE=/Users/ashah/Documents/common_tools/.env
+
 uv run fugue mcp import \
   --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
   --server wandb-main \
@@ -99,11 +106,11 @@ uv run fugue mcp import \
   --server wandb-0-4-staging \
   --as wandb-mcp-0-4-staging
 
-uv run fugue mcp lock wandb-mcp-main \
+uv run --env-file "$ENV_FILE" fugue mcp lock wandb-mcp-main \
   --acknowledge-package-code \
   --platform linux/amd64
 
-uv run fugue mcp lock wandb-mcp-0-4-staging \
+uv run --env-file "$ENV_FILE" fugue mcp lock wandb-mcp-0-4-staging \
   --acknowledge-package-code \
   --platform linux/amd64
 ```
@@ -120,30 +127,36 @@ roots:
 ```bash
 uv run python \
   examples/comparisons/wandb-mcp-maintenance/verify_hosted_source.py \
-  --lock .fugue/qualification/mcp-release-source-v1/evidence.lock.json \
+  --evidence-lock .fugue/qualification/mcp-release-source-v2/evidence.lock.json \
   --env-file /Users/ashah/Documents/common_tools/.env \
   --output .fugue/qualification/mcp-release-source-conformance.json
 ```
 
-The baseline must reproduce 18 direct children: 16 prediction-and-score calls
-plus two summary calls. The candidate must report exactly the 16 direct
-`Evaluation.predict_and_score` children.
+This first receipt proves only that the locked source cohort contains 18 direct
+children: 16 prediction-and-score calls plus two summary calls. It does not
+exercise either MCP revision.
 
 Then qualify both locked MCP runtimes without an Agent model:
 
 ```bash
 uv run python \
   examples/comparisons/wandb-mcp-maintenance/qualify_locked_revisions.py \
-  --source-lock .fugue/qualification/mcp-release-source-v1/evidence.lock.json \
+  --evidence-lock .fugue/qualification/mcp-release-source-v2/evidence.lock.json \
   --env-file /Users/ashah/Documents/common_tools/.env \
   --output .fugue/qualification/mcp-release-mechanism-receipt.json
 ```
+
+The second receipt must show that main reports all 18 direct children while
+the repaired staging runtime reports exactly the 16
+`Evaluation.predict_and_score` children.
 
 Package release gates are separate and must produce
 `.fugue/qualification/mcp-python-package-release-gates.json`. That receipt
 binds the exact final staging tree, fresh wheels on Python 3.11 and 3.12,
 W&B-latest compatibility, CI, dependency and source-security checks, local
-conformance, and the human-maintainer actionability review.
+conformance, and the declared package infrastructure gates. Human actionability
+review is a separate post-result `DecisionAttestationV1`; it is never inferred
+from this infrastructure receipt.
 
 ## Preview the natural-maintainer studies
 
@@ -157,27 +170,55 @@ env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
   --env-file "$ENV_FILE" --json
 
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
-  --preview --env-file "$ENV_FILE" --json
-```
-
-Previewing does not authorize spend. An operator must approve that exact
-preview digest with a maximum of eight cells and $10 before executing it.
-
-Only if the canary is valid, non-regressing, reconciled, and useful may an
-operator generate and separately approve the 16-cell confirmation:
-
-```bash
-SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-confirmation-local-v3.yaml
-
-env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
-  --env-file "$ENV_FILE" --json
+  --prepare --env-file "$ENV_FILE" --json
 
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
   --preview --env-file "$ENV_FILE" --json
 ```
 
-The confirmation requires a new approval capped at 16 cells and $20. Neither
-command in this document runs a model or grants approval.
+`--prepare` is the trusted no-spend boundary that freezes inputs and builds the
+exact local task and Agent images. It does not run a cell or create approval.
+Previewing also does not authorize spend. An operator must approve that exact
+preview digest with a maximum of eight cells and $10 before executing it with
+`--fetch-weave`; without fetched evidence links the V3 result cannot qualify.
+
+The confirmation is intentionally absent from the Research comparison
+registry. Only after the canonical canary Result is valid, non-regressing,
+reconciled, and owner-reviewed may the release workstream bind that exact
+qualification digest, register the confirmation, and generate its separate
+preview:
+
+```bash
+SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-confirmation-local-v3.yaml
+ENV_FILE=/Users/ashah/Documents/common_tools/.env
+
+env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
+  --env-file "$ENV_FILE" --json
+
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
+  --prepare --env-file "$ENV_FILE" --json
+
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
+  --preview --env-file "$ENV_FILE" --json
+```
+
+Until that prerequisite is recorded, the command above is specification
+inspection only and the Study must not be launched. The confirmation requires
+a new approval capped at 16 cells and $20. The confirmation `check`, `prepare`,
+and `preview` commands do not run a model or grant approval.
+
+After a valid, non-regressing canary has completed and a maintainer has reviewed
+it as useful, authorize the exact result for the declared confirmation:
+
+```bash
+uv run fugue result mcp-main-vs-0-4-natural-maintainer-canary-v3 \
+  --authorize-followup \
+  examples/comparisons/wandb-mcp-maintenance/natural-maintainer-confirmation-local-v3.yaml \
+  --reviewed-by RELEASE_OWNER
+```
+
+This writes the confirmation spec's canonical prerequisite result and
+attestation. It does not register, approve, or execute the confirmation.
 
 ## What the tasks and scorer measure
 
@@ -189,6 +230,7 @@ The deterministic scorer reports independent dimensions:
 
 - factual task outcome;
 - actual locked-project scope;
+- project identity reported in the Agent answer;
 - bounded evidence collection;
 - honest treatment of incomplete evidence;
 - observed release-mechanism use.
@@ -200,10 +242,10 @@ is actionable for a maintainer and remains distinct from deterministic scores.
 
 Fugue writes one stable attempt identity across the comparison design, Harbor
 cell, Claude conversation, MCP calls, Weave Evaluation chain, Study event, and
-result. A valid attempt resolves its Dataset, Evaluation root,
-prediction-and-score call, prediction call, and native Agent root in the
-result project. OTel identifiers remain diagnostic metadata and are never used
-as Weave links.
+result. A valid attempt resolves the Dataset in the locked source project and
+the Evaluation root, prediction-and-score call, prediction call, and native
+Agent root in the result project, with a verified cross-project relationship.
+OTel identifiers remain diagnostic metadata and are never used as Weave links.
 
 ## Reading the result
 
@@ -218,8 +260,20 @@ finding and package-release decision, then inspect each paired task:
 5. Reconcile terminal cells, result rows, Evaluation rows, and native Agent
    roots before accepting the finding.
 
+Evidence grade `A` means that required lineage, links, and privacy checks
+reconcile. It does not mean the tasks passed, the candidate improved, or the
+package is ready to release.
+
 A `GO` decision additionally requires the immutable package-gate receipt and a
-release-owner signature over the final result digest. A valid `HOLD` or
+release-owner actionability signature over a `ready_for_signoff` result:
+
+```bash
+uv run fugue result mcp-main-vs-0-4-natural-maintainer-confirmation-v3 \
+  --signoff-by RELEASE_OWNER
+```
+
+The command signs the exact qualification digest; it does not merge or publish
+the package. A valid `HOLD` or
 non-discriminating result remains a useful outcome and must not be rewritten
 to manufacture a release win.
 
@@ -229,4 +283,10 @@ The older `discovery*.yaml`, `primary*.yaml`,
 `wandb-replication*.yaml`, and checked-in `evidence.lock.json` are retained for
 audit compatibility. They are unregistered and are not current package-release
 evidence. The Research comparison registry exposes only the canonical V3
-canary and confirmation from this directory.
+canary from this directory; confirmation remains unregistered until its
+prerequisite result and owner review exist.
+
+The source-v1 invalidation record describes a failed preparation and has no
+ComparisonResult digest. It must not be used as a V3 `supersedes` entry. A
+historical Study result may be marked superseded only after its exact immutable
+result digest is recovered.

@@ -2651,16 +2651,17 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                         "max_evals": 20,
                         "run_id": "maint-r18-06",
                         "keys": ["_step", "latency_ms"],
-                        "samples": 5,
-                        "columns": [
+                            "samples": 5,
+                            "parent_filter_digest": "a" * 64,
+                            "parent_filter_count": 1,
+                            "columns": [
                             "id",
                             "config.attempt_label",
                             "summary.latency_ms",
                         ],
-                        "filters": {
-                            "limit": 6,
-                            "parent_ids": ["evaluation-a"],
-                            "op_name_contains": "predict_and_score",
+                            "filters": {
+                                "limit": 6,
+                                "op_name_contains": "predict_and_score",
                             "private_query": "must-not-be-exported",
                         },
                     },
@@ -2744,7 +2745,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
         "summary.latency_ms",
     ]
     assert calls[0]["limit"] == 6
-    assert calls[0]["parent_filter_ids"] == ["evaluation-a"]
+    assert calls[0]["parent_filter_count"] == 1
     assert calls[0]["op_name_filter"] == {
         "op_name_contains": ["predict_and_score"]
     }
@@ -2758,7 +2759,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     assert calls[0]["truncation_applied"] is False
     assert calls[0]["coverage_status"] == "project-exhaustive"
     assert calls[1]["prediction_count"] == 16
-    assert len(calls[0]["parent_filter_digest"]) == 64
+    assert calls[0]["parent_filter_digest"] == "a" * 64
     assert "must-not-be-exported" not in json.dumps(
         summary["mcp_tool_calls"], sort_keys=True
     )
