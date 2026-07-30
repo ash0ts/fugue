@@ -197,6 +197,10 @@ def test_enterprise_recipe_uses_fresh_versioned_demo_campaign() -> None:
     campaign = get_campaign("enterprise-evidence-use-demo-v3", REPO_ROOT)
     stages = {stage.id: stage for stage in campaign.stages}
 
+    assert not (
+        REPO_ROOT
+        / "configs/fugue/campaigns/enterprise-evidence-use-demo-v2.yaml"
+    ).exists()
     assert campaign.allowed_experiments == ("enterprise-evidence-use-v1",)
     assert campaign.revision == "v3"
     assert stages["canary"].max_proposals == 1

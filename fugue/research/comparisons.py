@@ -1351,15 +1351,15 @@ def _ensure_direct_comparison_research(
             raise
         store.create_study(
             study_id=research_id,
-            title="Harbor-first Fugue behavioral results",
-            campaign_id="fugue-harbor-results",
+            title="Fugue comparison results",
+            campaign_id="fugue-direct-comparisons",
             question=(
-                "What do the locked local-Harbor MCP and Claude comparisons "
-                "establish, and what remains outside package-release scope?"
+                "What does this locked comparison establish, and what remains "
+                "outside its declared decision scope?"
             ),
             background=(
-                "Canonical behavioral Studies are presented separately from "
-                "governed package-release decisions."
+                "Canonical comparison evidence is projected under the "
+                "comparison's declared Research identity."
             ),
             attribution=_service_attribution(),
             operation_id=f"create-{research_id}",
