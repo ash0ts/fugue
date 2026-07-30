@@ -12,9 +12,11 @@ Unpublished working notes.
   of those layers is reported as a completed result here.
 - Preregistration honesty: the decision remains pending. The plan now uses
   an 8-cell discovery canary and permits a separately approved 32-cell
-  confirmation only after the canary passes. Draft Fugue PRs #48–#50 and MCP
-  PR #126's current checked head are labeled preparation only; no final
-  staging SHA, package GO, live result, or Serverless observation is claimed.
+  confirmation only after the canary passes. Draft Fugue PRs #48–#50, source
+  lane `wandb/fugue-mcp-release-source-v2`, and final MCP staging source
+  `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7` are labeled preparation only;
+  no accepted preview, source-conformance receipt, package GO, live result,
+  or Serverless observation is claimed.
 - Isolation test: a reader should be able to say why a passing handshake
   does not qualify a release, why source and result projects are separate,
   and what evidence remains missing.

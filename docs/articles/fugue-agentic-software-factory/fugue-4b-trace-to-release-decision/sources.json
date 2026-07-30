@@ -56,13 +56,13 @@
       "supports": "Review-visible V3 evidence implementation; it does not establish live cells, a selected intervention, or a release decision."
     },
     {
-      "id": "mcp-repair-draft",
+      "id": "mcp-final-staging",
       "author": "Weights & Biases",
-      "title": "W&B MCP repair candidate",
-      "publication": "GitHub draft pull request #126",
+      "title": "W&B MCP final staging head",
+      "publication": "GitHub commit on staging/0.4.0",
       "date": "2026-07-30",
-      "url": "https://github.com/wandb/wandb-mcp-server/pull/126",
-      "supports": "Review-visible repair candidate; draft status and a moving head do not establish final staging identity or behavioral qualification."
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
+      "supports": "Exact final staging source identity for preparation; a repository commit does not establish an accepted Fugue preview, live canary, behavioral result, or package decision."
     },
     {
       "id": "fugue-mcp-qualification-draft",

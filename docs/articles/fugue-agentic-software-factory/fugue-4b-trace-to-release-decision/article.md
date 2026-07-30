@@ -252,12 +252,13 @@ First lock the reviewed failure, then prepare public discovery tasks,
 host-private holdouts, both reviewed Skills, and both exact MCP runtimes.
 
 The active identities are intentionally resolved by the reviewed repository
-configuration. The repaired MCP candidate is currently reviewable in draft
-pull request #126 at reported head
-`3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`; CI and security checks pass, but
-the pull request remains draft and unmerged. [@mcp-repair-draft] It is not a
-final staging lock or a live result. If the candidate source changes, the
-Skill or MCP lock changes and every affected preview becomes stale.
+configuration. The final MCP staging source selected for preparation is
+`staging/0.4.0` at
+`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. [@mcp-final-staging] This exact
+repository identity is not an accepted preview, prepared runtime, launched
+canary, behavioral result, or package decision. If the candidate source
+changes, the Skill or MCP lock changes and every affected preview becomes
+stale.
 
 Preparation is the only boundary allowed to build task images, Claude Code
 runtime assets, context, or MCP packages. Active cells receive those assets

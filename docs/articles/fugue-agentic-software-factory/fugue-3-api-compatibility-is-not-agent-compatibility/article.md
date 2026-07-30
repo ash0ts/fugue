@@ -3,9 +3,9 @@
 > **Fugue: Evals for the Agentic Software Factory · Part 3**  
 > A standalone preregistration for MCP maintainers and Agent-integration
 > teams. **Status:** draft preregistration and blocked; the release decision
-> is pending a source-isolated comparison against the final reviewed staging
-> head. No accepted preview and no result exist. **Reading time:** about
-> 11 minutes.
+> is pending a source-isolated comparison against final staging revision
+> `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. No result or accepted preview
+> exists. **Reading time:** about 11 minutes.
 
 This article defines the current evidence boundary, candidates, staged local
 Study, and release gate in one place. You do not need to know Fugue, W&B MCP,
@@ -27,8 +27,10 @@ The current decision is deliberately `pending`. Historical 0.3.7 and early
 0.4 candidate commits remain useful source evidence, but they are not the
 active comparison and cannot authorize a current release. [@mcp-baseline]
 [@mcp-candidate] The active design compares the exact reviewed `main` head
-with the exact final staging head after review is complete. If review or merge
-changes either head, Fugue must lock new candidates and produce a new preview.
+with final staging head `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`.
+This draft records that SHA for preparation only; no accepted preview has
+locked it. If either candidate changes, Fugue must lock new candidates and
+produce a new preview.
 
 No result is carried forward from a deterministic replay, a direct MCP probe,
 an earlier mixed-project canary, or a future remote-runtime plan. The decision
@@ -111,7 +113,7 @@ pending decision. [@fugue-provider-draft] [@fugue-mcp-draft]
 The current plan separates immutable task evidence from experiment output:
 
 ```text
-source:  wandb/fugue-mcp-release-source-v1
+source:  wandb/fugue-mcp-release-source-v2
 results: wandb/fugue-mcp-release-qualification-v1
 ```
 
@@ -250,13 +252,14 @@ a new preview.
 
 ## Lock the two MCP candidates
 
-The active candidates are the reviewed `main` head and the final reviewed
-staging head. The current repair work is visible in draft MCP pull request
-#126 at reported head `3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`; its CI and
-security checks pass, but the pull request remains draft and unmerged.
-[@mcp-repair-draft] Those facts establish review readiness, not final staging
-identity or behavioral evidence. The accepted preview must resolve the final
-reviewed head after review; this draft does not invent that SHA.
+The active candidates are the reviewed `main` head and final staging head
+`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. The latter is the exact
+`staging/0.4.0` source selected for this preparation pass.
+[@mcp-final-staging] Recording it establishes a candidate source identity
+only: no accepted preview, source-conformance receipt, canary, confirmation,
+behavioral result, or package decision exists. The accepted preview must
+independently resolve and lock both candidates; a later source change makes
+this draft stale.
 
 The trusted operator sequence is:
 

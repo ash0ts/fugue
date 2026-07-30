@@ -9,8 +9,9 @@ Unpublished working notes.
 - Preregistration honesty: no behavioral winner or release decision is
   claimed. Aria is optional and read-only. Serverless, OpenAI, direct
   CoreWeave operation, and WBAF are not dependencies or observed results.
-- Review-visible Fugue PRs #48–#52 and MCP PR #126 are preparation source
-  only; a green draft head is not a final staging lock, live canary, selected
+- Review-visible Fugue PRs #48–#52 and MCP final staging source
+  `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7` are preparation source only; an
+  exact repository head is not an accepted preview, live canary, selected
   intervention, or qualified tree.
 - Lane boundary: the Claude loop, real harness comparison, real memory
   comparison, and source-isolated MCP result use dedicated planned projects.
