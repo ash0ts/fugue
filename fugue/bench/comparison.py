@@ -7460,7 +7460,7 @@ def _canonical_decision_gate_policies(
             continue
         release_note = str(item.get("release_note") or "")
         for gate_id in _string_tuple(
-            item.get("infrastructure_gates") or (),
+            item.get("infrastructure_gates") or [],
             "release-note infrastructure gate",
             allow_empty=True,
         ):
