@@ -20,6 +20,7 @@ from fugue.bench.comparison import (
     _comparison_result_digest,
     _comparison_trial_output,
     _evaluate_decision,
+    _paired_attempt_view_v3,
     _sanitized_answer_excerpt,
     analyze_comparison_rows,
     check_comparison,
@@ -274,7 +275,13 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
     assert result.unchanged == 2
     assert result.incomplete == 0
     assert result.evidence_project is None
-    assert result.judge_summary == {"status": "not_used"}
+    assert result.judge_summary == {
+        "status": "not_used",
+        "claim_status": "not_applicable",
+        "judges": [],
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 0,
+    }
     assert result.deterministic_summary["candidate"]["passed"] == 6
     assert result.operational_summary == {
         "execution_states": {"unknown": 16},
@@ -2461,26 +2468,34 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
     calibration = tmp_path / "calibration.json"
     calibration.write_text(
         json.dumps(
-                {
-                    "schema_version": 1,
-                    "review_status": "adjudicated",
-                    "reviewers_per_example": 2,
-                    "disagreements_adjudicated": True,
-                    "judge_profile": judge.profile,
-                    "rubric_digest": stable_digest(
-                        {
-                            "schema_version": 1,
-                            "judge_id": judge.id,
-                            "profile": judge.profile,
-                            "rubric": judge.rubric,
-                            "dimensions": list(judge.dimensions),
-                            "evidence": list(judge.evidence),
-                        }
-                    ),
-                    "examples": 48,
+            {
+                "schema_version": 1,
+                "review_status": "adjudicated",
+                "reviewers_per_example": 2,
+                "disagreements_adjudicated": True,
+                "judge_profile": judge.profile,
+                "rubric_digest": stable_digest(
+                    {
+                        "schema_version": 1,
+                        "judge_id": judge.id,
+                        "profile": judge.profile,
+                        "rubric": judge.rubric,
+                        "dimensions": list(judge.dimensions),
+                        "evidence": list(judge.evidence),
+                    }
+                ),
+                "examples": 48,
+                "calibration_examples": 36,
+                "holdout_examples": 12,
+                "cases_digest": "a" * 64,
                 "true_positive_rate": 0.9,
                 "true_negative_rate": 0.9,
+                "calibration_true_positive_rate": 0.9,
+                "calibration_true_negative_rate": 0.9,
+                "holdout_true_positive_rate": 0.9,
+                "holdout_true_negative_rate": 0.9,
                 "critical_false_passes": 0,
+                "passed": True,
             }
         )
     )
@@ -2497,8 +2512,56 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
             execution=replace(spec.execution, max_cost_usd=10),
         )
         assert check_comparison(ready, repo_root=root).status == "ready"
+        split_regression = json.loads(copied.read_text())
+        split_regression["holdout_true_negative_rate"] = 0.8
+        copied.write_text(json.dumps(split_regression))
+        split_readiness = check_comparison(ready, repo_root=root)
+        assert split_readiness.status == "blocked"
+        assert any(
+            "calibration or holdout is below 0.85" in item
+            for item in split_readiness.blockers
+        )
     finally:
         copied.unlink(missing_ok=True)
+
+
+def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
+    row = {
+        "attempt_id": "a" * 64,
+        "attempt_identity": {
+            "task_id": "maintainer-project-health",
+            "arm": "candidate",
+            "harness": "claude-code",
+            "attempt": 1,
+            "candidate": "b" * 64,
+            "runtime": "c" * 64,
+        },
+        "prediction_id": "prediction-1",
+        "pass": True,
+        "status": "completed",
+        "comparison_evaluation_status": "scored",
+        "comparison_deterministic_scores": {
+            "natural-maintainer.answer_correct": True,
+        },
+        "comparison_judge_scores": {
+            "maintainer-actionability.maintenance_actionability": 0.8,
+        },
+        "mcp_tool_calls": [],
+    }
+
+    attempt = _paired_attempt_view_v3(row)
+
+    assert attempt is not None
+    assert attempt.scores == {
+        "natural-maintainer.answer_correct": True,
+        ("comparison.judge.maintainer-actionability.maintenance_actionability"): 0.8,
+    }
+    assert (
+        attempt.score_explanations[
+            ("comparison.judge.maintainer-actionability.maintenance_actionability")
+        ]
+        == "Blind judge score; no rationale or private truth is published."
+    )
 
 
 def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
@@ -2642,6 +2705,10 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                         "output": "private tool body",
                     }
                 ],
+                "mcp_tool_calls": [
+                    {"tool": "query_wandb_tool"},
+                ],
+                "mcp_tool_names": ["summarize_evaluation_tool"],
                 "inspected_paths": ["expense-policy-v4.md"],
                 "comparison_deterministic_scores": {"private": True},
             }
@@ -2656,9 +2723,65 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     assert "secret-prediction" not in prompt
     assert "do-not-send" not in prompt
     assert "private tool body" not in prompt
-    assert '"tool_names": ["search"]' in prompt
+    assert (
+        '"tool_names": ["query_wandb_tool", "search", "summarize_evaluation_tool"]'
+    ) in prompt
     assert rows[0]["comparison_judge_status"] == "scored"
     assert rows[0]["comparison_required_evaluation_complete"] is True
+    privacy = rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
+        "judge_input_privacy"
+    ]
+    assert privacy["status"] == "passed"
+    assert len(privacy["payload_sha256"]) == 64
+
+
+def test_blind_judge_rejects_secret_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        reserve_cost_usd=0.1,
+    )
+    provider_calls = []
+
+    def forbidden_post(*_args, **_kwargs):
+        provider_calls.append("called")
+        raise AssertionError("privacy failure must stop before the provider")
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", forbidden_post)
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {
+                    "amount": 125,
+                    "source": "credential super-secret-value",
+                },
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "WANDB_API_KEY": "super-secret-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+    )
+
+    assert provider_calls == []
+    assert rows[0]["comparison_judge_status"] == "unavailable"
+    assert rows[0]["comparison_required_evaluation_complete"] is False
 
 
 def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:

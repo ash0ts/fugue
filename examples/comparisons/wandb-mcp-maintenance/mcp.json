@@ -14,9 +14,18 @@
         "WANDB_MCP_READ_ONLY": "true"
       },
       "allowed_tools": [
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
         "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "probe_project_tool",
         "query_wandb_tool",
         "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
         "summarize_evaluation_tool"
       ],
       "allowed_hosts": [
@@ -40,9 +49,18 @@
         "WANDB_MCP_READ_ONLY": "true"
       },
       "allowed_tools": [
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
         "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "probe_project_tool",
         "query_wandb_tool",
         "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
         "summarize_evaluation_tool"
       ],
       "allowed_hosts": [

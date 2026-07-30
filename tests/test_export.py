@@ -2784,6 +2784,80 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ) == ["*/*", "other-team/*"]
 
 
+def test_mcp_artifact_refs_resolve_only_their_qualified_project() -> None:
+    project = "wandb/fugue-mcp-release-source-v2"
+    events = [
+        {
+            "tool": "get_artifact_details_tool",
+            "arguments": {
+                "artifact_name": (f"{project}/qualification-evidence-maint-r18-01:v0")
+            },
+        },
+        {
+            "tool": "compare_artifact_versions_tool",
+            "arguments": {
+                "artifact_name_a": (
+                    f"{project}/qualification-evidence-maint-r18-01:v0"
+                ),
+                "artifact_name_b": (
+                    f"{project}/qualification-evidence-maint-r18-02:v0"
+                ),
+            },
+        },
+    ]
+
+    assert export._mcp_queried_projects(events) == [project]
+    assert export._qualified_artifact_project("unqualified:v0") is None
+    assert export._qualified_artifact_project("../project/name:v0") is None
+
+
+def test_mcp_artifact_digest_survives_proxy_to_export_without_private_content(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    project = "wandb/fugue-mcp-release-source-v2"
+    artifact = f"{project}/qualification-evidence-maint-r18-02:v0"
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "staging",
+                    "tool": "get_artifact_details_tool",
+                    "request_id": "artifact-b",
+                    "arguments": {
+                        "artifact_name": artifact,
+                        "include_files": False,
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "staging",
+                    "tool": "get_artifact_details_tool",
+                    "request_id": "artifact-b",
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                    "artifact_digest": "sha256:" + "b" * 64,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+    call = summary["mcp_tool_calls"][0]
+
+    assert call["artifact_name"] == artifact
+    assert call["include_files"] is False
+    assert call["artifact_digest"] == "sha256:" + "b" * 64
+    assert summary["mcp_queried_projects"] == [project]
+
+
 def test_mcp_proxy_evidence_normalizes_raw_graphql_without_query_values(
     tmp_path: Path,
 ) -> None:

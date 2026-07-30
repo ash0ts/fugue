@@ -440,6 +440,9 @@ class ExperimentViewV3:
     backend: str | None = None
     candidate_source_revisions: tuple[dict[str, str], ...] = ()
     supersedes: tuple[dict[str, str], ...] = ()
+    judge_summary: dict[str, Any] = field(
+        default_factory=lambda: {"status": "not_used"}
+    )
 
     def to_dict(self) -> dict[str, Any]:
         serialized = _drop_empty(asdict(self), preserve_false=True)
@@ -634,6 +637,12 @@ def _experiment_view_v3_from_dict(
         scorer_revisions=scorer_revisions,
         runtime_locks=runtime_locks,
         supersedes=supersedes,
+        judge_summary=_safe_judge_summary(
+            raw.get("judge_summary"),
+            integrity_status=integrity_status,
+            attempts=matrix_size,
+            arm_attempts=_judge_arm_attempt_counts(paired_cases),
+        ),
     )
     _validate_view_shape(view)
     _validate_v3_evidence_routes(view)
@@ -1673,6 +1682,12 @@ def _build_comparison_evaluation_view_v3(
             superseded_result_from_dict(_mapping(item, "superseded_result")).to_dict()
             for item in _sequence(result.get("supersedes"), "supersedes")
         ),
+        judge_summary=_safe_judge_summary(
+            result.get("judge_summary"),
+            integrity_status=integrity_status,
+            attempts=rows,
+            arm_attempts=_judge_arm_attempt_counts(raw_pairs),
+        ),
     )
     return experiment_view_from_dict(view.to_dict())  # type: ignore[return-value]
 
@@ -2365,7 +2380,16 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         for key, item in _mapping_or_empty(value.get("score_explanations")).items()
     }
     if set(explanations) != set(base["scores"]):
-        raise ValueError("V3 score explanations must cover every deterministic score")
+        raise ValueError("V3 score explanations must cover every published score")
+    if any(
+        key.startswith("comparison.judge.")
+        and explanation
+        != "Blind judge score; no rationale or private truth is published."
+        for key, explanation in explanations.items()
+    ):
+        raise ValueError(
+            "V3 judge score explanations must not publish rationale or private truth"
+        )
     actual_query_scope = tuple(
         _text(item, "V3 paired_attempt.actual_query_scope", 500)
         for item in _sequence(
@@ -2828,6 +2852,319 @@ def _comparison_score_summaries(
                 )
             )
     return tuple(summaries)
+
+
+def _safe_judge_summary(
+    raw: Any,
+    *,
+    integrity_status: str,
+    attempts: int,
+    arm_attempts: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Validate and return only aggregate blind-judge scores safe to publish."""
+
+    value = _mapping_or_empty(raw)
+    _reject_unknown(
+        value,
+        {
+            "status",
+            "claim_status",
+            "judges",
+            "by_variant",
+            "unavailable_attempts",
+        },
+        "judge_summary",
+    )
+    status = str(value.get("status") or "not_used")
+    if status not in {"not_used", "unavailable", "scored"}:
+        raise ValueError("judge_summary.status is unsupported")
+    claim_status = str(value.get("claim_status") or "")
+    if claim_status not in {
+        "not_applicable",
+        "advisory_uncalibrated",
+        "calibrated",
+    }:
+        raise ValueError("judge_summary.claim_status is unsupported")
+    judges = _safe_judge_provenance(value.get("judges"))
+    by_variant = _safe_judge_variants(
+        value.get("by_variant"),
+        judge_dimensions={
+            item["judge_id"]: set(item["dimensions"]) for item in judges
+        },
+        arm_attempts=arm_attempts,
+    )
+    unavailable = _non_negative_int(
+        value.get("unavailable_attempts"),
+        "judge_summary.unavailable_attempts",
+    )
+    if unavailable > attempts:
+        raise ValueError("judge unavailable_attempts exceeds the attempt count")
+    calibrated = bool(judges) and all(
+        item["calibration"]["status"] == "adjudicated"
+        and item["calibration"]["passed"] is True
+        for item in judges
+    )
+    if status == "not_used":
+        if (
+            claim_status != "not_applicable"
+            or judges
+            or by_variant["baseline"]
+            or by_variant["candidate"]
+            or unavailable
+        ):
+            raise ValueError(
+                "a not-used judge summary cannot retain provenance or claims"
+            )
+    else:
+        if not judges:
+            raise ValueError(
+                "configured judge summaries require qualification provenance"
+            )
+        if claim_status == "not_applicable":
+            raise ValueError("a configured judge summary cannot be not applicable")
+        if (claim_status == "calibrated") != calibrated:
+            raise ValueError("judge claim status disagrees with calibration provenance")
+        if status == "unavailable" and (
+            by_variant["baseline"] or by_variant["candidate"]
+        ):
+            raise ValueError(
+                "an unavailable judge summary cannot retain scored dimensions"
+            )
+        if status == "scored" and not by_variant["baseline"]:
+            raise ValueError("a scored judge summary requires non-empty dimensions")
+        if status == "scored" and arm_attempts is not None:
+            evaluated = sum(
+                next(iter(by_variant[arm].values()))["evaluated"]
+                for arm in ("baseline", "candidate")
+            )
+            if evaluated + unavailable != attempts:
+                raise ValueError(
+                    "judge evaluated and unavailable counts do not reconcile "
+                    "to canonical attempts"
+                )
+    normalized = {
+        "status": status,
+        "claim_status": claim_status,
+        "judges": judges,
+        "by_variant": by_variant,
+        "unavailable_attempts": unavailable,
+    }
+    if integrity_status != "invalid" or status == "not_used":
+        return normalized
+    return {
+        **normalized,
+        "status": "unavailable",
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": max(attempts, unavailable),
+    }
+
+
+def _safe_judge_provenance(raw: Any) -> list[dict[str, Any]]:
+    judges: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw_judge in enumerate(_sequence(raw, "judge_summary.judges")):
+        judge = _mapping(raw_judge, f"judge_summary.judges[{index}]")
+        _reject_unknown(
+            judge,
+            {
+                "judge_id",
+                "profile",
+                "contract_digest",
+                "dimensions",
+                "calibration",
+            },
+            f"judge_summary.judges[{index}]",
+        )
+        judge_id = _text(judge.get("judge_id"), "judge_id", 300)
+        if judge_id in seen:
+            raise ValueError("judge provenance IDs must be unique")
+        seen.add(judge_id)
+        contract_digest = _strict_sha256(
+            judge.get("contract_digest"),
+            "judge contract_digest",
+        )
+        calibration = _mapping(
+            judge.get("calibration"),
+            f"judge_summary.judges[{index}].calibration",
+        )
+        _reject_unknown(
+            calibration,
+            {"status", "report_sha256", "cases_digest", "passed"},
+            f"judge_summary.judges[{index}].calibration",
+        )
+        calibration_status = str(calibration.get("status") or "")
+        if calibration_status not in {
+            "missing",
+            "pending_human_review",
+            "adjudicated",
+            "invalid",
+        }:
+            raise ValueError("judge calibration status is unsupported")
+        report_sha256 = _optional_strict_sha256(
+            calibration.get("report_sha256"),
+            "judge calibration report_sha256",
+        )
+        cases_digest = _optional_strict_sha256(
+            calibration.get("cases_digest"),
+            "judge calibration cases_digest",
+        )
+        passed = _required_bool(
+            calibration.get("passed"),
+            "judge calibration passed",
+        )
+        if passed and calibration_status != "adjudicated":
+            raise ValueError("a passing judge calibration must be adjudicated")
+        if calibration_status in {"pending_human_review", "adjudicated"} and (
+            report_sha256 is None or cases_digest is None
+        ):
+            raise ValueError(
+                "reviewed judge calibration requires report and case-set digests"
+            )
+        judges.append(
+            {
+                "judge_id": judge_id,
+                "profile": _text(judge.get("profile"), "judge profile", 500),
+                "contract_digest": contract_digest,
+                "dimensions": _unique_judge_dimensions(
+                    judge.get("dimensions"),
+                    judge_id=judge_id,
+                ),
+                "calibration": {
+                    "status": calibration_status,
+                    "report_sha256": report_sha256,
+                    "cases_digest": cases_digest,
+                    "passed": passed,
+                },
+            }
+        )
+    return judges
+
+
+def _safe_judge_variants(
+    raw: Any,
+    *,
+    judge_dimensions: Mapping[str, set[str]],
+    arm_attempts: Mapping[str, int] | None,
+) -> dict[str, dict[str, dict[str, float | int | None]]]:
+    variants = _mapping(raw, "judge_summary.by_variant")
+    _reject_unknown(
+        variants,
+        {"baseline", "candidate"},
+        "judge_summary.by_variant",
+    )
+    if set(variants) != {"baseline", "candidate"}:
+        raise ValueError("judge_summary.by_variant requires baseline and candidate")
+    result: dict[str, dict[str, dict[str, float | int | None]]] = {}
+    expected_dimensions = {
+        f"{judge_id}.{dimension}"
+        for judge_id, dimensions in judge_dimensions.items()
+        for dimension in dimensions
+    }
+    for variant in ("baseline", "candidate"):
+        dimensions: dict[str, dict[str, float | int | None]] = {}
+        raw_dimensions = _mapping(
+            variants[variant],
+            f"judge_summary.by_variant.{variant}",
+        )
+        for raw_dimension, raw_summary in raw_dimensions.items():
+            dimension = _text(
+                raw_dimension,
+                "judge summary dimension",
+                600,
+            )
+            if dimension not in expected_dimensions:
+                raise ValueError("judge summary dimension lacks matching provenance")
+            summary = _mapping(
+                raw_summary,
+                f"judge_summary.by_variant.{variant}.{dimension}",
+            )
+            _reject_unknown(
+                summary,
+                {"evaluated", "mean"},
+                f"judge_summary.by_variant.{variant}.{dimension}",
+            )
+            evaluated = _non_negative_int(
+                summary.get("evaluated"),
+                "judge summary evaluated",
+            )
+            mean = _optional_float(summary.get("mean"))
+            if mean is not None and not 0 <= mean <= 1:
+                raise ValueError("judge summary means must be between zero and one")
+            if (mean is None) != (evaluated == 0):
+                raise ValueError(
+                    "judge summary mean must be null exactly when no rows were evaluated"
+                )
+            if arm_attempts is not None and evaluated > arm_attempts[variant]:
+                raise ValueError(
+                    "judge evaluated count exceeds canonical arm attempts"
+                )
+            dimensions[dimension] = {
+                "evaluated": evaluated,
+                "mean": mean,
+            }
+        result[variant] = dimensions
+    if set(result["baseline"]) != set(result["candidate"]):
+        raise ValueError(
+            "judge summary must cover the same dimensions for baseline and candidate"
+        )
+    if result["baseline"] and set(result["baseline"]) != expected_dimensions:
+        raise ValueError(
+            "judge summary dimensions do not match locked judge provenance"
+        )
+    for variant in ("baseline", "candidate"):
+        if len(
+            {
+                summary["evaluated"]
+                for summary in result[variant].values()
+            }
+        ) > 1:
+            raise ValueError(
+                "judge dimensions disagree on evaluated attempt counts"
+            )
+    return result
+
+
+def _unique_judge_dimensions(
+    raw: Any,
+    *,
+    judge_id: str,
+) -> list[str]:
+    dimensions = [
+        _text(item, f"judge {judge_id} dimension", 300)
+        for item in _sequence(raw, f"judge {judge_id} dimensions")
+    ]
+    if not dimensions or len(dimensions) != len(set(dimensions)):
+        raise ValueError(
+            "judge provenance dimensions must be non-empty and unique"
+        )
+    return dimensions
+
+
+def _judge_arm_attempt_counts(
+    paired_cases: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    return {
+        arm: sum(
+            isinstance(pair.get(arm), Mapping)
+            for pair in paired_cases
+        )
+        for arm in ("baseline", "candidate")
+    }
+
+
+def _strict_sha256(raw: Any, field_name: str) -> str:
+    value = _text(raw, field_name, 64)
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _optional_strict_sha256(raw: Any, field_name: str) -> str | None:
+    if raw is None:
+        return None
+    return _strict_sha256(raw, field_name)
 
 
 def build_design_view(

@@ -22,8 +22,8 @@ Serverless, managed-service, or Helm readiness.
 | Baseline | `wandb-mcp-main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` |
 | Candidate | [`wandb-mcp-0-4-staging` at `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`](https://github.com/wandb/wandb-mcp-server/commit/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7) |
 | Execution | local Docker through Harbor |
-| Canary | 2 tasks × 2 arms × 2 attempts = 8 cells, maximum $10 |
-| Confirmation | 4 tasks × 2 arms × 2 attempts = 16 cells, maximum $20 |
+| Canary | 2 tasks × 2 arms × 2 attempts = 8 cells, $10.80 estimate / $11 cap |
+| Confirmation | 4 tasks × 2 arms × 2 attempts = 16 cells, $21.60 estimate / $22 cap |
 
 The checked-in candidate is the `staging/0.4.0` commit selected for this
 qualification and contains the reconciliation and STDIO protocol-safety fixes.
@@ -119,6 +119,13 @@ Preparation resolves package code and captures initialized tool manifests.
 Agent cells receive locked assets and may not clone, install, or mutate either
 candidate.
 
+The confirmation taskset classifies the exact 20-tool read-only surface. Four
+natural workflows exercise the 13 tools that can be safely scoped to the
+locked project: structured inventory, run triage, Evaluation/trace topology,
+and artifact provenance. Seven account-, organization-, registry-, or
+mutable-docs tools remain zero-model manifest/schema checks. Fugue never calls
+that conformance-only coverage an Agent outcome.
+
 ## Prove the mechanism before spending
 
 Run the zero-model source-conformance check against the two exact Evaluation
@@ -148,7 +155,10 @@ uv run python \
 
 The second receipt must show that main reports all 18 direct children while
 the repaired staging runtime reports exactly the 16
-`Evaluation.predict_and_score` children.
+`Evaluation.predict_and_score` children. It also distinguishes the exact
+read-only experiment manifest from the package-default manifest, proves the
+two expected write tools are present only in the latter, and classifies every
+locked read-only tool exactly once.
 
 Package release gates are separate and must produce
 `.fugue/qualification/mcp-python-package-release-gates.json`. That receipt
@@ -179,7 +189,7 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
 `--prepare` is the trusted no-spend boundary that freezes inputs and builds the
 exact local task and Agent images. It does not run a cell or create approval.
 Previewing also does not authorize spend. An operator must approve that exact
-preview digest with a maximum of eight cells and $10 before executing it with
+preview digest with a maximum of eight cells and $11 before executing it with
 `--fetch-weave`; without fetched evidence links the V3 result cannot qualify.
 
 The confirmation is intentionally absent from the Research comparison
@@ -204,7 +214,7 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
 
 Until that prerequisite is recorded, the command above is specification
 inspection only and the Study must not be launched. The confirmation requires
-a new approval capped at 16 cells and $20. The confirmation `check`, `prepare`,
+a new approval capped at 16 cells and $22. The confirmation `check`, `prepare`,
 and `preview` commands do not run a model or grant approval.
 
 After a valid, non-regressing canary has completed and a maintainer has reviewed
@@ -237,8 +247,35 @@ The deterministic scorer reports independent dimensions:
 
 Mechanism use cannot convert a factually wrong answer into a pass. Actual MCP
 calls and queried scopes are authoritative; an incorrect project name written
-in the Agent answer is shown separately. Human review judges whether the memo
-is actionable for a maintainer and remains distinct from deterministic scores.
+in the Agent answer is shown separately.
+
+The blind `maintainer-actionability` judge scores four different questions:
+whether the memo gives a concrete maintenance decision, connects that decision
+to stated evidence, proposes one bounded next step with a success/stop
+condition, and calibrates uncertainty to the inspected cohort. It uses
+`wandb/zai-org/GLM-5.2`, sees only the public task, Agent answer, and tool names,
+and never sees private expected facts, deterministic scores, arm/revision
+identity, receipts, or internal IDs. It does not rescore correctness.
+
+The judge is advisory while
+`maintainer-actionability-judge-calibration.json` remains
+`pending_human_review`. Before it can become required evidence, regenerate the
+48 distinct balanced cases, execute the locked judge route under a separate
+approval, obtain two independent reviews per case, adjudicate disagreements,
+and require TPR/TNR of at least 0.85 independently on the 36-case calibration
+split and the 12-case holdout split, with zero critical false passes:
+
+```bash
+uv run python \
+  examples/comparisons/wandb-mcp-maintenance/validate_judge_calibration.py \
+  --cases /SECURE/PATH/maintainer-actionability-cases.jsonl \
+  --report /SECURE/PATH/maintainer-actionability-calibration.json \
+  --write-template
+```
+
+Judge scores are presented separately from deterministic outcomes and cannot
+sign a release decision. The reviewed human actionability attestation remains
+the final release gate.
 
 Fugue writes one stable attempt identity across the comparison design, Harbor
 cell, Claude conversation, MCP calls, Weave Evaluation chain, Study event, and

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import json
 
@@ -12,65 +10,61 @@ _DIMENSIONS = {
     "evidence_honesty": False,
     "release_mechanism_used": False,
 }
-_WEAVE_OPERATION_CLASSES = (
-    "Evaluation.predict_and_score",
-    "Evaluation.summarize",
-    "other",
+_WEAVE_OPERATION_CLASSES = ("Evaluation.predict_and_score", "Evaluation.summarize", "other")
+_RECONCILIATION_FACTS = frozenset(
+    "evaluation_root_count direct_child_count summary_reported_predictions "
+    "direct_prediction_rows summary_children summary_matches_direct".split()
 )
+_HISTORY_FACTS = frozenset({"run_id", "step", "latency_ms", "broad_reads"})
 _FACT_KEYS = {
-    "maintainer-evaluation-reconciliation": frozenset(
-        {
-            "evaluation_root_count",
-            "direct_child_count",
-            "summary_reported_predictions",
-            "direct_prediction_rows",
-            "summary_children",
-            "summary_matches_direct",
-        }
-    ),
+    "maintainer-evaluation-reconciliation": _RECONCILIATION_FACTS,
+    "maintainer-evaluation-trace-topology": _RECONCILIATION_FACTS,
     "maintainer-project-health": frozenset(
-        {
-            "run_count",
-            "evaluation_root_count",
-            "largest_latency_run",
-            "largest_latency_ms",
-            "missing_cost_run",
-        }
+        "run_count evaluation_root_count largest_latency_run largest_latency_ms "
+        "missing_cost_run".split()
     ),
     "maintainer-source-inventory": frozenset(
-        {
-            "run_count",
-            "evaluation_root_count",
-            "summary_reported_predictions",
-        }
+        "run_count evaluation_root_count summary_reported_predictions".split()
     ),
-    "maintainer-history-hotspot": frozenset(
-        {
-            "run_id",
-            "step",
-            "latency_ms",
-            "broad_reads",
-        }
+    "maintainer-history-hotspot": _HISTORY_FACTS,
+    "maintainer-run-triage": _HISTORY_FACTS,
+    "maintainer-artifact-provenance": frozenset(
+        "collection listed_version artifact_a artifact_b artifact_a_digest "
+        "artifact_b_digest digests_differ".split()
     ),
 }
 
+_COMMON_SCHEMA = {
+    "source_project": "string",
+    "bounded": "boolean",
+    "evidence_status": "string",
+    "maintainer_memo": "memo",
+}
+_RECONCILIATION_SCHEMA = {
+    **_COMMON_SCHEMA,
+    "evaluation_root_count": "integer",
+    "direct_child_count": "integer",
+    "summary_reported_predictions": "integer",
+    "direct_prediction_rows": "integer",
+    "summary_children": "integer",
+    "summary_matches_direct": "boolean",
+    "unrelated_children_excluded": "boolean",
+    "recommendation": "string",
+}
+_HISTORY_SCHEMA = {
+    **_COMMON_SCHEMA,
+    "run_id": "string",
+    "step": "integer",
+    "latency_ms": "integer",
+    "broad_reads": "integer",
+    "observed_cost_status": "string",
+    "causal_scope": "string",
+}
 _SCHEMAS = {
-    "maintainer-evaluation-reconciliation": {
-        "source_project": "string",
-        "evaluation_root_count": "integer",
-        "direct_child_count": "integer",
-        "summary_reported_predictions": "integer",
-        "direct_prediction_rows": "integer",
-        "summary_children": "integer",
-        "summary_matches_direct": "boolean",
-        "unrelated_children_excluded": "boolean",
-        "recommendation": "string",
-        "bounded": "boolean",
-        "evidence_status": "string",
-        "maintainer_memo": "memo",
-    },
+    "maintainer-evaluation-reconciliation": _RECONCILIATION_SCHEMA,
+    "maintainer-evaluation-trace-topology": _RECONCILIATION_SCHEMA,
     "maintainer-project-health": {
-        "source_project": "string",
+        **_COMMON_SCHEMA,
         "run_count": "integer",
         "evaluation_root_count": "integer",
         "coverage": "string",
@@ -79,30 +73,24 @@ _SCHEMAS = {
         "missing_cost_run": "string",
         "recommendation": "string",
         "causal_scope": "string",
-        "bounded": "boolean",
-        "evidence_status": "string",
-        "maintainer_memo": "memo",
     },
     "maintainer-source-inventory": {
-        "source_project": "string",
+        **_COMMON_SCHEMA,
         "run_count": "integer",
         "evaluation_root_count": "integer",
         "summary_reported_predictions": "integer",
-        "bounded": "boolean",
-        "evidence_status": "string",
-        "maintainer_memo": "memo",
     },
-    "maintainer-history-hotspot": {
-        "source_project": "string",
-        "run_id": "string",
-        "step": "integer",
-        "latency_ms": "integer",
-        "broad_reads": "integer",
-        "observed_cost_status": "string",
-        "causal_scope": "string",
-        "bounded": "boolean",
-        "evidence_status": "string",
-        "maintainer_memo": "memo",
+    "maintainer-history-hotspot": _HISTORY_SCHEMA,
+    "maintainer-run-triage": _HISTORY_SCHEMA,
+    "maintainer-artifact-provenance": {
+        **_COMMON_SCHEMA,
+        "collection": "string",
+        "listed_version": "string",
+        "artifact_a": "string",
+        "artifact_b": "string",
+        "artifact_a_digest": "string",
+        "artifact_b_digest": "string",
+        "digests_differ": "boolean",
     },
 }
 
@@ -325,9 +313,34 @@ def _normalize_calls(evidence):
                 "limit": _integer(raw, "limit", "max_items"),
                 "max_evals": _integer(raw, "max_evals"),
                 "samples": _integer(raw, "samples", "sample_size"),
+                "sample_runs": _integer(raw, "sample_runs"),
+                "top_n_values": _integer(raw, "top_n_values"),
                 "run_id": _value(raw, "run_id"),
+                "run_id_a": _value(raw, "run_id_a"),
+                "run_id_b": _value(raw, "run_id_b"),
                 "x_axis": _value(raw, "x_axis"),
                 "target_x": _value(raw, "target_x"),
+                "trace_roots_only": _value(raw, "trace_roots_only"),
+                "trace_ids_digest": _value(raw, "trace_ids_digest"),
+                "trace_ids_count": _integer(raw, "trace_ids_count"),
+                "returned_trace_ids_digest": _value(
+                    raw,
+                    "returned_trace_ids_digest",
+                ),
+                "returned_trace_ids_count": _integer(
+                    raw,
+                    "returned_trace_ids_count",
+                ),
+                "artifact_name": _value(raw, "artifact_name"),
+                "artifact_name_a": _value(raw, "artifact_name_a"),
+                "artifact_name_b": _value(raw, "artifact_name_b"),
+                "collection_name": _value(raw, "collection_name"),
+                "include_file_diff": _value(raw, "include_file_diff"),
+                "include_files": _value(raw, "include_files"),
+                "include_history_overlap": _value(
+                    raw,
+                    "include_history_overlap",
+                ),
                 "parent_filter_digest": parent_filter_digest,
                 "parent_filter_count": (
                     _integer(raw, "parent_filter_count") or len(parent_ids) or None
@@ -341,6 +354,8 @@ def _normalize_calls(evidence):
                     "prediction_rows",
                 ),
                 "operation_counts": _operation_counts(raw),
+                "artifact_digest": _value(raw, "artifact_digest"),
+                "digest_match": _value(raw, "digest_match"),
                 "returned_parent_filter_match": _value(
                     raw,
                     "returned_parent_filter_match",
@@ -426,7 +441,12 @@ def _evaluation_summary(calls):
 
 def _evaluation_child_queries(calls, expected):
     parents = set(expected.get("evaluation_parent_ids") or ())
+    required_fields = set(
+        _mapping(expected.get("mechanism")).get("required_child_fields") or ()
+    )
     if len(parents) != 2:
+        return None
+    if not required_fields:
         return None
     child_calls = _calls(calls, "query_weave_traces_tool")
     if len(child_calls) != len(parents):
@@ -445,7 +465,7 @@ def _evaluation_child_queries(calls, expected):
             or call["returned_count"] is None
             or call["returned_count"] > call["limit"]
             or call["truncation_applied"] is not False
-            or call["fields"] != {"id", "op_name", "parent_id"}
+            or call["fields"] != required_fields
             or call["returned_parent_filter_match"] is not True
         ):
             return None
@@ -504,19 +524,146 @@ def _history_call(calls, expected):
     )
 
 
-def _reconciliation(task_output, calls, expected):
+def _probe_project_call(calls, expected):
+    mechanism = _mapping(expected.get("mechanism"))
+    facts = _mapping(expected.get("facts"))
+    probes = _calls(calls, "probe_project_tool")
+    if len(probes) != 1:
+        return None
+    probe = probes[0]
+    return (
+        probe
+        if probe["sample_runs"] == mechanism.get("probe_sample_runs")
+        and probe["total_count"] == facts.get("run_count")
+        else None
+    )
+
+
+def _trace_topology_calls(calls, expected):
+    mechanism = _mapping(expected.get("mechanism"))
+    counts = _calls(calls, "count_weave_traces_tool")
+    schemas = _calls(calls, "infer_trace_schema_tool")
+    roots = _calls(calls, "resolve_trace_roots_tool")
+    child_queries = _evaluation_child_queries(calls, expected)
+    if (
+        len(counts) != 1
+        or len(schemas) != 1
+        or len(roots) != 1
+        or child_queries is None
+    ):
+        return None
+    count = counts[0]
+    schema = schemas[0]
+    root = roots[0]
+    returned_trace_digests = {
+        call["returned_trace_ids_digest"]
+        for call in child_queries.values()
+        if call["returned_trace_ids_count"] == 1
+        and isinstance(call["returned_trace_ids_digest"], str)
+    }
+    if len(returned_trace_digests) != len(child_queries):
+        return None
+    if (
+        count["trace_roots_only"] is not True
+        or count["total_count"] != mechanism.get("root_trace_count")
+        or schema["samples"] != mechanism.get("schema_sample_size")
+        or schema["top_n_values"] != mechanism.get("schema_top_n_values")
+        or root["trace_ids_count"] != 1
+        or root["trace_ids_digest"] not in returned_trace_digests
+        or root["returned_count"] != 1
+        or root["total_count"] != 1
+    ):
+        return None
+    return {
+        "count": count,
+        "schema": schema,
+        "root": root,
+    }
+
+
+def _run_triage_calls(calls, expected):
+    mechanism = _mapping(expected.get("mechanism"))
+    facts = _mapping(expected.get("facts"))
+    comparisons = _calls(calls, "compare_runs_tool")
+    diagnoses = _calls(calls, "diagnose_run_tool")
+    if len(comparisons) != 1 or len(diagnoses) != 1:
+        return None
+    comparison = comparisons[0]
+    diagnosis = diagnoses[0]
+    expected_run = facts.get("run_id")
+    expected_peer = mechanism.get("comparison_peer_run_id")
+    if (
+        {comparison["run_id_a"], comparison["run_id_b"]}
+        != {expected_run, expected_peer}
+        or comparison["include_history_overlap"] is not False
+        or diagnosis["run_id"] != expected_run
+    ):
+        return None
+    return {
+        "comparison": comparison,
+        "diagnosis": diagnosis,
+    }
+
+
+def _artifact_calls(calls, expected):
+    facts = _mapping(expected.get("facts"))
+    versions = _calls(calls, "list_artifact_versions_tool")
+    details = _calls(calls, "get_artifact_details_tool")
+    comparisons = _calls(calls, "compare_artifact_versions_tool")
+    if len(versions) != 1 or len(details) != 2 or len(comparisons) != 1:
+        return None
+    version = versions[0]
+    details_by_artifact = {
+        detail["artifact_name"]: detail
+        for detail in details
+        if isinstance(detail["artifact_name"], str)
+    }
+    if set(details_by_artifact) != {
+        facts.get("artifact_a"),
+        facts.get("artifact_b"),
+    }:
+        return None
+    detail_a = details_by_artifact[facts.get("artifact_a")]
+    detail_b = details_by_artifact[facts.get("artifact_b")]
+    comparison = comparisons[0]
+    if (
+        version["collection_name"] != facts.get("collection")
+        or version["limit"] != 10
+        or version["returned_count"] is None
+        or not 1 <= version["returned_count"] <= 10
+        or detail_a["include_files"] is not False
+        or detail_a["artifact_digest"] != facts.get("artifact_a_digest")
+        or detail_b["include_files"] is not False
+        or detail_b["artifact_digest"] != facts.get("artifact_b_digest")
+        or comparison["artifact_name_a"] != facts.get("artifact_a")
+        or comparison["artifact_name_b"] != facts.get("artifact_b")
+        or comparison["include_file_diff"] is not True
+        or comparison["limit"] != 10
+        or comparison["digest_match"] is not False
+    ):
+        return None
+    return {
+        "versions": version,
+        "details": details_by_artifact,
+        "comparison": comparison,
+    }
+
+
+def _reconciliation(task_output, calls, expected, *, task_id):
     summaries = _evaluation_summary(calls)
     child_queries = _evaluation_child_queries(calls, expected)
     locked_root_count = len(set(expected.get("evaluation_parent_ids") or ()))
-    summary_root_count = (
-        summaries[0]["total_count"] if len(summaries) == 1 else None
-    )
+    summary_root_count = summaries[0]["total_count"] if len(summaries) == 1 else None
     bounded = (
         task_output.get("bounded") is True
         and len(summaries) == 1
         and locked_root_count == 2
         and summary_root_count == locked_root_count
         and child_queries is not None
+        and (
+            task_id != "maintainer-evaluation-trace-topology"
+            or _trace_topology_calls(calls, expected) is not None
+        )
     )
     children = _evaluation_children(calls, expected)
     if len(summaries) != 1 or children is None:
@@ -534,11 +681,9 @@ def _reconciliation(task_output, calls, expected):
     unrelated_children = sum(counts["other"] for counts in children.values())
     direct_children = sum(sum(counts.values()) for counts in children.values())
     summary_matches = observed_summary == direct_predictions
-    locked_roots_match = (
-        summary_root_count == locked_root_count == len(children)
-    )
+    locked_roots_match = summary_root_count == locked_root_count == len(children)
     reconciled = summary_matches and locked_roots_match
-    facts = _task_facts("maintainer-evaluation-reconciliation", expected)
+    facts = _task_facts(task_id, expected)
     factual = (
         _contains(task_output, facts)
         and task_output.get("evaluation_root_count") == len(children)
@@ -572,21 +717,25 @@ def _source_inventory(task_output, calls, expected):
         and summaries[0]["total_count"] == facts.get("evaluation_root_count")
         and observed_summary == facts.get("summary_reported_predictions")
         and task_output.get("summary_reported_predictions") == observed_summary
+        and _probe_project_call(calls, expected) is not None
     )
     bounded = (
         task_output.get("bounded") is True
         and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
         and _has_one_run_count(calls)
         and len(summaries) == 1
+        and _probe_project_call(calls, expected) is not None
     )
     honest = task_output.get("evidence_status") == "summary-only"
     return factual, bounded, honest
 
 
-def _history(task_output, calls, expected):
-    facts = _task_facts("maintainer-history-hotspot", expected)
+def _history(task_output, calls, expected, *, task_id):
+    facts = _task_facts(task_id, expected)
     history = _history_call(calls, expected)
     factual = _contains(task_output, facts)
+    if task_id == "maintainer-run-triage":
+        factual = factual and _run_triage_calls(calls, expected) is not None
     bounded = (
         task_output.get("bounded") is True
         and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
@@ -596,6 +745,18 @@ def _history(task_output, calls, expected):
         task_output.get("observed_cost_status") == "unavailable"
         and task_output.get("causal_scope") == "observed-mechanism-only"
         and task_output.get("evidence_status") == "reconciled"
+    )
+    return factual, bounded, honest
+
+
+def _artifact_provenance(task_output, calls, expected):
+    facts = _task_facts("maintainer-artifact-provenance", expected)
+    artifacts = _artifact_calls(calls, expected)
+    factual = _contains(task_output, facts) and artifacts is not None
+    bounded = task_output.get("bounded") is True and artifacts is not None
+    honest = (
+        task_output.get("evidence_status") == "reconciled"
+        and task_output.get("digests_differ") is True
     )
     return factual, bounded, honest
 
@@ -628,33 +789,76 @@ def _project_health(task_output, calls, expected):
 
 def _evaluate(task_id, output, calls, expected):
     if task_id == "maintainer-evaluation-reconciliation":
-        return _reconciliation(output, calls, expected)
+        return _reconciliation(output, calls, expected, task_id=task_id)
+    if task_id == "maintainer-evaluation-trace-topology":
+        return _reconciliation(output, calls, expected, task_id=task_id)
     if task_id == "maintainer-source-inventory":
         return _source_inventory(output, calls, expected)
     if task_id == "maintainer-history-hotspot":
-        return _history(output, calls, expected)
+        return _history(output, calls, expected, task_id=task_id)
+    if task_id == "maintainer-run-triage":
+        return _history(output, calls, expected, task_id=task_id)
+    if task_id == "maintainer-artifact-provenance":
+        return _artifact_provenance(output, calls, expected)
     if task_id == "maintainer-project-health":
         return _project_health(output, calls, expected)
     return False, False, False
 
 
+def _required_call_counts(calls, expected, include_failed):
+    required = _mapping(expected.get("mechanism")).get("required_tool_counts")
+    if not isinstance(required, dict) or not required:
+        return None
+    observed = calls if include_failed else [call for call in calls if _successful(call)]
+    if any(
+        not isinstance(tool, str)
+        or type(count) is not int
+        or count < 1
+        or len([call for call in observed if call["tool"] == tool]) != count
+        for tool, count in required.items()
+    ):
+        return None
+    if len(observed) != sum(required.values()) or {
+        call["tool"] for call in observed
+    } != set(required):
+        return None
+    return True
+
+
 def _mechanism_used(task_id, calls, expected):
+    if _required_call_counts(calls, expected, True) is None:
+        return False
     if task_id == "maintainer-evaluation-reconciliation":
         return (
             len(_evaluation_summary(calls)) == 1
             and _evaluation_child_queries(calls, expected) is not None
+        )
+    if task_id == "maintainer-evaluation-trace-topology":
+        return (
+            len(_evaluation_summary(calls)) == 1
+            and _evaluation_child_queries(calls, expected) is not None
+            and _trace_topology_calls(calls, expected) is not None
         )
     if task_id == "maintainer-source-inventory":
         return (
             _has_one_run_count(calls)
             and _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
             and len(_evaluation_summary(calls)) == 1
+            and _probe_project_call(calls, expected) is not None
         )
     if task_id == "maintainer-history-hotspot":
         return (
             _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
             and _history_call(calls, expected) is not None
         )
+    if task_id == "maintainer-run-triage":
+        return (
+            _bounded_run_items(calls, ("id", "attempt_label", "latency_ms"))
+            and _history_call(calls, expected) is not None
+            and _run_triage_calls(calls, expected) is not None
+        )
+    if task_id == "maintainer-artifact-provenance":
+        return _artifact_calls(calls, expected) is not None
     if task_id == "maintainer-project-health":
         return (
             _has_one_run_count(calls)
@@ -686,7 +890,9 @@ def score(task, output, evidence):
         "answer_correct": factual,
         "actual_query_scope": locked_scope,
         "reported_project_identity": (parsed.get("source_project") == project),
-        "bounded_evidence": bounded,
+        "bounded_evidence": (
+            bounded and _required_call_counts(calls, expected, False) is not None
+        ),
         "evidence_honesty": honest,
         "release_mechanism_used": mechanism,
     }

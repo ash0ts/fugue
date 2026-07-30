@@ -6212,6 +6212,11 @@ _MCP_PROJECT_REF_KEYS = (
     "project_slug",
     "entity_project",
 )
+_MCP_ARTIFACT_REF_KEYS = (
+    "artifact_name",
+    "artifact_name_a",
+    "artifact_name_b",
+)
 _MCP_PROJECTION_KEYS = (
     "columns",
     "fields",
@@ -6220,7 +6225,14 @@ _MCP_PROJECTION_KEYS = (
     "config_keys",
     "summary_keys",
 )
-_MCP_BOUND_KEYS = ("limit", "max_items", "samples", "sample_size")
+_MCP_BOUND_KEYS = (
+    "limit",
+    "max_items",
+    "max_files",
+    "max_file_diff_entries",
+    "samples",
+    "sample_size",
+)
 _MCP_PARENT_ID_KEYS = (
     "parent_id",
     "parent_ids",
@@ -6234,12 +6246,24 @@ _MCP_OPERATION_FILTER_KEYS = (
     "operation_name_contains",
 )
 _MCP_SAFE_MECHANISM_KEYS = (
+    "artifact_name",
+    "artifact_name_a",
+    "artifact_name_b",
+    "collection_name",
+    "include_file_diff",
+    "include_files",
+    "include_history_overlap",
     "resource",
     "response_mode",
     "target_x",
     "x_axis",
     "max_evals",
     "run_id",
+    "run_id_a",
+    "run_id_b",
+    "sample_runs",
+    "top_n_values",
+    "trace_roots_only",
 )
 _MCP_TERMINAL_STATUSES = {
     "succeeded",
@@ -6271,6 +6295,7 @@ def _mcp_tool_call_evidence(
         limits: list[int] = []
         sample_counts: list[int] = []
         parent_ids: set[str] = set()
+        trace_ids = _mcp_trace_ids(arguments)
         operation_filters: dict[str, set[str]] = {
             key: set() for key in _MCP_OPERATION_FILTER_KEYS
         }
@@ -6393,6 +6418,10 @@ def _mcp_tool_call_evidence(
             },
             "parent_filter_digest": parent_filter_digest,
             "parent_filter_count": parent_filter_count,
+            "trace_ids_digest": (
+                _stable_digest(sorted(trace_ids)) if trace_ids else None
+            ),
+            "trace_ids_count": len(trace_ids) if trace_ids else None,
             "op_name_filter": normalized_operation_filters or None,
             **raw_graphql_shape,
         }
@@ -6404,6 +6433,17 @@ def _mcp_tool_call_evidence(
         evidence.update(_normalized_mcp_response(response_matches, tool=tool))
         result.append(evidence)
     return result
+
+
+def _mcp_trace_ids(arguments: Mapping[str, Any]) -> set[str]:
+    return {
+        str(item).strip()
+        for values in _nested_mappings(arguments)
+        for item in (
+            values.get("trace_ids") if isinstance(values.get("trace_ids"), list) else ()
+        )
+        if isinstance(item, str) and item.strip()
+    }
 
 
 def _normalized_mcp_response(
@@ -6456,10 +6496,22 @@ def _normalized_mcp_response(
         "project_exhaustive",
         "truncation_applied",
         "returned_parent_filter_match",
+        "digest_match",
     ):
         value = response.get(key)
         if type(value) is bool:
             result[key] = value
+    artifact_digest = response.get("artifact_digest")
+    if isinstance(artifact_digest, str) and artifact_digest:
+        result["artifact_digest"] = artifact_digest
+    returned_trace_ids_digest = response.get("returned_trace_ids_digest")
+    if isinstance(returned_trace_ids_digest, str) and re.fullmatch(
+        r"[0-9a-f]{64}", returned_trace_ids_digest
+    ):
+        result["returned_trace_ids_digest"] = returned_trace_ids_digest
+    returned_trace_ids_count = response.get("returned_trace_ids_count")
+    if type(returned_trace_ids_count) is int and returned_trace_ids_count > 0:
+        result["returned_trace_ids_count"] = returned_trace_ids_count
     operation_counts = response.get("operation_counts")
     if isinstance(operation_counts, Mapping):
         normalized_operation_counts = {
@@ -6544,6 +6596,11 @@ def _mcp_queried_projects(events: list[dict[str, Any]]) -> list[str]:
                 reference = value.get(key)
                 if isinstance(reference, str) and reference.strip():
                     event_projects.add(reference.strip())
+            for key in _MCP_ARTIFACT_REF_KEYS:
+                reference = value.get(key)
+                project = _qualified_artifact_project(reference)
+                if project:
+                    event_projects.add(project)
         projects.update(event_projects or entity_scopes)
         tool = str(event.get("tool") or "")
         if not event_projects and tool == "list_entities_tool":
@@ -6555,6 +6612,19 @@ def _mcp_queried_projects(events: list[dict[str, Any]]) -> list[str]:
         ):
             projects.add("*/*")
     return sorted(projects)
+
+
+def _qualified_artifact_project(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    parts = raw.strip().split("/")
+    if (
+        len(parts) != 3
+        or any(not part or part in {".", ".."} for part in parts)
+        or ":" not in parts[2]
+    ):
+        return None
+    return f"{parts[0]}/{parts[1]}"
 
 
 def _nested_mappings(value: Mapping[str, Any]) -> list[Mapping[str, Any]]:

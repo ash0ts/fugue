@@ -38,6 +38,7 @@ from fugue.bench.mcp_release_qualification import (
     qualification_seed,
     qualification_seed_digest,
     release_note_coverage_v3,
+    tool_surface_coverage_v1,
     validate_evidence_lock,
     validate_release_notes_lock,
 )
@@ -1697,13 +1698,14 @@ def _prerequisite_v3_result(
     monkeypatch.setattr(
         comparison_module,
         "_scorer_revisions_v3",
-        lambda _execution_lock: (
+        lambda _execution_lock: tuple(
             LockDescriptorV1(
-                id="natural-maintainer",
-                label="Natural maintainer",
-                digest=str(cohort_lineage["scorer_digests"]["natural-maintainer"]),
+                id=str(scorer_id),
+                label=str(scorer_id),
+                digest=str(digest),
                 details={"kind": "scorer"},
-            ),
+            )
+            for scorer_id, digest in sorted(cohort_lineage["scorer_digests"].items())
         ),
     )
     result = analyze_comparison_rows(
@@ -1855,10 +1857,10 @@ def _write_prerequisite_attestation(
 
 
 @pytest.mark.parametrize(
-    ("filename", "tasks", "cells", "cap", "candidate_passes"),
+    ("filename", "tasks", "cells", "cap", "estimate", "candidate_passes"),
     [
-        ("natural-maintainer-canary-local-v3.yaml", 2, 8, 10, 4),
-        ("natural-maintainer-confirmation-local-v3.yaml", 4, 16, 20, 8),
+        ("natural-maintainer-canary-local-v3.yaml", 2, 8, 11, 10.8, 4),
+        ("natural-maintainer-confirmation-local-v3.yaml", 4, 16, 22, 21.6, 8),
     ],
 )
 def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
@@ -1866,6 +1868,7 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     tasks: int,
     cells: int,
     cap: int,
+    estimate: float,
     candidate_passes: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1917,9 +1920,31 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     assert spec.execution.max_cost_usd == cap
     assert readiness.task_count == tasks
     assert readiness.estimated_cells == cells
-    assert readiness.estimated_cost_usd == cap
+    assert readiness.estimated_cost_usd == estimate
+    assert readiness.estimated_cost_usd <= cap
     assert readiness.base_failures == tasks
     assert readiness.gold_passes == tasks
+    judge = next(
+        evaluator
+        for evaluator in spec.evaluators
+        if evaluator.id == "maintainer-actionability"
+    )
+    assert judge.type == "llm_judge"
+    assert judge.required is False
+    assert judge.profile == "wandb/zai-org/GLM-5.2"
+    assert judge.dimensions == (
+        "maintenance_actionability",
+        "evidence_to_action_traceability",
+        "bounded_next_step",
+        "uncertainty_calibration",
+    )
+    assert set(judge.dimension_roles.values()) == {"outcome"}
+    assert judge.evidence == ("tool_names",)
+    assert judge.reserve_cost_usd == 0.1
+    assert any(
+        "maintainer-actionability calibration is not adjudicated" in warning
+        for warning in readiness.warnings
+    )
     assert spec.decision_policy is not None
     assert spec.decision_policy.candidate_sha == (
         "29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
@@ -1941,6 +1966,193 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
         and "infrastructure receipt is not usable" in warning
         for warning in readiness.warnings
     )
+
+
+def test_maintainer_judge_calibration_is_honestly_pending_and_contract_bound() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        EXAMPLE / "natural-maintainer-canary-local-v3.yaml",
+        repo_root=root,
+    )
+    judge = next(
+        evaluator
+        for evaluator in spec.evaluators
+        if evaluator.id == "maintainer-actionability"
+    )
+    report = json.loads(
+        (EXAMPLE / "maintainer-actionability-judge-calibration.json").read_text()
+    )
+
+    assert report["review_status"] == "pending_human_review"
+    assert report["passed"] is False
+    assert report["distinct_reviewers"] == 0
+    assert report["true_positive_rate"] == 0
+    assert report["true_negative_rate"] == 0
+    assert report["calibration_examples"] == 36
+    assert report["holdout_examples"] == 12
+    assert report["calibration_true_positive_rate"] == 0
+    assert report["calibration_true_negative_rate"] == 0
+    assert report["holdout_true_positive_rate"] == 0
+    assert report["holdout_true_negative_rate"] == 0
+    assert report["rubric_digest"] == comparison_module._judge_contract_digest(judge)
+
+    calibration = runpy.run_path((EXAMPLE / "validate_judge_calibration.py").as_posix())
+    cases = calibration["calibration_template"]()
+    pending = calibration["validate_cases"](cases)
+    assert len(cases) == 48
+    assert len({item["response"] for item in cases}) == 48
+    assert {item["authored_reference"]["label"] for item in cases} == {"pass", "fail"}
+    assert sum(item["split"] == "calibration" for item in cases) == 36
+    assert sum(item["split"] == "holdout" for item in cases) == 12
+    assert not any(
+        "state one measurable stop condition" in item["response"]
+        or "generalize this conclusion immediately" in item["response"]
+        for item in cases
+    )
+    assert all(
+        len({item["split"] for item in cases if item["scenario_id"] == scenario}) == 1
+        for scenario in {item["scenario_id"] for item in cases}
+    )
+    assert pending["review_status"] == "pending_human_review"
+    assert pending["passed"] is False
+    assert pending["rubric_digest"] == report["rubric_digest"]
+    assert not {
+        "query_wandb_runs",
+        "get_weave_calls",
+        "get_weave_evaluation",
+        "query_wandb_run_history",
+    } & {tool for item in cases for tool in item["permitted_evidence"]["tool_names"]}
+
+
+def test_exact_mcp_tool_surface_is_classified_once_without_overclaiming() -> None:
+    tools = (
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
+        "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "list_entities_tool",
+        "list_registries_tool",
+        "list_registry_collections_tool",
+        "list_wandb_automations_tool",
+        "list_wandb_integrations_tool",
+        "probe_project_tool",
+        "query_wandb_entity_projects",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "search_wandb_docs_tool",
+        "summarize_evaluation_tool",
+    )
+    receipt = {
+        "candidates": [
+            {
+                "id": candidate_id,
+                "initialized_tools": list(tools),
+                "initialized_tool_schema_digest": "a" * 64,
+                "locked_tool_schema_digest": "a" * 64,
+                "initialized_schema_matches_lock": True,
+            }
+            for candidate_id in ("wandb-mcp-main", "wandb-mcp-0-4-staging")
+        ]
+    }
+    confirmation = tool_surface_coverage_v1(
+        receipt,
+        task_ids=(
+            "maintainer-source-inventory",
+            "maintainer-run-triage",
+            "maintainer-evaluation-trace-topology",
+            "maintainer-artifact-provenance",
+        ),
+    )
+
+    assert confirmation["total_tools"] == 20
+    assert confirmation["agent_task_tools"] == 13
+    assert confirmation["zero_model_tools"] == 7
+    assert confirmation["taskset_comprehensive"] is True
+    assert len({item["tool"] for item in confirmation["tools"]}) == 20
+    assert {item["qualification"] for item in confirmation["tools"]} == {
+        "agent_task",
+        "zero_model_conformance",
+    }
+
+    canary = tool_surface_coverage_v1(
+        receipt,
+        task_ids=(
+            "maintainer-evaluation-reconciliation",
+            "maintainer-project-health",
+        ),
+    )
+    assert canary["taskset_comprehensive"] is False
+    assert any(item["status"] == "confirmation_required" for item in canary["tools"])
+
+    drifted = json.loads(json.dumps(receipt))
+    drifted["candidates"][1]["initialized_tool_schema_digest"] = "b" * 64
+    drifted["candidates"][1]["initialized_schema_matches_lock"] = False
+    with pytest.raises(
+        ValueError,
+        match="input schemas to match their exact locks",
+    ):
+        tool_surface_coverage_v1(
+            drifted,
+            task_ids=(
+                "maintainer-source-inventory",
+                "maintainer-run-triage",
+                "maintainer-evaluation-trace-topology",
+                "maintainer-artifact-provenance",
+            ),
+        )
+
+
+def test_confirmation_tasks_require_every_project_scoped_allowed_tool() -> None:
+    labels = [
+        json.loads(line)
+        for line in (EXAMPLE / "natural-maintainer-confirmation-private.jsonl")
+        .read_text()
+        .splitlines()
+        if line.strip()
+    ]
+    required_by_task = {
+        item["id"]: set(item["expected"]["mechanism"]["required_tool_counts"])
+        for item in labels
+    }
+    config = json.loads((EXAMPLE / "mcp.json").read_text())
+    servers = config["mcpServers"]
+    allowed = {name: set(value["allowed_tools"]) for name, value in servers.items()}
+
+    assert len(set(map(frozenset, allowed.values()))) == 1
+    exact_allowed = next(iter(allowed.values()))
+    assert len(exact_allowed) == 13
+    assert exact_allowed == comparison_module._MCP_RELEASE_READ_ONLY_TOOLS
+    assert set().union(*required_by_task.values()) == exact_allowed
+    assert required_by_task == {
+        "maintainer-source-inventory": {
+            "probe_project_tool",
+            "query_wandb_tool",
+            "summarize_evaluation_tool",
+        },
+        "maintainer-evaluation-trace-topology": {
+            "count_weave_traces_tool",
+            "infer_trace_schema_tool",
+            "query_weave_traces_tool",
+            "resolve_trace_roots_tool",
+            "summarize_evaluation_tool",
+        },
+        "maintainer-run-triage": {
+            "compare_runs_tool",
+            "diagnose_run_tool",
+            "get_run_history_tool",
+            "query_wandb_tool",
+        },
+        "maintainer-artifact-provenance": {
+            "compare_artifact_versions_tool",
+            "get_artifact_details_tool",
+            "list_artifact_versions_tool",
+        },
+    }
 
 
 def test_v3_natural_maintainer_spec_requires_a_locked_role_per_dimension() -> None:
@@ -2366,7 +2578,13 @@ def test_natural_maintainer_private_reconciliation_locks_exact_roots_and_ops(
         if line.strip()
     ]
     label = next(
-        item for item in labels if item["id"] == "maintainer-evaluation-reconciliation"
+        item
+        for item in labels
+        if item["id"]
+        in {
+            "maintainer-evaluation-reconciliation",
+            "maintainer-evaluation-trace-topology",
+        }
     )
     expected = label["expected"]
 
@@ -2404,6 +2622,16 @@ def _natural_maintainer_score():
     ]
 
 
+def _natural_maintainer_confirmation_label(task_id: str) -> dict:
+    return next(
+        json.loads(line)
+        for line in (EXAMPLE / "natural-maintainer-confirmation-private.jsonl")
+        .read_text()
+        .splitlines()
+        if json.loads(line)["id"] == task_id
+    )
+
+
 @pytest.mark.parametrize(
     "private_filename",
     [
@@ -2437,6 +2665,236 @@ def test_natural_maintainer_scorer_qualifies_gold_and_rejects_known_bad(
 
 
 @pytest.mark.parametrize(
+    ("tool", "field", "wrong_value"),
+    [
+        (
+            "list_artifact_versions_tool",
+            "collection_name",
+            "qualification-evidence-maint-r18-02",
+        ),
+        (
+            "get_artifact_details_tool",
+            "artifact_name",
+            "wandb/fugue-mcp-release-source-v2/qualification-evidence-maint-r18-02:v0",
+        ),
+        (
+            "compare_artifact_versions_tool",
+            "artifact_name_a",
+            "wandb/fugue-mcp-release-source-v2/qualification-evidence-maint-r18-03:v0",
+        ),
+        (
+            "compare_artifact_versions_tool",
+            "artifact_name_b",
+            "wandb/fugue-mcp-release-source-v2/qualification-evidence-maint-r18-03:v0",
+        ),
+    ],
+)
+def test_natural_maintainer_artifact_semantics_reject_wrong_refs(
+    tool: str,
+    field: str,
+    wrong_value: str,
+) -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label("maintainer-artifact-provenance")
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    call = next(item for item in evidence["mcp_tool_calls"] if item["tool"] == tool)
+    call[field] = wrong_value
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is False
+    assert result["bounded_evidence"] is False
+    assert result["release_mechanism_used"] is False
+
+
+def test_natural_maintainer_artifact_semantics_reject_wrong_second_digest() -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label("maintainer-artifact-provenance")
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    details = [
+        item
+        for item in evidence["mcp_tool_calls"]
+        if item["tool"] == "get_artifact_details_tool"
+    ]
+    second = next(
+        item
+        for item in details
+        if item["artifact_name"] == label["expected"]["facts"]["artifact_b"]
+    )
+    second["artifact_digest"] = "sha256:" + "0" * 64
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["answer_correct"] is False
+    assert result["bounded_evidence"] is False
+    assert result["release_mechanism_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "field", "wrong_value"),
+    [
+        ("compare_runs_tool", "run_id_b", "maint-r18-02"),
+        ("compare_runs_tool", "include_history_overlap", True),
+        ("diagnose_run_tool", "run_id", "maint-r18-01"),
+    ],
+)
+def test_natural_maintainer_run_triage_rejects_wrong_comparison_or_diagnosis(
+    tool: str,
+    field: str,
+    wrong_value: object,
+) -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label("maintainer-run-triage")
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    call = next(item for item in evidence["mcp_tool_calls"] if item["tool"] == tool)
+    call[field] = wrong_value
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is False
+    assert result["bounded_evidence"] is True
+    assert result["release_mechanism_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong_value"),
+    [
+        ("sample_size", 19),
+        ("top_n_values", 4),
+    ],
+)
+def test_natural_maintainer_trace_topology_rejects_wrong_schema_sample(
+    field: str,
+    wrong_value: int,
+) -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label(
+        "maintainer-evaluation-trace-topology"
+    )
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    schema = next(
+        item
+        for item in evidence["mcp_tool_calls"]
+        if item["tool"] == "infer_trace_schema_tool"
+    )
+    schema[field] = wrong_value
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is True
+    assert result["bounded_evidence"] is False
+    assert result["release_mechanism_used"] is False
+
+
+def test_natural_maintainer_trace_topology_rejects_unrelated_root_resolution() -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label(
+        "maintainer-evaluation-trace-topology"
+    )
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    resolution = next(
+        item
+        for item in evidence["mcp_tool_calls"]
+        if item["tool"] == "resolve_trace_roots_tool"
+    )
+    resolution["trace_ids_digest"] = "0" * 64
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is True
+    assert result["bounded_evidence"] is False
+    assert result["release_mechanism_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("retry_status", "expected_bounded"),
+    [
+        ("failed", True),
+        ("succeeded", False),
+    ],
+)
+def test_natural_maintainer_mechanism_rejects_failed_or_extra_retry(
+    retry_status: str,
+    expected_bounded: bool,
+) -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label("maintainer-source-inventory")
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    retry = json.loads(json.dumps(evidence["mcp_tool_calls"][0]))
+    retry["terminal_status"] = retry_status
+    if retry_status == "failed":
+        retry["structured_error_code"] = "server_busy"
+    evidence["mcp_tool_calls"].insert(0, retry)
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is expected_bounded
+    assert result["bounded_evidence"] is expected_bounded
+    assert result["release_mechanism_used"] is False
+
+
+def test_natural_maintainer_mechanism_rejects_extra_successful_tool() -> None:
+    score = _natural_maintainer_score()
+    label = _natural_maintainer_confirmation_label("maintainer-source-inventory")
+    evidence = json.loads(json.dumps(label["gold_evidence"]))
+    evidence["mcp_tool_calls"].append(
+        {
+            "tool": "diagnose_run_tool",
+            "terminal_status": "succeeded",
+            "queried_projects": [QUALIFICATION_SOURCE_PROJECT],
+            "run_id": "maint-r18-06",
+        }
+    )
+
+    result = score(
+        {"id": label["id"]},
+        label["gold_output"],
+        {**evidence, "expected": label["expected"]},
+    )
+
+    assert result["actual_query_scope"] is True
+    assert result["reported_project_identity"] is True
+    assert result["answer_correct"] is True
+    assert result["bounded_evidence"] is False
+    assert result["release_mechanism_used"] is False
+
+
+@pytest.mark.parametrize(
     ("private_filename", "task_id", "factual_field", "wrong_value"),
     [
         (
@@ -2459,7 +2917,7 @@ def test_natural_maintainer_scorer_qualifies_gold_and_rejects_known_bad(
         ),
         (
             "natural-maintainer-confirmation-private.jsonl",
-            "maintainer-history-hotspot",
+            "maintainer-run-triage",
             "latency_ms",
             999,
         ),
@@ -2540,7 +2998,7 @@ def test_natural_maintainer_scorer_dimensions_are_independent(
         ),
         (
             "natural-maintainer-confirmation-private.jsonl",
-            "maintainer-history-hotspot",
+            "maintainer-run-triage",
             "get_run_history_tool",
         ),
     ],
@@ -2738,6 +3196,16 @@ def test_natural_maintainer_scorer_normalizes_raw_mcp_arguments() -> None:
         "expected": label["expected"],
         "mcp_tool_calls": [
             {
+                "tool": "probe_project_tool",
+                "arguments": {
+                    "entity_name": "wandb",
+                    "project_name": "fugue-mcp-release-source-v2",
+                    "sample_runs": 4,
+                },
+                "terminal_status": "succeeded",
+                "total_count": 6,
+            },
+            {
                 "tool": "query_wandb_tool",
                 "arguments": {
                     "entity_name": "wandb",
@@ -2794,6 +3262,15 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
     evaluations = lock["objects"]["evaluations"]
     call_ids = [item["call_id"] for item in evaluations]
 
+    def schemas(*names: str) -> list[dict]:
+        return [
+            {
+                "name": name,
+                "input_schema": {"type": "object", "properties": {}},
+            }
+            for name in sorted(names)
+        ]
+
     def observation(import_id: str, *, works: bool) -> dict:
         if not works:
             failed = {
@@ -2809,6 +3286,11 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                 "server": {"name": "mcp", "version": "old"},
                 "initialized_tools": ["query_wandb_tool"],
                 "locked_tools": ["query_wandb_tool"],
+                "initialized_tool_schema_digest": stable_digest(
+                    schemas("query_wandb_tool")
+                ),
+                "locked_tool_schema_digest": stable_digest(schemas("query_wandb_tool")),
+                "initialized_schema_matches_lock": True,
                 "release_capabilities": {
                     "structured_query": False,
                     "exact_count_mode": False,
@@ -2830,17 +3312,20 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
             "tool_manifest_digest": "sha256:" + "6" * 64,
             "server": {"name": "mcp", "version": "new"},
             "initialized_tools": [
-                "create_wandb_report_tool",
                 "get_run_history_tool",
-                "log_analysis_to_wandb",
                 "query_wandb_tool",
             ],
             "locked_tools": [
-                "create_wandb_report_tool",
                 "get_run_history_tool",
-                "log_analysis_to_wandb",
                 "query_wandb_tool",
             ],
+            "initialized_tool_schema_digest": stable_digest(
+                schemas("get_run_history_tool", "query_wandb_tool")
+            ),
+            "locked_tool_schema_digest": stable_digest(
+                schemas("get_run_history_tool", "query_wandb_tool")
+            ),
+            "initialized_schema_matches_lock": True,
             "release_capabilities": {
                 "structured_query": True,
                 "exact_count_mode": True,
@@ -2889,24 +3374,72 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                 for call_id in call_ids
             },
             "profile_probes": {
+                "package_default": {
+                    "overrides": {},
+                    "unset_fixed_env": ["WANDB_MCP_READ_ONLY"],
+                    "entrypoint": "package",
+                    "initialized_tools": [
+                        "create_wandb_report_tool",
+                        "get_run_history_tool",
+                        "log_analysis_to_wandb",
+                        "query_wandb_tool",
+                    ],
+                    "tool_schemas": schemas(
+                        "create_wandb_report_tool",
+                        "get_run_history_tool",
+                        "log_analysis_to_wandb",
+                        "query_wandb_tool",
+                    ),
+                    "tool_schema_digest": stable_digest(
+                        schemas(
+                            "create_wandb_report_tool",
+                            "get_run_history_tool",
+                            "log_analysis_to_wandb",
+                            "query_wandb_tool",
+                        )
+                    ),
+                    "tool_manifest_digest": "c" * 64,
+                    "mutation_probe": None,
+                },
                 "read_only": {
                     "overrides": {"WANDB_MCP_READ_ONLY": "true"},
+                    "unset_fixed_env": [],
+                    "entrypoint": "locked_wrapper",
                     "initialized_tools": [
                         "get_run_history_tool",
                         "query_wandb_tool",
                     ],
+                    "tool_schemas": schemas(
+                        "get_run_history_tool",
+                        "query_wandb_tool",
+                    ),
+                    "tool_schema_digest": stable_digest(
+                        schemas("get_run_history_tool", "query_wandb_tool")
+                    ),
                     "tool_manifest_digest": "a" * 64,
                     "mutation_probe": None,
                 },
                 "raw_graphql": {
                     "overrides": {"WANDB_MCP_ENABLE_RAW_GRAPHQL": "true"},
+                    "unset_fixed_env": [],
+                    "entrypoint": "locked_wrapper",
                     "initialized_tools": [
-                        "create_wandb_report_tool",
                         "get_run_history_tool",
-                        "log_analysis_to_wandb",
                         "query_wandb_graphql_tool",
                         "query_wandb_tool",
                     ],
+                    "tool_schemas": schemas(
+                        "get_run_history_tool",
+                        "query_wandb_graphql_tool",
+                        "query_wandb_tool",
+                    ),
+                    "tool_schema_digest": stable_digest(
+                        schemas(
+                            "get_run_history_tool",
+                            "query_wandb_graphql_tool",
+                            "query_wandb_tool",
+                        )
+                    ),
                     "tool_manifest_digest": "b" * 64,
                     "mutation_probe": {
                         "ok": True,
@@ -2974,3 +3507,75 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
         "infrastructure_only_not_live_induced",
     }
     assert len(receipt["receipt_digest"]) == 64
+
+
+def test_package_default_profile_removes_reviewed_read_only_override() -> None:
+    lock = {
+        "fixed_env": {
+            "MCP_ANALYTICS_LOG_STREAM": "stderr",
+            "WANDB_BASE_URL": "https://api.wandb.ai",
+            "WANDB_MCP_READ_ONLY": "true",
+        }
+    }
+
+    assert mcp_release_qualification._profile_fixed_env(
+        lock,
+        overrides={},
+        unset_fixed_env=("WANDB_MCP_READ_ONLY",),
+    ) == {
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+    }
+    assert (
+        mcp_release_qualification._profile_fixed_env(
+            lock,
+            overrides={"WANDB_MCP_READ_ONLY": "false"},
+            unset_fixed_env=(),
+        )["WANDB_MCP_READ_ONLY"]
+        == "false"
+    )
+
+
+def test_tool_schema_contract_detects_input_drift_not_description_drift() -> None:
+    initialized = mcp_release_qualification._initialized_tool_schema_contract(
+        [
+            SimpleNamespace(
+                name="query_wandb_tool",
+                description="new documentation",
+                inputSchema={
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}},
+                    "required": ["limit"],
+                },
+            )
+        ]
+    )
+    locked = mcp_release_qualification._locked_tool_schema_contract(
+        [
+            {
+                "name": "query_wandb_tool",
+                "description": "old documentation",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}},
+                    "required": ["limit"],
+                },
+            }
+        ]
+    )
+    assert initialized == locked
+
+    drifted = mcp_release_qualification._locked_tool_schema_contract(
+        [
+            {
+                "name": "query_wandb_tool",
+                "description": "old documentation",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "string"}},
+                    "required": ["limit"],
+                },
+            }
+        ]
+    )
+    assert initialized != drifted
