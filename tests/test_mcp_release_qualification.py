@@ -222,6 +222,67 @@ def test_weave_inventory_preflights_missing_project(
     ) == (None, [], {}, [], [], [], [])
 
 
+@pytest.mark.parametrize("raise_inside", [False, True])
+def test_source_weave_client_restores_active_result_client(
+    monkeypatch: pytest.MonkeyPatch,
+    raise_inside: bool,
+) -> None:
+    from weave.trace import weave_init
+    from weave.trace.context import weave_client_context
+
+    state: dict[str, object | None] = {}
+
+    class Client:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.finish_calls = 0
+
+        def finish(self) -> None:
+            self.finish_calls += 1
+
+    result_client = Client("result")
+    source_client = Client("source")
+    state["client"] = result_client
+
+    monkeypatch.setattr(
+        weave_client_context,
+        "get_weave_client",
+        lambda: state["client"],
+    )
+    monkeypatch.setattr(
+        weave_client_context,
+        "set_weave_client_global",
+        lambda client: state.__setitem__("client", client),
+    )
+
+    def init_weave(project: str, *, ensure_project_exists: bool):
+        assert project == QUALIFICATION_SOURCE_PROJECT
+        assert ensure_project_exists is False
+        state["client"] = source_client
+        return source_client
+
+    monkeypatch.setattr(weave_init, "init_weave", init_weave)
+
+    if raise_inside:
+        with pytest.raises(RuntimeError, match="source failure"):
+            with mcp_release_qualification._source_weave_client(
+                QUALIFICATION_SOURCE_PROJECT,
+                write=False,
+            ) as active:
+                assert active is source_client
+                raise RuntimeError("source failure")
+    else:
+        with mcp_release_qualification._source_weave_client(
+            QUALIFICATION_SOURCE_PROJECT,
+            write=False,
+        ) as active:
+            assert active is source_client
+
+    assert state["client"] is result_client
+    assert source_client.finish_calls == 1
+    assert result_client.finish_calls == 0
+
+
 def _lock(
     project: str = QUALIFICATION_PROJECT,
     *,

@@ -21,6 +21,7 @@ from fugue.bench.comparison import (
     _comparison_trial_output,
     _evaluate_decision,
     _paired_attempt_view_v3,
+    _require_checkpoint_judges,
     _sanitized_answer_excerpt,
     analyze_comparison_rows,
     check_comparison,
@@ -2562,6 +2563,57 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         ]
         == "Blind judge score; no rationale or private truth is published."
     )
+
+
+def test_checkpoint_requires_configured_advisory_judge_to_score() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        MCP_MAINTENANCE_EXAMPLE / "natural-maintainer-canary-local-v3.yaml",
+        repo_root=root,
+    )
+    row = {
+        "comparison_judges": {
+            "maintainer-actionability": {
+                "status": "unavailable",
+                "reason": "judge evaluation failed: ReadTimeout",
+            }
+        }
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="first-cell judge checkpoint did not score",
+    ):
+        _require_checkpoint_judges(
+            spec,
+            row,
+            checkpoint_index=0,
+        )
+
+    assert row["comparison_judge_checkpoint_status"] == "failed"
+    assert row["comparison_judge_checkpoint_unavailable"] == [
+        "maintainer-actionability"
+    ]
+
+    scored = {
+        "comparison_judges": {
+            "maintainer-actionability": {"status": "scored"}
+        }
+    }
+    _require_checkpoint_judges(
+        spec,
+        scored,
+        checkpoint_index=0,
+    )
+    assert scored["comparison_judge_checkpoint_status"] == "passed"
+
+    after_checkpoint: dict[str, object] = {}
+    _require_checkpoint_judges(
+        spec,
+        after_checkpoint,
+        checkpoint_index=1,
+    )
+    assert after_checkpoint == {}
 
 
 def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(

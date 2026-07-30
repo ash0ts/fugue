@@ -3446,18 +3446,22 @@ def _weave_missing_error(exc: Exception) -> bool:
 @contextmanager
 def _source_weave_client(project: str, *, write: bool):
     from weave.trace.context.weave_client_context import (
+        get_weave_client,
         set_weave_client_global,
     )
     from weave.trace.weave_init import init_weave
 
+    previous_client = get_weave_client()
     client = None
     try:
         client = init_weave(project, ensure_project_exists=write)
         yield client
     finally:
-        if client is not None:
+        if client is not None and client is not previous_client:
             client.finish()
         set_weave_client_global(None)
+        if previous_client is not None:
+            set_weave_client_global(previous_client)
 
 
 def _source_weave_project_exists(client: Any, project: str) -> bool:
