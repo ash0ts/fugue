@@ -1879,12 +1879,13 @@ def _comparison_cohort_lineage(
                 / ".fugue/imports/mcp/locks"
                 / f"{integration_id}.json"
             )
+            safe_lock_path = _safe_input_path(
+                lock_path,
+                repo_root,
+                f"{arm} cohort integration lock {integration_id}",
+            )
             lock = _load_json_object(
-                _safe_input_path(
-                    lock_path,
-                    repo_root,
-                    f"{arm} cohort integration lock {integration_id}",
-                ),
+                safe_lock_path,
                 f"{arm} cohort integration lock {integration_id}",
             )
             revisions.append(
@@ -1894,7 +1895,7 @@ def _comparison_cohort_lineage(
                         lock.get("version_identity") or ""
                     ),
                     "runtime_digest": str(lock.get("runtime_digest") or ""),
-                    "lock_digest": f"sha256:{_sha256_path(lock_path)}",
+                    "lock_digest": f"sha256:{_sha256_path(safe_lock_path)}",
                     "allowed_tools_digest": stable_digest(
                         sorted(str(item) for item in lock.get("allowed_tools") or ())
                     ),
