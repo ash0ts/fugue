@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from fugue.bench import mcp_release_qualification
+from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import check_comparison, load_comparison
 from fugue.bench.mcp_release_qualification import (
     QUALIFICATION_PROJECT,
@@ -32,15 +33,10 @@ def test_research_registry_exposes_only_canonical_mcp_v3_studies() -> None:
     mcp_entries = tuple(
         entry
         for entry in registry.catalog()
-        if entry.path.startswith(
-            "examples/comparisons/wandb-mcp-maintenance/"
-        )
+        if entry.path.startswith("examples/comparisons/wandb-mcp-maintenance/")
     )
 
-    assert {
-        (entry.id, entry.path)
-        for entry in mcp_entries
-    } == {
+    assert {(entry.id, entry.path) for entry in mcp_entries} == {
         (
             "mcp-main-vs-0-4-natural-maintainer-canary-v3",
             "examples/comparisons/wandb-mcp-maintenance/"
@@ -60,9 +56,7 @@ def test_release_notes_lock_binds_exact_rc_source_and_all_classifications() -> N
     )
     receipt = _mcp_release_qualification_receipt(_lock(), [])
 
-    assert release_notes["commit"] == (
-        "3dd4447ef0054d4707aafc515e3f2ddfb11b17bd"
-    )
+    assert release_notes["commit"] == ("3dd4447ef0054d4707aafc515e3f2ddfb11b17bd")
     assert release_notes["sha256"] == (
         "2e32e337dd6c98a5e4b3805b189af10c913ec1dd739a63b25b031ab35d786c99"
     )
@@ -113,6 +107,141 @@ def _lock(
     )
 
 
+def _verified_source_inventory(
+    *,
+    extra_objects: tuple[str, ...] = (),
+    drift: tuple[str, ...] = (),
+    actions: set[str] | None = None,
+    mutation: str = "",
+) -> dict:
+    selected = (
+        set(mcp_release_qualification._SOURCE_PREPARATION_ACTIONS)
+        if actions is None
+        else set(actions)
+    )
+    seed = qualification_seed(source_project=QUALIFICATION_SOURCE_PROJECT)
+    run_by_id = {str(item["id"]): item for item in seed["runs"]}
+    runs = []
+    for run_id, item in sorted(run_by_id.items()):
+        if f"wandb-run:{run_id}" not in selected:
+            continue
+        receipt = {
+            "id": run_id,
+            "name": item["attempt_label"],
+            "url": f"https://wandb.ai/{QUALIFICATION_SOURCE_PROJECT}/runs/{run_id}",
+            "ref": f"wandb-run:///{QUALIFICATION_SOURCE_PROJECT}/{run_id}",
+            "seed_digest": qualification_seed_digest(
+                source_project=QUALIFICATION_SOURCE_PROJECT
+            ),
+            "state": "finished",
+            "config_digest": stable_digest({"run": run_id, "kind": "config"}),
+            "history_digest": stable_digest({"run": run_id, "kind": "history"}),
+            "summary_digest": stable_digest({"run": run_id, "kind": "summary"}),
+            "artifact": {
+                "name": f"qualification-evidence-{run_id}:v0",
+                "version": "v0",
+                "digest": f"artifact-{run_id}",
+                "qualified_name": (
+                    f"{QUALIFICATION_SOURCE_PROJECT}/qualification-evidence-{run_id}:v0"
+                ),
+                "content_digest": stable_digest({"run": run_id, "kind": "artifact"}),
+            },
+        }
+        receipt["content_digest"] = stable_digest({**receipt, "mutation": mutation})
+        runs.append(receipt)
+    dataset = None
+    if "weave-dataset:mcp-release-maintenance-cases" in selected:
+        dataset = {
+            "name": "mcp-release-maintenance-cases",
+            "ref": (
+                f"weave:///{QUALIFICATION_SOURCE_PROJECT}/object/"
+                "mcp-release-maintenance-cases:dataset-digest"
+            ),
+            "rows": 8,
+            "content_digest": stable_digest({"dataset": "cases", "mutation": mutation}),
+        }
+    conversations = []
+    for run_id in sorted(run_by_id):
+        for index in range(1, 5):
+            action = f"weave-conversation:{run_id}:{index}"
+            if action not in selected:
+                continue
+            call_id = f"{run_id}-conversation-{index}"
+            conversations.append(
+                {
+                    "run_id": run_id,
+                    "conversation_index": index,
+                    "call_id": call_id,
+                    "ref": (f"weave:///{QUALIFICATION_SOURCE_PROJECT}/call/{call_id}"),
+                    "tool_call_ids": [
+                        f"{call_id}-tool-1",
+                        f"{call_id}-tool-2",
+                    ],
+                    "tool_span_count": 2,
+                    "content_digest": stable_digest(
+                        {
+                            "conversation": call_id,
+                            "mutation": mutation,
+                        }
+                    ),
+                }
+            )
+    evaluation_objects = {}
+    evaluations = []
+    for revision in ("maintainer-r17", "maintainer-r18"):
+        object_action = f"weave-evaluation-object:{revision}"
+        evaluation_ref = (
+            f"weave:///{QUALIFICATION_SOURCE_PROJECT}/object/"
+            f"mcp-release-{revision}:evaluation-digest"
+        )
+        if object_action in selected:
+            evaluation_objects[revision] = {
+                "revision": revision,
+                "ref": evaluation_ref,
+                "content_digest": stable_digest(
+                    {"evaluation": revision, "mutation": mutation}
+                ),
+            }
+        if f"weave-evaluation-run:{revision}" in selected:
+            call_id = f"evaluation-{revision}"
+            evaluations.append(
+                {
+                    "revision": revision,
+                    "ref": evaluation_ref,
+                    "call_id": call_id,
+                    "call_ref": (
+                        f"weave:///{QUALIFICATION_SOURCE_PROJECT}/call/{call_id}"
+                    ),
+                    "summary_digest": stable_digest({"summary": revision}),
+                    "prediction_rows": 8,
+                    "direct_children": 9,
+                    "summarize_children": 1,
+                    "content_digest": stable_digest(
+                        {
+                            "evaluation_call": revision,
+                            "mutation": mutation,
+                        }
+                    ),
+                }
+            )
+    return mcp_release_qualification._source_inventory(
+        source_project=QUALIFICATION_SOURCE_PROJECT,
+        runs=runs,
+        dataset=dataset,
+        conversations=conversations,
+        evaluation_objects=evaluation_objects,
+        evaluations=evaluations,
+        extra_objects=extra_objects,
+        drift=drift,
+    )
+
+
+def _preparation_env(tmp_path: Path) -> Path:
+    path = tmp_path / ".env"
+    path.write_text("WANDB_API_KEY=unit-test-key\n", encoding="utf-8")
+    return path
+
+
 def _source_call_snapshot(
     lock: dict,
     *,
@@ -127,9 +256,7 @@ def _source_call_snapshot(
             {
                 "id": call_id,
                 "project_id": project,
-                "op_name": (
-                    f"weave:///{project}/op/Evaluation.evaluate:root-digest"
-                ),
+                "op_name": (f"weave:///{project}/op/Evaluation.evaluate:root-digest"),
             }
         )
         rows = [
@@ -154,8 +281,7 @@ def _source_call_snapshot(
                 "project_id": project,
                 "parent_id": call_id,
                 "op_name": (
-                    f"weave:///{project}/op/"
-                    "Evaluation.summarize:summary-digest"
+                    f"weave:///{project}/op/Evaluation.summarize:summary-digest"
                 ),
             }
         )
@@ -241,10 +367,7 @@ def test_source_conformance_receipt_binds_exact_18_to_16_shape() -> None:
         "summarize_children": 2,
     }
     assert receipt["expectations"]["direct_children"] == 18
-    assert (
-        receipt["expectations"]["repaired_candidate_prediction_children"]
-        == 16
-    )
+    assert receipt["expectations"]["repaired_candidate_prediction_children"] == 16
     assert receipt["query_scope"]["models_invoked"] == 0
     assert receipt["query_scope"]["calls_published"] == 0
     assert receipt["blockers"] == []
@@ -274,10 +397,7 @@ def test_source_conformance_rejects_cross_project_or_drifted_children() -> None:
     assert receipt["status"] == "failed"
     assert "aggregate_direct_children_drift" in receipt["blockers"]
     assert "aggregate_summarize_children_drift" in receipt["blockers"]
-    assert any(
-        item.endswith(":child_project_mismatch")
-        for item in receipt["blockers"]
-    )
+    assert any(item.endswith(":child_project_mismatch") for item in receipt["blockers"])
 
 
 def test_zero_model_verifier_reads_only_source_and_redacts_key(
@@ -358,9 +478,520 @@ def test_existing_lock_must_validate_before_idempotent_reuse(
 
     with pytest.raises(ValueError, match="digest does not match"):
         prepare_hosted_project(
-            project=QUALIFICATION_PROJECT,
+            source_project=QUALIFICATION_SOURCE_PROJECT,
+            result_project=QUALIFICATION_RESULT_PROJECT,
             output=output,
             env_file=tmp_path / "missing.env",
+        )
+
+
+def test_v3_preparation_rejects_legacy_or_same_project_writers(
+    tmp_path: Path,
+) -> None:
+    prepare = mcp_release_qualification.prepare_hosted_project
+
+    with pytest.raises(ValueError, match="legacy single-project"):
+        prepare(
+            project=QUALIFICATION_RESULT_PROJECT,
+            output=tmp_path / "legacy.json",
+            env_file=tmp_path / "missing.env",
+        )
+    with pytest.raises(ValueError, match="distinct result project"):
+        prepare(
+            source_project=QUALIFICATION_SOURCE_PROJECT,
+            result_project=QUALIFICATION_SOURCE_PROJECT,
+            output=tmp_path / "same.json",
+            env_file=tmp_path / "missing.env",
+        )
+    with pytest.raises(ValueError, match="dedicated immutable source"):
+        prepare(
+            source_project=QUALIFICATION_RESULT_PROJECT,
+            result_project=QUALIFICATION_RESULT_PROJECT,
+            output=tmp_path / "result.json",
+            env_file=tmp_path / "missing.env",
+        )
+
+
+def test_fresh_then_missing_lock_rerun_reuses_remote_source_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"inventory": _verified_source_inventory(actions=set())}
+    writes = []
+    inventory_calls = []
+
+    def inventory(entity, project, *, source_project):
+        inventory_calls.append((entity, project, source_project))
+        return state["inventory"]
+
+    def materialize(
+        entity,
+        project,
+        *,
+        source_project,
+        inventory,
+        run_action,
+    ):
+        del inventory, run_action
+        writes.append((entity, project, source_project))
+        state["inventory"] = _verified_source_inventory()
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_inventory_hosted_source",
+        inventory,
+    )
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_materialize_hosted_source",
+        materialize,
+    )
+    output = tmp_path / "evidence.lock.json"
+    kwargs = {
+        "source_project": QUALIFICATION_SOURCE_PROJECT,
+        "result_project": QUALIFICATION_RESULT_PROJECT,
+        "output": output,
+        "env_file": _preparation_env(tmp_path),
+    }
+
+    first = mcp_release_qualification.prepare_hosted_project(**kwargs)
+    output.unlink()
+    second = mcp_release_qualification.prepare_hosted_project(**kwargs)
+
+    assert first == second
+    assert writes == [
+        (
+            "wandb",
+            "fugue-mcp-release-source-v1",
+            QUALIFICATION_SOURCE_PROJECT,
+        )
+    ]
+    assert inventory_calls
+    assert all(
+        item
+        == (
+            "wandb",
+            "fugue-mcp-release-source-v1",
+            QUALIFICATION_SOURCE_PROJECT,
+        )
+        for item in inventory_calls
+    )
+    assert first["source_project"] == QUALIFICATION_SOURCE_PROJECT
+    assert first["result_project"] == QUALIFICATION_RESULT_PROJECT
+    assert first["counts"] == {
+        "runs": 6,
+        "source_conversations": 24,
+        "tool_spans": 48,
+        "dataset_rows": 8,
+        "aligned_evaluation_pairs": 8,
+        "evaluation_prediction_rows": 16,
+    }
+    assert "unit-test-key" not in output.read_text(encoding="utf-8")
+    assert "unit-test-key" not in (
+        tmp_path / "evidence.lock.json.progress.json"
+    ).read_text(encoding="utf-8")
+
+
+def test_existing_lock_reuse_rejects_remote_content_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"inventory": _verified_source_inventory()}
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_inventory_hosted_source",
+        lambda *args, **kwargs: state["inventory"],
+    )
+    output = tmp_path / "evidence.lock.json"
+    kwargs = {
+        "source_project": QUALIFICATION_SOURCE_PROJECT,
+        "result_project": QUALIFICATION_RESULT_PROJECT,
+        "output": output,
+        "env_file": _preparation_env(tmp_path),
+    }
+    mcp_release_qualification.prepare_hosted_project(**kwargs)
+    state["inventory"] = _verified_source_inventory(mutation="drifted")
+
+    with pytest.raises(RuntimeError, match="disagrees with hosted source"):
+        mcp_release_qualification.prepare_hosted_project(**kwargs)
+
+
+def test_source_preparation_recovers_visible_in_flight_write_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_action = "wandb-run:maint-r18-01"
+    state = {"inventory": _verified_source_inventory(actions=set())}
+    attempts = []
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_inventory_hosted_source",
+        lambda *args, **kwargs: state["inventory"],
+    )
+
+    def interrupted_materialize(
+        entity,
+        project,
+        *,
+        source_project,
+        inventory,
+        run_action,
+    ):
+        del entity, project, source_project, inventory
+
+        def write_then_interrupt():
+            attempts.append(first_action)
+            state["inventory"] = _verified_source_inventory(actions={first_action})
+            raise RuntimeError("simulated interruption")
+
+        run_action(first_action, write_then_interrupt)
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_materialize_hosted_source",
+        interrupted_materialize,
+    )
+    output = tmp_path / "evidence.lock.json"
+    kwargs = {
+        "source_project": QUALIFICATION_SOURCE_PROJECT,
+        "result_project": QUALIFICATION_RESULT_PROJECT,
+        "output": output,
+        "env_file": _preparation_env(tmp_path),
+    }
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        mcp_release_qualification.prepare_hosted_project(**kwargs)
+
+    def finish_materialize(
+        entity,
+        project,
+        *,
+        source_project,
+        inventory,
+        run_action,
+    ):
+        del entity, project, source_project, inventory, run_action
+        state["inventory"] = _verified_source_inventory()
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_materialize_hosted_source",
+        finish_materialize,
+    )
+    result = mcp_release_qualification.prepare_hosted_project(**kwargs)
+
+    assert result["counts"]["runs"] == 6
+    assert attempts == [first_action]
+
+
+def test_source_preparation_refuses_unresolved_in_flight_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty = _verified_source_inventory(actions=set())
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_inventory_hosted_source",
+        lambda *args, **kwargs: empty,
+    )
+
+    def interrupted_materialize(
+        entity,
+        project,
+        *,
+        source_project,
+        inventory,
+        run_action,
+    ):
+        del entity, project, source_project, inventory
+
+        def unresolved():
+            raise RuntimeError("transport outcome unknown")
+
+        run_action("wandb-run:maint-r18-01", unresolved)
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_materialize_hosted_source",
+        interrupted_materialize,
+    )
+    kwargs = {
+        "source_project": QUALIFICATION_SOURCE_PROJECT,
+        "result_project": QUALIFICATION_RESULT_PROJECT,
+        "output": tmp_path / "evidence.lock.json",
+        "env_file": _preparation_env(tmp_path),
+    }
+    with pytest.raises(RuntimeError, match="transport outcome unknown"):
+        mcp_release_qualification.prepare_hosted_project(**kwargs)
+    with pytest.raises(RuntimeError, match="outcome is unresolved"):
+        mcp_release_qualification.prepare_hosted_project(**kwargs)
+
+
+def test_source_preflight_rejects_extra_objects_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _verified_source_inventory(
+        actions=set(),
+        extra_objects=("weave-evaluation-root:unexpected",),
+    )
+    writes = []
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_inventory_hosted_source",
+        lambda *args, **kwargs: inventory,
+    )
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_materialize_hosted_source",
+        lambda *args, **kwargs: writes.append("write"),
+    )
+
+    with pytest.raises(RuntimeError, match="contains extra objects"):
+        mcp_release_qualification.prepare_hosted_project(
+            source_project=QUALIFICATION_SOURCE_PROJECT,
+            result_project=QUALIFICATION_RESULT_PROJECT,
+            output=tmp_path / "evidence.lock.json",
+            env_file=_preparation_env(tmp_path),
+        )
+    assert writes == []
+
+
+def test_weave_inventory_requires_exact_conversation_tool_children() -> None:
+    seed_digest = qualification_seed_digest(source_project=QUALIFICATION_SOURCE_PROJECT)
+    calls = []
+    for item in qualification_seed(source_project=QUALIFICATION_SOURCE_PROJECT)["runs"]:
+        for index in range(1, 5):
+            root_id = f"{item['id']}-conversation-{index}"
+            trace_id = f"trace-{root_id}"
+            calls.append(
+                {
+                    "id": root_id,
+                    "project_id": QUALIFICATION_SOURCE_PROJECT,
+                    "trace_id": trace_id,
+                    "parent_id": "",
+                    "op_name": "fugue.qualification.maintenance_agent",
+                    "inputs": (
+                        mcp_release_qualification._expected_conversation_inputs(
+                            item,
+                            index,
+                            seed_digest,
+                        )
+                    ),
+                    "output": (
+                        mcp_release_qualification._expected_conversation_output(
+                            item,
+                            index,
+                        )
+                    ),
+                    "attributes": {"fugue.seed_digest": seed_digest},
+                    "ended_at": "2026-07-30T00:00:00Z",
+                    "exception": None,
+                }
+            )
+            for tool_index, tool_inputs in enumerate(
+                mcp_release_qualification._expected_tool_inputs(item, index),
+                start=1,
+            ):
+                calls.append(
+                    {
+                        "id": f"{root_id}-tool-{tool_index}",
+                        "project_id": QUALIFICATION_SOURCE_PROJECT,
+                        "trace_id": trace_id,
+                        "parent_id": root_id,
+                        "op_name": "fugue.qualification.wandb_mcp_tool",
+                        "inputs": tool_inputs,
+                        "output": {
+                            "tool_name": tool_inputs["tool_name"],
+                            "run_id": tool_inputs["run_id"],
+                            "result": tool_inputs["public_result"],
+                        },
+                        "attributes": {},
+                        "ended_at": "2026-07-30T00:00:00Z",
+                        "exception": None,
+                    }
+                )
+
+    receipts, extras, drift = mcp_release_qualification._inventory_conversations(
+        calls,
+        project=QUALIFICATION_SOURCE_PROJECT,
+        seed_digest=seed_digest,
+    )
+    assert len(receipts) == 24
+    assert sum(item["tool_span_count"] for item in receipts) == 48
+    assert extras == drift == []
+
+    calls[-1]["output"] = {"drifted": True}
+    _, _, drift = mcp_release_qualification._inventory_conversations(
+        calls,
+        project=QUALIFICATION_SOURCE_PROJECT,
+        seed_digest=seed_digest,
+    )
+    assert any(item.endswith(":tools") for item in drift)
+
+
+def test_weave_inventory_rejects_duplicate_evaluation_roots() -> None:
+    seed_digest = qualification_seed_digest(source_project=QUALIFICATION_SOURCE_PROJECT)
+    objects = {
+        revision: {
+            "revision": revision,
+            "ref": (
+                f"weave:///{QUALIFICATION_SOURCE_PROJECT}/object/"
+                f"mcp-release-{revision}:digest"
+            ),
+            "content_digest": stable_digest({"revision": revision}),
+        }
+        for revision in ("maintainer-r17", "maintainer-r18")
+    }
+    calls = []
+    for revision in objects:
+        root_id = f"evaluation-{revision}"
+        trace_id = f"trace-{root_id}"
+        calls.append(
+            {
+                "id": root_id,
+                "project_id": QUALIFICATION_SOURCE_PROJECT,
+                "trace_id": trace_id,
+                "parent_id": "",
+                "op_name": "Evaluation.evaluate",
+                "inputs": {},
+                "output": {"revision": revision},
+                "attributes": {
+                    "fugue.seed_digest": seed_digest,
+                    "fugue.evaluation_revision": revision,
+                },
+                "ended_at": "2026-07-30T00:00:00Z",
+                "exception": None,
+            }
+        )
+        for index in range(8):
+            calls.append(
+                {
+                    "id": f"{root_id}-prediction-{index}",
+                    "project_id": QUALIFICATION_SOURCE_PROJECT,
+                    "trace_id": trace_id,
+                    "parent_id": root_id,
+                    "op_name": "Evaluation.predict_and_score",
+                    "inputs": {"case": index},
+                    "output": {"case": index},
+                    "attributes": {},
+                    "ended_at": "2026-07-30T00:00:00Z",
+                    "exception": None,
+                }
+            )
+        calls.append(
+            {
+                "id": f"{root_id}-summary",
+                "project_id": QUALIFICATION_SOURCE_PROJECT,
+                "trace_id": trace_id,
+                "parent_id": root_id,
+                "op_name": "Evaluation.summarize",
+                "inputs": {},
+                "output": {},
+                "attributes": {},
+                "ended_at": "2026-07-30T00:00:00Z",
+                "exception": None,
+            }
+        )
+
+    receipts, extras, drift = mcp_release_qualification._inventory_evaluation_calls(
+        calls,
+        project=QUALIFICATION_SOURCE_PROJECT,
+        seed_digest=seed_digest,
+        evaluation_objects=objects,
+    )
+    assert len(receipts) == 2
+    assert extras == drift == []
+
+    calls.append({**calls[0], "id": "duplicate-evaluation-root"})
+    _, extras, _ = mcp_release_qualification._inventory_evaluation_calls(
+        calls,
+        project=QUALIFICATION_SOURCE_PROJECT,
+        seed_digest=seed_digest,
+        evaluation_objects=objects,
+    )
+    assert "weave-evaluation-root:maintainer-r17:duplicate" in extras
+
+
+def test_wandb_inventory_hashes_full_history_and_exact_artifact() -> None:
+    item = qualification_seed(source_project=QUALIFICATION_SOURCE_PROJECT)["runs"][0]
+    seed_digest = qualification_seed_digest(source_project=QUALIFICATION_SOURCE_PROJECT)
+
+    class Entry:
+        def download(self, *, root, replace):
+            assert replace is True
+            path = Path(root) / "attempt-evidence.json"
+            path.write_text(
+                json.dumps(
+                    mcp_release_qualification._expected_run_artifact_payload(
+                        item,
+                        seed_digest,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            return path.as_posix()
+
+    class Artifact:
+        type = "fugue-qualification-evidence"
+        metadata = {"seed_digest": seed_digest}
+        name = f"qualification-evidence-{item['id']}:v0"
+        version = "v0"
+        digest = "artifact-logical-digest"
+        qualified_name = (
+            f"{QUALIFICATION_SOURCE_PROJECT}/qualification-evidence-{item['id']}:v0"
+        )
+
+        def get_path(self, name):
+            assert name == "attempt-evidence.json"
+            return Entry()
+
+    class Run:
+        id = item["id"]
+        name = item["attempt_label"]
+        state = "finished"
+        url = f"https://wandb.ai/{QUALIFICATION_SOURCE_PROJECT}/runs/{item['id']}"
+        config = mcp_release_qualification._expected_run_config(
+            item,
+            seed_digest,
+        )
+        summary = {
+            "fugue_seed_digest": seed_digest,
+            "evidence_lock_status": "prepared",
+            "artifact_digest": Artifact.digest,
+        }
+        rows = mcp_release_qualification._expected_run_history(item)
+
+        def scan_history(self, *, keys, page_size):
+            assert keys
+            assert page_size == 1000
+            return iter(self.rows)
+
+        def logged_artifacts(self, *, per_page):
+            assert per_page == 100
+            return [Artifact()]
+
+    receipt = mcp_release_qualification._inspect_wandb_run(
+        Run(),
+        item,
+        source_project=QUALIFICATION_SOURCE_PROJECT,
+        seed_digest=seed_digest,
+    )
+    assert receipt["history_digest"] == stable_digest(Run.rows)
+    assert receipt["artifact"]["content_digest"] == stable_digest(
+        mcp_release_qualification._expected_run_artifact_payload(
+            item,
+            seed_digest,
+        )
+    )
+
+    Run.rows = [*Run.rows, {"step": 4, "latency_ms": 1}]
+    with pytest.raises(RuntimeError, match="history drifted"):
+        mcp_release_qualification._inspect_wandb_run(
+            Run(),
+            item,
+            source_project=QUALIFICATION_SOURCE_PROJECT,
+            seed_digest=seed_digest,
         )
 
 
@@ -398,9 +1029,7 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
 
     assert spec.schema_version == 3
     assert spec.baseline.integrations == ({"id": "wandb-mcp-main"},)
-    assert spec.candidate.integrations == (
-        {"id": "wandb-mcp-0-4-staging"},
-    )
+    assert spec.candidate.integrations == ({"id": "wandb-mcp-0-4-staging"},)
     assert spec.execution.source_evidence_project == QUALIFICATION_SOURCE_PROJECT
     assert spec.execution.evidence_project == QUALIFICATION_RESULT_PROJECT
     assert (
@@ -431,10 +1060,7 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     assert gates["matrix.rows"] == cells
     assert gates["task.candidate_passed"] == candidate_passes
     assert gates["infrastructure.gate.final-staging-head"] is True
-    assert (
-        gates["infrastructure.gate.human-maintainer-actionability-review"]
-        is True
-    )
+    assert gates["infrastructure.gate.human-maintainer-actionability-review"] is True
     assert gates["infrastructure.gate.fresh-wheel-python-3-11"] is True
     assert gates["infrastructure.gate.fresh-wheel-python-3-12"] is True
     assert any(
@@ -494,14 +1120,14 @@ def test_v3_natural_maintainer_tasks_keep_truth_host_only(
     public = json.dumps(public_tasks, sort_keys=True)
     assert "base_output" not in public
     assert "gold_output" not in public
-    assert "evaluation_root_count\": 2" not in public
-    assert "largest_latency_ms\": 4200" not in public
+    assert 'evaluation_root_count": 2' not in public
+    assert 'largest_latency_ms": 4200' not in public
 
 
 def _natural_maintainer_score():
-    return runpy.run_path(
-        (EXAMPLE / "natural_maintainer_scorer.py").as_posix()
-    )["score"]
+    return runpy.run_path((EXAMPLE / "natural_maintainer_scorer.py").as_posix())[
+        "score"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -697,17 +1323,17 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                     "ok": True,
                     "value": {"root_traces_count": 26, "total_count": 26},
                 },
-                    "probe_project_tool": {
-                        "ok": True,
-                        "value": {"run_count": 6, "state_counts": {"finished": 6}},
+                "probe_project_tool": {
+                    "ok": True,
+                    "value": {"run_count": 6, "state_counts": {"finished": 6}},
+                },
+                "count_evaluation_roots_tool": {
+                    "ok": True,
+                    "value": {
+                        "root_traces_count": 2,
+                        "total_count": 2,
                     },
-                    "count_evaluation_roots_tool": {
-                        "ok": True,
-                        "value": {
-                            "root_traces_count": 2,
-                            "total_count": 2,
-                        },
-                    },
+                },
                 "summarize_evaluation_tool": {
                     "ok": True,
                     "value": {
@@ -743,9 +1369,7 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                     "mutation_probe": None,
                 },
                 "raw_graphql": {
-                    "overrides": {
-                        "WANDB_MCP_ENABLE_RAW_GRAPHQL": "true"
-                    },
+                    "overrides": {"WANDB_MCP_ENABLE_RAW_GRAPHQL": "true"},
                     "initialized_tools": [
                         "create_wandb_report_tool",
                         "get_run_history_tool",
@@ -799,22 +1423,24 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
     assert "read-only-tool-manifest" not in conformance["unavailable"]
     assert "raw-graphql-opt-in-manifest" not in conformance["unavailable"]
     assert "graphql-mutation-rejection" not in conformance["unavailable"]
-    assert next(
-        item
-        for item in conformance["gates"]
-        if item["id"] == "default-tool-manifest"
-    )["status"] == "passed"
+    assert (
+        next(
+            item
+            for item in conformance["gates"]
+            if item["id"] == "default-tool-manifest"
+        )["status"]
+        == "passed"
+    )
     assert {
-        item["id"]
-        for item in conformance["gates"]
-        if item["status"] == "passed"
+        item["id"] for item in conformance["gates"] if item["status"] == "passed"
     } >= {
         "default-tool-manifest",
         "read-only-tool-manifest",
         "raw-graphql-opt-in-manifest",
         "graphql-mutation-rejection",
     }
-    assert {
-        item["status"] for item in receipt["release_note_classification"]
-    } >= {"observed_branch_delta", "infrastructure_only_not_live_induced"}
+    assert {item["status"] for item in receipt["release_note_classification"]} >= {
+        "observed_branch_delta",
+        "infrastructure_only_not_live_induced",
+    }
     assert len(receipt["receipt_digest"]) == 64
