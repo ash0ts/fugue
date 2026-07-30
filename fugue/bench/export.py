@@ -2377,6 +2377,11 @@ def _apply_host_evidence_scores(
         for path in row.get("changed_paths") or ()
         if (value := _normalize_repo_path(str(path))) is not None
     }
+    authored = {
+        value
+        for path in row.get("agent_evidence_paths") or ()
+        if (value := _normalize_repo_path(str(path))) is not None
+    }
     ranked = list(dict.fromkeys(returned))
     relevant_ranks = [
         rank for rank, path in enumerate(ranked, start=1) if path in expected
@@ -2388,7 +2393,11 @@ def _apply_host_evidence_scores(
     row["retrieval_mrr"] = 1.0 / min(relevant_ranks) if relevant_ranks else 0.0
     relevant_returned = expected & set(ranked)
     row["relevant_retrieval_observed"] = bool(relevant_returned)
+    row["relevant_retrieval_returned"] = bool(relevant_returned)
     row["relevant_retrieval_opened"] = bool(relevant_returned & inspected)
+    row["relevant_retrieval_used"] = bool(
+        relevant_returned & (authored | changed)
+    )
     row["relevant_retrieval_changed"] = bool(relevant_returned & changed)
     row["off_target_change_only"] = bool(changed) and not bool(expected & changed)
     row["premature_completion"] = bool(
@@ -2503,6 +2512,7 @@ def compile_export(
 
 
 _LOCAL_RESULT_FIELDS = {
+    "agent_runtime_completed",
     "agent_evidence_paths",
     "changed_paths",
     "citation_correctness",
@@ -2512,6 +2522,8 @@ _LOCAL_RESULT_FIELDS = {
     "evaluation_asset_lock_sha256",
     "inspected_paths",
     "local_error_events",
+    "relevant_retrieval_returned",
+    "relevant_retrieval_used",
     "runtime_fingerprints",
 }
 
@@ -5493,6 +5505,11 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         agent_execution_status = "not_started"
     else:
         agent_execution_status = "started"
+    agent_runtime_completed = bool(
+        agent_execution_status == "started"
+        and finished is not None
+        and not exception.get("exception_type")
+    )
     if registration_status is None:
         context_registered = bool(
             context_events["context_telemetry_available"]
@@ -5513,6 +5530,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "applicable": meta.get("applicable"),
         "skip_reason": meta.get("skip_reason"),
         "agent_execution_status": agent_execution_status,
+        "agent_runtime_completed": agent_runtime_completed,
         "identity_schema_version": meta.get("identity_schema_version"),
         "evaluation_scope_id": meta.get("evaluation_scope_id"),
         "job_name": meta.get("job_name") or trial_dir.parent.name,

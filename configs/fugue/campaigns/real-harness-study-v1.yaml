@@ -10,7 +10,7 @@ allowed:
   workloads: [canary]
   variants: [baseline]
   context_systems: [none]
-  analyses: []
+  analyses: [real-harness-task-stratified]
   trace_content: [full]
 stages:
   - id: canary

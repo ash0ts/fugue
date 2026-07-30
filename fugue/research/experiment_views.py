@@ -67,11 +67,14 @@ _PROVISIONAL_V2_EVALUATION_FIELDS = frozenset(
     }
 )
 _SAFE_BEHAVIORAL_MEASURES = (
+    "agent_runtime_completed",
     "context_invoked",
     "localization_recall_at_5",
     "localization_recall_at_10",
     "localization_mrr",
+    "relevant_retrieval_returned",
     "relevant_retrieval_open_rate",
+    "relevant_retrieval_used",
     "relevant_retrieval_change_rate",
     "off_target_change_only",
     "premature_completion",

@@ -19,6 +19,7 @@ from fugue.bench.ai import (
     ExperimentAnalyst,
     ExperimentComposer,
     _aggregate,
+    _intervention_lock_inputs,
     _write_analysis,
     get_analysis,
     save_analysis,
@@ -49,19 +50,46 @@ def _tool_response(name: str, arguments: dict, call_id: str = "call-1") -> dict:
     }
 
 
+def test_intervention_lock_inputs_require_prefrozen_discovery_suite() -> None:
+    inputs = {
+        "failure_lock_sha256": "a" * 64,
+        "discovery_suite_sha256": "b" * 64,
+        "holdout_suite_sha256": "c" * 64,
+        "failure_locked_at": "2026-07-30T10:00:00+00:00",
+        "suites_frozen_at": "2026-07-30T10:05:00+00:00",
+    }
+    rows = [
+        {
+            "task_authoring": {"intervention_lock_inputs": inputs},
+            "tags": ["task-suite:" + "b" * 64],
+        },
+        {
+            "intervention_lock_inputs": inputs,
+            "tags": ["task-suite:" + "b" * 64],
+        },
+    ]
+
+    assert _intervention_lock_inputs(rows) == inputs
+    rows[1]["tags"] = ["task-suite:" + "d" * 64]
+    assert _intervention_lock_inputs(rows) is None
+
+
 def test_analysis_aggregates_retrieval_to_action_funnel_without_fake_usage() -> None:
     rows = [
         {
             "row_id": "row-1",
             "variant_id": "memory-policy",
             "pass": True,
+            "agent_runtime_completed": True,
             "context_invoked": True,
             "retrieval_recall_at_5": 0.5,
             "retrieval_recall_at_10": 1.0,
             "retrieval_mrr": 0.5,
             "context_result_open_rate": 0.5,
             "context_result_change_rate": 0.25,
+            "relevant_retrieval_returned": True,
             "relevant_retrieval_opened": True,
+            "relevant_retrieval_used": True,
             "relevant_retrieval_changed": False,
             "off_target_change_only": False,
             "premature_completion": False,
@@ -72,13 +100,16 @@ def test_analysis_aggregates_retrieval_to_action_funnel_without_fake_usage() -> 
             "row_id": "row-2",
             "variant_id": "memory-policy",
             "pass": False,
+            "agent_runtime_completed": False,
             "context_invoked": False,
             "retrieval_recall_at_5": 0.0,
             "retrieval_recall_at_10": 0.5,
             "retrieval_mrr": 0.0,
             "context_result_open_rate": None,
             "context_result_change_rate": None,
+            "relevant_retrieval_returned": False,
             "relevant_retrieval_opened": False,
+            "relevant_retrieval_used": False,
             "relevant_retrieval_changed": False,
             "off_target_change_only": True,
             "premature_completion": True,
@@ -96,11 +127,14 @@ def test_analysis_aggregates_retrieval_to_action_funnel_without_fake_usage() -> 
     aggregates, _ = _aggregate(rows, spec)
     aggregate = aggregates[0]
 
+    assert aggregate["agent_runtime_completion_rate"] == 0.5
     assert aggregate["context_invocation_rate"] == 0.5
     assert aggregate["retrieval_recall_at_5"] == 0.25
     assert aggregate["retrieval_recall_at_10"] == 0.75
     assert aggregate["context_result_open_rate"] == 0.5
+    assert aggregate["relevant_retrieval_return_rate"] == 0.5
     assert aggregate["relevant_retrieval_open_rate"] == 0.5
+    assert aggregate["relevant_retrieval_use_rate"] == 0.5
     assert aggregate["off_target_change_only_rate"] == 0.5
     assert aggregate["premature_completion_rate"] == 0.5
     assert aggregate["total_tokens"] is None

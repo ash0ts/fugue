@@ -1,12 +1,55 @@
 id: claude-loop-skill-mcp
 title: Claude Code Skill and W&B MCP improvement loop
 description: Compare operator-reviewed and locked Skill and MCP interventions on a real repeated MCP canary failure, then confirm only the frozen winner.
+research_view:
+  observation: A repeated, source-isolated MCP maintenance failure survived two attempts under one exact production candidate.
+  rationale: Separate a Skill-policy intervention from an MCP implementation intervention, then confirm only a frozen winner on independent holdouts.
+  alternative_explanations:
+    - A discovery gain may be ordinary run-to-run variation.
+    - The Skill may be assigned but not opened or used.
+    - The MCP may be registered but not invoked.
+    - A combined arm may hide a regression in one component.
+  success_definition: Reproduce the locked failure, improve at least one paired deterministic outcome, observe use of each changed mechanism, and introduce no critical holdout regression.
+  task_title: Repair one repeated W&B MCP maintenance failure
+  task_summary: Diagnose safe evidence from the locked source attempt, compare independently locked Skill and MCP interventions, and confirm the selected arm on private holdouts.
+  interaction_mode: Single-turn isolated Claude Code cells
+  tools: [W&B MCP, shell, reviewed Skill bundle]
+  resources: [Failure lock, discovery Suite lock, private holdout Suite lock]
+  base_instruction_summary: Investigate the assigned maintenance task with only the locked source evidence and write the required bounded result.
+  treatment_summaries:
+    production: Use the exact Skill and MCP identities that reproduced the source failure.
+    skill-only: Change only the reviewed Skill bundle.
+    mcp-only: Change only the reviewed MCP bundle.
+    combined: Change both reviewed behavior components.
+  arm_factor_levels:
+    production: {skill: production, mcp: production}
+    skill-only: {skill: intervention, mcp: production}
+    mcp-only: {skill: production, mcp: intervention}
+    combined: {skill: intervention, mcp: intervention}
+  mechanism_stages:
+    - {id: skill-assigned, label: Skill assigned, source_key: skill_assignment_confirmed}
+    - {id: skill-used, label: Skill opened and used, source_key: skill_invocation_observed, eligibility_key: skill_assignment_confirmed}
+    - {id: mcp-registered, label: MCP registered, source_key: mcp_registration_confirmed}
+    - {id: mcp-used, label: MCP tool invoked, source_key: mcp_invocation_observed, eligibility_key: mcp_registration_confirmed}
+  pass_rule: Deterministic task criteria pass, the locked source scope is preserved, and every assigned changed mechanism has observed use.
+  scorers:
+    - id: loop-deterministic-outcome
+      label: Loop deterministic outcome
+      kind: deterministic
+      description: Checks the task-specific public artifact and host-only criteria without pooling mechanism use into correctness.
+      required: true
+      aggregation: Every critical outcome and safety dimension must pass.
+      evidence_inputs: [Public result artifact, private evaluator lock, normalized tool evidence]
+      revision: loop-deterministic-outcome-v1
+      dimensions:
+        - {id: task-pass, label: Task outcome, source_key: pass, target: true, primary: true}
+        - {id: source-scope, label: Locked source scope, source_key: locked_source_scope, target: true}
 model: anthropic/claude-sonnet-5
 run_name: claude-loop-skill-mcp
-source_evidence_project: wandb/fugue-mcp-release-source-v1
+source_evidence_project: wandb/fugue-mcp-release-source-v2
 source_evidence_destination:
   entity: wandb
-  project: fugue-mcp-release-source-v1
+  project: fugue-mcp-release-source-v2
   api_base_url: https://api.wandb.ai
   trace_base_url: https://trace.wandb.ai
   app_base_url: https://wandb.ai

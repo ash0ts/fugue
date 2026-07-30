@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fugue.bench.comparison import load_comparison
@@ -15,7 +16,7 @@ COMPARISON_PATH = Path(
     "examples/comparisons/wandb-mcp-maintenance/"
     "natural-maintainer-canary-local-v3.yaml"
 )
-SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v1"
+SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
 RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
 HARNESS = "claude-code"
 TASKS = 2
@@ -59,6 +60,12 @@ def main() -> int:
         )
     )
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument(
+        "--preview",
+        type=Path,
+        required=True,
+        help="Exact prepared preview used to produce the result.",
+    )
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--arm", choices=("baseline", "candidate"), required=True)
     parser.add_argument("--primary-attempt-id", required=True)
@@ -76,6 +83,7 @@ def main() -> int:
     spec_digest, required_sources = _locked_spec(repo_root)
     lock = build_comparison_failure_lock(
         result_path=args.result.resolve(),
+        preview_path=args.preview.resolve(),
         task_id=args.task_id,
         arm=args.arm,
         primary_attempt_id=args.primary_attempt_id,
@@ -86,6 +94,7 @@ def main() -> int:
         expected_tasks=TASKS,
         expected_attempts=ATTEMPTS,
         spec_digest=spec_digest,
+        locked_at=datetime.now(UTC).isoformat(),
         required_source_ids=required_sources,
     )
     output = write_comparison_failure_lock(args.output, lock)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -52,6 +53,7 @@ _SYNTHETIC_MARKERS = {"fixture", "manual", "placeholder", "synthetic"}
 def build_comparison_failure_lock(
     *,
     result_path: Path,
+    preview_path: Path,
     task_id: str,
     arm: FailureArm,
     primary_attempt_id: str,
@@ -62,6 +64,7 @@ def build_comparison_failure_lock(
     expected_tasks: int,
     expected_attempts: int,
     spec_digest: str,
+    locked_at: str,
     required_source_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Freeze a repeated real failure from one canonical V3 comparison.
@@ -73,6 +76,12 @@ def build_comparison_failure_lock(
     result = read_comparison_result(result_path)
     if not isinstance(result, ComparisonResultV3):
         raise ValueError("failure locking requires ComparisonResultV3")
+    preview_artifact_sha256 = _validate_preview_artifact(
+        preview_path,
+        result=result,
+        comparison_id=expected_comparison_id,
+        spec_digest=spec_digest,
+    )
     _validate_result_boundary(
         result,
         expected_comparison_id=expected_comparison_id,
@@ -133,6 +142,7 @@ def build_comparison_failure_lock(
 
     resolved_path = result_path.resolve()
     topology = result.evidence_topology
+    arm_candidates, arm_runtimes = _result_arm_identities(result)
     unsigned = {
         "schema_version": FAILURE_LOCK_SCHEMA_VERSION,
         "kind": FAILURE_LOCK_KIND,
@@ -144,6 +154,7 @@ def build_comparison_failure_lock(
                 resolved_path.read_bytes()
             ).hexdigest(),
             "preview_digest": result.preview_digest,
+            "preview_artifact_sha256": preview_artifact_sha256,
             "result_source": result.source,
             "spec_digest": _digest(spec_digest, "comparison spec digest"),
             "source_project": expected_source_project,
@@ -165,6 +176,8 @@ def build_comparison_failure_lock(
         "primary_attempt": primary,
         "repeated_attempts": locked_attempts,
         "locks": {
+            "arm_candidates": arm_candidates,
+            "arm_runtimes": arm_runtimes,
             "candidate_sources": [
                 item.to_dict() for item in result.candidate_source_revisions
             ],
@@ -173,6 +186,7 @@ def build_comparison_failure_lock(
                 item.to_dict() for item in result.scorer_revisions
             ],
         },
+        "locked_at": _timestamp(locked_at, "failure lock time"),
         "review_status": "reviewed",
         "lock_sha256": "",
     }
@@ -223,6 +237,7 @@ def validate_comparison_failure_lock(value: Mapping[str, Any]) -> dict[str, Any]
             "primary_attempt",
             "repeated_attempts",
             "locks",
+            "locked_at",
             "review_status",
             "lock_sha256",
         },
@@ -247,6 +262,7 @@ def validate_comparison_failure_lock(value: Mapping[str, Any]) -> dict[str, Any]
             "qualification_digest",
             "result_artifact_sha256",
             "preview_digest",
+            "preview_artifact_sha256",
             "result_source",
             "spec_digest",
             "source_project",
@@ -269,6 +285,7 @@ def validate_comparison_failure_lock(value: Mapping[str, Any]) -> dict[str, Any]
         "qualification_digest",
         "result_artifact_sha256",
         "preview_digest",
+        "preview_artifact_sha256",
         "spec_digest",
         "source_lock_digest",
         "evidence_topology_digest",
@@ -354,7 +371,12 @@ def validate_comparison_failure_lock(value: Mapping[str, Any]) -> dict[str, Any]
     )
     if primary != matching:
         raise ValueError("primary attempt differs from its repeated-attempt record")
-    _validate_lock_descriptors(value.get("locks"))
+    locks = _validate_lock_descriptors(value.get("locks"))
+    if primary["candidate_identity"] != locks["arm_candidates"][str(arm)]:
+        raise ValueError("primary attempt candidate differs from the failure lock")
+    if primary["runtime_identity"] not in locks["arm_runtimes"][str(arm)]:
+        raise ValueError("primary attempt runtime differs from the failure lock")
+    _timestamp(value.get("locked_at"), "failure lock time")
     _reject_private_fields(value)
     return json.loads(json.dumps(value, sort_keys=True))
 
@@ -657,13 +679,39 @@ def _locked_links(raw: Any, *, result_project: str) -> list[dict[str, str]]:
     return sorted(result, key=lambda item: item["kind"])
 
 
-def _validate_lock_descriptors(raw: Any) -> None:
+def _validate_lock_descriptors(raw: Any) -> dict[str, Any]:
     value = _mapping(raw, "failure source locks")
     _strict_keys(
         value,
-        {"candidate_sources", "runtime_locks", "scorer_revisions"},
+        {
+            "arm_candidates",
+            "arm_runtimes",
+            "candidate_sources",
+            "runtime_locks",
+            "scorer_revisions",
+        },
         "failure source locks",
     )
+    arm_candidates = _mapping(value.get("arm_candidates"), "arm candidates")
+    _strict_keys(
+        arm_candidates,
+        {"baseline", "candidate"},
+        "arm candidates",
+    )
+    normalized_candidates = {
+        arm: _identity(identity, f"{arm} candidate identity")
+        for arm, identity in arm_candidates.items()
+    }
+    arm_runtimes = _mapping(value.get("arm_runtimes"), "arm runtimes")
+    _strict_keys(arm_runtimes, {"baseline", "candidate"}, "arm runtimes")
+    normalized_runtimes = {
+        arm: _digest_sequence(
+            identities,
+            f"{arm} runtime identities",
+            minimum=1,
+        )
+        for arm, identities in arm_runtimes.items()
+    }
     for key in ("runtime_locks", "scorer_revisions"):
         items = value.get(key)
         if not isinstance(items, Sequence) or isinstance(items, str | bytes):
@@ -702,8 +750,77 @@ def _validate_lock_descriptors(raw: Any) -> None:
         for key in ("kind", "id", "version_identity"):
             _text(source.get(key), f"candidate source {key}")
         _identity(source.get("runtime_digest"), "candidate runtime digest")
-        if source.get("lock_digest"):
-            _identity(source.get("lock_digest"), "candidate source lock")
+        _identity(source.get("lock_digest"), "candidate source lock")
+    return {
+        "arm_candidates": normalized_candidates,
+        "arm_runtimes": normalized_runtimes,
+    }
+
+
+def _validate_preview_artifact(
+    path: Path,
+    *,
+    result: ComparisonResultV3,
+    comparison_id: str,
+    spec_digest: str,
+) -> str:
+    resolved = path.resolve()
+    raw = json.loads(resolved.read_text(encoding="utf-8"))
+    preview = _mapping(raw, "comparison preview")
+    _strict_keys(
+        preview,
+        {
+            "schema_version",
+            "comparison",
+            "readiness",
+            "matrix",
+            "experiment",
+            "manifest",
+            "preview_digest",
+        },
+        "comparison preview",
+    )
+    supplied = _digest(preview.get("preview_digest"), "comparison preview digest")
+    if supplied != stable_digest({**preview, "preview_digest": ""}):
+        raise ValueError("comparison preview digest does not match")
+    if supplied != result.preview_digest:
+        raise ValueError("comparison result does not belong to the supplied preview")
+    comparison = _mapping(preview.get("comparison"), "preview comparison")
+    if comparison.get("id") != comparison_id:
+        raise ValueError("comparison preview belongs to a different comparison")
+    if comparison.get("spec_digest") != _digest(
+        spec_digest,
+        "comparison spec digest",
+    ):
+        raise ValueError("comparison preview spec digest changed")
+    return hashlib.sha256(resolved.read_bytes()).hexdigest()
+
+
+def _result_arm_identities(
+    result: ComparisonResultV3,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    candidates: dict[str, set[str]] = {"baseline": set(), "candidate": set()}
+    runtimes: dict[str, set[str]] = {"baseline": set(), "candidate": set()}
+    for pair in result.paired_cases:
+        for arm in ("baseline", "candidate"):
+            attempt = pair.baseline if arm == "baseline" else pair.candidate
+            if attempt is None:
+                raise ValueError(f"comparison is missing a {arm} aligned attempt")
+            identity = _mapping(attempt.identity, f"{arm} attempt identity")
+            candidates[arm].add(
+                _identity(identity.get("candidate"), f"{arm} candidate identity")
+            )
+            runtimes[arm].add(
+                _identity(identity.get("runtime"), f"{arm} runtime identity")
+            )
+    if any(len(values) != 1 for values in candidates.values()):
+        raise ValueError("comparison arm candidate identity changed across attempts")
+    if any(not values for values in runtimes.values()):
+        raise ValueError("comparison arm runtime identity is missing")
+    return (
+        {arm: next(iter(values)) for arm, values in candidates.items()},
+        {arm: sorted(values) for arm, values in runtimes.items()},
+    )
 
 
 def _lock_digest(value: Mapping[str, Any]) -> str:
@@ -760,6 +877,17 @@ def _positive_int(value: Any, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _timestamp(value: Any, name: str) -> str:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 def _text_sequence(value: Any, name: str, *, minimum: int) -> list[str]:

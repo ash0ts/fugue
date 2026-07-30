@@ -1,0 +1,20 @@
+id: real-memory-factorial
+title: Dense retrieval × evidence-policy analysis
+question: Does locked dense repository retrieval change task outcomes by itself, or only when Claude Code must inspect and verify returned evidence?
+filters:
+  experiment_id: real-memory-study
+  tag: real-study-lane-v1
+group_by: [variant_id, task_name, context_system_id, model]
+metrics:
+  - pass_rate
+  - context_invocation_rate
+  - relevant_retrieval_return_rate
+  - relevant_retrieval_open_rate
+  - relevant_retrieval_use_rate
+  - relevant_retrieval_change_rate
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false

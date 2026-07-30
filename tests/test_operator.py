@@ -7,6 +7,7 @@ import subprocess
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,7 +42,11 @@ from fugue.bench.scoring import (
     write_intervention_selection_lock,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
-from fugue.model_plane import model_route_identity
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    model_route_identity,
+    trace_project_slug,
+)
 from fugue.preflight import PreflightCheck
 
 
@@ -139,6 +144,7 @@ id: loop
 title: Skill and MCP loop
 manifest: datasets/demo.yaml
 model: openai/gpt-5
+tags: [task-suite:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee]
 harnesses: [codex]
 default_preset: discovery
 presets:
@@ -197,9 +203,18 @@ variants:
         source_commit=source_commit,
         source_tree=source_tree,
         source_dirty_digest="",
+        failure_lock_sha256="f" * 64,
+        discovery_suite_sha256="d" * 64,
+        holdout_suite_sha256="e" * 64,
         analysis_snapshot_sha256="a" * 64,
         discovery_run_snapshot_sha256s=("b" * 64,),
         comparison_example_ids=("c" * 64,),
+        discovery_variant_ids=(
+            "production",
+            "skill-only",
+            "mcp-only",
+            "combined",
+        ),
         baseline_variant_id="production",
         selected_variant_id="combined",
         rankings=tuple(
@@ -211,6 +226,10 @@ variants:
         ),
         decision="recommend",
         rationale="the combined arm met the preregistered discovery gate",
+        failure_locked_at="2026-07-30T10:00:00Z",
+        suites_frozen_at="2026-07-30T10:05:00Z",
+        discovery_completed_at="2026-07-30T11:00:00Z",
+        selection_locked_at="2026-07-30T11:05:00Z",
     )
     lock_path = write_intervention_selection_lock(
         tmp_path / ".fugue/selection.json", lock
@@ -226,6 +245,22 @@ variants:
         write_configs=False,
     )
     assert {job.variant_id for job in holdout} == {"production", "combined"}
+
+    drifted_suite = replace(
+        service.experiment("loop"),
+        tags=["task-suite:" + "0" * 64],
+    )
+    with pytest.raises(ValueError, match="holdout Task Suite differs"):
+        service.rendered_jobs(
+            ExperimentRequest(
+                experiment_id="loop",
+                preset="holdout",
+                selection_lock=lock_path,
+            ),
+            run_id="holdout-drifted-suite",
+            write_configs=False,
+            experiment=drifted_suite,
+        )
 
     (tmp_path / "configs/fugue/skills/demo-skill/SKILL.md").write_text(
         "# Demo skill\n\nThis drift occurred after discovery.\n"
@@ -320,6 +355,126 @@ required_env: [FUGUE_GRAPHITI_URI, FUGUE_GRAPHITI_USER, FUGUE_GRAPHITI_PASSWORD]
     assert all(
         check.ok for check in checks if check.name.startswith("context graphiti: env:")
     )
+
+
+def test_operator_preflight_and_prepare_rebind_declared_destination_a_b_a(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    base = service.experiment("demo")
+
+    def lane(project: str):
+        destination = EvidenceDestinationV1(
+            entity="team",
+            project=project,
+            api_base_url="https://api.wandb.ai",
+            trace_base_url="https://trace.wandb.ai",
+            app_base_url="https://wandb.ai",
+        )
+        return replace(
+            base,
+            evidence_project=destination.project_slug,
+            evidence_destination=destination,
+        )
+
+    lane_a = lane("lane-a")
+    lane_b = lane("lane-b")
+    preflight_projects: list[str] = []
+    preparation_projects: list[str] = []
+
+    def capture_preflight(*_args, **kwargs):
+        preflight_projects.append(trace_project_slug(kwargs["env"]))
+        return []
+
+    async def capture_preparation(
+        _name,
+        _metadata,
+        env,
+        operation,
+        _summarize,
+    ):
+        preparation_projects.append(trace_project_slug(env))
+        return await operation()
+
+    monkeypatch.setattr("fugue.preflight.run_preflight", capture_preflight)
+    monkeypatch.setattr(
+        operator_module,
+        "trace_async_operation",
+        capture_preparation,
+    )
+
+    request = ExperimentRequest(experiment_id="demo")
+    for experiment in (lane_a, lane_b, lane_a):
+        service.preflight(request, live=False, experiment=experiment)
+        service.prepare_context(request, experiment=experiment)
+
+    assert preflight_projects == [
+        "team/lane-a",
+        "team/lane-b",
+        "team/lane-a",
+    ]
+    assert preparation_projects == [
+        "team/lane-a",
+        "team/lane-b",
+        "team/lane-a",
+    ]
+
+
+def test_operator_full_prepare_rebinds_declared_destination_a_b_a(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    base = service.experiment("demo")
+
+    def lane(project: str):
+        destination = EvidenceDestinationV1(
+            entity="team",
+            project=project,
+            api_base_url="https://api.wandb.ai",
+            trace_base_url="https://trace.wandb.ai",
+            app_base_url="https://wandb.ai",
+        )
+        return replace(
+            base,
+            evidence_project=destination.project_slug,
+            evidence_destination=destination,
+        )
+
+    preparation_projects: list[str] = []
+
+    def capture_runtime(**kwargs):
+        preparation_projects.append(trace_project_slug(kwargs["env"]))
+        return SimpleNamespace(env=kwargs["env"])
+
+    monkeypatch.setattr(operator_module, "ContextRuntime", capture_runtime)
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda _name: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        operator_module,
+        "prepare_task_runtime",
+        lambda *args, **kwargs: {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        },
+    )
+
+    request = ExperimentRequest(experiment_id="demo")
+    for experiment in (lane("lane-a"), lane("lane-b"), lane("lane-a")):
+        service.prepare(request, experiment=experiment)
+
+    assert preparation_projects == [
+        "team/lane-a",
+        "team/lane-b",
+        "team/lane-a",
+    ]
 
 
 def test_operator_status_masks_secrets_and_links_to_agents(tmp_path: Path) -> None:

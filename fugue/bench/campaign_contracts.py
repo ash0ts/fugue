@@ -183,6 +183,7 @@ class ExperimentProposalV1:
     n_concurrent: int
     trace_content: str
     task_suite_digest: str | None = None
+    intervention_lock_inputs: dict[str, str] | None = None
     selection_lock: str | None = None
     analysis_ids: tuple[str, ...] = ()
     parent_outcome_id: str | None = None
@@ -191,6 +192,8 @@ class ExperimentProposalV1:
 
     def to_dict(self) -> dict[str, Any]:
         value = _json_value(asdict(self))
+        if self.intervention_lock_inputs is None:
+            value.pop("intervention_lock_inputs", None)
         if self.selection_lock is None:
             value.pop("selection_lock", None)
         return value

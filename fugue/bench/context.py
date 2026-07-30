@@ -1228,10 +1228,9 @@ class RagContextProvider(BaseContextProvider):
             if line.strip()
         ]
         mode = str(spec.config.get("mode") or "bm25")
-        lexical = _bm25(query.text, chunks)
         if mode == "bm25":
-            ranked = lexical[: query.top_k]
-        else:
+            ranked = _bm25(query.text, chunks)[: query.top_k]
+        elif mode == "dense":
             dense = await asyncio.to_thread(
                 _dense_search,
                 artifact,
@@ -1239,10 +1238,19 @@ class RagContextProvider(BaseContextProvider):
                 _resolved_embedding_model(spec, runtime),
                 max(query.top_k, 20),
             )
-            ranked = (
-                dense if mode == "dense" else _reciprocal_rank_fusion(lexical, dense)
+            ranked = dense[: query.top_k]
+        elif mode == "hybrid":
+            lexical = _bm25(query.text, chunks)
+            dense = await asyncio.to_thread(
+                _dense_search,
+                artifact,
+                query.text,
+                _resolved_embedding_model(spec, runtime),
+                max(query.top_k, 20),
             )
-            ranked = ranked[: query.top_k]
+            ranked = _reciprocal_rank_fusion(lexical, dense)[: query.top_k]
+        else:
+            raise ValueError(f"{spec.id} has unsupported retrieval mode {mode!r}")
         return [
             RetrievalHit(
                 path=item["path"],
