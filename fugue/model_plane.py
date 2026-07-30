@@ -424,23 +424,19 @@ def provider_api_key_env(route: ModelRoute) -> str:
 def provider_api_key(
     route: ModelRoute, env: Mapping[str, str] | None = None
 ) -> str:
-    """Resolve a model credential without treating a trace key as authoritative."""
+    """Resolve a model credential without treating an evidence-only key as authoritative."""
 
     values = env if env is not None else os.environ
     if route.provider == "wandb":
         explicit = values.get(WANDB_INFERENCE_API_KEY_ENV, "").strip()
         if explicit:
             return explicit
-        split_evidence_configured = any(
-            values.get(name, "").strip()
-            for name in (
-                WEAVE_API_KEY_ENV,
-                WEAVE_PROJECT_ENV,
-                WEAVE_BASE_URL_ENV,
-                WEAVE_TRACE_SERVER_URL_ENV,
-            )
-        )
-        if split_evidence_configured:
+        # WANDB_API_KEY is the legacy general W&B credential and can
+        # authenticate both public-cloud evidence and Inference. Project and
+        # endpoint routing alone must not disable that compatibility. An
+        # explicit evidence-only credential, however, is never promoted into
+        # the model plane.
+        if values.get(WEAVE_API_KEY_ENV, "").strip():
             return ""
     return values.get(route.api_key_env, "").strip()
 

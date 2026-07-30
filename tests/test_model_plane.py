@@ -391,10 +391,23 @@ def test_evidence_destination_rejects_credential_bearing_endpoint() -> None:
         )
 
 
-def test_split_evidence_configuration_disables_legacy_inference_key_fallback() -> None:
+def test_split_evidence_routing_keeps_general_wandb_key_compatibility() -> None:
     route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
     env = {
-        "WANDB_API_KEY": "local-evidence-key",
+        "WANDB_API_KEY": "general-wandb-key",
+        "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
+        "FUGUE_WEAVE_BASE_URL": "https://api.wandb.ai",
+    }
+
+    assert provider_api_key(route, env) == "general-wandb-key"
+    assert missing_model_env(route, env) == []
+
+
+def test_evidence_only_key_cannot_be_promoted_to_wandb_inference() -> None:
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    env = {
+        "WANDB_API_KEY": "legacy-general-key",
+        "FUGUE_WEAVE_API_KEY": "evidence-only-key",
         "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
     }
 
