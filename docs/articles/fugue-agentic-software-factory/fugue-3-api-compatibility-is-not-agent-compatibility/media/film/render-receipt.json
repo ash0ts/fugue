@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
   "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
-  "html_digest": "sha256:b630a60ee904dc077f238e128758db981de760d3ecb0bad1646bd4e77ba9c159",
-  "mp4_digest": "sha256:3194046531565df0610d9e2fb7f0c8a260738c73d96c82e73853dab1bd2f70a3",
-  "poster_digest": "sha256:d489b40b5673de7bb6478ef11fc4802e797e820a39dc983a11b7f5277ca2af30",
-  "contact_sheet_digest": "sha256:7132cbedda73936372d954db73e721c019e1daaa57a3dd053465296e96f4c8d0",
+  "html_digest": "sha256:564c16fb774ada2f6ebb2f5fa144f7eae2fa17e392175d9015dbbd0d3e482f21",
+  "mp4_digest": "sha256:368119d6bc87df85584f2861fa5d0c43c18683c2da7e6b01e9d24b9b8ca18db2",
+  "poster_digest": "sha256:d78f759c113efb4a30a2c6cd9cbc8b3f318f98f5110c5a792c9bd0e8b68fff5e",
+  "contact_sheet_digest": "sha256:b6348c85bc6d5fe5679401de92e5291be6bd3afebbe1ebfae9107c31564bcc1e",
   "checkpoint_frame_digests": {
-    "exact-revisions": "sha256:e1668df54ed09c7966027c5e6ffef8a50c2bba43b4372724e8e64674a16486d4",
+    "exact-revisions": "sha256:d3574831937298808489a05ecde9416b5bbb9713f3f04018e943823a4c40bc90",
     "manifest-contract": "sha256:1764ee3104a1cba81d19565648954f582444520a12f878b267c4d76c26f78d04",
-    "prepared-evidence": "sha256:4bb61309320ce884738d4582a64eac3b61cafce6f7905a2170379314ff38539d",
-    "staged-study": "sha256:d489b40b5673de7bb6478ef11fc4802e797e820a39dc983a11b7f5277ca2af30",
-    "judge-gate": "sha256:371e7bf65450916d3307834b36a5ef68f0417dbf9fc472ced8c1e047b53725a0",
-    "four-outcomes": "sha256:b54bac68fc3fb698d0bf3dbfc32e1ae8163e9ea762d38e89ad2b325a750b3fef",
-    "blocked-status": "sha256:82468158b0775ce9ecc83ee8e1b2f4b1316b24d543abcc7c511f9eef886e6ec4",
-    "series-context": "sha256:f265efd717b0b0cd623a0b8919785605902552b656dbe5f4eab3bbd89b4b60c6"
+    "prepared-evidence": "sha256:c8989cf544a04d8044681e638065b2251a67229cb38305fd96a007a3373dab4e",
+    "staged-study": "sha256:d78f759c113efb4a30a2c6cd9cbc8b3f318f98f5110c5a792c9bd0e8b68fff5e",
+    "judge-gate": "sha256:16564389487c7225475d595e3f928b9741539e705b312d8138e4dba5db2d1c32",
+    "four-outcomes": "sha256:55262ed76d011b7f9c67c1d8291a440bfc410a6e13431ed1d5538e0b0504955b",
+    "blocked-status": "sha256:b9410406f5919ad18c83c6e7642dafd1c19bd6f4504b845a99d62aeaa7f4757d",
+    "series-context": "sha256:29a050448c6ea5f9d68cedca29b760cd07f4e734a03846a8e8824e1f316d9023"
   },
   "video": {
     "codec_name": "h264",

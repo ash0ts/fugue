@@ -42,41 +42,41 @@ The preregistration contains no observed winner or causal harness result.
 
 **Displayed values:** none
 
-## 02 — Each harness candidate receives the same locked task coordinates.
+## 02 — Four harnesses receive the same two locked task coordinates.
 
 **Time:** 00:10–00:23
 
 **Visual relationship:** matrix
 
-**On-screen support:** Task identity and attempt index align the comparison. A missing coordinate remains missing.
+**On-screen support:** GLM-5.2, context, local Docker, and one attempt stay fixed. A missing task–harness coordinate remains missing.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#assignment-ordering-and-attempts`
 
-**Displayed values:** TASK 1 / A1; TASK 1 / A2; TASK 2 / A1; TASK 2 / A2
+**Displayed values:** SYMPY / A1; ASTROPY / A1
 
-## 03 — Counterbalance execution order before observing outcomes.
+## 03 — Lock and record one deterministic serial expansion.
 
 **Time:** 00:23–00:37
 
 **Visual relationship:** timeline
 
-**On-screen support:** Half the blocks begin with A; half begin with B. Warm caches and temporal drift cannot become the treatment by accident.
+**On-screen support:** The canary uses one worker, one seed, and an inspectable cell order. Reproducible ordering does not estimate away temporal noise.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#assignment-ordering-and-attempts`
 
-**Displayed values:** BLOCK 1; BLOCK 2
+**Displayed values:** HERMES ×2; OPENCLAW ×2; CLAUDE CODE ×2; CODEX ×2
 
-## 04 — Estimate paired candidate differences under locked conditions.
+## 04 — Compare aligned candidate rows under locked conditions.
 
 **Time:** 00:37–00:50
 
 **Visual relationship:** boundary
 
-**On-screen support:** The reporting unit is model–harness–environment. The design does not estimate a universal model ranking.
+**On-screen support:** Raw task contrasts belong to model–harness–environment candidates. Two tasks and one attempt do not estimate a stable harness ranking.
 
 **Evidence status:** preregistered design
 
@@ -90,13 +90,13 @@ The preregistration contains no observed winner or causal harness result.
 
 **Visual relationship:** interaction plot
 
-**On-screen support:** Candidate A can lead on one task family while B leads on another. Separate reporting preserves the interaction.
+**On-screen support:** A harness can lead on one locked task and trail on the other. Separate task rows preserve the discordance.
 
 **Evidence status:** illustrative example
 
 **Source:** `article.md#reversals-and-the-no-pooling-rule`
 
-**Displayed values:** 0.75; 0.35
+**Displayed values:** LOCKED TASK 1; LOCKED TASK 2; 0.75; 0.35
 
 ## 06 — Protocol differences can prevent a pure harness claim.
 

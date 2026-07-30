@@ -1,5 +1,5 @@
 {
-  "content_sha256": "688eea23ddeb3cb2fb1f36b83e5b8c0f3454b67de9ed9bb22a5b602d9ea4d595",
+  "content_sha256": "53d15eead204d88e49a16eedd4608c7d90ba7ae58317085489343171fc90ef71",
   "experiments": [
     {
       "content_sha256": "ee6b6380dbc8c0262294807714a53d5e9356a58fb7eaac492dd923b130404ece",
@@ -192,6 +192,147 @@
         "rag-bm25",
         "rag-dense",
         "rag-hybrid"
+      ]
+    },
+    {
+      "content_sha256": "f6d83b135b7597bb378ad8cc50f3155c48303f6e6e3eeaeb1550092c65432fca",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "claude-code"
+      ],
+      "id": "claude-loop-skill-mcp-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 16,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned local-Harbor Study that compares four reviewed Skill and MCP arms on two discovery failures, locks one intervention, and then compares it with production on four private holdout tasks.",
+      "title": "Claude Code Skill \u00d7 MCP loop",
+      "treatments": [
+        "production",
+        "skill-only",
+        "mcp-only",
+        "combined"
+      ]
+    },
+    {
+      "content_sha256": "77eff6f8ca602cb3c04ed1854e07e542cfb6cc404058d4f9823e35e6f0bd7050",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex"
+      ],
+      "id": "real-harness-study-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 8,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "wandb/zai-org/GLM-5.2"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned eight-cell local-Harbor comparison of Hermes, OpenClaw, Claude Code, and Codex on two locked SWE-bench Verified tasks with GLM-5.2 fixed.",
+      "title": "Real harness behavior canary",
+      "treatments": [
+        "baseline"
+      ]
+    },
+    {
+      "content_sha256": "f0cc3233c239323065c3a609f59b2821ce6d0ba117871ddf22c89b6c5020fa20",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "claude-code"
+      ],
+      "id": "real-memory-study-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 8,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned eight-cell local-Harbor comparison of baseline, locked dense retrieval, an inspect-and-verify policy, and their combination with Claude Code and Sonnet 5 fixed.",
+      "title": "Real repository-memory intervention canary",
+      "treatments": [
+        "baseline",
+        "rag-dense",
+        "policy-only",
+        "combined"
       ]
     }
   ],

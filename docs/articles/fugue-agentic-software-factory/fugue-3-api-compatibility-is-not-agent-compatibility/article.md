@@ -1,18 +1,20 @@
 # Fugue 3 — API Compatibility Is Not Agent Compatibility: Qualifying an MCP Release
 
 > **Fugue: Evals for the Agentic Software Factory · Part 3**  
-> A standalone preregistration for MCP maintainers and agent-integration
-> teams. **Status:** draft preregistration and blocked; no accepted preview
-> and no result. **Reading time:** about 13 minutes.
+> A standalone preregistration for MCP maintainers and Agent-integration
+> teams. **Status:** draft preregistration and blocked; the release decision
+> is pending a source-isolated comparison against the final reviewed staging
+> head. No accepted preview and no result exist. **Reading time:** about
+> 11 minutes.
 
-This article defines the protocol, candidates, evidence objects, staged
-study, and release gate in place—you do not need to know Fugue, W&B MCP, or
-the earlier essays to evaluate the design.
+This article defines the current evidence boundary, candidates, staged local
+Study, and release gate in one place. You do not need to know Fugue, W&B MCP,
+or the earlier essays to evaluate the design.
 
 The failure that motivated it was subtler than a broken method. Two MCP
-revisions could both initialize and answer a human’s query, yet lead an Agent
-through different investigations. A changed tool description altered
-selection. A projection made the useful field easier to see. A structured
+revisions could both initialize and answer a human query, yet lead an Agent
+through different investigations. A changed description altered tool
+selection. A projection made a useful field easier to see. A structured
 partial-evidence error discouraged an unsupported completeness claim. No API
 call had “broken.” The behavioral product had changed.
 
@@ -21,31 +23,32 @@ The claim this preregistration freezes:
 > An MCP server changes what an Agent can perceive and do; its releases need
 > behavioral qualification, not only protocol and unit tests.
 
-And the honest outcomes are declared now. If the exact W&B MCP 0.3.7 and 0.4
-revisions yield no meaningful differences in task outcomes, maintainer
-judgment, or mechanism on the locked study, we report that null. If the
-effect reverses between Claude Code and the W&B Inference Agent, we report
-the reversal. The study is not allowed to credit a specific 0.4 feature,
-because the treatment is the whole locked release.
+The current decision is deliberately `pending`. Historical 0.3.7 and early
+0.4 candidate commits remain useful source evidence, but they are not the
+active comparison and cannot authorize a current release. [@mcp-baseline]
+[@mcp-candidate] The active design compares the exact reviewed `main` head
+with the exact final staging head after review is complete. If review or merge
+changes either head, Fugue must lock new candidates and produce a new preview.
 
-Where things stand: genuine hosted seed evidence and draft 80-cell
-specifications exist, but the evidence lock and Study preview have not both
-been accepted, so the design is not frozen and the result does not exist.
-Human judge calibration, published runtime locks, W&B Serverless access,
-accepted digests, and final-head execution are still required.
+No result is carried forward from a deterministic replay, a direct MCP probe,
+an earlier mixed-project canary, or a future remote-runtime plan. The decision
+waits for the source-isolated local Harbor canary and confirmation described
+below, followed by a separate human-signed package receipt.
 
 ## Scope and terms
 
-The **Model Context Protocol (MCP)** exposes tools and resources to an
-Agent. **Protocol compatibility** means the server initializes and answers
-valid requests. **Agent compatibility** asks whether changed descriptions,
-schemas, projections, pagination, and errors preserve safe downstream
-behavior. A **release candidate** here is one exact server revision plus its
-locked target-platform runtime.
+The **Model Context Protocol (MCP)** exposes tools and resources to an Agent.
+**Protocol compatibility** means the server initializes and answers valid
+requests. **Agent compatibility** asks whether changed descriptions, schemas,
+projections, pagination, and errors preserve safe downstream behavior. A
+**release candidate** here is one exact server revision plus its initialized,
+target-platform runtime lock.
 
-The comparison treats each MCP revision as a whole release. It cannot credit
-an outcome to one feature inside 0.4, and it cannot generalize beyond the
-locked tasks, evidence snapshot, harnesses, and runtimes.
+The behavioral Study uses a basic Claude Code harness. It has one W&B MCP
+integration per arm and no reviewed Skill, memory component, Aria, WBAF, loop
+controller, or second harness. Model route, tasks, evidence source, prompt,
+attempt policy, and local Harbor policy remain fixed. Only the locked MCP
+revision changes.
 
 The official MCP lifecycle orders initialization, capability negotiation, and
 normal operation; passing that contract is the protocol gate, not the
@@ -54,27 +57,25 @@ behavioral conclusion. [@mcp-lifecycle]
 ## The interface an Agent experiences
 
 Protocol conformance is necessary: initialization must succeed, schemas must
-be valid, calls must return legal responses. But an Agent experiences far
-more than the wire contract. It experiences the names and descriptions that
-compete for tool selection; parameter schemas that make some queries obvious
-and others awkward; default limits and pagination; projected fields versus
-broad payloads; error wording and structure; whether missing data looks
-empty, partial, or failed; latency and truncation; and the relationship
-between one call and the evidence needed next.
+be valid, and calls must return legal responses. But an Agent also experiences
+the names and descriptions competing for tool selection; parameter schemas;
+default limits and pagination; projected versus broad payloads; error wording;
+whether missing data looks empty, partial, or failed; latency and truncation;
+and the relationship between one call and the evidence needed next.
 
 An endpoint can stay callable while a description steers the Agent away from
 it. A broad result can be semantically complete and practically unreadable in
-the context window. An empty list can mean “there are no records,” “the
-query timed out,” or “the caller lacks scope.” A human notices these
-distinctions through deliberate inspection. An Agent may build a release
-recommendation from whichever shape it happens to receive.
+the context window. An empty list can mean “there are no records,” “the query
+timed out,” or “the caller lacks scope.” A human notices these distinctions
+through deliberate inspection. An Agent may build a release recommendation
+from whichever shape it receives.
 
 ```mermaid
 flowchart LR
-    R["MCP revision"] --> M["Initialized tool manifest"]
+    R["Locked MCP revision"] --> M["Initialized tool manifest"]
     M --> S["Agent tool selection"]
-    S --> Q["Query shape"]
-    Q --> E["Returned evidence or structured error"]
+    S --> Q["Bounded query shape"]
+    Q --> E["Evidence or structured error"]
     E --> I["Agent interpretation"]
     I --> O["Maintenance outcome"]
 ```
@@ -84,564 +85,394 @@ part of the fourth.
 
 ## The bounded release question
 
-The exact question is:
+The active question is:
 
-> Does W&B MCP revision
-> `a2bae7271323ac43262ffb73454b0aff01ddc808` (the 0.4 candidate)
-> improve how locked Agents investigate bounded W&B and Weave maintenance
-> evidence compared with revision
-> `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38` (the 0.3.7 baseline)?
+> Does the exact final reviewed W&B MCP staging head preserve or improve a
+> maintainer’s bounded investigation of an immutable W&B and Weave source
+> cohort relative to the exact reviewed `main` head?
 
-The revision SHAs are part of the candidate identity; “0.4” and “0.3.7” are
-labels for readers. Fugue imports each ordinary MCP declaration, prepares its
-target-platform package code outside Agent execution, initializes it,
-captures the exact tool manifest, and locks the result. Agent cells never
-clone the MCP repository or install its dependencies.
+Friendly labels are not identities. Each preview must show both source
+commits, prepared runtime and tool-manifest digests, the Claude Code and model
+route identity, task and private-label digests, source and result projects,
+attempts, and local Harbor execution fingerprint.
 
-Both exact sources are publicly inspectable at the baseline and candidate
-commits. [@mcp-baseline] [@mcp-candidate] The draft Fugue preparation and
-qualification machinery is reviewable at the public head of its integration
-PR—deliberately not described as merged `main`. [@fugue-mcp-draft]
+Fugue imports ordinary MCP declarations, prepares target-platform package code
+outside Agent execution, initializes each server, captures its exact manifest,
+and locks the result. Agent cells never clone an MCP repository or install
+dependencies.
 
-The comparison holds task, evidence snapshot, model route within each stage,
-harness, prompt, evaluator, attempts, and runtime policy fixed. The declared
-difference is the MCP integration lock.
-
-```mermaid
-flowchart TD
-    G1["0.3.7 source SHA"] --> P1["linux/amd64 prepared runtime"]
-    G2["0.4 source SHA"] --> P2["linux/amd64 prepared runtime"]
-    P1 --> L1["baseline integration lock<br/>tool manifest + digest"]
-    P2 --> L2["candidate integration lock<br/>tool manifest + digest"]
-    L1 --> C["Behavioral comparison"]
-    L2 --> C
-    T["Frozen tasks and private labels"] --> C
-    E["Hosted evidence lock"] --> C
-    H["Locked Agent + route"] --> C
-```
-
-Target-platform initialization matters. Preparing on an Apple Silicon laptop
-and running on `linux/amd64` can conceal native dependencies or a different
-tool surface. The probe belongs to the platform that will execute the study.
+The review-visible Fugue provider and V3 evidence pull requests remain
+preparation source, not evidence for the pending decision.
+[@fugue-provider-draft] [@fugue-mcp-draft]
 
 ## Genuine evidence, deliberately seeded
 
-The dedicated non-sensitive project is:
+The current plan separates immutable task evidence from experiment output:
 
 ```text
-wandb/fugue-mcp-release-qualification-v1
+source:  wandb/fugue-mcp-release-source-v1
+results: wandb/fugue-mcp-release-qualification-v1
 ```
 
-The checked-in evidence lock records six genuine W&B Runs with nontrivial
-configuration, three-step histories, summaries, and versioned evidence
-artifacts; 24 standardized Weave Agent conversations; 48 tool spans; one
-versioned eight-row Weave Dataset; two versioned Weave Evaluations with eight
-aligned rows each; 16 Evaluation prediction rows; an observed latency
-anomaly; a deliberately missing-cost case; and a deliberately
-incomplete-evaluation case.
+The source project contains the non-sensitive Runs, trace trees, Dataset, and
+Evaluations the tasks ask the Agent to investigate. W&B Runs carry
+configuration, metrics, and artifacts [@wandb-runs]; Weave Calls form trace
+trees [@weave-tracing]; Datasets version evaluation examples
+[@weave-datasets]; and Evaluations link predictions to scorers
+[@weave-evaluations].
 
-These objects were created with the real SDKs and open through their
-immutable references. They are deterministic seed evidence for the Agent to
-investigate—not comparison outcomes, and not customer data. They are also
-four distinct hosted contracts, not four names for one fixture: W&B Runs hold
-configuration, metrics, and artifacts [@wandb-runs]; Weave Calls form traces
-[@weave-tracing]; Datasets version evaluation examples [@weave-datasets]; and
-Evaluations link model outputs to scorers [@weave-evaluations].
+The result project receives Agent traces, Evaluation rows, and Fugue result
+projections. A release candidate must not write its own output into the source
+project and then rediscover that output as task evidence. The source lock and
+source-conformance receipt make that contamination detectable.
 
-Why seed at all? Because a realistic evaluation fixture can be a genuine Run
-without being a production accident. Seeding known maintenance conditions
-lets private labels be reviewed and the evidence graph frozen. The Agent
-still has to find, inspect, reconcile, and reason about those objects through
-the MCP candidate.
-
-Preparation is idempotent:
-
-```bash
-uv sync --python 3.13 --frozen --extra dev --extra research-worker
-
-uv run python \
-  examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
-  --project wandb/fugue-mcp-release-qualification-v1 \
-  --env-file /ABSOLUTE/PATH/TO/OPERATOR.env \
-  --output examples/comparisons/wandb-mcp-maintenance/evidence.lock.json
-```
-
-An existing snapshot must validate its counts, versions, seed identity, and
-content. Drift is an error. We do not edit expected facts until changed data
-looks correct.
+These objects are seeded prior evidence, not customer data and not comparison
+outcomes. A genuine hosted object can still be a controlled fixture. The
+claim is that the Agent investigated the locked source graph—not that the
+graph represents every production project.
 
 ## Tasks that need investigation
 
-The tasks are not “count the fixtures.” They exercise maintenance questions
-an MCP release should make easier to answer honestly: determine project and
-Evaluation coverage without claiming unsupported completeness; compare
-aligned Evaluation rows and identify a regression; inspect Run history for a
-latency or cost anomaly; prefer narrow projected reads when they answer the
-question; respond structurally to timeout, SDK, and partial-evidence
-failures; prioritize one bounded release or maintenance action; and refuse a
-conclusion when a required object cannot be inspected.
+The natural-maintainer tasks ask for bounded source inventory, Evaluation
+child reconciliation, an observed history hotspot, a release-risk summary,
+collection coverage, projected Run tables, incomplete evidence, and a
+source-use gap.
 
-Public task briefs contain the question and permitted project reference.
-Private labels contain expected facts, allowed evidence relations, and
-critical-failure conditions. The labels never enter Agent inputs, runtime
-images, MCP responses, traces, W&B configuration, or Study events.
+Public briefs identify the immutable source project and required output
+schema. Expected values and critical failure conditions remain host-private.
+They never enter Agent prompts, MCP responses, runtime images, traces, W&B
+configuration, or Study events.
 
-We deliberately include incomplete evidence. A useful maintenance agent must
-sometimes say “I cannot establish that.” A candidate that makes broad claims
-easy can improve superficial fluency while regressing evidence honesty.
+Incomplete evidence is intentional. A useful maintainer Agent must sometimes
+say “I cannot establish that.” A candidate that makes broad claims easy can
+improve superficial fluency while regressing evidence honesty.
 
 ## One task, end to end
 
-Consider a task that asks whether an Evaluation regression is complete enough
-to block a release.
+Consider a task that asks whether two locked Evaluation roots reconcile.
 
-The public brief identifies the hosted project and the bounded Evaluation
-comparison. It does not list the expected regressed rows or mention that one
-record is deliberately incomplete. The private label records which Dataset
-and Evaluation versions must be reconciled, the supported anomaly, and the
-critical rule against claiming full coverage without opening all required
-objects.
+The Agent reads the source locator lock, initializes its assigned MCP
+revision, lists the exact roots, requests their direct children with an
+explicit bound, counts `Evaluation.predict_and_score` children separately
+from summaries, and returns one schema-constrained answer. The host-private
+scorer checks the expected counts, exclusions, boundedness, and source
+project. Mechanism evidence records the initialized manifest and exact MCP
+calls. Infrastructure evidence binds the cell to the accepted local Harbor
+runtime and cleanup receipt.
 
-Baseline and candidate receive byte-identical briefs. A valid investigation
-might initialize the locked MCP tool manifest, locate the exact Evaluation
-versions, request projected summary and row data, align rows by immutable
-example identity, open the discordant prediction and its Agent trace, notice
-the incomplete record, and recommend a bounded maintenance action with an
-explicit limitation.
+Now imagine a candidate reaches the expected number by reading the result
+project or counting unrelated children. The numeric answer may look right,
+but the source and evidence-relation gates fail. That is why source isolation
+is part of the estimand rather than a cleanup detail.
 
-The deterministic scorer checks answer presence, exact supported values, and
-required evidence relations—it does not reward the phrase “block the
-release.” The blind judge evaluates whether the reasoning is useful and
-appropriately uncertain. Mechanism evidence records which tools and
-projections were used, whether broad queries were attempted, what errors
-returned, and which sources were opened. Infrastructure evidence proves the
-cell ran with the accepted image and deleted its Sandbox.
-
-Now imagine the candidate reaches the same correct values in half as many
-calls but says the Evaluation is complete. The deterministic facts may pass.
-The critical judge dimension must fail. The mechanism observation may still
-help the MCP maintainer. The release ledger must not average those three
-facts into a win.
-
-Or imagine the baseline sees a timeout represented as an empty result while
-the candidate receives a structured partial-evidence error and refuses the
-conclusion. The candidate can look “less complete” to a naive
-expected-answer grader and more correct to the evidence-honesty rubric. This
-is exactly why the task and grader stack are reviewed together before the
-cohort.
-
-The walkthrough also constrains the final claim. Even if the candidate
-improves the task, the study cannot say whether descriptions, projections,
-pagination, or error shape was causal. Those features moved as one revision.
+The walkthrough constrains the final claim. Even if the candidate improves a
+task, the Study cannot say whether descriptions, projections, pagination, or
+error shape was causal. Those features moved as one locked revision.
 
 ## Four outcome layers
 
-The release decision reads four ledgers.
+The release decision reads four independent ledgers.
 
 ### 1. MCP and infrastructure conformance
 
-Did the server initialize on `linux/amd64` with the locked manifest? Did the
-public Agent image start in W&B Serverless? Were only named secrets injected?
-Did the attempt terminate, publish an attestation, and delete its Sandbox?
-Did zero matching Sandboxes remain?
-
-W&B documents Serverless Sandboxes as isolated environments with their own
-filesystem, network, and process space and an explicit create–use–discard
-lifecycle
-([Serverless Sandboxes](https://docs.wandb.ai/sandboxes)). It is a real
-remote execution boundary, not a replay flag. Its public-preview status and
-organization availability remain operational limitations.
+Did each exact server initialize with its locked manifest? Did the zero-model
+source receipt establish the immutable source shape? Did every approved local
+Harbor cell start from the prepared image, preserve the private-label
+boundary, terminate, publish its policy receipt, and leave zero run-scoped
+containers?
 
 ### 2. Deterministic task outcome
 
-Did the answer exist? Did it contain the expected values supported by the
-locked evidence? Did required objects and aligned rows reconcile?
-Deterministic checks do not grade prose style.
+Did the answer satisfy the declared schema and expected source facts? Did it
+remain inside the immutable source project and preserve boundedness and honest
+missingness? Deterministic checks do not grade prose style.
 
 ### 3. Calibrated maintainer judgment
 
-A blind Anthropic judge scores evidence grounding, maintainer usefulness,
-prioritization, and uncertainty calibration. A confident completeness claim
-without inspected support is a critical failure.
+Human maintainer review may assess usefulness, prioritization, and uncertainty
+after deterministic and evidence-integrity gates reconcile. An automated
+judge is optional and cannot become release truth without a separately
+accepted calibration receipt.
 
 ### 4. Mechanism and evidence integrity
 
-We record initialization, available tools, selected tools, call counts,
-projected and broad reads, admissions, truncations, timeouts, structured
-errors, sources returned/opened/used, latency, observed tokens and cost, and
-Weave trace/Evaluation reconciliation.
+We record initialization, tool inventory, selected tools, call counts,
+projected and broad reads, truncations, timeouts, structured errors, sources
+returned and opened, latency, observed usage and cost, and Weave
+trace/Evaluation reconciliation.
 
-An improved deterministic outcome with missing traces is incomplete
-evidence. A reduction in broad reads is a mechanism observation, not proof of
-better maintenance. The ledgers meet only in the final bounded
-interpretation.
+An improved task outcome with missing native evidence is incomplete. A
+reduction in broad reads is a mechanism observation, not proof of better
+maintenance. The ledgers meet only in the bounded interpretation.
 
-## The 80-cell sequence
+## The staged local sequence
 
-The study is staged to separate discovery, primary evidence, and replication:
+The former 80-cell Claude/OpenClaw/Serverless sequence is retired as the
+active decision plan. It mixed a larger replication story with gates that
+were not ready and obscured the smallest source-isolated comparison that
+could answer the current question.
 
-| Stage            | Route and native harness                         | Tasks × revisions × attempts |  Cells |
-| ---------------- | ------------------------------------------------ | ---------------------------: | -----: |
-| Claude discovery | `anthropic/claude-sonnet-5` + Claude Code        |                    4 × 2 × 1 |      8 |
-| W&B discovery    | `wandb/deepseek-ai/DeepSeek-V4-Flash` + OpenClaw |                    4 × 2 × 1 |      8 |
-| Claude primary   | `anthropic/claude-sonnet-5` + Claude Code        |                    8 × 2 × 2 |     32 |
-| W&B replication  | `wandb/deepseek-ai/DeepSeek-V4-Flash` + OpenClaw |                    8 × 2 × 2 |     32 |
-| **Total**        | two locked route–harness candidates              |                              | **80** |
+The active sequence is:
+
+| Stage | Fixed harness and route | Tasks × revisions × attempts | Cells |
+| --- | --- | ---: | ---: |
+| Canary | Claude Code + locked Anthropic route | 4 × 2 × 1 | 8 |
+| Confirmation | Claude Code + the same locked route | 8 × 2 × 2 | 32 |
+
+The canary and confirmation have separate previews, approvals, run
+identities, budgets, and results. The confirmation is not admitted unless the
+canary has complete source, Agent, Evaluation, Harbor, privacy, and cleanup
+evidence. A canary result is not silently pooled into the confirmation.
 
 ```mermaid
 flowchart LR
-    CD["Claude discovery<br/>8"] --> WD["W&B discovery<br/>8"]
-    WD --> G{"informative, safe,<br/>complete?"}
-    G -->|no| STOP["freeze null/blocker"]
-    G -->|yes| CP["Claude primary<br/>32"]
-    CP --> F["freeze primary result"]
-    F --> WR["W&B replication<br/>32"]
-    WR --> A["aligned 80-cell interpretation"]
+    S["Verify immutable<br/>source"] --> M["Lock main and<br/>final staging"]
+    M --> C["8-cell local<br/>Harbor canary"]
+    C --> G{"Complete and<br/>informative?"}
+    G -->|no| H["HOLD with blocker"]
+    G -->|yes| F["32-cell separately<br/>approved confirmation"]
+    F --> D["Bounded behavior summary<br/>+ human package decision"]
 ```
-
-The order prevents replication from changing primary analysis. Discovery can
-stop unsafe or non-informative work before the larger cohort; it cannot be
-pooled with the primary as extra attempts.
-
-W&B Inference is a direct provider route for the OpenClaw replication cells,
-and its current public catalog lists the exact `deepseek-ai/DeepSeek-V4-Flash`
-model ID ([available models](https://docs.wandb.ai/inference/models)). Model
-catalogs change—readiness must verify that route at the accepted preview, and
-this article is not an availability guarantee.
 
 ## Judge calibration before paid work
 
-The repository contains 48 balanced authored examples: 24 passing and 24
-failing. Authored expected labels are not human calibration.
+The corrected package decision is deterministic plus human release sign-off.
+An automated maintainer judge is not required for the local canary or
+confirmation.
 
-The release gate requires two distinct human reviewers per example,
-adjudication for every disagreement, a blind judge result for each case, a
-true-positive rate of at least 0.85, a true-negative rate of at least 0.85,
-and zero false passes on critical unsupported-completeness cases.
-
-```bash
-uv run python \
-  examples/comparisons/wandb-mcp-maintenance/validate_judge_calibration.py \
-  --cases examples/comparisons/wandb-mcp-maintenance/judge-calibration-cases.jsonl \
-  --report examples/comparisons/wandb-mcp-maintenance/judge-calibration.json
-```
-
-Changing cases, rubric, labels, or judge profile changes the calibration
-digest. The study does not proceed by lowering a threshold after looking at
-performance.
+If a later plan adds one, authored examples are not calibration. The judge
+must have two independent human reviews per case, adjudication of
+disagreements, declared true-positive and true-negative thresholds, and zero
+false passes on critical unsupported-completeness cases. Changing cases,
+rubric, labels, or judge profile changes the calibration identity and requires
+a new preview.
 
 ## Lock the two MCP candidates
 
-From a trusted operator shell:
+The active candidates are the reviewed `main` head and the final reviewed
+staging head. The current repair work is visible in draft MCP pull request
+#126 at reported head `3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`; its CI and
+security checks pass, but the pull request remains draft and unmerged.
+[@mcp-repair-draft] Those facts establish review readiness, not final staging
+identity or behavioral evidence. The accepted preview must resolve the final
+reviewed head after review; this draft does not invent that SHA.
+
+The trusted operator sequence is:
 
 ```bash
-export WANDB_BASE_URL=https://api.wandb.ai
+uv run fugue mcp import \
+  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
+  --server wandb-main \
+  --as wandb-mcp-main
 
 uv run fugue mcp import \
   --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-3-7 \
-  --as wandb-mcp-0-3-7
+  --server wandb-0-4-staging \
+  --as wandb-mcp-0-4-staging
 
-uv run fugue mcp import \
-  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-4 \
-  --as wandb-mcp-0-4
+uv run fugue mcp inspect wandb-mcp-main
+uv run fugue mcp inspect wandb-mcp-0-4-staging
 
-uv run fugue mcp inspect wandb-mcp-0-3-7
-uv run fugue mcp inspect wandb-mcp-0-4
-
-uv run fugue mcp lock wandb-mcp-0-3-7 \
+uv run fugue mcp lock wandb-mcp-main \
   --acknowledge-package-code \
   --platform linux/amd64
 
-uv run fugue mcp lock wandb-mcp-0-4 \
+uv run fugue mcp lock wandb-mcp-0-4-staging \
   --acknowledge-package-code \
   --platform linux/amd64
 ```
 
 The explicit acknowledgment is not decorative. Importing package code means
 reviewing code that will enter a privileged preparation boundary. Runtime
-cells receive the prepared assets read-only and cannot mutate the accepted
+cells receive prepared assets read-only and cannot mutate the accepted
 candidate.
 
-## Build and qualify the Serverless runtime
+## Keep remote qualification separate
 
-W&B Serverless pulls public images, so Fugue’s builder creates one
-digest-pinned image per harness from a clean reviewed source tree. It embeds
-locked Fugue, Agent, MCP, and task-runtime assets; generates CycloneDX SBOMs;
-rejects High-or-worse Grype findings; runs offline probes; pushes; and
-verifies anonymous pullability.
+Serverless is not the active execution requirement and no Serverless
+execution is claimed. The current behavioral decision uses prepared local
+Docker through Harbor because that is the supported, inspectable boundary for
+the canary and confirmation.
 
-The article uses placeholders for the public registry and qualification SHA:
-
-```bash
-uv run fugue sandbox wandb build-runtime \
-  --comparison examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml \
-  --platform linux/amd64 \
-  --image docker.io/REGISTRY_ORG/fugue-mcp-release:QUALIFIED_GIT_SHA \
-  --push \
-  --output-manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --sbom-dir .fugue/wandb-serverless-runtime-reports
-
-uv run fugue sandbox wandb lock-runtime \
-  --manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --output .fugue/wandb-serverless-runtime.lock.json
-```
-
-`lock-runtime` rejects mutable image tags. Publishing public images is a
-separate protected release action; building locally does not grant authority
-to push.
-
-Only two named W&B team secrets enter the Sandboxes:
-
-| W&B secret                | Sandbox environment variable |
-| ------------------------- | ---------------------------- |
-| `fugue-wandb-api-key`     | `WANDB_API_KEY`              |
-| `fugue-anthropic-api-key` | `ANTHROPIC_API_KEY`          |
-
-W&B’s secret guidance recommends referencing Secrets Manager entries by name
-instead of placing values in code or Sandbox configuration
-([Sandbox secrets](https://docs.wandb.ai/sandboxes/secrets)). Fugue rejects
-unknown secret-shaped environment values. The comparison, image, lock, logs,
-and Study events contain names and digests, never credential values.
-
-The final operational probe creates a disposable Sandbox, verifies image
-startup and embedded runtimes, deletes it, and reconciles zero orphans:
-
-```bash
-uv run fugue sandbox wandb doctor \
-  --lock .fugue/wandb-serverless-runtime.lock.json \
-  --env-file /ABSOLUTE/PATH/TO/OPERATOR.env
-```
-
-A successful doctor is infrastructure qualification, not a task result.
+A future remote package qualification may retain separate, fail-closed
+Serverless definitions. It must not inherit a local behavior result as proof
+of remote isolation, lifecycle, privacy, or deletion. Conversely, the absence
+of remote receipts does not turn a completed local Study into a replay; it
+narrows the supported claim to local Harbor behavior.
 
 ## Leakage and hostile-result checks
 
-An MCP server sits between an Agent and evidence, so qualification includes
-content-boundary tests as well as behavior.
+Qualification scans Agent inputs, rendered jobs, runtime receipts, MCP
+stdout/stderr, Weave projections, and result bundles for credential values,
+private expected facts, local paths, and unapproved environment values.
 
-We scan every generated and remote artifact for the actual W&B and Anthropic
-credential values available to the trusted operator; private expected facts
-and gold identifiers; local absolute paths and environment-file locations;
-unapproved environment-variable values; and headers, URLs, or exception text
-that could carry authorization material. The scan covers rendered jobs,
-runtime manifests, image history, SBOMs, comparison snapshots, Agent inputs,
-MCP stdout/stderr, Weave traces, W&B Run configurations, result bundles,
-lifecycle attestations, and Study events. A source-code scan alone cannot see
-a secret serialized by a failing SDK call.
+The taskset includes ambiguous evidence shapes: bounded pages, summary
+children mixed with prediction children, unavailable cost, a latency hotspot,
+and returned sources that were not opened. These cases qualify the
+evidence-integrity behaviors the release claim depends on. They are not a
+complete MCP security audit.
 
-The taskset also contains hostile or ambiguous evidence shapes: an empty page
-with a continuation token; a partial result followed by timeout; an
-unavailable object whose name resembles a known fixture; missing cost that
-must not become zero; a broad payload that reaches the truncation boundary;
-and a structured error that should produce a bounded refusal.
-
-This is not a complete MCP security audit. These cases qualify the
-evidence-integrity behaviors the release claim depends on. A credential leak
-or private-label exposure is an immediate no-go regardless of task scores; a
-truncation or admission denial is reported as mechanism and may leave the
-aligned row incomplete.
-
-The runtime itself is minimized. Candidate package preparation happens
-outside the Agent cell; the active Sandbox cannot clone arbitrary source or
-install a new MCP revision. The image contains only reviewed runtime
-utilities needed for the two native harnesses and evidence publication.
-Reducing tools is both a defense and an identity control: undeclared
-utilities can change Agent behavior.
+The active cell cannot install another MCP revision, change project scope, or
+read host-private labels. A credential leak, private-label exposure, result
+write into the source project, or unresolved Harbor cleanup receipt is an
+immediate no-go regardless of task scores.
 
 ## Preview, approve, execute
 
-Local Harbor runs first as the behavioral parity baseline. The four
-Serverless stages are then previewed separately:
+Source preparation and direct MCP mechanism checks happen before the final
+preview. They do not run a model and cannot supply a behavioral result.
+
+The active local canary then follows Fugue’s normal immutable path:
 
 ```bash
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
-  --preview
+SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
 
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml \
-  --preview
+uv run fugue compare "$SPEC" --prepare --json
+uv run fugue check "$SPEC" --json
+uv run fugue compare "$SPEC" --preview --json
 
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml \
-  --preview
-
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml \
-  --preview
-```
-
-Each preview receives its own approval. For example:
-
-```bash
 uv run fugue approve PREVIEW_DIGEST \
   --max-cells 8 \
-  --max-usd 20 \
+  --max-usd APPROVED_CAP \
   --approved-by HUMAN_OPERATOR
 
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
+uv run fugue compare "$SPEC" \
   --run \
-  --approval APPROVAL_ID \
-  --env-file /ABSOLUTE/PATH/TO/OPERATOR.env
+  --approval APPROVAL_ID
 ```
 
-The actual primary and replication caps come from their accepted previews and
-reviewed budget; the discovery example does not authorize them. Operator
-credentials load only in the trusted shell. The agent-facing control plane
-can request approval and start an already-approved digest. It cannot issue
-approval.
+The spec name is a planned contract until the V3 comparison lands on a clean
+reviewed tree. Do not execute a similarly named draft or substitute an older
+preview. The 32-cell confirmation requires its own accepted spec, preview,
+approval, and budget.
 
 ## Reconciliation and decision rules
 
-A release recommendation requires:
+A behavioral summary requires:
 
 - nonzero planned cells and complete aligned rows;
-- no critical regression in evidence honesty, missing-data handling, or
-  coverage claims in either primary attempt;
-- candidate deterministic passes at least equal to baseline;
-- at least one reviewed discordant pair with an actionable maintenance
-  observation;
-- complete required judge evidence after calibration;
-- no harness reversal hidden by pooling;
-- complete runtime attestation, trace, Evaluation, usage, and cleanup
-  evidence.
+- exact source and result project separation;
+- final reviewed candidate identities and initialized manifests;
+- no critical regression in boundedness, missing-data handling, or source
+  honesty;
+- complete deterministic task evidence;
+- one native Agent conversation, root, prediction row, and Evaluation row per
+  cell;
+- complete local Harbor policy, privacy, cleanup, and zero-orphan receipts;
+- no hidden retry or cross-Study pooling.
 
-Each attempt must reconcile one Agent conversation, one root, one normalized
-prediction row, and one Evaluation record. Serverless cells additionally
-require a lifecycle attestation whose runtime image matches the lock, a
-deletion receipt, and zero remaining matching Sandboxes.
+The Study may report `improved`, `regressed`, `mixed`, `unchanged`,
+`incomplete`, or `invalid` behavior. `Incomplete` and `invalid` suppress a
+behavioral recommendation.
 
-```mermaid
-flowchart TD
-    CELL["Attempt identity"] --> CONV["one Agent conversation"]
-    CELL --> ROOT["one verified root"]
-    CELL --> ROW["one prediction row"]
-    CELL --> EVAL["one Evaluation record"]
-    CELL --> ATT["one lifecycle attestation"]
-    CONV --> REC{"all identities reconcile?"}
-    ROOT --> REC
-    ROW --> REC
-    EVAL --> REC
-    ATT --> REC
-    REC -->|yes| EL["eligible aligned row"]
-    REC -->|no| MISS["incomplete evidence; no score"]
-```
+The Python-package decision remains `HOLD` until a separate human-signed
+package receipt proves the final staging identity and the package, CI,
+security, compatibility, and release requirements. Local behavioral evidence
+cannot issue package `GO` by itself.
 
-A null or non-discriminating result is valid but not demo-ready. We freeze it
-and create a new study with a harder pre-frozen taskset. We never tune the
-current private labels or holdout to manufacture a winner.
+The supported behavioral claim is whole-release and local:
 
-The supported claim is whole-release and local:
+> Under the named Claude Code candidate, tasks, immutable source cohort,
+> attempts, local Harbor policy, and dates, the exact staging candidate did—or
+> did not—preserve the bounded maintenance behavior declared by the Study.
 
-> Under the named Agents, tasks, evidence, attempts, runtime, and dates, the
-> exact candidate supported—or did not support—the bounded maintenance
-> recommendation.
-
-Feature-level causality requires a separate ablation. And the decision is
-directional rather than permanent: “recommend 0.4 under this lock”
-authorizes the reviewed release action, not an exemption for the next
-commit. A changed tool description, dependency lock, runtime image, model
-route, or evidence snapshot creates another candidate or execution identity
-and narrows which prior evidence can be reused. That boundary belongs in the
-release note.
+Feature-level causality requires a separate ablation.
 
 ## The maintainer memo
 
-Aria’s final memo is an interpretation of the immutable result, not a fifth
-scorer. It must include:
+The final memo is a human-authored interpretation of immutable results, not a
+fifth scorer. It must include:
 
 1. the bounded release question;
-2. improved, regressed, and unchanged aligned cases;
-3. three to five direct evidence references;
-4. mechanism observations separated from outcome claims;
-5. one release or maintenance recommendation;
-6. explicit limitations;
-7. one proposed follow-up that Aria does not launch.
+2. source and result project identities;
+3. exact main and final-staging candidate locks;
+4. improved, regressed, unchanged, missing, and invalid aligned cases;
+5. mechanism observations separated from outcomes;
+6. local Harbor and evidence limitations;
+7. the separate package `HOLD`, `GO`, or `NO-GO` receipt.
 
-A good memo might say the candidate reduced broad reads and handled partial
-Evaluations more honestly on two reviewed pairs while deterministic
-resolution stayed tied. It must not say “0.4 is better” without the locked
-scope. It must not propose a follow-up and then quietly execute it.
+An optional Aria shell may read safe result projections and help navigate
+references after the Study. It is not part of either candidate, cannot issue
+approval or start execution, and cannot turn a behavioral summary into package
+authority.
+
+Prepared source evidence, a no-key replay, a direct MCP receipt, or a planned
+matrix does not unlock a release recommendation.
 
 ## Try this in 15 minutes
 
-Open the two exact MCP commit pages and compare one tool description, schema,
-projection, pagination path, or structured error. Write the smallest Agent
-behavior that change could affect. Then map it to one deterministic check,
-one trace observation, and one task-level criterion.
+Write four evidence labels on a page:
 
-If your proposed release claim names a single 0.4 feature but the candidate
-is the whole commit, rewrite the claim to the whole locked release.
+1. deterministic no-key replay;
+2. zero-model source-conformance receipt;
+3. live locked-MCP mechanism receipt;
+4. live Claude Code behavioral Study.
+
+For each, write one claim it supports and one it cannot support. If any label
+can be swapped for another without changing your release memo, the evidence
+boundary is still too vague.
+
+Then sketch the source and result projects as two boxes. Reject any plan in
+which an experiment output can appear inside the immutable source cohort.
 
 ## When behavioral qualification is unnecessary or insufficient
 
 Protocol conformance, schema validation, and deterministic integration tests
 remain the right tools for known MCP contracts. Behavioral qualification is
 needed when a release changes what an Agent perceives or how it investigates.
-It is still insufficient when the hosted evidence is synthetic, the task
-brief reveals private answers, or the two revisions are not locked to exact
-target-platform manifests.
+
+It remains insufficient when source and results are mixed, the task brief
+reveals expected answers, either revision lacks an exact initialized lock, the
+local runtime receipt is missing, or the package decision lacks independent
+release evidence.
 
 ## What this does not show
 
-The hosted objects are genuine W&B and Weave objects, but they are seeded,
-non-sensitive maintenance evidence. They do not represent every customer
-project or production distribution.
+The seeded source cohort does not represent every customer project. A
+four-task canary and eight-task confirmation are bounded maintenance Studies,
+not broad population estimates.
 
-The taskset has eight primary tasks. Two attempts improve alignment but do
-not create a broad population estimate. The blind judge remains imperfect
-after calibration. Claude Code and OpenClaw differ as complete native
-harnesses, so a reversal may reflect their interaction with the MCP release.
+Local Harbor receipts establish the declared local execution policy, not
+Serverless isolation or complete security. A basic Claude Code comparison
+does not establish behavior for OpenClaw, Codex, Hermes, Aria, or another
+model. No Skill or memory effect is in scope.
 
-Serverless isolation and lifecycle attestations establish execution
-mechanism, not answer quality. W&B Serverless is a preview service whose
-organization availability must be checked at runtime. W&B Inference model
-availability can change and must be locked at preview.
-
-Most importantly, no result exists yet. The real evidence lock demonstrates
-that the study can ask useful questions. It does not answer them.
+Most importantly, no result exists yet. The release decision remains pending
+the final source-isolated staging comparison and separate package sign-off.
 
 ## Results appendix — intentionally empty
 
-A future `Update YYYY-MM-DD: Results` section must contain:
+A future dated appendix must contain:
 
 ```text
 qualified Fugue commit and tree:
-four preview digests:
-MCP revision/runtime/tool-manifest digests:
-task/private-label/evidence/judge digests:
-Agent/model/runtime-image identities:
-planned/admitted/started/completed/excluded/missing cells by stage:
+immutable source project and source-conformance receipt:
+result project:
+main and final-staging revisions, runtime locks, and tool manifests:
+canary preview, approval, run, and result:
+confirmation preview, approval, run, and result:
+planned/admitted/started/completed/excluded/missing cells:
 deterministic results:
-blind-judge results and calibration receipt:
-mechanism measures:
-Serverless attestations and zero-orphan receipts:
-Weave trace/Evaluation reconciliation:
-aligned discordant pairs:
-harness reversal or null:
-maintainer recommendation and limitations:
-canonical W&B/Weave/Study links:
+mechanism observations:
+local Harbor policy, privacy, cleanup, and zero-orphan receipts:
+Weave Agent, prediction, Dataset, and Evaluation reconciliation:
+behavioral summary:
+independent package receipt and human decision:
+limitations:
 ```
 
-The final tree must be the qualified tree. If merge changes it,
-qualification runs again.
+The final tree and candidate heads must be the qualified identities. If review
+or merge changes them, qualification runs again.
 
 ## Next: a result is not a learning loop
 
-The MCP study can produce evidence about a release. It does not decide what
-question to ask next, who may authorize the work, or how a maintainer’s
-observation becomes a reversible engineering change.
+The MCP Study can produce bounded evidence about a release. It does not decide
+which engineering change should be authored next.
 
-In **Fugue 4A**, we place the study inside an outer loop with Aria, human
-approval, Serverless execution, Weave evidence, and Study Console projection.
-The hard problem moves from “can we run an eval?” to “can the system learn
-without approving and grading its own work?”
+In **Fugue 4A**, we place controlled Studies inside an outer loop whose active
+flagship is Claude Code plus Fugue through local Harbor. Aria remains an
+optional read-only presentation shell, not a runtime dependency or release
+authority.
 
 ## References
 

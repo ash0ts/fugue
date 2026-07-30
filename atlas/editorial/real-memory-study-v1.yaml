@@ -1,0 +1,44 @@
+schema_version: 1
+id: real-memory-study-v1
+title: Real repository-memory intervention canary
+summary: A planned eight-cell local-Harbor comparison of baseline, locked dense retrieval, an inspect-and-verify policy, and their combination with Claude Code and Sonnet 5 fixed.
+question: Do locked dense repository retrieval, an inspect-and-verify policy, or their combination change outcomes on two real maintenance tasks?
+hypothesis: At least one intervention will change task outcome or execution behavior, but assignment alone will not prove that retrieval influenced the answer.
+why_it_matters: Repository memory should be selected from aligned behavioral and mechanism evidence, not retrieval assignment or retrieval metrics alone.
+task_selection: The planned canary uses two immutable SWE-bench Verified cases assigned to the dedicated memory lane and selected for repository-scale maintenance work.
+evidence_tier: active
+decision_value: 0
+status: planned_unrun
+matrix:
+  experiment_id: real-memory-study
+  workload_id: canary
+  expected_predictions: 8
+  attempts: 1
+  models: [anthropic/claude-sonnet-5]
+  harnesses: [claude-code]
+  treatments: [baseline, rag-dense, policy-only, combined]
+  tasks: [sympy__sympy-18199, sphinx-doc__sphinx-9461]
+  cohorts:
+    - id: canary
+      label: Two-task repository-memory canary
+      models: [anthropic/claude-sonnet-5]
+      harnesses: [claude-code]
+      treatments: [baseline, rag-dense, policy-only, combined]
+      tasks: [sympy__sympy-18199, sphinx-doc__sphinx-9461]
+      expected_predictions: 8
+provenance:
+  source_commit: pending
+  source_url: https://github.com/ash0ts/fugue
+  dataset_id: real-study-lanes-memory-canary-v1
+  dataset_digest: pending
+  snapshot_digest: pending
+  run_ids: []
+links:
+  project: https://wandb.ai/wandb/fugue-memory-loop-engineering-v1/weave
+  evaluations: []
+findings: []
+caveats:
+  - This is a planned lane with zero published cells; it reports no memory lift or selected intervention.
+  - Source, dataset, route, dense-index, runtime, and preview locks remain pending.
+  - Assigned retrieval is not mechanism evidence; context calls and opened source paths must be reconciled before any use claim.
+  - The active execution backend is local Harbor; no Serverless behavior is claimed.

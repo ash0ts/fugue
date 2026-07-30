@@ -1,16 +1,16 @@
 {
   "schema_version": 2,
   "slug": "fugue-4b-trace-to-release-decision",
-  "audience": "Teams evaluating the complete Aria–Fugue workflow",
-  "question": "What receipts must exist before a live workflow supports a release decision?",
-  "intended_takeaway": "A credible workflow links genuine evidence, exact approval, remote work, reconciliation, and cleanup.",
-  "out_of_scope": "No completed 80-cell Study, live follow-up, or release memo is claimed.",
+  "audience": "Teams evaluating the flagship Claude Code–Fugue workflow",
+  "question": "What receipts must exist before a Claude Code-engineered Agent change supports a decision?",
+  "intended_takeaway": "A credible loop links one reviewed failure, exact approval, local Harbor work, selection, private holdout, and reconciled evidence.",
+  "out_of_scope": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed.",
   "placement": {
     "after_heading": "qualification-checklist",
     "after_label": "Qualification checklist",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Treat the workflow as a qualification contract: prepared evidence and approval are real boundaries, while remote execution and the final memo remain required and unobserved."
+    "what_to_watch": "Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor."
   },
   "poster_scene": "qualification-gates",
   "reduced_motion_scene": "qualification-gates",
@@ -38,43 +38,40 @@
     {
       "id": "evidence-scene",
       "scene": "evidence-scene",
-      "claim": "The story begins with genuine evidence, not a stage script.",
+      "claim": "The loop begins by locking one reviewed failure.",
       "support": [
-        "Runs, conversations, Dataset, and Evaluations exist before the comparison.",
-        "They seed the question; they are not the 80-cell result."
+        "The baseline must reproduce before an intervention is credited.",
+        "Skill and MCP changes become separately identifiable arms."
       ],
       "kind": "preregistered design",
       "source": "article.md#the-evidence-scene",
       "visual_relationship": "evidence_graph",
       "displayed_values": [
-        "6",
-        "24",
-        "8",
-        "2"
+        "4"
       ],
-      "caveat": "No completed 80-cell Study, live follow-up, or release memo is claimed."
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
     },
     {
       "id": "approval-card",
       "scene": "approval-card",
       "claim": "The approval card binds exact meaning and spend.",
       "support": [
-        "Candidate and runtime identities, 80 cells, judge, mechanism, and budget are visible.",
-        "Digest mismatch refuses execution."
+        "Two tasks × four Skill/MCP arms = 8 discovery cells.",
+        "Route, source, runtime, budget, and mechanism locks are visible."
       ],
       "kind": "preregistered design",
       "source": "article.md#the-approval-card",
       "visual_relationship": "state_machine",
       "displayed_values": [],
-      "caveat": "No completed 80-cell Study, live follow-up, or release memo is claimed."
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
     },
     {
       "id": "attempt-lifecycle",
       "scene": "attempt-lifecycle",
-      "claim": "Each approved cell needs one complete Serverless lifecycle.",
+      "claim": "Each approved cell needs one complete local Harbor lifecycle.",
       "support": [
-        "Create, attest, execute, publish, and delete.",
-        "One conversation, root, prediction, Evaluation row, and receipt must reconcile."
+        "Prepare, attest, execute, publish, and clean up.",
+        "One conversation, root, prediction, Evaluation row, and policy receipt must reconcile."
       ],
       "kind": "pending result",
       "source": "article.md#what-the-audience-sees-while-cells-run",
@@ -115,14 +112,14 @@
       "scene": "qualification-gates",
       "claim": "The flagship exists only after every qualification gate passes.",
       "support": [
-        "Exact identities, calibrated judge, 80 reconciled cells, and clean-clone rehearsals.",
-        "A null or incomplete Study is valid but not presentation-ready."
+        "Eight discovery cells precede a frozen intervention lock.",
+        "Eight private-holdout cells require a separate preview and approval."
       ],
       "kind": "pending result",
       "source": "article.md#qualification-checklist",
       "visual_relationship": "ledgers",
       "displayed_values": [
-        "80 CELLS"
+        "8 cells"
       ],
       "caveat": "Required evidence is not yet observed."
     },
@@ -138,7 +135,7 @@
       "source": "article.md#presentation-sequence",
       "visual_relationship": "boundary",
       "displayed_values": [
-        "80 cells absent"
+        "8+8 cells absent"
       ],
       "caveat": "Required evidence is not yet observed."
     },
@@ -147,14 +144,14 @@
       "scene": "series-context",
       "claim": "The flagship is the whole evidence chain—or it is not ready.",
       "support": [
-        "Approval, remote execution, evidence, decision, and cleanup stay linked.",
-        "No stage prop substitutes for a receipt."
+        "Claude Code engineers; Fugue governs local approval, execution, and evidence.",
+        "Optional Aria stays read-only and outside the execution path."
       ],
       "kind": "preregistered design",
       "source": "article.md#qualification-checklist",
       "visual_relationship": "series_map",
       "displayed_values": [],
-      "caveat": "No completed 80-cell Study, live follow-up, or release memo is claimed."
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
     }
   ]
 }

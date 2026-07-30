@@ -437,11 +437,12 @@ stylistic cue. A 0.85 calibration threshold does not make a judge correct on
 new examples, and 48 examples do not establish performance on all maintenance
 decisions. A complete evidence graph can faithfully document a bad task.
 
-Nor have we shown a Fugue treatment win. The flagship MCP cohort has not run.
-This essay describes the contract that must hold before it does—and that
-contract is itself testable: if readers cannot reconstruct a decision from
-its four ledgers without private oral context, the result is not ready to
-publish.
+Nor have we shown a Fugue treatment win. The Claude Code–Fugue flagship has
+not run, and the separate MCP decision remains pending its source-isolated
+staging comparison. This essay describes the contract that must hold before
+either result can be interpreted—and that contract is itself testable: if
+readers cannot reconstruct a decision from its four ledgers without private
+oral context, the result is not ready to publish.
 
 ## Next: a smaller language for the same rigor
 
@@ -451,9 +452,9 @@ preview, approval. A research system becomes unusable when every noun
 requires a methodology seminar.
 
 **Fugue 1** shows the smaller operational language we settled on, and walks
-the same public flow from shell, Python, REST, MCP, and Aria. Rigor should
-produce a shared object that agents and humans can both inspect—not five
-control planes.
+the same canonical flow behind shell, Python, REST, and MCP. Aria is an
+optional read-only projection. Rigor should produce a shared object that
+agents and humans can both inspect—not five control planes.
 
 ## References
 

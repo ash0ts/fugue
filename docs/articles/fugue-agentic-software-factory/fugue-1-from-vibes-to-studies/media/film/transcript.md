@@ -26,7 +26,7 @@ The same coordinates must survive preview, approval, execution, and result.
 
 ## What the film does not claim
 
-The no-key replay proves installation and result shape, not Agent efficacy.
+The no-key replay proves installation and result shape, not live Agent or live MCP behavior.
 
 ## 01 — A compact comparison expands into 32 cells.
 
@@ -84,7 +84,7 @@ The no-key replay proves installation and result shape, not Agent efficacy.
 
 **Displayed values:** PREVIEW d1; APPROVED d1; EXECUTE d1; EDIT → d2; APPROVED d1 → EXECUTE d2
 
-## 05 — CLI, Python, REST, MCP, and Aria converge on one service.
+## 05 — CLI, Python, REST, MCP, and optional Aria share one service.
 
 **Time:** 00:50–01:02
 
@@ -118,7 +118,7 @@ The no-key replay proves installation and result shape, not Agent efficacy.
 
 **Visual relationship:** boundary
 
-**On-screen support:** It checks packaging, parsing, and result projection. Mechanism remains unavailable; no live Agent or Serverless runtime ran.
+**On-screen support:** It checks packaging, parsing, and result projection. Mechanism remains unavailable; no live Agent, live MCP server, or local Harbor cell ran.
 
 **Evidence status:** audited Fugue observation
 

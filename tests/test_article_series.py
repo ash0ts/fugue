@@ -181,16 +181,29 @@ def test_specialized_visuals_preserve_denominators_and_authority() -> None:
     }
     assert scenes[("FUGUE 2A", "candidate-lattice")]["type"] == "candidate_assembly"
     assert scenes[("FUGUE 2A", "harness-reversal")]["type"] == "interaction_plot"
-    assert scenes[("FUGUE 3", "staged-study")]["type"] == "staged_study"
-    assert sum(
-        stage["cells"]
-        for stage in scenes[("FUGUE 3", "staged-study")]["stages"]
-    ) == 80
-    assert scenes[("FUGUE 3", "judge-gate")]["type"] == "review_gate"
-    assert scenes[("FUGUE 4B", "attempt-lifecycle")]["type"] == "attempt_lifecycle"
-    assert scenes[("FUGUE 4A", "authority-lanes")]["forbidden"].startswith(
-        "FORBIDDEN:"
-    )
+    mcp_stages = scenes[("FUGUE 3", "staged-study")]
+    assert mcp_stages["type"] == "staged_study"
+    assert [stage["cells"] for stage in mcp_stages["stages"]] == [8, 32]
+    package_boundary = scenes[("FUGUE 3", "judge-gate")]
+    assert package_boundary["type"] == "boundary"
+    assert package_boundary["rule"] == "BEHAVIOR ≠ PACKAGE AUTHORITY"
+    flagship_lifecycle = scenes[("FUGUE 4B", "attempt-lifecycle")]
+    assert flagship_lifecycle["type"] == "attempt_lifecycle"
+    assert flagship_lifecycle["lifecycle"] == [
+        "PREPARE",
+        "ATTEST",
+        "EXECUTE",
+        "PUBLISH",
+        "CLEANUP",
+    ]
+    authority = scenes[("FUGUE 4A", "authority-lanes")]
+    assert authority["lanes"] == [
+        "CLAUDE CODE",
+        "HUMAN",
+        "FUGUE",
+        "LOCAL HARBOR",
+    ]
+    assert authority["forbidden"].startswith("FORBIDDEN:")
 
 
 def test_film_state_foreground_background_pairs_meet_wcag_aa() -> None:

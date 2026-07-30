@@ -1,6 +1,6 @@
 {
   "slug": "fugue-4b-trace-to-release-decision",
-  "title": "From a Trace to a Release Decision",
+  "title": "The Claude Code–Fugue Loop",
   "width": 1280,
   "height": 720,
   "duration": 110,
@@ -36,7 +36,7 @@
     "after_label": "Qualification checklist",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Treat the workflow as a qualification contract: prepared evidence and approval are real boundaries, while remote execution and the final memo remain required and unobserved."
+    "what_to_watch": "Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor."
   },
   "checkpoints": [
     {

@@ -10,7 +10,7 @@
     "after_label": "The maintainer memo",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Track exact revisions through manifest qualification, genuine evidence, the staged 80-cell design, judge calibration, and the still-blocked decision."
+    "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision."
   },
   "poster_scene": "staged-study",
   "reduced_motion_scene": "staged-study",
@@ -18,7 +18,7 @@
     "lock-the-two-mcp-candidates",
     "the-interface-an-agent-experiences",
     "genuine-evidence-deliberately-seeded",
-    "the-80-cell-sequence",
+    "the-staged-local-sequence",
     "judge-calibration-before-paid-work",
     "four-outcome-layers",
     "the-maintainer-memo"
@@ -38,21 +38,15 @@
     {
       "id": "exact-revisions",
       "scene": "exact-revisions",
-      "claim": "The comparison begins with exact MCP revisions.",
+      "claim": "The comparison waits for two final reviewed heads.",
       "support": [
-        "Baseline: 80252b3…",
-        "Candidate: a2bae72…"
+        "Baseline: reviewed main.",
+        "Candidate: final repaired staging after review."
       ],
       "kind": "preregistered design",
       "source": "article.md#lock-the-two-mcp-candidates",
       "visual_relationship": "revision_compare",
-      "displayed_values": [
-        "W&B MCP 0.3.7",
-        "80252b3aa23ae3c1fdde089ce2b7dfb106dafb38",
-        "W&B MCP 0.4",
-        "a2bae7271323ac43262ffb73454b0aff01ddc808",
-        "linux/amd64"
-      ],
+      "displayed_values": [],
       "caveat": "Prepared evidence and planned cells are not an observed release result."
     },
     {
@@ -72,60 +66,49 @@
     {
       "id": "prepared-evidence",
       "scene": "prepared-evidence",
-      "claim": "Genuine W&B objects seed the maintainer questions.",
+      "claim": "Immutable source evidence stays separate from Study output.",
       "support": [
-        "6 Runs, 24 conversations, 48 tool spans.",
-        "8 Dataset rows, 2 Evaluations, 16 prediction rows."
+        "A zero-model receipt must lock the source shape.",
+        "Agent traces and Evaluation rows write only to the result project."
       ],
       "kind": "preregistered design",
       "source": "article.md#genuine-evidence-deliberately-seeded",
       "visual_relationship": "evidence_graph",
-      "displayed_values": [
-        "6",
-        "24",
-        "48",
-        "8",
-        "2",
-        "16"
-      ],
+      "displayed_values": [],
       "caveat": "Prepared evidence and planned cells are not an observed release result."
     },
     {
       "id": "staged-study",
       "scene": "staged-study",
-      "claim": "Discovery precedes untouched primary and replication cohorts.",
+      "claim": "An 8-cell canary gates a separate 32-cell confirmation.",
       "support": [
-        "8 Claude + 8 W&B Inference discovery.",
-        "32 Claude primary + 32 W&B Inference replication."
+        "Claude Code and the locked route stay fixed.",
+        "The confirmation needs its own preview, approval, budget, and result."
       ],
       "kind": "preregistered design",
-      "source": "article.md#the-80-cell-sequence",
+      "source": "article.md#the-staged-local-sequence",
       "visual_relationship": "staged_study",
       "displayed_values": [
         "8",
         "32",
-        "80 PLANNED CELLS"
+        "40 MAXIMUM PLANNED CELLS"
       ],
       "caveat": "Prepared evidence and planned cells are not an observed release result."
     },
     {
       "id": "judge-gate",
       "scene": "judge-gate",
-      "claim": "Forty-eight double-reviewed cases must qualify the judge.",
+      "claim": "Behavioral evidence cannot issue package GO.",
       "support": [
-        "TPR and TNR must each reach at least 0.85.",
-        "Zero critical false passes are permitted."
+        "The Study supports a bounded local behavior summary.",
+        "Package release still needs independent checks and human sign-off."
       ],
       "kind": "preregistered design",
       "source": "article.md#judge-calibration-before-paid-work",
-      "visual_relationship": "review_gate",
+      "visual_relationship": "boundary",
       "displayed_values": [
-        "48",
-        "24 ACCEPTABLE",
-        "24 UNACCEPTABLE",
-        "TPR ≥ .85",
-        "TNR ≥ .85",
-        "0 CRITICAL FP"
+        "8-cell canary",
+        "32-cell confirmation"
       ],
       "caveat": "Prepared evidence and planned cells are not an observed release result."
     },
@@ -148,15 +131,13 @@
       "scene": "blocked-status",
       "claim": "Prepared evidence does not unlock a release recommendation.",
       "support": [
-        "Evidence, candidate, taskset, judge, preview, and runtime locks must all exist.",
-        "The 80 cells and reconciliation remain unobserved."
+        "Final candidates, source receipt, preview, and runtime locks must all exist.",
+        "No canary, confirmation, or package sign-off is reported."
       ],
       "kind": "pending result",
       "source": "article.md#the-maintainer-memo",
       "visual_relationship": "state_machine",
-      "displayed_values": [
-        "80 CELLS REQUIRED"
-      ],
+      "displayed_values": [],
       "caveat": "Required evidence is not yet observed."
     },
     {
@@ -165,7 +146,7 @@
       "claim": "An MCP release spans design, execution, evidence, and decision.",
       "support": [
         "The whole locked release is the treatment.",
-        "No individual 0.4 feature receives causal credit."
+        "No individual staging feature receives causal credit."
       ],
       "kind": "preregistered design",
       "source": "article.md#the-maintainer-memo",

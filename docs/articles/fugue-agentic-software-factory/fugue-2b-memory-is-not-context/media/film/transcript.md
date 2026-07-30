@@ -34,7 +34,7 @@ Mechanism evidence does not by itself prove that memory caused task success.
 
 **Visual relationship:** mechanism funnel
 
-**On-screen support:** 12 sources returned; 3 opened; 1 used. Across four attempts, 0 tasks passed.
+**On-screen support:** Illustration: 12 sources returned; 3 opened; 1 used. Across four illustrative arm cells, 0 tasks passed.
 
 **Evidence status:** illustrative example
 
@@ -54,7 +54,7 @@ Mechanism evidence does not by itself prove that memory caused task success.
 
 **Source:** `article.md#what-used-can-honestly-mean`
 
-**Displayed values:** task-07 / harness-H / attempt-2 / arm-D; 1/1; 0/1
+**Displayed values:** locked-task / claude-code / attempt-1 / combined; 1/1; 0/1
 
 ## 03 — The row supports an audit statement, not a causal story.
 
@@ -84,19 +84,19 @@ Mechanism evidence does not by itself prove that memory caused task success.
 
 **Displayed values:** none
 
-## 05 — A vector failure cannot silently become vector success.
+## 05 — A dense failure blocks instead of silently becoming BM25.
 
 **Time:** 00:54–01:07
 
 **Visual relationship:** state machine
 
-**On-screen support:** Fallback is a structured failure or a distinct candidate. The explicit BM25 arm keeps its own identity.
+**On-screen support:** Both memory-bearing arms require the prepared dense artifact. Missing, corrupt, or unqueryable dense state blocks admission.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#failure-and-fallback-semantics`
 
-**Displayed values:** BM25 ARM; VECTOR FAILED → SILENT BM25 → VECTOR SUCCESS
+**Displayed values:** DENSE FAILED → SILENT BM25 → DENSE SUCCESS
 
 ## 06 — More retrieved text can displace instructions or task evidence.
 

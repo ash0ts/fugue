@@ -1,0 +1,125 @@
+{
+  "caveats": [
+    "This is a planned lane with zero published cells; it reports no winner, lift, mechanism success, or release decision.",
+    "The cohort labels are public plan boundaries, not frozen task IDs. Exact task, source, route, runtime, Skill, and integration locks remain pending.",
+    "Discovery and private holdout require separate approvals, and only a discovery-selected arm may enter the holdout.",
+    "The active execution backend is local Harbor; no Serverless behavior is claimed."
+  ],
+  "cells": [],
+  "content_sha256": "f6d83b135b7597bb378ad8cc50f3155c48303f6e6e3eeaeb1550092c65432fca",
+  "decision_value": 0,
+  "evidence_tier": "active",
+  "findings": [],
+  "groups": [],
+  "hypothesis": "At least one mechanism-backed intervention will produce a paired deterministic discovery gain without a critical private-holdout regression.",
+  "id": "claude-loop-skill-mcp-v1",
+  "links": {
+    "evaluations": [],
+    "project": "https://wandb.ai/wandb/fugue-claude-loop-engineering-v1/weave"
+  },
+  "matrix": {
+    "attempts": 1,
+    "cohorts": [
+      {
+        "expected_predictions": 8,
+        "harnesses": [
+          "claude-code"
+        ],
+        "id": "discovery",
+        "label": "Reviewed failure discovery",
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "tasks": [
+          "reviewed-discovery-cohort"
+        ],
+        "treatments": [
+          "production",
+          "skill-only",
+          "mcp-only",
+          "combined"
+        ]
+      },
+      {
+        "expected_predictions": 8,
+        "harnesses": [
+          "claude-code"
+        ],
+        "id": "private-holdout",
+        "label": "Separately approved private holdout",
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "tasks": [
+          "private-holdout-cohort"
+        ],
+        "treatments": [
+          "production",
+          "skill-only",
+          "mcp-only",
+          "combined"
+        ]
+      }
+    ],
+    "expected_predictions": 16,
+    "experiment_id": "claude-loop-skill-mcp",
+    "harnesses": [
+      "claude-code"
+    ],
+    "models": [
+      "anthropic/claude-sonnet-5"
+    ],
+    "tasks": [
+      "reviewed-discovery-cohort",
+      "private-holdout-cohort"
+    ],
+    "treatments": [
+      "production",
+      "skill-only",
+      "mcp-only",
+      "combined"
+    ],
+    "workload_id": "discovery-and-holdout"
+  },
+  "metrics": {
+    "agent_links": 0,
+    "completion_rate": 0.0,
+    "expected_predictions": 16,
+    "harness_errors": 0,
+    "input_tokens": null,
+    "mean_cost_usd": null,
+    "mean_mrr": null,
+    "mean_recall_at_10": null,
+    "measured_cost_predictions": 0,
+    "measured_latency_predictions": 0,
+    "measured_usage_predictions": 0,
+    "median_turns": null,
+    "median_wall_time_sec": null,
+    "output_tokens": null,
+    "paired_bootstrap": null,
+    "pass_rate": null,
+    "passed_predictions": 0,
+    "predictions": 0,
+    "provider_errors": 0,
+    "recoverable_errors": 0,
+    "refusals": 0,
+    "scored_predictions": 0,
+    "tool_calls": null,
+    "total_cost_usd": null
+  },
+  "provenance": {
+    "dataset_digest": "pending",
+    "dataset_id": "pending-reviewed-discovery-and-private-holdout",
+    "run_ids": [],
+    "snapshot_digest": "pending",
+    "source_commit": "pending",
+    "source_url": "https://github.com/ash0ts/fugue"
+  },
+  "question": "Can a reviewed Skill change, MCP change, or their combination repair a locked Claude Code evidence failure and retain the gain on independent private tasks?",
+  "schema_version": 1,
+  "status": "planned_unrun",
+  "summary": "A planned local-Harbor Study that compares four reviewed Skill and MCP arms on two discovery failures, locks one intervention, and then compares it with production on four private holdout tasks.",
+  "task_selection": "Two reviewed failures form the discovery cohort; four independent private tasks form the holdout. Exact task identities and digests are not public until a preview is frozen and separately approved.",
+  "title": "Claude Code Skill \u00d7 MCP loop",
+  "why_it_matters": "The flagship Fugue loop should demonstrate that Claude Code can engineer a bounded Agent improvement while Fugue keeps approval, execution, evaluation, selection, and evidence authority outside the Agent."
+}

@@ -1,0 +1,44 @@
+schema_version: 1
+id: real-harness-study-v1
+title: Real harness behavior canary
+summary: A planned eight-cell local-Harbor comparison of Hermes, OpenClaw, Claude Code, and Codex on two locked SWE-bench Verified tasks with GLM-5.2 fixed.
+question: How does the Agent harness change task outcome and execution behavior when model route, tasks, context, runtime policy, and attempt count are held fixed?
+hypothesis: The four harnesses will produce task-specific differences in outcome and execution trajectory even under one fixed model route.
+why_it_matters: Harness behavior must be measured as an experimental factor before model or memory claims can be interpreted, but a two-task canary cannot support a universal ranking.
+task_selection: The planned canary uses two immutable SWE-bench Verified cases already assigned to the dedicated harness lane.
+evidence_tier: active
+decision_value: 0
+status: planned_unrun
+matrix:
+  experiment_id: real-harness-study
+  workload_id: canary
+  expected_predictions: 8
+  attempts: 1
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  treatments: [baseline]
+  tasks: [sympy__sympy-13031, astropy__astropy-13033]
+  cohorts:
+    - id: canary
+      label: Two-task four-harness canary
+      models: [wandb/zai-org/GLM-5.2]
+      harnesses: [hermes, openclaw, claude-code, codex]
+      treatments: [baseline]
+      tasks: [sympy__sympy-13031, astropy__astropy-13033]
+      expected_predictions: 8
+provenance:
+  source_commit: pending
+  source_url: https://github.com/ash0ts/fugue
+  dataset_id: real-study-lanes-harness-canary-v1
+  dataset_digest: pending
+  snapshot_digest: pending
+  run_ids: []
+links:
+  project: https://wandb.ai/wandb/fugue-harness-comparison-v1/weave
+  evaluations: []
+findings: []
+caveats:
+  - This is a planned lane with zero published cells; it reports no harness result or ranking.
+  - Source, dataset, route, runtime, and preview locks remain pending.
+  - Any eventual result is limited to the two declared tasks and cannot establish a universal harness ordering.
+  - The active execution backend is local Harbor; no Serverless behavior is claimed.

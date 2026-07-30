@@ -25,9 +25,9 @@ pending study contains no implied result.
 | Scene | Read time | Takeaway | Evidence | Visual relationship |
 | --- | ---: | --- | --- | --- |
 | candidate-lattice | 10s | One model can produce several behavioral candidates. | article.md#the-candidate-lattice | candidate assembly |
-| paired-assignment | 13s | Each harness candidate receives the same locked task coordinates. | article.md#assignment-ordering-and-attempts | matrix |
-| balanced-order | 14s | Counterbalance execution order before observing outcomes. | article.md#assignment-ordering-and-attempts | timeline |
-| estimand | 13s | Estimate paired candidate differences under locked conditions. | article.md#the-bounded-question | boundary |
+| paired-assignment | 13s | Four harnesses receive the same two locked task coordinates. | article.md#assignment-ordering-and-attempts | matrix |
+| balanced-order | 14s | Lock and record one deterministic serial expansion. | article.md#assignment-ordering-and-attempts | timeline |
+| estimand | 13s | Compare aligned candidate rows under locked conditions. | article.md#the-bounded-question | boundary |
 | harness-reversal | 12s | A reversal is a result, not a reason to pool. | article.md#reversals-and-the-no-pooling-rule | interaction plot |
 | invalid-claims | 12s | Protocol differences can prevent a pure harness claim. | article.md#threats-we-will-check-before-interpretation | dependency stack |
 | valid-null | 12s | No difference and harness reversal are both publishable outcomes. | article.md#valid-results-including-nulls | state machine |

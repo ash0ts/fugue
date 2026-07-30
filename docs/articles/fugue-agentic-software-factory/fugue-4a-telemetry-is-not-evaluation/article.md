@@ -5,8 +5,8 @@
 > teams. **Status:** concept. **Reading time:** about 10 minutes.
 
 This article defines both loops, every authority, and the immutable state
-transitions locally—you do not need to know Aria, Fugue, Weave, or Study
-Console before reading.
+transitions locally—you do not need to know Claude Code, Aria, Fugue, Weave,
+or Study Console before reading.
 
 The failure that produced it was a loop diagram with no authority boundary.
 The same researcher could observe a weak result, rewrite the comparison,
@@ -102,14 +102,14 @@ Each transition creates or consumes a durable object.
 
 | Stage       | Object                                       | Authority                |
 | ----------- | -------------------------------------------- | ------------------------ |
-| Observe     | Evidence references and Research note        | Researcher/Aria          |
-| Hypothesize | Bounded question and expected mechanism      | Researcher/Aria          |
+| Observe     | Evidence references and Research note        | Researcher or loop engineer |
+| Hypothesize | Bounded question and expected mechanism      | Researcher or loop engineer |
 | Preregister | Registered comparison spec and Study brief   | Repository review        |
 | Preview     | Pure expanded plan and digest                | Fugue comparison service |
 | Approve     | Digest-bound cell/cost grant                 | Human operator           |
-| Execute     | Immutable attempts and lifecycle events      | Harbor + W&B Serverless  |
+| Execute     | Immutable attempts and lifecycle events      | Local Harbor             |
 | Evaluate    | Deterministic checks and calibrated judgment | External scorers         |
-| Interpret   | Sourced Result and proposed follow-up        | Researcher/Aria          |
+| Interpret   | Sourced Result and proposed follow-up        | Human maintainer         |
 
 The cycle is deliberately not closed by an automatic “accept” arrow. A
 release or code change still crosses the repository’s review and deployment
@@ -125,17 +125,18 @@ measurement, never an authority that approves its own optimization target.
 
 ## The division of labor
 
-The flagship uses five components with distinct jobs.
+The flagship uses five roles with distinct jobs.
 
-### Aria observes and proposes
+### Aria reads and explains
 
-Aria reads safe Research context, registered comparison metadata, Study
-state, and evidence-linked Results. It can identify a bounded pattern,
-explain a comparison, request approval, start a digest that is already
-approved, watch events, and summarize the result.
+Aria is an optional read-only presentation shell. It can read safe Research
+context, registered comparison metadata, Study state, and evidence-linked
+Results, then explain what the immutable records support.
 
-It cannot access private labels, issue approval, change accepted candidates
-or tasks, alter execution policy, retry attempts, or launch a follow-up.
+It cannot access private labels, request or issue approval, start execution,
+change accepted candidates or tasks, alter execution policy, retry attempts,
+select an intervention, or launch a follow-up. Removing Aria from the
+flagship must not change candidate or execution semantics.
 
 ### Fugue locks and reconciles
 
@@ -148,15 +149,19 @@ or declare a winner.
 
 The human sees the exact candidates, fixed controls, cell matrix, judge,
 mechanism measures, runtime policy, cost cap, and preview digest. Approval
-authorizes that object until a deadline. It does not authorize “whatever
-Aria needs next.”
+authorizes that object until a deadline. It does not authorize “whatever the
+loop needs next.”
 
-### Harbor and W&B Serverless execute
+### Local Harbor executes
 
-Harbor renders the native Agent job. W&B Serverless provides the remote,
-isolated lifecycle. The runtime cannot install candidate code during the
-attempt. Named W&B secrets enter through the secret boundary. Every cell
-must publish evidence and prove deletion.
+Harbor renders and executes the prepared native Agent job through local
+Docker. The runtime cannot install candidate code during the attempt. Every
+cell must publish a run-scoped policy receipt, preserve the private-label
+boundary, clean up, and prove zero remaining run-scoped containers.
+
+This supports the declared local execution policy. It does not certify
+Serverless isolation; any future remote runtime remains a separate
+qualification.
 
 ### Weave and Study Console make state inspectable
 
@@ -169,9 +174,9 @@ approval digest or lifecycle state, the projection is wrong.
 
 ```mermaid
 flowchart LR
-    A["Aria<br/>observe/propose"] --> F["Fugue<br/>lock/admit/reconcile"]
+    A["Optional Aria<br/>read-only projection"] --> F["Fugue<br/>lock/admit/reconcile"]
     H["Human<br/>approve exact digest"] --> F
-    F --> S["Harbor + W&B Serverless<br/>execute"]
+    F --> S["Local Harbor<br/>execute prepared cells"]
     S --> W["Weave<br/>native evidence"]
     F --> E["Study event store"]
     W --> F
@@ -192,16 +197,15 @@ tool’s usage may mean its description got worse, another tool got better, or
 the task mix changed. A high judge score may reflect better answers or a new
 rubric.
 
-So the loop treats telemetry as discovery evidence. Aria can say:
+So the loop treats telemetry as discovery evidence. A researcher can say:
 
-> In the locked project, reviewed traces show broad reads and unsupported
-> completeness claims around partial Evaluation data. I propose comparing
-> the registered 0.3.7 and 0.4 MCP revisions on the frozen maintenance
-> taskset.
+> In the locked failure, reviewed traces show that the current source was
+> returned but not opened. I propose comparing the four registered Skill/MCP
+> arms on the frozen discovery tasks.
 
 It may not say:
 
-> 0.4 fixed the issue.
+> The candidate fixed the issue.
 
 The second sentence requires the Study.
 
@@ -241,10 +245,10 @@ Agent cells.
 
 ## One service behind every interface
 
-Aria reaches Fugue through bounded MCP operations. An operator may use the
-CLI. Study Console uses typed HTTP and an event stream. Python clients
-support orchestration. All of them call the same comparison and Research
-services, which prevents the agent-facing path from acquiring an accidental
+An optional Aria shell reaches only the safe read surface. An operator may
+use the CLI. Study Console uses typed HTTP and an event stream. Python clients
+support orchestration. All of them consume the same comparison and Research
+services, which prevents a presentation path from acquiring an accidental
 capability the human preview does not show.
 
 The registered-comparison allowlist binds a stable ID to a
@@ -253,8 +257,8 @@ submit an arbitrary filesystem path. The public preview omits private-label
 content and digests that would reveal it, while keeping the accepted
 comparison identity.
 
-Approval issuance is absent from REST and MCP. A trusted operator command is
-the authority:
+Approval issuance and execution start are absent from the read-only shell. A
+trusted operator command is the authority:
 
 ```bash
 uv run fugue research approve PREVIEW_DIGEST \
@@ -311,7 +315,7 @@ rollback:
     - critical_evidence_honesty_regression
     - duplicate_execution
     - credential_or_private_label_exposure
-    - unreconciled_serverless_lifecycle
+    - unreconciled_harbor_policy_or_cleanup
   code_boundary: "<parent tree>"
   candidate_boundary: "<baseline fingerprint>"
   runtime_boundary: "<prior image digest>"
@@ -335,7 +339,7 @@ that target authority and recovery:
 - make the runtime image unavailable;
 - interrupt an Agent after its Weave prediction opens;
 - withhold a required Evaluation record;
-- fail Sandbox deletion and verify the result remains ineligible;
+- fail local Harbor cleanup and verify the result remains ineligible;
 - propose a follow-up from an incomplete parent and verify it stops before
   approval.
 
@@ -345,10 +349,10 @@ evidence; a compensating retry with a new attempt identity may be allowed in
 another Study, but it cannot overwrite the interrupted attempt.
 
 The drills also clarify who owns remediation. Fugue can refuse
-interpretation and reconcile known state. The Sandbox operator may need to
-clean up an orphan. The human may need to issue a new approval. Aria can
-describe the blocker. None of them may quietly impersonate another authority
-to make the loop appear self-healing.
+interpretation and reconcile known state. The local runtime operator may need
+to clean up an orphan. The human may need to issue a new approval. Aria can
+describe the blocker from the safe projection. None of them may quietly
+impersonate another authority to make the loop appear self-healing.
 
 ## Diversity is an engineering asset
 
@@ -382,16 +386,16 @@ observation:
   limitations: "Two reviewed traces; discovery only."
 
 hypothesis:
-  question: "Does exact MCP 0.4 improve bounded evidence investigation?"
+  question: "Does a reviewed Skill/MCP intervention improve source use?"
   expected_mechanism:
-    - "fewer broad reads"
-    - "more structured partial-evidence handling"
+    - "current source opened before a supported claim"
+    - "bounded MCP reads"
 
 proposal:
-  registered_comparison: "wandb-mcp-maintenance-primary-serverless-v1"
+  registered_comparison: "claude-loop-skill-mcp-v1"
   expected_spec_digest: "<sha256>"
-  requested_cells: 32
-  requested_max_usd: 80
+  requested_cells: 8
+  requested_max_usd: "<reviewed cap>"
 
 authority:
   preview_digest: "<generated by Fugue>"
@@ -403,9 +407,11 @@ stop_condition:
   - "incomplete required reconciliation"
 ```
 
-Aria may create the observation and proposal. Fugue supplies the preview
-digest. Only the operator fills approval. No free-form agent instruction can
-override the stop conditions.
+Claude Code or a human researcher may create the observation and candidate
+source. Fugue supplies the preview digest. Only the operator fills approval.
+Aria, if connected, may read the resulting safe projection but does not write
+this handoff. No free-form Agent instruction can override the stop
+conditions.
 
 ## Accept, reject, or learn?
 
@@ -454,10 +460,11 @@ Authority separation does not make the human correct. A human can approve a
 bad design or ignore a limitation. Append-only events can faithfully
 preserve poor evidence. External judges can share the candidate’s biases.
 
-W&B Serverless isolation does not prove a runtime image contains the
-intended assets; the runtime lock and probes do that. Weave traces do not
-prove source use; the evidence relation and evaluation do that. Study
-Console does not create evidence by rendering a card.
+Local Harbor execution does not prove a runtime contains the intended assets;
+the runtime lock and probes do that. A local receipt also does not prove
+Serverless isolation. Weave traces do not prove source use; the evidence
+relation and evaluation do that. Study Console does not create evidence by
+rendering a card.
 
 Nor does this architecture establish that an autonomous outer loop improves
 software. It describes a bounded loop in which proposals can be evaluated
@@ -476,10 +483,12 @@ An architecture diagram can hide every inconvenient detail: placeholder
 evidence, replayed attempts, a button that does not bind to the digest, a
 “remote” cell that never leaves the laptop.
 
-In **Fugue 4B**, we turn the governed cycle into a demo runbook. It begins
-with genuine W&B and Weave objects, crosses a visible human approval, runs
-actual W&B Serverless cells, opens discordant traces, and ends with a
-limited maintainer memo. If any link is missing, the demo says so.
+In **Fugue 4B**, we turn the governed cycle into a demo runbook. Claude Code
+diagnoses a reviewed failure and authors reviewed Skill/MCP candidates;
+Fugue crosses a visible human approval, runs 8-cell discovery and 8-cell
+holdout through local Harbor, opens aligned evidence, and qualifies or
+rejects the source tree. Aria remains an optional read-only shell. If any
+link is missing, the demo says so.
 
 ## References
 

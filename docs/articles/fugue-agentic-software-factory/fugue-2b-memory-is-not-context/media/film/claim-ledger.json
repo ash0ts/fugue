@@ -40,8 +40,8 @@
       "scene": "mechanism-funnel",
       "claim": "Most returned evidence never becomes used evidence.",
       "support": [
-        "12 sources returned; 3 opened; 1 used.",
-        "Across four attempts, 0 tasks passed."
+        "Illustration: 12 sources returned; 3 opened; 1 used.",
+        "Across four illustrative arm cells, 0 tasks passed."
       ],
       "kind": "illustrative example",
       "source": "article.md#primary-and-secondary-outcomes",
@@ -67,7 +67,7 @@
       "source": "article.md#what-used-can-honestly-mean",
       "visual_relationship": "paired_row",
       "displayed_values": [
-        "task-07 / harness-H / attempt-2 / arm-D",
+        "locked-task / claude-code / attempt-1 / combined",
         "1/1",
         "0/1"
       ],
@@ -104,17 +104,16 @@
     {
       "id": "fallback-detection",
       "scene": "fallback-detection",
-      "claim": "A vector failure cannot silently become vector success.",
+      "claim": "A dense failure blocks instead of silently becoming BM25.",
       "support": [
-        "Fallback is a structured failure or a distinct candidate.",
-        "The explicit BM25 arm keeps its own identity."
+        "Both memory-bearing arms require the prepared dense artifact.",
+        "Missing, corrupt, or unqueryable dense state blocks admission."
       ],
       "kind": "preregistered design",
       "source": "article.md#failure-and-fallback-semantics",
       "visual_relationship": "state_machine",
       "displayed_values": [
-        "BM25 ARM",
-        "VECTOR FAILED → SILENT BM25 → VECTOR SUCCESS"
+        "DENSE FAILED → SILENT BM25 → DENSE SUCCESS"
       ],
       "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
     },

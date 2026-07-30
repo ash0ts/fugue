@@ -1,676 +1,585 @@
-# Fugue 4B — From a Trace to a Release Decision: The Real Aria–Fugue Loop
+# Fugue 4B — From a Trace to a Release Decision: The Claude Code–Fugue Loop
 
 > **Fugue: Evals for the Agentic Software Factory · Part 4B**  
-> A standalone qualification runbook for maintainers evaluating a real agent
-> workflow. **Status:** draft preregistration; no result and remote
-> qualification not yet observed. **Reading time:** about 12 minutes.
+> A standalone qualification runbook for maintainers evaluating a real Agent
+> improvement loop. **Status:** draft preregistration; no result, accepted
+> preview, or qualified flagship run exists. **Reading time:** about
+> 11 minutes.
 
 All products, evidence objects, approval boundaries, and presentation gates
-are introduced here—the runbook is useful without the architectural essay
+are introduced here. The runbook is useful without the architecture essay
 that precedes it.
 
-The failure that shaped it was a demo that never risked discovering
-anything. The tasks were fixtures, the outcome was known, execution was
-local, and the approval gesture could not change what ran. It was reliable on
-stage because we had removed the boundaries the product claimed to govern.
+The failure that shaped it was a demo that never risked discovering anything.
+The tasks were fixtures, the outcome was known, and the approval gesture could
+not change what ran. It was reliable on stage because we had removed the
+boundaries the product claimed to govern.
 
-The claim this runbook holds itself to:
+The current claim is narrower and more useful:
 
-> The flagship is credible only if it begins with genuine evidence, requires
-> human approval, performs real remote work, and ends in an evidence-linked
-> bounded decision.
+> The flagship is Claude Code engineering a reviewed Agent change while Fugue
+> freezes, approves, runs, and evaluates the comparison through local Harbor.
 
-The demo fails that claim if its evidence references do not open, if the
-approved digest differs from execution, if Serverless cells are replayed, if
-attempts do not reconcile to Weave Evaluations, or if the final memo claims
-more than the locked Study supports.
+The flagship fails that claim if the starting failure is synthetic, if Claude
+Code can approve or grade its own change, if the accepted digest differs from
+execution, if the selected intervention changes before holdout, if local
+Harbor receipts do not reconcile, or if the final memo claims more than the
+locked Study supports.
 
-To be explicit about status: this is a qualification contract, not a record
-of a completed demo. No accepted preview, completed 80-cell Study, Serverless
-receipt set, or final memo is claimed here. The flagship is not presented
-until an actionable final-head result and two clean-clone rehearsals exist. A
-null or incomplete Study is publishable—it is never silently replaced with a
-victorious demo.
+This is a qualification contract, not a record of a completed demo. No Study
+result, treatment winner, package decision, merged source tree, or Serverless
+run is claimed here. A null, incomplete, or no-winner result is valid and
+ends the loop without a staged victory.
 
 ## Scope and terms
 
-**Aria** is the researcher that inspects evidence and proposes a bounded
-question. **Fugue** freezes the comparison, approval digest, execution, and
-result contract. **W&B Serverless Sandboxes** run isolated cells. **Weave**
-stores native calls and Evaluations. **Study Console** projects safe Study
-state. A **qualification** is evidence that these boundaries operated on one
-exact final tree; a replay is only an installation smoke test.
+**Claude Code** is both the loop engineer that diagnoses a reviewed failure
+and the fixed Agent harness used in the comparison cells. **Fugue** owns the
+immutable plan, human approval, candidate and runtime locks, local
+Docker/Harbor execution, host-private truth, evaluation, evidence
+reconciliation, and selection boundary. **Weave** stores native calls and
+Evaluations. **Study Console** projects safe Study state.
 
-The runbook demonstrates governance and evidence flow. It cannot manufacture
-an actionable MCP result, and it must be postponed when the completed Study
-is null, incomplete, or unreconciled.
+**Aria is optional.** It may be connected as a read-only presentation shell
+for safe evidence and Study projections. It is not a runtime dependency, a
+candidate, the cell harness, an approver, an executor, or evidence that Aria
+itself improved.
 
-Object contracts matter here because the qualification must open native
-evidence rather than screenshots: W&B Runs carry training or application
-state [@wandb-runs], Weave Calls form trace trees [@weave-tracing], Datasets
-version examples [@weave-datasets], and Evaluations connect predictions to
-scorers [@weave-evaluations]. W&B Serverless is the required remote execution
-mechanism [@wandb-sandboxes], with named secrets as the only credential path
-into a Sandbox [@wandb-secrets]. Availability and receipts remain unobserved
-until the final run.
+The flagship and adjacent Studies have dedicated planned W&B/Weave projects:
+
+| Lane | Planned project | Claim boundary |
+| --- | --- | --- |
+| Claude Code loop engineering | `wandb/fugue-claude-loop-engineering-v1` | Skill/MCP intervention under fixed Claude Code and local Harbor |
+| Harness behavior | `wandb/fugue-harness-comparison-v1` | Task-specific harness behavior under one fixed model route |
+| Repository memory | `wandb/fugue-memory-loop-engineering-v1` | Dense retrieval and evidence-use policy under fixed Claude Code |
+| MCP release behavior | `wandb/fugue-mcp-release-qualification-v1` | Separate source-isolated `main` versus final-staging comparison |
+
+These project names are destinations in planned contracts, not evidence that
+the Studies ran. No lane writes result rows into another lane’s project.
+
+The current provider and V3 evidence implementation are reviewable in Fugue
+draft pull requests #48 and #49. [@fugue-provider-draft]
+[@fugue-evidence-v3-draft] Those pull requests establish source availability
+for review, not an accepted preview, prepared runtime, launched cell, selected
+intervention, or qualified tree.
 
 ## What the audience should believe
 
 After qualification—not at the time of this draft—an unfamiliar engineer
-must be able to support five narrow statements:
+must be able to support six narrow statements:
 
-1. The starting evidence consists of genuine, inspectable W&B Runs and Weave
-   objects, not screenshots or local JSON pretending to be hosted data.
-2. Aria identified a bounded maintenance problem and selected a registered
-   comparison; it did not invent a hidden task or edit private labels.
-3. A human approved an immutable preview with explicit candidates, cells,
-   runtime, judge, and cost.
-4. Harbor executed actual cells in W&B Serverless Sandboxes whose runtime,
-   evidence publication, deletion, and zero-orphan state were attested.
-5. The final release recommendation links aligned evidence, separates
-   mechanism from outcome, and names its limitations.
+1. The loop begins with one immutable, human-reviewed failure and resolved
+   native evidence.
+2. Claude Code proposes source, Skill, or MCP changes, but cannot approve,
+   lock, select, or merge them.
+3. Fugue expands an exact four-arm discovery, and a human approves its digest
+   and cap.
+4. Local Harbor executes prepared Claude Code cells with private truth kept
+   outside the Agent boundary.
+5. A treatment-selection lock is written before anyone opens the independent
+   holdout.
+6. The final qualified tree links aligned outcomes, mechanism evidence,
+   native Agent/Evaluation evidence, and local runtime cleanup.
 
-The audience should **not** leave believing that 0.4 is universally better,
-that one MCP feature caused an effect, that the judge is a maintainer, or
-that eight live cells reproduce the full 80-cell estimate.
+The audience should not leave believing that one MCP feature caused an
+effect, that local Harbor proves remote isolation, that a no-key replay is
+live Agent evidence, that the winner generalizes beyond the locked tasks, or
+that the optional Aria shell was improved.
 
 ## The story begins before the stage
 
-A useful live demo is the last step of a real Study, not the first. Before
-any presentation, the qualification contract requires eight Claude Code
-discovery cells, eight OpenClaw + W&B Inference discovery cells, 32 untouched
-Claude Code primary cells, and 32 OpenClaw + W&B Inference replication cells.
-The team inspects aligned discordant pairs, reconciles every required object,
-and freezes the full result. Only then may Aria propose an eight-cell
-follow-up selected from that completed evidence:
+The flagship is one governed sequence:
 
 ```text
-2 reviewed tasks × 2 MCP revisions × 2 native harness routes × 1 attempt
-= 8 live cells
+immutable failed trace
+→ Claude Code diagnosis
+→ human-reviewed Skill/MCP candidates
+→ exact locks
+→ 8-cell discovery
+→ treatment-selection lock
+→ 8-cell private holdout
+→ qualified source tree
 ```
 
-The follow-up receives its own tasks, spec, preview digest, approval, Study
-identity, and $20 maximum. It does not retroactively become another attempt
-in the 80-cell Study.
+Discovery compares four exact arms on two public tasks:
+
+```text
+2 tasks × 4 Skill/MCP arms × 1 Claude Code harness × 1 attempt = 8 cells
+```
+
+The arms are production Skill + current MCP, patched Skill + current MCP,
+production Skill + repaired MCP, and patched Skill + repaired MCP. Only Skill
+and MCP identities vary. Model, Claude Code harness, prompts outside the
+reviewed Skill, tasks, budgets, local Harbor policy, and attempt count stay
+fixed.
+
+After discovery reconciles, a saved analysis may write an immutable selection
+lock. Only then does a separately approved holdout compare production with
+the locked winner:
+
+```text
+4 private holdout tasks × 2 candidates × 1 Claude Code harness × 1 attempt
+= 8 cells
+```
 
 ```mermaid
 flowchart LR
-    SEED["Prepared hosted<br/>seed evidence"] --> FULL["Required: 80-cell<br/>qualification"]
-    FULL --> MEMO["Required: bounded<br/>maintainer memo"]
-    MEMO --> PROP["Required: frozen 8-cell<br/>follow-up preview"]
-    PROP --> LIVE["Required: human<br/>approval + remote run"]
-    LIVE --> UPDATE["Required: bounded<br/>interpretation"]
+    FAIL["Reviewed immutable<br/>failure"] --> EDIT["Claude Code authors<br/>reviewed candidates"]
+    EDIT --> DISC["8-cell local<br/>discovery"]
+    DISC --> LOCK{"Eligible winner<br/>and selection lock?"}
+    LOCK -->|no| STOP["Stop with null,<br/>blocker, or no winner"]
+    LOCK -->|yes| HOLD["8-cell private<br/>holdout"]
+    HOLD --> TREE["Qualified source<br/>tree or rejection"]
 ```
 
-If the full Study is null or non-discriminating, we publish the null and
-postpone the flagship. We may write a new, harder preregistration. We do not
-select two convenient rows and call them a product result.
+Discovery and holdout are separate Studies with separate previews, approvals,
+caps, run identities, and results. The holdout is not an extra attempt in
+discovery, and a late intervention cannot enter it.
 
 ## The evidence scene
 
-The dedicated project is:
+The flagship project is planned as:
 
 ```text
-wandb/fugue-mcp-release-qualification-v1
+wandb/fugue-claude-loop-engineering-v1
 ```
 
-The presenter opens, live: one of the six W&B Runs with configuration,
-history, summary, and evidence artifact; one Weave Agent conversation with
-nested tool spans; the versioned eight-row Dataset; both aligned Evaluations
-with selected prediction rows; and the locked latency anomaly and
-incomplete-evidence case.
+The opening artifact is not a result card. It is one reviewed failed baseline
+attempt with a stable identity and resolved links to its Evaluation root,
+prediction-and-score Call, prediction Call, native Agent root, and Dataset.
+W&B Runs provide versioned execution records [@wandb-runs]; Weave Calls form
+the native trace tree [@weave-tracing]; the Dataset binds examples
+[@weave-datasets]; and the Evaluation links predictions and scorers
+[@weave-evaluations].
 
-The evidence lock supplies immutable references and content digests—the
-presenter does not browse “latest” and hope the same objects appear. The
-seed receipt identifies which objects were deliberately prepared, and the
-narration is precise:
+The failure lock contains public evidence identity, candidate and runtime
+identity, the exact MCP revision and lock, and the reviewed source relation.
+It excludes answers, scores, expected values, and private labels.
 
-> These are genuine hosted objects created to model a non-sensitive
-> maintenance situation. They are the evidence the Agents inspect. They are
-> not results produced by the comparison.
+The narration is precise:
 
-That sentence preserves realism without pretending the fixture is an organic
-customer incident.
+> This failed attempt is the reviewed source of the engineering question. It
+> is not proof that the proposed change fixes it.
+
+That sentence keeps telemetry in its proper place.
 
 ## The useful question for Aria
 
-We do not ask, “Which MCP is better?” That invites a broad answer assembled
-from names and priors. We ask:
+Aria is not required to ask the question. A human or any read-only Research
+client can inspect the same safe projection:
 
-> In the reviewed traces and Evaluations for this locked project, what
-> bounded failure pattern is supported strongly enough to qualify a release
-> against it? Cite what you opened, distinguish missing from negative
-> evidence, and stop after proposing one registered comparison.
+> Which reviewed failure and mechanism evidence justify this registered
+> comparison, and which claims remain unavailable before discovery and
+> holdout?
 
-Aria should identify a pattern such as unsupported completeness around
-partial Evaluation coverage, broad reads that obscure a latency/cost anomaly,
-or weak reconciliation of aligned records—with direct evidence references and
-limitations.
+If an Aria presentation shell is connected, it may explain the failure lock,
+candidate labels, fixed controls, preview coordinates, Study state, and safe
+result references. It may not author hidden tasks, read private truth, request
+or issue approval, start execution, select the winner, mutate the holdout, or
+write the final release decision.
 
-The operator then asks Aria to explain the comparison it selected: exact
-revisions, fixed conditions, task and cell counts, deterministic gate, judge
-calibration, mechanism measures, Serverless policy, and maximum spend—and to
-hold off requesting approval if any readiness gate is missing. That prompt
-makes the governance legible. It also gives the system a chance to refuse.
+The shell is therefore a navigation convenience, not part of the flagship
+estimand.
 
 ## The approval card
 
-The approval card is not a “Run experiment” button. It is a review of one
-digest.
+The approval card is a review of one digest, not a generic “Run experiment”
+button.
 
-It displays the registered comparison ID and spec digest; baseline revision
-`80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`; candidate revision
-`a2bae7271323ac43262ffb73454b0aff01ddc808`; exact model routes and native
-harnesses; task, private-label, evidence, judge, MCP, and runtime-lock
-digests; the declared treatment and fixed dimensions; all eight cell
-coordinates; deterministic and maintainer-judge gates; mechanism measures;
-the W&B Serverless resource and deletion policy; hard $20 and eight-cell
-caps; and the expiration and approval issuer.
+For discovery it displays the registered experiment and preset, exact source
+tree, model and Claude Code runtime, four candidate digests, two task and
+private-evaluator digests, eight coordinates, local Harbor policy, required
+evidence gates, maximum cells and spend, expiration, and approval issuer.
 
 ```mermaid
 flowchart TD
-    P["Preview digest"] --> CARD["Human approval card"]
+    P["Pure preview digest"] --> CARD["Human approval card"]
     CARD -->|reject| STOP["No execution"]
     CARD -->|approve exact digest| LEDGER["Approval ledger"]
     LEDGER --> ADMIT{"Re-resolved plan matches?"}
-    ADMIT -->|no| REFUSE["Stale/changed preview refused"]
-    ADMIT -->|yes| RUN["Eight Serverless cells"]
+    ADMIT -->|no| REFUSE["Stale or changed preview refused"]
+    ADMIT -->|yes| RUN["Eight local Harbor cells"]
 ```
 
-Aria may request the card. It cannot press approval through its MCP
-authority. If the UI fallback is not qualified, a trusted operator shell
-issues the same digest-bound grant:
+Claude Code and the optional Aria shell cannot issue the grant. A trusted
+operator approves the exact digest and caps:
 
 ```bash
-uv run fugue approve PREVIEW_DIGEST \
+uv run fugue research approve PREVIEW_DIGEST \
   --max-cells 8 \
-  --max-usd 20 \
-  --approved-by HUMAN_OPERATOR
+  --max-usd APPROVED_CAP
 ```
 
-The UI and CLI must produce the same approval record. A separate UI-only
-approval concept would invalidate the demo.
+Holdout receives a second approval card after the selection lock exists.
+Reusing discovery approval would invalidate the workflow.
 
 ## Clean-clone preparation
 
-The runbook starts from clean, reviewed checkouts and explicit expected
-revisions. Paths below are placeholders; no credential lives in a repository.
+The runbook begins from a clean reviewed Fugue tree and the exact candidate
+worktree under evaluation. Paths and digests below are placeholders; no
+credential lives in a repository.
 
 ```bash
 export FUGUE_REPO=/ABSOLUTE/PATH/TO/QUALIFIED/FUGUE
 export FUGUE_EXPECTED_SHA=QUALIFIED_FUGUE_SHA
-export STUDY_CONSOLE_REPO=/ABSOLUTE/PATH/TO/QUALIFIED/STUDY_CONSOLE
-export STUDY_CONSOLE_EXPECTED_SHA=QUALIFIED_STUDY_CONSOLE_SHA
-export INTEGRATION_REPO=/ABSOLUTE/PATH/TO/QUALIFIED/ARIA_INTEGRATION
+export CANDIDATE_REPO=/ABSOLUTE/PATH/TO/REVIEWED/CANDIDATE
+export CANDIDATE_EXPECTED_SHA=REVIEWED_CANDIDATE_SHA
 export OPERATOR_ENV=/ABSOLUTE/PATH/TO/OPERATOR.env
 
 test "$(git -C "$FUGUE_REPO" rev-parse HEAD)" = "$FUGUE_EXPECTED_SHA"
 test -z "$(git -C "$FUGUE_REPO" status --porcelain)"
-test "$(git -C "$STUDY_CONSOLE_REPO" rev-parse HEAD)" = \
-  "$STUDY_CONSOLE_EXPECTED_SHA"
-test -z "$(git -C "$STUDY_CONSOLE_REPO" status --porcelain)"
+test "$(git -C "$CANDIDATE_REPO" rev-parse HEAD)" = \
+  "$CANDIDATE_EXPECTED_SHA"
+test -z "$(git -C "$CANDIDATE_REPO" status --porcelain)"
 ```
 
-Install from the lock on Python 3.13:
-
-```bash
-cd "$FUGUE_REPO"
-uv sync --python 3.13 --frozen \
-  --extra research-worker \
-  --extra dev
-```
-
-At presentation time, the integration launcher must emit a boot receipt with
-the exact Core, Fugue, Study Console, evidence-lock, and Serverless
-runtime-image identities. If the launcher’s public Serverless profile has not
-landed and passed a clean-clone qualification, that UI path is unlanded and
-must not be improvised on stage.
+Install from the Fugue lock and unset unrelated provider credentials before
+preparation. The accepted preview must bind the exact model route rather than
+inherit ambient client configuration.
 
 ## One-time evidence and MCP preparation
 
-Validate the hosted evidence:
+First lock the reviewed failure, then prepare public discovery tasks,
+host-private holdouts, both reviewed Skills, and both exact MCP runtimes.
+
+The active identities are intentionally resolved by the reviewed repository
+configuration. The repaired MCP candidate is currently reviewable in draft
+pull request #126 at reported head
+`3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`; CI and security checks pass, but
+the pull request remains draft and unmerged. [@mcp-repair-draft] It is not a
+final staging lock or a live result. If the candidate source changes, the
+Skill or MCP lock changes and every affected preview becomes stale.
+
+Preparation is the only boundary allowed to build task images, Claude Code
+runtime assets, context, or MCP packages. Active cells receive those assets
+read-only and may not clone, install, or rebuild them.
+
+The source-use no-key replay does not satisfy this preparation. It exercises
+installation and deterministic result projection without starting a live
+Agent or MCP server.
+
+## Prepare the exact local Harbor boundary
+
+The active workflow uses local Docker through Harbor. It prepares the exact
+Claude Code harness, reviewed Skills, locked MCP runtimes, task images, and
+host-private evaluation assets before the final preview.
+
+Every completed cell must publish a run-scoped Harbor conformance receipt
+binding its image/runtime identity, policy attestation, private-label boundary
+check, privacy scan, cleanup check, and zero remaining run-scoped containers.
+That is real behavioral evidence under a local policy. It is not Serverless
+isolation certification.
+
+Remote runtime definitions remain out of scope until separately reviewed
+image, security, privacy, admission, lifecycle, and deletion receipts exist.
+The flagship neither needs nor claims them.
+
+## Complete the 8+8 Studies before presentation — required, not yet observed
+
+The planned discovery command shape is:
 
 ```bash
-uv run python \
-  examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
-  --project wandb/fugue-mcp-release-qualification-v1 \
+uv run fugue run claude-loop-skill-mcp \
+  --preset discovery \
+  --run-name claude-loop-discovery-v1 \
   --env-file "$OPERATOR_ENV" \
-  --output examples/comparisons/wandb-mcp-maintenance/evidence.lock.json
-```
-
-Import and lock the two exact MCP candidates:
-
-```bash
-export WANDB_BASE_URL=https://api.wandb.ai
-
-uv run fugue mcp import \
-  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-3-7 \
-  --as wandb-mcp-0-3-7
-
-uv run fugue mcp import \
-  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-4 \
-  --as wandb-mcp-0-4
-
-uv run fugue mcp lock wandb-mcp-0-3-7 \
-  --acknowledge-package-code \
-  --platform linux/amd64
-
-uv run fugue mcp lock wandb-mcp-0-4 \
-  --acknowledge-package-code \
-  --platform linux/amd64
-```
-
-The lock captures initialized target-platform tool manifests. We show their
-differences to explain what could plausibly change. We do not infer that a
-manifest difference caused an outcome.
-
-## Build the public runtime images
-
-From the exact clean Fugue tree:
-
-```bash
-uv run fugue sandbox wandb build-runtime \
-  --comparison examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml \
-  --comparison examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml \
-  --platform linux/amd64 \
-  --image docker.io/REGISTRY_ORG/fugue-mcp-release:"$FUGUE_EXPECTED_SHA" \
-  --push \
-  --output-manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --sbom-dir .fugue/wandb-serverless-runtime-reports
-
-uv run fugue sandbox wandb lock-runtime \
-  --manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --output .fugue/wandb-serverless-runtime.lock.json
-```
-
-This protected preparation action requires explicit authority to publish
-public images. It builds outside Agent execution, embeds locked assets,
-generates SBOMs, fails High-or-worse scan findings, performs offline probes,
-and verifies anonymous pulls. The lock contains immutable registry digests,
-not the qualification tag.
-
-The W&B team’s Secrets Manager contains only the named entries the runtime
-requests:
-
-| Secret name               | Injected variable   |
-| ------------------------- | ------------------- |
-| `fugue-wandb-api-key`     | `WANDB_API_KEY`     |
-| `fugue-anthropic-api-key` | `ANTHROPIC_API_KEY` |
-
-No command displays their values. W&B’s documented secret mechanism injects
-requested secret names as environment variables without placing values in
-the Sandbox configuration
-([Sandbox secrets](https://docs.wandb.ai/sandboxes/secrets)).
-
-Qualify creation, startup, embedded runtimes, deletion, and zero orphans:
-
-```bash
-uv run fugue sandbox wandb doctor \
-  --lock .fugue/wandb-serverless-runtime.lock.json \
-  --env-file "$OPERATOR_ENV"
-```
-
-## Complete the 80-cell Study before rehearsal — required, not yet observed
-
-Run local Harbor parity first. Then preview, approve, and execute each remote
-stage in protected order. The example below shows one stage; each stage gets
-its own digest and caps:
-
-```bash
-SPEC=examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml
-
-uv run fugue check "$SPEC"
-uv run fugue compare "$SPEC" --preview
-
-uv run fugue approve PREVIEW_DIGEST \
-  --max-cells 8 \
-  --max-usd 20 \
-  --approved-by HUMAN_OPERATOR
-
-uv run fugue compare "$SPEC" \
-  --run \
-  --approval APPROVAL_ID \
-  --env-file "$OPERATOR_ENV"
-
-uv run fugue result wandb-mcp-maintenance-discovery-claude-serverless-v1 \
+  --preview \
   --json
 ```
 
-Repeat with the W&B discovery spec only after the first stage reconciles.
-Proceed to the 32-cell Claude primary only if discovery is informative and
-safe. Freeze the primary result before the 32-cell W&B Inference replication.
+The final preview must show exactly eight cells. Run it through Research so
+the human approval binds the same digest, cap, and registered plan. Direct
+execution that bypasses the Research approval ledger is not flagship
+evidence.
 
-Every stage must show nonzero planned, admitted, started, and eligible rows;
-the exact candidate and runtime identities; complete deterministic and
-required judge evidence; no critical evidence-honesty regression; private
-labels and credential values absent everywhere; one Agent conversation, root,
-prediction, and Evaluation per attempt; a matching Serverless lifecycle
-attestation; and deletion receipts with zero remaining matching Sandboxes.
+After discovery terminates, export with Weave enrichment and run the saved
+selection analysis. An eligible analysis writes
+`intervention-selection-lock.json`; a no-winner analysis ends the loop.
 
-Do not pool a Claude/OpenClaw reversal. Do not replace a failed cell with a
-successful retry under the same coordinate.
+The planned holdout command shape is:
+
+```bash
+uv run fugue run claude-loop-skill-mcp \
+  --preset holdout \
+  --selection-lock REPORT_DIR/intervention-selection-lock.json \
+  --run-name claude-loop-holdout-v1 \
+  --env-file "$OPERATOR_ENV" \
+  --preview \
+  --json
+```
+
+The holdout preview must contain only production and the selected arm across
+four independent private tasks: exactly eight cells. It receives a new
+approval. Any source, task, Skill, MCP, model, harness, or runtime drift
+invalidates the selection lock.
 
 ## Build the evidence wall first — required, not yet observed
 
-The full Study is not summarized by one green or red card. Before selecting
-the live follow-up, the team assembles an evidence wall with four columns:
+The flagship is not summarized by one green card. The team assembles four
+separate ledgers:
 
-| Deterministic                          | Maintainer judgment                               | Mechanism                                           | Infrastructure/integrity                       |
-| -------------------------------------- | ------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------- |
-| aligned expected facts and task passes | blinded dimensions, disagreements, critical cases | tool choice, reads, sources, errors, latency, usage | manifests, attestations, missing rows, cleanup |
+| Outcome | Mechanism | Native evidence | Infrastructure/integrity |
+| --- | --- | --- | --- |
+| paired deterministic checks and critical regressions | assigned and confirmed Skill/MCP use, source opens, tool calls | Agent root, prediction, Dataset, Evaluation | image/runtime identity, policy, privacy, cleanup, zero orphans |
 
-Every displayed aggregate links to its aligned baseline/candidate rows. Every
-row links to attempts. Every attempt links to its Agent conversation,
-verified root, prediction, Evaluation, and Serverless attestation. A count
-that cannot be traversed is not stage evidence.
+Every aggregate links to aligned rows. Every row links to one exact attempt.
+Every attempt reconciles to one native Agent conversation and root, one Fugue
+prediction, one Weave Evaluation row, and one local Harbor receipt. A count
+that cannot be traversed is not evidence.
 
-The team reviews at least one candidate improvement, one regression if any
-exists, one unchanged pair, every critical judge case, every infrastructure
-or evidence exclusion, the largest latency and observed-cost deltas, and any
-Claude/OpenClaw directional disagreement.
+The selection analysis may inspect discovery only. Holdout truth and results
+remain closed until the selection lock is durable. After holdout, reviewers
+inspect at least baseline reproduction, every candidate gain or regression,
+missing evidence, mechanism support for the selected intervention, and every
+infrastructure exclusion.
 
-The live tasks are selected from this review under a written rule: they must
-represent the supported maintenance observation or its most important
-uncertainty, remain safe and bounded for the presentation, and include no
-unresolved private or customer data. Audience appeal is not a hidden outcome
-criterion. The selection receipt records candidate task IDs, reason,
-reviewers by role, parent Study identity, and the digest of the frozen
-result. If a result changes, the follow-up is stale.
+## Rehearsal without consuming the evidence
 
-## Rehearsal without consuming the moment
+A clean-clone rehearsal validates commands and failure handling without
+pretending to create the missing result. Rehearsal may use a separately named
+Study and approval, but its result cannot be relabeled as the flagship.
 
-Two clean-clone rehearsals validate the system, but the final presentation
-approval must remain real. So we separate reusable qualification from the
-unconsumed operation. In rehearsal we:
+Rehearse:
 
-1. run the complete flow with a rehearsal Study identity and separately
-   approved cells;
-2. exercise approval rejection, cancellation, and one controlled failure;
-3. verify evidence and cleanup;
-4. reset the integration environment;
-5. create a new presentation follow-up preview with a new digest;
-6. confirm that no approval or operation exists for that digest.
+1. a rejected preview;
+2. an expired or stale approval;
+3. a task or candidate digest mismatch;
+4. an interrupted cell with terminal evidence;
+5. missing Evaluation reconciliation;
+6. local Harbor cleanup failure.
 
-Rehearsal evidence is never deleted—it stays labeled by Study identity and
-cannot appear in the presentation result. The rehearsal approval is never
-reused, because approval binds to a digest and operation.
+The active qualification must still run from the reviewed final tree with its
+own unconsumed approvals. Receipts are append-only; rehearsal evidence stays
+labeled rather than being deleted.
 
-The second rehearsal starts from another clean clone, not the same prepared
-working directory. Runtime images may be reused only by immutable digest and
-only if the source tree and locks match. The boot receipt must detect a stale
-Fugue tree, Study Console tree, evidence lock, or image.
+## Freeze the selection before holdout
 
-Three unfamiliar engineers participate in the final readiness review: one
-drives the runbook, one interprets the evidence wall, one attempts recovery
-from a documented failure. Their questions become launch defects if the
-public artifacts cannot answer them.
+The selection lock is the pivotal boundary. It binds the discovery snapshot,
+exact source tree, complete four-arm ranking, paired examples, candidate
+digests, and chosen arm.
 
-## Freeze the live follow-up
+An arm is ineligible unless discovery reproduces the baseline failure,
+improves at least one relevant paired deterministic outcome, proves the
+assigned Skill or MCP intervention was used, preserves native evidence, and
+has complete local Harbor receipts. Cost or latency alone cannot select a
+winner.
 
-After the full result and maintainer review, Aria proposes two tasks that
-make the observed difference or uncertainty legible. The tasks are reviewed,
-not cherry-picked by aggregate score.
-
-Good live tasks have a maintenance question that requires opening more than
-one object; a known incomplete-evidence boundary; an answer that is useful
-whether baseline or candidate wins; bounded runtime below the presentation
-envelope; no customer data or private-label exposure; and a direct relation
-to the completed Study’s supported insight.
-
-The follow-up spec locks:
-
-```text
-two tasks
-× two exact MCP integration locks
-× Claude Code/Anthropic and OpenClaw/W&B Inference
-× one attempt
-= eight cells
-```
-
-Aria previews it. The team records the digest. Nobody approves or executes it
-during rehearsal after the final reset. The unconsumed preview is the
-presentation’s starting point.
+Only production and the selected arm enter holdout. Claude Code may author a
+new candidate after seeing discovery, but that candidate belongs to a new
+Study and cannot enter the frozen holdout.
 
 ## What the audience sees while cells run
 
-Remote agent work has dead time. Hiding it behind a spinner makes the system
-feel simulated; dumping raw logs makes it unintelligible. The live view
-projects a small state for each coordinate:
+Local Agent work still has dead time. The view projects a small state for each
+coordinate:
 
 ```text
-planned → admitted → sandbox creating → agent running
-→ evidence publishing → deleting → reconciled
+planned → admitted → container starting → Agent running
+→ evidence publishing → cleaning up → reconciled
 ```
 
-For the selected cell it shows the task, revision, harness, route, and
-attempt identity; the immutable runtime-image digest; Sandbox identity and
-bounded resource policy; the current lifecycle transition; a safe Agent
-conversation link when available; prediction and Evaluation links after
-publication; and deletion state with orphan reconciliation.
+For the selected cell it shows task, candidate, harness, route, and attempt
+identity; local runtime and policy identity; current lifecycle transition; a
+safe Agent conversation link when available; prediction and Evaluation links
+after publication; and cleanup state.
 
 It does not stream private labels, full environment, credentials, hidden
 reasoning, or unsafe raw logs. A structured failure stays visible with its
-origin, so the presenter can explain why a task answer is unavailable without
-turning an SDK exception into theater.
-
-The eight cells run at the concurrency accepted in the preview, not at an
-on-stage override. If the wall clock exceeds the slot, the real operation
-continues and the presentation ends with an explicit incomplete state. We do
-not swap in prerecorded outcomes. A later dated appendix can link the
-terminal result.
+origin. If the wall clock exceeds the presentation slot, the real operation
+continues and the presentation ends with an explicit incomplete state. No
+prerecorded outcome replaces it.
 
 ## Presentation sequence
 
 ### 1. Establish reality
 
-Open the hosted project, one Run history, one Agent trace, the Dataset, and
-the aligned Evaluations. Show the evidence-lock identity beside them.
+Open the reviewed failed attempt and its native evidence links. Show the
+failure-lock identity.
 
-### 2. Ask the bounded question
+### 2. Explain the candidate
 
-Ask Aria which failure pattern the reviewed evidence supports. Require
-citations and uncertainty.
+Have Claude Code explain the diagnosed failure and the reviewed Skill/MCP
+changes. Show the human review and exact locks; do not claim a fix.
 
 ### 3. Explain the preregistration
 
-Have Aria show exact revisions, routes, harnesses, fixed controls, cell
-count, judge calibration receipt, mechanism measures, Serverless runtime
-digest, and budget.
+Show the four discovery arms, fixed Claude Code and model route, two tasks,
+eight coordinates, outcome and mechanism gates, local Harbor policy, and cap.
 
-### 4. Show the completed Study, only after receipts exist
+### 4. Cross the human boundary
 
-Open the four ledgers separately. Start with planned/completed
-reconciliation, then deterministic outcomes, blind judgment, mechanism, and
-infrastructure.
+Approve the discovery digest in the trusted operator surface. Show that
+Claude Code and Aria cannot issue the grant.
 
-### 5. Inspect discordant pairs
+### 5. Watch real local work
 
-Open baseline and candidate traces for at least one improved and one
-regressed or unchanged pair. Show what each Agent actually opened. Do not
-narrate only the winner.
+Show local Harbor lifecycle, native Agent and Evaluation publication, and
+cleanup per cell.
 
-### 6. Show the follow-up preview
+### 6. Reconcile discovery
 
-Display all eight coordinates and the reason these two tasks were selected.
-Confirm the preview remains unapproved.
+Open the four ledgers separately. An incomplete row blocks selection.
 
-### 7. Cross the human boundary
+### 7. Freeze the winner—or stop
 
-Approve the exact digest in the card or trusted shell. Show that Aria cannot
-issue the grant.
+Write and inspect the treatment-selection lock. If no arm is eligible, end
+with no winner.
 
-### 8. Watch real remote work
+### 8. Preview and separately approve holdout
 
-For each live cell, show lifecycle state, Sandbox identity, runtime-image
-digest, Agent conversation link, result publication, deletion, and orphan
-reconciliation. W&B describes Sandboxes as independently isolated
-filesystems, networks, and process spaces with explicit lifecycle management
-([Serverless Sandboxes](https://docs.wandb.ai/sandboxes)).
+Show exactly production versus the locked winner on four private tasks. Keep
+private truth out of the Agent and presentation surfaces.
 
 ### 9. Reconcile before interpreting
 
-The UI waits for eight terminal coordinates and the required linked objects.
-An incomplete row blocks the updated recommendation. It is not hidden for
-stage timing.
+Wait for eight terminal holdout coordinates and all required linked objects.
+Do not replace a failed coordinate with an unlabeled retry.
 
 ### 10. End with a bounded memo
 
-Aria updates: what improved, regressed, or remained unchanged; three to five
-evidence links; mechanism observations; the release or maintenance
-recommendation; limitations; and one next question it does not launch.
-
-Then stop the integration environment and verify no Serverless Sandboxes
-remain.
+The human maintainer records baseline reproduction, paired gains and
+regressions, mechanism evidence, local runtime limitations, the qualified or
+rejected source tree, and one unlaunched follow-up.
 
 ```mermaid
 sequenceDiagram
-    participant U as Human
-    participant A as Aria
+    participant C as Claude Code
+    participant H as Human
     participant F as Fugue
-    participant S as W&B Serverless
+    participant L as Local Harbor
     participant W as Weave
-    U->>A: Ask bounded evidence question
-    A->>F: Preview registered follow-up
-    F-->>U: Exact digest, cells, caps
-    U->>F: Approve digest
-    A->>F: Start already-approved digest
-    F->>S: Execute locked cells
-    S->>W: Publish traces and Evaluations
-    S-->>F: Attestation and deletion receipt
-    F-->>A: Reconciled bounded result
-    A-->>U: Sourced memo + unlaunched follow-up
+    C->>H: Reviewed diagnosis and candidate source
+    H->>F: Approve exact discovery digest
+    F->>L: Execute prepared discovery cells
+    L->>W: Publish Agent and Evaluation evidence
+    L-->>F: Policy and cleanup receipts
+    F-->>H: Discovery result and selection lock
+    H->>F: Separately approve frozen holdout
+    F->>L: Execute prepared holdout cells
+    F-->>H: Reconciled bounded result
 ```
 
 ## Failure is part of the runbook
 
-A credible live system needs an explicit failure version.
+A credible system needs an explicit failure version.
 
-If a Sandbox fails to start, the UI shows infrastructure failure and the
-missing behavioral row. If deletion cannot be proven, the result is
-ineligible and the operator performs incident cleanup outside the Study. If
-the approval expires, the run refuses to start. If W&B Inference is
-unavailable, the affected cells stay missing rather than borrowing another
-model. If the eight-cell follow-up is null, Aria says so.
+If the starting failure cannot be reconciled, the loop does not begin. If an
+assigned intervention is not confirmed, that arm is ineligible. If discovery
+has no winner, holdout is never opened. If the selection lock drifts, holdout
+preview fails. If a container fails to start, the row remains missing. If
+cleanup cannot be proven, the result is ineligible. If holdout is null or
+regresses critically, the candidate is rejected.
 
-The presentation never responds to failure by switching to the no-key replay
-without labeling the change. The replay can demonstrate package installation
-after an incident; it cannot complete the flagship claim.
-
-After the session, the operator exports a presentation receipt containing the
-boot identity, approved digest, operation and Study IDs, eight terminal
-coordinates, evidence-reconciliation status, and cleanup result. The receipt
-carries safe references rather than copied trace content, so an audience
-member can revisit the claim after the transient UI is gone. It also marks
-the no-key replay as unrelated smoke evidence.
+The presentation never responds by switching to the no-key replay without
+labeling the evidence change. The replay can demonstrate installation and
+result shape; it cannot complete a live Agent, MCP, Harbor, or treatment
+claim.
 
 ## Qualification checklist
 
-Before inviting an audience:
+Before calling the flagship decision-ready:
 
-- the exact Fugue tree passes formatting, compilation, full tests, package
-  build, dead-code analysis, and dependency analysis;
-- fresh wheel and source installs pass on Linux and macOS, Python 3.12 and
-  3.13;
-- public `init`, `check`, `compare`, `approve`, and `result` flows pass;
-- the no-key replay is repeatable and labeled as smoke evidence;
-- both exact MCP revisions initialize on `linux/amd64`;
-- judge calibration has 48 double-reviewed, adjudicated examples and meets
-  its thresholds;
-- local Harbor parity passes before W&B Serverless;
-- public images are digest-pinned, scanned, SBOM-attested, and anonymously
-  pullable;
-- named secret injection, credential isolation, cancellation, recovery,
-  idempotency, deletion, and zero-orphan behavior pass;
-- full 80-cell rows reconcile to Weave and Study evidence;
-- the eight-cell follow-up is frozen and unconsumed;
-- two consecutive clean-clone rehearsals pass;
-- three unfamiliar engineers can run, interpret, and reproduce the workflow.
+- the exact final Fugue and candidate trees are clean and reviewed;
+- the starting failed attempt and all five native evidence relationships
+  reconcile;
+- the no-key replay is labeled installation smoke, not live MCP evidence;
+- both Skills and both MCP candidates are reviewed, prepared, and locked;
+- the discovery preview expands to exactly eight cells;
+- a human approves that exact digest and cap;
+- every discovery row reconciles outcome, mechanism, native evidence, local
+  Harbor policy, privacy, cleanup, and zero-orphan state;
+- the selection lock exists before holdout is opened;
+- the holdout preview contains exactly production and the selected arm across
+  eight cells;
+- holdout receives a separate approval;
+- baseline failure reproduction, at least one relevant gain, and no critical
+  holdout regression are supported;
+- the qualified tree equals the reviewed tree;
+- no lane’s results are mixed into another project;
+- Aria, if present, remains read-only and optional.
 
-Qualify the exact final tree. After merge, prove the merged tree equals the
-qualified tree:
-
-```bash
-test "$(git rev-parse QUALIFIED_SHA^{tree})" = \
-  "$(git rev-parse main^{tree})"
-```
-
-Any difference requires another live qualification.
+The MCP package-release decision is separate. It remains pending the
+source-isolated `main` versus final-staging comparison and independent package
+sign-off described in Fugue 3.
 
 ## Try this in 15 minutes
 
-Download the separate
-[draft qualification runbook](/fugue/articles/fugue-4b-trace-to-release-decision/runbook.md),
-choose one required receipt, and trace it from preview identity to remote
-attempt, Weave evidence, Evaluation row, deletion receipt, and final memo.
-Mark every absent hop `not yet observed`; do not replace it with a
-screenshot.
+Draw two boxes labeled discovery and holdout. Put the four Skill/MCP arms in
+the first and only production plus `selected-arm` in the second. Draw a one-way
+selection-lock arrow between them.
 
-Then rehearse the digest-mismatch failure. The expected behavior is a blocked
-launch, not a warning beside a running cell.
+Now label the no-key replay, direct MCP receipt, discovery result, and holdout
+result. If your diagram lets any earlier artifact stand in for a later one,
+the evidence boundary is not ready.
+
+Finally add Aria outside the execution path with read-only arrows to safe
+Study and result projections. If removing that box changes the candidate or
+execution semantics, the shell is not actually optional.
 
 ## When the flagship is unnecessary or insufficient
 
-Use the no-key replay for installation and local interface checks; do not pay
-for Serverless cells to prove that parsing works. The flagship is warranted
-only for the end-to-end governance claim. It is insufficient when the full
-Study has no actionable evidence, when a live attempt cannot reconcile to one
-conversation and Evaluation row, or when deletion receipts are missing.
+Use the no-key replay for installation and projection checks. Use a failing
+test for a known deterministic defect. Do not run 16 Agent cells merely to
+prove parsing works.
+
+The flagship earns its cost when a reviewed Agent change needs controlled
+discovery, frozen selection, and independent holdout. It remains insufficient
+when the source failure is weak, expected answers leak, the selected
+intervention is not observed, native evidence is missing, or local runtime
+receipts cannot be reconciled.
 
 ## What this does not show
 
-The flagship demonstrates one bounded MCP release workflow. It does not prove
-every Fugue integration, every MCP server, or every agentic software task.
+The flagship demonstrates one bounded Claude Code–Fugue improvement loop. It
+does not prove every Agent, Skill, MCP server, memory system, task class, or
+runtime.
 
-The hosted evidence is genuine but seeded. The live eight-cell follow-up
-demonstrates control and execution; it does not replace the full 80-cell
-evidence. W&B Serverless lifecycle evidence establishes isolation mechanism,
-not complete security. Named secret injection reduces exposure; scans and
-runtime controls still matter.
+Local Harbor receipts establish the declared local execution policy, not W&B
+Serverless isolation or complete security. The optional Aria shell is a
+presentation and navigation aid, not autonomous release authority and not an
+evaluated treatment.
 
-Aria’s memo is a sourced interpretation, not autonomous release authority.
-The human approval does not certify the methodology. The calibrated judge
-does not replace maintainer review. A successful stage demo does not
-guarantee a future service level.
+The MCP release decision is not this flagship result. It remains pending its
+own source-isolated staging comparison. The harness and repository-memory
+lanes also remain separate planned Studies in dedicated projects.
 
-At the time of writing, the runbook is not presentation-ready, because the
-full result and final integration qualification do not exist. That limitation
-is a result of the same contract the demo is meant to show.
+At the time of writing, no result exists. That limitation is the consequence
+of the same evidence contract the flagship is meant to demonstrate.
 
 ## Results appendix — intentionally empty
 
-The future dated appendix must link:
+A future dated appendix must link:
 
 ```text
-qualified and merged tree equality receipt:
-hosted evidence and preparation receipt:
-80-cell Study previews, approvals, and Results:
-eight-cell follow-up preview, approval, and Result:
-all candidate/MCP/model/harness/runtime identities:
-judge calibration and human adjudication:
-Serverless lifecycle and zero-orphan receipts:
-Weave Agent, prediction, and Evaluation reconciliation:
-two clean-clone rehearsal receipts:
-maintainer memo:
+qualified Fugue and candidate tree identities:
+reviewed failure lock and native evidence:
+Skill and MCP candidate locks:
+discovery preview, approval, Result, and local Harbor receipts:
+treatment-selection lock:
+holdout preview, approval, Result, and local Harbor receipts:
+planned/admitted/terminal/excluded/missing cells:
+deterministic outcomes and critical regressions:
+confirmed intervention-use evidence:
+Weave Agent, prediction, Dataset, and Evaluation reconciliation:
+privacy, cleanup, and zero-orphan receipts:
+qualified or rejected source tree:
+human maintainer memo:
 supported claims and limitations:
 ```
 
-No screenshot substitutes for the underlying object link.
+No screenshot substitutes for an underlying object or receipt.
 
 ## Next: who built the evaluator?
 
-The flagship makes agents subjects of evaluation. Fugue itself was also
-co-developed with agents working across tasks, worktrees, tests, and stacked
-pull requests. That recursion is useful and dangerous.
+The flagship makes an Agent both an engineer and a subject of evaluation.
+Fugue itself was also co-developed with agents working across tasks,
+worktrees, tests, and stacked changes. That recursion is useful and
+dangerous.
 
-In the final installment, **Fugue Extra**, we audit what agent co-development
-can legitimately show—implementation throughput, defects caught, invariants
-encoded, obsolete code removed—and draw the boundary it cannot cross. An
-evaluator does not become correct because an evaluated system helped build
-it.
+In the final installment, **Fugue Extra**, we audit what Agent
+co-development can legitimately show—implementation throughput, defects
+caught, invariants encoded, and obsolete code removed—and draw the boundary
+it cannot cross.
 
 ## References
 

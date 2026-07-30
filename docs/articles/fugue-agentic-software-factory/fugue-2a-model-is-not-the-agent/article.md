@@ -9,7 +9,7 @@ This article defines the candidate and study design locally—you do not need
 the earlier essays. Every diagram and command below is part of a
 preregistration, not evidence that one harness wins. The design stays mutable
 until an accepted Fugue preview digest, article digest, acceptance time, and
-exact-final-head identity exist.
+exact source-tree identity exist.
 
 Here is the failure that produced it. We once had a chart labeled by model,
 where each row had actually been produced through a different agent program,
@@ -120,33 +120,32 @@ error recovery, finish detection.
 
 ## The bounded question
 
-The preregistered question is:
+The planned canary asks:
 
-> On the locked hard repository tasks, under an identical provider route,
-> task image, prompt, tool policy, resources, budget, and attempt policy, do
-> native harnesses differ in deterministic repair, efficiency, failure
-> fingerprint, or oversight burden?
+> On two locked SWE-bench Verified tasks, under an identical provider route,
+> task image, context treatment, local Docker policy, and one-attempt policy,
+> how do Hermes, OpenClaw, Claude Code, and Codex differ in deterministic
+> repair, efficiency, failure fingerprint, and evidence integrity?
 
-The estimand—the exact quantity the study estimates—is the paired difference
-in deterministic task success between two compatible native harness
-candidates over the exact accepted holdout coordinates, holding one model
-route and runtime envelope fixed. Secondary estimands are paired differences
-in observed cost, latency, no-action turns, tool behavior, and reviewer
-intervention. We report at the level of the complete
-model–harness–environment candidate and analyze at the level of the aligned
-logical task and attempt. Neither level licenses a model-only claim.
+With two tasks and one attempt, this lane does not estimate a stable
+population effect. It reports raw aligned task outcomes for the four complete
+model–harness–environment candidates while holding the model and runtime
+envelope fixed. Secondary comparisons cover observed cost, latency, tool
+trajectory, structured failures, and evidence integrity. The unit of
+analysis is the aligned logical task and attempt; neither the cell nor any
+aggregate licenses a model-only or universal-harness claim.
 
-The current Fugue repository contains `swe-frontier-harness`, a
-no-added-context experiment over four stable harness identities:
-`hermes-agent`, `openclaw`, `claude-code`, and `codex`. Its locked discovery
-partition contains eight hard SWE-style tasks. The checked-in default model
-is a W&B Inference route, and the experiment accepts an explicitly supplied
-single route for an immutable run.
+The dedicated lane is campaign `real-harness-study-v1`, experiment
+`real-harness-study`, preset `canary`, and W&B/Weave project
+`wandb/fugue-harness-comparison-v1`. It freezes the W&B Inference route
+`wandb/zai-org/GLM-5.2`, context system `none`, one attempt, local Docker
+execution through Harbor, and four native harness identities: `hermes`,
+`openclaw`, `claude-code`, and `codex`. Its exact matrix is two tasks × four
+harnesses × one attempt = eight planned cells.
 
-The final preregistration will not pool model routes. Each accepted preview
-holds one route constant; where a route is not natively supported by all four
-harnesses, the preview contains only the compatible subset and the claim
-names it.
+Changing the route, adding a harness, or adding tasks is outside this
+campaign’s allowlist. It requires a new preview, approval, and Study rather
+than a wider interpretation of this canary.
 
 At publication time, the appendix must print—not abbreviate—the source commit
 and tree, task manifest and task-image digests, provider route and model
@@ -172,7 +171,7 @@ table:
 | Context treatment        | Fixed                  | No added repository-memory system                      |
 | Resources                | Fixed                  | Enforced CPU, memory, storage, timeout, network        |
 | Attempts                 | Fixed                  | Same declared count; no replacement retries            |
-| Scheduling               | Fixed/randomized       | Locked seed and balanced ordering                      |
+| Scheduling               | Fixed                  | Locked seed, serial execution, and expanded order      |
 | Deterministic repair     | Primary outcome        | Official offline verifier                              |
 | Usage, latency, behavior | Secondary outcomes     | Observed, never imputed                                |
 | Oversight burden         | Secondary judgment     | Blinded review protocol                                |
@@ -193,25 +192,25 @@ isolated. Provider load changes. Container caches warm. An image pulled for
 the first harness makes the second start faster. A long first task delays
 only one arm.
 
-So the discovery grid uses a locked scheduling seed and balances harness
-ordering across tasks. Runtime caches are prepared before the cohort or
-isolated per cell—a baseline attempt never prepares the candidate’s
-behavioral assets. Wall-clock start and terminal timestamps stay in the
-evidence so later analysis can see temporal clustering. Anthropic’s
+The planned canary therefore locks the scheduling seed and expanded order,
+runs one cell at a time, and preserves wall-clock start and terminal
+timestamps. Runtime assets are prepared before the cohort or isolated per
+cell—a baseline attempt never prepares the candidate’s behavioral assets.
+This makes the order reproducible; it does not make two tasks a
+counterbalanced estimate of infrastructure noise. Anthropic’s
 infrastructure-noise study is the standing counterexample to treating any of
 this as housekeeping: changing the execution substrate alone moved a measured
 coding-agent outcome while the nominal Agent stayed fixed. [@anthropic-noise]
 
 Attempts are independent coordinates, not buttons labeled “try again.” The
-accepted preview specifies the assignment seed, balanced order, and attempt
-count. Repeated attempts estimate within-coordinate variation; they are not
-retries selected after failure. If an Agent fails deterministically, we keep
-the failure. If the environment fails, we keep that classification. A
-replacement can occur only under a predeclared infrastructure-recovery rule,
-gets a new attempt identity, and leaves the original row visible.
+accepted preview specifies the assignment seed, order, and one-attempt
+policy. A failed Agent cell is not replaced by retries selected until one
+passes. If the environment fails, we keep that classification. Any future
+replicated design is a new Study with a new attempt policy, not an edit to
+this eight-cell canary.
 
-We also do not adapt temperature or token budgets per harness after
-discovery. Native harnesses may stop differently on the inside; their
+We also do not adapt temperature or token budgets per harness after preview.
+Native harnesses may stop differently on the inside; their
 external resource envelope stays fixed. If one harness needs a different
 envelope to operate at all, that is a different candidate study, not a quiet
 fairness correction.
@@ -267,15 +266,16 @@ The verifier cannot download dependencies or grading metadata during the
 trial; a network-dependent grader changes the environment and fails for
 reasons unrelated to the patch. Qualification pins those assets in advance.
 
-The hard discovery tasks require production and test changes, repository
-diversity, multiple touched files, and a nontrivial localization boundary.
-Those eligibility rules reduce trivial wins. They do not make eight tasks a
-population estimate for all coding work.
+The two locked tasks are `sympy__sympy-13031` and
+`astropy__astropy-13033`. Each pinned task must pass its task-image
+qualification before admission. Their repository and verifier diversity make
+them useful real canary cases; they do not make two tasks a population
+estimate for all coding work.
 
-We report raw paired outcomes by task and harness—`solved / eligible
-attempts`. Replicated holdout cohorts can add paired intervals under the
-predeclared analysis. A one-attempt discovery grid stays raw numerators and
-denominators; no confidence interval rescues an under-replicated design.
+We report raw outcomes by aligned task and harness—`solved / eligible
+attempts`—alongside infrastructure eligibility. This one-attempt canary stays
+raw numerators and denominators. A future replication can add intervals only
+under a separately accepted analysis plan.
 
 ## Secondary outcomes
 
@@ -305,11 +305,10 @@ The analysis begins with the aligned task table, not an ordering:
 | --------------- | --------------- | ----------------: | --------: | ---------------: | --------------------- | ---------------- |
 | locked identity | locked identity |         raw count | raw count | value or missing | blinded label         | structured class |
 
-We then compute paired contrasts for outcomes declared before the run.
-Discovery reports raw differences. A sufficiently replicated holdout can use
-a paired bootstrap over tasks under its predeclared seed and interval
-convention. We do not treat attempts on one task as independent tasks, and we
-do not claim a population interval from harness calls alone.
+We then show aligned task contrasts for outcomes declared before the run.
+The canary reports raw differences only. We do not treat four harness calls
+on one task as four independent tasks, and we do not claim a population
+interval from eight cells.
 
 Efficiency stays conditional:
 
@@ -384,12 +383,12 @@ difficult tasks disappeared.
 
 ## Reversals and the no-pooling rule
 
-If one harness wins on route X and loses on route Y, the correct result is a
-harness-by-route interaction on the observed tasks. A pooled universal
-harness ranking is not supported. The same rule applies across task strata: a
-harness may be stronger on diagnosis and weaker on broad implementation, or
-more reliable on small repositories than large ones. We show aligned task
-rows and strata before any aggregate.
+The active lane fixes one route, so it cannot estimate a harness-by-route
+interaction. If a later, separately approved Study finds one harness ahead on
+route X and behind on route Y, the correct result is an interaction on those
+observed tasks, not a pooled universal ranking. The same caution applies to
+task reversals in this canary: show both aligned task rows before any
+aggregate.
 
 The preregistration rejects these analyses outright:
 
@@ -397,42 +396,34 @@ The preregistration rejects these analyses outright:
 - excluding timeouts without reporting them;
 - replacing infrastructure failures with zero task scores;
 - selecting tasks after seeing harness differences;
-- interpreting discovery as untouched holdout;
+- interpreting this canary as a replicated or untouched holdout;
 - claiming the model caused a difference in a harness-varied study.
 
 An observed reversal does not invalidate the study. Hiding it does.
 
 ## Command and approval sequence
 
-The checked-in experiment supports a side-effect-free preview:
+The checked-in experiment supports a side-effect-free local preview:
 
 ```bash
 uv sync --python 3.13 --frozen --extra dev
 
-uv run fugue run swe-frontier-harness \
+uv run fugue run real-harness-study \
   --preset canary \
-  --model wandb/MODEL_ROUTE \
-  --preview
-
-uv run fugue run swe-frontier-harness \
-  --preset discovery \
-  --model wandb/MODEL_ROUTE \
-  --preview
+  --preview \
+  --json
 ```
 
-These commands illustrate the artifact; `MODEL_ROUTE` must be replaced by the
-exact reviewed route before publication. Task images, harness runtimes, and
-dependencies are prepared beforehand through the repository’s setup boundary.
-Preview may not download them.
-
-The canary qualifies one task across compatible harnesses—infrastructure and
-contract evidence, not an efficacy denominator. The discovery preview expands
-eight tasks × compatible harnesses × one attempt. The operator then records
-the exact preview digest and identities, approves a hard cell and cost cap in
-a trusted shell, executes the digest without modifying it, reconciles every
-planned coordinate and Weave Agent link, and freezes discovery results before
-designing a replicated holdout. The holdout is a new study, not a
-continuation that inherits retries.
+The preview must expand exactly eight cells and show project
+`wandb/fugue-harness-comparison-v1`, route
+`wandb/zai-org/GLM-5.2`, the two locked tasks, the four allowed harnesses,
+one attempt, and local Docker/Harbor execution. Preview is inspection, not
+execution authority. The Research Agent can request approval, but only a
+trusted human operator may approve the exact preview digest and spend cap.
+Preparation then locks task images, harness runtimes, dependencies, route,
+and runtime assets before campaign admission. The accepted digest executes
+without mutation, and every planned coordinate must reconcile with native
+Agent and Evaluation evidence.
 
 ## The preregistration artifact
 
@@ -469,22 +460,22 @@ has a defect. The reviewer receipt is evidence too.
 
 ## Valid results, including nulls
 
-The study can support statements such as:
+The study can support bounded statements such as:
 
-- “On these eight tasks with route R and runtime L, harness A solved 5/8 and
-  harness B solved 3/8; the one-attempt design does not estimate a stable
-  population difference.”
-- “Deterministic outcomes were tied, while harness A used fewer observed
-  tokens on solved pairs and produced more structured tool errors.”
-- “A and B reversed between routes R1 and R2; no universal harness ordering
-  is supported.”
-- “The cohort is incomplete because three cells lack reconciled Evaluation
-  evidence; no behavioral conclusion is issued.”
+- “For each of the two locked tasks, here are the raw eligible outcomes for
+  Hermes, OpenClaw, Claude Code, and Codex under the fixed GLM-5.2 route.”
+- “Deterministic outcomes were tied on this canary, while observed usage and
+  structured failure behavior differed; the lane does not establish a stable
+  population ordering.”
+- “The harness pattern reversed across the two tasks, so no aggregate or
+  universal ordering is supported.”
+- “Required cells lack reconciled Evaluation evidence; no behavioral
+  conclusion is issued.”
 
 A null is valuable. Equivalent task performance redirects effort toward cost,
 reliability, or usability—or reveals a saturated taskset that needs a harder
-preregistered successor. We do not rewrite the current holdout to force
-separation.
+preregistered successor. We do not add tasks or retries to the current canary
+to force separation.
 
 ## Try this in 15 minutes
 
@@ -513,14 +504,14 @@ study that can find a bounded effect, a null, or a reversal.
 Holding a provider route constant does not guarantee identical sampling
 behavior if harnesses use APIs differently. Native behavior improves product
 validity while complicating causal isolation. Tool-capability equivalence
-does not make tool representations identical. Eight discovery tasks cannot
-support a universal ranking. The official verifier establishes task
-resolution, not mergeability.
+does not make tool representations identical. Two tasks with one attempt
+cannot support a stable or universal ranking. The official verifier
+establishes task resolution, not mergeability.
 
 The cited harness papers motivate attention to scaffolds; their results do
 not predict these candidates, tasks, or runtime. Historical Fugue smoke runs
 show that harness cells can reach terminal evidence; they are not results for
-this final-head preregistration.
+this dedicated canary.
 
 ## Results appendix — intentionally empty
 
@@ -530,6 +521,8 @@ Results` must include:
 ```text
 source commit/tree:
 preview digest:
+campaign/experiment/preset:
+W&B/Weave project:
 taskset/task-image lock:
 model route:
 harness/runtime locks:

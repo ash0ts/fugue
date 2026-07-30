@@ -1,0 +1,106 @@
+{
+  "caveats": [
+    "This is a planned lane with zero published cells; it reports no memory lift or selected intervention.",
+    "Source, dataset, route, dense-index, runtime, and preview locks remain pending.",
+    "Assigned retrieval is not mechanism evidence; context calls and opened source paths must be reconciled before any use claim.",
+    "The active execution backend is local Harbor; no Serverless behavior is claimed."
+  ],
+  "cells": [],
+  "content_sha256": "f0cc3233c239323065c3a609f59b2821ce6d0ba117871ddf22c89b6c5020fa20",
+  "decision_value": 0,
+  "evidence_tier": "active",
+  "findings": [],
+  "groups": [],
+  "hypothesis": "At least one intervention will change task outcome or execution behavior, but assignment alone will not prove that retrieval influenced the answer.",
+  "id": "real-memory-study-v1",
+  "links": {
+    "evaluations": [],
+    "project": "https://wandb.ai/wandb/fugue-memory-loop-engineering-v1/weave"
+  },
+  "matrix": {
+    "attempts": 1,
+    "cohorts": [
+      {
+        "expected_predictions": 8,
+        "harnesses": [
+          "claude-code"
+        ],
+        "id": "canary",
+        "label": "Two-task repository-memory canary",
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "tasks": [
+          "sympy__sympy-18199",
+          "sphinx-doc__sphinx-9461"
+        ],
+        "treatments": [
+          "baseline",
+          "rag-dense",
+          "policy-only",
+          "combined"
+        ]
+      }
+    ],
+    "expected_predictions": 8,
+    "experiment_id": "real-memory-study",
+    "harnesses": [
+      "claude-code"
+    ],
+    "models": [
+      "anthropic/claude-sonnet-5"
+    ],
+    "tasks": [
+      "sympy__sympy-18199",
+      "sphinx-doc__sphinx-9461"
+    ],
+    "treatments": [
+      "baseline",
+      "rag-dense",
+      "policy-only",
+      "combined"
+    ],
+    "workload_id": "canary"
+  },
+  "metrics": {
+    "agent_links": 0,
+    "completion_rate": 0.0,
+    "expected_predictions": 8,
+    "harness_errors": 0,
+    "input_tokens": null,
+    "mean_cost_usd": null,
+    "mean_mrr": null,
+    "mean_recall_at_10": null,
+    "measured_cost_predictions": 0,
+    "measured_latency_predictions": 0,
+    "measured_usage_predictions": 0,
+    "median_turns": null,
+    "median_wall_time_sec": null,
+    "output_tokens": null,
+    "paired_bootstrap": null,
+    "pass_rate": null,
+    "passed_predictions": 0,
+    "predictions": 0,
+    "provider_errors": 0,
+    "recoverable_errors": 0,
+    "refusals": 0,
+    "scored_predictions": 0,
+    "tool_calls": null,
+    "total_cost_usd": null
+  },
+  "provenance": {
+    "dataset_digest": "pending",
+    "dataset_id": "real-study-lanes-memory-canary-v1",
+    "run_ids": [],
+    "snapshot_digest": "pending",
+    "source_commit": "pending",
+    "source_url": "https://github.com/ash0ts/fugue"
+  },
+  "question": "Do locked dense repository retrieval, an inspect-and-verify policy, or their combination change outcomes on two real maintenance tasks?",
+  "schema_version": 1,
+  "status": "planned_unrun",
+  "summary": "A planned eight-cell local-Harbor comparison of baseline, locked dense retrieval, an inspect-and-verify policy, and their combination with Claude Code and Sonnet 5 fixed.",
+  "task_selection": "The planned canary uses two immutable SWE-bench Verified cases assigned to the dedicated memory lane and selected for repository-scale maintenance work.",
+  "title": "Real repository-memory intervention canary",
+  "why_it_matters": "Repository memory should be selected from aligned behavioral and mechanism evidence, not retrieval assignment or retrieval metrics alone."
+}

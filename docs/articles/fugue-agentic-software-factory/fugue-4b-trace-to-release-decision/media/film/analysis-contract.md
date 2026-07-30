@@ -1,17 +1,17 @@
-# Analysis contract — From a Trace to a Release Decision
+# Analysis contract — The Claude Code–Fugue Loop
 
 ## Audience and question
 
-- **Audience:** Teams evaluating the complete Aria–Fugue workflow.
-- **Single question:** What receipts must exist before a live workflow supports a release decision?
-- **Intended takeaway:** A credible workflow links genuine evidence, exact approval, remote work, reconciliation, and cleanup.
-- **Out of scope:** No completed 80-cell Study, live follow-up, or release memo is claimed.
+- **Audience:** Teams evaluating the flagship Claude Code–Fugue workflow.
+- **Single question:** What receipts must exist before a Claude Code-engineered Agent change supports a decision?
+- **Intended takeaway:** A credible loop links one reviewed failure, exact approval, local Harbor work, selection, private holdout, and reconciled evidence.
+- **Out of scope:** No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed.
 
 ## Article relationship
 
 - **Synthesizes:** the cited article sections through Qualification checklist
 - **Bridges to:** Try this in 15 minutes
-- **What to watch:** Treat the workflow as a qualification contract: prepared evidence and approval are real boundaries, while remote execution and the final memo remain required and unobserved.
+- **What to watch:** Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor.
 
 ## Evidence boundary
 
@@ -24,9 +24,9 @@ pending study contains no implied result.
 
 | Scene | Read time | Takeaway | Evidence | Visual relationship |
 | --- | ---: | --- | --- | --- |
-| evidence-scene | 11s | The story begins with genuine evidence, not a stage script. | article.md#the-evidence-scene | evidence graph |
+| evidence-scene | 11s | The loop begins by locking one reviewed failure. | article.md#the-evidence-scene | evidence graph |
 | approval-card | 15s | The approval card binds exact meaning and spend. | article.md#the-approval-card | state machine |
-| attempt-lifecycle | 15s | Each approved cell needs one complete Serverless lifecycle. | article.md#what-the-audience-sees-while-cells-run | attempt lifecycle |
+| attempt-lifecycle | 15s | Each approved cell needs one complete local Harbor lifecycle. | article.md#what-the-audience-sees-while-cells-run | attempt lifecycle |
 | failure-branches | 15s | Mismatch, missing evidence, null outcome, and orphan cleanup stop the story. | article.md#failure-is-part-of-the-runbook | state machine |
 | evidence-reconcile | 15s | Weave and Study rows must agree before interpretation. | article.md#build-the-evidence-wall-first-required-not-yet-observed | reconciliation |
 | qualification-gates | 14s | The flagship exists only after every qualification gate passes. | article.md#qualification-checklist | ledgers |

@@ -20,7 +20,7 @@
       "The public result projection preserves improved, regressed, and unchanged cases."
     ],
     "does_not_prove": [
-      "Live Agent behavior or model quality.",
+      "Live Agent behavior, live MCP server behavior, or model quality.",
       "W&B Serverless isolation or remote execution.",
       "That the treatment caused the replayed difference."
     ]

@@ -5,7 +5,7 @@
 - **Audience:** Agent builders and eval owners.
 - **Single question:** How does one readable comparison become exact, approved work?
 - **Intended takeaway:** The same coordinates must survive preview, approval, execution, and result.
-- **Out of scope:** The no-key replay proves installation and result shape, not Agent efficacy.
+- **Out of scope:** The no-key replay proves installation and result shape, not live Agent or live MCP behavior.
 
 ## Article relationship
 
@@ -28,7 +28,7 @@ pending study contains no implied result.
 | coordinate-identity | 13s | A cell is more than a row number. | article.md#scope-and-terms | dependency stack |
 | preview-digest | 14s | Resolve and digest the plan before execution exists. | article.md#pure-preview-is-a-security-property | pipeline |
 | approval-boundary | 13s | Approval grants execution, not authorship. | article.md#approval-grants-execution-not-authorship | state machine |
-| one-service | 12s | CLI, Python, REST, MCP, and Aria converge on one service. | article.md#one-service-several-doors | reconciliation |
+| one-service | 12s | CLI, Python, REST, MCP, and optional Aria share one service. | article.md#one-service-several-doors | reconciliation |
 | observed-replay | 12s | Sixteen aligned rows make the result contract tangible. | article.md#the-no-key-replay | paired rows |
 | smoke-boundary | 12s | Replay evidence is smoke evidence, not efficacy evidence. | article.md#the-no-key-replay | boundary |
 | series-context | 10s | Primitives preserve identity across the control plane. | article.md#the-unfamiliar-maintainer-test | series map |

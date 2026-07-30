@@ -7,9 +7,9 @@
 
 The causal vocabulary, the 2×2 intervention, the measurement denominators,
 and the privacy boundary all appear here—no previous installment required.
-The design stays mutable until a new exact preview, accepted article digest,
-and untouched holdout exist. Historical Fugue memory runs are operational
-evidence only.
+The design stays mutable until an exact eight-cell preview, accepted article
+digest, human approval, and immutable source and runtime locks exist.
+Historical Fugue memory runs are operational evidence only.
 
 The failure that produced this study: a treatment that looked healthy in its
 retrieval table and inert in its Agent traces. The system had indexed the
@@ -115,29 +115,30 @@ The core design crosses two binary treatments:
 - **P:** an evidence-use policy tells the Agent to search, open, and verify
   relevant repository evidence before editing.
 
-| Arm | Memory system | Evidence-use policy | Question                                                                      |
-| --- | ------------- | ------------------- | ----------------------------------------------------------------------------- |
-| A   | No            | Standard            | What does the native Agent do?                                                |
-| B   | Yes           | Standard            | Does availability alone change behavior or outcome?                           |
-| C   | No            | Yes                 | Does an inspection policy help with ordinary repository tools?                |
-| D   | Yes           | Yes                 | Does policy create uptake of the memory system, and does that affect outcome? |
+| Variant ID   | Memory system | Evidence-use policy | Question                                                                      |
+| ------------ | ------------- | ------------------- | ----------------------------------------------------------------------------- |
+| `baseline`   | No            | Standard            | What does the native Agent do?                                                |
+| `rag-dense`  | Yes           | Standard            | Does availability alone change behavior or outcome?                           |
+| `policy-only` | No           | Yes                 | Does an inspection policy help with ordinary repository tools?                |
+| `combined`   | Yes           | Yes                 | Does policy create uptake of the memory system, and does that affect outcome? |
 
 ```mermaid
 quadrantChart
     title Repository-memory intervention
     x-axis Standard policy --> Evidence-use policy
     y-axis No memory --> Locked memory
-    quadrant-1 "D: memory + policy"
-    quadrant-2 "B: memory only"
-    quadrant-3 "A: neither"
-    quadrant-4 "C: policy only"
+    quadrant-1 "combined"
+    quadrant-2 "rag-dense"
+    quadrant-3 "baseline"
+    quadrant-4 "policy-only"
 ```
 
-The design blocks a common attribution mistake. If D beats A, the memory
-system did not necessarily cause the difference: C may perform just as well,
-showing explicit source inspection—not the index—was the active ingredient.
-B may improve localization without changing completion, showing availability
-is not uptake. D may just cost more.
+The design blocks a common attribution mistake. If `combined` beats
+`baseline`, the memory system did not necessarily cause the difference:
+`policy-only` may perform just as well, showing explicit source
+inspection—not the index—was the active ingredient. `rag-dense` may improve
+localization without changing completion, showing availability is not
+uptake. `combined` may just cost more.
 
 The interaction matters too. The policy could help only when memory is
 available, or memory could distract a policy-guided Agent with irrelevant
@@ -146,8 +147,9 @@ retrievals.
 ## The factorial question
 
 The 2×2 is not four unrelated demos. It estimates three bounded contrasts:
-memory availability (B − A under standard policy, D − C under the
-evidence-use policy), the evidence-use policy (C − A without memory, D − B
+memory availability (`rag-dense` − `baseline` under standard policy,
+`combined` − `policy-only` under the evidence-use policy), the evidence-use
+policy (`policy-only` − `baseline` without memory, `combined` − `rag-dense`
 with it), and their interaction (does the policy contrast change when memory
 is available?).
 
@@ -158,11 +160,12 @@ cohort is large enough for a model-based interaction estimate, that analysis
 must be declared in the accepted preview—it does not get added because one
 plot looks interesting.
 
-A worked reading: A=2, B=2, C=4, D=4 solved tasks supports a policy
-observation on these tasks, not a memory effect. A=2, B=2, C=2, D=4 suggests
-an interaction worth replicating. A=2, B=4, C=2, D=2 may mean the policy
-interfered with a memory benefit. With only a few tasks, all of these stay
-fragile and get shown as aligned rows.
+An illustrative reading—not a Fugue result—is that equal `baseline` and
+`rag-dense` outcomes paired with equal, higher `policy-only` and `combined`
+outcomes would support a policy observation on those tasks, not a memory
+effect. A gain only in `combined` would suggest an interaction worth
+replicating. With only two tasks, either pattern stays fragile and must be
+shown as aligned rows.
 
 There is deliberately no universal “memory score.” Official resolution,
 mechanism uptake, latency, and cost can disagree, and a treatment that
@@ -187,11 +190,19 @@ changes cover only the environment that schedules an otherwise identical
 candidate. A vector candidate cannot fall back to lexical search and keep the
 same identity.
 
-Fugue’s current managed GitNexus hybrid-vector boundary, for example, pins
-its runtime dependencies and 384-dimensional embedding path, and setup runs
-an offline lexical-mismatch semantic probe. If vector execution fails during
-a candidate cell, the cell is not relabeled as a successful vector treatment.
-The explicit BM25 candidate remains a different, legal arm.
+The dedicated lane is campaign `real-memory-study-v1`, experiment
+`real-memory-study`, preset `canary`, and W&B/Weave project
+`wandb/fugue-memory-loop-engineering-v1`. It freezes Claude Code,
+`anthropic/claude-sonnet-5`, two tasks, one attempt, and local Docker
+execution through Harbor. The four exact candidate IDs are `baseline`,
+`rag-dense`, `policy-only`, and `combined`; the last two use the registered
+inspect-and-verify policy where applicable.
+
+Fugue preparation must build and lock the `rag-dense` artifacts for both
+memory-bearing candidates before admission. Dense embedding and index
+preparation plus an offline semantic probe must succeed. If the artifact is
+missing, corrupt, or unqueryable, the Study blocks. There is no BM25
+substitution that keeps the `rag-dense` identity.
 
 The principle generalizes: graceful product fallback may be good user
 experience, but hidden fallback is invalid experiment identity.
@@ -201,20 +212,18 @@ experience, but hidden fallback is invalid experiment identity.
 Before testing memory efficacy, we qualify whether the evidence pipeline can
 even observe the mechanism.
 
-The contract canary uses a task that explicitly requires a semantic lookup.
-It must demonstrate that the exact memory runtime initialized, the native MCP
-tool registered under the expected schema, the Agent invoked the tool, vector
-telemetry reported nonzero 384-dimensional execution, the returned source was
-linked to a subsequent content open, the official verifier ran offline, and
-the Agent conversation reconciled with its Evaluation prediction. The canary
-is deliberately biased toward tool use—it proves transport and observability,
-not spontaneous uptake—so its row is excluded from efficacy.
+Before the eight task cells can be admitted, qualification must demonstrate
+that the exact dense runtime and locked index initialize offline, the
+semantic probe distinguishes a meaningful dense match, both memory-bearing
+candidates resolve the same prepared artifact, the official verifier can run
+offline, and Agent conversations can reconcile with their Evaluation
+predictions. This qualifies the treatment and evidence path; it is not an
+efficacy result.
 
-We also run direct retrieval diagnostics against a frozen 225-query source.
-Those queries characterize recall, rank, latency, errors, and vector
-contribution without Agent variance. Preparation materializes and locks the
-source; trials may not download it. Direct measurements stay ordinary Weave
-operations and never synthesize Agent conversations.
+The planned task cells then preserve retrieval calls, returned source
+identities, subsequent content reads, tool and context events, deterministic
+outcomes, and missing usage without imputation. Assignment to `rag-dense` is
+not invocation, and a returned path is not opened or used evidence.
 
 The measurement is ready only when deterministic event joins survive negative
 cases:
@@ -230,48 +239,40 @@ cases:
 Without these controls, a beautiful assigned-to-outcome funnel can be a
 logging artifact.
 
-## Discovery, selection, holdout
+## The dedicated planned canary
 
-Fugue’s hard-memory program separates discovery from holdout. The checked-in
-`repo-memory-impact` experiment contains an eight-task hard calibration
-cohort with no memory, an eight-task Latin-square discovery cohort, a
-versioned treatment-selection analysis, a four-task untouched holdout with
-three attempts, two easy control tasks with three attempts, hard
-repository-QA, direct retrieval, and continuity diagnostics, and an uptake
-diagnostic kept outside efficacy denominators.
+This article now maps to one source-isolated eight-cell canary, not the
+broader historical `repo-memory-impact` program and not a
+discovery–selection–holdout sequence. The two immutable SWE-bench Verified
+tasks are:
 
-The broader program evaluates several repository-memory systems. The 2×2
-article study is a frozen subdesign: discovery selects one qualifying memory
-variant by predeclared rules, then crosses it with the evidence-use policy on
-untouched tasks. Selection cannot use holdout outcomes.
+- `sympy__sympy-18199`
+- `sphinx-doc__sphinx-9461`
+
+Each task runs once through all four candidate IDs with Claude Code and
+Sonnet 5 fixed: two tasks × four arms × one attempt = eight planned local
+Harbor cells. No result exists. A replication, harder cohort, cross-harness
+comparison, or treatment-selection stage would be a new, separately approved
+Study.
 
 ```mermaid
 flowchart LR
-    Q["Qualification<br/>runtime and contract"] --> D["Discovery<br/>rank treatments"]
-    D --> L["TreatmentSelectionLockV1"]
-    L --> H["Untouched 2×2 holdout"]
-    H --> R["Aligned analysis"]
-    E["Easy controls"] --> R
-    U["Uptake diagnostic"] -. "mechanism only" .-> R
+    Q["Qualify<br/>tasks, dense artifacts, runtime"] --> P["Preview<br/>exact eight cells"]
+    P --> A["Human approval<br/>digest and spend cap"]
+    A --> H["Local Harbor<br/>immutable candidates"]
+    H --> R["Reconcile<br/>outcome and mechanism"]
 ```
 
-Discovery ranks variants within the same task, harness, and trial baseline.
-Official resolution is primary; localization recall@10, mean reciprocal rank,
-recoverable-error rate, observed cost, and stable variant ID act as
-tie-breakers exactly as declared. The selection lock records the full ranking
-and the chosen treatment, and the holdout refuses a manually substituted
-variant.
-
-Easy controls exist to catch a treatment that adds overhead or breaks obvious
-tasks; they stay out of the hard-task efficacy estimate. The uptake
-diagnostic may require a semantic lookup to prove the end-to-end
-contract—because that instruction changes behavior and its tasks were used
-during qualification, it stays out of the unbiased treatment denominator.
+The canary does not choose a winner for a later holdout. It determines
+whether the four exact arms can produce interpretable, aligned task and
+mechanism evidence under the declared locks. Any follow-up decision must cite
+the two task rows, their limitations, and a new preregistration.
 
 ## Primary and secondary outcomes
 
 The primary outcome is official task resolution under the pinned offline
-verifier, paired within task, harness, and attempt policy.
+verifier, aligned within task across the four arms while model, Claude Code,
+and the one-attempt policy stay fixed.
 
 Secondary outcomes: localization recall@10 and mean reciprocal rank;
 assigned, returned, opened, and used source counts; required and spontaneous
@@ -289,10 +290,9 @@ If 12 sources are returned across four attempts, three are opened, one is
 used, and zero tasks pass, we do not report “75% uptake” by picking the
 convenient middle denominator.
 
-Retrieval-only diagnostics live in a separate evidence table. Nine hundred
-direct queries can qualify a search system more precisely than a handful of
-Agent tasks—but they are not Agent conversations, and they never become task
-outcomes.
+The offline semantic probe lives in a separate qualification table. It can
+establish that the locked dense artifact is queryable, but it is not an Agent
+conversation and never becomes a task outcome.
 
 ## Context budget and displacement
 
@@ -306,14 +306,14 @@ content exposed per turn, truncation and compaction events, repository reads
 displaced or added, time between retrieval and first edit, and whether
 required task or error content survived compaction.
 
-These measures are harness-sensitive. One harness injects retrieved content
-directly; another exposes only an MCP reference. We do not normalize away
-that product behavior: the candidate identity includes the delivery
-interface, and analysis facets by harness.
+These measures can be harness-sensitive, which is why the planned lane fixes
+Claude Code and the delivery interface. A cross-harness memory question
+belongs in a separate Study rather than an unplanned facet of this canary.
 
-A result can therefore say “memory improved localization but increased
-truncation and reduced official resolution under harness H.” A good retrieval
-component does not make the integrated treatment good.
+A bounded result could say “on one locked task, the memory-bearing arms
+improved localization but increased truncation without improving official
+resolution.” A good retrieval component does not make the integrated
+treatment good.
 
 ## What “used” can honestly mean
 
@@ -360,10 +360,10 @@ identity-preserving, whether sources were available to the Agent, and whether
 task, trace, usage, and Evaluation evidence reconciled.
 
 The classifications matter. An unavailable optional product may be
-`not_applicable`. A required vector runtime that silently uses BM25 is an
-identity violation. A timeout is not a zero localization score. Missing
-OpenClaw usage is not free execution. A memory service that starts after the
-Agent turn cannot claim availability.
+`not_applicable`. A required dense runtime that silently uses BM25 is an
+identity violation. A timeout is not a zero localization score. Missing usage
+is not free execution. A memory service that starts after the Agent turn
+cannot claim availability.
 
 Structured errors are themselves mechanism evidence. An agent that receives a
 bounded “index unavailable” result can respond honestly; one that receives an
@@ -371,85 +371,64 @@ empty success may hallucinate completeness.
 
 ## The execution artifact
 
-The repository exposes the existing cohort previews:
+The dedicated experiment exposes a side-effect-free local preview:
 
 ```bash
 uv sync --python 3.13 --frozen --extra dev
 
-uv run fugue run repo-memory-impact \
-  --preset hard-calibration \
-  --preview
-
-uv run fugue run repo-memory-impact \
-  --preset hard-discovery \
-  --preview
-
-uv run fugue analyze \
-  --saved repo-memory-discovery-selection \
-  --yes
-
-uv run fugue run repo-memory-impact \
-  --preset hard-holdout \
-  --selection-lock REPORT_DIR/treatment-selection-lock.json \
-  --preview
-
-uv run fugue run repo-memory-impact \
-  --preset uptake-diagnostic \
-  --preview
+uv run fugue run real-memory-study \
+  --preset canary \
+  --preview \
+  --json
 ```
 
-These previews describe the broader managed-memory program. Before the
-article’s 2×2 holdout executes, the exact standard and evidence-use policy
-variants must appear in one generated preview whose matrix shows all four
-arms for every selected task–harness pair. The published artifact includes
-that preview digest.
+The preview must expand exactly eight cells and show project
+`wandb/fugue-memory-loop-engineering-v1`, model
+`anthropic/claude-sonnet-5`, Claude Code, the two locked tasks, all four exact
+candidate IDs, one attempt, and local Docker/Harbor execution. It is
+inspection, not execution authority.
 
-Preparation happens before preview: task repositories, verifier assets, and
-images pinned; the selected memory runtime and index built; vector artifacts
-and models verified offline; tool registration and a nonzero semantic probe
-passed; the host-only evaluation lock materialized. No trial may download or
-install any of it.
-
-A human approves the exact cell and dollar cap. No discovery process can
-approve its own selected holdout.
+After approval and before campaign admission, preparation pins task
+repositories, verifier assets, and images; builds the `rag-dense` runtime and
+index; verifies dense artifacts offline; passes the semantic probe; and
+materializes the host-only evaluation lock. No trial may download or install
+any of it. The Research Agent may request approval, but only a trusted human
+operator approves the exact preview digest and spend cap. The accepted plan
+then passes campaign admission unchanged.
 
 ## Predeclared decision policy
 
 The study does not automatically make a memory system the product default. It
 produces evidence for a decision policy declared now.
 
-Eligibility first: all four arms need complete eligible aligned rows, the
-selected memory runtime must prove its declared retrieval mode, and there can
-be no critical privacy or evidence-honesty regression. Then we consider, in
+Eligibility first: all eight planned coordinates must reconcile; both
+memory-bearing arms must prove the exact locked dense mode; and there can be
+no critical privacy or evidence-honesty regression. Then we consider, in
 order:
 
-1. official resolution contrasts within each harness;
+1. official resolution contrasts by aligned task and arm;
 2. the assigned-to-used funnel;
-3. easy-control regressions;
-4. observed latency, usage, and cost;
-5. structured failure and fallback behavior;
-6. maintainer usefulness and uncertainty.
+3. observed latency, usage, and cost;
+4. structured failure and fallback behavior;
+5. maintainer usefulness and uncertainty.
 
-A default-treatment recommendation requires a replicated resolution benefit
-or an explicitly approved auditability benefit, no critical regressions, and
-an operational cost the product owner accepts. A mechanism-only improvement
-can justify further study or an opt-in mode—it cannot be described as a
-coding-outcome win. A harness reversal blocks a universal default.
+This two-task canary cannot make a memory system the product default. Its
+decision is narrower: advance a named arm or interaction to a separately
+approved replication, stop and remediate a concrete failure, or issue no
+interpretable result. A mechanism-only improvement can justify more study; it
+cannot be described as a coding-outcome win.
 
-We reject the selected treatment outright if it leaks private facts, hides
-vector fallback, breaks easy controls, or creates unsupported completeness
-claims, even when hard-task passes rise. We issue no decision if required
-rows, usage, or source-use evidence are missing.
+We mark the Study ineligible if any arm leaks private facts, hides dense
+fallback, or creates unsupported completeness claims. We issue no behavioral
+decision if required rows, usage, or source-use evidence are missing.
 
 Notice what this policy admits: statistics cannot supply the values. How much
-latency is acceptable for better auditability is a product judgment. Whether
-one critical honesty regression outweighs two extra solved tasks is an
-authority decision made in advance. Fugue records those choices; it does not
-derive them from a composite score.
+latency is acceptable for better auditability is a product judgment, and the
+authority boundary must be recorded rather than hidden in a composite score.
 
-If no arm is distinguishable, we keep the null. A successor study may target
+If no arm is distinguishable, we keep the null. A successor Study may target
 tasks with stronger repository-discovery demands, but it receives new private
-labels, locks, preview, and approval—never the current holdout’s identity.
+labels, locks, preview, and approval—never this canary’s identity.
 
 The decision record names the owning workstream for each follow-up: memory
 runtime maintainers for retrieval defects, harness maintainers for delivery
@@ -460,8 +439,9 @@ vague request to “improve the agent.”
 
 ## Analysis and useful nulls
 
-The primary paired analysis reports each harness separately; a memory win in
-one harness never pools with a loss in another.
+The primary aligned analysis fixes Claude Code and Sonnet 5, then reports
+each task separately before any two-task summary. This lane cannot estimate a
+cross-harness or cross-model interaction.
 
 All of the following are useful publishable outcomes:
 
@@ -475,12 +455,12 @@ All of the following are useful publishable outcomes:
   intervention; the interaction is the result.
 - **Higher cost, equal outcome.** The treatment is not justified for this
   taskset despite richer traces.
-- **Harness reversal.** Context delivery or tool use differs by native
-  harness; no universal memory claim is supported.
+- **Task reversal.** The arm pattern differs across the two cases; no
+  aggregate memory claim is supported.
 - **No interpretable result.** Missing locks, fallback, or evidence
   reconciliation prevent analysis.
 
-We will not respond to a null by editing the holdout. A new, harder taskset
+We will not respond to a null by editing the canary. A new, harder taskset
 gets a new Study identity and preregistration.
 
 ## Privacy and leakage
@@ -524,11 +504,12 @@ evidence at all.
 ## What this does not show
 
 This preregistration does not prove repository memory helps. It does not
-prove the selected memory system represents RAG, code graphs, generated maps,
-or longitudinal memory in general. It does not make trace-based “use” causal.
+prove this locked dense treatment represents RAG, code graphs, generated
+maps, or longitudinal memory in general. It does not make trace-based “use”
+causal.
 
-Four untouched tasks with three attempts produce aligned evidence, not a
-universal effect estimate. The official SWE verifier measures task
+Two tasks with one attempt produce canary evidence, not a stable or universal
+effect estimate. The official SWE verifier measures task
 resolution, not long-term maintainability. The evidence-use policy is a real
 treatment bundle; any benefit belongs to its exact wording and harness
 integration.
@@ -544,21 +525,21 @@ The dated results appendix must record:
 
 ```text
 source commit/tree and preview digest:
-selected memory treatment and TreatmentSelectionLockV1:
+campaign/experiment/preset and W&B/Weave project:
 task/evaluation/runtime/model/harness locks:
 all four arm fingerprints:
 planned/started/completed/excluded/missing by arm:
-official paired outcomes by harness:
+official aligned outcomes by task and arm:
 assigned/returned/opened/used funnel:
 localization, error, latency, usage, and cost:
-fallback and vector-conformance evidence:
+fallback and dense-conformance evidence:
 privacy scan receipt:
 reversals, nulls, and limitations:
 canonical Weave/Study links:
 supported claim:
 ```
 
-If exact vector execution or private-label isolation cannot be proven, the
+If exact dense execution or private-label isolation cannot be proven, the
 study is ineligible.
 
 ## Next: an MCP release is an agent change
@@ -569,9 +550,9 @@ An MCP server is the general version of the same intervention—descriptions,
 projections, pagination, and errors all change what the Agent notices and
 does.
 
-In **Fugue 3**, we apply the same study primitives to an exact W&B MCP
-release comparison using genuine hosted evidence and W&B Serverless
-execution.
+In **Fugue 3**, we apply the same study primitives to a source-isolated W&B
+MCP `main` versus final-staging comparison using genuine hosted evidence and
+local Harbor execution. The decision remains pending.
 
 ## References
 

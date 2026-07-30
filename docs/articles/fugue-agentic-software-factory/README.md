@@ -54,11 +54,11 @@ a dated result file and a separate result-coda film.
 
 ## Runtime boundary
 
-The flagship workflow uses W&B Serverless Sandboxes, W&B Inference,
-Anthropic, W&B Runs, and Weave Calls, Datasets, and Evaluations. It contains
-credential names only, never values. Local Harbor is a parity baseline.
-OpenAI and direct CoreWeave operation are not part of the runtime
-instructions.
+The active flagship is Claude Code plus Fugue through local Docker/Harbor,
+using Anthropic for the fixed model route and W&B/Weave for reviewed evidence
+and publication. Aria is an optional read-only presentation shell. W&B
+Serverless, OpenAI, direct CoreWeave operation, and WBAF are not dependencies
+of the active flagship and have no observed execution claim in this series.
 
 ## Editorial influences
 

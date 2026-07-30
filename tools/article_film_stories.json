@@ -324,7 +324,7 @@
       "audience": "Agent builders and eval owners",
       "question": "How does one readable comparison become exact, approved work?",
       "takeaway": "The same coordinates must survive preview, approval, execution, and result.",
-      "out_of_scope": "The no-key replay proves installation and result shape, not Agent efficacy.",
+      "out_of_scope": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior.",
       "duration": 96,
       "poster_scene": "observed-replay",
       "reduced_motion_scene": "observed-replay",
@@ -416,7 +416,7 @@
           "id": "one-service",
           "duration": 12,
           "eyebrow": "MANY DOORS, ONE PLAN",
-          "headline": "CLI, Python, REST, MCP, and Aria converge on one service.",
+          "headline": "CLI, Python, REST, MCP, and optional Aria share one service.",
           "support": ["Each interface must return the same preview digest.", "No interface owns a private execution path."],
           "kind": "audited Fugue observation",
           "source": "article.md#one-service-several-doors",
@@ -451,13 +451,13 @@
           "duration": 12,
           "eyebrow": "DO NOT OVERCLAIM",
           "headline": "Replay evidence is smoke evidence, not efficacy evidence.",
-          "support": ["It checks packaging, parsing, and result projection.", "Mechanism remains unavailable; no live Agent or Serverless runtime ran."],
+          "support": ["It checks packaging, parsing, and result projection.", "Mechanism remains unavailable; no live Agent, live MCP server, or local Harbor cell ran."],
           "kind": "audited Fugue observation",
           "source": "article.md#the-no-key-replay",
           "visual": {
             "type": "boundary",
             "left": {"label": "OBSERVED", "items": ["install", "16 rows", "result shape"], "state": "verified"},
-            "right": {"label": "NOT OBSERVED", "items": ["live Agent", "mechanism", "Serverless"], "state": "missing"},
+            "right": {"label": "NOT OBSERVED", "items": ["live Agent", "live MCP", "local Harbor"], "state": "missing"},
             "rule": "SMOKE ≠ EFFICACY"
           }
         },
@@ -518,33 +518,32 @@
         {
           "id": "paired-assignment",
           "duration": 13,
-          "eyebrow": "PAIR THE TASKS",
-          "headline": "Each harness candidate receives the same locked task coordinates.",
-          "support": ["Task identity and attempt index align the comparison.", "A missing coordinate remains missing."],
+          "eyebrow": "EXACT EIGHT-CELL CANARY",
+          "headline": "Four harnesses receive the same two locked task coordinates.",
+          "support": ["GLM-5.2, context, local Docker, and one attempt stay fixed.", "A missing task–harness coordinate remains missing."],
           "kind": "preregistered design",
           "source": "article.md#assignment-ordering-and-attempts",
           "visual": {
             "type": "matrix",
-            "rows": ["HARNESS A", "HARNESS B"],
-            "columns": ["TASK 1 / A1", "TASK 1 / A2", "TASK 2 / A1", "TASK 2 / A2"],
+            "rows": ["SYMPY / A1", "ASTROPY / A1"],
+            "columns": ["HERMES", "OPENCLAW", "CLAUDE CODE", "CODEX"],
             "cells": [["planned", "planned", "planned", "planned"], ["planned", "planned", "planned", "planned"]],
-            "legend": ["PAIRED", "PLANNED"],
+            "legend": ["ALIGNED", "PLANNED"],
             "unit": "LOCKED COORDINATES"
           }
         },
         {
           "id": "balanced-order",
           "duration": 14,
-          "eyebrow": "ORDER IS A CONTROL",
-          "headline": "Counterbalance execution order before observing outcomes.",
-          "support": ["Half the blocks begin with A; half begin with B.", "Warm caches and temporal drift cannot become the treatment by accident."],
+          "eyebrow": "SERIAL ORDER IS A CONTROL",
+          "headline": "Lock and record one deterministic serial expansion.",
+          "support": ["The canary uses one worker, one seed, and an inspectable cell order.", "Reproducible ordering does not estimate away temporal noise."],
           "kind": "preregistered design",
           "source": "article.md#assignment-ordering-and-attempts",
           "visual": {
             "type": "timeline",
             "lanes": [
-              {"label": "BLOCK 1", "events": ["A", "B", "A", "B"]},
-              {"label": "BLOCK 2", "events": ["B", "A", "B", "A"]}
+              {"label": "SERIAL QUEUE", "events": ["HERMES ×2", "OPENCLAW ×2", "CLAUDE CODE ×2", "CODEX ×2"]}
             ],
             "unit": "PREDECLARED ORDER",
             "status": "PLANNED"
@@ -554,13 +553,13 @@
           "id": "estimand",
           "duration": 13,
           "eyebrow": "NAME THE QUESTION",
-          "headline": "Estimate paired candidate differences under locked conditions.",
-          "support": ["The reporting unit is model–harness–environment.", "The design does not estimate a universal model ranking."],
+          "headline": "Compare aligned candidate rows under locked conditions.",
+          "support": ["Raw task contrasts belong to model–harness–environment candidates.", "Two tasks and one attempt do not estimate a stable harness ranking."],
           "kind": "preregistered design",
           "source": "article.md#the-bounded-question",
           "visual": {
             "type": "boundary",
-            "left": {"label": "ESTIMAND", "items": ["paired task difference", "locked runtime", "declared attempts"], "state": "evidence"},
+            "left": {"label": "ESTIMAND", "items": ["aligned raw task rows", "locked runtime", "one declared attempt"], "state": "evidence"},
             "right": {"label": "NOT ESTIMATED", "items": ["all repositories", "all harnesses", "model rank"], "state": "missing"},
             "rule": "CANDIDATE ≠ MODEL NAME"
           }
@@ -570,12 +569,12 @@
           "duration": 12,
           "eyebrow": "VALID DISCORDANCE / ILLUSTRATIVE",
           "headline": "A reversal is a result, not a reason to pool.",
-          "support": ["Candidate A can lead on one task family while B leads on another.", "Separate reporting preserves the interaction."],
+          "support": ["A harness can lead on one locked task and trail on the other.", "Separate task rows preserve the discordance."],
           "kind": "illustrative example",
           "source": "article.md#reversals-and-the-no-pooling-rule",
           "visual": {
             "type": "interaction_plot",
-            "families": ["TASK FAMILY X", "TASK FAMILY Y"],
+            "families": ["LOCKED TASK 1", "LOCKED TASK 2"],
             "series": [
               {"label": "CANDIDATE A", "values": [0.75, 0.35], "state": "variable"},
               {"label": "CANDIDATE B", "values": [0.35, 0.75], "state": "decision"}
@@ -664,7 +663,7 @@
           "duration": 10,
           "eyebrow": "VISUAL SYNTHESIS / ILLUSTRATIVE",
           "headline": "Most returned evidence never becomes used evidence.",
-          "support": ["12 sources returned; 3 opened; 1 used.", "Across four attempts, 0 tasks passed."],
+          "support": ["Illustration: 12 sources returned; 3 opened; 1 used.", "Across four illustrative arm cells, 0 tasks passed."],
           "kind": "illustrative example",
           "source": "article.md#primary-and-secondary-outcomes",
           "visual": {
@@ -688,7 +687,7 @@
           "source": "article.md#what-used-can-honestly-mean",
           "visual": {
             "type": "paired_row",
-            "identity": "task-07 / harness-H / attempt-2 / arm-D",
+            "identity": "locked-task / claude-code / attempt-1 / combined",
             "stages": [
               {"label": "ASSIGNED", "value": "1/1", "state": "evidence"},
               {"label": "RETURNED", "value": "1/1", "state": "evidence"},
@@ -725,7 +724,7 @@
             "type": "matrix",
             "rows": ["STANDARD POLICY", "EVIDENCE-USE POLICY"],
             "columns": ["NO MEMORY", "MEMORY"],
-            "cells": [["CONTROL", "MEMORY ONLY"], ["POLICY ONLY", "MEMORY + POLICY"]],
+            "cells": [["BASELINE", "RAG-DENSE"], ["POLICY-ONLY", "COMBINED"]],
             "legend": ["PLANNED", "NO RESULT"],
             "unit": "INTERVENTION ARMS"
           }
@@ -733,21 +732,21 @@
         {
           "id": "fallback-detection",
           "duration": 13,
-          "eyebrow": "FALLBACK CHANGES THE ARM",
-          "headline": "A vector failure cannot silently become vector success.",
-          "support": ["Fallback is a structured failure or a distinct candidate.", "The explicit BM25 arm keeps its own identity."],
+          "eyebrow": "DENSE IDENTITY IS LOCKED",
+          "headline": "A dense failure blocks instead of silently becoming BM25.",
+          "support": ["Both memory-bearing arms require the prepared dense artifact.", "Missing, corrupt, or unqueryable dense state blocks admission."],
           "kind": "preregistered design",
           "source": "article.md#failure-and-fallback-semantics",
           "visual": {
             "type": "state_machine",
             "states": [
-              {"label": "VECTOR ASSIGNED", "state": "variable"},
-              {"label": "VECTOR RETURNED", "state": "verified"},
-              {"label": "VECTOR FAILED", "state": "failure"},
-              {"label": "BM25 ARM", "state": "evidence"}
+              {"label": "DENSE ASSIGNED", "state": "variable"},
+              {"label": "DENSE RETURNED", "state": "verified"},
+              {"label": "DENSE FAILED", "state": "failure"},
+              {"label": "STUDY BLOCKED", "state": "missing"}
             ],
-            "edges": [[0, 1, "observed"], [0, 2, "structured error"]],
-            "forbidden": "VECTOR FAILED → SILENT BM25 → VECTOR SUCCESS"
+            "edges": [[0, 1, ""], [0, 2, ""], [2, 3, ""]],
+            "forbidden": "DENSE FAILED → SILENT BM25 → DENSE SUCCESS"
           }
         },
         {
@@ -822,22 +821,22 @@
         "after_label": "The maintainer memo",
         "bridge_to_heading": "try-this-in-15-minutes",
         "bridge_to_label": "Try this in 15 minutes",
-        "what_to_watch": "Track exact revisions through manifest qualification, genuine evidence, the staged 80-cell design, judge calibration, and the still-blocked decision."
+        "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision."
       },
       "scenes": [
         {
           "id": "exact-revisions",
           "duration": 11,
           "eyebrow": "VISUAL SYNTHESIS / PLANNED",
-          "headline": "The comparison begins with exact MCP revisions.",
-          "support": ["Baseline: 80252b3…", "Candidate: a2bae72…"],
+          "headline": "The comparison waits for two final reviewed heads.",
+          "support": ["Baseline: reviewed main.", "Candidate: final repaired staging after review."],
           "kind": "preregistered design",
           "source": "article.md#lock-the-two-mcp-candidates",
           "visual": {
             "type": "revision_compare",
-            "left": {"label": "W&B MCP 0.3.7", "revision": "80252b3aa23ae3c1fdde089ce2b7dfb106dafb38"},
-            "right": {"label": "W&B MCP 0.4", "revision": "a2bae7271323ac43262ffb73454b0aff01ddc808"},
-            "fixed": ["linux/amd64", "model route", "taskset", "runtime policy"]
+            "left": {"label": "REVIEWED MAIN", "revision": "LOCK AFTER REVIEW"},
+            "right": {"label": "FINAL STAGING", "revision": "LOCK AFTER REVIEW"},
+            "fixed": ["source cohort", "Claude Code", "model route", "local Harbor"]
           }
         },
         {
@@ -863,59 +862,53 @@
           "id": "prepared-evidence",
           "duration": 15,
           "eyebrow": "PREPARED EVIDENCE / NOT RESULTS",
-          "headline": "Genuine W&B objects seed the maintainer questions.",
-          "support": ["6 Runs, 24 conversations, 48 tool spans.", "8 Dataset rows, 2 Evaluations, 16 prediction rows."],
+          "headline": "Immutable source evidence stays separate from Study output.",
+          "support": ["A zero-model receipt must lock the source shape.", "Agent traces and Evaluation rows write only to the result project."],
           "kind": "preregistered design",
           "source": "article.md#genuine-evidence-deliberately-seeded",
           "visual": {
             "type": "evidence_graph",
             "nodes": [
-              {"label": "RUNS", "value": 6},
-              {"label": "CONVERSATIONS", "value": 24},
-              {"label": "TOOL SPANS", "value": 48},
-              {"label": "DATASET ROWS", "value": 8},
-              {"label": "EVALUATIONS", "value": 2},
-              {"label": "PREDICTIONS", "value": 16}
+              {"label": "SOURCE PROJECT", "value": "LOCKED"},
+              {"label": "ZERO-MODEL RECEIPT", "value": "PENDING"},
+              {"label": "RESULT PROJECT", "value": "EMPTY"},
+              {"label": "CROSS-WRITE", "value": "BLOCKED"}
             ],
-            "output": "EVIDENCE LOCK",
-            "status": "PREPARED / NOT STUDY OUTCOME"
+            "output": "SOURCE-ISOLATED STUDY",
+            "status": "PLAN BOUNDARY / NO RESULT"
           }
         },
         {
           "id": "staged-study",
           "duration": 15,
-          "eyebrow": "THE 80-CELL DESIGN",
-          "headline": "Discovery precedes untouched primary and replication cohorts.",
-          "support": ["8 Claude + 8 W&B Inference discovery.", "32 Claude primary + 32 W&B Inference replication."],
+          "eyebrow": "THE LOCAL STAGED DESIGN",
+          "headline": "An 8-cell canary gates a separate 32-cell confirmation.",
+          "support": ["Claude Code and the locked route stay fixed.", "The confirmation needs its own preview, approval, budget, and result."],
           "kind": "preregistered design",
-          "source": "article.md#the-80-cell-sequence",
+          "source": "article.md#the-staged-local-sequence",
           "visual": {
             "type": "staged_study",
             "stages": [
-              {"label": "CLAUDE DISCOVERY", "cells": 8, "state": "variable"},
-              {"label": "W&B DISCOVERY", "cells": 8, "state": "decision"},
-              {"label": "CLAUDE PRIMARY", "cells": 32, "state": "variable"},
-              {"label": "W&B REPLICATION", "cells": 32, "state": "decision"}
+              {"label": "LOCAL CANARY", "cells": 8, "state": "variable"},
+              {"label": "SEPARATE CONFIRMATION", "cells": 32, "state": "decision"}
             ],
-            "unit": "80 PLANNED CELLS",
-            "status": "ORDERED / NO RESULT"
+            "unit": "40 MAXIMUM PLANNED CELLS",
+            "status": "CANARY FIRST / NO RESULT"
           }
         },
         {
           "id": "judge-gate",
           "duration": 15,
-          "eyebrow": "JUDGE BEFORE PAID COHORT",
-          "headline": "Forty-eight double-reviewed cases must qualify the judge.",
-          "support": ["TPR and TNR must each reach at least 0.85.", "Zero critical false passes are permitted."],
+          "eyebrow": "SEPARATE PACKAGE AUTHORITY",
+          "headline": "Behavioral evidence cannot issue package GO.",
+          "support": ["The Study supports a bounded local behavior summary.", "Package release still needs independent checks and human sign-off."],
           "kind": "preregistered design",
           "source": "article.md#judge-calibration-before-paid-work",
           "visual": {
-            "type": "review_gate",
-            "cases": 48,
-            "balance": ["24 ACCEPTABLE", "24 UNACCEPTABLE"],
-            "reviewers": ["REVIEWER A", "REVIEWER B"],
-            "gates": ["TPR ≥ .85", "TNR ≥ .85", "0 CRITICAL FP"],
-            "status": "PLANNED / NOT CALIBRATED"
+            "type": "boundary",
+            "left": {"label": "BEHAVIOR STUDY", "items": ["8-cell canary", "32-cell confirmation", "local Harbor receipts"], "state": "evidence"},
+            "right": {"label": "PACKAGE DECISION", "items": ["CI and security", "compatibility review", "human sign-off"], "state": "missing"},
+            "rule": "BEHAVIOR ≠ PACKAGE AUTHORITY"
           }
         },
         {
@@ -928,7 +921,7 @@
           "source": "article.md#four-outcome-layers",
           "visual": {
             "type": "reconciliation",
-            "inputs": ["MCP CONFORMANCE", "TASK OUTCOME", "MAINTAINER JUDGE", "MECHANISM"],
+            "inputs": ["MCP CONFORMANCE", "TASK OUTCOME", "HUMAN REVIEW", "MECHANISM"],
             "output": "WHOLE-RELEASE MEMO",
             "blocked": ["MISSING TRACE", "CRITICAL REGRESSION", "ATTESTATION GAP"]
           }
@@ -938,19 +931,19 @@
           "duration": 13,
           "eyebrow": "CURRENT STATUS / REQUIRED",
           "headline": "Prepared evidence does not unlock a release recommendation.",
-          "support": ["Evidence, candidate, taskset, judge, preview, and runtime locks must all exist.", "The 80 cells and reconciliation remain unobserved."],
+          "support": ["Final candidates, source receipt, preview, and runtime locks must all exist.", "No canary, confirmation, or package sign-off is reported."],
           "kind": "pending result",
           "source": "article.md#the-maintainer-memo",
           "visual": {
             "type": "state_machine",
             "states": [
-              {"label": "EVIDENCE PREPARED", "state": "verified"},
-              {"label": "LOCKS REQUIRED", "state": "missing"},
-              {"label": "80 CELLS REQUIRED", "state": "missing"},
-              {"label": "MEMO BLOCKED", "state": "failure"}
+              {"label": "SOURCE RECEIPT", "state": "missing"},
+              {"label": "FINAL HEADS", "state": "missing"},
+              {"label": "LIVE STUDIES", "state": "missing"},
+              {"label": "DECISION PENDING", "state": "failure"}
             ],
-            "edges": [[0, 1, "next"], [1, 2, "after approval"], [2, 3, "not observed"]],
-            "forbidden": "PREPARED EVIDENCE → RELEASE WINNER"
+            "edges": [[0, 1, ""], [1, 2, ""], [2, 3, ""]],
+            "forbidden": "SMOKE OR DIRECT MCP RECEIPT → RELEASE WINNER"
           }
         },
         {
@@ -958,7 +951,7 @@
           "duration": 12,
           "eyebrow": "THE BIGGER PICTURE / NO RESULT",
           "headline": "An MCP release spans design, execution, evidence, and decision.",
-          "support": ["The whole locked release is the treatment.", "No individual 0.4 feature receives causal credit."],
+          "support": ["The whole locked release is the treatment.", "No individual staging feature receives causal credit."],
           "kind": "preregistered design",
           "source": "article.md#the-maintainer-memo",
           "visual": {
@@ -977,7 +970,7 @@
       "audience": "Loop-engineering and autoresearch architects",
       "question": "What authority boundaries turn observations into reversible engineering?",
       "takeaway": "A learning loop requires immutable proposals, external evaluation, and reversible decisions.",
-      "out_of_scope": "More telemetry alone does not create an evaluator or approval authority.",
+      "out_of_scope": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation.",
       "duration": 98,
       "poster_scene": "authority-lanes",
       "reduced_motion_scene": "authority-lanes",
@@ -1022,7 +1015,7 @@
               {"label": "OBSERVE", "detail": "trace", "state": "evidence"},
               {"label": "HYPOTHESIZE", "detail": "bounded", "state": "variable"},
               {"label": "LOCK", "detail": "study", "state": "approval"},
-              {"label": "EXECUTE", "detail": "isolated", "state": "execution"},
+              {"label": "EXECUTE", "detail": "local Harbor", "state": "execution"},
               {"label": "EVALUATE", "detail": "external", "state": "decision"}
             ]
           }
@@ -1031,20 +1024,21 @@
           "id": "authority-lanes",
           "duration": 14,
           "eyebrow": "SEPARATE POWERS",
-          "headline": "Proposer, approver, executor, and evaluator do different work.",
-          "support": ["Aria may select and explain a registered comparison.", "It may not approve, retry, or rewrite accepted meaning."],
+          "headline": "Claude Code engineers; Fugue governs the local Study.",
+          "support": ["Human approval binds the exact preview before local Harbor runs.", "Aria, if connected, is an optional read-only projection."],
           "kind": "cited background",
           "source": "article.md#the-division-of-labor",
           "visual": {
             "type": "swimlane",
-            "lanes": ["ARIA", "HUMAN", "SERVERLESS", "FUGUE / WEAVE"],
+            "lanes": ["CLAUDE CODE", "HUMAN", "FUGUE", "LOCAL HARBOR"],
             "events": [
-              {"lane": 0, "label": "propose", "step": 0, "state": "variable"},
-              {"lane": 1, "label": "approve digest", "step": 1, "state": "approval"},
-              {"lane": 2, "label": "execute cells", "step": 2, "state": "execution"},
-              {"lane": 3, "label": "reconcile", "step": 3, "state": "evidence"}
+              {"lane": 0, "label": "engineer change", "step": 0, "state": "variable"},
+              {"lane": 2, "label": "preview exact plan", "step": 1, "state": "evidence"},
+              {"lane": 1, "label": "approve digest", "step": 2, "state": "approval"},
+              {"lane": 3, "label": "execute cells", "step": 3, "state": "execution"},
+              {"lane": 2, "label": "reconcile evidence", "step": 4, "state": "evidence"}
             ],
-            "forbidden": "FORBIDDEN: ONE ROLE OWNS ALL FOUR STEPS"
+            "forbidden": "FORBIDDEN: CLAUDE CODE APPROVES ITS OWN STUDY"
           }
         },
         {
@@ -1091,7 +1085,7 @@
           "duration": 12,
           "eyebrow": "FAILURE IS A STATE",
           "headline": "Digest mismatch, missing evidence, and cleanup failure block progress.",
-          "support": ["They remain visible in durable Study state.", "The loop does not manufacture a low score or a success."],
+          "support": ["Local Harbor policy and zero-orphan receipts remain visible.", "The loop does not manufacture a low score or a success."],
           "kind": "cited background",
           "source": "article.md#failure-drills-before-autonomy",
           "visual": {
@@ -1139,13 +1133,13 @@
     },
     {
       "slug": "fugue-4b-trace-to-release-decision",
-      "title": "From a Trace to a Release Decision",
+      "title": "The Claude Code–Fugue Loop",
       "part": "FUGUE 4B",
       "status": "DRAFT DESIGN / NO RESULT YET",
-      "audience": "Teams evaluating the complete Aria–Fugue workflow",
-      "question": "What receipts must exist before a live workflow supports a release decision?",
-      "takeaway": "A credible workflow links genuine evidence, exact approval, remote work, reconciliation, and cleanup.",
-      "out_of_scope": "No completed 80-cell Study, live follow-up, or release memo is claimed.",
+      "audience": "Teams evaluating the flagship Claude Code–Fugue workflow",
+      "question": "What receipts must exist before a Claude Code-engineered Agent change supports a decision?",
+      "takeaway": "A credible loop links one reviewed failure, exact approval, local Harbor work, selection, private holdout, and reconciled evidence.",
+      "out_of_scope": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed.",
       "duration": 110,
       "poster_scene": "qualification-gates",
       "reduced_motion_scene": "qualification-gates",
@@ -1154,27 +1148,27 @@
         "after_label": "Qualification checklist",
         "bridge_to_heading": "try-this-in-15-minutes",
         "bridge_to_label": "Try this in 15 minutes",
-        "what_to_watch": "Treat the workflow as a qualification contract: prepared evidence and approval are real boundaries, while remote execution and the final memo remain required and unobserved."
+        "what_to_watch": "Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor."
       },
       "scenes": [
         {
           "id": "evidence-scene",
           "duration": 11,
-          "eyebrow": "VISUAL SYNTHESIS / PREPARED",
-          "headline": "The story begins with genuine evidence, not a stage script.",
-          "support": ["Runs, conversations, Dataset, and Evaluations exist before the comparison.", "They seed the question; they are not the 80-cell result."],
+          "eyebrow": "VISUAL SYNTHESIS / PLANNED",
+          "headline": "The loop begins by locking one reviewed failure.",
+          "support": ["The baseline must reproduce before an intervention is credited.", "Skill and MCP changes become separately identifiable arms."],
           "kind": "preregistered design",
           "source": "article.md#the-evidence-scene",
           "visual": {
             "type": "evidence_graph",
             "nodes": [
-              {"label": "W&B RUNS", "value": 6},
-              {"label": "CONVERSATIONS", "value": 24},
-              {"label": "DATASET", "value": 8},
-              {"label": "EVALUATIONS", "value": 2}
+              {"label": "REVIEWED FAILURE", "value": "REQUIRED"},
+              {"label": "BASELINE", "value": "REPRODUCE"},
+              {"label": "SKILL / MCP ARMS", "value": 4},
+              {"label": "HOLDOUT", "value": "PRIVATE"}
             ],
-            "output": "BOUNDED QUESTION",
-            "status": "PREPARED EVIDENCE"
+            "output": "BOUND HYPOTHESIS",
+            "status": "PLAN BOUNDARY / NO RESULT"
           }
         },
         {
@@ -1182,7 +1176,7 @@
           "duration": 15,
           "eyebrow": "HUMAN BOUNDARY",
           "headline": "The approval card binds exact meaning and spend.",
-          "support": ["Candidate and runtime identities, 80 cells, judge, mechanism, and budget are visible.", "Digest mismatch refuses execution."],
+          "support": ["Two tasks × four Skill/MCP arms = 8 discovery cells.", "Route, source, runtime, budget, and mechanism locks are visible."],
           "kind": "preregistered design",
           "source": "article.md#the-approval-card",
           "visual": {
@@ -1191,25 +1185,25 @@
               {"label": "REGISTERED STUDY", "state": "evidence"},
               {"label": "PREVIEW DIGEST", "state": "evidence"},
               {"label": "HUMAN APPROVAL", "state": "approval"},
-              {"label": "SERVERLESS START", "state": "execution"}
+              {"label": "LOCAL HARBOR START", "state": "execution"}
             ],
-            "edges": [[0, 1, "resolve"], [1, 2, "inspect"], [2, 3, "exact match"]],
+            "edges": [[0, 1, ""], [1, 2, ""], [2, 3, ""]],
             "forbidden": "CHANGED DIGEST → START"
           }
         },
         {
           "id": "attempt-lifecycle",
           "duration": 15,
-          "eyebrow": "REMOTE WORK / REQUIRED",
-          "headline": "Each approved cell needs one complete Serverless lifecycle.",
-          "support": ["Create, attest, execute, publish, and delete.", "One conversation, root, prediction, Evaluation row, and receipt must reconcile."],
+          "eyebrow": "LOCAL WORK / REQUIRED",
+          "headline": "Each approved cell needs one complete local Harbor lifecycle.",
+          "support": ["Prepare, attest, execute, publish, and clean up.", "One conversation, root, prediction, Evaluation row, and policy receipt must reconcile."],
           "kind": "pending result",
           "source": "article.md#what-the-audience-sees-while-cells-run",
           "visual": {
             "type": "attempt_lifecycle",
-            "lifecycle": ["CREATE", "ATTEST", "EXECUTE", "PUBLISH", "DELETE"],
+            "lifecycle": ["PREPARE", "ATTEST", "EXECUTE", "PUBLISH", "CLEANUP"],
             "evidence": ["CONVERSATION", "ROOT", "PREDICTION", "EVALUATION"],
-            "cleanup": "DELETION RECEIPT",
+            "cleanup": "ZERO ORPHANS",
             "unit": "ONE ATTEMPT",
             "status": "REQUIRED / NOT YET OBSERVED"
           }
@@ -1244,7 +1238,7 @@
           "source": "article.md#build-the-evidence-wall-first-required-not-yet-observed",
           "visual": {
             "type": "reconciliation",
-            "inputs": ["AGENT TRACE", "PREDICTION", "EVALUATION", "ATTESTATION", "CLEANUP"],
+            "inputs": ["AGENT TRACE", "PREDICTION", "EVALUATION", "HARBOR POLICY", "CLEANUP"],
             "output": "ALIGNED STUDY ROW",
             "blocked": ["MISSING LINK", "COUNT DRIFT", "ORPHAN"]
           }
@@ -1254,16 +1248,16 @@
           "duration": 14,
           "eyebrow": "GO / NO-GO",
           "headline": "The flagship exists only after every qualification gate passes.",
-          "support": ["Exact identities, calibrated judge, 80 reconciled cells, and clean-clone rehearsals.", "A null or incomplete Study is valid but not presentation-ready."],
+          "support": ["Eight discovery cells precede a frozen intervention lock.", "Eight private-holdout cells require a separate preview and approval."],
           "kind": "pending result",
           "source": "article.md#qualification-checklist",
           "visual": {
             "type": "ledgers",
             "rows": [
-              {"label": "IDENTITIES", "left": "required", "right": "unobserved"},
-              {"label": "JUDGE", "left": "required", "right": "unobserved"},
-              {"label": "80 CELLS", "left": "required", "right": "unobserved"},
-              {"label": "CLEANUP", "left": "required", "right": "unobserved"}
+              {"label": "FAILURE LOCK", "left": "required", "right": "pending"},
+              {"label": "DISCOVERY", "left": "8 cells", "right": "unrun"},
+              {"label": "SELECTION LOCK", "left": "after discovery", "right": "absent"},
+              {"label": "PRIVATE HOLDOUT", "left": "8 cells", "right": "unrun"}
             ],
             "columns": ["GATE", "CURRENT STATUS"]
           }
@@ -1279,7 +1273,7 @@
           "visual": {
             "type": "boundary",
             "left": {"label": "MEMO REQUIRES", "items": ["aligned cases", "evidence links", "limitations"], "state": "evidence"},
-            "right": {"label": "CURRENTLY", "items": ["80 cells absent", "rehearsal absent", "memo blocked"], "state": "missing"},
+            "right": {"label": "CURRENTLY", "items": ["8+8 cells absent", "selection absent", "memo blocked"], "state": "missing"},
             "rule": "REQUIRED ≠ OBSERVED"
           }
         },
@@ -1288,7 +1282,7 @@
           "duration": 12,
           "eyebrow": "THE BIGGER PICTURE / NO RESULT",
           "headline": "The flagship is the whole evidence chain—or it is not ready.",
-          "support": ["Approval, remote execution, evidence, decision, and cleanup stay linked.", "No stage prop substitutes for a receipt."],
+          "support": ["Claude Code engineers; Fugue governs local approval, execution, and evidence.", "Optional Aria stays read-only and outside the execution path."],
           "kind": "preregistered design",
           "source": "article.md#qualification-checklist",
           "visual": {

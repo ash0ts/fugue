@@ -26,7 +26,7 @@ A learning loop requires immutable proposals, external evaluation, and reversibl
 
 ## What the film does not claim
 
-More telemetry alone does not create an evaluator or approval authority.
+More telemetry alone does not create an evaluator, approval authority, or Serverless observation.
 
 ## 01 — The proposer sees a weak result and edits the experiment.
 
@@ -56,13 +56,13 @@ More telemetry alone does not create an evaluator or approval authority.
 
 **Displayed values:** none
 
-## 03 — Proposer, approver, executor, and evaluator do different work.
+## 03 — Claude Code engineers; Fugue governs the local Study.
 
 **Time:** 00:23–00:37
 
 **Visual relationship:** swimlane
 
-**On-screen support:** Aria may select and explain a registered comparison. It may not approve, retry, or rewrite accepted meaning.
+**On-screen support:** Human approval binds the exact preview before local Harbor runs. Aria, if connected, is an optional read-only projection.
 
 **Evidence status:** cited background
 
@@ -104,7 +104,7 @@ More telemetry alone does not create an evaluator or approval authority.
 
 **Visual relationship:** reconciliation
 
-**On-screen support:** They remain visible in durable Study state. The loop does not manufacture a low score or a success.
+**On-screen support:** Local Harbor policy and zero-orphan receipts remain visible. The loop does not manufacture a low score or a success.
 
 **Evidence status:** cited background
 

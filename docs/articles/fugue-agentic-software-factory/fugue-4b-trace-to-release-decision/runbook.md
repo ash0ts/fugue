@@ -1,43 +1,61 @@
 # Fugue 4B draft qualification runbook
 
-Status: mutable working draft. Command shape has been reviewed; final-head
-Serverless execution and receipt reconciliation have not yet been observed.
+Status: mutable working draft. No accepted preview, paid Study result, selected
+intervention, holdout result, or qualified source tree is claimed.
 
 ## Required identities
 
-- Qualified Fugue commit and tree
-- Accepted comparison and preview digests
-- Evidence, taskset, candidate, judge, and runtime-image locks
-- Exact W&B MCP revisions `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`
-  and `a2bae7271323ac43262ffb73454b0aff01ddc808`
-- W&B Serverless project, secret names, resource policy, and budget
+- Clean reviewed Fugue and candidate trees
+- One human-reviewed failed attempt with resolved native evidence
+- Fixed Claude Code harness and Anthropic route
+- Production and patched Skill locks
+- Current and repaired MCP locks
+- Discovery and host-private holdout task digests
+- Local Harbor runtime and policy identities
+- Dedicated result project `wandb/fugue-claude-loop-engineering-v1`
 
-## Required sequence
+## Ordered gates
 
-1. Validate the prepared hosted project and evidence lock.
-2. Prepare both MCP candidates for the target platform and verify tool manifests.
-3. Calibrate the maintainer judge on the accepted 48-example review set.
-4. Preview the complete Study and independently recompute nonzero cells.
-5. Have a human approve the exact immutable digest and cost envelope.
-6. Execute discovery, untouched primary, and replication stages through Serverless.
-7. Reconcile one attempt, Agent root, prediction, Evaluation row, lifecycle
-   attestation, usage record, and deletion receipt per planned coordinate.
-8. Inspect discordant aligned pairs and author a bounded maintainer memo.
-9. Freeze a separate eight-cell follow-up; never edit the original Study.
-10. Rehearse twice from clean clones before presentation.
+1. Reconcile and lock the original failed attempt.
+2. Prepare discovery tasks, private holdouts, Skills, MCP runtimes, Claude Code,
+   task images, and evaluation assets.
+3. Preview exactly two tasks × four Skill/MCP arms × one attempt = eight
+   discovery cells.
+4. Have a human approve the exact discovery digest and cap.
+5. Execute through local Harbor and reconcile outcome, intervention-use,
+   Agent/Evaluation, privacy, policy, cleanup, and zero-orphan evidence.
+6. Run the saved selection analysis. Stop if no arm is eligible.
+7. Persist the treatment-selection lock before opening holdout.
+8. Preview exactly four private tasks × production/selected arm × one attempt
+   = eight holdout cells.
+9. Obtain a separate human approval, execute through local Harbor, and
+   reconcile every row.
+10. Qualify or reject the source tree; publish a bounded human memo.
 
-## Immediate no-go conditions
+## Optional Aria shell
 
-- Digest or exact-tree mismatch
-- Missing, zero, duplicate, or unaligned cells
-- Private labels or credential values in Agent-visible evidence
-- Uncalibrated judge or any critical false pass
-- Missing Serverless attestation, Evaluation row, usage evidence, or deletion receipt
-- Harness reversal hidden by pooling
-- Null or non-discriminating result presented as a release win
+Aria may read safe Study and result projections for presentation. It is not a
+runtime dependency and cannot approve, start, retry, select, mutate holdout,
+or issue a release decision.
 
-## Current evidence boundary
+## Fail closed on
 
-Prepared hosted evidence and draft implementation sources exist. The accepted
-preview, complete remote cohort, final-head receipts, bounded memo, and two
-clean-clone rehearsals remain required and unobserved.
+- unresolved source failure or native evidence;
+- changed source, task, Skill, MCP, model, harness, or runtime identity;
+- missing confirmed intervention use;
+- holdout opened before a durable selection lock;
+- private truth or credential exposure;
+- incomplete Agent/Evaluation reconciliation;
+- missing local Harbor policy, cleanup, or zero-orphan receipt;
+- hidden retry, cross-Study pooling, or cross-project result mixing.
+
+## Evidence boundaries
+
+The no-key replay proves installation and deterministic result projection. A
+direct MCP receipt proves server and tool mechanism only. Neither is a live
+Agent Study.
+
+Local Harbor evidence supports only the declared local execution policy; it
+does not certify Serverless isolation. The separate MCP package decision
+remains pending its source-isolated `main` versus final-staging Study and
+independent package sign-off.

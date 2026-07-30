@@ -11,7 +11,7 @@
 
 - **Synthesizes:** the cited article sections through The maintainer memo
 - **Bridges to:** Try this in 15 minutes
-- **What to watch:** Track exact revisions through manifest qualification, genuine evidence, the staged 80-cell design, judge calibration, and the still-blocked decision.
+- **What to watch:** Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision.
 
 ## Evidence boundary
 
@@ -24,11 +24,11 @@ pending study contains no implied result.
 
 | Scene | Read time | Takeaway | Evidence | Visual relationship |
 | --- | ---: | --- | --- | --- |
-| exact-revisions | 11s | The comparison begins with exact MCP revisions. | article.md#lock-the-two-mcp-candidates | revision compare |
+| exact-revisions | 11s | The comparison waits for two final reviewed heads. | article.md#lock-the-two-mcp-candidates | revision compare |
 | manifest-contract | 15s | Descriptions, projections, pagination, and errors are behavioral inputs. | article.md#the-interface-an-agent-experiences | ledgers |
-| prepared-evidence | 15s | Genuine W&B objects seed the maintainer questions. | article.md#genuine-evidence-deliberately-seeded | evidence graph |
-| staged-study | 15s | Discovery precedes untouched primary and replication cohorts. | article.md#the-80-cell-sequence | staged study |
-| judge-gate | 15s | Forty-eight double-reviewed cases must qualify the judge. | article.md#judge-calibration-before-paid-work | review gate |
+| prepared-evidence | 15s | Immutable source evidence stays separate from Study output. | article.md#genuine-evidence-deliberately-seeded | evidence graph |
+| staged-study | 15s | An 8-cell canary gates a separate 32-cell confirmation. | article.md#the-staged-local-sequence | staged study |
+| judge-gate | 15s | Behavioral evidence cannot issue package GO. | article.md#judge-calibration-before-paid-work | boundary |
 | four-outcomes | 14s | Four outcome layers remain independently inspectable. | article.md#four-outcome-layers | reconciliation |
 | blocked-status | 13s | Prepared evidence does not unlock a release recommendation. | article.md#the-maintainer-memo | state machine |
 | series-context | 12s | An MCP release spans design, execution, evidence, and decision. | article.md#the-maintainer-memo | series map |

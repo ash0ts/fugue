@@ -84,10 +84,10 @@ input that can change what the agent does. The **execution fingerprint**
 covers the policy that schedules an otherwise identical attempt: CPU, memory,
 timeout, network, image digest, secret policy.
 
-That split is what lets local Harbor and W&B Serverless act as parity
-environments—when, and only when, the embedded Agent, MCP, Skill, task, and
-Fugue assets are identical. Moving to Serverless cannot quietly rebuild a
-different candidate.
+That split keeps behavior identity separate from execution identity. The
+active flagship qualifies behavior through local Harbor. A future remote
+runtime would require its own locked execution receipts and could not inherit
+local evidence as proof of parity.
 
 ```mermaid
 flowchart TD
@@ -287,7 +287,8 @@ a new approval, and a new Study.
 
 Humans and agents want different interfaces. A maintainer may prefer the CLI.
 An application may use Python. A UI may call REST. An MCP client needs
-bounded tools. Aria needs Study events and safe result references.
+bounded tools. An optional Aria shell needs read-only Study events and safe
+result references.
 
 They do not need different semantics.
 
@@ -304,11 +305,12 @@ flowchart LR
     S --> OUT["Result exporter"]
 ```
 
-The bounded MCP operations mirror the service: readiness, preview, approval
-request, start of an already-approved digest, watch, and safe result. Aria
-may select a registered comparison and explain it. It may not read private
-labels, approve, mutate an accepted preview, retry an attempt, change policy,
-or launch a follow-up.
+The write-capable operator surfaces mirror the service: readiness, preview,
+approval request, start of an already-approved digest, watch, and safe result.
+The optional Aria shell is narrower: it may read safe comparison, Study, and
+result projections and explain them. It may not request or issue approval,
+start work, read private labels, mutate an accepted preview, select a
+treatment, retry an attempt, change policy, or launch a follow-up.
 
 Study Console receives projections of canonical Study events rather than
 inventing a second lifecycle. If a card says “approved,” the approval ledger
@@ -329,11 +331,12 @@ mutable. Even a stable object ID can point to content whose meaning depends
 on another, unrecorded object. The lock closes enough of that graph to make
 drift detectable.
 
-For the MCP qualification, the checked-in seed lock points to a dedicated
-non-sensitive W&B project: six Runs, 24 standardized Agent conversations, 48
-tool spans, an eight-row Dataset, two Evaluations with eight aligned rows
-each, and 16 prediction rows. These are genuine SDK and Weave objects. They
-are prior evidence for tasks, not the comparison result.
+For the pending MCP qualification, immutable task evidence and experiment
+results use separate projects. The source lock names the dedicated
+non-sensitive source cohort; Agent traces, Evaluations, and result
+projections go to the qualification result project. Genuine SDK and Weave
+objects are prior task evidence, not the comparison result, and result rows
+must never become new source evidence.
 
 The preparation tool is idempotent. An existing lock must validate exactly or
 fail. It never “fixes” changed evidence by editing private labels: drift
@@ -364,11 +367,12 @@ provider key. This is the same move Hamel makes with his copyable eval
 skills: hand people a runnable starting point grounded in concrete behavior,
 then let them extend it with their own stack and data. [@hamel-evals-skills]
 
-Its limits are part of the artifact. It does not launch a live agent, qualify
-W&B Serverless, demonstrate a causal treatment effect, prove a judge is
-calibrated, or substitute for the 80-cell MCP Study. Promoting this replay to
-flagship status would optimize the demo for reliability by deleting the
-behavior we intend to prove.
+Its limits are part of the artifact. It does not launch a live Agent, start a
+live MCP server, execute through local Harbor, demonstrate a causal treatment
+effect, or substitute for either the Claude Code loop or the separate
+source-isolated MCP staging comparison. Promoting this replay to flagship
+status would optimize the demo for reliability by deleting the behavior we
+intend to prove.
 
 ## Inspecting a result
 
@@ -463,8 +467,9 @@ wisdom. A human approval proves authorization, not correctness. An evidence
 lock can faithfully preserve synthetic or irrelevant evidence. Interface
 parity can make the same mistake everywhere.
 
-The no-key replay proves installation and deterministic projection only. The
-real W&B MCP result remains preregistered and blocked at the time of writing.
+The no-key replay proves installation and deterministic projection only. It
+is not live MCP evidence. The W&B MCP decision remains pending a
+source-isolated `main` versus final-staging comparison at the time of writing.
 
 ## Next: the model is not the candidate
 

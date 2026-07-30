@@ -1,10 +1,10 @@
-# Transcript — From a Trace to a Release Decision
+# Transcript — The Claude Code–Fugue Loop
 
 **Series:** Fugue: Evals for the Agentic Software Factory
 
 **Part:** FUGUE 4B
 
-**Audience:** Teams evaluating the complete Aria–Fugue workflow
+**Audience:** Teams evaluating the flagship Claude Code–Fugue workflow
 
 **Duration:** 110 seconds
 
@@ -18,29 +18,29 @@ only sections that appear before the film.
 
 ## Question
 
-What receipts must exist before a live workflow supports a release decision?
+What receipts must exist before a Claude Code-engineered Agent change supports a decision?
 
 ## Intended takeaway
 
-A credible workflow links genuine evidence, exact approval, remote work, reconciliation, and cleanup.
+A credible loop links one reviewed failure, exact approval, local Harbor work, selection, private holdout, and reconciled evidence.
 
 ## What the film does not claim
 
-No completed 80-cell Study, live follow-up, or release memo is claimed.
+No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed.
 
-## 01 — The story begins with genuine evidence, not a stage script.
+## 01 — The loop begins by locking one reviewed failure.
 
 **Time:** 00:00–00:11
 
 **Visual relationship:** evidence graph
 
-**On-screen support:** Runs, conversations, Dataset, and Evaluations exist before the comparison. They seed the question; they are not the 80-cell result.
+**On-screen support:** The baseline must reproduce before an intervention is credited. Skill and MCP changes become separately identifiable arms.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#the-evidence-scene`
 
-**Displayed values:** 6; 24; 8; 2
+**Displayed values:** 4
 
 ## 02 — The approval card binds exact meaning and spend.
 
@@ -48,7 +48,7 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Visual relationship:** state machine
 
-**On-screen support:** Candidate and runtime identities, 80 cells, judge, mechanism, and budget are visible. Digest mismatch refuses execution.
+**On-screen support:** Two tasks × four Skill/MCP arms = 8 discovery cells. Route, source, runtime, budget, and mechanism locks are visible.
 
 **Evidence status:** preregistered design
 
@@ -56,13 +56,13 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Displayed values:** none
 
-## 03 — Each approved cell needs one complete Serverless lifecycle.
+## 03 — Each approved cell needs one complete local Harbor lifecycle.
 
 **Time:** 00:26–00:41
 
 **Visual relationship:** attempt lifecycle
 
-**On-screen support:** Create, attest, execute, publish, and delete. One conversation, root, prediction, Evaluation row, and receipt must reconcile.
+**On-screen support:** Prepare, attest, execute, publish, and clean up. One conversation, root, prediction, Evaluation row, and policy receipt must reconcile.
 
 **Evidence status:** pending result
 
@@ -104,13 +104,13 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Visual relationship:** ledgers
 
-**On-screen support:** Exact identities, calibrated judge, 80 reconciled cells, and clean-clone rehearsals. A null or incomplete Study is valid but not presentation-ready.
+**On-screen support:** Eight discovery cells precede a frozen intervention lock. Eight private-holdout cells require a separate preview and approval.
 
 **Evidence status:** pending result
 
 **Source:** `article.md#qualification-checklist`
 
-**Displayed values:** 80 CELLS
+**Displayed values:** 8 cells
 
 ## 07 — A maintainer memo is the last artifact, not the first narrative.
 
@@ -124,7 +124,7 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Source:** `article.md#presentation-sequence`
 
-**Displayed values:** 80 cells absent
+**Displayed values:** 8+8 cells absent
 
 ## 08 — The flagship is the whole evidence chain—or it is not ready.
 
@@ -132,7 +132,7 @@ No completed 80-cell Study, live follow-up, or release memo is claimed.
 
 **Visual relationship:** series map
 
-**On-screen support:** Approval, remote execution, evidence, decision, and cleanup stay linked. No stage prop substitutes for a receipt.
+**On-screen support:** Claude Code engineers; Fugue governs local approval, execution, and evidence. Optional Aria stays read-only and outside the execution path.
 
 **Evidence status:** preregistered design
 

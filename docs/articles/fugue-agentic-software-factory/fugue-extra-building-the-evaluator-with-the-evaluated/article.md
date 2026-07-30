@@ -261,7 +261,7 @@ canonical comparison
 → cleanup
 → governed Research control
 → real MCP evidence Study
-→ remote Serverless execution
+→ local Harbor behavioral qualification
 → runtime hardening
 → final-head qualification
 ```
@@ -419,8 +419,9 @@ independent or calibrated.
 
 The cleanup commit’s net addition demonstrates that liveness documentation
 has a maintenance cost. The exact-image fix does not qualify the final
-image. The real hosted seed evidence does not supply the 80-cell result. The
-co-development process remains subject to the same evidence rules it built.
+image. The real hosted seed evidence does not supply the Claude loop or MCP
+staging result. The co-development process remains subject to the same
+evidence rules it built.
 
 ## The unresolved question
 

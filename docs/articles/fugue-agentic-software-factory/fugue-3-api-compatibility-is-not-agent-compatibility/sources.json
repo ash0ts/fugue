@@ -65,13 +65,31 @@
       "supports": "Official Evaluation and scorer contract."
     },
     {
+      "id": "mcp-repair-draft",
+      "author": "Weights & Biases",
+      "title": "W&B MCP repair candidate",
+      "publication": "GitHub draft pull request #126",
+      "date": "2026-07-30",
+      "url": "https://github.com/wandb/wandb-mcp-server/pull/126",
+      "supports": "Review-visible repair candidate; draft status and a moving head do not establish final staging identity or behavioral qualification."
+    },
+    {
+      "id": "fugue-provider-draft",
+      "author": "Fugue maintainers",
+      "title": "Fugue MCP provider boundary",
+      "publication": "GitHub draft pull request #48",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/48",
+      "supports": "Review-visible provider implementation; it is preparation source rather than a live Study result."
+    },
+    {
       "id": "fugue-mcp-draft",
       "author": "Fugue maintainers",
-      "title": "MCP release qualification integration",
-      "publication": "GitHub pull request #44 head",
-      "date": "2026-07-28",
-      "url": "https://github.com/ash0ts/fugue/tree/68c8b9d9867562286be411f788e69a147b505635/examples/comparisons/wandb-mcp-maintenance",
-      "supports": "Accessible draft Fugue comparison, evidence preparation, and qualification sources."
+      "title": "Fugue MCP evidence V3",
+      "publication": "GitHub draft pull request #49",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/49",
+      "supports": "Review-visible V3 evidence and qualification source; it does not establish a live canary, result, or release decision."
     }
   ]
 }

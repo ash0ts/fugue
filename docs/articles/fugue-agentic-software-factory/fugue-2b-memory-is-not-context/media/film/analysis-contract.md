@@ -28,7 +28,7 @@ pending study contains no implied result.
 | aligned-row | 15s | The Agent opened the evidence but did not satisfy the declared use relation. | article.md#what-used-can-honestly-mean | paired row |
 | causal-boundary | 15s | The row supports an audit statement, not a causal story. | article.md#what-used-can-honestly-mean | boundary |
 | factorial-design | 14s | Separate memory from the evidence-use policy. | article.md#the-22-intervention | matrix |
-| fallback-detection | 13s | A vector failure cannot silently become vector success. | article.md#failure-and-fallback-semantics | state machine |
+| fallback-detection | 13s | A dense failure blocks instead of silently becoming BM25. | article.md#failure-and-fallback-semantics | state machine |
 | context-displacement | 13s | More retrieved text can displace instructions or task evidence. | article.md#context-budget-and-displacement | budget bar |
 | decision-policy | 12s | Localization can improve without completion improving. | article.md#analysis-and-useful-nulls | ledgers |
 | series-context | 12s | Mechanism evidence explains where a treatment reached—not why it won. | article.md#privacy-and-leakage | series map |

@@ -4,7 +4,7 @@
   "audience": "Agent builders and eval owners",
   "question": "How does one readable comparison become exact, approved work?",
   "intended_takeaway": "The same coordinates must survive preview, approval, execution, and result.",
-  "out_of_scope": "The no-key replay proves installation and result shape, not Agent efficacy.",
+  "out_of_scope": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior.",
   "placement": {
     "after_heading": "the-unfamiliar-maintainer-test",
     "after_label": "The unfamiliar-maintainer test",
@@ -54,7 +54,7 @@
         "4",
         "32 PLANNED"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "coordinate-identity",
@@ -72,7 +72,7 @@
         "TASK 05",
         "ATTEMPT 1"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "preview-digest",
@@ -90,7 +90,7 @@
         "$40 / 32",
         "sha256"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "approval-boundary",
@@ -110,12 +110,12 @@
         "EDIT → d2",
         "APPROVED d1 → EXECUTE d2"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "one-service",
       "scene": "one-service",
-      "claim": "CLI, Python, REST, MCP, and Aria converge on one service.",
+      "claim": "CLI, Python, REST, MCP, and optional Aria share one service.",
       "support": [
         "Each interface must return the same preview digest.",
         "No interface owns a private execution path."
@@ -124,7 +124,7 @@
       "source": "article.md#one-service-several-doors",
       "visual_relationship": "reconciliation",
       "displayed_values": [],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "observed-replay",
@@ -144,7 +144,7 @@
         "1",
         "2"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "smoke-boundary",
@@ -152,7 +152,7 @@
       "claim": "Replay evidence is smoke evidence, not efficacy evidence.",
       "support": [
         "It checks packaging, parsing, and result projection.",
-        "Mechanism remains unavailable; no live Agent or Serverless runtime ran."
+        "Mechanism remains unavailable; no live Agent, live MCP server, or local Harbor cell ran."
       ],
       "kind": "audited Fugue observation",
       "source": "article.md#the-no-key-replay",
@@ -160,7 +160,7 @@
       "displayed_values": [
         "16 rows"
       ],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     },
     {
       "id": "series-context",
@@ -174,7 +174,7 @@
       "source": "article.md#the-unfamiliar-maintainer-test",
       "visual_relationship": "series_map",
       "displayed_values": [],
-      "caveat": "The no-key replay proves installation and result shape, not Agent efficacy."
+      "caveat": "The no-key replay proves installation and result shape, not live Agent or live MCP behavior."
     }
   ]
 }

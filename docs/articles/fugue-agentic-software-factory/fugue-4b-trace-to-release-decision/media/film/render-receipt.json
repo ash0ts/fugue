@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
   "slug": "fugue-4b-trace-to-release-decision",
-  "html_digest": "sha256:2799f380771a110f5e38c2378def2c1da8cc7641afdba328ee9030dc300ea90b",
-  "mp4_digest": "sha256:5e034e37cbba95b2e25208955552f44a45ba22c77965afdd63ed4ad2eb0845f2",
-  "poster_digest": "sha256:f074c5c4c1220783a18018fd0b27f2297bb4974b383e5e0afea74933090f5cc5",
-  "contact_sheet_digest": "sha256:59b81be859939049d877919a6c02afca115780d2314a852b13617c565b102075",
+  "html_digest": "sha256:f66c09b243d0042bfe153896d40c55197d1b1644d05778b10940e4b715e42e12",
+  "mp4_digest": "sha256:e0667161ea794526db7c8338078b8c20deea12ddfb54f9d2948ca9ae72e83c99",
+  "poster_digest": "sha256:dddfc098b836c0d666b42113a5f89fdfdf501229cd4fc83339e4e0da5067f3cb",
+  "contact_sheet_digest": "sha256:3c8d2fd3681a90755e30efbd06fec8bf65bc7e7ff27692fb3efad35b47ef9ec0",
   "checkpoint_frame_digests": {
-    "evidence-scene": "sha256:972ea05de20141ddbf1c9a1ee3f0788f9ef12cb901f8bcbe9e946329dc3b3ea5",
-    "approval-card": "sha256:c03c3ec454929fbeb227e9f56d899f529244919c4269f798474072e8ca134ef8",
-    "attempt-lifecycle": "sha256:04efadce765f2abefaef80b99e582bdac326143d5dfe7f63c1be8d9c84f510ea",
+    "evidence-scene": "sha256:8809e9af9176c68d8723c4c2675458d21d585fafb3ec79fc4b2699823acd2ab1",
+    "approval-card": "sha256:36882c980e234a9f27f014d35785b7a9439e7d18a6a8cd3e9b6e52c936e06846",
+    "attempt-lifecycle": "sha256:21970a77ad7e74045f4bfad09fcca58cca0feeabede07f58e12acb5b18d829a4",
     "failure-branches": "sha256:40e89f14a6e6cca534f7cfdc99d0a479da966d5ccd9997d9ddae751f391ec2f6",
-    "evidence-reconcile": "sha256:d76487b6f449d18e644858c78c8cf9d32d2d26be7601c485e10fcb56adecf7b3",
-    "qualification-gates": "sha256:f074c5c4c1220783a18018fd0b27f2297bb4974b383e5e0afea74933090f5cc5",
-    "bounded-memo": "sha256:e4e9ea50b4ce7797005ff2da93ebd06d4cfad8a215634379d16a35aa330950ce",
-    "series-context": "sha256:c049d74c30a9028687e6fbdd6b53e4ff03827596f67bf97879e61ee6c72c1793"
+    "evidence-reconcile": "sha256:383615abb82062c4ab780dbaa3a9a60999a830bfb850706bf7ce6ace22c05a02",
+    "qualification-gates": "sha256:dddfc098b836c0d666b42113a5f89fdfdf501229cd4fc83339e4e0da5067f3cb",
+    "bounded-memo": "sha256:d231d0ab593eaa92d1723c36d9af27b08cd1060e0212bb6e3c730387b7a6f020",
+    "series-context": "sha256:7a0dfcc84832e228da2e2a1831c72cabe6a32e317502b8284b9b159ceab4d50b"
   },
   "video": {
     "codec_name": "h264",

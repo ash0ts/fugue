@@ -5,7 +5,7 @@
 - **Audience:** Loop-engineering and autoresearch architects.
 - **Single question:** What authority boundaries turn observations into reversible engineering?
 - **Intended takeaway:** A learning loop requires immutable proposals, external evaluation, and reversible decisions.
-- **Out of scope:** More telemetry alone does not create an evaluator or approval authority.
+- **Out of scope:** More telemetry alone does not create an evaluator, approval authority, or Serverless observation.
 
 ## Article relationship
 
@@ -26,7 +26,7 @@ pending study contains no implied result.
 | --- | ---: | --- | --- | --- |
 | authority-failure | 10s | The proposer sees a weak result and edits the experiment. | article.md#why-telemetry-alone-cannot-drive-the-loop | swimlane |
 | governed-cycle | 13s | Observation becomes a new proposal, not a hidden retry. | article.md#the-governed-cycle | pipeline |
-| authority-lanes | 14s | Proposer, approver, executor, and evaluator do different work. | article.md#the-division-of-labor | swimlane |
+| authority-lanes | 14s | Claude Code engineers; Fugue governs the local Study. | article.md#the-division-of-labor | swimlane |
 | study-state | 13s | Accepted meaning moves forward; it is never edited in place. | article.md#immutable-study-state | state machine |
 | retry-rollback | 12s | Recovery cannot silently add evidence after approval. | article.md#reversibility-is-part-of-the-hypothesis | timeline |
 | failure-drills | 12s | Digest mismatch, missing evidence, and cleanup failure block progress. | article.md#failure-drills-before-autonomy | reconciliation |

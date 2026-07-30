@@ -4,7 +4,7 @@
   "audience": "Loop-engineering and autoresearch architects",
   "question": "What authority boundaries turn observations into reversible engineering?",
   "intended_takeaway": "A learning loop requires immutable proposals, external evaluation, and reversible decisions.",
-  "out_of_scope": "More telemetry alone does not create an evaluator or approval authority.",
+  "out_of_scope": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation.",
   "placement": {
     "after_heading": "accept-reject-or-learn",
     "after_label": "Accept, reject, or learn?",
@@ -47,7 +47,7 @@
       "source": "article.md#why-telemetry-alone-cannot-drive-the-loop",
       "visual_relationship": "swimlane",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "governed-cycle",
@@ -61,21 +61,21 @@
       "source": "article.md#the-governed-cycle",
       "visual_relationship": "pipeline",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "authority-lanes",
       "scene": "authority-lanes",
-      "claim": "Proposer, approver, executor, and evaluator do different work.",
+      "claim": "Claude Code engineers; Fugue governs the local Study.",
       "support": [
-        "Aria may select and explain a registered comparison.",
-        "It may not approve, retry, or rewrite accepted meaning."
+        "Human approval binds the exact preview before local Harbor runs.",
+        "Aria, if connected, is an optional read-only projection."
       ],
       "kind": "cited background",
       "source": "article.md#the-division-of-labor",
       "visual_relationship": "swimlane",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "study-state",
@@ -89,7 +89,7 @@
       "source": "article.md#immutable-study-state",
       "visual_relationship": "state_machine",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "retry-rollback",
@@ -103,21 +103,21 @@
       "source": "article.md#reversibility-is-part-of-the-hypothesis",
       "visual_relationship": "timeline",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "failure-drills",
       "scene": "failure-drills",
       "claim": "Digest mismatch, missing evidence, and cleanup failure block progress.",
       "support": [
-        "They remain visible in durable Study state.",
+        "Local Harbor policy and zero-orphan receipts remain visible.",
         "The loop does not manufacture a low score or a success."
       ],
       "kind": "cited background",
       "source": "article.md#failure-drills-before-autonomy",
       "visual_relationship": "reconciliation",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "null-memory",
@@ -131,7 +131,7 @@
       "source": "article.md#accept-reject-or-learn",
       "visual_relationship": "state_machine",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     },
     {
       "id": "series-context",
@@ -145,7 +145,7 @@
       "source": "article.md#accept-reject-or-learn",
       "visual_relationship": "series_map",
       "displayed_values": [],
-      "caveat": "More telemetry alone does not create an evaluator or approval authority."
+      "caveat": "More telemetry alone does not create an evaluator, approval authority, or Serverless observation."
     }
   ]
 }

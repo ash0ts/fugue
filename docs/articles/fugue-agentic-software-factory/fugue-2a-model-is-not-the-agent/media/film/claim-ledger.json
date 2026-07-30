@@ -51,46 +51,46 @@
     {
       "id": "paired-assignment",
       "scene": "paired-assignment",
-      "claim": "Each harness candidate receives the same locked task coordinates.",
+      "claim": "Four harnesses receive the same two locked task coordinates.",
       "support": [
-        "Task identity and attempt index align the comparison.",
-        "A missing coordinate remains missing."
+        "GLM-5.2, context, local Docker, and one attempt stay fixed.",
+        "A missing task–harness coordinate remains missing."
       ],
       "kind": "preregistered design",
       "source": "article.md#assignment-ordering-and-attempts",
       "visual_relationship": "matrix",
       "displayed_values": [
-        "TASK 1 / A1",
-        "TASK 1 / A2",
-        "TASK 2 / A1",
-        "TASK 2 / A2"
+        "SYMPY / A1",
+        "ASTROPY / A1"
       ],
       "caveat": "The preregistration contains no observed winner or causal harness result."
     },
     {
       "id": "balanced-order",
       "scene": "balanced-order",
-      "claim": "Counterbalance execution order before observing outcomes.",
+      "claim": "Lock and record one deterministic serial expansion.",
       "support": [
-        "Half the blocks begin with A; half begin with B.",
-        "Warm caches and temporal drift cannot become the treatment by accident."
+        "The canary uses one worker, one seed, and an inspectable cell order.",
+        "Reproducible ordering does not estimate away temporal noise."
       ],
       "kind": "preregistered design",
       "source": "article.md#assignment-ordering-and-attempts",
       "visual_relationship": "timeline",
       "displayed_values": [
-        "BLOCK 1",
-        "BLOCK 2"
+        "HERMES ×2",
+        "OPENCLAW ×2",
+        "CLAUDE CODE ×2",
+        "CODEX ×2"
       ],
       "caveat": "The preregistration contains no observed winner or causal harness result."
     },
     {
       "id": "estimand",
       "scene": "estimand",
-      "claim": "Estimate paired candidate differences under locked conditions.",
+      "claim": "Compare aligned candidate rows under locked conditions.",
       "support": [
-        "The reporting unit is model–harness–environment.",
-        "The design does not estimate a universal model ranking."
+        "Raw task contrasts belong to model–harness–environment candidates.",
+        "Two tasks and one attempt do not estimate a stable harness ranking."
       ],
       "kind": "preregistered design",
       "source": "article.md#the-bounded-question",
@@ -103,13 +103,15 @@
       "scene": "harness-reversal",
       "claim": "A reversal is a result, not a reason to pool.",
       "support": [
-        "Candidate A can lead on one task family while B leads on another.",
-        "Separate reporting preserves the interaction."
+        "A harness can lead on one locked task and trail on the other.",
+        "Separate task rows preserve the discordance."
       ],
       "kind": "illustrative example",
       "source": "article.md#reversals-and-the-no-pooling-rule",
       "visual_relationship": "interaction_plot",
       "displayed_values": [
+        "LOCKED TASK 1",
+        "LOCKED TASK 2",
         "0.75",
         "0.35"
       ],

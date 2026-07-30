@@ -28,19 +28,19 @@ Qualify exact MCP revisions as whole Agent-facing releases.
 
 Prepared evidence and planned cells are not an observed release result.
 
-## 01 — The comparison begins with exact MCP revisions.
+## 01 — The comparison waits for two final reviewed heads.
 
 **Time:** 00:00–00:11
 
 **Visual relationship:** revision compare
 
-**On-screen support:** Baseline: 80252b3… Candidate: a2bae72…
+**On-screen support:** Baseline: reviewed main. Candidate: final repaired staging after review.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#lock-the-two-mcp-candidates`
 
-**Displayed values:** W&B MCP 0.3.7; 80252b3aa23ae3c1fdde089ce2b7dfb106dafb38; W&B MCP 0.4; a2bae7271323ac43262ffb73454b0aff01ddc808; linux/amd64
+**Displayed values:** none
 
 ## 02 — Descriptions, projections, pagination, and errors are behavioral inputs.
 
@@ -56,47 +56,47 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Displayed values:** none
 
-## 03 — Genuine W&B objects seed the maintainer questions.
+## 03 — Immutable source evidence stays separate from Study output.
 
 **Time:** 00:26–00:41
 
 **Visual relationship:** evidence graph
 
-**On-screen support:** 6 Runs, 24 conversations, 48 tool spans. 8 Dataset rows, 2 Evaluations, 16 prediction rows.
+**On-screen support:** A zero-model receipt must lock the source shape. Agent traces and Evaluation rows write only to the result project.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#genuine-evidence-deliberately-seeded`
 
-**Displayed values:** 6; 24; 48; 8; 2; 16
+**Displayed values:** none
 
-## 04 — Discovery precedes untouched primary and replication cohorts.
+## 04 — An 8-cell canary gates a separate 32-cell confirmation.
 
 **Time:** 00:41–00:56
 
 **Visual relationship:** staged study
 
-**On-screen support:** 8 Claude + 8 W&B Inference discovery. 32 Claude primary + 32 W&B Inference replication.
+**On-screen support:** Claude Code and the locked route stay fixed. The confirmation needs its own preview, approval, budget, and result.
 
 **Evidence status:** preregistered design
 
-**Source:** `article.md#the-80-cell-sequence`
+**Source:** `article.md#the-staged-local-sequence`
 
-**Displayed values:** 8; 32; 80 PLANNED CELLS
+**Displayed values:** 8; 32; 40 MAXIMUM PLANNED CELLS
 
-## 05 — Forty-eight double-reviewed cases must qualify the judge.
+## 05 — Behavioral evidence cannot issue package GO.
 
 **Time:** 00:56–01:11
 
-**Visual relationship:** review gate
+**Visual relationship:** boundary
 
-**On-screen support:** TPR and TNR must each reach at least 0.85. Zero critical false passes are permitted.
+**On-screen support:** The Study supports a bounded local behavior summary. Package release still needs independent checks and human sign-off.
 
 **Evidence status:** preregistered design
 
 **Source:** `article.md#judge-calibration-before-paid-work`
 
-**Displayed values:** 48; 24 ACCEPTABLE; 24 UNACCEPTABLE; TPR ≥ .85; TNR ≥ .85; 0 CRITICAL FP
+**Displayed values:** 8-cell canary; 32-cell confirmation
 
 ## 06 — Four outcome layers remain independently inspectable.
 
@@ -118,13 +118,13 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Visual relationship:** state machine
 
-**On-screen support:** Evidence, candidate, taskset, judge, preview, and runtime locks must all exist. The 80 cells and reconciliation remain unobserved.
+**On-screen support:** Final candidates, source receipt, preview, and runtime locks must all exist. No canary, confirmation, or package sign-off is reported.
 
 **Evidence status:** pending result
 
 **Source:** `article.md#the-maintainer-memo`
 
-**Displayed values:** 80 CELLS REQUIRED
+**Displayed values:** none
 
 ## 08 — An MCP release spans design, execution, evidence, and decision.
 
@@ -132,7 +132,7 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Visual relationship:** series map
 
-**On-screen support:** The whole locked release is the treatment. No individual 0.4 feature receives causal credit.
+**On-screen support:** The whole locked release is the treatment. No individual staging feature receives causal credit.
 
 **Evidence status:** preregistered design
 

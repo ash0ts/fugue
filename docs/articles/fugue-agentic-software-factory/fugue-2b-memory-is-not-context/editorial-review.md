@@ -2,12 +2,19 @@
 
 Unpublished working notes.
 
-- Voice pass (2026-07-29): opens with the healthy-retrieval-table /
-  inert-traces story; the seven-event funnel, 2×2 table, worked aligned row
-  (1/1, 1/1, 1/1, 0/1, pass), 12→3→1 denominator example, and decision
-  policy are unchanged. Weng, Hamel, and lost-in-the-middle citations sit on
-  the sentences that use them.
+- Plan-alignment pass (2026-07-30): the active design now names
+  `real-memory-study-v1` / `real-memory-study`, project
+  `wandb/fugue-memory-loop-engineering-v1`, Claude Code, Sonnet 5, the two
+  locked tasks, and the exact baseline/rag-dense/policy-only/combined
+  eight-cell local Harbor matrix.
 - Preregistration honesty: masthead keeps draft status and "no result";
-  historical runs stay labeled smoke evidence; the appendix stays empty.
+  the dedicated canary is no longer presented as the historical
+  `repo-memory-impact` discovery/selection/holdout program; the appendix stays
+  empty.
+- Treatment integrity: `rag-dense` requires locked dense preparation and an
+  offline semantic probe; missing dense artifacts block admission and cannot
+  silently become BM25.
+- Decision boundary: two tasks with one attempt may justify a separately
+  approved replication or remediation, not a product-default claim.
 - Isolation test: a reader should leave able to distinguish assigned,
   returned, opened, and used, and to say why "path observed" is not "used."
