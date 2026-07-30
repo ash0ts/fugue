@@ -1,0 +1,18 @@
+id: real-harness-task-stratified
+title: Task-stratified harness behavior
+question: How do Hermes, OpenClaw, Claude Code, and Codex differ on each locked task when model, context, runtime policy, and limits are held fixed?
+filters:
+  experiment_id: real-harness-study
+  tag: real-study-lane-v1
+group_by: [harness, task_name, model]
+metrics:
+  - pass_rate
+  - agent_runtime_completion_rate
+  - failures
+  - recoverable_error_rate
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false

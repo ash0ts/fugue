@@ -321,6 +321,7 @@ def build_experiment_proposal(
     n_tasks: int | None = None,
     trace_content: str = "full",
     task_suite_digest: str | None = None,
+    intervention_lock_inputs: Mapping[str, str] | None = None,
     selection_lock: str | Path | None = None,
     analysis_ids: Sequence[str] = (),
     parent_outcome_id: str | None = None,
@@ -349,6 +350,11 @@ def build_experiment_proposal(
         "n_concurrent": n_concurrent,
         "trace_content": trace_content,
         "task_suite_digest": task_suite_digest,
+        "intervention_lock_inputs": (
+            dict(intervention_lock_inputs)
+            if intervention_lock_inputs is not None
+            else None
+        ),
         "selection_lock": (
             Path(selection_lock).as_posix() if selection_lock is not None else None
         ),
@@ -526,6 +532,7 @@ def _proposal_from_dict(
         "n_concurrent",
         "trace_content",
         "task_suite_digest",
+        "intervention_lock_inputs",
         "selection_lock",
         "analysis_ids",
         "parent_outcome_id",
@@ -535,6 +542,26 @@ def _proposal_from_dict(
     _reject_unknown(raw, fields, "experiment proposal")
     if int(raw.get("schema_version") or 0) != CAMPAIGN_SCHEMA_VERSION:
         raise ValueError("experiment proposal must use schema_version 1")
+    intervention_inputs = _intervention_lock_inputs_from_dict(
+        raw.get("intervention_lock_inputs")
+    )
+    task_suite_digest = (
+        _required_digest(raw["task_suite_digest"], "task suite digest")
+        if raw.get("task_suite_digest")
+        else None
+    )
+    if intervention_inputs is not None:
+        if task_suite_digest != intervention_inputs["discovery_suite_sha256"]:
+            raise ValueError(
+                "intervention discovery suite must equal task_suite_digest"
+            )
+        if (
+            intervention_inputs["discovery_suite_sha256"]
+            == intervention_inputs["holdout_suite_sha256"]
+        ):
+            raise ValueError(
+                "intervention discovery and holdout suites must be distinct"
+            )
     proposal = ExperimentProposalV1(
         schema_version=CAMPAIGN_SCHEMA_VERSION,
         proposal_id=validate_id(raw.get("proposal_id") or "", kind="proposal id"),
@@ -571,11 +598,8 @@ def _proposal_from_dict(
         ),
         n_concurrent=_positive_int(raw.get("n_concurrent"), "proposal n_concurrent"),
         trace_content=_bounded_text(raw.get("trace_content"), "trace content", 32),
-        task_suite_digest=(
-            _required_digest(raw["task_suite_digest"], "task suite digest")
-            if raw.get("task_suite_digest")
-            else None
-        ),
+        task_suite_digest=task_suite_digest,
+        intervention_lock_inputs=intervention_inputs,
         selection_lock=(
             _repo_relative_path(raw["selection_lock"], "selection lock")
             if raw.get("selection_lock")
@@ -600,6 +624,64 @@ def _proposal_from_dict(
     if proposal.proposal_digest and proposal.proposal_digest != digest:
         raise ValueError("proposal_digest does not match the experiment proposal")
     return replace(proposal, proposal_digest=digest)
+
+
+def _intervention_lock_inputs_from_dict(raw: Any) -> dict[str, str] | None:
+    if raw in (None, ""):
+        return None
+    value = _mapping(raw, "intervention lock inputs")
+    required = {
+        "failure_lock_sha256",
+        "discovery_suite_sha256",
+        "holdout_suite_sha256",
+        "failure_locked_at",
+        "suites_frozen_at",
+    }
+    _reject_unknown(value, required, "intervention lock inputs")
+    missing = sorted(required - set(value))
+    if missing:
+        raise ValueError(
+            "intervention lock inputs are missing: " + ", ".join(missing)
+        )
+    failure_time = _canonical_timestamp(
+        value["failure_locked_at"],
+        "failure_locked_at",
+    )
+    suites_time = _canonical_timestamp(
+        value["suites_frozen_at"],
+        "suites_frozen_at",
+    )
+    if datetime.fromisoformat(failure_time) > datetime.fromisoformat(suites_time):
+        raise ValueError(
+            "intervention suites must be frozen after the failure is locked"
+        )
+    return {
+        "failure_lock_sha256": _required_digest(
+            value["failure_lock_sha256"],
+            "failure lock digest",
+        ),
+        "discovery_suite_sha256": _required_digest(
+            value["discovery_suite_sha256"],
+            "discovery suite digest",
+        ),
+        "holdout_suite_sha256": _required_digest(
+            value["holdout_suite_sha256"],
+            "holdout suite digest",
+        ),
+        "failure_locked_at": failure_time,
+        "suites_frozen_at": suites_time,
+    }
+
+
+def _canonical_timestamp(value: Any, name: str) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 class CampaignService:
@@ -2794,6 +2876,12 @@ class CampaignService:
             if proposal.task_suite_digest
             else None
         )
+        intervention_tags = tuple(
+            f"intervention-lock:{key}={value}"
+            for key, value in sorted(
+                (proposal.intervention_lock_inputs or {}).items()
+            )
+        )
         return ExperimentRequest(
             experiment_id=proposal.experiment_id,
             preset=proposal.preset_id,
@@ -2810,6 +2898,7 @@ class CampaignService:
                 f"campaign:{proposal.campaign_id}",
                 f"proposal:{proposal.proposal_id}",
                 f"stage:{proposal.stage_id}",
+                *intervention_tags,
             ),
             trace_content=proposal.trace_content,
             cohort_id=f"{proposal.campaign_id}:{proposal.proposal_id}",

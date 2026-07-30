@@ -36,6 +36,11 @@ admission; missing or drifted preparation fails before launch. A revised
 project, model route, source tree, taskset, candidate, context artifact, or
 runtime requires a new preview and approval.
 
+Operator preflight, context preparation, and runtime preparation all bind the
+experiment's declared evidence destination. Sequential lane work such as
+harness → memory → harness must explicitly reactivate the harness destination;
+legacy `.env` project values never select a lane.
+
 The configs deliberately contain no alternate direct runner. Use:
 
 - `claude-loop-skill-mcp-v1` / `claude-loop-skill-mcp`
@@ -68,6 +73,12 @@ The source must be a repeated valid failure from
 `mcp-main-vs-0-4-natural-maintainer-canary-v3`. The old wrong-project Study
 and placeholder trace cannot be used. Both discovery and private holdout Task
 Suites are locked before discovery results are inspected.
+The selection lock binds the reviewed failure-lock digest, both Suite digests,
+the complete four-arm candidate map, discovery snapshots, and the ordered
+failure-lock → Suite-freeze → discovery → selection chronology.
+The discovery campaign proposal carries those prefreeze inputs as governed
+proposal metadata, and its declared discovery Suite must match the Task Suite
+actually rendered into every row.
 
 Discovery and holdout require separate approvals. A useful result requires
 baseline reproduction, a paired deterministic gain, mechanism evidence for
@@ -90,7 +101,9 @@ The separately approved preview is capped at $10.
 
 Interpret this as task-specific harness behavior. Compare completion, verifier
 outcome, tool trajectory, cost, latency, and evidence integrity by aligned
-task. Do not publish a universal harness ranking from two cases.
+task with `real-harness-task-stratified`. Study Console presents the harness as
+the varied factor while keeping runtime completion separate from task success.
+Do not publish a universal harness ranking from two cases.
 
 ## Repository-memory intervention
 
@@ -116,7 +129,11 @@ The separately approved preview is capped at $10.
 
 Interpret outcome evidence separately from retrieval mechanism evidence.
 Assignment to `rag-dense` is not proof of use; inspect the context calls and
-opened source paths before claiming that memory affected an answer.
+opened source paths before claiming that memory affected an answer. The
+`real-memory-factorial` analysis and Study view expose the exact
+dense-retrieval × evidence-policy levels and report returned, opened, and used
+evidence separately. Dense mode never computes or falls back to BM25; lexical
+retrieval exists only in the separately named BM25 and hybrid systems.
 
 ## Before approving any preview
 

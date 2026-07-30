@@ -101,6 +101,18 @@ def _source_failure(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
+def _task_suite_digest(row: Mapping[str, Any]) -> str:
+    direct = str(row.get("task_suite_digest") or "")
+    if direct:
+        return direct
+    values = {
+        str(tag).removeprefix("task-suite:")
+        for tag in row.get("tags") or ()
+        if str(tag).startswith("task-suite:")
+    }
+    return next(iter(values)) if len(values) == 1 else ""
+
+
 def _keys(value: Any) -> Iterable[str]:
     if isinstance(value, Mapping):
         for key, nested in value.items():
@@ -198,11 +210,25 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     )
     if discovery_counts != expected_discovery:
         blockers.append("discovery is not the complete two-task four-arm matrix")
+    if set(discovery_counts) != set(selection.discovery_variant_ids):
+        blockers.append("discovery arms differ from the selection lock")
 
     selected = selection.selected_variant_id
     holdout_counts = Counter(str(row.get("variant_id") or "") for row in holdout)
     if holdout_counts != Counter({"production": 4, selected: 4}):
         blockers.append("holdout is not four aligned production/winner tasks")
+    if selection.failure_lock_sha256 != failure["lock_sha256"]:
+        blockers.append("selection lock does not bind the reviewed failure lock")
+    if selection.failure_locked_at != failure["locked_at"]:
+        blockers.append("selection chronology disagrees with the failure lock")
+    if {_task_suite_digest(row) for row in discovery} != {
+        selection.discovery_suite_sha256
+    }:
+        blockers.append("discovery rows differ from the pre-frozen discovery suite")
+    if {_task_suite_digest(row) for row in holdout} != {
+        selection.holdout_suite_sha256
+    }:
+        blockers.append("holdout rows differ from the pre-frozen holdout suite")
 
     for phase, rows, counts in (
         ("discovery", discovery, discovery_counts),
@@ -370,6 +396,8 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         "selected_variant_id": selected,
         "selection_lock_sha256": selection.lock_sha256,
         "failure_lock_sha256": failure["lock_sha256"],
+        "discovery_suite_sha256": selection.discovery_suite_sha256,
+        "holdout_suite_sha256": selection.holdout_suite_sha256,
         "source_commit": selection.source_commit,
         "source_tree": selection.source_tree,
         "discovery_candidate_improvements": selected_improvements,

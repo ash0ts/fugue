@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue.bench.candidates import stable_digest
 from fugue.bench.scoring import (
     SelectionPolicy,
     build_intervention_selection_lock,
@@ -243,22 +244,120 @@ def test_intervention_selection_lock_binds_candidates_and_discovery(
         source_commit="e" * 40,
         source_tree="9" * 40,
         source_dirty_digest="",
+        failure_lock_sha256="4" * 64,
+        discovery_suite_sha256="5" * 64,
+        holdout_suite_sha256="6" * 64,
         analysis_snapshot_sha256="f" * 64,
         discovery_run_snapshot_sha256s=("1" * 64,),
         comparison_example_ids=("2" * 64, "3" * 64),
+        discovery_variant_ids=(
+            "production",
+            "skill-only",
+            "mcp-only",
+            "combined",
+        ),
         baseline_variant_id="production",
         selected_variant_id="combined",
         rankings=rankings,
         decision="recommend",
         rationale="combined is the only arm with a preregistered deterministic gain",
+        failure_locked_at="2026-07-30T10:00:00Z",
+        suites_frozen_at="2026-07-30T10:05:00Z",
+        discovery_completed_at="2026-07-30T11:00:00Z",
+        selection_locked_at="2026-07-30T11:05:00Z",
     )
     path = write_intervention_selection_lock(tmp_path / "selection.json", lock)
 
     assert read_intervention_selection_lock(path) == lock
+    assert lock.failure_lock_sha256 == "4" * 64
+    assert lock.discovery_suite_sha256 == "5" * 64
+    assert lock.holdout_suite_sha256 == "6" * 64
+    assert set(lock.discovery_variant_ids) == {
+        "production",
+        "skill-only",
+        "mcp-only",
+        "combined",
+    }
     payload = json.loads(path.read_text())
     payload["rankings"][3]["candidate_digest"] = "0" * 64
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="digest"):
+        read_intervention_selection_lock(path)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda value: value.__setitem__(
+                "discovery_variant_ids",
+                ["production", "skill-only", "combined"],
+            ),
+            "every predeclared discovery arm",
+        ),
+        (
+            lambda value: value.__setitem__(
+                "suites_frozen_at",
+                "2026-07-30T11:01:00+00:00",
+            ),
+            "intervention chronology",
+        ),
+        (
+            lambda value: value.__setitem__(
+                "holdout_suite_sha256",
+                value["discovery_suite_sha256"],
+            ),
+            "independently frozen",
+        ),
+    ],
+)
+def test_intervention_selection_lock_rejects_incomplete_prefreeze_contract(
+    tmp_path: Path,
+    mutate,
+    message: str,
+) -> None:
+    rankings = (
+        {"variant_id": "production", "candidate_digest": "a" * 64},
+        {"variant_id": "skill-only", "candidate_digest": "b" * 64},
+        {"variant_id": "mcp-only", "candidate_digest": "c" * 64},
+        {"variant_id": "combined", "candidate_digest": "d" * 64},
+    )
+    lock = build_intervention_selection_lock(
+        experiment_id="claude-loop-skill-mcp",
+        source_commit="e" * 40,
+        source_tree="9" * 40,
+        source_dirty_digest="",
+        failure_lock_sha256="4" * 64,
+        discovery_suite_sha256="5" * 64,
+        holdout_suite_sha256="6" * 64,
+        analysis_snapshot_sha256="f" * 64,
+        discovery_run_snapshot_sha256s=("1" * 64,),
+        comparison_example_ids=("2" * 64, "3" * 64),
+        discovery_variant_ids=(
+            "production",
+            "skill-only",
+            "mcp-only",
+            "combined",
+        ),
+        baseline_variant_id="production",
+        selected_variant_id="combined",
+        rankings=rankings,
+        decision="recommend",
+        rationale="combined met the preregistered gate",
+        failure_locked_at="2026-07-30T10:00:00Z",
+        suites_frozen_at="2026-07-30T10:05:00Z",
+        discovery_completed_at="2026-07-30T11:00:00Z",
+        selection_locked_at="2026-07-30T11:05:00Z",
+    )
+    payload = lock.to_dict()
+    mutate(payload)
+    payload["lock_sha256"] = stable_digest(
+        {**payload, "lock_sha256": ""}
+    )
+    path = tmp_path / f"{message.replace(' ', '-')}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         read_intervention_selection_lock(path)
 
 

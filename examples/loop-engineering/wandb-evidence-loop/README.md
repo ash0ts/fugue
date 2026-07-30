@@ -14,7 +14,7 @@ wandb/fugue-claude-loop-engineering-v1
 The immutable task evidence remains in:
 
 ```text
-wandb/fugue-mcp-release-source-v1
+wandb/fugue-mcp-release-source-v2
 ```
 
 The MCP release canary that supplies the failure remains in
@@ -31,8 +31,9 @@ After a human reviews one task that failed on the same arm in both attempts:
 
 ```bash
 uv run python \
-  examples/loop-engineering/wandb-evidence-loop/lock_failure.py \
-  --result .fugue/results/comparisons/RESULT/result.json \
+	  examples/loop-engineering/wandb-evidence-loop/lock_failure.py \
+	  --result .fugue/results/comparisons/RESULT/result.json \
+	  --preview .fugue/comparisons/RUN/prepared-preview.json \
   --task-id TASK_ID \
   --arm baseline \
   --primary-attempt-id ATTEMPT_ID \
@@ -40,10 +41,12 @@ uv run python \
   --output .fugue/loop-engineering/failure.lock.json
 ```
 
-The helper accepts only `ComparisonResultV3`, exact source/result topology,
-matched pre/post source drift checks, eight unique reconciled attempts, a valid
-task, two repeated critical failures, and five resolved Weave links. It copies
-no Agent answer or private expected value.
+The helper accepts only `ComparisonResultV3`, the exact digest-verified preview
+and spec that produced it, exact source/result topology, matched pre/post source
+drift checks, eight unique reconciled attempts, one stable candidate identity
+per arm, exact runtime/scorer/MCP locks, a valid task, two repeated critical
+failures, and five resolved Weave links. It copies no Agent answer or private
+expected value.
 
 If the final `staging/0.4.0` head changes, the MCP preview and result change and
 the failure lock must be recreated.
@@ -101,6 +104,26 @@ suite must not expose its prompts, expected values, or outcomes to the
 controller. Pass the exact locked Task Suite manifest to the experiment
 preview; the manifest and private-evaluation digests are part of the plan.
 
+The governed discovery proposal must also carry this public, digest-bound
+prefreeze metadata:
+
+```json
+{
+  "intervention_lock_inputs": {
+    "failure_lock_sha256": "…",
+    "discovery_suite_sha256": "…",
+    "holdout_suite_sha256": "…",
+    "failure_locked_at": "2026-07-30T10:00:00+00:00",
+    "suites_frozen_at": "2026-07-30T10:05:00+00:00"
+  }
+}
+```
+
+`discovery_suite_sha256` must equal the proposal's `task_suite_digest`.
+Fugue binds this object into the proposal, plan, preview, approval, and every
+discovery row; mismatched or late-added metadata cannot produce a selection
+lock.
+
 Do not ship checked-in "expected facts" copied from an older project. A real
 canary failure and reviewed task locks are prerequisites.
 
@@ -122,8 +145,10 @@ own pure preview and operator approval capped at $10.
 Run `claude-loop-discovery-selection` only after all eight rows reconcile.
 Selection requires a paired deterministic gain, native Agent links, observed
 Skill invocation, and observed W&B MCP tool use. Freeze the selected variant,
-all four candidate digests, clean source tree, discovery snapshots, and
-rationale in `InterventionSelectionLockV1`.
+the failure-lock digest, both pre-frozen discovery and holdout Suite digests,
+all four arm and candidate identities, clean source tree, discovery snapshots,
+chronology, and rationale in `InterventionSelectionLockV1`. The selection lock
+is not written if any discovery row lacks those pre-run lock inputs.
 
 Only then preview `holdout` with the exact selection lock:
 

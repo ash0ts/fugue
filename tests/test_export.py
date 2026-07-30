@@ -3072,6 +3072,7 @@ def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
         "inspected_paths": ["src/relevant.py", "tests/test_relevant.py"],
         "changed_paths": ["src/other.py"],
         "evidence_paths": ["src/relevant.py", "src/other.py"],
+        "agent_evidence_paths": ["tests/test_relevant.py"],
         "agent_execution_status": "started",
         "pass": False,
     }
@@ -3100,7 +3101,9 @@ def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
     assert row["retrieval_recall_at_10"] == 1.0
     assert row["retrieval_mrr"] == 0.5
     assert row["relevant_retrieval_observed"] is True
+    assert row["relevant_retrieval_returned"] is True
     assert row["relevant_retrieval_opened"] is True
+    assert row["relevant_retrieval_used"] is True
     assert row["relevant_retrieval_changed"] is False
     assert row["off_target_change_only"] is True
     assert row["premature_completion"] is False
@@ -3123,6 +3126,36 @@ def test_retrieval_to_action_funnel_preserves_rank_without_exporting_gold(
     assert hidden_gold_row["retrieval_recall_at_5"] == 0.0
     assert hidden_gold_row["relevant_retrieval_opened"] is False
     assert hidden_gold_row["premature_completion"] is True
+
+
+def test_trial_row_separates_runtime_completion_from_task_outcome(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+    result_path = trial_dir / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "task_name": "maintenance-task",
+                "started_at": "2026-07-30T10:00:00+00:00",
+                "finished_at": "2026-07-30T10:01:00+00:00",
+                "agent_execution": {},
+                "verifier_result": {"rewards": {"reward": 0.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    row = export._row_from_trial(result_path)
+
+    assert row["agent_runtime_completed"] is True
+    assert row["pass"] is False
+
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    failed["exception_info"] = {"exception_type": "AgentRuntimeError"}
+    result_path.write_text(json.dumps(failed), encoding="utf-8")
+    assert export._row_from_trial(result_path)["agent_runtime_completed"] is False
 
 
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:

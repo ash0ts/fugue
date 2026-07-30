@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from fugue.bench import campaign_lifecycle, context
+from fugue.bench.ai import get_analysis
 from fugue.bench.campaign_lifecycle import (
     CampaignError,
     CampaignService,
@@ -130,6 +131,7 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
 ) -> None:
     experiment = get_experiment("real-harness-study", REPO_ROOT)
     campaign = get_campaign("real-harness-study-v1", REPO_ROOT)
+    analysis = get_analysis("real-harness-task-stratified", REPO_ROOT)
     jobs = _jobs(experiment.id)
     service = _clean_campaign_service(campaign.id, monkeypatch)
     plan = _preview_campaign(
@@ -171,6 +173,13 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
     assert campaign.limits.total_cost_usd == 10
     assert campaign.limits.max_total_cells == 8
     assert campaign.require_clean_source is True
+    assert campaign.allowed_analyses == ("real-harness-task-stratified",)
+    assert analysis.group_by == ("harness", "task_name", "model")
+    assert analysis.selection is None
+    assert experiment.research_view is not None
+    assert experiment.research_view.pass_rule.startswith(
+        "Report Harbor verifier success"
+    )
 
 
 def test_memory_lane_resolves_exact_locked_sonnet_factorial(
@@ -178,6 +187,7 @@ def test_memory_lane_resolves_exact_locked_sonnet_factorial(
 ) -> None:
     experiment = get_experiment("real-memory-study", REPO_ROOT)
     campaign = get_campaign("real-memory-study-v1", REPO_ROOT)
+    analysis = get_analysis("real-memory-factorial", REPO_ROOT)
     jobs = _jobs(experiment.id)
     service = _clean_campaign_service(campaign.id, monkeypatch)
     plan = _preview_campaign(
@@ -228,6 +238,21 @@ def test_memory_lane_resolves_exact_locked_sonnet_factorial(
     assert campaign.limits.total_cost_usd == 10
     assert campaign.limits.max_total_cells == 8
     assert campaign.require_clean_source is True
+    assert campaign.allowed_analyses == ("real-memory-factorial",)
+    assert analysis.group_by == (
+        "variant_id",
+        "task_name",
+        "context_system_id",
+        "model",
+    )
+    assert analysis.selection is None
+    assert experiment.research_view is not None
+    assert experiment.research_view.arm_factor_levels == {
+        "baseline": {"retrieval": "off", "evidence-policy": "standard"},
+        "rag-dense": {"retrieval": "dense", "evidence-policy": "standard"},
+        "policy-only": {"retrieval": "off", "evidence-policy": "required"},
+        "combined": {"retrieval": "dense", "evidence-policy": "required"},
+    }
 
 
 def test_rag_dense_failure_cannot_fall_back_to_bm25(
@@ -283,7 +308,7 @@ def test_rag_dense_failure_cannot_fall_back_to_bm25(
                 runtime,
             )
         )
-    assert lexical_used is True
+    assert lexical_used is False
 
 
 @pytest.mark.parametrize(

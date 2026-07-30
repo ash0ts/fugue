@@ -1326,6 +1326,9 @@ def _aggregate(
                 row.get("pass") is False or bool(row.get("exception_class"))
                 for row in values
             ),
+            "agent_runtime_completion_rate": _average(
+                _numbers(values, "agent_runtime_completed")
+            ),
             "tool_calls": sum(
                 int(row.get("weave_tool_call_count") or 0) for row in values
             ),
@@ -1348,6 +1351,12 @@ def _aggregate(
             ),
             "relevant_retrieval_open_rate": _average(
                 _numbers(values, "relevant_retrieval_opened")
+            ),
+            "relevant_retrieval_return_rate": _average(
+                _numbers(values, "relevant_retrieval_returned")
+            ),
+            "relevant_retrieval_use_rate": _average(
+                _numbers(values, "relevant_retrieval_used")
             ),
             "relevant_retrieval_change_rate": _average(
                 _numbers(values, "relevant_retrieval_changed")
@@ -1801,6 +1810,9 @@ def _write_intervention_lock(result: AnalysisResult) -> None:
         or not examples
     ):
         return
+    lock_inputs = _intervention_lock_inputs(rows)
+    if lock_inputs is None:
+        return
     candidate_by_variant: dict[str, str] = {}
     variant_ids = {
         baseline_variant,
@@ -1855,18 +1867,84 @@ def _write_intervention_lock(result: AnalysisResult) -> None:
         source_commit=source_commits[0],
         source_tree=source_trees[0],
         source_dirty_digest="",
+        failure_lock_sha256=str(lock_inputs["failure_lock_sha256"]),
+        discovery_suite_sha256=str(lock_inputs["discovery_suite_sha256"]),
+        holdout_suite_sha256=str(lock_inputs["holdout_suite_sha256"]),
         analysis_snapshot_sha256=result.snapshot.digest,
         discovery_run_snapshot_sha256s=run_snapshots,
         comparison_example_ids=examples,
+        discovery_variant_ids=tuple(sorted(candidate_by_variant)),
         baseline_variant_id=baseline_variant,
         selected_variant_id=selected_variant,
         rankings=rankings,
         decision=selection.decision,
         rationale=selection.reason,
+        failure_locked_at=str(lock_inputs["failure_locked_at"]),
+        suites_frozen_at=str(lock_inputs["suites_frozen_at"]),
+        discovery_completed_at=result.snapshot.created_at,
+        selection_locked_at=datetime.now(UTC).isoformat(),
     )
     write_intervention_selection_lock(
         result.report_dir / "intervention-selection-lock.json", lock
     )
+
+
+def _intervention_lock_inputs(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    required = {
+        "failure_lock_sha256",
+        "discovery_suite_sha256",
+        "holdout_suite_sha256",
+        "failure_locked_at",
+        "suites_frozen_at",
+    }
+    values: dict[str, dict[str, Any]] = {}
+    observed_suite_digests: set[str] = set()
+    for row in rows:
+        raw = row.get("intervention_lock_inputs")
+        if not isinstance(raw, Mapping):
+            task_authoring = row.get("task_authoring")
+            raw = (
+                task_authoring.get("intervention_lock_inputs")
+                if isinstance(task_authoring, Mapping)
+                else None
+            )
+        tagged: dict[str, str] = {}
+        for tag in row.get("tags") or ():
+            value = str(tag)
+            if not value.startswith("intervention-lock:"):
+                continue
+            key, separator, item = value.removeprefix(
+                "intervention-lock:"
+            ).partition("=")
+            if not separator or key in tagged:
+                return None
+            tagged[key] = item
+        if tagged:
+            if isinstance(raw, Mapping) and dict(raw) != tagged:
+                return None
+            raw = tagged
+        if not isinstance(raw, Mapping) or set(raw) != required:
+            return None
+        value = {key: raw[key] for key in sorted(required)}
+        values[json.dumps(value, sort_keys=True, separators=(",", ":"))] = value
+        task_suite_tags = {
+            str(tag).removeprefix("task-suite:")
+            for tag in row.get("tags") or ()
+            if str(tag).startswith("task-suite:")
+        }
+        if len(task_suite_tags) != 1:
+            return None
+        observed_suite_digests.update(task_suite_tags)
+    if len(values) != 1 or len(observed_suite_digests) != 1:
+        return None
+    selected = next(iter(values.values()))
+    if selected["discovery_suite_sha256"] != next(
+        iter(observed_suite_digests)
+    ):
+        return None
+    return selected
 
 
 def _suite_provenance(
@@ -2333,8 +2411,11 @@ def _metric_present(row: Mapping[str, Any], metric: str) -> bool:
         "tokens": "n_input_tokens",
         "failures": "pass",
         "tool_calls": "weave_tool_call_count",
+        "agent_runtime_completion_rate": "agent_runtime_completed",
         "context_invocation_rate": "context_invoked",
+        "relevant_retrieval_return_rate": "relevant_retrieval_returned",
         "relevant_retrieval_open_rate": "relevant_retrieval_opened",
+        "relevant_retrieval_use_rate": "relevant_retrieval_used",
         "relevant_retrieval_change_rate": "relevant_retrieval_changed",
         "off_target_change_only_rate": "off_target_change_only",
         "premature_completion_rate": "premature_completion",

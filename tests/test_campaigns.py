@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
+from fugue.bench.ai import _intervention_lock_inputs
 from fugue.bench.campaign_evidence import _runtime_locks_valid
 from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
@@ -657,6 +658,79 @@ def test_campaign_contracts_are_strict_and_digest_verified(tmp_path: Path) -> No
         experiment_proposal_from_dict(tampered)
 
 
+def test_campaign_proposal_binds_and_propagates_intervention_prefreeze(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    catalog = service.catalog("demo")
+    inputs = {
+        "failure_lock_sha256": "a" * 64,
+        "discovery_suite_sha256": "b" * 64,
+        "holdout_suite_sha256": "c" * 64,
+        "failure_locked_at": "2026-07-30T10:00:00Z",
+        "suites_frozen_at": "2026-07-30T10:05:00Z",
+    }
+    proposal = build_experiment_proposal(
+        proposal_id="loop-discovery",
+        campaign_id="demo",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Which locked intervention repairs the failure?",
+        hypothesis="One predeclared arm improves the deterministic outcome.",
+        fixed_dimensions=("model", "task", "runtime"),
+        varied_dimensions=("skill", "mcp"),
+        measured_dimensions=("task outcome", "mechanism use"),
+        experiment_id="demo",
+        model="openai/gpt-5",
+        n_attempts=1,
+        n_concurrent=1,
+        task_suite_digest="b" * 64,
+        intervention_lock_inputs=inputs,
+    )
+
+    parsed = experiment_proposal_from_dict(proposal.to_dict())
+    assert parsed.intervention_lock_inputs == {
+        **inputs,
+        "failure_locked_at": "2026-07-30T10:00:00+00:00",
+        "suites_frozen_at": "2026-07-30T10:05:00+00:00",
+    }
+    monkeypatch.setattr(
+        campaign_lifecycle,
+        "read_task_suite_lock",
+        lambda *_args, **_kwargs: SimpleNamespace(task_count=2),
+    )
+    request = service._request(parsed)
+    rows = [
+        {
+            "tags": [
+                *request.tags,
+                "task-suite:" + parsed.task_suite_digest,
+            ]
+        }
+    ]
+    assert _intervention_lock_inputs(rows) == parsed.intervention_lock_inputs
+
+    with pytest.raises(ValueError, match="must equal task_suite_digest"):
+        build_experiment_proposal(
+            proposal_id="loop-drifted-suite",
+            campaign_id="demo",
+            catalog_digest=catalog.catalog_digest,
+            stage_id="qualification",
+            research_question="Can a drifted suite be used?",
+            hypothesis="It must fail before planning.",
+            fixed_dimensions=("model",),
+            varied_dimensions=("skill",),
+            measured_dimensions=("task outcome",),
+            experiment_id="demo",
+            model="openai/gpt-5",
+            n_attempts=1,
+            n_concurrent=1,
+            task_suite_digest="d" * 64,
+            intervention_lock_inputs=inputs,
+        )
+
+
 def test_catalog_and_preview_are_pure_and_hide_execution_details(
     tmp_path: Path,
 ) -> None:
@@ -1021,30 +1095,6 @@ def test_authored_holdout_preserves_preset_and_binds_intervention_lock(
     candidate_by_variant = {
         job.variant_id: job.candidate_id for job in discovery
     }
-    source = resolve_fugue_source_provenance(tmp_path)
-    selection = build_intervention_selection_lock(
-        experiment_id="demo",
-        source_commit=str(source["commit"]),
-        source_tree=str(source["tree"]),
-        source_dirty_digest="",
-        analysis_snapshot_sha256="a" * 64,
-        discovery_run_snapshot_sha256s=("b" * 64,),
-        comparison_example_ids=("c" * 64,),
-        baseline_variant_id="production",
-        selected_variant_id="candidate",
-        rankings=tuple(
-            {
-                "variant_id": variant_id,
-                "candidate_digest": candidate_by_variant[variant_id],
-            }
-            for variant_id in ("production", "candidate")
-        ),
-        decision="recommend",
-        rationale="candidate passed the preregistered discovery gate",
-    )
-    selection_path = write_intervention_selection_lock(
-        tmp_path / ".fugue/selection.json", selection
-    )
     draft = task_suite_draft_from_dict(
         {
             "schema_version": 1,
@@ -1111,6 +1161,38 @@ def test_authored_holdout_preserves_preset_and_binds_intervention_lock(
         "demo", catalog.catalog_digest, draft
     )
     task_lock = service.lock_task_suite(task_preview, "lock-holdout")
+    source = resolve_fugue_source_provenance(tmp_path)
+    selection = build_intervention_selection_lock(
+        experiment_id="demo",
+        source_commit=str(source["commit"]),
+        source_tree=str(source["tree"]),
+        source_dirty_digest="",
+        failure_lock_sha256="f" * 64,
+        discovery_suite_sha256="d" * 64,
+        holdout_suite_sha256=task_lock.suite_digest,
+        analysis_snapshot_sha256="a" * 64,
+        discovery_run_snapshot_sha256s=("b" * 64,),
+        comparison_example_ids=("c" * 64,),
+        discovery_variant_ids=("production", "candidate"),
+        baseline_variant_id="production",
+        selected_variant_id="candidate",
+        rankings=tuple(
+            {
+                "variant_id": variant_id,
+                "candidate_digest": candidate_by_variant[variant_id],
+            }
+            for variant_id in ("production", "candidate")
+        ),
+        decision="recommend",
+        rationale="candidate passed the preregistered discovery gate",
+        failure_locked_at="2026-07-30T10:00:00Z",
+        suites_frozen_at="2026-07-30T10:05:00Z",
+        discovery_completed_at="2026-07-30T11:00:00Z",
+        selection_locked_at="2026-07-30T11:05:00Z",
+    )
+    selection_path = write_intervention_selection_lock(
+        tmp_path / ".fugue/selection.json", selection
+    )
 
     proposal_args = {
         "proposal_id": "locked-holdout",

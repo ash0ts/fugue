@@ -10,7 +10,7 @@ allowed:
   workloads: [canary]
   variants: [baseline, rag-dense, policy-only, combined]
   context_systems: [none, rag-dense]
-  analyses: []
+  analyses: [real-memory-factorial]
   trace_content: [full]
 stages:
   - id: canary

@@ -42,7 +42,7 @@ from fugue.model_plane import EvidenceDestinationV1
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPARISON_ID = "mcp-main-vs-0-4-natural-maintainer-canary-v3"
-SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v1"
+SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
 RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
 LOOP_PROJECT = "wandb/fugue-claude-loop-engineering-v1"
 
@@ -403,17 +403,40 @@ def _build_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     result: ComparisonResultV3 | None = None,
+    *,
+    preview_spec_digest: str = "f" * 64,
+    expected_spec_digest: str = "f" * 64,
 ) -> dict[str, object]:
     result_path = tmp_path / "result.json"
     result_path.write_text('{"schema_version":3}\n', encoding="utf-8")
+    preview_path = tmp_path / "prepared-preview.json"
+    preview = {
+        "schema_version": 3,
+        "comparison": {
+            "id": COMPARISON_ID,
+            "spec_digest": preview_spec_digest,
+        },
+        "readiness": {},
+        "matrix": {},
+        "experiment": {},
+        "manifest": {},
+        "preview_digest": "",
+    }
+    preview["preview_digest"] = stable_digest(preview)
+    preview_path.write_text(json.dumps(preview), encoding="utf-8")
+    selected_result = replace(
+        result or _result(),
+        preview_digest=str(preview["preview_digest"]),
+    )
     monkeypatch.setattr(
         "fugue.bench.loop_failure.read_comparison_result",
-        lambda _: result or _result(),
+        lambda _: selected_result,
     )
-    baseline = _result().paired_cases[0].baseline
+    baseline = selected_result.paired_cases[0].baseline
     assert baseline is not None
     return build_comparison_failure_lock(
         result_path=result_path,
+        preview_path=preview_path,
         task_id="reconcile-evaluations",
         arm="baseline",
         primary_attempt_id=baseline.attempt_id,
@@ -423,7 +446,8 @@ def _build_lock(
         expected_harness="claude-code",
         expected_tasks=2,
         expected_attempts=2,
-        spec_digest="f" * 64,
+        spec_digest=expected_spec_digest,
+        locked_at="2026-07-30T10:00:00Z",
         required_source_ids=("wandb-mcp-main", "wandb-mcp-0-4-staging"),
     )
 
@@ -442,10 +466,37 @@ def test_v3_failure_lock_binds_repeated_real_failure_without_answers(
     ]
     assert validated["source"]["source_project"] == SOURCE_PROJECT
     assert validated["source"]["result_project"] == RESULT_PROJECT
+    assert validated["source"]["spec_digest"] == "f" * 64
+    assert validated["source"]["preview_artifact_sha256"]
+    assert set(validated["locks"]["arm_candidates"]) == {
+        "baseline",
+        "candidate",
+    }
+    assert validated["locks"]["arm_runtimes"]["baseline"]
     serialized = json.dumps(validated, sort_keys=True).lower()
     assert "expected_answer" not in serialized
     assert "sanitized_answer_excerpt" not in serialized
     assert "news" + "-research-agent" not in serialized
+
+    tampered = json.loads(json.dumps(validated))
+    tampered["locks"]["arm_candidates"]["baseline"] = "0" * 64
+    tampered["lock_sha256"] = stable_digest(
+        {**tampered, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="primary attempt candidate"):
+        validate_comparison_failure_lock(tampered)
+
+
+def test_failure_lock_rejects_preview_spec_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="preview spec digest changed"):
+        _build_lock(
+            tmp_path,
+            monkeypatch,
+            preview_spec_digest="0" * 64,
+        )
 
 
 def test_failure_lock_rejects_non_valid_or_drifted_source(
@@ -591,6 +642,9 @@ def _verification_row(
         "orphaned_sandbox": False,
         "execution_fingerprint": stable_digest({"phase": phase}),
         "run_snapshot_sha256": "2" * 64,
+        "task_suite_digest": (
+            "6" * 64 if phase == "discovery" else "7" * 64
+        ),
         "source_commit": "3" * 40,
         "source_tree": "4" * 40,
         "source_dirty_digest": "",
@@ -639,6 +693,7 @@ def test_loop_qualification_receipt_accepts_exact_8_plus_8(
     holdout_tasks = ("c" * 64, "d" * 64, "e" * 64, "f" * 64)
     failure = {
         "lock_sha256": "1" * 64,
+        "locked_at": "2026-07-30T10:00:00+00:00",
         "failure": {
             "task_id": "reconcile-evaluations",
             "primary_attempt_id": "9" * 64,
@@ -689,6 +744,16 @@ def test_loop_qualification_receipt_accepts_exact_8_plus_8(
         ),
         discovery_run_snapshot_sha256s=("2" * 64,),
         comparison_example_ids=discovery_tasks,
+        discovery_variant_ids=(
+            "production",
+            "skill-only",
+            "mcp-only",
+            "combined",
+        ),
+        failure_lock_sha256="1" * 64,
+        discovery_suite_sha256="6" * 64,
+        holdout_suite_sha256="7" * 64,
+        failure_locked_at="2026-07-30T10:00:00+00:00",
         source_commit="3" * 40,
         source_tree="4" * 40,
         source_dirty_digest="",
