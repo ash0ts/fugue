@@ -10675,6 +10675,11 @@ def execute_comparison(
         )[0]
         scored.pop("final_output", None)
         row.update(scored)
+        _require_checkpoint_judges(
+            spec,
+            row,
+            checkpoint_index=evaluated_cells,
+        )
         if source_pre_run_drift is not None:
             row["source_pre_run_drift"] = (
                 source_pre_run_drift.to_dict()
@@ -10837,6 +10842,39 @@ def execute_comparison(
         repo_root=repo_root,
     )
     return result, json_path, markdown_path
+
+
+def _require_checkpoint_judges(
+    spec: ComparisonSpecV1,
+    row: dict[str, Any],
+    *,
+    checkpoint_index: int,
+) -> None:
+    """Fail the guarded launch if a configured judge did not produce a score."""
+
+    if checkpoint_index >= spec.execution.evidence_checkpoint_cells:
+        return
+    judge_ids = tuple(
+        evaluator.id
+        for evaluator in spec.evaluators
+        if evaluator.type == "llm_judge"
+    )
+    if not judge_ids:
+        return
+    results = _mapping_or_empty(row.get("comparison_judges"))
+    unavailable = [
+        judge_id
+        for judge_id in judge_ids
+        if _mapping_or_empty(results.get(judge_id)).get("status") != "scored"
+    ]
+    if unavailable:
+        row["comparison_judge_checkpoint_status"] = "failed"
+        row["comparison_judge_checkpoint_unavailable"] = unavailable
+        raise RuntimeError(
+            "first-cell judge checkpoint did not score: "
+            + ", ".join(unavailable)
+        )
+    row["comparison_judge_checkpoint_status"] = "passed"
 
 
 def _apply_harbor_conformance(

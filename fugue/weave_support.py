@@ -15,6 +15,7 @@ from fugue.model_plane import (
 
 _ACTIVE_DESTINATION_DIGEST: str | None = None
 _LOCK = Lock()
+_WEAVE_CLIENT_CONTEXT_UNAVAILABLE = object()
 WEAVE_AGENTS_BASE_URL = DEFAULT_WEAVE_TRACE_BASE_URL
 
 _WEAVE_ENV_KEYS = (
@@ -43,6 +44,25 @@ def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
             os.environ[key] = value
 
 
+def _active_weave_project_slug() -> str | None | object:
+    """Return the active SDK project, or a sentinel when context introspection is absent."""
+
+    try:
+        from weave.trace.context.weave_client_context import get_weave_client
+    except (ImportError, ModuleNotFoundError):
+        return _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
+    client = get_weave_client()
+    if client is None:
+        return None
+    project = str(getattr(client, "project", "") or "")
+    entity = str(getattr(client, "entity", "") or "")
+    if not project:
+        return None
+    if "/" in project or not entity:
+        return project
+    return f"{entity}/{project}"
+
+
 def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
     """Activate the exact evidence destination, including A → B → A switches."""
 
@@ -55,7 +75,15 @@ def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
     global _ACTIVE_DESTINATION_DIGEST
     with _LOCK:
         _apply_weave_environment(bound_env)
-        if destination.destination_digest != _ACTIVE_DESTINATION_DIGEST:
+        active_project = _active_weave_project_slug()
+        destination_changed = (
+            destination.destination_digest != _ACTIVE_DESTINATION_DIGEST
+        )
+        client_missing_or_wrong = (
+            active_project is not _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
+            and active_project != destination.project_slug
+        )
+        if destination_changed or client_missing_or_wrong:
             weave.init(destination.project_slug)
             _ACTIVE_DESTINATION_DIGEST = destination.destination_digest
     return weave

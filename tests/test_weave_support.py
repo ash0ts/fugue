@@ -80,3 +80,33 @@ def test_initialize_weave_does_not_leak_project_identity_to_process_env(
         "WANDB_PROJECT",
     ):
         assert key not in weave_support.os.environ
+
+
+def test_initialize_weave_reactivates_cached_destination_when_client_was_cleared(
+    monkeypatch,
+) -> None:
+    initialized: list[str] = []
+    weave = SimpleNamespace(init=initialized.append)
+    monkeypatch.setitem(sys.modules, "weave", weave)
+    monkeypatch.setattr(weave_support, "_ACTIVE_DESTINATION_DIGEST", None)
+    monkeypatch.setattr(
+        weave_support,
+        "_apply_weave_environment",
+        lambda env: None,
+    )
+    active_projects = iter(
+        [
+            weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
+            None,
+        ]
+    )
+    monkeypatch.setattr(
+        weave_support,
+        "_active_weave_project_slug",
+        lambda: next(active_projects),
+    )
+
+    weave_support.initialize_weave("wandb/project-a", {})
+    weave_support.initialize_weave("wandb/project-a", {})
+
+    assert initialized == ["wandb/project-a", "wandb/project-a"]
