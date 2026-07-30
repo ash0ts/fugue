@@ -183,7 +183,7 @@ def test_specialized_visuals_preserve_denominators_and_authority() -> None:
     assert scenes[("FUGUE 2A", "harness-reversal")]["type"] == "interaction_plot"
     mcp_stages = scenes[("FUGUE 3", "staged-study")]
     assert mcp_stages["type"] == "staged_study"
-    assert [stage["cells"] for stage in mcp_stages["stages"]] == [8, 32]
+    assert [stage["cells"] for stage in mcp_stages["stages"]] == [8, 16]
     package_boundary = scenes[("FUGUE 3", "judge-gate")]
     assert package_boundary["type"] == "boundary"
     assert package_boundary["rule"] == "BEHAVIOR ≠ PACKAGE AUTHORITY"
@@ -204,6 +204,32 @@ def test_specialized_visuals_preserve_denominators_and_authority() -> None:
         "LOCAL HARBOR",
     ]
     assert authority["forbidden"].startswith("FORBIDDEN:")
+
+
+def test_mcp_film_separates_zero_model_conformance_from_agent_results() -> None:
+    ledger = json.loads(
+        (
+            SERIES_ROOT
+            / "fugue-3-api-compatibility-is-not-agent-compatibility"
+            / "media"
+            / "film"
+            / "claim-ledger.json"
+        ).read_text(encoding="utf-8")
+    )
+    observed = [
+        claim
+        for claim in ledger["claims"]
+        if claim["kind"] == "audited Fugue observation"
+    ]
+    assert {claim["id"] for claim in observed} == {
+        "exact-revisions",
+        "prepared-evidence",
+    }
+    assert "not an Agent behavioral result" in ledger["out_of_scope"]
+    for claim in observed:
+        claim_text = " ".join((claim["claim"], *claim["support"])).lower()
+        assert "zero-model" in claim_text or "no model" in claim_text
+        assert claim["caveat"] == ledger["out_of_scope"]
 
 
 def test_film_state_foreground_background_pairs_meet_wcag_aa() -> None:

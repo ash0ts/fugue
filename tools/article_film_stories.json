@@ -808,11 +808,11 @@
       "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
       "title": "API Compatibility Is Not Agent Compatibility",
       "part": "FUGUE 3",
-      "status": "DRAFT DESIGN / NO RESULT YET",
+      "status": "DRAFT DESIGN / ZERO-MODEL ONLY / NO AGENT RESULT YET / RELEASE HOLD",
       "audience": "MCP maintainers and Agent-integration teams",
       "question": "What must be locked before an MCP release can receive a behavioral recommendation?",
       "takeaway": "Qualify exact MCP revisions as whole Agent-facing releases.",
-      "out_of_scope": "Prepared evidence and planned cells are not an observed release result.",
+      "out_of_scope": "Zero-model conformance is not an Agent behavioral result or a package release decision.",
       "duration": 110,
       "poster_scene": "staged-study",
       "reduced_motion_scene": "staged-study",
@@ -821,21 +821,21 @@
         "after_label": "The maintainer memo",
         "bridge_to_heading": "try-this-in-15-minutes",
         "bridge_to_label": "Try this in 15 minutes",
-        "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision."
+        "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD."
       },
       "scenes": [
         {
           "id": "exact-revisions",
           "duration": 11,
           "eyebrow": "VISUAL SYNTHESIS / PLANNED",
-          "headline": "The comparison waits for two final reviewed heads.",
-          "support": ["Baseline: reviewed main.", "Candidate: final repaired staging after review."],
-          "kind": "preregistered design",
+          "headline": "Zero-model preparation locked the two reviewed revisions.",
+          "support": ["Baseline: main at 53b199a.", "Candidate: staging at 29cc1b5."],
+          "kind": "audited Fugue observation",
           "source": "article.md#lock-the-two-mcp-candidates",
           "visual": {
             "type": "revision_compare",
-            "left": {"label": "REVIEWED MAIN", "revision": "LOCK AFTER REVIEW"},
-            "right": {"label": "FINAL STAGING", "revision": "LOCK AFTER REVIEW"},
+            "left": {"label": "REVIEWED MAIN", "revision": "53b199a"},
+            "right": {"label": "FINAL STAGING", "revision": "29cc1b5"},
             "fixed": ["source cohort", "Claude Code", "model route", "local Harbor"]
           }
         },
@@ -861,28 +861,28 @@
         {
           "id": "prepared-evidence",
           "duration": 15,
-          "eyebrow": "PREPARED EVIDENCE / NOT RESULTS",
+          "eyebrow": "OBSERVED SOURCE SHAPE / NOT AGENT RESULTS",
           "headline": "Immutable source evidence stays separate from Study output.",
-          "support": ["A zero-model receipt must lock the source shape.", "Agent traces and Evaluation rows write only to the result project."],
-          "kind": "preregistered design",
+          "support": ["Receipt passed: 2 roots, 18 direct children, 16 prediction rows.", "No model ran and no result Calls were published."],
+          "kind": "audited Fugue observation",
           "source": "article.md#genuine-evidence-deliberately-seeded",
           "visual": {
             "type": "evidence_graph",
             "nodes": [
               {"label": "SOURCE PROJECT", "value": "LOCKED"},
-              {"label": "ZERO-MODEL RECEIPT", "value": "PENDING"},
+              {"label": "ZERO-MODEL RECEIPT", "value": "PASSED"},
               {"label": "RESULT PROJECT", "value": "EMPTY"},
               {"label": "CROSS-WRITE", "value": "BLOCKED"}
             ],
             "output": "SOURCE-ISOLATED STUDY",
-            "status": "PLAN BOUNDARY / NO RESULT"
+            "status": "CONFORMANCE ONLY / NO AGENT RESULT"
           }
         },
         {
           "id": "staged-study",
           "duration": 15,
           "eyebrow": "THE LOCAL STAGED DESIGN",
-          "headline": "An 8-cell canary gates a separate 32-cell confirmation.",
+          "headline": "An 8-cell canary gates a separate 16-cell confirmation.",
           "support": ["Claude Code and the locked route stay fixed.", "The confirmation needs its own preview, approval, budget, and result."],
           "kind": "preregistered design",
           "source": "article.md#the-staged-local-sequence",
@@ -890,9 +890,9 @@
             "type": "staged_study",
             "stages": [
               {"label": "LOCAL CANARY", "cells": 8, "state": "variable"},
-              {"label": "SEPARATE CONFIRMATION", "cells": 32, "state": "decision"}
+              {"label": "SEPARATE CONFIRMATION", "cells": 16, "state": "decision"}
             ],
-            "unit": "40 MAXIMUM PLANNED CELLS",
+            "unit": "24 MAXIMUM PLANNED CELLS",
             "status": "CANARY FIRST / NO RESULT"
           }
         },
@@ -906,7 +906,7 @@
           "source": "article.md#judge-calibration-before-paid-work",
           "visual": {
             "type": "boundary",
-            "left": {"label": "BEHAVIOR STUDY", "items": ["8-cell canary", "32-cell confirmation", "local Harbor receipts"], "state": "evidence"},
+            "left": {"label": "BEHAVIOR STUDY", "items": ["8-cell canary", "16-cell confirmation", "local Harbor receipts"], "state": "evidence"},
             "right": {"label": "PACKAGE DECISION", "items": ["CI and security", "compatibility review", "human sign-off"], "state": "missing"},
             "rule": "BEHAVIOR ≠ PACKAGE AUTHORITY"
           }
@@ -930,17 +930,17 @@
           "id": "blocked-status",
           "duration": 13,
           "eyebrow": "CURRENT STATUS / REQUIRED",
-          "headline": "Prepared evidence does not unlock a release recommendation.",
-          "support": ["Final candidates, source receipt, preview, and runtime locks must all exist.", "No canary, confirmation, or package sign-off is reported."],
+          "headline": "A real mechanism fix still leaves the package on HOLD.",
+          "support": ["Main reported 18 rows; staging reported the correct 16.", "No Agent canary, confirmation, or package sign-off is reported."],
           "kind": "pending result",
           "source": "article.md#the-maintainer-memo",
           "visual": {
             "type": "state_machine",
             "states": [
-              {"label": "SOURCE RECEIPT", "state": "missing"},
-              {"label": "FINAL HEADS", "state": "missing"},
+              {"label": "SOURCE RECEIPT", "state": "complete"},
+              {"label": "EXACT MCP PROBE", "state": "complete"},
               {"label": "LIVE STUDIES", "state": "missing"},
-              {"label": "DECISION PENDING", "state": "failure"}
+              {"label": "PACKAGE HOLD", "state": "failure"}
             ],
             "edges": [[0, 1, ""], [1, 2, ""], [2, 3, ""]],
             "forbidden": "SMOKE OR DIRECT MCP RECEIPT → RELEASE WINNER"

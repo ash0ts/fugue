@@ -8,7 +8,7 @@
 
 **Duration:** 110 seconds
 
-**Status:** DRAFT DESIGN / NO RESULT YET
+**Status:** DRAFT DESIGN / ZERO-MODEL ONLY / NO AGENT RESULT YET / RELEASE HOLD
 
 ## Article placement
 
@@ -26,21 +26,21 @@ Qualify exact MCP revisions as whole Agent-facing releases.
 
 ## What the film does not claim
 
-Prepared evidence and planned cells are not an observed release result.
+Zero-model conformance is not an Agent behavioral result or a package release decision.
 
-## 01 — The comparison waits for two final reviewed heads.
+## 01 — Zero-model preparation locked the two reviewed revisions.
 
 **Time:** 00:00–00:11
 
 **Visual relationship:** revision compare
 
-**On-screen support:** Baseline: reviewed main. Candidate: final repaired staging after review.
+**On-screen support:** Baseline: main at 53b199a. Candidate: staging at 29cc1b5.
 
-**Evidence status:** preregistered design
+**Evidence status:** audited Fugue observation
 
 **Source:** `article.md#lock-the-two-mcp-candidates`
 
-**Displayed values:** none
+**Displayed values:** 53b199a; 29cc1b5
 
 ## 02 — Descriptions, projections, pagination, and errors are behavioral inputs.
 
@@ -62,15 +62,15 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Visual relationship:** evidence graph
 
-**On-screen support:** A zero-model receipt must lock the source shape. Agent traces and Evaluation rows write only to the result project.
+**On-screen support:** Receipt passed: 2 roots, 18 direct children, 16 prediction rows. No model ran and no result Calls were published.
 
-**Evidence status:** preregistered design
+**Evidence status:** audited Fugue observation
 
 **Source:** `article.md#genuine-evidence-deliberately-seeded`
 
 **Displayed values:** none
 
-## 04 — An 8-cell canary gates a separate 32-cell confirmation.
+## 04 — An 8-cell canary gates a separate 16-cell confirmation.
 
 **Time:** 00:41–00:56
 
@@ -82,7 +82,7 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Source:** `article.md#the-staged-local-sequence`
 
-**Displayed values:** 8; 32; 40 MAXIMUM PLANNED CELLS
+**Displayed values:** 8; 16; 24 MAXIMUM PLANNED CELLS
 
 ## 05 — Behavioral evidence cannot issue package GO.
 
@@ -96,7 +96,7 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Source:** `article.md#judge-calibration-before-paid-work`
 
-**Displayed values:** 8-cell canary; 32-cell confirmation
+**Displayed values:** 8-cell canary; 16-cell confirmation
 
 ## 06 — Four outcome layers remain independently inspectable.
 
@@ -112,13 +112,13 @@ Prepared evidence and planned cells are not an observed release result.
 
 **Displayed values:** none
 
-## 07 — Prepared evidence does not unlock a release recommendation.
+## 07 — A real mechanism fix still leaves the package on HOLD.
 
 **Time:** 01:25–01:38
 
 **Visual relationship:** state machine
 
-**On-screen support:** Final candidates, source receipt, preview, and runtime locks must all exist. No canary, confirmation, or package sign-off is reported.
+**On-screen support:** Main reported 18 rows; staging reported the correct 16. No Agent canary, confirmation, or package sign-off is reported.
 
 **Evidence status:** pending result
 

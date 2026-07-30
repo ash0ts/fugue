@@ -6,7 +6,7 @@
     "The active execution backend is local Harbor; no Serverless behavior is claimed."
   ],
   "cells": [],
-  "content_sha256": "f0cc3233c239323065c3a609f59b2821ce6d0ba117871ddf22c89b6c5020fa20",
+  "content_sha256": "856abc7cb6ce8d9fff69a274a0e40ef4d7b82f215edb580a3f548314323c8e71",
   "decision_value": 0,
   "evidence_tier": "active",
   "findings": [],
@@ -15,7 +15,7 @@
   "id": "real-memory-study-v1",
   "links": {
     "evaluations": [],
-    "project": "https://wandb.ai/wandb/fugue-memory-loop-engineering-v1/weave"
+    "project": "https://wandb.ai/wandb/fugue-memory-experiments-v1/weave"
   },
   "matrix": {
     "attempts": 1,

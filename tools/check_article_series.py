@@ -305,7 +305,50 @@ def _check_claim_ledger(
             claim for claim in claims if claim["kind"] == "audited Fugue observation"
         ]
         if observed:
-            _fail(f"{entry['id']} preregistration film claims an observed result")
+            out_of_scope = str(ledger.get("out_of_scope", "")).lower()
+            forbidden_outcome_terms = (
+                "agent improved",
+                "agent regressed",
+                "behavioral winner",
+                "package go",
+                "release go",
+            )
+            observed_text = " ".join(
+                str(value)
+                for claim in observed
+                for value in (
+                    claim.get("claim", ""),
+                    *claim.get("support", []),
+                )
+            ).lower()
+            if (
+                entry["publication_state"] != "working_draft"
+                or "zero-model" not in article.lower()
+                or "not an agent behavioral result" not in out_of_scope
+                or any(term in observed_text for term in forbidden_outcome_terms)
+                or any(
+                    str(claim.get("caveat", "")).lower() != out_of_scope
+                    for claim in observed
+                )
+                or any(
+                    "zero-model"
+                    not in " ".join(
+                        (
+                            str(claim.get("claim", "")),
+                            *(str(item) for item in claim.get("support", [])),
+                        )
+                    ).lower()
+                    and "no model"
+                    not in " ".join(
+                        (
+                            str(claim.get("claim", "")),
+                            *(str(item) for item in claim.get("support", [])),
+                        )
+                    ).lower()
+                    for claim in observed
+                )
+            ):
+                _fail(f"{entry['id']} preregistration film claims an observed result")
 
 
 def _check_film_runtime(entry: dict[str, Any], film_path: Path) -> None:
@@ -321,6 +364,7 @@ def _check_film_runtime(entry: dict[str, Any], film_path: Path) -> None:
     if (
         entry["evidence_state"] in {"draft_preregistration", "preregistered"}
         and "NO RESULT YET" not in html
+        and "NO AGENT RESULT YET" not in html
     ):
         _fail(f"{entry['id']} film is missing its preregistration label")
     if entry["publication_state"] == "working_draft" and (

@@ -38,6 +38,51 @@
       "supports": "Human-guided validation limits for automated analysis."
     },
     {
+      "id": "fugue-pr34",
+      "author": "Fugue maintainers",
+      "title": "Make Fugue validate one Agent-system change",
+      "publication": "GitHub draft pull request #34",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/34",
+      "supports": "Review-visible canonical comparison façade; draft source is not merged or qualified."
+    },
+    {
+      "id": "fugue-pr35",
+      "author": "Fugue maintainers",
+      "title": "Compile normal MCP servers and Agent Skills into governed locks",
+      "publication": "GitHub draft pull request #35",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/35",
+      "supports": "Review-visible governed MCP and Skill import layer; draft source is not merged or qualified."
+    },
+    {
+      "id": "fugue-pr36",
+      "author": "Fugue maintainers",
+      "title": "Add the source-use Skill comparison and a no-key replay",
+      "publication": "GitHub draft pull request #36",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/36",
+      "supports": "Review-visible source-use Study and deterministic no-key replay; replay evidence is not live Agent or MCP evidence."
+    },
+    {
+      "id": "fugue-pr37",
+      "author": "Fugue maintainers",
+      "title": "Define a W&B MCP release-maintenance comparison",
+      "publication": "GitHub draft pull request #37",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/37",
+      "supports": "Review-visible initial MCP release comparison; draft source is not the final source-isolated result."
+    },
+    {
+      "id": "fugue-pr38",
+      "author": "Fugue maintainers",
+      "title": "Make tasksets and deterministic scoring easy to adapt",
+      "publication": "GitHub draft pull request #38",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/38",
+      "supports": "Review-visible taskset, scorer, and Python API layer; draft source is not merged or qualified."
+    },
+    {
       "id": "fugue-pr42",
       "author": "Fugue maintainers",
       "title": "Remove obsolete Fugue surfaces",

@@ -4,7 +4,7 @@ Unpublished working notes.
 
 - Plan-alignment pass (2026-07-30): the active design now names
   `real-memory-study-v1` / `real-memory-study`, project
-  `wandb/fugue-memory-loop-engineering-v1`, Claude Code, Sonnet 5, the two
+  `wandb/fugue-memory-experiments-v1`, Claude Code, Sonnet 5, the two
   locked tasks, and the exact baseline/rag-dense/policy-only/combined
   eight-cell local Harbor matrix.
 - Preregistration honesty: masthead keeps draft status and "no result";

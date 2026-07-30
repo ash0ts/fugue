@@ -192,7 +192,7 @@ same identity.
 
 The dedicated lane is campaign `real-memory-study-v1`, experiment
 `real-memory-study`, preset `canary`, and W&B/Weave project
-`wandb/fugue-memory-loop-engineering-v1`. It freezes Claude Code,
+`wandb/fugue-memory-experiments-v1`. It freezes Claude Code,
 `anthropic/claude-sonnet-5`, two tasks, one attempt, and local Docker
 execution through Harbor. The four exact candidate IDs are `baseline`,
 `rag-dense`, `policy-only`, and `combined`; the last two use the registered
@@ -383,7 +383,7 @@ uv run fugue run real-memory-study \
 ```
 
 The preview must expand exactly eight cells and show project
-`wandb/fugue-memory-loop-engineering-v1`, model
+`wandb/fugue-memory-experiments-v1`, model
 `anthropic/claude-sonnet-5`, Claude Code, the two locked tasks, all four exact
 candidate IDs, one attempt, and local Docker/Harbor execution. It is
 inspection, not execution authority.

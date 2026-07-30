@@ -34,7 +34,7 @@ provenance:
   snapshot_digest: pending
   run_ids: []
 links:
-  project: https://wandb.ai/wandb/fugue-harness-comparison-v1/weave
+  project: https://wandb.ai/wandb/fugue-harness-experiments-v1/weave
   evaluations: []
 findings: []
 caveats:

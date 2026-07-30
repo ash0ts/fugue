@@ -238,8 +238,18 @@ rather than an unrecorded hunch.
 
 ## The stack as research evidence
 
-The public July integration stack can be reconstructed from GitHub PR
-metadata:
+The dependent review stack is not one 33,000-line change. Its foundation is
+five separately reviewable draft pull requests:
+
+| Draft source identity | Review-visible layer |
+| --- | --- |
+| #34 [@fugue-pr34] | Canonical comparison façade |
+| #35 [@fugue-pr35] | Governed MCP and Skill imports |
+| #36 [@fugue-pr36] | Source-use Skill Study and deterministic no-key replay |
+| #37 [@fugue-pr37] | Initial W&B MCP release comparison |
+| #38 [@fugue-pr38] | Tasksets, custom scorers, and Python API |
+
+The next exact-head slice can be reconstructed from GitHub PR metadata:
 
 | Public head | Auditable layer | Changed files | Insertions | Deletions |
 | --- | --- | ---: | ---: | ---: |
@@ -264,9 +274,13 @@ A newer five-layer stack is also review-visible, but remains draft:
 | #51 [@fugue-pr51] | Dedicated loop, harness, and memory Studies |
 | #52 [@fugue-pr52] | Removal of obsolete shared-demo routing |
 
-This table records exact review URLs, not completion. None of these draft pull
-requests supplies an accepted preview, live qualification, Study result,
-final staging SHA, package decision, merge, or release.
+Together, the active dependency set is #34–#38, #42–#45, and #48–#52; the
+missing numbers are not hidden integration layers. These tables record exact
+review URLs, not completion. None of these draft pull requests supplies an
+approved paid preview, live Agent qualification, Study result, package
+decision, merge, or release. The exact W&B MCP staging source
+`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7` and the zero-model conformance
+receipts are preparation evidence, not a behavioral result.
 
 The more important sequence is dependency:
 

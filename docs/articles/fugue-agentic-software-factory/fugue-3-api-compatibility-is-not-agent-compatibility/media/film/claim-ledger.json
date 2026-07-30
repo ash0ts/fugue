@@ -4,13 +4,13 @@
   "audience": "MCP maintainers and Agent-integration teams",
   "question": "What must be locked before an MCP release can receive a behavioral recommendation?",
   "intended_takeaway": "Qualify exact MCP revisions as whole Agent-facing releases.",
-  "out_of_scope": "Prepared evidence and planned cells are not an observed release result.",
+  "out_of_scope": "Zero-model conformance is not an Agent behavioral result or a package release decision.",
   "placement": {
     "after_heading": "the-maintainer-memo",
     "after_label": "The maintainer memo",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision."
+    "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD."
   },
   "poster_scene": "staged-study",
   "reduced_motion_scene": "staged-study",
@@ -38,16 +38,19 @@
     {
       "id": "exact-revisions",
       "scene": "exact-revisions",
-      "claim": "The comparison waits for two final reviewed heads.",
+      "claim": "Zero-model preparation locked the two reviewed revisions.",
       "support": [
-        "Baseline: reviewed main.",
-        "Candidate: final repaired staging after review."
+        "Baseline: main at 53b199a.",
+        "Candidate: staging at 29cc1b5."
       ],
-      "kind": "preregistered design",
+      "kind": "audited Fugue observation",
       "source": "article.md#lock-the-two-mcp-candidates",
       "visual_relationship": "revision_compare",
-      "displayed_values": [],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "displayed_values": [
+        "53b199a",
+        "29cc1b5"
+      ],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "manifest-contract",
@@ -61,26 +64,26 @@
       "source": "article.md#the-interface-an-agent-experiences",
       "visual_relationship": "ledgers",
       "displayed_values": [],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "prepared-evidence",
       "scene": "prepared-evidence",
       "claim": "Immutable source evidence stays separate from Study output.",
       "support": [
-        "A zero-model receipt must lock the source shape.",
-        "Agent traces and Evaluation rows write only to the result project."
+        "Receipt passed: 2 roots, 18 direct children, 16 prediction rows.",
+        "No model ran and no result Calls were published."
       ],
-      "kind": "preregistered design",
+      "kind": "audited Fugue observation",
       "source": "article.md#genuine-evidence-deliberately-seeded",
       "visual_relationship": "evidence_graph",
       "displayed_values": [],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "staged-study",
       "scene": "staged-study",
-      "claim": "An 8-cell canary gates a separate 32-cell confirmation.",
+      "claim": "An 8-cell canary gates a separate 16-cell confirmation.",
       "support": [
         "Claude Code and the locked route stay fixed.",
         "The confirmation needs its own preview, approval, budget, and result."
@@ -90,10 +93,10 @@
       "visual_relationship": "staged_study",
       "displayed_values": [
         "8",
-        "32",
-        "40 MAXIMUM PLANNED CELLS"
+        "16",
+        "24 MAXIMUM PLANNED CELLS"
       ],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "judge-gate",
@@ -108,9 +111,9 @@
       "visual_relationship": "boundary",
       "displayed_values": [
         "8-cell canary",
-        "32-cell confirmation"
+        "16-cell confirmation"
       ],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "four-outcomes",
@@ -124,15 +127,15 @@
       "source": "article.md#four-outcome-layers",
       "visual_relationship": "reconciliation",
       "displayed_values": [],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     },
     {
       "id": "blocked-status",
       "scene": "blocked-status",
-      "claim": "Prepared evidence does not unlock a release recommendation.",
+      "claim": "A real mechanism fix still leaves the package on HOLD.",
       "support": [
-        "Final candidates, source receipt, preview, and runtime locks must all exist.",
-        "No canary, confirmation, or package sign-off is reported."
+        "Main reported 18 rows; staging reported the correct 16.",
+        "No Agent canary, confirmation, or package sign-off is reported."
       ],
       "kind": "pending result",
       "source": "article.md#the-maintainer-memo",
@@ -152,7 +155,7 @@
       "source": "article.md#the-maintainer-memo",
       "visual_relationship": "series_map",
       "displayed_values": [],
-      "caveat": "Prepared evidence and planned cells are not an observed release result."
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
     }
   ]
 }

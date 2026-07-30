@@ -15,8 +15,9 @@ Unpublished working notes.
   intervention, or qualified tree.
 - Lane boundary: the Claude loop, real harness comparison, real memory
   comparison, and source-isolated MCP result use dedicated planned projects.
-  The MCP package decision remains separate and pending its final staging
-  comparison.
+  The MCP package decision remains separate and `HOLD`: zero-model
+  conformance exists, but the paid final-staging Agent comparison and package
+  sign-off do not.
 - Isolation test: a reader should be able to state the five audience
   beliefs, the non-beliefs, and why discovery approval cannot be reused for
   the private holdout.

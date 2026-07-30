@@ -137,7 +137,7 @@ aggregate licenses a model-only or universal-harness claim.
 
 The dedicated lane is campaign `real-harness-study-v1`, experiment
 `real-harness-study`, preset `canary`, and W&B/Weave project
-`wandb/fugue-harness-comparison-v1`. It freezes the W&B Inference route
+`wandb/fugue-harness-experiments-v1`. It freezes the W&B Inference route
 `wandb/zai-org/GLM-5.2`, context system `none`, one attempt, local Docker
 execution through Harbor, and four native harness identities: `hermes`,
 `openclaw`, `claude-code`, and `codex`. Its exact matrix is two tasks × four
@@ -415,7 +415,7 @@ uv run fugue run real-harness-study \
 ```
 
 The preview must expand exactly eight cells and show project
-`wandb/fugue-harness-comparison-v1`, route
+`wandb/fugue-harness-experiments-v1`, route
 `wandb/zai-org/GLM-5.2`, the two locked tasks, the four allowed harnesses,
 one attempt, and local Docker/Harbor execution. Preview is inspection, not
 execution authority. The Research Agent can request approval, but only a

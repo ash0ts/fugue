@@ -113,7 +113,7 @@
       "preview_digest": null,
       "previous_id": "fugue-1",
       "next_id": "fugue-2b",
-      "source_digest": "sha256:39a04d25d2eb539838709a21371a8ce4fb55a28c05a0aa146438ba15776b39ce",
+      "source_digest": "sha256:686606161592cc30287c773f1750d61402ee4258dbf155fc1646c775dfdff419",
       "animation": {
         "html": "media/film/fugue-2a-model-is-not-the-agent.html",
         "mp4": "media/film/fugue-2a-model-is-not-the-agent.mp4",
@@ -144,7 +144,7 @@
       "preview_digest": null,
       "previous_id": "fugue-2a",
       "next_id": "fugue-3",
-      "source_digest": "sha256:898b2ed7ea3e421382262eb8e8c8f769ac9e760a1bb5685a2c4de3f161968df3",
+      "source_digest": "sha256:b9f9ef77b9a6fe5ebdf1d4f6d0b95b4092d3dcae53a1492b87e481e61e7066ae",
       "animation": {
         "html": "media/film/fugue-2b-memory-is-not-context.html",
         "mp4": "media/film/fugue-2b-memory-is-not-context.mp4",
@@ -175,7 +175,7 @@
       "preview_digest": null,
       "previous_id": "fugue-2b",
       "next_id": "fugue-4a",
-      "source_digest": "sha256:f27ebfe8738625af3115cb576c496fd1adf28fc0de8eaa8c9de494170dfa18d6",
+      "source_digest": "sha256:9ceb282814e50d01128232281e8931466535d166380d046c053c110425397829",
       "animation": {
         "html": "media/film/fugue-3-api-compatibility-is-not-agent-compatibility.html",
         "mp4": "media/film/fugue-3-api-compatibility-is-not-agent-compatibility.mp4",
@@ -186,7 +186,7 @@
         "poster_scene": "staged-study",
         "reduced_motion_scene": "staged-study",
         "duration_seconds": 110,
-        "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision.",
+        "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD.",
         "chapters": ["exact-revisions", "manifest-contract", "prepared-evidence", "staged-study", "judge-gate", "four-outcomes", "blocked-status", "series-context"]
       },
       "results_appendices": []
@@ -237,7 +237,7 @@
       "preview_digest": null,
       "previous_id": "fugue-4a",
       "next_id": "fugue-extra",
-      "source_digest": "sha256:5071844d3b7d8120f115220a603845163767959e8cc0eaf57078a6141d8e91a1",
+      "source_digest": "sha256:026f6829460db7a4e8a86b93d993308fb2cdb83c85f8e607358cafec700deb81",
       "animation": {
         "html": "media/film/fugue-4b-trace-to-release-decision.html",
         "mp4": "media/film/fugue-4b-trace-to-release-decision.mp4",
@@ -268,7 +268,7 @@
       "preview_digest": null,
       "previous_id": "fugue-4b",
       "next_id": null,
-      "source_digest": "sha256:50426ff7d30f76e76f25fcf9fc499004081f37df703385e8189903ea56e58916",
+      "source_digest": "sha256:c1ec17a03f5232b707e27afd08ca957bb27aa8909d26ccc2c67f64fd6e256ca2",
       "animation": {
         "html": "media/film/fugue-extra-building-the-evaluator-with-the-evaluated.html",
         "mp4": "media/film/fugue-extra-building-the-evaluator-with-the-evaluated.mp4",

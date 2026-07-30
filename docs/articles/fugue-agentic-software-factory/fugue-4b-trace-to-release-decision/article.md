@@ -50,9 +50,10 @@ The flagship and adjacent Studies have dedicated planned W&B/Weave projects:
 | Lane | Planned project | Claim boundary |
 | --- | --- | --- |
 | Claude Code loop engineering | `wandb/fugue-claude-loop-engineering-v1` | Skill/MCP intervention under fixed Claude Code and local Harbor |
-| Harness behavior | `wandb/fugue-harness-comparison-v1` | Task-specific harness behavior under one fixed model route |
-| Repository memory | `wandb/fugue-memory-loop-engineering-v1` | Dense retrieval and evidence-use policy under fixed Claude Code |
+| Harness behavior | `wandb/fugue-harness-experiments-v1` | Task-specific harness behavior under one fixed model route |
+| Repository memory | `wandb/fugue-memory-experiments-v1` | Dense retrieval and evidence-use policy under fixed Claude Code |
 | MCP release behavior | `wandb/fugue-mcp-release-qualification-v1` | Separate source-isolated `main` versus final-staging comparison |
+| Aria presentation | `wandb/fugue-aria-loop-engineering-v1` | Optional read-only/no-spend Study navigation; no Aria-improvement claim |
 
 These project names are destinations in planned contracts, not evidence that
 the Studies ran. No lane writes result rows into another lane’s project.
@@ -508,9 +509,10 @@ Before calling the flagship decision-ready:
 - no lane’s results are mixed into another project;
 - Aria, if present, remains read-only and optional.
 
-The MCP package-release decision is separate. It remains pending the
-source-isolated `main` versus final-staging comparison and independent package
-sign-off described in Fugue 3.
+The MCP package-release decision is separate. Its current status is `HOLD`:
+the source-isolated zero-model checks have run, but the paid `main` versus
+final-staging Agent Study and independent package sign-off described in
+Fugue 3 have not.
 
 ## Try this in 15 minutes
 
@@ -549,12 +551,14 @@ Serverless isolation or complete security. The optional Aria shell is a
 presentation and navigation aid, not autonomous release authority and not an
 evaluated treatment.
 
-The MCP release decision is not this flagship result. It remains pending its
-own source-isolated staging comparison. The harness and repository-memory
-lanes also remain separate planned Studies in dedicated projects.
+The MCP release decision is not this flagship result. It remains `HOLD`
+pending its own paid source-isolated staging comparison and package gates.
+The harness and repository-memory lanes also remain separate planned Studies
+in dedicated projects.
 
-At the time of writing, no result exists. That limitation is the consequence
-of the same evidence contract the flagship is meant to demonstrate.
+At the time of writing, no loop-engineering Agent result exists. That
+limitation is the consequence of the same evidence contract the flagship is
+meant to demonstrate.
 
 ## Results appendix — intentionally empty
 

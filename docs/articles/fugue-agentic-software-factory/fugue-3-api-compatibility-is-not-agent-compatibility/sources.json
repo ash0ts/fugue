@@ -29,6 +29,15 @@
       "supports": "Exact public source identity for the 0.4 candidate."
     },
     {
+      "id": "mcp-main-final",
+      "author": "Weights & Biases",
+      "title": "wandb-mcp-server reviewed main revision 53b199a",
+      "publication": "GitHub",
+      "date": "2026-07-30",
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
+      "supports": "Exact active baseline source identity for the source-isolated MCP comparison."
+    },
+    {
       "id": "wandb-runs",
       "author": "Weights & Biases",
       "title": "Runs",
@@ -74,9 +83,18 @@
       "supports": "Exact final staging source identity for preparation; a repository commit does not establish an accepted Fugue preview, live canary, behavioral result, or package decision."
     },
     {
+      "id": "mcp-release-pr",
+      "author": "Weights & Biases",
+      "title": "Release W&B MCP 0.4.0",
+      "publication": "GitHub draft pull request #117",
+      "date": "2026-07-30",
+      "url": "https://github.com/wandb/wandb-mcp-server/pull/117",
+      "supports": "Review-visible Python package release candidate at final staging head; the draft remains subject to the independent release decision."
+    },
+    {
       "id": "fugue-provider-draft",
       "author": "Fugue maintainers",
-      "title": "Fugue MCP provider boundary",
+      "title": "Generic Evaluation provider contract",
       "publication": "GitHub draft pull request #48",
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/48",
@@ -85,7 +103,7 @@
     {
       "id": "fugue-mcp-draft",
       "author": "Fugue maintainers",
-      "title": "Fugue MCP evidence V3",
+      "title": "Source-aware V3 evidence and analysis",
       "publication": "GitHub draft pull request #49",
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/49",

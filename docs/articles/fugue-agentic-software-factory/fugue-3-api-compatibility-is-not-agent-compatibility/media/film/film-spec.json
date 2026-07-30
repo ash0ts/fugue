@@ -36,7 +36,7 @@
     "after_label": "The maintainer memo",
     "bridge_to_heading": "try-this-in-15-minutes",
     "bridge_to_label": "Try this in 15 minutes",
-    "what_to_watch": "Track reviewed main and final staging through source isolation, locked manifests, an 8-cell canary, a conditional 32-cell confirmation, and the still-pending package decision."
+    "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD."
   },
   "checkpoints": [
     {

@@ -2,10 +2,11 @@
 
 > **Fugue: Evals for the Agentic Software Factory · Part 3**  
 > A standalone preregistration for MCP maintainers and Agent-integration
-> teams. **Status:** draft preregistration and blocked; the release decision
-> is pending a source-isolated comparison against final staging revision
-> `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. No result or accepted preview
-> exists. **Reading time:** about 11 minutes.
+> teams. **Status:** draft preregistration; package release is `HOLD`.
+> Source-isolated zero-model conformance has passed for final staging revision
+> `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. No result is claimed for
+> Agent behavior, and there is no paid Study or human-signed package decision.
+> **Reading time:** about 11 minutes.
 
 This article defines the current evidence boundary, candidates, staged local
 Study, and release gate in one place. You do not need to know Fugue, W&B MCP,
@@ -23,19 +24,22 @@ The claim this preregistration freezes:
 > An MCP server changes what an Agent can perceive and do; its releases need
 > behavioral qualification, not only protocol and unit tests.
 
-The current decision is deliberately `pending`. Historical 0.3.7 and early
-0.4 candidate commits remain useful source evidence, but they are not the
-active comparison and cannot authorize a current release. [@mcp-baseline]
-[@mcp-candidate] The active design compares the exact reviewed `main` head
-with final staging head `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`.
-This draft records that SHA for preparation only; no accepted preview has
-locked it. If either candidate changes, Fugue must lock new candidates and
-produce a new preview.
+The current package decision is deliberately `HOLD`. Historical 0.3.7 and
+early 0.4 candidate commits remain useful source evidence, but they are not
+the active comparison and cannot authorize a current release. [@mcp-baseline]
+[@mcp-candidate] The active design compares exact reviewed `main` revision
+`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with final staging revision
+`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. [@mcp-main-final]
+[@mcp-final-staging] Zero-model preparation locked those identities. No human
+has approved the paid Agent preview, so a source change still requires new
+locks and a new preview.
 
-No result is carried forward from a deterministic replay, a direct MCP probe,
-an earlier mixed-project canary, or a future remote-runtime plan. The decision
-waits for the source-isolated local Harbor canary and confirmation described
-below, followed by a separate human-signed package receipt.
+No behavioral result is carried forward from a deterministic replay, a
+direct MCP probe, an earlier mixed-project canary, or a future remote-runtime
+plan. The release stays `HOLD` while it waits for the source-isolated local
+Harbor canary and confirmation described below, followed by a separate
+human-signed package receipt. Release PR #117 therefore remains a draft.
+[@mcp-release-pr]
 
 ## Scope and terms
 
@@ -105,7 +109,7 @@ dependencies.
 
 The review-visible Fugue provider, V3 evidence, and source-isolated MCP
 qualification pull requests remain preparation source, not evidence for the
-pending decision. [@fugue-provider-draft] [@fugue-mcp-draft]
+paid behavioral decision. [@fugue-provider-draft] [@fugue-mcp-draft]
 [@fugue-mcp-qualification-draft]
 
 ## Genuine evidence, deliberately seeded
@@ -133,6 +137,34 @@ These objects are seeded prior evidence, not customer data and not comparison
 outcomes. A genuine hosted object can still be a controlled fixture. The
 claim is that the Agent investigated the locked source graph—not that the
 graph represents every production project.
+
+## What has actually run
+
+Two no-spend checks ran on 2026-07-30. They are useful preparation evidence,
+not an Agent result.
+
+The source-conformance receipt passed against the private source project with
+zero model invocations and zero published Calls. It resolved two exact
+Evaluation roots, 18 direct children, 16
+`Evaluation.predict_and_score` children, and two summary children. Its
+receipt digest is
+`9c770379c09d1b65370ed7af7f213cf5b688e28842a04bca301d8e3e0d6074a4`.
+
+The exact-revision mechanism probe then reproduced the bug: `main` reported
+nine rows for each root because it included one summary child, while final
+staging reported the intended eight prediction rows for each root. Across
+both roots that is `18` versus `16`. Both initialized manifests matched their
+locks and both revisions read the locked source project. The mechanism
+receipt digest is
+`d91a6ae7a513f9015fd52db6443bd42f44a5c9fa2481190049a1a842a75abc19`.
+
+These receipts support one narrow statement: the repaired staging revision
+fixes the direct-child reconciliation mechanism on this immutable source
+graph. They do not show how Claude Code uses the change, whether the
+maintainer memo improves, whether another task regresses, or whether the
+Python package should ship. The receipts remain operator evidence rather than
+a public sanitized Result, which is why this article stays draft and
+`noindex`.
 
 ## Tasks that need investigation
 
@@ -219,8 +251,8 @@ The active sequence is:
 
 | Stage | Fixed harness and route | Tasks × revisions × attempts | Cells |
 | --- | --- | ---: | ---: |
-| Canary | Claude Code + locked Anthropic route | 4 × 2 × 1 | 8 |
-| Confirmation | Claude Code + the same locked route | 8 × 2 × 2 | 32 |
+| Canary | Claude Code + locked Anthropic route | 2 × 2 × 2 | 8 |
+| Confirmation | Claude Code + the same locked route | 4 × 2 × 2 | 16 |
 
 The canary and confirmation have separate previews, approvals, run
 identities, budgets, and results. The confirmation is not admitted unless the
@@ -233,7 +265,7 @@ flowchart LR
     M --> C["8-cell local<br/>Harbor canary"]
     C --> G{"Complete and<br/>informative?"}
     G -->|no| H["HOLD with blocker"]
-    G -->|yes| F["32-cell separately<br/>approved confirmation"]
+    G -->|yes| F["16-cell separately<br/>approved confirmation"]
     F --> D["Bounded behavior summary<br/>+ human package decision"]
 ```
 
@@ -256,10 +288,10 @@ The active candidates are the reviewed `main` head and final staging head
 `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. The latter is the exact
 `staging/0.4.0` source selected for this preparation pass.
 [@mcp-final-staging] Recording it establishes a candidate source identity
-only: no accepted preview, source-conformance receipt, canary, confirmation,
-behavioral result, or package decision exists. The accepted preview must
-independently resolve and lock both candidates; a later source change makes
-this draft stale.
+plus a completed zero-model mechanism receipt. No approved paid preview,
+canary, confirmation, behavioral result, or signed package decision exists.
+The paid preview must independently resolve and lock both candidates; a later
+source change makes this draft stale.
 
 The trusted operator sequence is:
 
@@ -347,7 +379,7 @@ uv run fugue compare "$SPEC" \
 
 The spec name is a planned contract until the V3 comparison lands on a clean
 reviewed tree. Do not execute a similarly named draft or substitute an older
-preview. The 32-cell confirmation requires its own accepted spec, preview,
+preview. The 16-cell confirmation requires its own accepted spec, preview,
 approval, and budget.
 
 ## Reconciliation and decision rules
@@ -369,10 +401,10 @@ The Study may report `improved`, `regressed`, `mixed`, `unchanged`,
 `incomplete`, or `invalid` behavior. `Incomplete` and `invalid` suppress a
 behavioral recommendation.
 
-The Python-package decision remains `HOLD` until a separate human-signed
-package receipt proves the final staging identity and the package, CI,
-security, compatibility, and release requirements. Local behavioral evidence
-cannot issue package `GO` by itself.
+The Python-package decision remains `HOLD` until the paid behavioral stages
+reconcile and a separate human-signed package receipt proves the final
+staging identity and the package, CI, security, compatibility, and release
+requirements. Local behavioral evidence cannot issue package `GO` by itself.
 
 The supported behavioral claim is whole-release and local:
 
@@ -433,7 +465,7 @@ release evidence.
 ## What this does not show
 
 The seeded source cohort does not represent every customer project. A
-four-task canary and eight-task confirmation are bounded maintenance Studies,
+two-task canary and four-task confirmation are bounded maintenance Studies,
 not broad population estimates.
 
 Local Harbor receipts establish the declared local execution policy, not
@@ -441,10 +473,13 @@ Serverless isolation or complete security. A basic Claude Code comparison
 does not establish behavior for OpenClaw, Codex, Hermes, Aria, or another
 model. No Skill or memory effect is in scope.
 
-Most importantly, no result exists yet. The release decision remains pending
-the final source-isolated staging comparison and separate package sign-off.
+Most importantly, no Agent behavioral result exists yet. The no-spend
+receipts expose a real reconciliation difference; they do not resolve whether
+that difference is useful enough, safe enough, or efficient enough to release.
+The package decision remains `HOLD` pending the paid source-isolated staging
+comparison and separate package sign-off.
 
-## Results appendix — intentionally empty
+## Behavioral results appendix — intentionally empty
 
 A future dated appendix must contain:
 

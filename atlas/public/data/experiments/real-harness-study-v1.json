@@ -6,7 +6,7 @@
     "The active execution backend is local Harbor; no Serverless behavior is claimed."
   ],
   "cells": [],
-  "content_sha256": "77eff6f8ca602cb3c04ed1854e07e542cfb6cc404058d4f9823e35e6f0bd7050",
+  "content_sha256": "34e571a9a343538e0a484b6616e492245f2567f2ece87d84280f172a68ebaa40",
   "decision_value": 0,
   "evidence_tier": "active",
   "findings": [],
@@ -15,7 +15,7 @@
   "id": "real-harness-study-v1",
   "links": {
     "evaluations": [],
-    "project": "https://wandb.ai/wandb/fugue-harness-comparison-v1/weave"
+    "project": "https://wandb.ai/wandb/fugue-harness-experiments-v1/weave"
   },
   "matrix": {
     "attempts": 1,

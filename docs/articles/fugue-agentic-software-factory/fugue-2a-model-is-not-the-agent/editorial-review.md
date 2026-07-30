@@ -4,7 +4,7 @@ Unpublished working notes.
 
 - Plan-alignment pass (2026-07-30): the active design now names
   `real-harness-study-v1` / `real-harness-study`, project
-  `wandb/fugue-harness-comparison-v1`, fixed
+  `wandb/fugue-harness-experiments-v1`, fixed
   `wandb/zai-org/GLM-5.2`, the two locked tasks, and the exact four-harness,
   eight-cell local Harbor matrix.
 - Preregistration honesty: masthead still declares draft status and "no

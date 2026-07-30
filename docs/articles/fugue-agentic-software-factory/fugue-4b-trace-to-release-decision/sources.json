@@ -40,7 +40,7 @@
     {
       "id": "fugue-provider-draft",
       "author": "Fugue maintainers",
-      "title": "Fugue MCP provider boundary",
+      "title": "Generic Evaluation provider contract",
       "publication": "GitHub draft pull request #48",
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/48",
@@ -49,7 +49,7 @@
     {
       "id": "fugue-evidence-v3-draft",
       "author": "Fugue maintainers",
-      "title": "Fugue MCP evidence V3",
+      "title": "Source-aware V3 evidence and analysis",
       "publication": "GitHub draft pull request #49",
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/49",
