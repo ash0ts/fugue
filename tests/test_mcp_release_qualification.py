@@ -1022,7 +1022,30 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     cells: int,
     cap: int,
     candidate_passes: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scorer = runpy.run_path(
+        (EXAMPLE / "natural_maintainer_scorer.py").as_posix()
+    )["score"]
+
+    def fake_inline_runner(*, source, evidence, reference, profile, limits):
+        assert "if __name__ == \"__main__\":" in source
+        assert profile.id == "python312-sandbox-v1"
+        details = scorer(
+            reference["task"],
+            reference["output"],
+            {**evidence, "expected": reference["expected"]},
+        )
+        return {
+            "score": 1.0 if all(details.values()) else 0.0,
+            "reason": "offline qualification fixture",
+            "details": details,
+        }
+
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer",
+        fake_inline_runner,
+    )
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / filename, repo_root=root)
     readiness = check_comparison(spec, repo_root=root)
