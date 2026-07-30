@@ -90,6 +90,14 @@ uv run fugue skills lock loop-intervention-skill
 Use `fugue mcp import`, `inspect`, and `lock` for the two MCP aliases. A trial
 may not clone, install, build, or resolve either intervention.
 
+For every proposed component, the operator also writes an
+`InterventionComponentLockV1` under `.fugue/interventions/`. It binds the
+component id and content-lock digest to the reviewed source repository, full
+commit, and Git tree. An MCP lock that changes the 0.4 staging candidate must
+name the superseded staging SHA and set
+`release_requalification_required=true`; the prior MCP release preview,
+approval, and result cannot be reused.
+
 ## 3. Freeze tasks before selecting a winner
 
 Use Fugue's existing governed task-authoring contract:
@@ -109,6 +117,10 @@ prefreeze metadata:
 
 ```json
 {
+  "intervention_component_locks": [
+    ".fugue/interventions/loop-intervention-skill.json",
+    ".fugue/interventions/loop-intervention-mcp.json"
+  ],
   "intervention_lock_inputs": {
     "failure_lock_sha256": "…",
     "discovery_suite_sha256": "…",
@@ -169,6 +181,8 @@ uv run python \
   --holdout /PATH/TO/holdout-attempts.jsonl \
   --selection-lock /PATH/TO/intervention-selection.json \
   --failure-lock .fugue/loop-engineering/failure.lock.json \
+  --component-worktree loop-intervention-skill=/PATH/TO/SKILL/WORKTREE \
+  --component-worktree loop-intervention-mcp=/PATH/TO/MCP/WORKTREE \
   --env-file /Users/ashah/Documents/common_tools/.env \
   --output .fugue/loop-engineering/qualification.json
 ```
@@ -183,7 +197,9 @@ A winner requires:
 - observed use of every changed mechanism;
 - complete Agent, Evaluation, prediction, Dataset, and Harbor lineage;
 - no credential/private-truth leak, duplicate attempt, or scoped container;
-- the PR tree equals the qualified clean tree.
+- every selected component's PR worktree is clean and its tree equals the
+  qualified component tree;
+- an MCP change explicitly invalidates the prior 0.4 release lock.
 
 If nothing qualifies, publish "no winner" and do not prepare an improvement
 PR. Local Harbor evidence supports only the exact behavioral claim. It does

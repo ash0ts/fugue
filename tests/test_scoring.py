@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 
 from fugue.bench.candidates import stable_digest
+from fugue.bench.intervention_provenance import (
+    build_intervention_component_lock,
+)
 from fugue.bench.scoring import (
     SelectionPolicy,
     build_intervention_selection_lock,
@@ -17,6 +20,30 @@ from fugue.bench.scoring import (
     write_intervention_selection_lock,
     write_treatment_selection_lock,
 )
+
+
+def _selected_components():
+    return (
+        build_intervention_component_lock(
+            kind="skill",
+            component_id="loop-intervention-skill",
+            lock_digest="7" * 64,
+            repository="https://github.com/wandb/fugue",
+            source_commit="8" * 40,
+            source_tree="9" * 40,
+        ),
+        build_intervention_component_lock(
+            kind="mcp",
+            component_id="loop-intervention-mcp",
+            lock_digest="a" * 64,
+            repository="https://github.com/wandb/wandb-mcp-server",
+            source_commit="b" * 40,
+            source_tree="c" * 40,
+            release_target="wandb-mcp-server Python package 0.4",
+            superseded_release_candidate_sha="d" * 40,
+            release_requalification_required=True,
+        ),
+    )
 
 
 def _rows(candidate: str, *, cost: float | None, wall: float = 2.0):
@@ -258,6 +285,7 @@ def test_intervention_selection_lock_binds_candidates_and_discovery(
         ),
         baseline_variant_id="production",
         selected_variant_id="combined",
+        selected_components=_selected_components(),
         rankings=rankings,
         decision="recommend",
         rationale="combined is the only arm with a preregistered deterministic gain",
@@ -341,6 +369,7 @@ def test_intervention_selection_lock_rejects_incomplete_prefreeze_contract(
         ),
         baseline_variant_id="production",
         selected_variant_id="combined",
+        selected_components=_selected_components(),
         rankings=rankings,
         decision="recommend",
         rationale="combined met the preregistered gate",

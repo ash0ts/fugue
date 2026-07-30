@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 import yaml
 
+from fugue.bench.candidates import stable_digest
 from fugue.bench.context_contracts import (
     ContextCapability,
     ContextDelivery,
@@ -69,6 +70,42 @@ class ContextSelection:
 class IntegrationSelection:
     id: str
     config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExecutionLimitsV1:
+    """One immutable outer execution wall shared by every experiment cell."""
+
+    wall_time_sec: int
+    schema_version: Literal[1] = 1
+    limits_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise ValueError("unsupported execution limits schema version")
+        if (
+            not isinstance(self.wall_time_sec, int)
+            or isinstance(self.wall_time_sec, bool)
+            or self.wall_time_sec < 1
+        ):
+            raise ValueError("execution wall_time_sec must be a positive integer")
+        computed = stable_digest(
+            {
+                "schema_version": self.schema_version,
+                "wall_time_sec": self.wall_time_sec,
+            }
+        )
+        if self.limits_digest and self.limits_digest != computed:
+            raise ValueError("execution limits digest does not match")
+        if not self.limits_digest:
+            object.__setattr__(self, "limits_digest", computed)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "wall_time_sec": self.wall_time_sec,
+            "limits_digest": self.limits_digest,
+        }
 
 
 @dataclass(frozen=True)
@@ -355,6 +392,7 @@ class ExperimentSpec:
     n_attempts: int | None = None
     n_concurrent: int | None = None
     n_tasks: int | None = None
+    execution_limits: ExecutionLimitsV1 | None = None
     jobs_dir: Path | None = None
     environment: dict[str, Any] = field(default_factory=dict)
     artifacts: list[Any] = field(default_factory=list)
@@ -669,6 +707,7 @@ def experiment_from_data(
             raw.get("n_concurrent"), kind="experiment n_concurrent"
         ),
         n_tasks=_positive_int(raw.get("n_tasks"), kind="experiment n_tasks"),
+        execution_limits=_execution_limits(raw.get("execution_limits")),
         jobs_dir=Path(str(raw["jobs_dir"])) if raw.get("jobs_dir") else None,
         environment=_dict(raw.get("environment")),
         artifacts=_list(raw.get("artifacts")),
@@ -1273,6 +1312,31 @@ def _trace_content(value: Any) -> str:
     if selected not in {"full", "metadata"}:
         raise ValueError("trace_content must be 'full' or 'metadata'")
     return selected
+
+
+def _execution_limits(value: Any) -> ExecutionLimitsV1 | None:
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("execution_limits must be a mapping")
+    unknown = sorted(
+        set(value) - {"schema_version", "wall_time_sec", "limits_digest"}
+    )
+    if unknown:
+        raise ValueError(
+            "unknown execution limits field(s): " + ", ".join(unknown)
+        )
+    wall_time_sec = _positive_int(
+        value.get("wall_time_sec"),
+        kind="execution wall_time_sec",
+    )
+    if wall_time_sec is None:
+        raise ValueError("execution_limits requires wall_time_sec")
+    return ExecutionLimitsV1(
+        schema_version=int(value.get("schema_version") or 1),  # type: ignore[arg-type]
+        wall_time_sec=wall_time_sec,
+        limits_digest=str(value.get("limits_digest") or ""),
+    )
 
 
 def _reject_unknown(raw: dict[str, Any], contract: type, *, kind: str) -> None:

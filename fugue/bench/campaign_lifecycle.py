@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
@@ -32,6 +33,10 @@ from fugue.bench.campaign_contracts import (
     PlanReceiptV1,
     PreparedPlanV1,
     ResearchCampaignSpecV1,
+    intervention_lock_inputs_from_data,
+)
+from fugue.bench.campaign_evidence import (
+    apply_campaign_run_conformance as _apply_campaign_run_conformance,
 )
 from fugue.bench.campaign_evidence import (
     outcome_eligibility_failures as _outcome_eligibility_failures,
@@ -66,6 +71,10 @@ from fugue.bench.campaign_store import (
 from fugue.bench.candidates import stable_digest
 from fugue.bench.context import list_context_systems
 from fugue.bench.execution import new_run_id
+from fugue.bench.intervention_provenance import (
+    InterventionComponentLockV1,
+    read_intervention_component_lock,
+)
 from fugue.bench.library import (
     ExperimentSpec,
     IntegrationSelection,
@@ -82,7 +91,13 @@ from fugue.bench.operator import (
     SetupPreparation,
 )
 from fugue.bench.reproducibility import read_evaluation_asset_lock
+from fugue.bench.run_conformance import (
+    PRIVACY_CONTRACT_VERSION,
+    read_hosted_evidence_privacy_receipt,
+    write_hosted_evidence_privacy_receipt,
+)
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.scoring import read_intervention_selection_lock
 from fugue.bench.task_authoring import (
     TaskAuthoringPolicyV1,
     TaskEvaluationV1,
@@ -108,11 +123,15 @@ from fugue.bench.task_authoring import (
     task_suite_preview_from_dict,
 )
 from fugue.model_plane import (
+    evidence_destination_environment,
+    evidence_destination_from_dict,
     model_route_identity,
     provider_api_key,
     provider_api_key_env,
     resolve_harness_model_route,
     resolve_model_route,
+    trace_destination_identity,
+    trace_project_environment,
 )
 from fugue.preflight import PreflightCheck
 from fugue.redaction import redact_value, secrets_from_env
@@ -322,6 +341,8 @@ def build_experiment_proposal(
     trace_content: str = "full",
     task_suite_digest: str | None = None,
     intervention_lock_inputs: Mapping[str, str] | None = None,
+    failure_lock: str | Path | None = None,
+    intervention_component_locks: Sequence[str | Path] = (),
     selection_lock: str | Path | None = None,
     analysis_ids: Sequence[str] = (),
     parent_outcome_id: str | None = None,
@@ -355,6 +376,12 @@ def build_experiment_proposal(
             if intervention_lock_inputs is not None
             else None
         ),
+        "failure_lock": (
+            Path(failure_lock).as_posix() if failure_lock is not None else None
+        ),
+        "intervention_component_locks": [
+            Path(value).as_posix() for value in intervention_component_locks
+        ],
         "selection_lock": (
             Path(selection_lock).as_posix() if selection_lock is not None else None
         ),
@@ -533,6 +560,8 @@ def _proposal_from_dict(
         "trace_content",
         "task_suite_digest",
         "intervention_lock_inputs",
+        "failure_lock",
+        "intervention_component_locks",
         "selection_lock",
         "analysis_ids",
         "parent_outcome_id",
@@ -542,7 +571,7 @@ def _proposal_from_dict(
     _reject_unknown(raw, fields, "experiment proposal")
     if int(raw.get("schema_version") or 0) != CAMPAIGN_SCHEMA_VERSION:
         raise ValueError("experiment proposal must use schema_version 1")
-    intervention_inputs = _intervention_lock_inputs_from_dict(
+    intervention_inputs = intervention_lock_inputs_from_data(
         raw.get("intervention_lock_inputs")
     )
     task_suite_digest = (
@@ -551,17 +580,27 @@ def _proposal_from_dict(
         else None
     )
     if intervention_inputs is not None:
-        if task_suite_digest != intervention_inputs["discovery_suite_sha256"]:
+        if task_suite_digest is None:
             raise ValueError(
-                "intervention discovery suite must equal task_suite_digest"
+                "intervention lock inputs require a prelocked task_suite_digest"
             )
-        if (
-            intervention_inputs["discovery_suite_sha256"]
-            == intervention_inputs["holdout_suite_sha256"]
-        ):
+        expected_suite = (
+            intervention_inputs["holdout_suite_sha256"]
+            if raw.get("selection_lock") or raw.get("stage_id") == "holdout"
+            else intervention_inputs["discovery_suite_sha256"]
+        )
+        if task_suite_digest != expected_suite:
             raise ValueError(
-                "intervention discovery and holdout suites must be distinct"
+                "intervention task suite must match the governed phase lock"
             )
+        if not raw.get("failure_lock"):
+            raise ValueError(
+                "intervention work requires a comparison failure lock"
+            )
+    elif raw.get("failure_lock"):
+        raise ValueError(
+            "comparison failure locks require intervention lock inputs"
+        )
     proposal = ExperimentProposalV1(
         schema_version=CAMPAIGN_SCHEMA_VERSION,
         proposal_id=validate_id(raw.get("proposal_id") or "", kind="proposal id"),
@@ -600,6 +639,15 @@ def _proposal_from_dict(
         trace_content=_bounded_text(raw.get("trace_content"), "trace content", 32),
         task_suite_digest=task_suite_digest,
         intervention_lock_inputs=intervention_inputs,
+        failure_lock=(
+            _repo_relative_path(raw["failure_lock"], "comparison failure lock")
+            if raw.get("failure_lock")
+            else None
+        ),
+        intervention_component_locks=_repo_lock_paths(
+            raw.get("intervention_component_locks"),
+            "intervention component lock",
+        ),
         selection_lock=(
             _repo_relative_path(raw["selection_lock"], "selection lock")
             if raw.get("selection_lock")
@@ -624,64 +672,6 @@ def _proposal_from_dict(
     if proposal.proposal_digest and proposal.proposal_digest != digest:
         raise ValueError("proposal_digest does not match the experiment proposal")
     return replace(proposal, proposal_digest=digest)
-
-
-def _intervention_lock_inputs_from_dict(raw: Any) -> dict[str, str] | None:
-    if raw in (None, ""):
-        return None
-    value = _mapping(raw, "intervention lock inputs")
-    required = {
-        "failure_lock_sha256",
-        "discovery_suite_sha256",
-        "holdout_suite_sha256",
-        "failure_locked_at",
-        "suites_frozen_at",
-    }
-    _reject_unknown(value, required, "intervention lock inputs")
-    missing = sorted(required - set(value))
-    if missing:
-        raise ValueError(
-            "intervention lock inputs are missing: " + ", ".join(missing)
-        )
-    failure_time = _canonical_timestamp(
-        value["failure_locked_at"],
-        "failure_locked_at",
-    )
-    suites_time = _canonical_timestamp(
-        value["suites_frozen_at"],
-        "suites_frozen_at",
-    )
-    if datetime.fromisoformat(failure_time) > datetime.fromisoformat(suites_time):
-        raise ValueError(
-            "intervention suites must be frozen after the failure is locked"
-        )
-    return {
-        "failure_lock_sha256": _required_digest(
-            value["failure_lock_sha256"],
-            "failure lock digest",
-        ),
-        "discovery_suite_sha256": _required_digest(
-            value["discovery_suite_sha256"],
-            "discovery suite digest",
-        ),
-        "holdout_suite_sha256": _required_digest(
-            value["holdout_suite_sha256"],
-            "holdout suite digest",
-        ),
-        "failure_locked_at": failure_time,
-        "suites_frozen_at": suites_time,
-    }
-
-
-def _canonical_timestamp(value: Any, name: str) -> str:
-    text = str(value or "").strip()
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise ValueError(f"{name} must include a timezone")
-    return parsed.astimezone(UTC).isoformat()
 
 
 class CampaignService:
@@ -1328,6 +1318,38 @@ class CampaignService:
         policy = self._policy(proposal.campaign_id)
         catalog = self.catalog(policy.id)
         self._validate_proposal(policy, catalog, proposal)
+
+    def resolved_evidence_destination(
+        self, proposal: ExperimentProposalV1
+    ) -> dict[str, Any]:
+        """Resolve the exact experiment destination without consulting caller state."""
+
+        _verify_artifact(proposal.to_dict(), "proposal_digest", "experiment proposal")
+        experiment = self._proposal_experiment(proposal) or get_experiment(
+            proposal.experiment_id,
+            self.repo_root,
+        )
+        if experiment.evidence_destination is not None:
+            if (
+                experiment.evidence_project is not None
+                and experiment.evidence_destination.project_slug
+                != experiment.evidence_project
+            ):
+                raise CampaignError(
+                    "evidence_destination_mismatch",
+                    "declared evidence destination disagrees with evidence project",
+                    category="validation",
+                )
+            env = evidence_destination_environment(
+                experiment.evidence_destination,
+                self.operator.env,
+            )
+        else:
+            env = trace_project_environment(
+                experiment.evidence_project,
+                self.operator.env,
+            )
+        return trace_destination_identity(env)
 
     def prepare(self, plan_receipt: PlanReceiptV1, operation_id: str) -> PreparedPlanV1:
         operation_id = self._operation_id(operation_id)
@@ -2326,6 +2348,13 @@ class CampaignService:
                     details={"exception_type": type(exc).__name__},
                 ) from exc
             rows = _read_jsonl(exported.path)
+            self._apply_hosted_privacy_receipt(
+                proposal=proposal,
+                plan=plan,
+                run_id=run_id,
+                rows=rows,
+            )
+            _atomic_jsonl(exported.path, rows)
             input_lock_path = (
                 self.repo_root / ".fugue/runtime" / run_id / "input-lock.json"
             )
@@ -2535,6 +2564,182 @@ class CampaignService:
                 )
             return outcome
 
+    def _apply_hosted_privacy_receipt(
+        self,
+        *,
+        proposal: ExperimentProposalV1,
+        plan: PlanReceiptV1,
+        run_id: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Bind post-publication privacy evidence before campaign eligibility."""
+
+        for row in rows:
+            if row.get("run_id") != run_id:
+                continue
+            row.update(
+                {
+                    "privacy_contract_version": PRIVACY_CONTRACT_VERSION,
+                    "local_artifact_privacy_scan_status": "unavailable",
+                    "local_artifact_privacy_scan_digest": None,
+                    "local_artifact_privacy_match_count": 0,
+                    "hosted_evidence_privacy_scan_status": "unavailable",
+                    "hosted_evidence_privacy_scan_digest": None,
+                    "hosted_evidence_privacy_match_count": 0,
+                    "private_label_boundary_verified": False,
+                }
+            )
+        private_corpus = self._hosted_private_corpus(
+            proposal=proposal,
+            run_id=run_id,
+        )
+
+        destination_value = self.resolved_evidence_destination(proposal)
+        destination = evidence_destination_from_dict(destination_value)
+        evidence_env = evidence_destination_environment(
+            destination,
+            self.operator.env,
+        )
+        configured_secrets = secrets_from_env(evidence_env)
+        result_payload = {
+            "schema_version": CAMPAIGN_SCHEMA_VERSION,
+            "campaign_id": proposal.campaign_id,
+            "proposal_id": proposal.proposal_id,
+            "run_id": run_id,
+            "rows": [
+                _safe_prediction_row(row, configured_secrets) for row in rows
+            ],
+            "evidence": [
+                _safe_agent_evidence(row, configured_secrets)
+                for row in rows
+                if row.get("execution_kind") == "agent"
+            ],
+        }
+        fetch_hosted = any(
+            row.get("execution_kind") == "agent" for row in rows
+        )
+        write_hosted_evidence_privacy_receipt(
+            repo_root=self.repo_root,
+            run_id=run_id,
+            rows=rows,
+            env=evidence_env,
+            evidence_project=destination.project_slug,
+            private_labels_path=private_corpus["path"],
+            publication_payloads={"result": result_payload},
+            private_corpus_applicable=private_corpus["applicable"],
+            private_corpus_source_kind=private_corpus["source_kind"],
+            private_corpus_source_lock_sha256=private_corpus["source_lock_sha256"],
+            private_corpus_reason=private_corpus["reason"],
+            fetch_hosted=fetch_hosted,
+        )
+        hosted = read_hosted_evidence_privacy_receipt(
+            repo_root=self.repo_root,
+            run_id=run_id,
+        )
+        hosted_matches = sum(
+            int(hosted.get(field) or 0)
+            for field in (
+                "secret_match_count",
+                "private_corpus_match_count",
+                "private_structure_match_count",
+            )
+        )
+        for row in rows:
+            if row.get("run_id") != run_id:
+                continue
+            row.update(
+                {
+                    "hosted_evidence_privacy_scan_status": hosted["status"],
+                    "hosted_evidence_privacy_scan_digest": hosted["receipt_sha256"],
+                    "hosted_evidence_privacy_match_count": hosted_matches,
+                }
+            )
+        _apply_campaign_run_conformance(
+            rows,
+            repo_root=self.repo_root,
+            run_id=run_id,
+            required_attempt_ids=frozenset(
+                str(cell.get("attempt_id") or "")
+                for cell in plan.cells
+                if cell.get("execution_kind") == "agent"
+                and cell.get("applicable")
+                and cell.get("workload_runner") == "harbor"
+                and cell.get("attempt_id")
+            ),
+        )
+
+    def _hosted_private_corpus(
+        self,
+        *,
+        proposal: ExperimentProposalV1,
+        run_id: str,
+    ) -> dict[str, Any]:
+        """Resolve only verified host-side evaluation material for leak scanning."""
+
+        if proposal.task_suite_digest is not None:
+            task_lock = read_task_suite_lock(
+                self.repo_root,
+                proposal.campaign_id,
+                proposal.task_suite_digest,
+            )
+            return {
+                "path": self.repo_root / task_lock.private_evaluation_path,
+                "applicable": True,
+                "source_kind": "task_suite_private_evaluation",
+                "source_lock_sha256": task_lock.component_digests[
+                    "private_evaluation"
+                ],
+                "reason": "locked Task Suite contains host-only evaluation truth",
+            }
+
+        run_lock_path = (
+            self.repo_root
+            / ".fugue"
+            / "runtime"
+            / run_id
+            / "evaluation-assets.json"
+        )
+        try:
+            run_lock = read_evaluation_asset_lock(run_lock_path)
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+            return {
+                "path": run_lock_path,
+                "applicable": True,
+                "source_kind": "run_evaluation_asset_lock",
+                "source_lock_sha256": "",
+                "reason": (
+                    "run-scoped host evaluation assets are missing or invalid"
+                ),
+            }
+        if run_lock.run_id != run_id:
+            return {
+                "path": run_lock_path,
+                "applicable": True,
+                "source_kind": "run_evaluation_asset_lock",
+                "source_lock_sha256": run_lock.lock_sha256,
+                "reason": "run-scoped host evaluation assets belong to another run",
+            }
+        if run_lock.predictions:
+            return {
+                "path": run_lock_path,
+                "applicable": True,
+                "source_kind": "run_evaluation_asset_lock",
+                "source_lock_sha256": run_lock.lock_sha256,
+                "reason": (
+                    "run-scoped host evaluation assets contain private "
+                    "prediction material"
+                ),
+            }
+        return {
+            "path": None,
+            "applicable": False,
+            "source_kind": "run_evaluation_asset_lock",
+            "source_lock_sha256": run_lock.lock_sha256,
+            "reason": (
+                "the verified run evaluation lock declares no private corpus"
+            ),
+        }
+
     def _registered_analyses(
         self, analysis_ids: Sequence[str], run_id: str
     ) -> tuple[dict[str, Any], ...]:
@@ -2550,20 +2755,27 @@ class CampaignService:
             preview = self.operator.prepare_analysis(local)
             if preview.scope.rows < 1:
                 raise ValueError(f"analysis {analysis_id} resolved no rows")
-            results.append(
-                {
-                    "analysis_id": analysis_id,
-                    "snapshot_id": preview.snapshot.id,
-                    "snapshot_digest": preview.snapshot.digest,
-                    "rows": preview.scope.rows,
-                    "aggregates": _json_value(preview.aggregates),
-                    "selection": (
-                        preview.selection.to_dict()
-                        if preview.selection is not None
-                        else None
-                    ),
-                }
-            )
+            aligned = preview.aligned_analysis
+            result = {
+                "analysis_id": analysis_id,
+                "analysis_digest": (
+                    aligned.analysis_digest
+                    if aligned is not None
+                    else preview.snapshot.digest
+                ),
+                "snapshot_id": preview.snapshot.id,
+                "snapshot_digest": preview.snapshot.digest,
+                "rows": preview.scope.rows,
+                "aggregates": _json_value(preview.aggregates),
+                "selection": (
+                    preview.selection.to_dict()
+                    if preview.selection is not None
+                    else None
+                ),
+            }
+            if aligned is not None:
+                result["aligned_analysis"] = aligned.to_dict()
+            results.append(result)
         return tuple(results)
 
     def _policy(self, campaign_id: str) -> ResearchCampaignSpecV1:
@@ -2735,6 +2947,229 @@ class CampaignService:
                     "campaign policy does not allow adaptive discovery tasks",
                     category="policy",
                 )
+        self._validate_intervention_proposal(policy, catalog, proposal, preset)
+
+    def _validate_intervention_proposal(
+        self,
+        policy: ResearchCampaignSpecV1,
+        catalog: CampaignCatalogSnapshotV1,
+        proposal: ExperimentProposalV1,
+        preset: Any,
+    ) -> None:
+        inputs = proposal.intervention_lock_inputs
+        _bound_intervention_failure_lock(self.repo_root, proposal)
+        components = self._intervention_components(proposal)
+        if inputs is not None:
+            if not components:
+                raise CampaignError(
+                    "intervention_component_locks_missing",
+                    "intervention discovery requires exact reviewed component locks",
+                    category="validation",
+                )
+            self._validate_intervention_suite_pair(
+                policy,
+                catalog,
+                discovery_digest=inputs["discovery_suite_sha256"],
+                holdout_digest=inputs["holdout_suite_sha256"],
+                suites_frozen_at=inputs["suites_frozen_at"],
+            )
+        if (
+            preset is not None
+            and preset.selection_lock_required
+            and preset.selection_lock_kind == "intervention"
+            and proposal.selection_lock is not None
+        ):
+            selection_path = self.repo_root / proposal.selection_lock
+            try:
+                selection = read_intervention_selection_lock(selection_path)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                raise CampaignError(
+                    "selection_lock_invalid",
+                    "intervention selection lock is missing or invalid",
+                    category="validation",
+                ) from exc
+            if selection.experiment_id != proposal.experiment_id:
+                raise CampaignError(
+                    "selection_lock_experiment_mismatch",
+                    "intervention selection lock belongs to another experiment",
+                    category="validation",
+                )
+            if proposal.task_suite_digest != selection.holdout_suite_sha256:
+                raise CampaignError(
+                    "selection_lock_holdout_mismatch",
+                    "holdout Task Suite differs from the intervention selection lock",
+                    category="validation",
+                )
+            if inputs is None:
+                raise CampaignError(
+                    "selection_failure_lock_missing",
+                    "holdout selection requires the exact reviewed failure lock",
+                    category="validation",
+                )
+            if (
+                selection.failure_lock_sha256 != inputs["failure_lock_sha256"]
+                or selection.failure_locked_at != inputs["failure_locked_at"]
+            ):
+                raise CampaignError(
+                    "selection_failure_lock_mismatch",
+                    "holdout selection belongs to a different locked failure",
+                    category="validation",
+                )
+            selected_digests = {
+                item.component_digest for item in selection.selected_components
+            }
+            proposal_digests = {
+                item.component_digest for item in components
+            }
+            if proposal_digests != selected_digests:
+                raise CampaignError(
+                    "selection_component_lock_mismatch",
+                    "holdout component locks differ from the selected intervention",
+                    category="validation",
+                )
+            self._validate_intervention_suite_pair(
+                policy,
+                catalog,
+                discovery_digest=selection.discovery_suite_sha256,
+                holdout_digest=selection.holdout_suite_sha256,
+                suites_frozen_at=selection.suites_frozen_at,
+            )
+
+    def _intervention_components(
+        self,
+        proposal: ExperimentProposalV1,
+    ) -> tuple[InterventionComponentLockV1, ...]:
+        components: list[InterventionComponentLockV1] = []
+        for raw in proposal.intervention_component_locks:
+            path = (self.repo_root / raw).resolve()
+            try:
+                relative = path.relative_to(self.repo_root.resolve())
+            except ValueError as exc:
+                raise CampaignError(
+                    "intervention_component_lock_escaped",
+                    "intervention component lock escaped the repository",
+                    category="validation",
+                ) from exc
+            if not relative.parts or relative.parts[0] != ".fugue":
+                raise CampaignError(
+                    "intervention_component_lock_escaped",
+                    "intervention component locks must remain under .fugue",
+                    category="validation",
+                )
+            try:
+                components.append(read_intervention_component_lock(path))
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                raise CampaignError(
+                    "intervention_component_lock_invalid",
+                    "intervention component lock is missing or invalid",
+                    category="validation",
+                ) from exc
+        keys = {(item.kind, item.component_id) for item in components}
+        if len(keys) != len(components):
+            raise CampaignError(
+                "intervention_component_lock_duplicate",
+                "intervention component locks must have unique kind/id identities",
+                category="validation",
+            )
+        return tuple(components)
+
+    def _validate_intervention_suite_pair(
+        self,
+        policy: ResearchCampaignSpecV1,
+        catalog: CampaignCatalogSnapshotV1,
+        *,
+        discovery_digest: str,
+        holdout_digest: str,
+        suites_frozen_at: str,
+    ) -> None:
+        if discovery_digest == holdout_digest:
+            raise CampaignError(
+                "intervention_suite_identity",
+                "intervention discovery and holdout Task Suites must be distinct",
+                category="validation",
+            )
+        try:
+            discovery = read_task_suite_lock(
+                self.repo_root,
+                policy.id,
+                discovery_digest,
+            )
+            holdout = read_task_suite_lock(
+                self.repo_root,
+                policy.id,
+                holdout_digest,
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise CampaignError(
+                "intervention_task_suite_missing",
+                "intervention discovery and holdout inputs must resolve to real "
+                "TaskSuiteLockV1 artifacts in this campaign",
+                category="validation",
+            ) from exc
+        for lock, stage, partition in (
+            (discovery, "discovery", "discovery"),
+            (holdout, "holdout", "holdout"),
+        ):
+            if lock.policy_digest != policy.campaign_digest:
+                raise CampaignError(
+                    "intervention_task_suite_policy_drift",
+                    f"{partition} Task Suite is bound to another campaign policy",
+                    category="policy",
+                )
+            if lock.catalog_digest != catalog.catalog_digest:
+                raise CampaignError(
+                    "intervention_task_suite_catalog_drift",
+                    f"{partition} Task Suite is bound to another campaign catalog",
+                    category="validation",
+                )
+            if lock.stage_id != stage or set(lock.partitions) != {partition}:
+                raise CampaignError(
+                    "intervention_task_suite_phase_mismatch",
+                    f"{partition} Task Suite must use the {stage!r} stage and "
+                    f"only the {partition!r} partition",
+                    category="policy",
+                )
+            if lock.parent_outcome_id is not None:
+                raise CampaignError(
+                    "intervention_task_suite_not_prefrozen",
+                    f"{partition} Task Suite must be frozen before campaign outcomes",
+                    category="policy",
+                )
+
+        events = self.events(policy.id)
+
+        def lock_event(digest: str, phase: str) -> CampaignEventV1:
+            matches = [
+                event
+                for event in events
+                if event.event == "task_suite_locked"
+                and event.artifact_type == "TaskSuiteLockV1"
+                and event.artifact_digest == digest
+            ]
+            if len(matches) != 1:
+                raise CampaignError(
+                    "intervention_task_suite_event_missing",
+                    f"{phase} Task Suite requires one durable lock event",
+                    category="evidence",
+                )
+            return matches[0]
+
+        holdout_event = lock_event(holdout_digest, "holdout")
+        discovery_event = lock_event(discovery_digest, "discovery")
+        if holdout_event.sequence_number >= discovery_event.sequence_number:
+            raise CampaignError(
+                "intervention_holdout_not_prefrozen",
+                "holdout Task Suite must be frozen before the discovery Task Suite",
+                category="policy",
+            )
+        recorded_freeze = _canonical_event_timestamp(discovery_event.recorded_at)
+        if suites_frozen_at != recorded_freeze:
+            raise CampaignError(
+                "intervention_freeze_time_mismatch",
+                "suites_frozen_at must equal the canonical discovery lock event "
+                "timestamp, when both Task Suites were frozen",
+                category="validation",
+            )
 
     def _validate_resolved_plan(
         self,
@@ -2882,6 +3317,10 @@ class CampaignService:
                 (proposal.intervention_lock_inputs or {}).items()
             )
         )
+        intervention_component_tags = tuple(
+            f"intervention-component-lock:{path}"
+            for path in proposal.intervention_component_locks
+        )
         return ExperimentRequest(
             experiment_id=proposal.experiment_id,
             preset=proposal.preset_id,
@@ -2899,6 +3338,7 @@ class CampaignService:
                 f"proposal:{proposal.proposal_id}",
                 f"stage:{proposal.stage_id}",
                 *intervention_tags,
+                *intervention_component_tags,
             ),
             trace_content=proposal.trace_content,
             cohort_id=f"{proposal.campaign_id}:{proposal.proposal_id}",
@@ -3857,8 +4297,12 @@ def _plan_cell_record(
         int((job.config.get("fugue") or {}).get("task_count") or 1) if job else 1
     )
     expected = 1 if cell.execution_kind == "agent" else task_count * cell.n_attempts
+    workload_runner = (
+        str((job.config.get("fugue") or {}).get("runner") or "") if job else ""
+    )
     coordinate = {
         "workload_id": cell.workload_id,
+        "workload_runner": workload_runner,
         "task_id": cell.task_id,
         "harness": cell.harness,
         "context_system_id": cell.context_system_id,
@@ -3875,6 +4319,13 @@ def _plan_cell_record(
         "skip_reason": cell.skip_reason,
         "expected_predictions": expected,
     }
+    if cell.execution_kind == "agent":
+        coordinate.update(
+            {
+                "attempt_id": cell.attempt_id,
+                "attempt_identity": dict(cell.attempt_identity),
+            }
+        )
     return {
         "position": position,
         "coordinate_id": stable_digest(coordinate),
@@ -3935,7 +4386,97 @@ def _plan_component_digests(
         if not path.is_absolute():
             path = repo_root / path
         values["selection_lock"] = _sha256_path(path)
+    failure = _bound_intervention_failure_lock(repo_root, proposal)
+    if failure is not None:
+        path, lock = failure
+        values["intervention_failure_lock:canonical"] = str(lock["lock_sha256"])
+        values["intervention_failure_lock:file"] = _sha256_path(path)
+    for raw in proposal.intervention_component_locks:
+        path = (repo_root / raw).resolve()
+        try:
+            component = read_intervention_component_lock(path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise CampaignError(
+                "intervention_component_lock_invalid",
+                "intervention component lock is missing or invalid",
+                category="validation",
+            ) from exc
+        prefix = (
+            f"intervention_component:{component.kind}:{component.component_id}"
+        )
+        values[f"{prefix}:canonical"] = component.component_digest
+        values[f"{prefix}:file"] = _sha256_path(path)
     return dict(sorted(values.items()))
+
+
+def _bound_intervention_failure_lock(
+    repo_root: Path,
+    proposal: ExperimentProposalV1,
+) -> tuple[Path, dict[str, Any]] | None:
+    from fugue.bench.loop_failure import read_comparison_failure_lock
+
+    inputs = proposal.intervention_lock_inputs
+    raw_path = proposal.failure_lock
+    if inputs is None:
+        if raw_path is not None:
+            raise CampaignError(
+                "failure_lock_not_applicable",
+                "comparison failure locks are only valid for intervention discovery",
+                category="validation",
+            )
+        return None
+    if raw_path is None:
+        raise CampaignError(
+            "failure_lock_missing",
+            "intervention discovery requires a reviewed comparison failure lock",
+            category="validation",
+        )
+    path = (repo_root / raw_path).resolve()
+    try:
+        relative = path.relative_to(repo_root.resolve())
+    except ValueError as exc:
+        raise CampaignError(
+            "failure_lock_escaped",
+            "comparison failure lock escaped the repository",
+            category="validation",
+        ) from exc
+    if not relative.parts or relative.parts[0] != ".fugue":
+        raise CampaignError(
+            "failure_lock_escaped",
+            "comparison failure lock must remain under .fugue",
+            category="validation",
+        )
+    try:
+        lock = read_comparison_failure_lock(path)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise CampaignError(
+            "failure_lock_invalid",
+            "comparison failure lock is missing or invalid",
+            category="validation",
+        ) from exc
+    if str(lock.get("lock_sha256") or "") != inputs["failure_lock_sha256"]:
+        raise CampaignError(
+            "failure_lock_digest_mismatch",
+            "comparison failure lock differs from intervention_lock_inputs",
+            category="validation",
+        )
+    try:
+        locked_at = datetime.fromisoformat(
+            str(lock.get("locked_at") or "").replace("Z", "+00:00")
+        ).astimezone(UTC).isoformat()
+    except (ValueError, AttributeError) as exc:
+        raise CampaignError(
+            "failure_lock_invalid",
+            "comparison failure lock is missing or invalid",
+            category="validation",
+        ) from exc
+    if locked_at != inputs["failure_locked_at"]:
+        raise CampaignError(
+            "failure_lock_time_mismatch",
+            "comparison failure lock time differs from intervention_lock_inputs",
+            category="validation",
+        )
+    return path, lock
 
 
 def _resolved_attempts_match(plan: ResolvedRunPlan, expected: int) -> bool:
@@ -4690,6 +5231,50 @@ def _repo_relative_path(value: Any, label: str) -> str:
     ):
         raise ValueError(f"{label} must be a repository-relative path inside .fugue")
     return candidate.as_posix()
+
+
+def _repo_lock_paths(value: Any, label: str) -> tuple[str, ...]:
+    paths = tuple(
+        _repo_relative_path(item, label) for item in _sequence(value, f"{label}s")
+    )
+    if len(set(paths)) != len(paths):
+        raise ValueError(f"{label} paths must be unique")
+    return paths
+
+
+def _canonical_event_timestamp(value: Any) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CampaignError(
+            "campaign_event_time_invalid",
+            "Task Suite lock event has an invalid timestamp",
+            category="evidence",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise CampaignError(
+            "campaign_event_time_invalid",
+            "Task Suite lock event timestamp must include a timezone",
+            category="evidence",
+        )
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _atomic_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    payload = "".join(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+        for row in rows
+    )
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _schema(raw: Mapping[str, Any], label: str) -> int:

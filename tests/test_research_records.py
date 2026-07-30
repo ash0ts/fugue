@@ -532,7 +532,7 @@ def test_historical_experiment_views_are_backfilled_without_execution(
     )
     assert projected[-1].observed_cost_usd == 1.53
     assert all(
-        any(link["system"] == "weave" for link in cell["evidence_links"])
+        not any(link["system"] == "weave" for link in cell["evidence_links"])
         for cell in projected[-1].summary["experiment_view"]["cells"]
     )
     assert "private limitation text" not in json.dumps(
@@ -588,7 +588,7 @@ def test_historical_experiment_views_are_backfilled_without_execution(
         [event.to_dict() for event in replayed]
     )
     assert all(
-        any(link["system"] == "weave" for link in cell["evidence_links"])
+        not any(link["system"] == "weave" for link in cell["evidence_links"])
         for cell in replayed[-1].summary["experiment_view"]["cells"]
     )
     assert any(

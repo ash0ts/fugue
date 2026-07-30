@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from fugue.bench.campaigns import CampaignError
+from fugue.model_plane import EvidenceDestinationV1
 from fugue.research.agent_contracts import build_trace_audit_draft
 from fugue.research.client import FugueResearchClient
 from fugue.research.contracts import ResearchError, build_experiment_draft
@@ -41,6 +42,8 @@ class FakeCampaignService:
     def __init__(self) -> None:
         self.launches = 0
         self.status_checks = 0
+        self.last_proposal: Any | None = None
+        self.destination_project = "resolved-research-project"
         self.plan = Artifact(
             {
                 "schema_version": 1,
@@ -108,11 +111,23 @@ class FakeCampaignService:
             }
         )
 
-    def preview(self, _: Any) -> Artifact:
+    def preview(self, proposal: Any) -> Artifact:
+        self.last_proposal = proposal
         return self.plan
 
-    def validate_proposal(self, _: Any) -> None:
+    def validate_proposal(self, proposal: Any) -> None:
+        self.last_proposal = proposal
         return None
+
+    def resolved_evidence_destination(self, proposal: Any) -> dict[str, Any]:
+        self.last_proposal = proposal
+        return EvidenceDestinationV1(
+            entity="wandb",
+            project=self.destination_project,
+            api_base_url="https://api.wandb.ai",
+            trace_base_url="https://trace.wandb.ai",
+            app_base_url="https://wandb.ai",
+        ).to_dict()
 
     def estimate_reservation(
         self,
@@ -395,6 +410,128 @@ def test_preview_is_pure_and_start_is_explicit_boundary(tmp_path: Path) -> None:
         idempotency_key="start-1",
     )
     assert record.state == "queued"
+
+
+def test_research_preview_propagates_loop_locks_and_uses_resolved_destination(
+    tmp_path: Path,
+) -> None:
+    service, campaign = _service(tmp_path)
+    values = _draft().to_dict()
+    values.pop("draft_digest")
+    values.pop("schema_version")
+    values["task_suite_digest"] = _A
+    values["intervention_lock_inputs"] = {
+        "failure_lock_sha256": _B,
+        "discovery_suite_sha256": _A,
+        "holdout_suite_sha256": _C,
+        "failure_locked_at": "2026-07-30T10:00:00Z",
+        "suites_frozen_at": "2026-07-30T10:05:00Z",
+    }
+    values["failure_lock"] = ".fugue/failures/repeated-failure.json"
+    values["intervention_component_locks"] = [
+        ".fugue/interventions/skill.lock.json",
+        ".fugue/interventions/mcp.lock.json",
+    ]
+
+    preview = service.preview_experiment(
+        "study-1",
+        build_experiment_draft(**values),
+    )
+
+    assert campaign.last_proposal is not None
+    assert campaign.last_proposal.task_suite_digest == _A
+    assert campaign.last_proposal.intervention_lock_inputs == {
+        **values["intervention_lock_inputs"],
+        "failure_locked_at": "2026-07-30T10:00:00+00:00",
+        "suites_frozen_at": "2026-07-30T10:05:00+00:00",
+    }
+    assert campaign.last_proposal.intervention_component_locks == (
+        ".fugue/interventions/skill.lock.json",
+        ".fugue/interventions/mcp.lock.json",
+    )
+    assert (
+        campaign.last_proposal.failure_lock
+        == ".fugue/failures/repeated-failure.json"
+    )
+    expected_destination = EvidenceDestinationV1(
+        entity="wandb",
+        project="resolved-research-project",
+        api_base_url="https://api.wandb.ai",
+        trace_base_url="https://trace.wandb.ai",
+        app_base_url="https://wandb.ai",
+    )
+    assert preview.evidence_scope == {
+        "entity": "wandb",
+        "project": "resolved-research-project",
+        "evidence_types": [
+            "agent_conversation",
+            "prediction_and_score",
+            "dataset",
+            "evaluation",
+        ],
+    }
+    assert preview.evidence_destination == expected_destination.to_dict()
+
+    selection_values = _draft().to_dict()
+    selection_values.pop("draft_digest")
+    selection_values.pop("schema_version")
+    selection_values["selection_lock"] = ".fugue/selection.json"
+    service.preview_experiment(
+        "study-1",
+        build_experiment_draft(**selection_values),
+    )
+    assert campaign.last_proposal.selection_lock == ".fugue/selection.json"
+
+
+def test_start_rejects_evidence_destination_drift(tmp_path: Path) -> None:
+    service, campaign = _service(tmp_path)
+    preview = service.preview_experiment("study-1", _draft())
+    approval = _approval(service, preview, "approve-before-route-drift")
+    campaign.destination_project = "drifted-project"
+
+    with pytest.raises(ResearchError, match="differs from the accepted preview"):
+        service.start_experiment(
+            preview,
+            approval_digest=approval,
+            idempotency_key="start-after-route-drift",
+        )
+
+
+def test_research_draft_rejects_unlocked_or_unsafe_loop_inputs() -> None:
+    values = _draft().to_dict()
+    values.pop("draft_digest")
+    values.pop("schema_version")
+    values["intervention_lock_inputs"] = {
+        "failure_lock_sha256": _B,
+        "discovery_suite_sha256": _A,
+        "holdout_suite_sha256": _C,
+        "failure_locked_at": "2026-07-30T10:00:00Z",
+        "suites_frozen_at": "2026-07-30T10:05:00Z",
+    }
+    with pytest.raises(ValueError, match="prelocked task_suite_digest"):
+        build_experiment_draft(**values)
+
+    values["task_suite_digest"] = _A
+    with pytest.raises(ValueError, match="comparison failure lock"):
+        build_experiment_draft(**values)
+    values["failure_lock"] = "../failure.json"
+    with pytest.raises(ValueError, match="inside .fugue"):
+        build_experiment_draft(**values)
+
+    values.pop("intervention_lock_inputs")
+    values.pop("task_suite_digest")
+    values.pop("failure_lock")
+    values["intervention_component_locks"] = [
+        ".fugue/interventions/skill.lock.json",
+        ".fugue/interventions/skill.lock.json",
+    ]
+    with pytest.raises(ValueError, match="must be unique"):
+        build_experiment_draft(**values)
+
+    values.pop("intervention_component_locks")
+    values["selection_lock"] = "../selection.json"
+    with pytest.raises(ValueError, match="inside .fugue"):
+        build_experiment_draft(**values)
 
 
 def test_start_resolves_prior_operator_approval_without_exposing_receipt(

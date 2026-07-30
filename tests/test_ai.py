@@ -535,6 +535,9 @@ def test_analyst_snapshots_scope_and_requires_evidence(
                 "wall_time_sec": 4.0,
                 "n_input_tokens": 100,
                 "n_output_tokens": 20,
+                "result_evidence_project": "wandb/demo-analysis",
+                "trace_project": "wandb/demo-analysis",
+                "trace_receipt": {"project_slug": "wandb/demo-analysis"},
             }
         )
         + "\n"
@@ -583,6 +586,7 @@ def test_analyst_snapshots_scope_and_requires_evidence(
 
     def fetch(run_keys, **kwargs):
         weave_queries.append(list(run_keys))
+        assert kwargs["project"] == "wandb/demo-analysis"
         return {
             "run-1:task:codex:1": {
                 "weave_span_count": 2,

@@ -33,7 +33,11 @@ before discovery begins. Require the failure lock, both Suite digests, all four
 arm identities, and their freeze times to be present in the discovery plan
 before any row can later produce an `InterventionSelectionLockV1`. Bind them
 as governed `intervention_lock_inputs`; its `discovery_suite_sha256` must equal
-the proposal's `task_suite_digest`. Preview exactly:
+the proposal's `task_suite_digest`. Require operator-authored
+`InterventionComponentLockV1` files for each proposed Skill/MCP source, and
+bind their repository-relative paths as `intervention_component_locks`.
+An MCP component that changes the staging tree must explicitly invalidate the
+previous 0.4 release lock. Preview exactly:
 
 ```text
 experiment: claude-loop-skill-mcp
@@ -60,4 +64,6 @@ Preview the four-task production-versus-selected holdout using the exact
 approval. Recommend a PR only when the original failure reproduces, a relevant
 deterministic outcome improves, no critical holdout outcome regresses, changed
 mechanisms were used, and the qualified source tree matches the proposed PR
-tree. Otherwise record no winner and one unexecuted follow-up.
+tree. The verifier must inspect each selected component's clean source
+worktree and prove its current tree equals the component lock. Otherwise
+record no winner and one unexecuted follow-up.
