@@ -1621,17 +1621,31 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.run_id:
         return _run_worker(args)
     service = OperatorService(args.repo_root, args.env_file)
-    experiment = _load_experiment_arg(args)
+    try:
+        experiment = _load_experiment_arg(args)
+    except FileNotFoundError as exc:
+        return _report_missing_run_asset(
+            exc,
+            repo_root=service.repo_root,
+            as_json=args.json,
+        )
     request = _request_from_args(args, experiment.id)
     inline_experiment = bool(
         args.experiment_file or args.manifest or not args.experiment
     )
     if args.preview:
-        preview = (
-            service.preview_experiment(experiment, request=request)
-            if inline_experiment
-            else service.preview(request)
-        )
+        try:
+            preview = (
+                service.preview_experiment(experiment, request=request)
+                if inline_experiment
+                else service.preview(request)
+            )
+        except FileNotFoundError as exc:
+            return _report_missing_run_asset(
+                exc,
+                repo_root=service.repo_root,
+                as_json=args.json,
+            )
         if args.json:
             from fugue.bench.operator import as_json
 
@@ -1639,7 +1653,17 @@ def _run_command(args: argparse.Namespace) -> int:
         else:
             _print_preview(preview)
         return 0
-    run = service.launch(request, experiment=experiment if inline_experiment else None)
+    try:
+        run = service.launch(
+            request,
+            experiment=experiment if inline_experiment else None,
+        )
+    except FileNotFoundError as exc:
+        return _report_missing_run_asset(
+            exc,
+            repo_root=service.repo_root,
+            as_json=args.json,
+        )
     if args.json:
         from fugue.bench.operator import as_json
 
@@ -1650,6 +1674,43 @@ def _run_command(args: argparse.Namespace) -> int:
         _print_started_run(run)
         return 0
     return _wait_for_run(service, run.run_id)
+
+
+def _report_missing_run_asset(
+    exc: FileNotFoundError,
+    *,
+    repo_root: Path,
+    as_json: bool,
+) -> int:
+    raw_path = Path(exc.filename) if exc.filename else None
+    if raw_path is not None:
+        try:
+            display_path = raw_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            display_path = raw_path.name
+    else:
+        display_path = "unknown"
+    payload = {
+        "schema_version": 1,
+        "status": "blocked",
+        "error_type": "missing_governed_asset",
+        "asset": display_path,
+        "next_action": (
+            "Materialize and lock the referenced task or evaluation asset before "
+            "previewing or running this experiment."
+        ),
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(
+            Panel(
+                f"[bold]{display_path}[/]\n{payload['next_action']}",
+                title="Experiment blocked: missing governed asset",
+                border_style="fugue.warning",
+            )
+        )
+    return 2
 
 
 def _run_worker(args: argparse.Namespace) -> int:
