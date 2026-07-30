@@ -125,6 +125,11 @@ def _parser() -> FugueArgumentParser:
     )
     compare.add_argument("comparison", type=Path)
     action = compare.add_mutually_exclusive_group(required=True)
+    action.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Freeze inputs and build the exact local runtimes without running cells",
+    )
     action.add_argument("--preview", action="store_true")
     action.add_argument("--run", action="store_true")
     compare.add_argument("--approval")
@@ -150,6 +155,8 @@ def _parser() -> FugueArgumentParser:
     result.add_argument("comparison", nargs="?", default="latest")
     result.add_argument("--json", action="store_true")
     result.add_argument("--open", action="store_true", dest="open_result")
+    result.add_argument("--append-invalidation", type=Path)
+    result.add_argument("--research-id")
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.set_defaults(handler=_comparison_result)
 
@@ -274,7 +281,6 @@ def _parser() -> FugueArgumentParser:
     provider_conformance_parser.add_argument("--output", type=Path)
     provider_conformance_parser.add_argument("--timeout", type=float, default=120.0)
     provider_conformance_parser.set_defaults(handler=_component_provider)
-
     taskset = subparsers.add_parser(
         "taskset", help="Build or import simple Agent evaluation tasksets"
     )
@@ -297,7 +303,6 @@ def _parser() -> FugueArgumentParser:
     taskset_weave.add_argument("--env-file", type=Path, default=Path(".env"))
     taskset_weave.add_argument("--repo-root", type=Path, default=Path.cwd())
     taskset_weave.set_defaults(handler=_component_taskset)
-
     mcp_component = subparsers.add_parser(
         "mcp", help="Import, inspect, and lock a normal MCP server declaration"
     )
@@ -755,11 +760,59 @@ def _comparison_check(args: argparse.Namespace) -> int:
         print(json.dumps(readiness.to_dict(), indent=2, sort_keys=True))
     else:
         _print_comparison_readiness(readiness)
-    return 0 if readiness.status == "ready" else 2
+    return 0 if readiness.status in {"ready", "needs_review"} else 2
+
+
+def _comparison_prepare(
+    args: argparse.Namespace,
+    *,
+    spec: Any,
+    root: Path,
+    operator: OperatorService,
+) -> int:
+    from fugue.bench.comparison import prepare_comparison
+
+    receipt, preview, receipt_path = prepare_comparison(
+        spec,
+        repo_root=root,
+        operator=operator,
+    )
+    preview_usable = (
+        int(preview.matrix["applicable_cells"])
+        == int(preview.readiness["estimated_cells"])
+        == int(preview.matrix["estimated_trials"])
+    )
+    if args.json:
+        payload = preview.to_dict()
+        payload["approval_eligible"] = preview_usable
+        payload["preparation"] = {
+            "receipt": receipt,
+            "path": receipt_path.relative_to(root).as_posix(),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_comparison_readiness_dict(preview.readiness)
+        CONSOLE.print(
+            Panel(
+                f"[bold]{receipt['receipt_digest']}[/]\n"
+                f"{receipt_path.relative_to(root)}\n"
+                f"Final preview: {preview.preview_digest}",
+                title="Prepared comparison",
+                border_style="fugue.cyan",
+            )
+        )
+        if not preview_usable:
+            CONSOLE.print(
+                "[fugue.warning]Preparation completed, but the final "
+                "preview is not approval-eligible in this environment.[/]"
+            )
+    return 0 if preview_usable else 2
 
 
 def _comparison_compare(args: argparse.Namespace) -> int:
     from fugue.bench.comparison import (
+        ComparisonPublicationError,
+        check_comparison,
         execute_comparison,
         load_comparison,
         preview_comparison,
@@ -767,43 +820,171 @@ def _comparison_compare(args: argparse.Namespace) -> int:
 
     root = args.repo_root.resolve()
     spec = load_comparison(args.comparison, repo_root=root)
+    operator = OperatorService(root, args.env_file)
+    if args.prepare:
+        return _comparison_prepare(
+            args,
+            spec=spec,
+            root=root,
+            operator=operator,
+        )
+    readiness = check_comparison(spec, repo_root=root)
+    if readiness.status not in {"ready", "needs_review"}:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "preview_digest": None,
+                        "approval_eligible": False,
+                        "readiness": readiness.to_dict(),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            _print_comparison_readiness(readiness)
+            CONSOLE.print(
+                "\n[fugue.warning]Exact preview not generated while the "
+                "comparison is blocked.[/]"
+            )
+        return 2
     preview = preview_comparison(
         spec,
         repo_root=root,
-        operator=OperatorService(root, args.env_file),
+        operator=operator,
+    )
+    preview_usable = (
+        int(preview.matrix["applicable_cells"])
+        == int(preview.readiness["estimated_cells"])
+        == int(preview.matrix["estimated_trials"])
     )
     if args.preview:
         if args.json:
-            print(json.dumps(preview.to_dict(), indent=2, sort_keys=True))
+            payload = preview.to_dict()
+            payload["approval_eligible"] = preview_usable
+            print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             _print_comparison_readiness_dict(preview.readiness)
-            CONSOLE.print(
-                Panel(
-                    f"[bold]{preview.preview_digest}[/]\n"
-                    f"{preview.matrix['estimated_trials']} aligned attempts",
-                    title="Exact preview",
-                    border_style="fugue.cyan",
+            if preview_usable:
+                CONSOLE.print(
+                    Panel(
+                        f"[bold]{preview.preview_digest}[/]\n"
+                        f"{preview.matrix['estimated_trials']} aligned attempts\n"
+                        "This exact digest is eligible for human approval.",
+                        title="Exact preview",
+                        border_style="fugue.cyan",
+                    )
+                )
+            else:
+                CONSOLE.print(
+                    "\n[fugue.warning]No usable preview: one or more planned "
+                    "attempts are unavailable in this environment.[/]"
+                )
+        return 0 if preview_usable else 2
+    if not preview_usable:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "preview_digest": preview.preview_digest,
+                        "approval_eligible": False,
+                        "readiness": preview.readiness,
+                        "matrix": preview.matrix,
+                    },
+                    indent=2,
+                    sort_keys=True,
                 )
             )
-        status = str(preview.readiness["status"])
-        return 0 if status == "ready" else 2
+        else:
+            CONSOLE.print(
+                "[fugue.warning]Comparison cannot run because one or more "
+                "planned attempts are unavailable in this environment.[/]"
+            )
+        return 2
     if not args.approval:
         raise ValueError("--run requires --approval APPROVAL_DIGEST")
-    result, json_path, markdown_path = execute_comparison(
-        preview,
-        approval_digest=args.approval,
-        repo_root=root,
-        env_file=args.env_file,
-        fetch_weave=args.fetch_weave,
-    )
+    publication_error: ComparisonPublicationError | None = None
+    try:
+        result, json_path, markdown_path = execute_comparison(
+            preview,
+            approval_digest=args.approval,
+            repo_root=root,
+            env_file=args.env_file,
+            fetch_weave=args.fetch_weave,
+        )
+    except ComparisonPublicationError as exc:
+        publication_error = exc
+        if exc.result is None:
+            payload = {
+                "schema_version": 1,
+                "status": "publication_incomplete",
+                "stage": exc.stage,
+                "research_id": exc.research_id,
+                "error_type": exc.error_type,
+                "receipt": exc.receipt_path.relative_to(root).as_posix(),
+                "behavioral_result": None,
+            }
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                CONSOLE.print(
+                    "[fugue.warning]Research publication failed before any "
+                    "comparison cells started.[/]"
+                )
+                CONSOLE.print(f"Publication receipt: {exc.receipt_path}")
+            return 3
+        if exc.result_path is None or exc.markdown_path is None:
+            raise RuntimeError(
+                "result publication failure did not preserve result paths"
+            ) from exc
+        result = exc.result
+        json_path = exc.result_path
+        markdown_path = exc.markdown_path
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        payload = result.to_dict()
+        if publication_error is not None:
+            payload = {
+                "schema_version": 1,
+                "status": "publication_incomplete",
+                "stage": publication_error.stage,
+                "research_id": publication_error.research_id,
+                "error_type": publication_error.error_type,
+                "receipt": publication_error.receipt_path.relative_to(
+                    root
+                ).as_posix(),
+                "behavioral_result": payload,
+            }
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
         CONSOLE.print(f"\nResult JSON: {json_path}")
-    if result.incomplete or result.required_evaluations_incomplete:
+        if publication_error is not None:
+            CONSOLE.print(
+                "\n[fugue.warning]The immutable behavioral result was saved, "
+                "but its declared Research publication is incomplete.[/]"
+            )
+            CONSOLE.print(
+                f"Publication receipt: {publication_error.receipt_path}"
+            )
+    if publication_error is not None:
         return 3
-    return 1 if result.regressed else 0
+    behavioral = getattr(result, "behavioral_summary", None)
+    if (
+        result.incomplete
+        or result.required_evaluations_incomplete
+        or getattr(behavioral, "status", "") in {"invalid", "incomplete"}
+    ):
+        return 3
+    return (
+        1
+        if result.regressed
+        or getattr(result, "mixed", 0)
+        or getattr(behavioral, "status", "") in {"regressed", "mixed"}
+        else 0
+    )
 
 
 def _comparison_approve(args: argparse.Namespace) -> int:
@@ -831,6 +1012,18 @@ def _comparison_result(args: argparse.Namespace) -> int:
     from fugue.bench.comparison import COMPARISON_RESULT_ROOT
 
     root = args.repo_root.resolve()
+    if args.append_invalidation is not None:
+        from fugue.research.comparisons import append_comparison_invalidation
+
+        receipt = append_comparison_invalidation(
+            root,
+            args.append_invalidation,
+            research_id=args.research_id,
+        )
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return 0
+    if args.research_id is not None:
+        raise ValueError("--research-id requires --append-invalidation")
     result_root = root / COMPARISON_RESULT_ROOT
     if args.comparison == "latest":
         pointer_path = result_root / "latest.json"
@@ -872,6 +1065,7 @@ def _comparison_demo(args: argparse.Namespace) -> int:
         score_comparison_rows,
         write_comparison_result,
     )
+    from fugue.bench.export import write_jsonl
 
     root = args.repo_root.resolve()
     resource = files("fugue").joinpath("resources", "source-use-replay")
@@ -909,6 +1103,7 @@ def _comparison_demo(args: argparse.Namespace) -> int:
         if args.out
         else root / "artifacts" / "source-use-replay"
     )
+    write_jsonl(rows, destination / "attempts.jsonl")
     json_path, markdown_path = write_comparison_result(
         result, destination=destination
     )
@@ -975,6 +1170,10 @@ def _print_comparison_readiness_dict(value: Mapping[str, Any]) -> None:
     table.add_column(style="bold")
     table.add_column()
     table.add_row("Question", str(value["question"]))
+    table.add_row(
+        "Evidence project",
+        str(value.get("evidence_project") or "operator environment"),
+    )
     table.add_row("Tasks", str(value["task_count"]))
     table.add_row("Changed", ", ".join(value["actual_changes"]) or "none")
     table.add_row(
@@ -999,6 +1198,14 @@ def _print_comparison_readiness_dict(value: Mapping[str, Any]) -> None:
 
 def _normalize_runs_argv(argv: list[str]) -> list[str]:
     """Keep the public `runs RUN_ID [ACTION]` grammar unambiguous to argparse."""
+    if len(argv) >= 4 and argv[:2] == ["runs", "cancel"] and argv[2] == "--run-id":
+        return ["runs", "--run-id", argv[3], "cancel", *argv[4:]]
+    if (
+        len(argv) >= 3
+        and argv[:2] == ["runs", "cancel"]
+        and not argv[2].startswith("-")
+    ):
+        return ["runs", "--run-id", argv[2], "cancel", *argv[3:]]
     if len(argv) < 2 or argv[0] != "runs" or argv[1].startswith("-"):
         return argv
     return ["runs", "--run-id", argv[1], *argv[2:]]
@@ -1205,6 +1412,11 @@ def _print_preview(preview: Any) -> None:
     summary.add_row("Harnesses", ", ".join(preview.harnesses) or "none")
     summary.add_row("Variants", ", ".join(preview.variants) or "none")
     summary.add_row("Workloads", ", ".join(preview.workloads) or "none")
+    summary.add_row(
+        "Environment",
+        str((preview.environment or {}).get("type") or "docker"),
+    )
+    summary.add_row("Evidence project", preview.evidence_project or "not configured")
     commands = "\n".join(preview.commands) or "No applicable commands."
     CONSOLE.print(
         Group(

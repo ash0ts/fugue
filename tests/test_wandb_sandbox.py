@@ -23,6 +23,7 @@ from fugue.bench.wandb_sandbox import (
     WANDB_ENVIRONMENT_IMPORT,
     _remote_secret_env,
     _scan_image,
+    _wandb_sandbox_is_terminal,
     _write_build_context,
     bind_wandb_job_environment,
     lock_wandb_runtime,
@@ -377,6 +378,25 @@ def test_named_secret_boundary_derives_aliases_and_headers_remotely(
         {"PUBLIC_SETTING": "reviewed"},
         [],
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "terminal"),
+    [
+        ("completed", True),
+        ("FAILED", True),
+        ("terminated", True),
+        ("running", False),
+        ("creating", False),
+        ("pending", False),
+        ("", False),
+    ],
+)
+def test_serverless_cleanup_counts_only_nonterminal_resources(
+    status: str,
+    terminal: bool,
+) -> None:
+    assert _wandb_sandbox_is_terminal(SimpleNamespace(status=status)) is terminal
 
 
 def test_serverless_specs_preserve_behavior_and_total_eighty_cells() -> None:

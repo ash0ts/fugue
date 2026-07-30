@@ -15,6 +15,7 @@ from fugue.bench.library import IntegrationSelection
 
 INTEGRATION_ROOT = Path("configs") / "fugue" / "integrations"
 IMPORTED_INTEGRATION_ROOT = Path(".fugue") / "imports" / "integrations"
+IMPORTED_MCP_LOCK_ROOT = Path(".fugue") / "imports" / "mcp" / "locks"
 MANAGED_MCP_RUNTIME_ROOT = Path(".fugue") / "runtime" / "mcp"
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _IMAGE_DIGEST_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -261,6 +262,7 @@ def bind_integrations(
         identities.append(
             _integration_identity(spec, selection.config, instruction_assets)
         )
+        source_revision = _imported_mcp_source_revision(spec, repo_root)
         provenance.append(
             {
                 "id": spec.id,
@@ -276,6 +278,7 @@ def bind_integrations(
                     for interface in spec.interfaces
                     if interface.allowed_tools
                 },
+                **source_revision,
             }
         )
         if spec.support in {"not_applicable", "disabled"}:
@@ -369,6 +372,42 @@ def bind_integrations(
         allowed_hosts=tuple(dict.fromkeys(allowed_hosts)),
         provenance=tuple(provenance),
     )
+
+
+def _imported_mcp_source_revision(
+    spec: IntegrationSpec,
+    repo_root: Path,
+) -> dict[str, str]:
+    lock_path = repo_root / IMPORTED_MCP_LOCK_ROOT / f"{spec.id}.json"
+    if not lock_path.is_file():
+        return {}
+    raw = json.loads(lock_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{lock_path}: imported MCP lock must be a mapping")
+    lock_digest = f"sha256:{_stable_hash(raw)}"
+    if spec.version != lock_digest:
+        raise ValueError(
+            f"{lock_path}: imported MCP lock digest does not match integration version"
+        )
+    if str(raw.get("id") or "") != spec.id:
+        raise ValueError(f"{lock_path}: imported MCP lock id does not match integration")
+    version_identity = str(
+        raw.get("version_identity")
+        or (
+            f"source:{raw['source_digest']}"
+            if raw.get("source_digest")
+            else ""
+        )
+    )
+    runtime_digest = str(raw.get("runtime_digest") or "")
+    if not version_identity or not runtime_digest.startswith("sha256:"):
+        return {}
+    return {
+        "kind": "mcp",
+        "version_identity": version_identity,
+        "runtime_digest": runtime_digest,
+        "lock_digest": lock_digest,
+    }
 
 
 def _integration_identity(

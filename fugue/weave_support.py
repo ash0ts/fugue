@@ -7,23 +7,26 @@ from threading import Lock
 from typing import Any
 
 from fugue.model_plane import (
-    WEAVE_BASE_URL_ENV,
-    WEAVE_TRACE_SERVER_URL_ENV,
+    DEFAULT_WEAVE_TRACE_BASE_URL,
+    resolve_evidence_destination,
     trace_api_key,
+    trace_project_environment,
 )
 
-_INITIALIZED_PROJECTS: set[str] = set()
+_ACTIVE_DESTINATION_DIGEST: str | None = None
 _LOCK = Lock()
-
-WEAVE_AGENTS_BASE_URL = "https://trace.wandb.ai"
-DEFAULT_WANDB_BASE_URL = "https://api.wandb.ai"
-
+WEAVE_AGENTS_BASE_URL = DEFAULT_WEAVE_TRACE_BASE_URL
 
 _WEAVE_ENV_KEYS = (
     "WANDB_API_KEY",
     "WANDB_BASE_URL",
+    "WANDB_APP_BASE_URL",
     "WANDB_PUBLIC_BASE_URL",
     "WF_TRACE_SERVER_URL",
+    "FUGUE_WEAVE_BASE_URL",
+    "FUGUE_WEAVE_TRACE_SERVER_URL",
+    "FUGUE_EVIDENCE_DESTINATION_DIGEST",
+    "FUGUE_EVIDENCE_DESTINATION_JSON",
     "WEAVE_INSECURE_DISABLE_SSL",
 )
 
@@ -34,12 +37,6 @@ def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
     trace_key = trace_api_key(env)
     if trace_key:
         os.environ["WANDB_API_KEY"] = trace_key
-    base_url = env.get(WEAVE_BASE_URL_ENV, "").strip()
-    if base_url:
-        os.environ["WANDB_BASE_URL"] = base_url
-    trace_server_url = env.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
-    if trace_server_url:
-        os.environ["WF_TRACE_SERVER_URL"] = trace_server_url
     for key in _WEAVE_ENV_KEYS:
         value = env.get(key)
         if value is not None:
@@ -47,15 +44,20 @@ def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
 
 
 def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
+    """Activate the exact evidence destination, including A → B → A switches."""
+
     try:
         import weave
     except ImportError as exc:
         raise RuntimeError("weave is not installed") from exc
+    bound_env = trace_project_environment(project, env)
+    destination = resolve_evidence_destination(bound_env)
+    global _ACTIVE_DESTINATION_DIGEST
     with _LOCK:
-        _apply_weave_environment(env)
-        if project not in _INITIALIZED_PROJECTS:
-            weave.init(project)
-            _INITIALIZED_PROJECTS.add(project)
+        _apply_weave_environment(bound_env)
+        if destination.destination_digest != _ACTIVE_DESTINATION_DIGEST:
+            weave.init(destination.project_slug)
+            _ACTIVE_DESTINATION_DIGEST = destination.destination_digest
     return weave
 
 
@@ -68,34 +70,7 @@ def weave_agents_otel_headers(project: str, api_key: str) -> str:
 def resolved_weave_trace_server_url(env: Mapping[str, str]) -> str:
     """Resolve the same trace endpoint as the pinned Weave SDK without mutating env."""
 
-    explicit = (
-        env.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
-        or env.get("WF_TRACE_SERVER_URL", "").strip()
-    )
-    if explicit:
-        return explicit.rstrip("/")
-    public = env.get("WANDB_PUBLIC_BASE_URL", "").strip()
-    if public:
-        base_url = public.rstrip("/")
-    else:
-        configured = (
-            env.get(WEAVE_BASE_URL_ENV, "").strip()
-            or env.get("WANDB_BASE_URL", "").strip()
-        )
-        if configured:
-            base_url = configured.rstrip("/")
-        else:
-            try:
-                from weave.trace.env import Settings
-
-                base_url = Settings().base_url.rstrip("/")
-            except ImportError:
-                base_url = DEFAULT_WANDB_BASE_URL
-    return (
-        WEAVE_AGENTS_BASE_URL
-        if base_url == DEFAULT_WANDB_BASE_URL
-        else f"{base_url}/traces"
-    )
+    return resolve_evidence_destination(env).trace_base_url
 
 
 def weave_agents_otel_endpoint(env: Mapping[str, str]) -> str:

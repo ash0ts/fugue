@@ -33,8 +33,16 @@ hashes.spans = mutate('dist/genaiSpans.js', source => source
   .replace(
     'if (key.startsWith(WEAVE_INTEGRATION_PREFIX)) {',
     "if (key.startsWith(WEAVE_INTEGRATION_PREFIX) || key.startsWith('fugue.') || key.startsWith('weave.eval.')) {",
+  )
+  .replace(
+    'return tracer.startSpan(`${OP.INVOKE_AGENT} ${args.agentName}`, { kind: SpanKind.INTERNAL, attributes: attrs });',
+    "const parentContext = args.traceparent ? propagation.extract(otelContext.active(), {traceparent: args.traceparent}) : otelContext.active();\n    return tracer.startSpan(`${OP.INVOKE_AGENT} ${args.agentName}`, { kind: SpanKind.INTERNAL, attributes: attrs }, parentContext);",
   ));
 hashes.daemon = mutate('dist/daemon.js', source => source
+  .replace(
+    "baseUrl: (env['WANDB_BASE_URL'] ?? 'https://trace.wandb.ai').replace(/\\/+$/, ''),",
+    "baseUrl: (env['FUGUE_WEAVE_TRACE_SERVER_URL'] ?? env['WF_TRACE_SERVER_URL'] ?? env['WANDB_BASE_URL'] ?? 'https://trace.wandb.ai').replace(/\\/+$/, ''),",
+  )
   .replace(
     'meta: { claude_code_app_version: claudeCodeAppVersion },',
     "meta: { claude_code_app_version: claudeCodeAppVersion, ...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}') },",
@@ -42,6 +50,10 @@ hashes.daemon = mutate('dist/daemon.js', source => source
   .replace(
     `        const group = callsForResponseKey(calls, key);\n        const model = group.map(c => c.model).find(Boolean);`,
     `        const group = callsForResponseKey(calls, key);\n        if (group.length === 0) {\n            existingSpan?.end();\n            session.emittedChatSpanResponseKeys.add(key);\n            return;\n        }\n        const model = group.map(c => c.model).find(Boolean);`,
+  )
+  .replace(
+    '            displayName: `Turn ${session.turnNumber}: ${promptSnippet(prompt)}`,',
+    '            displayName: `Turn ${session.turnNumber}: ${promptSnippet(prompt)}`,\n            traceparent: process.env.FUGUE_WEAVE_TRACEPARENT,',
   ));
 fs.writeFileSync(
   path.join(root, 'claude-code-patch-lock.json'),

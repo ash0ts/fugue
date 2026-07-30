@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import keyword
 import math
 import os
 import re
+import secrets
 import threading
 import time
+import urllib.parse
+import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -28,10 +32,16 @@ from fugue.bench.reproducibility import (
     read_evaluation_asset_lock,
 )
 from fugue.bench.scoring import latency_summary, score_evidence_paths
+from fugue.mcp_evidence import (
+    safe_graphql_query_shape,
+    safe_structured_error_code,
+    validated_graphql_query_shape,
+)
 from fugue.model_plane import (
     inference_project_slug,
     trace_api_key,
     trace_destination_identity,
+    trace_project_environment,
     trace_project_slug,
 )
 from fugue.redaction import redact_value, secrets_from_env
@@ -95,6 +105,7 @@ class PublishedEvaluation:
     candidate_id: str
     name: str
     examples: int
+    project: str | None = None
     url: str | None = None
     evaluation_ref: str | None = None
     dataset_ref: str | None = None
@@ -136,12 +147,60 @@ class _LiveCandidate:
 class _LivePrediction:
     session: _LiveCandidate
     prediction: Any
+    bridge_call: Any | None
+    bridge_client: Any | None
     row: dict[str, Any]
     opened_monotonic: float
+    bridge_finished: bool = False
 
 
 class _TracePollingCancelled(Exception):
     pass
+
+
+_WEAVE_CALL_SOURCE = "weave_calls"
+_WEAVE_AGENT_SPAN_SOURCE = "weave_agents"
+
+
+def _eager_call_op(weave_module: Any, name: str) -> Any:
+    """Create a public Weave op whose Call start is sent immediately."""
+
+    op = getattr(weave_module, "op", None)
+    if not callable(op):
+        # Lightweight test doubles may only accept anonymous op names.
+        return name
+
+    def evidence_boundary(**values: Any) -> dict[str, Any]:
+        return values
+
+    return op(
+        name=name,
+        enable_code_capture=False,
+        eager_call_start=True,
+    )(evidence_boundary)
+
+
+def _enable_eager_evaluation_starts(logger: Any) -> bool:
+    """Expose the exact open prediction Calls without closing their scores."""
+
+    pseudo_evaluation = getattr(logger, "_pseudo_evaluation", None)
+    values = (
+        getattr(pseudo_evaluation, "predict_and_score", None),
+        getattr(logger, "_context_predict_method", None),
+    )
+    configured = 0
+    for value in values:
+        operation = getattr(value, "__func__", value)
+        if operation is None or not hasattr(operation, "eager_call_start"):
+            continue
+        operation.eager_call_start = True
+        if operation.eager_call_start is True:
+            configured += 1
+    # Test doubles without Weave internals do not publish Calls. A real
+    # EvaluationLogger must expose both predict-and-score and prediction ops.
+    if type(logger).__module__.startswith("weave."):
+        return configured == 2
+    return True
 
 
 class LiveEvaluationCoordinator:
@@ -160,6 +219,10 @@ class LiveEvaluationCoordinator:
         cancellation_event: threading.Event | None = None,
         host_evaluator: Callable[[dict[str, Any]], None] | None = None,
         host_scorer_names: tuple[str, ...] = (),
+        evidence_checkpoint_cells: int = 0,
+        checkpoint_conformance: (
+            Callable[[PlannedCell], Mapping[str, Any]] | None
+        ) = None,
     ) -> None:
         if not trace_api_key(env):
             raise RuntimeError(
@@ -167,7 +230,7 @@ class LiveEvaluationCoordinator:
             )
         self.repo_root = repo_root
         self.project = project
-        self.env = dict(env)
+        self.env = trace_project_environment(project, env)
         self.run_id = cells[0].run_id if cells else "unknown"
         self.run_dir = repo_root / ".fugue" / "runtime" / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +242,16 @@ class LiveEvaluationCoordinator:
         self._terminal_cells: set[str] = set()
         self._cancellation_event = cancellation_event or threading.Event()
         self._host_evaluator = host_evaluator
+        if evidence_checkpoint_cells < 0:
+            raise ValueError("evidence checkpoint cells must be non-negative")
+        self._evidence_checkpoint_cells = evidence_checkpoint_cells
+        self._evidence_checkpoint_terminal = 0
+        self._checkpoint_conformance = checkpoint_conformance
+        self._evidence_destination = trace_destination_identity(self.env)
+        if self._evidence_destination["project_slug"] != project:
+            raise RuntimeError(
+                "live Evaluation destination disagrees with its project"
+            )
         self._summary_fetcher = summary_fetcher or fetch_weave_summaries
         configured_timeout = self.env.get("FUGUE_WEAVE_LINK_TIMEOUT_SEC")
         self.trace_timeout_sec = (
@@ -187,6 +260,14 @@ class LiveEvaluationCoordinator:
             else float(configured_timeout or 45)
         )
         self.weave = weave_module or initialize_weave(project, env)
+        self._agent_bridge_op = _eager_call_op(
+            self.weave,
+            "fugue.agent_execution_bridge",
+        )
+        self._native_agent_root_op = _eager_call_op(
+            self.weave,
+            "fugue.claude_code_native_agent_root",
+        )
         logger_cls = getattr(self.weave, "EvaluationLogger", None)
         if logger_cls is None:
             raise RuntimeError("installed weave package has no EvaluationLogger")
@@ -226,7 +307,14 @@ class LiveEvaluationCoordinator:
                     model=_evaluation_model(candidate),
                     dataset=datasets[scope_id],
                     eval_attributes=_evaluation_scope_attributes(candidate),
-                    scorers=candidate["scorers"],
+                    scorers=_weave_predefined_scorer_names(
+                        candidate["scorers"]
+                    ),
+                )
+            if not _enable_eager_evaluation_starts(logger):
+                raise RuntimeError(
+                    "installed Weave EvaluationLogger cannot expose exact "
+                    "prediction Call starts before terminal scoring"
                 )
             session = _LiveCandidate(candidate=candidate, logger=logger)
             for row, inputs in zip(
@@ -249,24 +337,147 @@ class LiveEvaluationCoordinator:
         session = self._sessions_by_cell.get(cell.id)
         if session is None:
             return None
-        with session.lock:
-            prediction = session.logger.log_prediction(
-                inputs=self._inputs_by_cell[cell.id]
-            )
-            prediction.__enter__()
         row = _planned_evaluation_row(cell)
-        predict_call = getattr(prediction, "predict_call", None)
-        prediction_call_id = str(getattr(predict_call, "id", "") or "")
-        if prediction_call_id:
-            row["weave_prediction_call_id"] = prediction_call_id
+        prediction = None
+        prediction_entered = False
+        bridge_call = None
+        bridge_client = None
+        attributes = getattr(self.weave, "attributes", None)
+        context = (
+            attributes(
+                {
+                    "fugue.attempt_id": cell.attempt_id,
+                    "fugue.cell_id": cell.id,
+                    "fugue.variant_id": cell.variant_id,
+                    "fugue.candidate_id": cell.candidate_id,
+                    "fugue.execution_fingerprint": cell.execution_fingerprint,
+                    "fugue.experiment_id": cell.env.get("FUGUE_EXPERIMENT_ID", ""),
+                    "wandb.research_id": cell.env.get(
+                        "FUGUE_WANDB_RESEARCH_ID", ""
+                    ),
+                    "wandb.study_id": cell.env.get("FUGUE_WANDB_STUDY_ID", ""),
+                    "fugue.source_evidence_project": cell.env.get(
+                        "FUGUE_SOURCE_EVIDENCE_PROJECT", ""
+                    ),
+                    "fugue.result_evidence_project": cell.env.get(
+                        "FUGUE_RESULT_EVIDENCE_PROJECT", ""
+                    ),
+                    "fugue.study_console_backlink": cell.env.get(
+                        "FUGUE_STUDY_CONSOLE_BACKLINK", ""
+                    ),
+                }
+            )
+            if attributes is not None
+            else nullcontext()
+        )
+        try:
+            with session.lock:
+                with context:
+                    prediction = session.logger.log_prediction(
+                        inputs=self._inputs_by_cell[cell.id]
+                    )
+                    prediction.__enter__()
+                    prediction_entered = True
+            dataset = self._datasets[session.candidate["evaluation_scope_id"]]
+            _apply_evaluation_evidence(
+                row,
+                logger=session.logger,
+                dataset=dataset,
+                project=self.project,
+            )
+            predict_call = getattr(prediction, "predict_call", None)
+            if predict_call is not None:
+                _apply_call_evidence(
+                    row,
+                    prefix="weave_prediction",
+                    call=predict_call,
+                    project=self.project,
+                )
+            call = prediction.predict_and_score_call
+            _apply_call_evidence(
+                row,
+                prefix="eval_predict_and_score",
+                call=call,
+                project=self.project,
+            )
+            _verify_live_evaluation_graph(
+                row,
+                logger=session.logger,
+                dataset=dataset,
+                prediction=prediction,
+                project=self.project,
+            )
+            if (
+                cell.harness == "claude-code"
+                and row.get("evaluation_prediction_graph_verified") is not True
+            ):
+                raise RuntimeError(
+                    "live Evaluation graph is unresolved before Claude execution"
+                )
+            traceparent = ""
+            if cell.harness == "claude-code":
+                bridge_call, bridge_client, traceparent = self._open_agent_bridge(
+                    cell=cell,
+                    row=row,
+                    prediction=prediction,
+                )
+        except Exception as exc:
+            if self._evidence_checkpoint_cells:
+                self._cancellation_event.set()
+                self._append_event(
+                    "evidence_checkpoint_failed",
+                    cell_id=cell.id,
+                    candidate_id=cell.candidate_id,
+                    failures=[
+                        "live Evaluation could not open its authoritative graph"
+                    ],
+                )
+            if bridge_call is not None and bridge_client is not None:
+                failed_active = _LivePrediction(
+                    session=session,
+                    prediction=prediction,
+                    bridge_call=bridge_call,
+                    bridge_client=bridge_client,
+                    row=row,
+                    opened_monotonic=time.monotonic(),
+                )
+                self._finish_agent_bridge(failed_active, status="start_failed")
+            if prediction is not None and prediction_entered:
+                row.update(
+                    {
+                        "status": "failed",
+                        "pass": False,
+                        "trace_link_status": "failed",
+                        "trace_link_error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                try:
+                    prediction.output = _evaluation_output(row)
+                except Exception:
+                    pass
+                try:
+                    with session.lock:
+                        prediction.__exit__(type(exc), exc, exc.__traceback__)
+                except Exception:
+                    # The original start failure remains authoritative. A
+                    # broken SDK close must not leave the cell eligible to run.
+                    pass
+            self._append_event(
+                "prediction_start_failed",
+                cell_id=cell.id,
+                candidate_id=cell.candidate_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         with self._prediction_lock:
             self._predictions[cell.id] = _LivePrediction(
                 session=session,
                 prediction=prediction,
+                bridge_call=bridge_call,
+                bridge_client=bridge_client,
                 row=row,
                 opened_monotonic=time.monotonic(),
             )
-        call = prediction.predict_and_score_call
         call_id = str(call.id)
         self._append_event(
             "prediction_open",
@@ -274,12 +485,435 @@ class LiveEvaluationCoordinator:
             candidate_id=cell.candidate_id,
             eval_predict_and_score_call_id=call_id,
         )
-        return {
+        overlay = {
+            "FUGUE_ATTEMPT_ID": cell.attempt_id,
             "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": call_id,
             "FUGUE_WEAVE_EVAL_PROJECT_ID": str(call.project_id),
             "FUGUE_WEAVE_EVAL_NAME": _evaluation_name(session.candidate),
             "FUGUE_EVALUATION_SCOPE_ID": session.candidate["evaluation_scope_id"],
         }
+        if traceparent:
+            overlay["FUGUE_WEAVE_TRACEPARENT"] = traceparent
+        return overlay
+
+    def _open_agent_bridge(
+        self,
+        *,
+        cell: PlannedCell,
+        row: dict[str, Any],
+        prediction: Any,
+    ) -> tuple[Any, Any, str]:
+        """Create the real Call bridge used to parent Claude's remote OTel root."""
+
+        get_client = getattr(self.weave, "get_client", None)
+        client = get_client() if callable(get_client) else None
+        if client is None or not callable(getattr(client, "create_call", None)):
+            raise RuntimeError(
+                "installed Weave runtime cannot create the Agent ancestry bridge"
+            )
+        parent = getattr(prediction, "predict_call", None)
+        if parent is None:
+            raise RuntimeError("live Evaluation prediction Call is unavailable")
+        bridge_id = secrets.token_hex(8)
+        bridge = client.create_call(
+            getattr(
+                self,
+                "_agent_bridge_op",
+                "fugue.agent_execution_bridge",
+            ),
+            {
+                "attempt_id": cell.attempt_id,
+                "cell_id": cell.id,
+                "candidate_id": cell.candidate_id,
+                "execution_fingerprint": cell.execution_fingerprint,
+            },
+            parent=parent,
+            attributes={
+                "fugue.attempt_id": cell.attempt_id,
+                "fugue.cell_id": cell.id,
+                "fugue.run_key": str(row.get("run_key") or ""),
+                "fugue.harness": cell.harness,
+                "fugue.task_id": cell.task_id,
+                "fugue.candidate_id": cell.candidate_id,
+                "fugue.execution_fingerprint": cell.execution_fingerprint,
+                "fugue.comparison_example_id": cell.comparison_example_id,
+                "fugue.trial_index": cell.trial_index,
+                "fugue.experiment_id": cell.env.get("FUGUE_EXPERIMENT_ID", ""),
+                "wandb.research_id": cell.env.get(
+                    "FUGUE_WANDB_RESEARCH_ID", ""
+                ),
+                "wandb.study_id": cell.env.get("FUGUE_WANDB_STUDY_ID", ""),
+                "fugue.source_evidence_project": cell.env.get(
+                    "FUGUE_SOURCE_EVIDENCE_PROJECT", ""
+                ),
+                "fugue.result_evidence_project": cell.env.get(
+                    "FUGUE_RESULT_EVIDENCE_PROJECT", ""
+                ),
+                "fugue.study_console_backlink": cell.env.get(
+                    "FUGUE_STUDY_CONSOLE_BACKLINK", ""
+                ),
+                "fugue.agent_bridge": True,
+                "fugue.agent_bridge_version": 1,
+                "weave.eval.predict_and_score_call_id": str(
+                    row.get("eval_predict_and_score_call_id") or ""
+                ),
+            },
+            display_name=f"Fugue Agent bridge · {cell.task_id}",
+            use_stack=False,
+            _call_id_override=bridge_id,
+        )
+        parent_id = _live_call_value(bridge, "parent_id")
+        project_id = _live_call_value(bridge, "project_id")
+        trace_id = _live_call_value(bridge, "trace_id")
+        expected_parent = _live_call_value(parent, "id")
+        expected_trace = _live_call_value(parent, "trace_id")
+        otel_trace_id = _w3c_trace_id(trace_id)
+        if (
+            _live_call_value(bridge, "id") != bridge_id
+            or parent_id != expected_parent
+            or project_id != self.project
+            or not _same_nonempty_trace(trace_id, expected_trace)
+            or otel_trace_id is None
+        ):
+            try:
+                client.finish_call(
+                    bridge,
+                    output={"status": "invalid_bridge"},
+                )
+            finally:
+                raise RuntimeError(
+                    "Weave Agent ancestry bridge did not preserve prediction ownership"
+                )
+        try:
+            row.update(
+                {
+                    "weave_agent_bridge_call_id": bridge_id,
+                    "weave_agent_bridge_parent_id": parent_id,
+                    "weave_agent_bridge_project_id": project_id,
+                    "weave_agent_bridge_trace_id": trace_id,
+                    "weave_agent_bridge_otel_trace_id": otel_trace_id,
+                }
+            )
+            _apply_call_evidence(
+                row,
+                prefix="weave_agent_bridge",
+                call=bridge,
+                project=self.project,
+            )
+            row["weave_agent_bridge_object_verified"] = True
+        except Exception:
+            try:
+                client.finish_call(
+                    bridge,
+                    output={"status": "start_failed"},
+                )
+            except Exception:
+                pass
+            raise
+        return (
+            bridge,
+            client,
+            f"00-{otel_trace_id}-{bridge_id}-01",
+        )
+
+    @staticmethod
+    def _finish_agent_bridge(
+        active: _LivePrediction,
+        *,
+        status: str,
+        native_root: Mapping[str, Any] | None = None,
+        terminal_row: dict[str, Any] | None = None,
+    ) -> None:
+        def sync_terminal_row() -> None:
+            if terminal_row is None or terminal_row is active.row:
+                return
+            for key in (
+                "weave_agent_bridge_close_status",
+                "weave_agent_bridge_closed_verified",
+                "weave_agent_bridge_close_error",
+                "weave_agent_root_call_otel_trace_id",
+                "weave_agent_root_call_otel_span_id",
+            ):
+                if key in active.row:
+                    terminal_row[key] = active.row[key]
+                else:
+                    terminal_row.pop(key, None)
+
+        if (
+            active.bridge_finished
+            or active.bridge_call is None
+            or active.bridge_client is None
+        ):
+            sync_terminal_row()
+            return
+        active.bridge_finished = True
+        active.row["weave_agent_bridge_close_status"] = status
+        output = {"status": status}
+        if native_root is not None:
+            output.update(
+                {
+                    "native_conversation_id": native_root.get(
+                        "conversation_id"
+                    ),
+                    "native_otel_trace_id": native_root.get("trace_id"),
+                    "native_otel_span_id": native_root.get("span_id"),
+                }
+            )
+        try:
+            active.bridge_client.finish_call(
+                active.bridge_call,
+                output=output,
+            )
+        except Exception as exc:
+            active.row["weave_agent_bridge_closed_verified"] = False
+            active.row["weave_agent_bridge_close_error"] = type(exc).__name__
+            sync_terminal_row()
+            return
+        active.row["weave_agent_bridge_closed_verified"] = True
+        if native_root is not None:
+            active.row["weave_agent_root_call_otel_trace_id"] = str(
+                native_root.get("trace_id") or ""
+            )
+            active.row["weave_agent_root_call_otel_span_id"] = str(
+                native_root.get("span_id") or ""
+            )
+        active.row.pop("weave_agent_bridge_close_error", None)
+        sync_terminal_row()
+
+    def _materialize_native_agent_call(
+        self,
+        *,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        root: Mapping[str, Any],
+    ) -> None:
+        """Create one durable Weave Call receipt for a verified Claude OTel root."""
+
+        client = active.bridge_client
+        bridge = active.bridge_call
+        if (
+            client is None
+            or bridge is None
+            or not callable(getattr(client, "create_call", None))
+            or not callable(getattr(client, "finish_call", None))
+        ):
+            raise RuntimeError(
+                "installed Weave runtime cannot materialize the native Agent Call"
+            )
+        call_id = _native_agent_call_id(row, root)
+        attributes = {
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.conversation.id": str(root["conversation_id"]),
+            "fugue.native_agent_root_receipt": True,
+            "fugue.native_agent_root_receipt_version": 1,
+            "fugue.run_key": str(row["run_key"]),
+            "fugue.harness": str(row["harness"]),
+            "fugue.task_id": str(row["task_id"]),
+            "fugue.candidate_id": str(row["candidate_id"]),
+            "fugue.attempt_id": str(row["attempt_id"]),
+            "fugue.execution_fingerprint": str(
+                row["execution_fingerprint"]
+            ),
+            "fugue.comparison_example_id": str(
+                row["comparison_example_id"]
+            ),
+            "fugue.trial_index": int(row["trial_index"]),
+            "fugue.experiment_id": row.get("experiment_id"),
+            "wandb.research_id": row.get("wandb_research_id"),
+            "wandb.study_id": row.get("wandb_study_id"),
+            "fugue.source_evidence_project": row.get(
+                "source_evidence_project"
+            ),
+            "fugue.result_evidence_project": row.get(
+                "result_evidence_project"
+            ),
+            "fugue.study_console_backlink": row.get(
+                "study_console_backlink"
+            ),
+            "weave.eval.predict_and_score_call_id": str(
+                row["eval_predict_and_score_call_id"]
+            ),
+            "fugue.native_otel_trace_id": str(root["trace_id"]),
+            "fugue.native_otel_span_id": str(root["span_id"]),
+        }
+        call = client.create_call(
+            getattr(
+                self,
+                "_native_agent_root_op",
+                "fugue.claude_code_native_agent_root",
+            ),
+            {
+                "attempt_id": str(row["attempt_id"]),
+                "conversation_id": str(root["conversation_id"]),
+                "native_otel_trace_id": str(root["trace_id"]),
+                "native_otel_span_id": str(root["span_id"]),
+            },
+            parent=bridge,
+            attributes=attributes,
+            display_name=f"Claude Code Agent root · {row['task_id']}",
+            use_stack=False,
+            _call_id_override=call_id,
+        )
+        if (
+            _live_call_value(call, "id") != call_id
+            or _live_call_value(call, "parent_id")
+            != _live_call_value(bridge, "id")
+            or _live_call_value(call, "project_id") != self.project
+            or not _same_nonempty_trace(
+                _live_call_value(call, "trace_id"),
+                _live_call_value(bridge, "trace_id"),
+            )
+        ):
+            try:
+                client.finish_call(
+                    call,
+                    output={"status": "invalid_native_root_receipt"},
+                )
+            finally:
+                raise RuntimeError(
+                    "native Agent Call did not preserve the Evaluation ancestry"
+                )
+        client.finish_call(
+            call,
+            output={
+                "status": str(row.get("status") or "completed"),
+                "response_sha256": row.get("agent_response_sha256"),
+                "native_otel_trace_id": str(root["trace_id"]),
+                "native_otel_span_id": str(root["span_id"]),
+            },
+        )
+        row.update(
+            {
+                "weave_agent_root_call_id": call_id,
+                "weave_agent_root_call_materialization_source": (
+                    "verified_native_otel_root_v1"
+                ),
+                "weave_agent_root_call_otel_trace_id": str(root["trace_id"]),
+                "weave_agent_root_call_otel_span_id": str(root["span_id"]),
+                "weave_agent_root_call_object_created": True,
+            }
+        )
+
+    def _record_verified_agent_root(
+        self,
+        *,
+        active: _LivePrediction,
+        cell: PlannedCell,
+        row: dict[str, Any],
+        root: Mapping[str, Any],
+        predict_and_score_call_id: str,
+        attach_span_ref: bool,
+    ) -> None:
+        _apply_verified_agent_evidence(
+            row,
+            root,
+            project=self.project,
+        )
+        if attach_span_ref:
+            _attach_genai_span_ref(
+                active.prediction.predict_and_score_call,
+                trace_id=str(root["trace_id"]),
+                span_id=str(root["span_id"]),
+            )
+        row["trace_link_status"] = "linked"
+        row["trace_link_error"] = None
+        _apply_agent_graph_verification(row, root)
+        self._append_event(
+            "trace_linked",
+            cell_id=cell.id,
+            candidate_id=cell.candidate_id,
+            observed_conversation_id=row.get("observed_conversation_id"),
+            trace_id=root.get("trace_id"),
+            root_span_id=root.get("span_id"),
+            eval_predict_and_score_call_id=predict_and_score_call_id,
+        )
+
+    def _prepare_terminal_agent_trace(
+        self,
+        *,
+        active: _LivePrediction,
+        cell: PlannedCell,
+        row: dict[str, Any],
+        predict_and_score_call_id: str,
+    ) -> None:
+        """Resolve final native trace evidence before persisting Evaluation output."""
+
+        if row.get("agent_execution_status") == "not_started":
+            self._finish_agent_bridge(
+                active,
+                status="not_started",
+                terminal_row=row,
+            )
+            _mark_agent_execution_not_started(row)
+            return
+        if cell.harness != "claude-code":
+            self._finish_agent_bridge(
+                active,
+                status="agent_completed",
+                terminal_row=row,
+            )
+            _apply_trace_summary(row, self._wait_for_trace(row))
+            return
+        # Claude exports a native OTel root to the Agents endpoint, not a
+        # Weave Call. Verify it first, then materialize one durable child Call
+        # under the still-open Evaluation bridge. OTel IDs remain diagnostic.
+        _apply_trace_summary(
+            row,
+            self._wait_for_trace(
+                row,
+                require_authoritative_graph=False,
+            ),
+        )
+        _apply_observed_identity(row)
+        native_root = _verified_native_otel_root(
+            row,
+            predict_and_score_call_id,
+        )
+        if native_root is None:
+            raise RuntimeError(
+                row.get("trace_link_error")
+                or "native Claude OTel root did not reconcile"
+            )
+        if not native_root.get("weave_call_id"):
+            self._materialize_native_agent_call(
+                active=active,
+                row=row,
+                root=native_root,
+            )
+        _attach_genai_span_ref(
+            active.prediction.predict_and_score_call,
+            trace_id=str(native_root["trace_id"]),
+            span_id=str(native_root["span_id"]),
+        )
+        self._finish_agent_bridge(
+            active,
+            status="agent_completed",
+            terminal_row=row,
+        )
+        # Fugue initializes the host Weave client with separate start/end
+        # publication, so the still-open Evaluation Calls become queryable
+        # without persisting a provisional prediction output first.
+        _apply_trace_summary(row, self._wait_for_trace(row))
+        _merge_error_events(row)
+        _apply_observed_identity(row)
+        _verify_authoritative_agent_graph(row)
+        verified_root = _verified_evaluation_root(
+            row,
+            predict_and_score_call_id,
+        )
+        if verified_root is None:
+            raise RuntimeError(
+                row.get("trace_link_error")
+                or "native Claude Weave Call did not reconcile"
+            )
+        self._record_verified_agent_root(
+            active=active,
+            cell=cell,
+            row=row,
+            root=verified_root,
+            predict_and_score_call_id=predict_and_score_call_id,
+            attach_span_ref=False,
+        )
 
     def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
         with self._prediction_lock:
@@ -303,36 +937,35 @@ class LiveEvaluationCoordinator:
             )
             return
         owns_prediction = False
+        prediction_closed = False
+        session_row_appended = False
         try:
-            if row.get("agent_execution_status") == "not_started":
-                _mark_agent_execution_not_started(row)
-            else:
-                _apply_trace_summary(row, self._wait_for_trace(row))
+            self._prepare_terminal_agent_trace(
+                active=active,
+                cell=cell,
+                row=row,
+                predict_and_score_call_id=call_id,
+            )
             self._raise_if_cancelled()
             _merge_error_events(row)
             _apply_observed_identity(row)
-            root = (
-                None
-                if row.get("trace_link_status") in {"not_applicable", "not_started"}
-                else _verified_evaluation_root(row, call_id)
-            )
-            if root is not None:
-                _attach_genai_span_ref(
-                    active.prediction.predict_and_score_call,
-                    trace_id=str(root["trace_id"]),
-                    span_id=str(root["span_id"]),
+            if row.get("trace_link_status") != "linked":
+                _verify_authoritative_agent_graph(row)
+                root = (
+                    None
+                    if row.get("trace_link_status")
+                    in {"not_applicable", "not_started"}
+                    else _verified_evaluation_root(row, call_id)
                 )
-                row["trace_link_status"] = "linked"
-                row["trace_link_error"] = None
-                self._append_event(
-                    "trace_linked",
-                    cell_id=cell.id,
-                    candidate_id=cell.candidate_id,
-                    observed_conversation_id=row.get("observed_conversation_id"),
-                    trace_id=root.get("trace_id"),
-                    root_span_id=root.get("span_id"),
-                    eval_predict_and_score_call_id=call_id,
-                )
+                if root is not None:
+                    self._record_verified_agent_root(
+                        active=active,
+                        cell=cell,
+                        row=row,
+                        root=root,
+                        predict_and_score_call_id=call_id,
+                        attach_span_ref=True,
+                    )
             if cell.evaluation_case is not None:
                 try:
                     apply_generated_evaluation(
@@ -349,8 +982,8 @@ class LiveEvaluationCoordinator:
                     row["evaluation_judge_status"] = "failed"
                     row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
             self._raise_if_cancelled()
-            _set_adapter_outcome(row)
             self._apply_host_evaluator(row)
+            _set_adapter_outcome(row)
             if not self._pop_prediction(cell.id, active):
                 return
             owns_prediction = True
@@ -359,8 +992,12 @@ class LiveEvaluationCoordinator:
                 for name, value in _evaluation_scores(row).items():
                     active.prediction.log_score(name, value)
                 active.prediction.__exit__(None, None, None)
+                prediction_closed = True
+            with active.session.lock:
                 active.session.rows.append(row)
+                session_row_appended = True
             self._terminal_cells.add(cell.id)
+            self._apply_evidence_checkpoint(cell, row)
             self._append_result(row)
             self._append_event(
                 "finalized",
@@ -370,6 +1007,11 @@ class LiveEvaluationCoordinator:
                 eval_predict_and_score_call_id=call_id,
             )
         except _TracePollingCancelled:
+            self._finish_agent_bridge(
+                active,
+                status="cancelled",
+                terminal_row=row,
+            )
             self._cancel_prediction(
                 cell.id,
                 active,
@@ -377,20 +1019,32 @@ class LiveEvaluationCoordinator:
                 reason="Run cancelled by the operator.",
             )
         except Exception as exc:
+            self._finish_agent_bridge(
+                active,
+                status="failed",
+                terminal_row=row,
+            )
             if not owns_prediction and not self._pop_prediction(cell.id, active):
                 return
             row["trace_link_status"] = "failed"
             row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
+            if not row.get("host_evaluator_status"):
+                self._apply_host_evaluator(row)
             _set_adapter_outcome(row)
-            self._apply_host_evaluator(row)
             try:
-                active.prediction.output = _evaluation_output(row)
+                if not prediction_closed:
+                    active.prediction.output = _evaluation_output(row)
                 with active.session.lock:
-                    for name, value in _evaluation_scores(row).items():
-                        active.prediction.log_score(name, value)
-                    active.prediction.__exit__(None, None, None)
-                    active.session.rows.append(row)
+                    if not prediction_closed:
+                        for name, value in _evaluation_scores(row).items():
+                            active.prediction.log_score(name, value)
+                        active.prediction.__exit__(None, None, None)
+                        prediction_closed = True
+                    if not session_row_appended:
+                        active.session.rows.append(row)
+                        session_row_appended = True
                 self._terminal_cells.add(cell.id)
+                self._apply_evidence_checkpoint(cell, row)
                 self._append_result(row)
             finally:
                 self._append_event(
@@ -403,12 +1057,15 @@ class LiveEvaluationCoordinator:
 
     def _apply_host_evaluator(self, row: dict[str, Any]) -> None:
         if self._host_evaluator is None:
+            row["host_evaluator_status"] = "not_required"
             return
         try:
             self._host_evaluator(row)
+            row["host_evaluator_status"] = "passed"
         except Exception as exc:
             row.update(
                 {
+                    "host_evaluator_status": "failed",
                     "comparison_evaluation_status": "unavailable",
                     "comparison_evaluation_reason": (
                         "host evaluation failed: "
@@ -417,6 +1074,129 @@ class LiveEvaluationCoordinator:
                     "comparison_required_evaluation_complete": False,
                 }
             )
+
+    def _apply_evidence_checkpoint(
+        self,
+        cell: PlannedCell,
+        row: dict[str, Any],
+    ) -> None:
+        if (
+            not self._evidence_checkpoint_cells
+            or self._evidence_checkpoint_terminal
+            >= self._evidence_checkpoint_cells
+        ):
+            return
+        self._evidence_checkpoint_terminal += 1
+        if self._checkpoint_conformance is None:
+            row["local_cell_conformance"] = {
+                "status": "unavailable",
+                "reason": "no exact per-cell Harbor conformance callback was configured",
+            }
+        else:
+            try:
+                row["local_cell_conformance"] = dict(
+                    self._checkpoint_conformance(cell)
+                )
+            except Exception as exc:
+                row["local_cell_conformance"] = {
+                    "status": "unavailable",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+        row["negative_routing_receipt"] = self._negative_routing_receipt(row)
+        failures = _live_evidence_checkpoint_failures(
+            row,
+            expected_destination=self._evidence_destination,
+            host_evaluator_required=self._host_evaluator is not None,
+        )
+        if failures:
+            self._cancellation_event.set()
+            row["evidence_checkpoint_status"] = "failed"
+            row["evidence_checkpoint_failures"] = failures
+            self._append_event(
+                "evidence_checkpoint_failed",
+                cell_id=row.get("cell_id"),
+                candidate_id=row.get("candidate_id"),
+                checkpoint_index=self._evidence_checkpoint_terminal,
+                failures=failures,
+            )
+            return
+        row["evidence_checkpoint_status"] = "passed"
+        self._append_event(
+            "evidence_checkpoint_passed",
+            cell_id=row.get("cell_id"),
+            candidate_id=row.get("candidate_id"),
+            checkpoint_index=self._evidence_checkpoint_terminal,
+        )
+
+    def _negative_routing_receipt(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        configured = [
+            value.strip()
+            for value in self.env.get(
+                "FUGUE_EVIDENCE_NEGATIVE_PROJECTS", ""
+            ).split(",")
+            if value.strip()
+        ]
+        projects = sorted(
+            {
+                "wandb/news-research-agent",
+                "wandb/fugue-aria-loop-engineering-v1",
+                *configured,
+            }
+            - {self.project}
+        )
+        run_key = str(row.get("run_key") or "")
+        conversations = list(
+            dict.fromkeys(
+                str(value)
+                for value in (
+                    row.get("planned_conversation_id"),
+                    row.get("observed_conversation_id"),
+                    *(row.get("native_session_ids") or ()),
+                )
+                if value
+            )
+        )
+        agent_call_id = str(row.get("weave_agent_root_call_id") or "")
+        matches: list[str] = []
+        errors: list[str] = []
+        for project in projects:
+            try:
+                result = self._summary_fetcher(
+                    run_keys=[run_key],
+                    conversation_ids_by_run={run_key: conversations},
+                    call_ids_by_run={
+                        run_key: [agent_call_id] if agent_call_id else []
+                    },
+                    project=project,
+                    timeout_sec=min(max(self.trace_timeout_sec, 1), 10),
+                    env=self.env,
+                ).get(run_key, {})
+            except Exception as exc:
+                errors.append(f"{project}: {type(exc).__name__}")
+                continue
+            if int(result.get("weave_span_count") or 0) > 0 or (
+                result.get("weave_authoritative_call_graph")
+            ):
+                matches.append(project)
+        return {
+            "schema_version": 1,
+            "status": (
+                "failed"
+                if matches
+                else "unavailable"
+                if errors
+                else "passed"
+            ),
+            "target_project": self.project,
+            "queried_projects": projects,
+            "query_identity": {
+                "run_key": run_key,
+                "conversation_ids": conversations,
+                "agent_call_id": agent_call_id or None,
+            },
+            "matching_projects": matches,
+            "query_errors": errors,
+        }
 
     def cancel_open_predictions(self, reason: str) -> None:
         self._cancellation_event.set()
@@ -461,6 +1241,11 @@ class LiveEvaluationCoordinator:
         *,
         reason: str,
     ) -> None:
+        self._finish_agent_bridge(
+            active,
+            status="cancelled",
+            terminal_row=row,
+        )
         cell_id = str(row.get("cell_id") or "")
         row.update(
             {
@@ -557,6 +1342,36 @@ class LiveEvaluationCoordinator:
                 self._datasets[session.candidate["evaluation_scope_id"]]
             )
             model_ref = _logger_ref(session.logger, "model")
+            for row in session.rows:
+                active = self._predictions.get(str(row.get("cell_id") or ""))
+                if active is not None:
+                    _verify_live_evaluation_graph(
+                        row,
+                        logger=session.logger,
+                        dataset=self._datasets[
+                            session.candidate["evaluation_scope_id"]
+                        ],
+                        prediction=active.prediction,
+                        project=self.project,
+                    )
+                    roots = [
+                        root
+                        for root in row.get("weave_root_spans") or ()
+                        if isinstance(root, Mapping)
+                        and root.get("weave_call_id")
+                        == row.get("weave_agent_root_call_id")
+                    ]
+                    if len(roots) == 1:
+                        _apply_agent_graph_verification(row, roots[0])
+                else:
+                    _apply_evaluation_evidence(
+                        row,
+                        logger=session.logger,
+                        dataset=self._datasets[
+                            session.candidate["evaluation_scope_id"]
+                        ],
+                        project=self.project,
+                    )
             agent_rows = [
                 row
                 for row in session.rows
@@ -603,6 +1418,7 @@ class LiveEvaluationCoordinator:
                     candidate_id=candidate_id,
                     name=_evaluation_name(session.candidate),
                     examples=len(session.rows),
+                    project=self.project,
                     url=url,
                     evaluation_ref=evaluation_ref,
                     dataset_ref=dataset_ref,
@@ -614,6 +1430,7 @@ class LiveEvaluationCoordinator:
                     publication_id=published["publication_id"],
                 )
             )
+        self._rewrite_results()
         return PublicationResult(
             published=len(evaluations),
             skipped=0,
@@ -621,8 +1438,24 @@ class LiveEvaluationCoordinator:
             failures=tuple(failures),
         )
 
-    def _wait_for_trace(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _wait_for_trace(
+        self,
+        row: dict[str, Any],
+        *,
+        require_authoritative_graph: bool = True,
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + max(self.trace_timeout_sec, 0)
+        required_call_ids = [
+            str(value)
+            for value in (
+                row.get("weave_evaluation_root_call_id"),
+                row.get("eval_predict_and_score_call_id"),
+                row.get("weave_prediction_call_id"),
+                row.get("weave_agent_bridge_call_id"),
+                row.get("weave_agent_root_call_id"),
+            )
+            if value
+        ]
         conversation_ids = list(
             dict.fromkeys(
                 str(value)
@@ -641,6 +1474,7 @@ class LiveEvaluationCoordinator:
             values = self._summary_fetcher(
                 run_keys=[str(row["run_key"])],
                 conversation_ids_by_run={str(row["run_key"]): conversation_ids},
+                call_ids_by_run={str(row["run_key"]): required_call_ids},
                 project=self.project,
                 timeout_sec=min(max(self.trace_timeout_sec, 1), 10),
                 env=self.env,
@@ -649,7 +1483,13 @@ class LiveEvaluationCoordinator:
             latest = values.get(str(row["run_key"]), {})
             probe = {**row, **latest}
             _apply_observed_identity(probe)
-            if probe.get("observed_conversation_id"):
+            _verify_authoritative_agent_graph(probe)
+            claude_graph_ready = (
+                str(row.get("harness") or "") != "claude-code"
+                or not require_authoritative_graph
+                or probe.get("weave_authoritative_call_graph_verified") is True
+            )
+            if probe.get("observed_conversation_id") and claude_graph_ready:
                 return latest
             if time.monotonic() >= deadline:
                 return latest
@@ -677,6 +1517,47 @@ class LiveEvaluationCoordinator:
                 handle.write(
                     json.dumps(redact_value(row), sort_keys=True, default=str) + "\n"
                 )
+
+    def _rewrite_results(self) -> None:
+        if not self.results_path.is_file():
+            return
+        updates = {
+            str(row["cell_id"]): row
+            for session in self._unique_sessions
+            for row in session.rows
+            if row.get("cell_id")
+        }
+        if not updates:
+            return
+        values: list[dict[str, Any] | str] = []
+        for line in self.results_path.read_text(errors="replace").splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                values.append(line)
+                continue
+            if not isinstance(value, dict):
+                values.append(line)
+                continue
+            replacement = updates.get(str(value.get("cell_id") or ""))
+            values.append(replacement if replacement is not None else value)
+        temporary = self.results_path.with_name(
+            f".{self.results_path.name}.{os.getpid()}.tmp"
+        )
+        with temporary.open("w") as handle:
+            for value in values:
+                if isinstance(value, str):
+                    handle.write(value + "\n")
+                    continue
+                handle.write(
+                    json.dumps(
+                        redact_value(value),
+                        sort_keys=True,
+                        default=str,
+                    )
+                    + "\n"
+                )
+        os.replace(temporary, self.results_path)
 
 
 class GeneratedEvaluationCoordinator:
@@ -762,6 +1643,9 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "prediction_schema_version": PREDICTION_SCHEMA_VERSION,
         "record_type": "trial",
         "cell_id": cell.id,
+        "task_id": cell.task_id,
+        "attempt_id": cell.attempt_id,
+        "attempt_identity": cell.attempt_identity,
         "run_key": run_key,
         "run_id": cell.run_id,
         "run_name": cell.run_name,
@@ -770,6 +1654,8 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "candidate_id": cell.candidate_id,
         "execution_fingerprint": cell.execution_fingerprint,
         "execution_kind": cell.execution_kind,
+        "applicable": cell.applicable,
+        "skip_reason": cell.skip_reason,
         "identity_schema_version": CANDIDATE_IDENTITY_SCHEMA_VERSION,
         "task_name": cell.task_id,
         "harness": cell.harness,
@@ -799,6 +1685,8 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "evaluation_asset_lock_sha256": cell.evaluation_asset_lock_sha256 or None,
         "run_snapshot_sha256": cell.run_snapshot_sha256 or None,
         "source_commit": cell.source_commit or None,
+        "source_tree": cell.source_tree or None,
+        "source_dirty_digest": cell.source_dirty_digest or None,
         "model_provider": cell.model_provider,
         "model": cell.model,
         "inference_project": (
@@ -811,12 +1699,20 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "wandb_research_id": env.get("FUGUE_WANDB_RESEARCH_ID"),
         "wandb_study_id": env.get("FUGUE_WANDB_STUDY_ID"),
         "research_experiment_id": env.get("FUGUE_RESEARCH_EXPERIMENT_ID"),
+        "source_evidence_project": env.get("FUGUE_SOURCE_EVIDENCE_PROJECT"),
+        "result_evidence_project": env.get("FUGUE_RESULT_EVIDENCE_PROJECT"),
+        "study_console_backlink": env.get("FUGUE_STUDY_CONSOLE_BACKLINK"),
         "trace_content": env.get("FUGUE_TRACE_CONTENT", "full"),
         "context_assigned": cell.context_system_id != "none",
         "evaluation_case": cell.evaluation_case,
         "evaluation_scorers": list(cell.scorer_refs),
         "evaluation_rubrics": list(cell.evaluation_rubrics),
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
+        **(
+            {"approved_comparison": cell.approved_comparison}
+            if cell.approved_comparison
+            else {}
+        ),
     }
     row["prediction_id"] = _stable_digest(
         {
@@ -868,6 +1764,8 @@ def _completed_evaluation_row(
         row.setdefault(key, value)
     row["status"] = outcome.status
     for key in (
+        "attempt_id",
+        "attempt_identity",
         "comparison_example_id",
         "candidate_id",
         "run_id",
@@ -875,6 +1773,7 @@ def _completed_evaluation_row(
         "trial_index",
         "dataset",
         "workload_id",
+        "task_id",
         "task_name",
         "harness",
         "experiment_id",
@@ -897,6 +1796,11 @@ def _completed_evaluation_row(
         "repository",
         "base_commit",
         "evaluation_asset_lock_sha256",
+        "run_snapshot_sha256",
+        "source_commit",
+        "source_tree",
+        "source_dirty_digest",
+        "approved_comparison",
     ):
         if key in planned:
             row[key] = planned[key]
@@ -913,9 +1817,214 @@ def _completed_evaluation_row(
     return row
 
 
+def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
+    """Verify Claude's complete Evaluation ancestry from fetched Weave Calls."""
+
+    if str(row.get("harness") or "") != "claude-code":
+        row["weave_authoritative_call_graph_status"] = "not_required"
+        return
+    expected = {
+        "evaluation": str(row.get("weave_evaluation_root_call_id") or ""),
+        "predict_and_score": str(row.get("eval_predict_and_score_call_id") or ""),
+        "prediction": str(row.get("weave_prediction_call_id") or ""),
+        "bridge": str(row.get("weave_agent_bridge_call_id") or ""),
+        "agent": str(row.get("weave_agent_root_call_id") or ""),
+    }
+    if any(not value for value in expected.values()):
+        missing_names = sorted(name for name, value in expected.items() if not value)
+        row.update(
+            {
+                "weave_authoritative_call_graph_verified": False,
+                "weave_authoritative_call_graph_status": "missing_identity",
+                "weave_authoritative_call_graph_error": (
+                    "missing exact Call identities: " + ", ".join(missing_names)
+                ),
+            }
+        )
+        return
+    graph = row.get("weave_authoritative_call_graph")
+    if not isinstance(graph, list):
+        graph = []
+    calls: dict[str, Mapping[str, Any]] = {}
+    duplicate_ids: set[str] = set()
+    for value in graph:
+        if not isinstance(value, Mapping):
+            continue
+        call_id = str(value.get("call_id") or "")
+        if not call_id:
+            continue
+        if call_id in calls:
+            duplicate_ids.add(call_id)
+        calls[call_id] = value
+    missing_ids = sorted(
+        {
+            *(
+                str(value)
+                for value in row.get(
+                    "weave_authoritative_missing_call_ids"
+                )
+                or ()
+                if value
+            ),
+            *(call_id for call_id in expected.values() if call_id not in calls),
+        }
+    )
+    if duplicate_ids or missing_ids:
+        details = []
+        if missing_ids:
+            details.append("missing " + ", ".join(missing_ids))
+        if duplicate_ids:
+            details.append("duplicate " + ", ".join(sorted(duplicate_ids)))
+        row.update(
+            {
+                "weave_authoritative_call_graph_verified": False,
+                "weave_authoritative_call_graph_status": "incomplete",
+                "weave_authoritative_call_graph_error": "; ".join(details),
+            }
+        )
+        return
+    expected_project = str(row.get("trace_project") or "")
+    expected_trace = str(row.get("eval_predict_and_score_trace_id") or "")
+    relationships = (
+        ("predict_and_score", "evaluation"),
+        ("prediction", "predict_and_score"),
+        ("bridge", "prediction"),
+        ("agent", "bridge"),
+    )
+    failures: list[str] = []
+    for child_name, parent_name in relationships:
+        child = calls[expected[child_name]]
+        if str(child.get("parent_id") or "") != expected[parent_name]:
+            failures.append(f"{child_name} parent")
+    for name, call_id in expected.items():
+        call = calls[call_id]
+        if (
+            not expected_project
+            or str(call.get("project_id") or "") != expected_project
+        ):
+            failures.append(f"{name} project")
+        if (
+            not expected_trace
+            or str(call.get("trace_id") or "") != expected_trace
+        ):
+            failures.append(f"{name} trace")
+    if calls[expected["bridge"]].get("terminal") is not True:
+        failures.append("bridge terminal state")
+    if calls[expected["agent"]].get("terminal") is not True:
+        failures.append("agent terminal state")
+    if row.get("weave_agent_bridge_closed_verified") is not True:
+        failures.append("bridge close receipt")
+    if failures:
+        row.update(
+            {
+                "weave_authoritative_call_graph_verified": False,
+                "weave_authoritative_call_graph_status": "mismatch",
+                "weave_authoritative_call_graph_error": (
+                    "authoritative Weave ancestry mismatch: "
+                    + ", ".join(sorted(set(failures)))
+                ),
+            }
+        )
+        return
+    row.update(
+        {
+            "weave_authoritative_call_graph_verified": True,
+            "weave_authoritative_call_graph_status": "verified",
+            "weave_authoritative_call_graph_error": None,
+            "weave_authoritative_call_graph_source": (
+                "weave_calls_exact_id_query_v1"
+            ),
+        }
+    )
+
+
 def _verified_evaluation_root(
     row: dict[str, Any], predict_and_score_call_id: str
 ) -> dict[str, Any] | None:
+    root = _verified_native_otel_root(row, predict_and_score_call_id)
+    if root is None:
+        return None
+    weave_call_id = str(root.get("weave_call_id") or "")
+    weave_parent_id = str(root.get("weave_call_parent_id") or "")
+    weave_project_id = str(root.get("weave_call_project_id") or "")
+    weave_trace_id = str(root.get("weave_call_trace_id") or "")
+    expected_project = str(row.get("trace_project") or "")
+    expected_prediction_id = str(row.get("weave_prediction_call_id") or "")
+    expected_trace_id = str(row.get("eval_predict_and_score_trace_id") or "")
+    if not weave_call_id:
+        row["trace_link_status"] = "call_missing"
+        row["trace_link_error"] = (
+            "native Agent telemetry has no authoritative Weave Call"
+        )
+        return None
+    bridge_id = str(row.get("weave_agent_bridge_call_id") or "")
+    bridge_required = str(row.get("harness") or "") == "claude-code"
+    if (
+        bridge_required
+        and row.get("weave_authoritative_call_graph_verified") is not True
+    ):
+        row["trace_link_status"] = "ancestry_unresolved"
+        row["trace_link_error"] = (
+            "Claude Agent ancestry was not verified from authoritative Weave Calls"
+        )
+        return None
+    allowed_parents = (
+        {bridge_id}
+        if bridge_required and bridge_id
+        else {predict_and_score_call_id, expected_prediction_id}
+    )
+    if bridge_required and (
+        not bridge_id
+        or row.get("weave_agent_bridge_object_verified") is not True
+        or str(row.get("weave_agent_bridge_parent_id") or "")
+        != expected_prediction_id
+        or str(row.get("weave_agent_bridge_trace_id") or "")
+        != expected_trace_id
+    ):
+        row["trace_link_status"] = "ancestry_mismatch"
+        row["trace_link_error"] = (
+            "native Agent Call has no verified Evaluation ancestry bridge"
+        )
+        return None
+    if weave_parent_id not in allowed_parents:
+        row["trace_link_status"] = "ancestry_mismatch"
+        row["trace_link_error"] = (
+            "native Agent Call is not a child of the exact evaluation prediction"
+        )
+        return None
+    if expected_project and weave_project_id and weave_project_id != expected_project:
+        row["trace_link_status"] = "project_mismatch"
+        row["trace_link_error"] = (
+            "native Agent Call belongs to a different Weave project"
+        )
+        return None
+    if expected_project and not weave_project_id:
+        row["trace_link_status"] = "attribute_missing"
+        row["trace_link_error"] = "native Agent Call is missing its Weave project"
+        return None
+    if expected_trace_id and weave_trace_id != expected_trace_id:
+        row["trace_link_status"] = "ancestry_mismatch"
+        row["trace_link_error"] = (
+            "native Agent Call is outside the evaluation Call trace"
+        )
+        return None
+    root["weave_ancestry_verified"] = True
+    root["weave_parent_kind"] = (
+        "agent_execution_bridge"
+        if bridge_id and weave_parent_id == bridge_id
+        else "prediction"
+        if weave_parent_id == expected_prediction_id
+        else "prediction_and_score"
+    )
+    return root
+
+
+def _verified_native_otel_root(
+    row: dict[str, Any],
+    predict_and_score_call_id: str,
+) -> dict[str, Any] | None:
+    """Verify the native Claude OTel root before creating any Call receipt."""
+
     observed = (
         str(row.get("trace_id") or ""),
         str(row.get("root_span_id") or ""),
@@ -942,6 +2051,19 @@ def _verified_evaluation_root(
             )
         return None
     root = roots[0]
+    for key in ("attempt_id", "execution_fingerprint"):
+        expected = str(row.get(key) or "")
+        observed_identity = str(root.get(key) or "")
+        if not expected or not observed_identity:
+            row["trace_link_status"] = "attribute_missing"
+            row["trace_link_error"] = f"native root is missing {key}"
+            return None
+        if observed_identity != expected:
+            row["trace_link_status"] = "identity_mismatch"
+            row["trace_link_error"] = (
+                f"native root {key} disagrees with the planned attempt"
+            )
+            return None
     root_conversation_id = str(root.get("conversation_id") or "")
     conversation_ids = {
         str(value) for value in row.get("weave_conversation_ids") or [] if value
@@ -954,6 +2076,19 @@ def _verified_evaluation_root(
         row["trace_link_status"] = "identity_mismatch"
         row["trace_link_error"] = (
             "native trace operations do not share the root conversation identity"
+        )
+        return None
+    if row.get("planned_conversation_id") and row.get(
+        "conversation_correlation_verified"
+    ) is not True:
+        _apply_conversation_correlation(row, root)
+    if row.get("planned_conversation_id") and row.get(
+        "conversation_correlation_verified"
+    ) is not True:
+        row["trace_link_status"] = "identity_mismatch"
+        row["trace_link_error"] = (
+            "planned and native conversation identities were not explicitly "
+            "correlated to the same attempt"
         )
         return None
     observed_call_id = str(root.get("eval_predict_and_score_call_id") or "")
@@ -969,7 +2104,99 @@ def _verified_evaluation_root(
             "native root points to a different evaluation prediction"
         )
         return None
+    bridge_id = str(row.get("weave_agent_bridge_call_id") or "")
+    otel_parent = str(root.get("otel_parent_span_id") or "")
+    expected_otel_trace = str(
+        row.get("weave_agent_bridge_otel_trace_id")
+        or _w3c_trace_id(str(row.get("weave_agent_bridge_trace_id") or ""))
+        or ""
+    )
+    if str(row.get("harness") or "") == "claude-code" and (
+        not bridge_id or otel_parent != bridge_id
+    ):
+        row["trace_link_status"] = "otel_ancestry_mismatch"
+        row["trace_link_error"] = (
+            "native Claude OTel root is not parented by the Evaluation bridge"
+        )
+        return None
+    if expected_otel_trace and str(root.get("trace_id") or "") != expected_otel_trace:
+        row["trace_link_status"] = "otel_ancestry_mismatch"
+        row["trace_link_error"] = (
+            "native Claude OTel root is outside the Evaluation bridge trace"
+        )
+        return None
     return root
+
+
+def _native_agent_call_id(
+    row: Mapping[str, Any],
+    root: Mapping[str, Any],
+) -> str:
+    identity = {
+        "schema_version": 1,
+        "project": row.get("trace_project"),
+        "run_id": row.get("run_id"),
+        "cell_id": row.get("cell_id"),
+        "attempt_id": row.get("attempt_id"),
+        "native_otel_trace_id": root.get("trace_id"),
+        "native_otel_span_id": root.get("span_id"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    # Weave Call IDs are UUIDs. UUIDv5 keeps the receipt deterministic for an
+    # exact attempt/native-span identity while satisfying the backend's strict
+    # round-trip validation.
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
+
+
+def _live_evidence_checkpoint_failures(
+    row: Mapping[str, Any],
+    *,
+    expected_destination: Mapping[str, Any],
+    host_evaluator_required: bool,
+) -> list[str]:
+    failures: list[str] = []
+    receipt = row.get("trace_receipt")
+    if not isinstance(receipt, Mapping) or dict(receipt) != dict(
+        expected_destination
+    ):
+        failures.append("evidence destination receipt did not reconcile")
+    required_evidence = {
+        "Evaluation root": row.get("evaluation_root_object_verified"),
+        "Dataset": row.get("dataset_version_object_verified"),
+        "prediction-and-score": row.get(
+            "eval_predict_and_score_object_verified"
+        ),
+        "prediction": row.get("weave_prediction_object_verified"),
+        "Evaluation graph": row.get("evaluation_prediction_graph_verified"),
+        "Agent graph": row.get("agent_graph_verified"),
+        "conversation correlation": row.get(
+            "conversation_correlation_verified"
+        ),
+    }
+    failures.extend(
+        f"{label} was not authoritatively verified"
+        for label, status in required_evidence.items()
+        if status is not True
+    )
+    if row.get("trace_link_status") != "linked":
+        failures.append("native Agent Call was not linked")
+    agent_call_id = str(row.get("weave_agent_root_call_id") or "")
+    otel_span_id = str(row.get("otel_root_span_id") or "")
+    if not agent_call_id:
+        failures.append("native Agent Weave Call ID is missing")
+    elif agent_call_id == otel_span_id:
+        failures.append("OTel span ID was misidentified as a Weave Call ID")
+    if host_evaluator_required and row.get("host_evaluator_status") != "passed":
+        failures.append("host evaluator did not complete successfully")
+    conformance = row.get("local_cell_conformance")
+    if not isinstance(conformance, Mapping) or conformance.get("status") != "passed":
+        failures.append(
+            "local Harbor cleanup/privacy conformance did not pass"
+        )
+    negative = row.get("negative_routing_receipt")
+    if not isinstance(negative, Mapping) or negative.get("status") != "passed":
+        failures.append("negative cross-project routing proof did not pass")
+    return failures
 
 
 def _attach_genai_span_ref(call: Any, *, trace_id: str, span_id: str) -> None:
@@ -1325,6 +2552,73 @@ def _mark_agent_execution_not_started(row: dict[str, Any]) -> None:
     )
 
 
+def _apply_verified_agent_evidence(
+    row: dict[str, Any],
+    root: Mapping[str, Any],
+    *,
+    project: str,
+) -> None:
+    trace_id = str(root.get("trace_id") or "")
+    span_id = str(root.get("span_id") or "")
+    if trace_id:
+        row["otel_trace_id"] = trace_id
+    if span_id:
+        row["otel_root_span_id"] = span_id
+    call_id = str(root.get("weave_call_id") or "")
+    if not call_id:
+        return
+    row["weave_agent_root_call_id"] = call_id
+    call_ref = str(root.get("weave_call_ref") or "") or _weave_call_ref(
+        project, call_id
+    )
+    # Native tracers may report SDK/test-host URLs.  The Call ID and verified
+    # project establish evidence identity; navigation is materialized from the
+    # configured application origin so stale `/calls` or test-host URLs never
+    # become canonical evidence links.
+    receipt = row.get("trace_receipt")
+    app_base_url = (
+        str(receipt.get("app_base_url") or "https://wandb.ai")
+        if isinstance(receipt, Mapping)
+        else "https://wandb.ai"
+    )
+    call_url = _weave_call_url(
+        project,
+        call_id,
+        app_base_url=app_base_url,
+    )
+    if call_ref:
+        row["weave_agent_root_ref"] = call_ref
+    if call_url:
+        row["weave_agent_root_url"] = call_url
+        # Kept for existing evidence-link readers.
+        row["weave_agent_url"] = call_url
+
+
+def _apply_agent_graph_verification(
+    row: dict[str, Any],
+    root: Mapping[str, Any],
+) -> None:
+    claude = str(row.get("harness") or "") == "claude-code"
+    row["agent_graph_verified"] = bool(
+        row.get("trace_link_status") == "linked"
+        and root.get("weave_call_id")
+        and root.get("weave_ancestry_verified") is True
+        and root.get("eval_predict_and_score_call_id")
+        == row.get("eval_predict_and_score_call_id")
+        and root.get("attempt_id") == row.get("attempt_id")
+        and root.get("execution_fingerprint")
+        == row.get("execution_fingerprint")
+        and row.get("evaluation_prediction_graph_verified") is True
+        and (
+            not claude
+            or (
+                row.get("weave_authoritative_call_graph_verified") is True
+                and row.get("weave_agent_bridge_closed_verified") is True
+            )
+        )
+    )
+
+
 def _apply_observed_identity(row: dict[str, Any]) -> None:
     if row.get("status") == "not_applicable" or row.get("applicable") is False:
         row.update(
@@ -1353,6 +2647,8 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
     expected_run_key = str(row.get("run_key") or "")
     expected_task = str(row.get("task_name") or row.get("task_id") or "")
     expected_candidate = str(row.get("candidate_id") or "")
+    expected_attempt_id = str(row.get("attempt_id") or "")
+    expected_execution = str(row.get("execution_fingerprint") or "")
     expected_example = str(row.get("comparison_example_id") or "")
     expected_trial = _positive_int(row.get("trial_index"))
     matches: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1370,6 +2666,16 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
         if (
             expected_candidate
             and str(root.get("candidate_id") or "") != expected_candidate
+        ):
+            continue
+        if (
+            expected_attempt_id
+            and str(root.get("attempt_id") or "") != expected_attempt_id
+        ):
+            continue
+        if (
+            expected_execution
+            and str(root.get("execution_fingerprint") or "") != expected_execution
         ):
             continue
         if (
@@ -1391,6 +2697,11 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
         return
     root = next(iter(matches.values()))
     link_status = "linked" if row.get("trace_link_status") == "linked" else "observed"
+    _apply_verified_agent_evidence(
+        row,
+        root,
+        project=str(row.get("trace_project") or ""),
+    )
     row.update(
         {
             "observed_conversation_id": root.get("conversation_id"),
@@ -1400,6 +2711,47 @@ def _apply_observed_identity(row: dict[str, Any]) -> None:
             "trace_link_error": None,
         }
     )
+    _apply_conversation_correlation(row, root)
+
+
+def _apply_conversation_correlation(
+    row: dict[str, Any],
+    root: Mapping[str, Any],
+) -> None:
+    """Correlate planned and native identities without claiming they are equal."""
+
+    planned = str(row.get("planned_conversation_id") or "")
+    observed = str(root.get("conversation_id") or "")
+    native_sessions = {
+        str(value)
+        for value in row.get("native_session_ids") or ()
+        if str(value)
+    }
+    failures: list[str] = []
+    if not planned:
+        failures.append("planned conversation identity is missing")
+    if not observed:
+        failures.append("native conversation identity is missing")
+    if native_sessions and observed not in native_sessions:
+        failures.append(
+            "native Agent root does not match the harness session receipt"
+        )
+    for key in ("attempt_id", "execution_fingerprint"):
+        if not row.get(key) or str(root.get(key) or "") != str(row.get(key) or ""):
+            failures.append(f"native Agent root does not match {key}")
+    verified = not failures
+    row["conversation_correlation_verified"] = verified
+    row["conversation_ids_match"] = bool(
+        verified and planned and observed and planned == observed
+    )
+    row["conversation_correlation"] = {
+        "status": "verified" if verified else "invalid",
+        "planned_conversation_id": planned or None,
+        "observed_conversation_id": observed or None,
+        "native_session_ids": sorted(native_sessions),
+        "identities_equal": row["conversation_ids_match"],
+        "reason": "; ".join(failures) if failures else None,
+    }
 
 
 def _apply_trace_summary(row: dict[str, Any], summary: dict[str, Any]) -> None:
@@ -1600,7 +2952,7 @@ def publish_to_weave(
                         model=_evaluation_model(candidate),
                         dataset=datasets[scope_id],
                         eval_attributes=_evaluation_scope_attributes(candidate),
-                        scorers=score_names,
+                        scorers=_weave_predefined_scorer_names(score_names),
                     )
                 for row, inputs in zip(
                     candidate["rows"], candidate["prediction_inputs"], strict=True
@@ -1675,6 +3027,7 @@ def publish_to_weave(
                     candidate_id=candidate["candidate_id"],
                     name=name,
                     examples=len(candidate["rows"]),
+                    project=project,
                     url=url,
                     evaluation_ref=evaluation_ref,
                     dataset_ref=dataset_ref,
@@ -1966,6 +3319,7 @@ def _published_evaluation_from_marker(
         candidate_id=candidate_id,
         name=name,
         examples=examples,
+        project=project,
         url=str(value["url"]) if value.get("url") else None,
         evaluation_ref=(
             str(value["evaluation_ref"]) if value.get("evaluation_ref") else None
@@ -2135,6 +3489,16 @@ def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
     row = candidate["rows"][0]
+    attempt_ids = sorted(
+        str(item["attempt_id"])
+        for item in candidate["rows"]
+        if item.get("attempt_id")
+    )
+    execution_fingerprints = sorted(
+        str(item["execution_fingerprint"])
+        for item in candidate["rows"]
+        if item.get("execution_fingerprint")
+    )
     return _drop_none(
         {
             "fugue.evaluation_scope_id": candidate["evaluation_scope_id"],
@@ -2145,6 +3509,21 @@ def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "wandb.research_id": row.get("wandb_research_id"),
             "wandb.study_id": row.get("wandb_study_id"),
             "fugue.research_experiment_id": row.get("research_experiment_id"),
+            "fugue.source_evidence_project": row.get(
+                "source_evidence_project"
+            ),
+            "fugue.result_evidence_project": row.get(
+                "result_evidence_project"
+            ),
+            "fugue.study_console_backlink": row.get(
+                "study_console_backlink"
+            ),
+            "fugue.variant_id": row.get("variant_id"),
+            "fugue.candidate_id": row.get("candidate_id"),
+            "fugue.attempt_ids": "|".join(attempt_ids) or None,
+            "fugue.execution_fingerprints": (
+                "|".join(execution_fingerprints) or None
+            ),
         }
     )
 
@@ -2173,6 +3552,15 @@ def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "wandb.research_id": row.get("wandb_research_id"),
             "wandb.study_id": row.get("wandb_study_id"),
             "fugue.research_experiment_id": row.get("research_experiment_id"),
+            "fugue.source_evidence_project": row.get(
+                "source_evidence_project"
+            ),
+            "fugue.result_evidence_project": row.get(
+                "result_evidence_project"
+            ),
+            "fugue.study_console_backlink": row.get(
+                "study_console_backlink"
+            ),
             "fugue.tags": "|".join(str(x) for x in row.get("tags") or []),
         }
     )
@@ -2189,7 +3577,15 @@ def _evaluation_output(
         ]
         if value
     ]
-    trace_ids = [str(value) for value in row.get("weave_trace_ids") or [] if value]
+    trace_ids = [
+        str(value)
+        for value in (
+            row.get("otel_trace_ids")
+            or row.get("weave_trace_ids")
+            or []
+        )
+        if value
+    ]
     return _drop_none(
         {
             "status": _outcome_status(row),
@@ -2197,13 +3593,19 @@ def _evaluation_output(
             "observed_conversation_id": next(iter(dict.fromkeys(conversations)), None),
             "planned_conversation_id": row.get("planned_conversation_id")
             or row.get("weave_conversation_id"),
-            "trace_id": trace_ids[0] if trace_ids else None,
+            "trace_id": row.get("otel_trace_id")
+            or (trace_ids[0] if trace_ids else None),
             "root_span_id": next(
                 (
                     value
                     for value in [
+                        row.get("otel_root_span_id"),
                         row.get("root_span_id"),
-                        *(row.get("weave_root_span_ids") or []),
+                        *(
+                            row.get("otel_root_span_ids")
+                            or row.get("weave_root_span_ids")
+                            or []
+                        ),
                     ]
                     if value
                 ),
@@ -2379,6 +3781,21 @@ def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(values)
 
 
+def _weave_predefined_scorer_names(names: list[str]) -> list[str]:
+    """Match the identifiers Weave assigns when a score is logged by string name."""
+    normalized: list[str] = []
+    for name in names:
+        value = re.sub(r"\W", "", name)
+        if not value:
+            value = "GeneratedClass"
+        elif not value[0].isalpha() and value[0] != "_":
+            value = f"C{value}"
+        if keyword.iskeyword(value):
+            value = f"{value}Class"
+        normalized.append(value)
+    return normalized
+
+
 def _dataset_name(candidate: dict[str, Any]) -> str:
     row = candidate["rows"][0]
     return _safe_slug(
@@ -2388,7 +3805,8 @@ def _dataset_name(candidate: dict[str, Any]) -> str:
                 "fugue",
                 row.get("experiment_id") or "experiment",
                 row.get("workload_id") or "workload",
-                candidate["evaluation_scope_id"][:10],
+                row.get("harness") or "harness",
+                "tasks",
             )
         )
     )
@@ -2401,7 +3819,8 @@ def _evaluation_name(candidate: dict[str, Any]) -> str:
         for value in (
             row.get("experiment_id") or "fugue",
             row.get("workload_id") or "workload",
-            candidate["evaluation_scope_id"][:10],
+            row.get("harness") or "harness",
+            row.get("variant_id") or "candidate",
         )
     )
 
@@ -2424,15 +3843,321 @@ def _candidate_model_name(candidate: dict[str, Any]) -> str:
 
 def _logger_ref(logger: Any, attribute: str) -> str | None:
     value = getattr(logger, attribute, None)
-    ref = getattr(value, "ref", None)
-    uri = getattr(ref, "uri", None)
-    return str(uri or ref) if ref else None
+    return _ref_uri(value)
 
 
 def _object_ref(value: Any) -> str | None:
+    return _ref_uri(value)
+
+
+def _ref_uri(value: Any) -> str | None:
     ref = getattr(value, "ref", None)
     uri = getattr(ref, "uri", None)
-    return str(uri or ref) if ref else None
+    if ref:
+        return str(uri() if callable(uri) else uri or ref)
+    # Weave Call inputs serialize persisted Objects as ObjectRef values rather
+    # than reusing the local Python Object instance.  Treat a direct Ref as the
+    # same immutable identity instead of relying on process-local `is`
+    # equality.
+    direct_uri = getattr(value, "uri", None)
+    if direct_uri:
+        return str(direct_uri() if callable(direct_uri) else direct_uri)
+    return None
+
+
+def _object_url(value: Any, ref: str | None) -> str | None:
+    direct = str(getattr(value, "ui_url", "") or "")
+    if direct:
+        return direct
+    if not ref:
+        return None
+    parsed = urllib.parse.urlsplit(ref)
+    parts = parsed.path.strip("/").split("/")
+    if parsed.scheme != "weave" or len(parts) != 4 or parts[2] != "object":
+        return None
+    entity, project, _, version = parts
+    if ":" not in version:
+        return None
+    name, digest = version.rsplit(":", 1)
+    if not all((entity, project, name, digest)):
+        return None
+    return (
+        f"https://wandb.ai/{urllib.parse.quote(entity, safe='')}/"
+        f"{urllib.parse.quote(project, safe='')}/weave/objects/"
+        f"{urllib.parse.quote(name, safe='')}/versions/"
+        f"{urllib.parse.quote(digest, safe='')}"
+    )
+
+
+def _weave_call_ref(project: str, call_id: str) -> str | None:
+    if project.count("/") != 1 or not call_id:
+        return None
+    entity, project_id = project.split("/", 1)
+    if not entity or not project_id:
+        return None
+    return f"weave:///{entity}/{project_id}/call/{call_id}"
+
+
+def _weave_call_url(
+    project: str,
+    call_id: str,
+    *,
+    app_base_url: str = "https://wandb.ai",
+) -> str | None:
+    if project.count("/") != 1 or not call_id:
+        return None
+    entity, project_id = project.split("/", 1)
+    if not entity or not project_id:
+        return None
+    return (
+        f"{app_base_url.rstrip('/')}/{urllib.parse.quote(entity, safe='')}/"
+        f"{urllib.parse.quote(project_id, safe='')}/weave/calls/"
+        f"{urllib.parse.quote(call_id, safe='')}"
+    )
+
+
+def _apply_call_evidence(
+    row: dict[str, Any],
+    *,
+    prefix: str,
+    call: Any,
+    project: str,
+) -> None:
+    call_id = str(getattr(call, "id", "") or "")
+    if not call_id:
+        return
+    ref = _ref_uri(call) or _weave_call_ref(project, call_id)
+    receipt = row.get("trace_receipt")
+    app_base_url = (
+        str(receipt.get("app_base_url") or "https://wandb.ai")
+        if isinstance(receipt, Mapping)
+        else "https://wandb.ai"
+    )
+    url = _weave_call_url(
+        project,
+        call_id,
+        app_base_url=app_base_url,
+    )
+    row[f"{prefix}_call_id"] = call_id
+    if ref:
+        row[f"{prefix}_ref"] = ref
+    if url:
+        row[f"{prefix}_url"] = url
+    # Navigation metadata is not evidence that the Call exists or belongs in
+    # the Evaluation graph. `_verify_live_evaluation_graph` owns that claim
+    # using the live SDK objects and their parent/trace/project relationships.
+    row[f"{prefix}_object_verified"] = False
+
+
+def _apply_evaluation_evidence(
+    row: dict[str, Any],
+    *,
+    logger: Any,
+    dataset: Any,
+    project: str,
+) -> None:
+    evaluation = getattr(logger, "_pseudo_evaluation", None)
+    evaluation_ref = _ref_uri(evaluation)
+    evaluation_call = getattr(logger, "_evaluate_call", None)
+    evaluation_call_id = _live_call_value(evaluation_call, "id")
+    receipt = row.get("trace_receipt")
+    app_base_url = (
+        str(receipt.get("app_base_url") or "https://wandb.ai")
+        if isinstance(receipt, Mapping)
+        else "https://wandb.ai"
+    )
+    evaluation_url = (
+        _weave_call_url(
+            project,
+            evaluation_call_id,
+            app_base_url=app_base_url,
+        )
+        if evaluation_call_id
+        else None
+    )
+    evaluation_call_ref = _ref_uri(evaluation_call) or (
+        _weave_call_ref(project, evaluation_call_id)
+        if evaluation_call_id
+        else None
+    )
+    dataset_ref = _object_ref(dataset)
+    dataset_url = _object_url(dataset, dataset_ref)
+    if evaluation_call_id:
+        row["weave_evaluation_root_call_id"] = evaluation_call_id
+    if evaluation_call_ref:
+        row["weave_evaluation_root_ref"] = evaluation_call_ref
+    if evaluation_url:
+        row["weave_evaluation_root_url"] = evaluation_url
+    if evaluation_ref:
+        row["weave_evaluation_id"] = evaluation_ref
+        row["weave_evaluation_ref"] = evaluation_ref
+        # Kept for existing comparison readers.
+        row["evaluation_id"] = evaluation_ref
+    if evaluation_url:
+        row["weave_evaluation_url"] = evaluation_url
+        row["evaluation_url"] = evaluation_url
+    if dataset_ref:
+        row["weave_dataset_id"] = dataset_ref
+        row["weave_dataset_ref"] = dataset_ref
+        row["dataset_id"] = dataset_ref
+    if dataset_url:
+        row["weave_dataset_url"] = dataset_url
+        row["dataset_url"] = dataset_url
+    evaluation_inputs = getattr(evaluation_call, "inputs", None)
+    evaluation_input_ref = (
+        _ref_uri(evaluation_inputs.get("self"))
+        if isinstance(evaluation_inputs, Mapping)
+        else None
+    )
+    root_owns_evaluation = bool(
+        evaluation_ref
+        and evaluation_input_ref == evaluation_ref
+    )
+    evaluation_dataset_ref = _object_ref(
+        getattr(evaluation, "dataset", None)
+    )
+    evaluation_owns_dataset = bool(
+        evaluation is not None
+        and dataset_ref
+        and evaluation_dataset_ref == dataset_ref
+    )
+    evaluation_call_project = _live_call_value(evaluation_call, "project_id")
+    row["evaluation_root_object_verified"] = bool(
+        evaluation_call_id
+        and evaluation_call_project == project
+        and root_owns_evaluation
+        and _canonical_object_ref(evaluation_ref, project=project)
+    )
+    row["evaluation_root_dataset_relationship_verified"] = bool(
+        row["evaluation_root_object_verified"]
+        and evaluation_owns_dataset
+        and _canonical_object_ref(dataset_ref, project=project)
+    )
+    row["dataset_version_object_verified"] = bool(
+        row["evaluation_root_dataset_relationship_verified"]
+    )
+
+
+def _verify_live_evaluation_graph(
+    row: dict[str, Any],
+    *,
+    logger: Any,
+    dataset: Any,
+    prediction: Any,
+    project: str,
+) -> None:
+    """Verify the exact live Evaluation → prediction Call ancestry.
+
+    IDs, refs, and UI URLs are navigation metadata. They never establish this
+    relationship by themselves. The proof below uses the SDK objects returned
+    by the active EvaluationLogger and requires object ownership plus exact
+    parent, project, and trace relationships.
+    """
+
+    _apply_evaluation_evidence(
+        row,
+        logger=logger,
+        dataset=dataset,
+        project=project,
+    )
+    evaluation_call = getattr(logger, "_evaluate_call", None)
+    prediction_evaluation_call = getattr(prediction, "evaluate_call", None)
+    predict_and_score_call = getattr(prediction, "predict_and_score_call", None)
+    predict_call = getattr(prediction, "predict_call", None)
+    evaluation_call_id = _live_call_value(evaluation_call, "id")
+    predict_and_score_id = _live_call_value(predict_and_score_call, "id")
+    predict_id = _live_call_value(predict_call, "id")
+    evaluation_trace_id = _live_call_value(evaluation_call, "trace_id")
+    predict_and_score_trace_id = _live_call_value(
+        predict_and_score_call, "trace_id"
+    )
+    predict_trace_id = _live_call_value(predict_call, "trace_id")
+    if evaluation_trace_id:
+        row["weave_evaluation_root_trace_id"] = evaluation_trace_id
+    if predict_and_score_trace_id:
+        row["eval_predict_and_score_trace_id"] = predict_and_score_trace_id
+    if predict_trace_id:
+        row["weave_prediction_trace_id"] = predict_trace_id
+    evaluation_owns_prediction = bool(
+        evaluation_call is not None
+        and prediction_evaluation_call is evaluation_call
+        and predict_and_score_id
+        and _live_call_value(predict_and_score_call, "parent_id")
+        == evaluation_call_id
+        and _live_call_value(predict_and_score_call, "project_id") == project
+        and _same_nonempty_trace(
+            evaluation_trace_id,
+            predict_and_score_trace_id,
+        )
+    )
+    prediction_is_child = bool(
+        predict_id
+        and _live_call_value(predict_call, "parent_id") == predict_and_score_id
+        and _live_call_value(predict_call, "project_id") == project
+        and _same_nonempty_trace(predict_and_score_trace_id, predict_trace_id)
+    )
+    row["evaluation_root_prediction_relationship_verified"] = (
+        evaluation_owns_prediction
+    )
+    row["prediction_child_relationship_verified"] = prediction_is_child
+    row["eval_predict_and_score_object_verified"] = bool(
+        evaluation_owns_prediction
+    )
+    row["weave_prediction_object_verified"] = bool(prediction_is_child)
+    row["evaluation_prediction_graph_verified"] = bool(
+        row.get("evaluation_root_object_verified") is True
+        and row.get("dataset_version_object_verified") is True
+        and evaluation_owns_prediction
+        and prediction_is_child
+    )
+    row["weave_evidence_verification_source"] = "live_weave_sdk_v1"
+    if not row["evaluation_prediction_graph_verified"]:
+        row["evaluation_prediction_graph_error"] = (
+            "live Weave Evaluation, Dataset, prediction-and-score, and "
+            "prediction ownership did not reconcile"
+        )
+    else:
+        row.pop("evaluation_prediction_graph_error", None)
+
+
+def _live_call_value(call: Any, key: str) -> str:
+    return str(getattr(call, key, "") or "")
+
+
+def _same_nonempty_trace(left: str, right: str) -> bool:
+    return bool(left and right and left == right)
+
+
+def _w3c_trace_id(value: str) -> str | None:
+    """Return the W3C 16-byte trace ID for a Weave trace identity.
+
+    Weave Call objects currently expose their trace identity as a UUID while
+    OpenTelemetry's ``traceparent`` wire format uses the same bytes as 32
+    lowercase hex characters.  The conversion is lossless; the Weave form
+    remains authoritative for persisted Call ancestry.
+    """
+
+    compact = value.replace("-", "").lower()
+    if re.fullmatch(r"[0-9a-f]{32}", compact) is None or compact == "0" * 32:
+        return None
+    return compact
+
+
+def _canonical_object_ref(ref: str | None, *, project: str) -> bool:
+    if not ref or project.count("/") != 1:
+        return False
+    parsed = urllib.parse.urlsplit(ref)
+    parts = parsed.path.strip("/").split("/")
+    if (
+        parsed.scheme != "weave"
+        or len(parts) != 4
+        or parts[2] != "object"
+        or "/".join(parts[:2]) != project
+        or ":" not in parts[3]
+    ):
+        return False
+    name, digest = parts[3].rsplit(":", 1)
+    return bool(name and digest)
 
 
 def _outcome_status(row: dict[str, Any]) -> str:
@@ -2481,6 +4206,7 @@ def fetch_weave_summaries(
     *,
     run_keys: list[str],
     conversation_ids_by_run: Mapping[str, list[str]] | None = None,
+    call_ids_by_run: Mapping[str, list[str]] | None = None,
     project: str,
     timeout_sec: float = 30.0,
     env: Mapping[str, str] | None = None,
@@ -2501,14 +4227,50 @@ def fetch_weave_summaries(
     summaries: dict[str, dict[str, Any]] = {}
     with httpx.Client(timeout=timeout_sec, headers=headers) as client:
         for run_key in run_keys:
-            summaries[run_key] = _summarize_spans(
-                _fetch_calls_spans(client, base_url, project, run_key)
-                + _fetch_agents_spans(
-                    client,
-                    agents_base_url,
-                    project,
-                    (conversation_ids_by_run or {}).get(run_key, []),
+            required_call_ids = list(
+                dict.fromkeys((call_ids_by_run or {}).get(run_key, []))
+            )
+            run_calls = [
+                {
+                    **value,
+                    "_fugue_evidence_source": _WEAVE_CALL_SOURCE,
+                    "_fugue_query_project": project,
+                }
+                for value in _fetch_calls_spans(
+                    client, base_url, project, run_key
                 )
+            ]
+            required_calls = [
+                {
+                    **value,
+                    "_fugue_evidence_source": _WEAVE_CALL_SOURCE,
+                    "_fugue_query_project": project,
+                    "_fugue_required_call": True,
+                }
+                for value in _fetch_call_ids(
+                    client,
+                    base_url,
+                    project,
+                    required_call_ids,
+                )
+            ]
+            summaries[run_key] = _summarize_spans(
+                run_calls
+                + required_calls
+                + [
+                    {
+                        **value,
+                        "_fugue_evidence_source": _WEAVE_AGENT_SPAN_SOURCE,
+                    }
+                    for value in _fetch_agents_spans(
+                        client,
+                        agents_base_url,
+                        project,
+                        (conversation_ids_by_run or {}).get(run_key, []),
+                    )
+                ],
+                project=project,
+                required_call_ids=required_call_ids,
             )
     return summaries
 
@@ -2534,6 +4296,34 @@ def _fetch_calls_spans(
     response = client.post(f"{base_url}/calls/stream_query", json=payload)
     if response.status_code >= 400:
         raise RuntimeError(f"Weave Calls query failed with HTTP {response.status_code}")
+    return _decode_call_stream(response.text)
+
+
+def _fetch_call_ids(
+    client: httpx.Client,
+    base_url: str,
+    project: str,
+    call_ids: list[str],
+) -> list[dict[str, Any]]:
+    unique_ids = list(dict.fromkeys(str(value) for value in call_ids if value))
+    if not unique_ids:
+        return []
+    response = client.post(
+        f"{base_url}/calls/stream_query",
+        json={
+            "project_id": project,
+            "filter": {
+                "trace_roots_only": False,
+                "call_ids": unique_ids,
+            },
+            "limit": len(unique_ids),
+        },
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            "Weave authoritative Calls query failed with "
+            f"HTTP {response.status_code}"
+        )
     return _decode_call_stream(response.text)
 
 
@@ -2595,26 +4385,48 @@ def _fetch_agents_spans(
     return spans
 
 
-def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize_spans(
+    spans: list[dict[str, Any]],
+    *,
+    project: str | None = None,
+    required_call_ids: list[str] | None = None,
+) -> dict[str, Any]:
     unique: dict[str, dict[str, Any]] = {}
     for index, span in enumerate(spans):
-        identity = str(
-            span.get("id")
-            or span.get("span_id")
-            or span.get("call_id")
-            or f"row-{index}"
+        identity = ":".join(
+            (
+                str(span.get("_fugue_evidence_source") or "unspecified"),
+                str(
+                    span.get("id")
+                    or span.get("span_id")
+                    or span.get("call_id")
+                    or f"row-{index}"
+                ),
+            )
         )
         unique[identity] = span
-    values = list(unique.values())
+    all_values = list(unique.values())
+    agent_values = [
+        span
+        for span in all_values
+        if span.get("_fugue_evidence_source") != _WEAVE_CALL_SOURCE
+    ]
+    # Agents spans are the authoritative OTel record for operations and usage.
+    # Calls remain available below solely for resolving durable Weave Call IDs.
+    values = agent_values or all_values
     if not values:
         return {
             "weave_span_count": 0,
             "weave_observability_status": "unavailable",
             "weave_agent_names": [],
             "weave_conversation_ids": [],
-            "weave_trace_ids": [],
-            "weave_root_span_ids": [],
+            "otel_trace_ids": [],
+            "otel_root_span_ids": [],
             "weave_root_spans": [],
+            "weave_authoritative_call_graph": [],
+            "weave_authoritative_missing_call_ids": sorted(
+                set(required_call_ids or ())
+            ),
             "weave_usage_status": "unavailable",
             "weave_usage_source": "unavailable",
             "weave_input_tokens": None,
@@ -2650,25 +4462,31 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
             if (value := span.get("agent_name") or attrs.get("gen_ai.agent.name"))
         }
     )
-    trace_ids = sorted(
-        {str(value) for span in values if (value := _span_value(span, "trace_id"))}
-    )
-    root_span_ids = sorted(
-        {
-            str(_span_value(span, "id") or _span_value(span, "span_id"))
-            for span in values
-            if _span_operation(span) == "invoke_agent"
-            and not (
-                _span_value(span, "parent_id") or _span_value(span, "parent_span_id")
-            )
-        }
-        - {"None"}
-    )
-    roots = [
+    otel_spans = [
         span
         for span in values
-        if _span_operation(span) == "invoke_agent"
-        and not (_span_value(span, "parent_id") or _span_value(span, "parent_span_id"))
+        if span.get("_fugue_evidence_source") != _WEAVE_CALL_SOURCE
+    ]
+    roots = _agent_root_spans(otel_spans)
+    root_identities = {
+        str(_span_value(span, "span_id") or _span_value(span, "id"))
+        for span in roots
+    }
+    trace_ids = sorted(
+        {
+            str(value)
+            for span in otel_spans
+            if (value := _span_value(span, "trace_id"))
+        }
+    )
+    root_span_ids = sorted(
+        root_identities - {"None"}
+    )
+    weave_agent_calls = [
+        span
+        for span in all_values
+        if span.get("_fugue_evidence_source") == _WEAVE_CALL_SOURCE
+        and _span_operation(span) == "invoke_agent"
     ]
     tool_names = Counter(
         str(value)
@@ -2682,15 +4500,37 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
     error_events = [
         _error_event_from_span(span) for span in values if _span_has_error(span)
     ]
-    root_id = next(
-        (
-            str(value)
-            for span in roots
-            if (value := _span_value(span, "id") or _span_value(span, "span_id"))
-        ),
-        None,
+    root_spans = [
+        _root_span_summary(
+            span,
+            weave_call=_matched_agent_call(span, weave_agent_calls),
+            project=project,
+        )
+        for span in roots
+    ]
+    root_call_ids = sorted(
+        {
+            str(root["weave_call_id"])
+            for root in root_spans
+            if root.get("weave_call_id")
+        }
     )
-    root_spans = [_root_span_summary(span) for span in roots]
+    required_ids = {
+        str(value) for value in (required_call_ids or ()) if value
+    }
+    authoritative_call_ids = required_ids | set(root_call_ids)
+    authoritative_calls = [
+        _authoritative_call_summary(span)
+        for span in all_values
+        if span.get("_fugue_evidence_source") == _WEAVE_CALL_SOURCE
+        and str(span.get("id") or span.get("call_id") or "")
+        in authoritative_call_ids
+    ]
+    observed_authoritative_ids = {
+        str(value["call_id"])
+        for value in authoritative_calls
+        if value.get("call_id")
+    }
     chat_spans = [span for span in values if _span_operation(span) == "chat"]
     tool_spans = [span for span in values if _span_operation(span) == "execute_tool"]
     gateway_call_ids = sorted(
@@ -2742,10 +4582,14 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         "weave_tool_names": dict(sorted(tool_names.items())),
         "weave_agent_names": agent_names,
         "weave_conversation_ids": conversation_ids,
-        "weave_trace_ids": trace_ids,
-        "weave_root_span_ids": root_span_ids,
+        "otel_trace_ids": trace_ids,
+        "otel_root_span_ids": root_span_ids,
         "weave_root_spans": root_spans,
-        "weave_call_id": root_id,
+        "weave_authoritative_call_graph": authoritative_calls,
+        "weave_authoritative_missing_call_ids": sorted(
+            required_ids - observed_authoritative_ids
+        ),
+        "weave_call_id": root_call_ids[0] if len(root_call_ids) == 1 else None,
         "weave_agent_latency_sec": _root_latency(roots),
         "weave_model_latency_sec": _root_latency(chat_spans),
         "weave_fugue_attributes": fugue_attributes,
@@ -2754,6 +4598,34 @@ def _summarize_spans(spans: list[dict[str, Any]]) -> dict[str, Any]:
         "_weave_agent_response": _latest_agent_response([*roots, *chat_spans]),
         **usage,
     }
+
+
+def _authoritative_call_summary(call: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(call)
+    ended_at = (
+        value.get("ended_at")
+        or value.get("end_time")
+        or value.get("finished_at")
+    )
+    return _drop_none(
+        {
+            "call_id": str(value.get("id") or value.get("call_id") or ""),
+            "parent_id": (
+                str(_span_value(value, "parent_id") or "") or None
+            ),
+            "project_id": (
+                str(
+                    _span_value(value, "project_id")
+                    or value.get("_fugue_query_project")
+                    or ""
+                )
+                or None
+            ),
+            "trace_id": str(_span_value(value, "trace_id") or "") or None,
+            "op_name": _span_operation(value) or None,
+            "terminal": bool(ended_at),
+        }
+    )
 
 
 def _latest_agent_response(spans: list[dict[str, Any]]) -> str | None:
@@ -2817,8 +4689,111 @@ def _nested_value(value: Any, key: str, *, _depth: int = 0) -> Any:
     return None
 
 
-def _root_span_summary(span: dict[str, Any]) -> dict[str, Any]:
+def _agent_root_identity(span: Mapping[str, Any]) -> dict[str, str]:
+    value = dict(span)
+    attrs = _span_attributes(value)
+    return {
+        "conversation_id": str(
+            value.get("conversation_id")
+            or attrs.get("gen_ai.conversation.id")
+            or ""
+        ),
+        "run_key": str(attrs.get("fugue.run_key") or ""),
+        "harness": str(attrs.get("fugue.harness") or ""),
+        "task_id": str(attrs.get("fugue.task_id") or ""),
+        "candidate_id": str(attrs.get("fugue.candidate_id") or ""),
+        "attempt_id": str(attrs.get("fugue.attempt_id") or ""),
+        "execution_fingerprint": str(
+            attrs.get("fugue.execution_fingerprint") or ""
+        ),
+        "comparison_example_id": str(
+            attrs.get("fugue.comparison_example_id") or ""
+        ),
+        "trial_index": str(attrs.get("fugue.trial_index") or ""),
+        "eval_predict_and_score_call_id": str(
+            attrs.get("weave.eval.predict_and_score_call_id") or ""
+        ),
+    }
+
+
+def _matched_agent_call(
+    root: Mapping[str, Any],
+    calls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    explicit_call_id = str(root.get("call_id") or "")
+    if explicit_call_id:
+        matches = [
+            call
+            for call in calls
+            if str(call.get("id") or call.get("call_id") or "")
+            == explicit_call_id
+        ]
+        return matches[0] if len(matches) == 1 else None
+    expected = _agent_root_identity(root)
+    if not expected or any(not value for value in expected.values()):
+        return None
+    matches = [
+        call
+        for call in calls
+        if _agent_root_identity(call) == expected
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _mapping_ref(value: Mapping[str, Any]) -> str | None:
+    raw = value.get("ref") or value.get("uri")
+    if isinstance(raw, Mapping):
+        raw = raw.get("uri")
+    return str(raw) if raw else None
+
+
+def _root_span_summary(
+    span: dict[str, Any],
+    *,
+    weave_call: Mapping[str, Any] | None = None,
+    project: str | None = None,
+) -> dict[str, Any]:
     attrs = _span_attributes(span)
+    call_id = str(
+        (
+            weave_call.get("id")
+            or weave_call.get("call_id")
+            if weave_call is not None
+            else None
+        )
+        or ""
+    )
+    call_ref = _mapping_ref(weave_call) if weave_call is not None else None
+    call_url = str(
+        (
+            weave_call.get("ui_url") or weave_call.get("url")
+            if weave_call is not None
+            else None
+        )
+        or ""
+    )
+    if call_id and project:
+        call_ref = call_ref or _weave_call_ref(project, call_id)
+        call_url = call_url or _weave_call_url(project, call_id)
+    call_parent_id = (
+        str(_span_value(dict(weave_call), "parent_id") or "")
+        if weave_call is not None
+        else ""
+    )
+    call_project_id = (
+        str(
+            _span_value(dict(weave_call), "project_id")
+            or weave_call.get("_fugue_query_project")
+            or ""
+        )
+        if weave_call is not None
+        else ""
+    )
+    call_trace_id = (
+        str(_span_value(dict(weave_call), "trace_id") or "")
+        if weave_call is not None
+        else ""
+    )
     return _drop_none(
         {
             "conversation_id": span.get("conversation_id")
@@ -2826,10 +4801,22 @@ def _root_span_summary(span: dict[str, Any]) -> dict[str, Any]:
             "agent_name": span.get("agent_name") or attrs.get("gen_ai.agent.name"),
             "trace_id": _span_value(span, "trace_id"),
             "span_id": _span_value(span, "span_id") or _span_value(span, "id"),
+            "otel_parent_span_id": (
+                _span_value(span, "parent_span_id")
+                or _span_value(span, "parent_id")
+            ),
+            "weave_call_id": call_id or None,
+            "weave_call_ref": call_ref,
+            "weave_call_url": call_url or None,
+            "weave_call_parent_id": call_parent_id or None,
+            "weave_call_project_id": call_project_id or None,
+            "weave_call_trace_id": call_trace_id or None,
             "run_key": attrs.get("fugue.run_key"),
             "harness": attrs.get("fugue.harness"),
             "task_id": attrs.get("fugue.task_id"),
             "candidate_id": attrs.get("fugue.candidate_id"),
+            "attempt_id": attrs.get("fugue.attempt_id"),
+            "execution_fingerprint": attrs.get("fugue.execution_fingerprint"),
             "comparison_example_id": attrs.get("fugue.comparison_example_id"),
             "trial_index": attrs.get("fugue.trial_index"),
             "eval_predict_and_score_call_id": attrs.get(
@@ -2914,6 +4901,32 @@ def _span_has_error(span: dict[str, Any]) -> bool:
     )
 
 
+def _agent_root_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    span_ids = {
+        str(value)
+        for span in spans
+        if (
+            value := _span_value(span, "span_id")
+            or _span_value(span, "id")
+        )
+    }
+    roots: list[dict[str, Any]] = []
+    for span in spans:
+        if _span_operation(span) != "invoke_agent":
+            continue
+        parent_id = str(
+            _span_value(span, "parent_span_id")
+            or _span_value(span, "parent_id")
+            or ""
+        )
+        # Remote W3C parents belong to the host Evaluation bridge and are not
+        # returned by the Agents API. Nested invoke_agent spans, by contrast,
+        # point to another fetched Agent span and are not native roots.
+        if not parent_id or parent_id not in span_ids:
+            roots.append(span)
+    return roots
+
+
 def _span_usage_summary(
     spans: list[dict[str, Any]], attributes: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -2922,11 +4935,11 @@ def _span_usage_summary(
         for span, attrs in zip(spans, attributes, strict=True)
         if _span_operation(span) == "chat"
     ]
+    root_ids = {id(span) for span in _agent_root_spans(spans)}
     roots = [
         (span, attrs)
         for span, attrs in zip(spans, attributes, strict=True)
-        if _span_operation(span) == "invoke_agent"
-        and not (_span_value(span, "parent_id") or _span_value(span, "parent_span_id"))
+        if id(span) in root_ids
     ]
     selected: list[tuple[dict[str, Any], dict[str, Any]]] = []
     source = "unavailable"
@@ -3034,6 +5047,8 @@ _REQUIRED_FUGUE_ATTRIBUTES = (
     "fugue.trial_index",
     "fugue.comparison_example_id",
     "fugue.candidate_id",
+    "fugue.attempt_id",
+    "fugue.execution_fingerprint",
     "fugue.model_provider",
     "fugue.model",
 )
@@ -3484,6 +5499,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
             or meta.get("context_artifact")
         )
     wandb_serverless = _wandb_serverless_evidence(trial_dir, meta)
+    runtime_evidence = _runtime_evidence_from_meta(meta)
     return {
         "schema_version": 1,
         "record_type": "trial",
@@ -3494,6 +5510,8 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "candidate_id": meta.get("candidate_id"),
         "execution_fingerprint": meta.get("execution_fingerprint"),
         "execution_kind": meta.get("execution_kind", "agent"),
+        "applicable": meta.get("applicable"),
+        "skip_reason": meta.get("skip_reason"),
         "agent_execution_status": agent_execution_status,
         "identity_schema_version": meta.get("identity_schema_version"),
         "evaluation_scope_id": meta.get("evaluation_scope_id"),
@@ -3539,6 +5557,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "harbor_environment": meta.get("harbor_environment"),
         "harbor_resources": meta.get("harbor_resources", {}),
         "sandbox_runtime": meta.get("sandbox_runtime", {}),
+        **runtime_evidence,
         "agent_config_hash": meta.get("agent_config_hash"),
         "tags": meta.get("tags", []),
         "dataset": meta.get("dataset"),
@@ -3562,6 +5581,9 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "wandb_research_id": meta.get("wandb_research_id"),
         "wandb_study_id": meta.get("wandb_study_id"),
         "research_experiment_id": meta.get("research_experiment_id"),
+        "source_evidence_project": meta.get("source_evidence_project"),
+        "result_evidence_project": meta.get("result_evidence_project"),
+        "study_console_backlink": meta.get("study_console_backlink"),
         "reward": reward,
         "pass": reward == 1.0 if reward is not None else None,
         **prompt_injection,
@@ -3608,6 +5630,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         or meta.get("weave_conversation_id"),
         "weave_conversation_ids": meta.get("weave_conversation_ids", []),
         "native_session_ids": meta.get("native_session_ids", []),
+        "conversation_correlation": meta.get("conversation_correlation"),
         "task_interaction": task_interaction,
         "trace_content": meta.get("trace_content", "full"),
         "agent_response": (
@@ -3622,6 +5645,24 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "trial_dir": trial_dir.as_posix(),
         **wandb_serverless,
     }
+
+
+def _runtime_evidence_from_meta(meta: Mapping[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for evidence_field in ("agent_runtime", "task_runtime", "sandbox_attestation"):
+        value = meta.get(evidence_field)
+        if not isinstance(value, Mapping):
+            continue
+        observed = dict(value)
+        result[evidence_field] = observed
+        image_id = str(observed.get("image_id") or "")
+        if evidence_field in {"agent_runtime", "task_runtime"} and image_id:
+            result[f"{evidence_field}_image_id"] = image_id
+        if evidence_field == "sandbox_attestation":
+            digest = str(observed.get("attestation_digest") or "")
+            if digest:
+                result["sandbox_attestation_digest"] = digest
+    return result
 
 
 def _wandb_serverless_evidence(
@@ -3946,6 +5987,18 @@ def _context_event_summary(
     proxy_responses = [
         event for event in events if event.get("event") == "mcp_tool_response"
     ]
+    proxy_requests = [
+        event for event in events if event.get("event") == "mcp_tool_request"
+    ]
+    normalized_mcp_calls = _mcp_tool_call_evidence(
+        proxy_requests,
+        proxy_responses,
+    )
+    successful_mcp_calls = [
+        call
+        for call in normalized_mcp_calls
+        if call.get("terminal_status") == "succeeded"
+    ]
     provider_retrievals = [
         event for event in events if event.get("event") == "retrieve"
     ]
@@ -4013,6 +6066,19 @@ def _context_event_summary(
         "context_provider_event_count": sum(
             1 for event in events if event.get("layer") == "provider"
         ),
+        "mcp_tool_names": sorted(
+            {
+                str(call["tool"])
+                for call in successful_mcp_calls
+                if str(call.get("tool") or "")
+            }
+        ),
+        "mcp_tool_call_count": len(successful_mcp_calls),
+        "mcp_tool_error_count": (
+            len(normalized_mcp_calls) - len(successful_mcp_calls)
+        ),
+        "mcp_tool_calls": normalized_mcp_calls,
+        "mcp_queried_projects": _mcp_queried_projects(proxy_requests),
         "context_error_count": sum(1 for event in events if event.get("error"))
         + sum(
             event.get("event") in {"tool_failed", "tool_cancelled"}
@@ -4059,6 +6125,341 @@ def _context_event_summary(
             float(value.get("query_latency_ms") or 0.0) for value in vector_events
         ),
     }
+
+
+_MCP_ENTITY_KEYS = (
+    "entity",
+    "entity_name",
+    "entityName",
+    "wandb_entity",
+)
+_MCP_PROJECT_KEYS = (
+    "project",
+    "project_name",
+    "projectName",
+    "wandb_project",
+)
+_MCP_PROJECT_REF_KEYS = (
+    "project_path",
+    "project_ref",
+    "project_slug",
+    "entity_project",
+)
+_MCP_PROJECTION_KEYS = (
+    "columns",
+    "fields",
+    "selected_fields",
+    "keys",
+    "config_keys",
+    "summary_keys",
+)
+_MCP_BOUND_KEYS = ("limit", "max_items", "samples", "sample_size")
+_MCP_PARENT_ID_KEYS = (
+    "parent_id",
+    "parent_ids",
+    "parent_call_id",
+    "parent_call_ids",
+)
+_MCP_OPERATION_FILTER_KEYS = (
+    "op_name",
+    "op_name_contains",
+    "operation_name",
+    "operation_name_contains",
+)
+_MCP_SAFE_MECHANISM_KEYS = (
+    "resource",
+    "response_mode",
+    "target_x",
+    "x_axis",
+    "max_evals",
+    "run_id",
+)
+_MCP_TERMINAL_STATUSES = {
+    "succeeded",
+    "structured_error",
+    "protocol_error",
+}
+
+
+def _mcp_tool_call_evidence(
+    events: list[dict[str, Any]],
+    responses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return bounded, secret-free MCP mechanism metadata for host scorers."""
+
+    result: list[dict[str, Any]] = []
+    response_index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for response in responses:
+        request_id = str(response.get("request_id") or "")
+        if not request_id:
+            continue
+        key = (str(response.get("server") or ""), request_id)
+        response_index.setdefault(key, []).append(response)
+    for event in events:
+        arguments = event.get("arguments")
+        if not isinstance(arguments, Mapping):
+            continue
+        fields: set[str] = set()
+        requested_keys: set[str] = set()
+        limits: list[int] = []
+        sample_counts: list[int] = []
+        parent_ids: set[str] = set()
+        operation_filters: dict[str, set[str]] = {
+            key: set() for key in _MCP_OPERATION_FILTER_KEYS
+        }
+        safe_values: dict[str, list[str | int | float | bool]] = {
+            key: [] for key in _MCP_SAFE_MECHANISM_KEYS
+        }
+        for values in _nested_mappings(arguments):
+            for key in _MCP_SAFE_MECHANISM_KEYS:
+                selected = values.get(key)
+                if (
+                    isinstance(selected, str | int | float | bool)
+                    and str(selected).strip()
+                ):
+                    safe_values[key].append(selected)
+            for key in _MCP_PROJECTION_KEYS:
+                selected = values.get(key)
+                if not isinstance(selected, list):
+                    continue
+                for item in selected:
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+                    field = item.strip()
+                    fields.add(field)
+                    fields.add(field.rsplit(".", 1)[-1])
+                    if key == "keys":
+                        requested_keys.add(field)
+                    if key in {"config_keys", "summary_keys"}:
+                        fields.add(f"{key.removesuffix('_keys')}.{field}")
+            for key in _MCP_BOUND_KEYS:
+                bound = values.get(key)
+                if type(bound) is int and bound >= 0:
+                    if key in {"samples", "sample_size"}:
+                        sample_counts.append(bound)
+                    else:
+                        limits.append(bound)
+            for key in _MCP_PARENT_ID_KEYS:
+                parent = values.get(key)
+                candidates = parent if isinstance(parent, list) else [parent]
+                parent_ids.update(
+                    str(item).strip()
+                    for item in candidates
+                    if isinstance(item, str) and item.strip()
+                )
+            for key in _MCP_OPERATION_FILTER_KEYS:
+                operation = values.get(key)
+                candidates = (
+                    operation if isinstance(operation, list) else [operation]
+                )
+                operation_filters[key].update(
+                    str(item).strip()
+                    for item in candidates
+                    if isinstance(item, str) and item.strip()
+                )
+        raw_graphql_shape = _raw_graphql_query_shape(arguments)
+        fields.update(raw_graphql_shape.get("projected_fields") or ())
+        graphql_limit = raw_graphql_shape.get("graphql_requested_limit")
+        effective_limits = [
+            *limits,
+            *(
+                [graphql_limit]
+                if type(graphql_limit) is int and graphql_limit >= 0
+                else []
+            ),
+        ]
+        tool = str(event.get("tool") or "")
+        if (
+            tool == "query_wandb_tool"
+            and str(arguments.get("resource") or "").lower()
+            in {"run", "runs"}
+        ):
+            fields.add("id")
+        queried_projects = _mcp_queried_projects([event])
+        normalized_operation_filters = {
+            key: sorted(values)
+            for key, values in operation_filters.items()
+            if values
+        }
+        parent_filter = {
+            "parent_ids": sorted(parent_ids),
+            "operations": normalized_operation_filters,
+        }
+        evidence = {
+            "tool": tool,
+            "request_id": str(event.get("request_id") or "") or None,
+            "argument_keys": sorted(str(key) for key in arguments),
+            "queried_projects": queried_projects,
+            "queried_project": (
+                queried_projects[0] if len(queried_projects) == 1 else None
+            ),
+            "projected_fields": sorted(fields),
+            "projection": sorted(fields),
+            "keys": sorted(requested_keys),
+            "limit": min(effective_limits) if effective_limits else None,
+            "effective_limit": (
+                min(effective_limits) if effective_limits else None
+            ),
+            "samples": min(sample_counts) if sample_counts else None,
+            **{
+                key: values[0]
+                for key, values in safe_values.items()
+                if values
+            },
+            "parent_filter_ids": sorted(parent_ids),
+            "parent_filter_digest": (
+                _stable_digest(parent_filter)
+                if parent_ids or normalized_operation_filters
+                else None
+            ),
+            "op_name_filter": normalized_operation_filters or None,
+            **raw_graphql_shape,
+        }
+        request_id = str(event.get("request_id") or "")
+        response_matches = response_index.get(
+            (str(event.get("server") or ""), request_id),
+            [],
+        )
+        evidence.update(_normalized_mcp_response(response_matches, tool=tool))
+        result.append(evidence)
+    return result
+
+
+def _normalized_mcp_response(
+    responses: list[Mapping[str, Any]],
+    *,
+    tool: str,
+) -> dict[str, Any]:
+    if not responses:
+        return {
+            "terminal_status": "missing",
+            "successful": False,
+            "response_metadata_verified": False,
+        }
+    if len(responses) != 1 or str(responses[0].get("tool") or "") != tool:
+        return {
+            "terminal_status": "ambiguous",
+            "successful": False,
+            "response_metadata_verified": False,
+        }
+    response = responses[0]
+    status = str(response.get("terminal_status") or "")
+    successful = response.get("successful")
+    if (
+        status not in _MCP_TERMINAL_STATUSES
+        or type(successful) is not bool
+        or successful is not (status == "succeeded")
+    ):
+        return {
+            "terminal_status": "invalid",
+            "successful": False,
+            "response_metadata_verified": False,
+        }
+    result: dict[str, Any] = {
+        "terminal_status": status,
+        "successful": successful,
+        "response_metadata_verified": True,
+    }
+    for key in ("returned_count", "total_count", "rows_scanned", "total_steps"):
+        value = response.get(key)
+        if type(value) is int and value >= 0:
+            result[key] = value
+    for key in ("has_more", "project_exhaustive", "truncation_applied"):
+        value = response.get(key)
+        if type(value) is bool:
+            result[key] = value
+    coverage_status = str(response.get("coverage_status") or "")
+    if coverage_status in {
+        "project-exhaustive",
+        "bounded-page",
+        "exact-target",
+        "bounded-full-history",
+    }:
+        result["coverage_status"] = coverage_status
+    structured_error = response.get("structured_error_code")
+    if status != "succeeded" and structured_error not in (None, ""):
+        result["structured_error_code"] = safe_structured_error_code(
+            structured_error,
+            "tool_error",
+        )
+    return result
+
+
+def _raw_graphql_query_shape(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    recorded_shape = validated_graphql_query_shape(
+        arguments.get("raw_graphql_shape")
+    )
+    if recorded_shape:
+        return recorded_shape
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return {}
+    variables = arguments.get("variables")
+    return safe_graphql_query_shape(
+        query,
+        variables=variables if isinstance(variables, Mapping) else None,
+    )
+
+
+def _mcp_queried_projects(events: list[dict[str, Any]]) -> list[str]:
+    projects: set[str] = set()
+    for event in events:
+        arguments = event.get("arguments")
+        if not isinstance(arguments, Mapping):
+            continue
+        event_projects: set[str] = set()
+        entity_scopes: set[str] = set()
+        for value in _nested_mappings(arguments):
+            entity = _first_text(value, _MCP_ENTITY_KEYS)
+            project = _first_text(value, _MCP_PROJECT_KEYS)
+            if project:
+                event_projects.add(
+                    project
+                    if "/" in project
+                    else f"{entity}/{project}"
+                    if entity
+                    else f"*/{project}"
+                )
+            elif entity:
+                entity_scopes.add(f"{entity}/*")
+            for key in _MCP_PROJECT_REF_KEYS:
+                reference = value.get(key)
+                if isinstance(reference, str) and reference.strip():
+                    event_projects.add(reference.strip())
+        projects.update(event_projects or entity_scopes)
+        tool = str(event.get("tool") or "")
+        if not event_projects and tool == "list_entities_tool":
+            projects.add("*/*")
+        elif (
+            not event_projects
+            and tool == "query_wandb_tool"
+            and isinstance(arguments.get("query"), str)
+        ):
+            projects.add("*/*")
+    return sorted(projects)
+
+
+def _nested_mappings(value: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    result: list[Mapping[str, Any]] = [value]
+    for item in value.values():
+        if isinstance(item, Mapping):
+            result.extend(_nested_mappings(item))
+        elif isinstance(item, list):
+            result.extend(
+                nested
+                for candidate in item
+                if isinstance(candidate, Mapping)
+                for nested in _nested_mappings(candidate)
+            )
+    return result
+
+
+def _first_text(value: Mapping[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    return ""
 
 
 def _ordered_context_result_paths(events: list[dict[str, Any]]) -> list[str]:

@@ -22,8 +22,10 @@ from fugue.bench.agent_runtime import runtime_ready as agent_runtime_ready
 from fugue.bench.agent_runtime import runtime_spec as agent_runtime_spec
 from fugue.bench.candidates import (
     CANDIDATE_IDENTITY_SCHEMA_VERSION,
+    attempt_id,
     comparison_example_id,
     resolve_candidate,
+    stable_digest,
 )
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
@@ -54,6 +56,7 @@ from fugue.bench.execution import (
     mark_unfinished_cells,
     new_run_id,
     plan_cells,
+    read_run_manifest,
     update_run_manifest,
     write_run_manifest,
 )
@@ -97,9 +100,17 @@ from fugue.bench.reproducibility import (
     write_evaluation_asset_lock,
     write_run_input_lock,
 )
+from fugue.bench.run_conformance import (
+    capture_local_cell_conformance,
+    capture_local_docker_inventory,
+    write_harbor_run_conformance_receipt,
+)
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
-from fugue.bench.scoring import read_treatment_selection_lock
+from fugue.bench.scoring import (
+    read_intervention_selection_lock,
+    read_treatment_selection_lock,
+)
 from fugue.bench.services import (
     GRAPHITI_SERVICE_ID,
     ManagedServiceStatus,
@@ -136,6 +147,7 @@ from fugue.bridge import (
     bridge_up,
 )
 from fugue.model_plane import (
+    evidence_destination_environment,
     model_route_identity,
     provider_api_key,
     provider_api_key_env,
@@ -144,7 +156,7 @@ from fugue.model_plane import (
     select_model,
     trace_api_key,
     trace_destination_identity,
-    trace_env_defaults,
+    trace_project_environment,
     trace_project_slug,
 )
 from fugue.weave_support import trace_async_operation
@@ -152,6 +164,8 @@ from fugue.weave_support import trace_async_operation
 if TYPE_CHECKING:
     from fugue.bench.ai import AnalysisPreview, AnalysisResult, AnalysisSpec
 from fugue.preflight import PreflightCheck, validate_harbor_job_configs
+
+_DEFAULT_EXECUTE_CELLS = execute_cells
 
 
 @dataclass(frozen=True)
@@ -176,6 +190,7 @@ class ExperimentRequest:
     agent_preset_id: str | None = None
     cohort_id: str | None = None
     selection_lock: Path | None = None
+    approved_comparison: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -186,11 +201,16 @@ class PreviewCellSummary:
     context_system_id: str
     workload_id: str
     task_id: str
+    trial_index: int
     trial_count: int
     applicable: bool
     reason: str | None = None
     context_cache_ready: bool = False
     context_delivery: str = "portable"
+    attempt_id: str = ""
+    candidate_id: str = ""
+    execution_fingerprint: str = ""
+    integration_provenance: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,6 +224,11 @@ class PreviewSummary:
     workloads: tuple[str, ...]
     commands: tuple[str, ...]
     matrix_cells: tuple[PreviewCellSummary, ...] = ()
+    environment: dict[str, Any] = field(default_factory=dict)
+    source_evidence_project: str = ""
+    source_evidence_destination: dict[str, Any] = field(default_factory=dict)
+    evidence_project: str = ""
+    evidence_destination: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -439,12 +464,12 @@ class OperatorService:
         *,
         experiment: ExperimentSpec | None = None,
     ) -> OperatorStatus:
-        env = self.env
         selected = experiment or self.experiment(
             request.experiment_id if request else "pilot"
         )
         if request:
             selected = _experiment_with_request_overrides(selected, request)
+        env = _experiment_evidence_environment(selected, self.env)
         selected_model = select_model(
             request.model if request else None,
             env=env,
@@ -837,8 +862,10 @@ class OperatorService:
                 run_name=run_name,
                 scheduling_seed=preset.scheduling_seed,
                 verify_inputs=False,
+                approved_comparison=request.approved_comparison,
             )
         )
+        _validate_approved_comparison_plan(request.approved_comparison, cells)
         return ResolvedRunPlan(
             request=request,
             experiment=resolved,
@@ -872,8 +899,10 @@ class OperatorService:
                 run_id=run_id,
                 run_name=plan.run_name,
                 scheduling_seed=plan.preset.scheduling_seed,
+                approved_comparison=plan.request.approved_comparison,
             )
         )
+        _validate_approved_comparison_plan(plan.request.approved_comparison, cells)
         if _plan_coordinates(cells) != _plan_coordinates(plan.cells):
             raise RuntimeError(
                 "materialized run coordinates differ from the resolved plan"
@@ -1432,6 +1461,10 @@ class OperatorService:
                 continue
             task_count = int((job.config.get("fugue") or {}).get("task_count") or 1)
             estimated_trials += task_count * job.n_attempts
+        evidence_env = _experiment_evidence_environment(
+            plan.experiment,
+            self.env,
+        )
         return PreviewSummary(
             cells=len(jobs),
             applicable_cells=sum(job.applicable for job in jobs),
@@ -1457,15 +1490,40 @@ class OperatorService:
                     context_system_id=job.context_system_id,
                     workload_id=job.workload_id,
                     task_id=job.task_id,
+                    trial_index=job.trial_index,
                     trial_count=job.n_attempts
                     * int((job.config.get("fugue") or {}).get("task_count") or 1),
                     applicable=job.applicable,
                     reason=job.skip_reason,
                     context_cache_ready=job.context_cache_ready,
                     context_delivery=job.context_delivery,
+                    attempt_id=attempt_id(
+                        task_id=job.task_id,
+                        arm=job.variant_id,
+                        harness=job.harness,
+                        attempt=job.trial_index,
+                        candidate=job.candidate_id,
+                        runtime=job.resolved_candidate.execution_fingerprint,
+                    ),
+                    candidate_id=job.candidate_id,
+                    execution_fingerprint=(
+                        job.resolved_candidate.execution_fingerprint
+                    ),
+                    integration_provenance=job.integration_provenance,
                 )
                 for job in jobs
             ),
+            environment=dict(plan.experiment.environment),
+            source_evidence_project=(
+                plan.experiment.source_evidence_project or ""
+            ),
+            source_evidence_destination=(
+                plan.experiment.source_evidence_destination.to_dict()
+                if plan.experiment.source_evidence_destination is not None
+                else {}
+            ),
+            evidence_project=trace_project_slug(evidence_env),
+            evidence_destination=trace_destination_identity(evidence_env),
         )
 
     def rendered_jobs(
@@ -1480,14 +1538,13 @@ class OperatorService:
         selected = experiment or self.experiment(request.experiment_id)
         request = _request_with_selection_lock(selected, request, self.repo_root)
         selected = _experiment_with_request_overrides(selected, request)
-        env = self.env
+        env = _experiment_evidence_environment(selected, self.env)
         if "graphiti" in _selected_request_system_ids(selected, request):
             env = managed_service_environment(
                 env,
                 repo_root=self.repo_root,
                 planning=not write_configs,
             )
-        env |= trace_env_defaults(env)
         if request.model:
             env["FUGUE_MODEL"] = request.model
         env["FUGUE_BUILDER_MODEL"] = (
@@ -1620,6 +1677,17 @@ class OperatorService:
                         source_provenance=source_provenance,
                     )
                 )
+        _validate_selection_lock_jobs(
+            preset=preset,
+            selection_lock=request.selection_lock,
+            jobs=rendered,
+            repo_root=self.repo_root,
+        )
+        _validate_evidence_project_jobs(
+            rendered,
+            expected_project=trace_project_slug(env),
+            expected_destination=trace_destination_identity(env),
+        )
         return rendered
 
     def _direct_workload_jobs(
@@ -1817,6 +1885,15 @@ class OperatorService:
                     "n_attempts": attempts,
                     "trace_content": experiment.trace_content,
                     "evidence_destination": trace_destination_identity(direct_env),
+                    **(
+                        {
+                            "source_evidence_destination": (
+                                experiment.source_evidence_destination.to_dict()
+                            )
+                        }
+                        if experiment.source_evidence_destination is not None
+                        else {}
+                    ),
                     "scheduling_seed": preset.scheduling_seed,
                     "fugue_source": source_provenance,
                 },
@@ -1941,6 +2018,12 @@ class OperatorService:
         run_dir.mkdir(parents=True, exist_ok=True)
         cancel_event = cancellation_event or threading.Event()
         restore_sigterm = _install_worker_sigterm_handler(cancel_event)
+        existing_manifest = read_run_manifest(run_dir) or {}
+        foreground_identity = (
+            {}
+            if isinstance(existing_manifest.get("pid"), int)
+            else {"pid": os.getpid(), "detached": False}
+        )
         write_run_manifest(
             self.repo_root,
             run_id,
@@ -1949,6 +2032,7 @@ class OperatorService:
                 "run_name": request.run_name or request.experiment_id,
                 "experiment_id": request.experiment_id,
                 "trace_content": request.trace_content,
+                **foreground_identity,
             },
         )
         running = False
@@ -1971,6 +2055,10 @@ class OperatorService:
             os.replace(temporary, snapshot_path)
             plan = self._materialize_run_plan(plan, run_id=run_id)
             rendered = list(plan.jobs)
+            execution_env = _experiment_evidence_environment(
+                resolved,
+                self.env,
+            )
             _verify_rendered_setup(rendered)
             validate_harbor_job_configs(
                 [
@@ -1988,7 +2076,7 @@ class OperatorService:
                 request=request,
                 experiment=resolved,
                 repo_root=self.repo_root,
-                env=self.env,
+                env=execution_env,
             )
             evaluation_assets = build_evaluation_asset_lock(run_id, cells)
             write_evaluation_asset_lock(self.repo_root, evaluation_assets)
@@ -1999,7 +2087,7 @@ class OperatorService:
                 )
                 for cell in cells
             ]
-            treatment_selection_sha256 = _selection_lock_digest(
+            selection_lock_kind, selection_lock_sha256 = _selection_lock_identity(
                 request.selection_lock, self.repo_root
             )
             run_snapshot = build_run_snapshot(
@@ -2009,19 +2097,40 @@ class OperatorService:
                 request=asdict(request),
                 jobs=rendered,
                 cells=cells,
-                env=self.env,
+                env=execution_env,
                 bridge_runtime=bridge_runtime,
                 evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
-                treatment_selection_sha256=treatment_selection_sha256,
+                selection_lock_sha256=selection_lock_sha256,
+                treatment_selection_sha256=(
+                    selection_lock_sha256
+                    if selection_lock_kind == "treatment"
+                    else ""
+                ),
+                intervention_selection_sha256=(
+                    selection_lock_sha256
+                    if selection_lock_kind == "intervention"
+                    else ""
+                ),
             )
             source_commit = str(
                 (run_snapshot.runtime.get("fugue_source") or {}).get("commit") or ""
+            )
+            source_tree = str(
+                (run_snapshot.runtime.get("fugue_source") or {}).get("tree") or ""
+            )
+            source_dirty_digest = str(
+                (run_snapshot.runtime.get("fugue_source") or {}).get(
+                    "dirty_digest"
+                )
+                or ""
             )
             cells = [
                 replace(
                     cell,
                     run_snapshot_sha256=run_snapshot.snapshot_sha256,
                     source_commit=source_commit,
+                    source_tree=source_tree,
+                    source_dirty_digest=source_dirty_digest,
                 )
                 for cell in cells
             ]
@@ -2051,7 +2160,10 @@ class OperatorService:
                     "run_name": run_name,
                     "experiment_id": resolved.id,
                     "trace_project": trace_project_slug(
-                        rendered[0].env if rendered else self.env
+                        rendered[0].env if rendered else execution_env
+                    ),
+                    "evidence_destination": trace_destination_identity(
+                        rendered[0].env if rendered else execution_env
                     ),
                     "cell_count": len(cells),
                     "jobs_dirs": job_dirs,
@@ -2063,13 +2175,82 @@ class OperatorService:
                 },
             )
             running = True
-            run_env = rendered[0].env if rendered else self.env
+            run_env = rendered[0].env if rendered else execution_env
+            approved_destination = (
+                request.approved_comparison.get("evidence_destination")
+                if request.approved_comparison
+                else None
+            )
+            if approved_destination is not None and (
+                not isinstance(approved_destination, Mapping)
+                or dict(approved_destination)
+                != trace_destination_identity(run_env)
+            ):
+                raise RuntimeError(
+                    "approved comparison evidence destination changed before "
+                    "execution"
+                )
+            evidence_checkpoint_cells = int(
+                request.approved_comparison.get(
+                    "evidence_checkpoint_cells", 0
+                )
+                if request.approved_comparison
+                else 0
+            )
+            if evidence_checkpoint_cells and max_workers != 1:
+                raise RuntimeError(
+                    "evidence-checkpoint comparisons require cell concurrency 1"
+                )
+            conformance_enforced = (
+                cell_runner is None
+                and execute_cells is _DEFAULT_EXECUTE_CELLS
+            )
+            pre_execution_inventory = (
+                capture_local_docker_inventory(rendered)
+                if conformance_enforced
+                else None
+            )
+            rendered_by_config = {
+                Path(job.config_path).resolve(): job for job in rendered
+            }
+
+            def checkpoint_conformance(cell: PlannedCell) -> Mapping[str, Any]:
+                job = rendered_by_config.get(Path(cell.config_path).resolve())
+                if job is None:
+                    raise RuntimeError(
+                        "checkpoint cell has no exact rendered Harbor job"
+                    )
+                return capture_local_cell_conformance(
+                    repo_root=self.repo_root,
+                    cell=cell,
+                    job=job,
+                    env=run_env,
+                    host_scorer_names=host_scorer_names,
+                    pre_execution_inventory=pre_execution_inventory,
+                )
+
             observability_error = None
+            live_required = bool(request.approved_comparison) and any(
+                cell.applicable and cell.execution_kind == "agent"
+                for cell in cells
+            )
+            live_disabled = (
+                run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
+                in {"1", "true", "yes"}
+            )
+            if live_required and not trace_api_key(run_env):
+                raise RuntimeError(
+                    "approved comparison requires live Weave evidence before "
+                    "Agent execution, but no trace credential is configured"
+                )
+            if live_required and live_disabled:
+                raise RuntimeError(
+                    "approved comparison cannot disable required live Weave evidence"
+                )
             if (
                 cells
                 and trace_api_key(run_env)
-                and run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
-                not in {"1", "true", "yes"}
+                and not live_disabled
             ):
                 try:
                     live = LiveEvaluationCoordinator(
@@ -2080,9 +2261,24 @@ class OperatorService:
                         cancellation_event=cancel_event,
                         host_evaluator=host_evaluator,
                         host_scorer_names=host_scorer_names,
+                        evidence_checkpoint_cells=evidence_checkpoint_cells,
+                        checkpoint_conformance=(
+                            checkpoint_conformance
+                            if evidence_checkpoint_cells
+                            and conformance_enforced
+                            else None
+                        ),
                     )
                 except Exception as exc:
                     observability_error = f"{type(exc).__name__}: {exc}"
+                    if live_required:
+                        raise RuntimeError(
+                            "approved comparison live-evidence initialization failed"
+                        ) from exc
+            if live_required and live is None:
+                raise RuntimeError(
+                    "approved comparison has no live-evidence coordinator"
+                )
             local = (
                 GeneratedEvaluationCoordinator(
                     cells,
@@ -2103,6 +2299,7 @@ class OperatorService:
                 max_workers=max_workers,
                 runner=cell_runner,
                 cell_started=live.begin_cell if live is not None else None,
+                require_cell_started_success=live is not None,
                 cell_finished=(
                     live.finish_cell
                     if live is not None
@@ -2122,6 +2319,11 @@ class OperatorService:
                 if live is not None
                 else None
             )
+            if publication is not None:
+                _validate_publication_project(
+                    publication.evaluations,
+                    expected_project=trace_project_slug(run_env),
+                )
             failures = list(publication.failures if publication else ())
             if observability_error:
                 failures.insert(0, observability_error)
@@ -2129,12 +2331,40 @@ class OperatorService:
             skipped = sum(item.status == "not_applicable" for item in outcomes)
             cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
             passed = sum(item.status == "passed" for item in outcomes)
+            harbor_conformance = write_harbor_run_conformance_receipt(
+                repo_root=self.repo_root,
+                run_id=run_id,
+                jobs=rendered,
+                env=run_env,
+                host_scorer_names=host_scorer_names,
+                pre_execution_inventory=pre_execution_inventory,
+                enforce=conformance_enforced,
+            )
+            conformance_blocked = (
+                harbor_conformance.enforced
+                and harbor_conformance.status != "passed"
+            )
             _finalize_run(
                 self.repo_root,
                 run_id,
                 run_dir=run_dir,
-                status=("cancelled" if cancelled else "failed" if failed else "passed"),
-                error="Run cancelled by the operator." if cancelled else None,
+                status=(
+                    "cancelled"
+                    if cancelled
+                    else "failed"
+                    if failed or conformance_blocked
+                    else "passed"
+                ),
+                error=(
+                    "Run cancelled by the operator."
+                    if cancelled
+                    else (
+                        "Local Harbor conformance receipt did not pass: "
+                        f"{harbor_conformance.status}"
+                    )
+                    if conformance_blocked
+                    else None
+                ),
                 running=running,
                 values={
                     "passed_cells": passed,
@@ -2152,6 +2382,9 @@ class OperatorService:
                     if publication
                     else [],
                     "evaluation_failures": failures,
+                    "harbor_conformance": harbor_conformance.manifest_reference(
+                        self.repo_root
+                    ),
                 },
             )
         except _RunCancellation:
@@ -2591,6 +2824,14 @@ class OperatorService:
                 candidate_id=str(item.get("candidate_id") or ""),
                 name=str(item.get("name") or "evaluation"),
                 examples=int(item.get("examples") or 0),
+                project=(
+                    str(
+                        item.get("project")
+                        or run.metadata.get("trace_project")
+                        or ""
+                    )
+                    or None
+                ),
                 url=str(item["url"]) if item.get("url") else None,
                 evaluation_ref=(
                     str(item["evaluation_ref"]) if item.get("evaluation_ref") else None
@@ -2958,6 +3199,76 @@ def _verify_rendered_setup(jobs: list[RenderedJob]) -> None:
         )
 
 
+def _experiment_evidence_environment(
+    experiment: ExperimentSpec,
+    env: Mapping[str, str],
+) -> dict[str, str]:
+    destination = experiment.evidence_destination
+    if destination is not None:
+        if (
+            experiment.evidence_project is not None
+            and destination.project_slug != experiment.evidence_project
+        ):
+            raise RuntimeError(
+                "declared evidence destination disagrees with evidence project"
+            )
+        return evidence_destination_environment(destination, env)
+    return trace_project_environment(experiment.evidence_project, env)
+
+
+def _validate_evidence_project_jobs(
+    jobs: list[RenderedJob],
+    *,
+    expected_project: str,
+    expected_destination: Mapping[str, Any] | None = None,
+) -> None:
+    mismatched = sorted(
+        {
+            f"{job.job_name}={trace_project_slug(job.env)}"
+            for job in jobs
+            if trace_project_slug(job.env) != expected_project
+        }
+    )
+    if mismatched:
+        raise RuntimeError(
+            "rendered jobs disagree with the locked evidence project "
+            f"{expected_project}: {', '.join(mismatched)}"
+        )
+    if expected_destination is None:
+        return
+    destination_mismatches = sorted(
+        {
+            job.job_name
+            for job in jobs
+            if trace_destination_identity(job.env) != dict(expected_destination)
+        }
+    )
+    if destination_mismatches:
+        raise RuntimeError(
+            "rendered jobs disagree with the locked evidence destination: "
+            + ", ".join(destination_mismatches)
+        )
+
+
+def _validate_publication_project(
+    evaluations: tuple[PublishedEvaluation, ...],
+    *,
+    expected_project: str,
+) -> None:
+    mismatched = sorted(
+        {
+            f"{item.name}={item.project or 'unreported'}"
+            for item in evaluations
+            if item.project != expected_project
+        }
+    )
+    if mismatched:
+        raise RuntimeError(
+            "Weave publication did not confirm the locked evidence project "
+            f"{expected_project}: {', '.join(mismatched)}"
+        )
+
+
 def _preparation_targets(
     *,
     experiment: ExperimentSpec,
@@ -3121,6 +3432,7 @@ def _experiment_with_request_overrides(
     missing = sorted(variant_ids - {variant.id for variant in experiment.variants})
     if missing:
         raise ValueError(f"unknown variant(s): {', '.join(missing)}")
+    preset = select_preset(experiment, request.preset)
     # A request narrows the plan, not the authored experiment. Removing variants here
     # invalidates unrelated workload contracts before workload selection runs.
     return experiment_with_overrides(
@@ -3138,6 +3450,7 @@ def _experiment_with_request_overrides(
         n_attempts=request.n_attempts,
         n_concurrent=request.n_concurrent,
         trace_content=request.trace_content,
+        environment=dict(preset.environment) if preset.environment else None,
     )
 
 
@@ -3262,6 +3575,62 @@ def _plan_coordinates(cells: tuple[PlannedCell, ...]) -> tuple[tuple[Any, ...], 
         )
         for cell in cells
     )
+
+
+def _validate_approved_comparison_plan(
+    approved: Mapping[str, Any],
+    cells: tuple[PlannedCell, ...],
+) -> None:
+    if not approved:
+        return
+    supplied_digest = str(approved.get("lock_digest") or "")
+    unsigned = {key: value for key, value in approved.items() if key != "lock_digest"}
+    if not supplied_digest or supplied_digest != stable_digest(unsigned):
+        raise ValueError("approved comparison execution lock digest does not match")
+    expected_raw = approved.get("expected_cells")
+    if not isinstance(expected_raw, list):
+        raise ValueError("approved comparison expected_cells must be a list")
+    expected = sorted(
+        (
+            str(item.get("attempt_id") or ""),
+            str(item.get("task_id") or ""),
+            str(item.get("variant_id") or ""),
+            str(item.get("harness") or ""),
+            int(item.get("trial_index") or 0),
+            str(item.get("candidate_id") or ""),
+            str(item.get("execution_fingerprint") or ""),
+            bool(item.get("applicable")),
+            str(item.get("skip_reason") or ""),
+            str(item.get("integration_provenance_digest") or ""),
+        )
+        for item in expected_raw
+        if isinstance(item, Mapping)
+    )
+    if len(expected) != len(expected_raw):
+        raise ValueError("approved comparison expected_cells contains a non-object")
+    actual = sorted(
+        (
+            cell.attempt_id,
+            cell.task_id,
+            cell.variant_id,
+            cell.harness,
+            cell.trial_index,
+            cell.candidate_id,
+            cell.execution_fingerprint,
+            cell.applicable,
+            str(cell.skip_reason or ""),
+            stable_digest(list(cell.integration_provenance)),
+        )
+        for cell in cells
+    )
+    if int(approved.get("expected_cell_count") or 0) != len(expected):
+        raise ValueError("approved comparison expected cell count does not match")
+    if str(approved.get("expected_cells_digest") or "") != stable_digest(
+        expected_raw
+    ):
+        raise ValueError("approved comparison expected cell manifest digest does not match")
+    if actual != expected:
+        raise ValueError("resolved run coordinates differ from the approved comparison")
 
 
 def _cancel_live_evaluation(
@@ -3440,13 +3809,18 @@ def _resolve(root: Path, path: Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def _selection_lock_digest(path: Path | None, repo_root: Path) -> str:
+def _selection_lock_identity(
+    path: Path | None, repo_root: Path
+) -> tuple[str, str]:
     if path is None:
-        return ""
+        return "", ""
     resolved = _resolve(repo_root, path)
     if not resolved.is_file():
-        raise ValueError(f"treatment selection lock does not exist: {resolved}")
-    return read_treatment_selection_lock(resolved).lock_sha256
+        raise ValueError(f"selection lock does not exist: {resolved}")
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if payload.get("kind") == "intervention_selection":
+        return "intervention", read_intervention_selection_lock(resolved).lock_sha256
+    return "treatment", read_treatment_selection_lock(resolved).lock_sha256
 
 
 def _request_with_selection_lock(
@@ -3460,14 +3834,73 @@ def _request_with_selection_lock(
     if request.selection_lock is None:
         raise ValueError(f"preset {preset.id} requires --selection-lock")
     path = _resolve(repo_root, request.selection_lock)
-    lock = read_treatment_selection_lock(path)
-    selected = ("none", *lock.selected_variants)
+    if preset.selection_lock_kind == "intervention":
+        intervention = read_intervention_selection_lock(path)
+        if intervention.experiment_id != experiment.id:
+            raise ValueError(
+                "intervention selection lock belongs to a different experiment"
+            )
+        current_source = resolve_fugue_source_provenance(repo_root)
+        if (
+            str(current_source.get("commit") or "") != intervention.source_commit
+            or str(current_source.get("tree") or "") != intervention.source_tree
+            or bool(current_source.get("dirty"))
+            or str(current_source.get("dirty_digest") or "")
+            != intervention.source_dirty_digest
+        ):
+            raise ValueError(
+                "intervention selection lock source tree differs from this clean checkout"
+            )
+        selected = (
+            intervention.baseline_variant_id,
+            intervention.selected_variant_id,
+        )
+    else:
+        lock = read_treatment_selection_lock(path)
+        selected = ("none", *lock.selected_variants)
     if request.variants and set(request.variants) != set(selected):
         raise ValueError(
-            "requested variants disagree with the treatment selection lock: "
+            "requested variants disagree with the selection lock: "
             + ", ".join(selected)
         )
     return replace(request, variants=selected)
+
+
+def _validate_selection_lock_jobs(
+    *,
+    preset: PresetSpec,
+    selection_lock: Path | None,
+    jobs: list[RenderedJob],
+    repo_root: Path,
+) -> None:
+    if (
+        not preset.selection_lock_required
+        or preset.selection_lock_kind != "intervention"
+        or selection_lock is None
+    ):
+        return
+    lock = read_intervention_selection_lock(_resolve(repo_root, selection_lock))
+    expected = {
+        str(item["variant_id"]): str(item["candidate_digest"])
+        for item in lock.rankings
+        if str(item.get("variant_id") or "")
+        in {lock.baseline_variant_id, lock.selected_variant_id}
+    }
+    observed: dict[str, set[str]] = {}
+    for job in jobs:
+        observed.setdefault(job.variant_id, set()).add(job.candidate_id)
+    if set(observed) != set(expected):
+        raise ValueError("holdout variants do not match the intervention selection lock")
+    mismatched = [
+        variant_id
+        for variant_id, candidate_ids in observed.items()
+        if candidate_ids != {expected[variant_id]}
+    ]
+    if mismatched:
+        raise ValueError(
+            "holdout candidate identity drifted after intervention selection: "
+            + ", ".join(sorted(mismatched))
+        )
 
 
 def _run_job_paths(root: Path, run: ManagedRun) -> list[Path]:
@@ -3496,13 +3929,21 @@ def _agent_trace_refs(rows: list[dict[str, Any]]) -> tuple[AgentTraceRef, ...]:
         )
         for key, target in (
             ("weave_conversation_ids", "conversations"),
-            ("weave_trace_ids", "traces"),
-            ("weave_root_span_ids", "roots"),
         ):
             raw = row.get(key) or []
             if isinstance(raw, str):
                 raw = [raw]
             values[target].update(str(value) for value in raw if value)
+        for primary, legacy, target in (
+            ("otel_trace_ids", "weave_trace_ids", "traces"),
+            ("otel_root_span_ids", "weave_root_span_ids", "roots"),
+        ):
+            raw = row.get(primary)
+            if raw is None:
+                raw = row.get(legacy)
+            if isinstance(raw, str):
+                raw = [raw]
+            values[target].update(str(value) for value in raw or [] if value)
         if row.get("weave_conversation_id"):
             values["conversations"].add(str(row["weave_conversation_id"]))
     return tuple(

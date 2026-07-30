@@ -282,6 +282,122 @@ def test_codex_skill_evidence_ignores_failed_or_unrelated_commands(
     assert evidence["missing_skills"] == ["pdf"]
 
 
+def test_claude_skill_tool_proves_assigned_skill_invocation(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-skill",
+                        "name": "Skill",
+                        "input": {"skill": "wandb-evidence-analysis"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-skill",
+                        "is_error": False,
+                        "content": "Skill loaded",
+                    }
+                ]
+            },
+        },
+    ]
+    (tmp_path / "claude-code.txt").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "claude-code",
+        {
+            "skills_assigned": ["wandb-evidence-analysis-v2"],
+            "skills_registered": ["wandb-evidence-analysis-v2"],
+            "directory": "/tmp/claude/skills",
+            "skill_provenance": [
+                {
+                    "id": "wandb-evidence-analysis-v2",
+                    "declared_name": "wandb-evidence-analysis",
+                }
+            ],
+        },
+    )
+
+    assert evidence["status"] == "observed"
+    assert evidence["skills_invoked"] == ["wandb-evidence-analysis-v2"]
+    assert evidence["events"] == [
+        {
+            "item_id": "tool-skill",
+            "operation": "invoke_skill",
+            "skill_id": "wandb-evidence-analysis-v2",
+        }
+    ]
+
+
+def test_claude_failed_skill_tool_is_not_mechanism_evidence(
+    tmp_path: Path,
+) -> None:
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-failed",
+                        "name": "Skill",
+                        "input": {"skill": "wandb-evidence-analysis"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-failed",
+                        "is_error": True,
+                        "content": "Skill unavailable",
+                    }
+                ]
+            },
+        },
+    ]
+    (tmp_path / "claude-code.txt").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "claude-code",
+        {
+            "skills_assigned": ["wandb-evidence-analysis-v2"],
+            "directory": "/tmp/claude/skills",
+            "skill_provenance": [
+                {
+                    "id": "wandb-evidence-analysis-v2",
+                    "declared_name": "wandb-evidence-analysis",
+                }
+            ],
+        },
+    )
+
+    assert evidence["status"] == "not_observed"
+    assert evidence["missing_skills"] == ["wandb-evidence-analysis-v2"]
+
+
 def test_context_registration_digest_is_order_independent_and_behavioral() -> None:
     inputs = {
         "context_system_id": "gitnexus",
@@ -340,6 +456,7 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
     ):
         assert f'"{attribute}"' in source
     assert "FUGUE_TRACE_ATTRIBUTES_JSON" in source
+    assert "FUGUE_WEAVE_TRACEPARENT" in source
     assert "key: str(value)" in source
     assert "self._resolved_env_vars.update(trace_environment)" in source
     assert 'env.update(self._trace_environment("hermes", self.model_route))' in source

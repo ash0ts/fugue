@@ -9,6 +9,7 @@ from typing import Any
 CANDIDATE_IDENTITY_SCHEMA_VERSION = 1
 EXECUTION_IDENTITY_SCHEMA_VERSION = 1
 COMPARISON_IDENTITY_SCHEMA_VERSION = 1
+ATTEMPT_IDENTITY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,46 @@ def comparison_example_id(
             "dataset": dataset_id.strip(),
             "workload": workload_id.strip(),
             "logical_task": logical_task_id.strip(),
+        }
+    )
+
+
+def attempt_identity(
+    *,
+    task_id: str,
+    arm: str,
+    harness: str,
+    attempt: int,
+    candidate: str,
+    runtime: str,
+) -> dict[str, Any]:
+    """Return the canonical identity shared by design, execution, and evidence."""
+
+    if attempt < 1:
+        raise ValueError("attempt must be positive")
+    values = {
+        "task_id": task_id.strip(),
+        "arm": arm.strip(),
+        "harness": harness.strip(),
+        "attempt": attempt,
+        "candidate": candidate.strip(),
+        "runtime": runtime.strip(),
+    }
+    missing = [key for key, value in values.items() if value in {"", None}]
+    if missing:
+        raise ValueError(
+            "attempt identity requires " + ", ".join(sorted(missing))
+        )
+    return values
+
+
+def attempt_id(**coordinates: Any) -> str:
+    """Hash one immutable attempt independently of a particular run id."""
+
+    return stable_digest(
+        {
+            "schema_version": ATTEMPT_IDENTITY_SCHEMA_VERSION,
+            **attempt_identity(**coordinates),
         }
     )
 

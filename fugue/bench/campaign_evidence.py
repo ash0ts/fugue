@@ -77,7 +77,9 @@ def _row_eligibility_failures(
         return failures
     if row.get("trace_link_status") not in {"linked", "verified", "exact"}:
         failures.append(f"row {index} lacks a valid Agent link")
-    roots = row.get("weave_root_span_ids")
+    roots = row.get("otel_root_span_ids")
+    if roots is None:
+        roots = row.get("weave_root_span_ids")
     if (
         not isinstance(roots, list)
         or len(roots) != 1
@@ -95,7 +97,9 @@ def _row_eligibility_failures(
         failures.append(
             f"row {index} does not reconcile to exactly one Agent conversation"
         )
-    traces = row.get("weave_trace_ids")
+    traces = row.get("otel_trace_ids")
+    if traces is None:
+        traces = row.get("weave_trace_ids")
     if not isinstance(traces, list) or len(traces) != 1 or not traces[0]:
         failures.append(f"row {index} does not reconcile to exactly one Agent trace")
     agent_url = row.get("agent_url") or row.get("weave_agent_url")
@@ -340,6 +344,8 @@ _SAFE_PREDICTION_FIELDS = (
     "weave_prediction_call_id",
     "eval_predict_and_score_call_id",
     "weave_conversation_ids",
+    "otel_root_span_ids",
+    "otel_trace_ids",
     "weave_root_span_ids",
     "weave_trace_ids",
     "runtime_equivalence_status",
@@ -420,10 +426,24 @@ def safe_agent_evidence(
             str(value) for value in row.get("weave_conversation_ids") or [] if value
         ],
         "root_span_ids": [
-            str(value) for value in row.get("weave_root_span_ids") or [] if value
+            str(value)
+            for value in (
+                row.get("otel_root_span_ids")
+                if row.get("otel_root_span_ids") is not None
+                else row.get("weave_root_span_ids")
+            )
+            or []
+            if value
         ],
         "trace_ids": [
-            str(value) for value in row.get("weave_trace_ids") or [] if value
+            str(value)
+            for value in (
+                row.get("otel_trace_ids")
+                if row.get("otel_trace_ids") is not None
+                else row.get("weave_trace_ids")
+            )
+            or []
+            if value
         ],
         "agent_url": _safe_immutable_url(
             row.get("agent_url") or row.get("weave_agent_url")

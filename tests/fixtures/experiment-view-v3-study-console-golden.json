@@ -1,0 +1,384 @@
+{
+  "aligned_analysis": {
+    "aligned_attempts": [
+      {
+        "alignment_id": "3333333333333333333333333333333333333333333333333333333333333333",
+        "attempt": 1,
+        "attempt_ids_by_arm": {
+          "baseline": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
+          "candidate": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b"
+        },
+        "harness": "claude-code",
+        "task_id": "task-1",
+        "task_label": "Bounded answer"
+      }
+    ],
+    "analysis_digest": "914ce621a317028599ff1cf873c2958fa0e1937405f0d37f7640d675bf0a5db3",
+    "arms": [
+      {
+        "id": "baseline",
+        "label": "MCP main"
+      },
+      {
+        "id": "candidate",
+        "label": "Repaired MCP 0.4",
+        "source_revision": {
+          "id": "wandb-mcp-0-4-reconciliation-fix",
+          "kind": "mcp",
+          "lock_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "runtime_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "version_identity": "git:571ee85eedd73e06bd414316f73d732c398535d6"
+        }
+      }
+    ],
+    "contrasts": [
+      {
+        "dimensions": [
+          {
+            "critical": true,
+            "id": "bounded_answer",
+            "label": "Bounded answer",
+            "role": "outcome"
+          }
+        ],
+        "id": "main-vs-repaired",
+        "reference_arm": "baseline",
+        "treatment_arms": [
+          "candidate"
+        ]
+      }
+    ],
+    "reference_arm": "baseline",
+    "schema_version": 1,
+    "study_intent": "Decide whether repaired MCP behavior merits qualification.",
+    "task_summaries": [
+      {
+        "pair_counts": {
+          "improved": 1
+        },
+        "task_id": "task-1",
+        "validity": "valid"
+      }
+    ]
+  },
+  "backend": "harbor-docker",
+  "behavioral_summary": {
+    "candidate_critical_failures": 0,
+    "critical_blockers": [],
+    "improved_pairs": 1,
+    "incomplete_pairs": 0,
+    "limitations": [
+      "Local Harbor evidence only."
+    ],
+    "mixed_pairs": 0,
+    "next_action": "Run a separately approved confirmation.",
+    "recommendation": "IMPROVED — candidate is better on this locked comparison.",
+    "regressed_pairs": 0,
+    "status": "improved",
+    "supported_claim": "Candidate improved one aligned pair.",
+    "unchanged_pairs": 0
+  },
+  "candidate_source_revisions": [
+    {
+      "id": "wandb-mcp-0-4-reconciliation-fix",
+      "kind": "mcp",
+      "lock_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "runtime_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "version_identity": "git:571ee85eedd73e06bd414316f73d732c398535d6"
+    }
+  ],
+  "completed_cells": 2,
+  "decision": {
+    "critical_blockers": [],
+    "evidence_grade": "A",
+    "gates": [],
+    "human_signoff_required": false,
+    "limitations": [
+      "Local Harbor evidence only."
+    ],
+    "next_action": "Run a separately approved package qualification.",
+    "recommendation": "Package release not evaluated by this Study.",
+    "status": "inconclusive"
+  },
+  "evidence_eligible": true,
+  "evidence_grade": "A",
+  "evidence_scope": {
+    "entity": "wandb",
+    "evidence_types": [
+      "evaluation",
+      "prediction_and_score",
+      "prediction",
+      "agent_conversation",
+      "dataset"
+    ],
+    "project": "fugue-mcp-release-qualification-v1"
+  },
+  "evidence_topology": {
+    "execution_identity": "2222222222222222222222222222222222222222222222222222222222222222",
+    "post_run_drift": {
+      "expected_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "observed_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "matched"
+    },
+    "pre_run_drift": {
+      "expected_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "observed_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "matched"
+    },
+    "result_destination": {
+      "api_base_url": "https://api.wandb.ai",
+      "app_base_url": "https://wandb.ai",
+      "destination_digest": "c7518cbd011799c7def25831286a282842658ff595e35fc62ee8befeb900a7f2",
+      "entity": "wandb",
+      "project": "fugue-mcp-release-qualification-v1",
+      "project_slug": "wandb/fugue-mcp-release-qualification-v1",
+      "schema_version": 1,
+      "trace_base_url": "https://trace.wandb.ai"
+    },
+    "schema_version": 1,
+    "source_destination": {
+      "api_base_url": "https://api.wandb.ai",
+      "app_base_url": "https://wandb.ai",
+      "destination_digest": "d14e00b140272ccc93f7ff82798ab070488017d4e6b2529a7558a49fcc6b9dda",
+      "entity": "wandb",
+      "project": "fugue-mcp-release-source-v1",
+      "project_slug": "wandb/fugue-mcp-release-source-v1",
+      "schema_version": 1,
+      "trace_base_url": "https://trace.wandb.ai"
+    },
+    "source_lock_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "topology_digest": "5b100351a8c520cced26d13b2600acd5a7883714a546f3c1be30c5c0fb5558fd"
+  },
+  "infrastructure_health": "healthy",
+  "integrity_status": "reconciled",
+  "kind": "evaluation",
+  "matrix_size": 2,
+  "paired_cases": [
+    {
+      "attempt": 1,
+      "baseline": {
+        "actual_query_scope": [
+          "wandb/fugue-mcp-release-source-v1"
+        ],
+        "attempt_id": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
+        "cost_usd": 0.1,
+        "evaluation_status": "completed",
+        "evidence_links": [
+          {
+            "kind": "evaluation_root",
+            "ref": "baseline-evaluation_root",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-evaluation_root"
+          },
+          {
+            "kind": "prediction_and_score",
+            "ref": "baseline-prediction_and_score",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction_and_score"
+          },
+          {
+            "kind": "prediction",
+            "ref": "baseline-prediction",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction"
+          },
+          {
+            "kind": "agent_root",
+            "ref": "baseline-agent_root",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent_root"
+          },
+          {
+            "kind": "dataset",
+            "ref": "release-dataset:v1",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"
+          }
+        ],
+        "evidence_status": "reconciled",
+        "execution_fingerprint": "harbor-execution-fingerprint",
+        "execution_status": "passed",
+        "identity": {
+          "arm": "baseline",
+          "attempt": 1,
+          "candidate": "baseline-candidate-lock",
+          "harness": "claude-code",
+          "runtime": "harbor-runtime-lock",
+          "task_id": "task-1"
+        },
+        "infrastructure": {
+          "backend": "harbor-docker",
+          "cleanup_verified": true
+        },
+        "input_tokens": 100.0,
+        "latency_sec": 3.0,
+        "otel_root_span_id": "baseline-otel-root-span",
+        "output_tokens": 20.0,
+        "passed": false,
+        "prediction_id": "baseline-prediction",
+        "queried_projects": [
+          "wandb/fugue-mcp-release-source-v1"
+        ],
+        "reported_project_identity": "wandb/fugue-mcp-release-source-v1",
+        "runtime_lock_digest": "harbor-runtime-lock",
+        "sanitized_answer_excerpt": "The baseline summary did not reconcile direct children.",
+        "score_explanations": {
+          "bounded_answer": "The answer made an unsupported broad claim."
+        },
+        "scores": {
+          "bounded_answer": false
+        },
+        "tool_calls": 2,
+        "tools": [
+          "query_wandb",
+          "summarize_evaluation"
+        ],
+        "weave_agent_root_call_id": "baseline-agent_root"
+      },
+      "candidate": {
+        "actual_query_scope": [
+          "wandb/fugue-mcp-release-source-v1"
+        ],
+        "attempt_id": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b",
+        "cost_usd": 0.1,
+        "evaluation_status": "completed",
+        "evidence_links": [
+          {
+            "kind": "evaluation_root",
+            "ref": "candidate-evaluation_root",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-evaluation_root"
+          },
+          {
+            "kind": "prediction_and_score",
+            "ref": "candidate-prediction_and_score",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction_and_score"
+          },
+          {
+            "kind": "prediction",
+            "ref": "candidate-prediction",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction"
+          },
+          {
+            "kind": "agent_root",
+            "ref": "candidate-agent_root",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent_root"
+          },
+          {
+            "kind": "dataset",
+            "ref": "release-dataset:v1",
+            "status": "resolved",
+            "system": "weave",
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"
+          }
+        ],
+        "evidence_status": "reconciled",
+        "execution_fingerprint": "harbor-execution-fingerprint",
+        "execution_status": "passed",
+        "identity": {
+          "arm": "candidate",
+          "attempt": 1,
+          "candidate": "candidate-candidate-lock",
+          "harness": "claude-code",
+          "runtime": "harbor-runtime-lock",
+          "task_id": "task-1"
+        },
+        "infrastructure": {
+          "backend": "harbor-docker",
+          "cleanup_verified": true
+        },
+        "input_tokens": 100.0,
+        "latency_sec": 3.0,
+        "otel_root_span_id": "candidate-otel-root-span",
+        "output_tokens": 20.0,
+        "passed": true,
+        "prediction_id": "candidate-prediction",
+        "queried_projects": [
+          "wandb/fugue-mcp-release-source-v1"
+        ],
+        "reported_project_identity": "wandb/fugue-mcp-release-source-v1",
+        "runtime_lock_digest": "harbor-runtime-lock",
+        "sanitized_answer_excerpt": "The candidate reconciled the exact direct children.",
+        "score_explanations": {
+          "bounded_answer": "The answer stayed within the locked project."
+        },
+        "scores": {
+          "bounded_answer": true
+        },
+        "tool_calls": 2,
+        "tools": [
+          "query_wandb",
+          "summarize_evaluation"
+        ],
+        "weave_agent_root_call_id": "candidate-agent_root"
+      },
+      "dimension_changes": [
+        {
+          "baseline": false,
+          "baseline_explanation": "The answer did not respect the evidence bound.",
+          "candidate": true,
+          "candidate_explanation": "The answer stayed within the locked source.",
+          "critical": true,
+          "id": "bounded_answer",
+          "label": "Bounded answer",
+          "role": "outcome",
+          "status": "improved"
+        }
+      ],
+      "harness": "claude-code",
+      "pair_id": "2b2101aa1954484d7e4036ca161e4dbe5cd37491d68bacf269697e22549418a9",
+      "status": "improved",
+      "task_id": "task-1",
+      "task_label": "Bounded answer"
+    }
+  ],
+  "phase": "completed",
+  "runtime_locks": [
+    {
+      "details": {
+        "backend": "harbor"
+      },
+      "digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "id": "harbor-runtime",
+      "label": "Local Harbor runtime"
+    }
+  ],
+  "schema_version": 3,
+  "scorer_revisions": [
+    {
+      "details": {
+        "kind": "deterministic"
+      },
+      "digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "id": "bounded-answer",
+      "label": "Bounded answer scorer"
+    }
+  ],
+  "supersedes": [
+    {
+      "reason": "The earlier task evidence was not source-isolated.",
+      "result_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  ],
+  "task_validity": [
+    {
+      "discriminating_dimensions": [
+        "bounded_answer"
+      ],
+      "status": "valid",
+      "task_id": "task-1"
+    }
+  ]
+}

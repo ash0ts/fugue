@@ -94,7 +94,7 @@ def skill_invocation_evidence(
     assigned = [str(item) for item in registration.get("skills_assigned") or []]
     if not assigned:
         return {"status": "not_applicable", "skills_invoked": []}
-    if harness != "codex":
+    if harness not in {"codex", "claude-code"}:
         return {
             "status": "unavailable",
             "skills_invoked": [],
@@ -108,11 +108,14 @@ def skill_invocation_evidence(
             "reason": "Codex skill registration did not record its isolated directory",
         }
     events: list[dict[str, str]] = []
-    path = logs_dir / "codex.txt"
+    path = logs_dir / (
+        "codex.txt" if harness == "codex" else "claude-code.txt"
+    )
     try:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
         lines = []
+    payloads: list[dict[str, Any]] = []
     for line in lines:
         if not line.startswith("{"):
             continue
@@ -120,33 +123,33 @@ def skill_invocation_evidence(
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        item = payload.get("item") or {}
-        if (
-            payload.get("type") != "item.completed"
-            or item.get("type") != "command_execution"
-            or item.get("status") != "completed"
-            or item.get("exit_code") != 0
-        ):
-            continue
-        command = str(item.get("command") or "")
-        try:
-            outer = shlex.split(command)
-        except ValueError:
-            continue
-        argv = outer
-        if len(outer) == 3 and Path(outer[0]).name in {"bash", "sh"} and outer[1] in {
-            "-c",
-            "-lc",
-        }:
-            try:
-                argv = shlex.split(outer[2])
-            except ValueError:
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    if harness == "claude-code":
+        events.extend(
+            _claude_skill_events(
+                payloads,
+                assigned=assigned,
+                directory=directory,
+                provenance=registration.get("skill_provenance") or [],
+            )
+        )
+    else:
+        for payload in payloads:
+            item = payload.get("item") or {}
+            if (
+                payload.get("type") != "item.completed"
+                or item.get("type") != "command_execution"
+                or item.get("status") != "completed"
+                or item.get("exit_code") != 0
+            ):
                 continue
-        if not argv or Path(argv[0]).name not in {"cat", "head", "sed", "tail"}:
-            continue
-        for skill_id in assigned:
-            expected = f"{directory}/{skill_id}/SKILL.md"
-            if expected in argv:
+            skill_id = _skill_read_from_command(
+                str(item.get("command") or ""),
+                assigned=assigned,
+                directory=directory,
+            )
+            if skill_id:
                 events.append(
                     {
                         "item_id": str(item.get("id") or ""),
@@ -162,3 +165,92 @@ def skill_invocation_evidence(
         "missing_skills": missing,
         "events": events,
     }
+
+
+def _claude_skill_events(
+    payloads: list[dict[str, Any]],
+    *,
+    assigned: list[str],
+    directory: str,
+    provenance: Any,
+) -> list[dict[str, str]]:
+    declared_to_id = {
+        str(item.get("declared_name") or ""): str(item.get("id") or "")
+        for item in provenance
+        if isinstance(item, dict)
+        and str(item.get("id") or "") in assigned
+        and item.get("declared_name")
+    }
+    pending: dict[str, tuple[str, str]] = {}
+    succeeded: set[str] = set()
+    for payload in payloads:
+        message = payload.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_id = str(block.get("id") or "")
+                tool_name = str(block.get("name") or "")
+                tool_input = block.get("input") or {}
+                if not tool_id or not isinstance(tool_input, dict):
+                    continue
+                if tool_name == "Skill":
+                    declared = str(
+                        tool_input.get("skill")
+                        or tool_input.get("name")
+                        or ""
+                    )
+                    skill_id = declared_to_id.get(declared)
+                    if skill_id:
+                        pending[tool_id] = ("invoke_skill", skill_id)
+                elif tool_name in {"Bash", "Shell"}:
+                    skill_id = _skill_read_from_command(
+                        str(tool_input.get("command") or ""),
+                        assigned=assigned,
+                        directory=directory,
+                    )
+                    if skill_id:
+                        pending[tool_id] = ("read_skill_instructions", skill_id)
+            elif block.get("type") == "tool_result":
+                tool_id = str(block.get("tool_use_id") or "")
+                if tool_id and block.get("is_error") is not True:
+                    succeeded.add(tool_id)
+    return [
+        {
+            "item_id": tool_id,
+            "operation": operation,
+            "skill_id": skill_id,
+        }
+        for tool_id, (operation, skill_id) in pending.items()
+        if tool_id in succeeded
+    ]
+
+
+def _skill_read_from_command(
+    command: str,
+    *,
+    assigned: list[str],
+    directory: str,
+) -> str | None:
+    try:
+        outer = shlex.split(command)
+    except ValueError:
+        return None
+    argv = outer
+    if len(outer) == 3 and Path(outer[0]).name in {"bash", "sh"} and outer[1] in {
+        "-c",
+        "-lc",
+    }:
+        try:
+            argv = shlex.split(outer[2])
+        except ValueError:
+            return None
+    if not argv or Path(argv[0]).name not in {"cat", "head", "sed", "tail"}:
+        return None
+    for skill_id in assigned:
+        if f"{directory}/{skill_id}/SKILL.md" in argv:
+            return skill_id
+    return None

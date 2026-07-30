@@ -67,7 +67,10 @@ from fugue.bench.services import (
     without_managed_service_environment,
 )
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
-from fugue.bench.task_runtime import read_task_runtime_lock
+from fugue.bench.task_runtime import (
+    read_task_runtime_lock,
+    task_runtime_lock_identity,
+)
 from fugue.bench.wandb_sandbox import (
     bind_wandb_job_environment,
     wandb_execution_identity,
@@ -396,70 +399,75 @@ def _build_jobs(
                     tasks[0],
                     repo_root,
                 )
-                resolved_candidate = resolve_candidate(
-                    harness=harness.name,
-                    harness_version=(
-                        agent_runtime_spec(harness.name).version
-                        if agent_runtime_spec(harness.name) is not None
-                        else harness.agent
-                    ),
-                    model_route=_candidate_model_route(route, env),
-                    prompt_digest=next(iter(content_hashes["prompts"].values()), None),
-                    skills=[item.provenance() for item in resolved_skills],
-                    context={
-                        "id": spec.id,
-                        "version": spec.version,
-                        "config_hash": _context_config_hash(spec),
-                        "delivery": variant.context.delivery,
+                candidate_execution = {
+                    "harbor_version": HARBOR_VERSION,
+                    "harbor_config": {
+                        "n_attempts": 1,
+                        "n_concurrent": selected_concurrent,
+                        "verifier": _merge_dicts(
+                            experiment.verifier, variant.verifier
+                        ),
+                        "retry": _merge_dicts(experiment.retry, variant.retry),
                     },
-                    integrations=integration_binding.identity,
-                    agent=_candidate_agent_configuration(experiment, variant),
-                    execution={
-                        "harbor_version": HARBOR_VERSION,
-                        "harbor_config": {
-                            "n_attempts": 1,
-                            "n_concurrent": selected_concurrent,
-                            "verifier": _merge_dicts(
-                                experiment.verifier, variant.verifier
-                            ),
-                            "retry": _merge_dicts(experiment.retry, variant.retry),
-                        },
-                        "trace_content": experiment.trace_content,
-                        "instrumentation": "weave",
-                        "evidence_destination": trace_destination_identity(env),
-                        "scheduling_seed": scheduling_seed,
-                        "sandbox_policy_version": SANDBOX_POLICY_VERSION,
-                        "fugue_source": selected_source_provenance,
-                        **(
-                            {
-                                "sandbox_runtime": wandb_execution_identity(
-                                    selected_environment,
-                                    harness=harness.name,
-                                    repo_root=repo_root,
-                                )
-                            }
-                            if str(
-                                selected_environment.get("type") or "docker"
+                    "trace_content": experiment.trace_content,
+                    "instrumentation": "weave",
+                    "evidence_destination": trace_destination_identity(env),
+                    **(
+                        {
+                            "source_evidence_destination": (
+                                experiment.source_evidence_destination.to_dict()
                             )
-                            == "wandb"
-                            else {}
-                        ),
-                        **(
-                            {"context_runtime": context_runtime}
-                            if context_runtime is not None
-                            else {}
-                        ),
-                        **(
-                            {"agent_runtime": agent_runtime}
-                            if agent_runtime is not None
-                            else {}
-                        ),
-                        **(
-                            {"task_runtime": task_runtime}
-                            if task_runtime is not None
-                            else {}
-                        ),
-                    },
+                        }
+                        if experiment.source_evidence_destination is not None
+                        else {}
+                    ),
+                    "scheduling_seed": scheduling_seed,
+                    "sandbox_policy_version": SANDBOX_POLICY_VERSION,
+                    "fugue_source": selected_source_provenance,
+                    **(
+                        {
+                            "sandbox_runtime": wandb_execution_identity(
+                                selected_environment,
+                                harness=harness.name,
+                                repo_root=repo_root,
+                            )
+                        }
+                        if str(selected_environment.get("type") or "docker")
+                        == "wandb"
+                        else {}
+                    ),
+                    **(
+                        {"context_runtime": context_runtime}
+                        if context_runtime is not None
+                        else {}
+                    ),
+                    **(
+                        {"agent_runtime": agent_runtime}
+                        if agent_runtime is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "task_runtime": task_runtime_lock_identity(
+                                task_runtime,
+                                repo_root=repo_root,
+                            )
+                        }
+                        if task_runtime is not None
+                        else {}
+                    ),
+                }
+                resolved_candidate = _resolve_rendered_candidate(
+                    harness=harness,
+                    experiment=experiment,
+                    variant=variant,
+                    route=route,
+                    env=env,
+                    content_hashes=content_hashes,
+                    resolved_skills=resolved_skills,
+                    context_spec=spec,
+                    integration_binding=integration_binding,
+                    execution=candidate_execution,
                 )
                 candidate_id = resolved_candidate.candidate_id
                 context_instruction = _context_instruction_path(
@@ -527,6 +535,8 @@ def _build_jobs(
                     )
                 job_env = _job_env(
                     base_env=env,
+                    applicable=applicable,
+                    skip_reason=skip_reason,
                     experiment=experiment,
                     manifest=manifest,
                     manifest_path=manifest_path,
@@ -555,6 +565,11 @@ def _build_jobs(
                     candidate_id=candidate_id,
                     execution_fingerprint=resolved_candidate.execution_fingerprint,
                     sandbox_runtime=wandb_identity,
+                    agent_runtime=config.get("fugue", {}).get("agent_runtime"),
+                    task_runtime=config.get("fugue", {}).get("task_runtime"),
+                    sandbox_attestation=config.get("fugue", {}).get(
+                        "sandbox_attestation"
+                    ),
                     expected_artifact_paths=config.get("fugue", {}).get(
                         "expected_artifact_paths", []
                     ),
@@ -963,6 +978,8 @@ def _extra_instruction_paths(
 def _job_env(
     *,
     base_env: dict[str, str],
+    applicable: bool,
+    skip_reason: str | None,
     experiment: ExperimentSpec,
     manifest: BenchmarkManifest,
     manifest_path: Path,
@@ -991,6 +1008,9 @@ def _job_env(
     candidate_id: str,
     execution_fingerprint: str,
     sandbox_runtime: Mapping[str, Any] | None,
+    agent_runtime: Mapping[str, Any] | None,
+    task_runtime: Mapping[str, Any] | None,
+    sandbox_attestation: Mapping[str, Any] | None,
     expected_artifact_paths: list[str],
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
@@ -1036,6 +1056,15 @@ def _job_env(
             "FUGUE_WANDB_STUDY_ID": base_env.get("FUGUE_WANDB_STUDY_ID", ""),
             "FUGUE_RESEARCH_EXPERIMENT_ID": base_env.get(
                 "FUGUE_RESEARCH_EXPERIMENT_ID", ""
+            ),
+            "FUGUE_SOURCE_EVIDENCE_PROJECT": base_env.get(
+                "FUGUE_SOURCE_EVIDENCE_PROJECT", ""
+            ),
+            "FUGUE_RESULT_EVIDENCE_PROJECT": base_env.get(
+                "FUGUE_RESULT_EVIDENCE_PROJECT", ""
+            ),
+            "FUGUE_STUDY_CONSOLE_BACKLINK": base_env.get(
+                "FUGUE_STUDY_CONSOLE_BACKLINK", ""
             ),
             "FUGUE_RUN_ID": run_id,
             "FUGUE_WORKLOAD_ID": workload_id,
@@ -1094,7 +1123,21 @@ def _job_env(
                 sandbox_runtime or {},
                 sort_keys=True,
             ),
+            "FUGUE_AGENT_RUNTIME": json.dumps(
+                agent_runtime or {},
+                sort_keys=True,
+            ),
+            "FUGUE_TASK_RUNTIME": json.dumps(
+                task_runtime or {},
+                sort_keys=True,
+            ),
+            "FUGUE_SANDBOX_ATTESTATION": json.dumps(
+                sandbox_attestation or {},
+                sort_keys=True,
+            ),
             "FUGUE_EXECUTION_KIND": "agent",
+            "FUGUE_APPLICABLE": "true" if applicable else "false",
+            "FUGUE_SKIP_REASON": skip_reason or "",
             "FUGUE_IDENTITY_SCHEMA_VERSION": str(CANDIDATE_IDENTITY_SCHEMA_VERSION),
             "FUGUE_MODEL": route.display_model,
             "FUGUE_MODEL_PROVIDER": route.provider,
@@ -1383,10 +1426,13 @@ def _render_trial_policy_compose(
                             "pull_policy": "never",
                             "cap_drop": ["ALL"],
                             "security_opt": ["no-new-privileges:true"],
-                            "pids_limit": 1024,
                             "deploy": {
                                 "resources": {
-                                    "limits": {"cpus": "8.0", "memory": "16g"}
+                                    "limits": {
+                                        "cpus": "${CPUS:-8.0}",
+                                        "memory": "${MEMORY:-16384M}",
+                                        "pids": 1024,
+                                    }
                                 }
                             },
                         }
@@ -1603,12 +1649,53 @@ def _agent_config_hash(
 def _candidate_agent_configuration(
     experiment: ExperimentSpec, variant: FeatureVariant
 ) -> dict[str, Any]:
+    agent_env = _merge_dicts(experiment.agent_env, variant.agent_env)
+    for metadata_key in (
+        "FUGUE_WANDB_RESEARCH_ID",
+        "FUGUE_WANDB_STUDY_ID",
+        "FUGUE_SOURCE_EVIDENCE_PROJECT",
+        "FUGUE_RESULT_EVIDENCE_PROJECT",
+        "FUGUE_STUDY_CONSOLE_BACKLINK",
+    ):
+        agent_env.pop(metadata_key, None)
     return _identity_configuration(
         {
             "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
-            "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
+            "agent_env": agent_env,
             "environment": dict(variant.environment),
         }
+    )
+
+
+def _resolve_rendered_candidate(
+    *,
+    harness: HarnessSpec,
+    experiment: ExperimentSpec,
+    variant: FeatureVariant,
+    route: ModelRoute,
+    env: Mapping[str, str],
+    content_hashes: Mapping[str, Mapping[str, str]],
+    resolved_skills: list[ResolvedSkill],
+    context_spec: ContextSystemSpec,
+    integration_binding: IntegrationBinding,
+    execution: Mapping[str, Any],
+) -> ResolvedCandidate:
+    runtime = agent_runtime_spec(harness.name)
+    return resolve_candidate(
+        harness=harness.name,
+        harness_version=runtime.version if runtime is not None else harness.agent,
+        model_route=_candidate_model_route(route, dict(env)),
+        prompt_digest=next(iter(content_hashes["prompts"].values()), None),
+        skills=[item.provenance() for item in resolved_skills],
+        context={
+            "id": context_spec.id,
+            "version": context_spec.version,
+            "config_hash": _context_config_hash(context_spec),
+            "delivery": variant.context.delivery,
+        },
+        integrations=integration_binding.identity,
+        agent=_candidate_agent_configuration(experiment, variant),
+        execution=execution,
     )
 
 

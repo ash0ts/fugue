@@ -52,6 +52,28 @@ def test_all_checked_in_experiments_use_the_strict_public_schema() -> None:
         get_experiment(path.stem)
 
 
+def test_experiment_evidence_project_requires_exact_entity_project_slug() -> None:
+    experiment = experiment_from_data(
+        {
+            "id": "routed",
+            "title": "Routed",
+            "evidence_project": "wandb/fugue-claude-loop-engineering-v1",
+        }
+    )
+
+    assert experiment.evidence_project == (
+        "wandb/fugue-claude-loop-engineering-v1"
+    )
+    with pytest.raises(ValueError, match="exact W&B entity/project"):
+        experiment_from_data(
+            {
+                "id": "invalid",
+                "title": "Invalid",
+                "evidence_project": "news-research-agent",
+            }
+        )
+
+
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
     prompt = tmp_path / "configs/fugue/prompts/fugue-maintainer.md"
     prompt.parent.mkdir(parents=True)
@@ -149,6 +171,7 @@ workloads:
 presets:
   smoke:
     workloads: [coding]
+    environment: {type: docker}
     workload_overrides:
       coding: {n_tasks: 1}
 """,
@@ -172,6 +195,7 @@ presets:
     assert experiment.variants[1].prompt_id == "prompt-a"
     assert experiment.variants[1].skill_ids == ["skill-a"]
     assert experiment.variants[1].agent_kwargs == {"temperature": 0}
+    assert experiment.presets[0].environment == {"type": "docker"}
     assert experiment.presets[0].workload_overrides == {"coding": {"n_tasks": 1}}
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fugue.bench.candidates import stable_digest
 from fugue.task_interaction import TaskInteractionController
 
 
@@ -87,6 +88,29 @@ def test_metadata_trace_records_hashes_without_conversation_content(
     assert "Private response text." not in evidence
     assert "Private follow-up text." not in evidence
     assert "content_sha256" in evidence
+
+
+def test_interaction_controller_digest_is_verified(tmp_path: Path) -> None:
+    controller = {
+        "type": "single_turn",
+        "max_user_turns": 0,
+        "max_agent_turns": 1,
+        "timeout_sec": 60,
+    }
+    controller["controller_digest"] = stable_digest(controller)
+    TaskInteractionController.from_environment(
+        logs_dir=tmp_path,
+        initial_instruction="Inspect the evidence.",
+        env={"FUGUE_TASK_AUTHORING": _metadata(controller)},
+    )
+
+    controller["controller_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="controller digest does not match"):
+        TaskInteractionController.from_environment(
+            logs_dir=tmp_path,
+            initial_instruction="Inspect the evidence.",
+            env={"FUGUE_TASK_AUTHORING": _metadata(controller)},
+        )
 
 
 def test_model_interactor_has_a_separate_route_receipt_and_cost(

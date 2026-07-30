@@ -679,12 +679,6 @@ def _generated_judge_request(
     evidence: Mapping[str, Any],
     deterministic: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    route = resolve_model_route(model, env)
-    api_key = provider_api_key(route, env)
-    if not api_key:
-        raise RuntimeError(
-            f"{provider_api_key_env(route)} is required for evaluation judging"
-        )
     prompt = (
         "Evaluate one capability task. Return only JSON with a scores object and "
         "a reasons object keyed by the requested dimension ids. Each score must be "
@@ -702,6 +696,23 @@ def _generated_judge_request(
             default=str,
         )[:48_000]
     )
+    return request_json_judge(model=model, env=env, prompt=prompt)
+
+
+def request_json_judge(
+    *,
+    model: str,
+    env: Mapping[str, str],
+    prompt: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one bounded JSON judge request through Fugue's model plane."""
+
+    route = resolve_model_route(model, env)
+    api_key = provider_api_key(route, env)
+    if not api_key:
+        raise RuntimeError(
+            f"{provider_api_key_env(route)} is required for evaluation judging"
+        )
     with httpx.Client(timeout=120) as client:
         return _post_judge(client, route, api_key, env, prompt)
 
@@ -724,7 +735,6 @@ def _post_judge(
             json={
                 "model": route.model_id,
                 "max_tokens": 1_200,
-                "temperature": 0,
                 "messages": [{"role": "user", "content": prompt}],
             },
         )

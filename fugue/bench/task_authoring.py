@@ -2538,6 +2538,7 @@ def _write_authored_harbor_task(
         )
     else:
         docker_lines.append("WORKDIR /workspace")
+    resource_targets: list[str] = []
     for index, attachment in enumerate(case.get("attachments") or []):
         value = _mapping(attachment, "task attachment")
         relative = _safe_relative_path(value.get("locked_relative"), "locked resource")
@@ -2552,6 +2553,7 @@ def _write_authored_harbor_task(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         docker_lines.append(f"COPY {local.as_posix()} {value['target']}")
+        resource_targets.append(str(value["target"]))
     interaction = _mapping(case.get("interaction"), "task interaction")
     (root / "environment" / "Dockerfile").write_text("\n".join(docker_lines) + "\n")
     (root / "task.toml").write_text(
@@ -2578,8 +2580,18 @@ def _write_authored_harbor_task(
             ]
         )
     )
+    resource_guidance = ""
+    if resource_targets:
+        rendered_targets = "\n".join(f"- `{target}`" for target in resource_targets)
+        resource_guidance = (
+            "\n\nLocked public resources (read-only):\n"
+            f"{rendered_targets}\n\n"
+            "Read the relevant locked public resources before using attached "
+            "integrations."
+        )
     (root / "instruction.md").write_text(
-        f"# {case['title']}\n\n{case['instruction']}\n\n"
+        f"# {case['title']}\n\n{case['instruction']}"
+        f"{resource_guidance}\n\n"
         "Write the final response to `/logs/artifacts/fugue-answer.md`. "
         "Place any requested files under `/logs/artifacts`.\n"
     )
