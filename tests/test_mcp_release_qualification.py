@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import runpy
+from contextlib import contextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 
 from fugue.bench import mcp_release_qualification
@@ -63,6 +65,60 @@ def test_release_notes_lock_binds_exact_rc_source_and_all_classifications() -> N
     assert {
         item["release_note"] for item in receipt["release_note_classification"]
     } == set(release_notes["behaviors"])
+
+
+def test_weave_missing_project_is_distinct_from_forbidden_access() -> None:
+    request = httpx.Request("POST", "https://trace.wandb.ai/project/stats")
+    missing = httpx.HTTPStatusError(
+        "403 Forbidden: Project not found",
+        request=request,
+        response=httpx.Response(403, request=request),
+    )
+    forbidden = httpx.HTTPStatusError(
+        "403 Forbidden: access denied",
+        request=request,
+        response=httpx.Response(403, request=request),
+    )
+
+    assert mcp_release_qualification._weave_missing_error(missing) is True
+    assert mcp_release_qualification._weave_missing_error(forbidden) is False
+
+
+def test_weave_inventory_preflights_missing_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "https://trace.wandb.ai/project/stats")
+
+    class Server:
+        def project_stats(self, request_value):
+            assert request_value.project_id == QUALIFICATION_SOURCE_PROJECT
+            raise httpx.HTTPStatusError(
+                "403 Forbidden: Project not found",
+                request=request,
+                response=httpx.Response(403, request=request),
+            )
+
+    class Client:
+        server = Server()
+
+        def get_calls(self, **kwargs):
+            raise AssertionError("missing project must not query Calls")
+
+    @contextmanager
+    def source_client(project: str, *, write: bool):
+        assert project == QUALIFICATION_SOURCE_PROJECT
+        assert write is False
+        yield Client()
+
+    monkeypatch.setattr(
+        mcp_release_qualification,
+        "_source_weave_client",
+        source_client,
+    )
+
+    assert mcp_release_qualification._inventory_weave_evidence(
+        QUALIFICATION_SOURCE_PROJECT
+    ) == (None, [], {}, [], [], [])
 
 
 def _lock(
@@ -1024,12 +1080,12 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     candidate_passes: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scorer = runpy.run_path(
-        (EXAMPLE / "natural_maintainer_scorer.py").as_posix()
-    )["score"]
+    scorer = runpy.run_path((EXAMPLE / "natural_maintainer_scorer.py").as_posix())[
+        "score"
+    ]
 
     def fake_inline_runner(*, source, evidence, reference, profile, limits):
-        assert "if __name__ == \"__main__\":" in source
+        assert 'if __name__ == "__main__":' in source
         assert profile.id == "python312-sandbox-v1"
         details = scorer(
             reference["task"],
