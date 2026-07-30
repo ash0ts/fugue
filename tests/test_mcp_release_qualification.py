@@ -56,9 +56,9 @@ def test_release_notes_lock_binds_exact_rc_source_and_all_classifications() -> N
     )
     receipt = _mcp_release_qualification_receipt(_lock(), [])
 
-    assert release_notes["commit"] == ("3dd4447ef0054d4707aafc515e3f2ddfb11b17bd")
+    assert release_notes["commit"] == ("29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7")
     assert release_notes["sha256"] == (
-        "2e32e337dd6c98a5e4b3805b189af10c913ec1dd739a63b25b031ab35d786c99"
+        "257110b2542caec6bf30c24cfb59c1a3ee1074b69ad68497b9978ba130243e12"
     )
     assert {
         item["release_note"] for item in receipt["release_note_classification"]
@@ -1077,7 +1077,7 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     assert readiness.gold_passes == tasks
     assert spec.decision_policy is not None
     assert spec.decision_policy.candidate_sha == (
-        "3dd4447ef0054d4707aafc515e3f2ddfb11b17bd"
+        "29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
     )
     gates = {gate.source: gate.target for gate in spec.decision_policy.gates}
     assert gates["matrix.rows"] == cells
@@ -1086,6 +1086,7 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
     assert gates["infrastructure.gate.human-maintainer-actionability-review"] is True
     assert gates["infrastructure.gate.fresh-wheel-python-3-11"] is True
     assert gates["infrastructure.gate.fresh-wheel-python-3-12"] is True
+    assert gates["infrastructure.gate.installed-wheel-stdio-protocol"] is True
     assert any(
         "infrastructure receipt is not usable" in blocker
         for blocker in readiness.blockers

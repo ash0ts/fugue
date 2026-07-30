@@ -1,6 +1,6 @@
 schema_version: 3
 id: mcp-main-vs-0-4-natural-maintainer-confirmation-v3
-question: Is the exact provisional W&B MCP 0.4 fix PR #126 behavior repeatable across the full immutable natural-maintainer taskset relative to main?
+question: Is the exact W&B MCP 0.4 staging behavior repeatable across the full immutable natural-maintainer taskset relative to main?
 taskset:
   tasks: natural-maintainer-confirmation-tasks.jsonl
   private_labels: natural-maintainer-confirmation-private.jsonl
@@ -8,7 +8,7 @@ baseline:
   label: W&B MCP main at 53b199a5
   integrations: [wandb-mcp-main]
 candidate:
-  label: W&B MCP provisional fix PR #126 head at 3dd4447e
+  label: W&B MCP staging at 29cc1b5b
   integrations: [wandb-mcp-0-4-staging]
 changed: [integrations]
 evaluators:
@@ -56,7 +56,7 @@ execution:
   environment: {type: docker}
 decision_policy:
   release_target: wandb-mcp-server Python package 0.4
-  candidate_sha: 3dd4447ef0054d4707aafc515e3f2ddfb11b17bd
+  candidate_sha: 29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7
   minimum_evidence_grade: A
   human_signoff_required: true
   gates:
@@ -141,6 +141,13 @@ decision_policy:
       label: Package passes against the latest supported W&B SDK
       category: infrastructure
       source: infrastructure.gate.wandb-latest
+      operator: eq
+      target: true
+      critical: true
+    - id: installed-wheel-stdio-protocol
+      label: Installed wheel keeps STDIO reserved for MCP JSON-RPC
+      category: infrastructure
+      source: infrastructure.gate.installed-wheel-stdio-protocol
       operator: eq
       target: true
       critical: true

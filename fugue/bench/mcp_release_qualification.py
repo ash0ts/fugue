@@ -28,11 +28,11 @@ QUALIFICATION_PROJECT = QUALIFICATION_RESULT_PROJECT
 MCP_RELEASE_NOTES_LOCK = Path(
     "examples/comparisons/wandb-mcp-maintenance/release-notes.lock.json"
 )
-_MCP_RELEASE_NOTES_COMMIT = "3dd4447ef0054d4707aafc515e3f2ddfb11b17bd"
+_MCP_RELEASE_NOTES_COMMIT = "29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
 _MCP_RELEASE_NOTES_SHA256 = (
-    "2e32e337dd6c98a5e4b3805b189af10c913ec1dd739a63b25b031ab35d786c99"
+    "257110b2542caec6bf30c24cfb59c1a3ee1074b69ad68497b9978ba130243e12"
 )
-_MCP_RELEASE_NOTES_BYTES = 7838
+_MCP_RELEASE_NOTES_BYTES = 8187
 EVIDENCE_LOCK_SCHEMA_VERSION = 1
 _REQUIRED_COUNTS = {
     "runs": 6,
@@ -58,7 +58,7 @@ _MCP_RELEASE_CANDIDATES = (
     ),
     (
         "wandb-mcp-0-4-staging",
-        "git:3dd4447ef0054d4707aafc515e3f2ddfb11b17bd",
+        "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
     ),
 )
 
@@ -1048,6 +1048,14 @@ def _infrastructure_conformance(
             "evidence": "requires upstream CI and security receipts",
         },
         {
+            "id": "installed-wheel-stdio-protocol",
+            "status": "unavailable",
+            "evidence": (
+                "requires installed-wheel MCP sessions proving stdout contains "
+                "only JSON-RPC across supported client identities"
+            ),
+        },
+        {
             "id": "serverless-runtime-digest",
             "status": "unavailable",
             "evidence": "requires a scanned public image and runtime lock",
@@ -1305,6 +1313,11 @@ def _release_note_classification(
             {
                 "release_note": "managed-staging-and-helm-validation",
                 "status": "unqualified_separate_release_gate",
+                "evidence_kind": "infrastructure",
+            },
+            {
+                "release_note": "stdio-protocol-safety",
+                "status": "upstream_ci_only_not_runtime_qualified",
                 "evidence_kind": "infrastructure",
             },
         )
