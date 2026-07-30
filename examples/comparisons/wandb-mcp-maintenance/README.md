@@ -1,262 +1,211 @@
-# W&B MCP release-maintenance qualification
+# W&B MCP 0.4 maintainer qualification
 
-This is the real-evidence Fugue qualification workflow:
+This directory contains the canonical, source-isolated Fugue qualification for
+the W&B MCP Python package:
 
-> Does the exact W&B MCP 0.4 revision improve how an Agent investigates
-> bounded W&B and Weave maintenance evidence compared with exact 0.3.7?
+> Does the exact 0.4 staging revision improve a maintainer's ability to
+> reconcile W&B/Weave evidence and assess project health compared with the
+> exact `main` revision?
 
-It compares two complete Agent candidates. The task, model, harness, runtime,
-attempt policy, and evidence snapshot are fixed inside each comparison. Only
-the locked MCP integration revision changes.
+The current release decision is **HOLD** until the natural-maintainer studies,
+package gates, and human sign-off all pass. A local behavioral finding does not
+certify W&B Serverless, managed-service, or Helm readiness.
 
-The active path uses:
+## Locked design
 
-- W&B Serverless Sandboxes through Harbor's `wandb` environment;
-- one W&B API key for Sandbox auth, hosted evidence, and W&B Inference;
-- Anthropic credentials for Claude Code and the blind judge;
-- `anthropic/claude-sonnet-5` for Claude discovery and primary;
-- `wandb/deepseek-ai/DeepSeek-V4-Flash` for OpenClaw discovery and
-  replication.
+| Role | Locked value |
+|---|---|
+| Source evidence | `wandb/fugue-mcp-release-source-v1` |
+| Result evidence | `wandb/fugue-mcp-release-qualification-v1` |
+| Baseline | `wandb-mcp-main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` |
+| Provisional candidate | [`wandb-mcp-0-4-staging` at PR #126 head `3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`](https://github.com/wandb/wandb-mcp-server/pull/126) |
+| Execution | local Docker through Harbor |
+| Canary | 2 tasks × 2 arms × 2 attempts = 8 cells, maximum $10 |
+| Confirmation | 4 tasks × 2 arms × 2 attempts = 16 cells, maximum $20 |
 
-It does not require CoreWeave or OpenAI. Local Harbor is the behavioral parity
-baseline; W&B Serverless is the remote execution policy.
+The checked-in candidate is the provisional reviewed fix-PR head, not yet the
+final `staging/0.4.0` head. It is suitable for offline contract preparation
+only. After PR #126 merges, lock the resulting staging head and regenerate
+every candidate, runtime, scorer, preview, and approval lock before running a
+behavioral study.
 
-## Real hosted evidence
+The source project contains immutable task evidence only. Agent traces,
+Evaluations, result rows, and release decisions go to the result project.
+Publication to the source project, source drift, or a query outside the locked
+source scope fails qualification.
 
-The immutable lock in `evidence.lock.json` points to the dedicated,
-non-sensitive hosted project:
+## Prepare and freeze source evidence
 
-`wandb/fugue-mcp-release-qualification-v1`
-
-The checked-in lock contains:
-
-- six genuine W&B Runs with configuration, three-step histories, summaries,
-  and versioned evidence artifacts;
-- 24 standardized Weave Agent conversations and 48 tool spans;
-- one versioned eight-row Weave Dataset;
-- two versioned Weave Evaluations with eight aligned rows each;
-- 16 Evaluation prediction rows;
-- one observed latency anomaly, one missing-cost case, and one deliberately
-  incomplete-evaluation case.
-
-These deterministic objects are seeded prior evidence for investigating the
-MCP behavior. They are not the result of the MCP comparison and are not
-customer data.
-
-Recreate or validate the snapshot idempotently:
+Install the trusted preparation environment:
 
 ```bash
 uv sync --python 3.13 --frozen --extra dev --extra research-worker
-
-uv run python \
-  examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
-  --project wandb/fugue-mcp-release-qualification-v1 \
-  --env-file /Users/ashah/Documents/common_tools/.env \
-  --output \
-  examples/comparisons/wandb-mcp-maintenance/evidence.lock.json
 ```
 
-The preparation command loads only the required W&B value into its child
-process and never writes a credential into the lock. An existing lock must
-validate exactly before it is reused. Drift in counts, versions, seed identity,
-or content is an error; do not edit private labels to match drifted data.
+Seed or validate the dedicated source project idempotently. The output path is
+operator-local and must not be committed:
+
+```bash
+uv run python \
+  examples/comparisons/wandb-mcp-maintenance/prepare_hosted_project.py \
+  --source-project wandb/fugue-mcp-release-source-v1 \
+  --result-project wandb/fugue-mcp-release-qualification-v1 \
+  --env-file /Users/ashah/Documents/common_tools/.env \
+  --output .fugue/qualification/mcp-release-source-v1/evidence.lock.json
+```
+
+The command never serializes credentials. Existing objects must match the
+locked identities, versions, counts, and digests exactly; it does not rewrite
+private labels to accommodate drift.
+
+The checked-in `evidence.lock.json` belongs to the earlier single-project
+study. It is retained only as historical audit input and is not the current
+source lock.
 
 ## Import and lock exact MCP revisions
 
-The ordinary `mcp.json` declaration pins:
-
-- 0.3.7: `80252b3aa23ae3c1fdde089ce2b7dfb106dafb38`
-- 0.4: `a2bae7271323ac43262ffb73454b0aff01ddc808`
-
-Load credentials into the trusted operator shell without printing them. The
-declaration references environment variable names only:
+`mcp.json` declares the exact repositories and revisions. Import and lock them
+from the trusted operator boundary:
 
 ```bash
-set -a
-source /Users/ashah/Documents/common_tools/.env
-set +a
-export WANDB_BASE_URL=https://api.wandb.ai
+uv run fugue mcp import \
+  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
+  --server wandb-main \
+  --as wandb-mcp-main
 
 uv run fugue mcp import \
   --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-3-7 \
-  --as wandb-mcp-0-3-7
+  --server wandb-0-4-staging \
+  --as wandb-mcp-0-4-staging
 
-uv run fugue mcp import \
-  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
-  --server wandb-0-4 \
-  --as wandb-mcp-0-4
-
-uv run fugue mcp inspect wandb-mcp-0-3-7
-uv run fugue mcp inspect wandb-mcp-0-4
-
-uv run fugue mcp lock wandb-mcp-0-3-7 \
+uv run fugue mcp lock wandb-mcp-main \
   --acknowledge-package-code \
   --platform linux/amd64
-uv run fugue mcp lock wandb-mcp-0-4 \
+
+uv run fugue mcp lock wandb-mcp-0-4-staging \
   --acknowledge-package-code \
   --platform linux/amd64
 ```
 
-The lock operation prepares the exact target-platform MCP runtime and captures
-its initialized tool manifest. Agent attempts do not clone repositories or
-install MCP package code.
+Preparation resolves package code and captures initialized tool manifests.
+Agent cells receive locked assets and may not clone, install, or mutate either
+candidate.
 
-## Calibrate the blind judge
+## Prove the mechanism before spending
 
-`judge-calibration-cases.jsonl` contains 48 authored, balanced examples: 24
-passes and 24 failures, including critical unsupported-completeness failures.
-Authored references are not human reviews.
-
-Each example requires two distinct human reviewers. Disagreements require
-adjudication. Add the blinded judge result, then regenerate the report:
+Run the zero-model source-conformance check against the two exact Evaluation
+roots:
 
 ```bash
 uv run python \
-  examples/comparisons/wandb-mcp-maintenance/validate_judge_calibration.py \
-  --cases \
-  examples/comparisons/wandb-mcp-maintenance/judge-calibration-cases.jsonl \
-  --report \
-  examples/comparisons/wandb-mcp-maintenance/judge-calibration.json
+  examples/comparisons/wandb-mcp-maintenance/verify_hosted_source.py \
+  --lock .fugue/qualification/mcp-release-source-v1/evidence.lock.json \
+  --env-file /Users/ashah/Documents/common_tools/.env \
+  --output .fugue/qualification/mcp-release-source-conformance.json
 ```
 
-Paid execution remains blocked until the report has:
+The baseline must reproduce 18 direct children: 16 prediction-and-score calls
+plus two summary calls. The candidate must report exactly the 16 direct
+`Evaluation.predict_and_score` children.
 
-- 48 reviewed examples and two reviewers per example;
-- adjudication for every disagreement;
-- true-positive and true-negative rates of at least 0.85;
-- zero false passes on critical unsupported-completeness cases.
-
-## Qualify the W&B Serverless runtime
-
-W&B Serverless pulls public images. Put these two values in the W&B team
-Secrets Manager; do not copy their values into a comparison, lock, image,
-GitHub secret, or command:
-
-| W&B secret name | Environment variable in the Sandbox |
-|---|---|
-| `fugue-wandb-api-key` | `WANDB_API_KEY` |
-| `fugue-anthropic-api-key` | `ANTHROPIC_API_KEY` |
-
-The runtime build accepts a public registry repository with a qualification
-tag and creates one digest-pinned image per harness. It prepares the pinned
-Agent runtimes, embeds the locked Fugue and MCP assets, generates CycloneDX
-SBOMs, rejects High-or-worse Grype findings, runs offline probes, pushes the
-images, and verifies that they can be pulled anonymously:
+Then qualify both locked MCP runtimes without an Agent model:
 
 ```bash
-uv run fugue sandbox wandb build-runtime \
-  --comparison \
-  examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
-  --comparison \
-  examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml \
-  --comparison \
-  examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml \
-  --comparison \
-  examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml \
-  --platform linux/amd64 \
-  --image docker.io/REGISTRY_ORG/fugue-mcp-release:QUALIFIED_GIT_SHA \
-  --push \
-  --output-manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --sbom-dir .fugue/wandb-serverless-runtime-reports
-
-uv run fugue sandbox wandb lock-runtime \
-  --manifest .fugue/wandb-serverless-runtime.manifest.json \
-  --output .fugue/wandb-serverless-runtime.lock.json
+uv run python \
+  examples/comparisons/wandb-mcp-maintenance/qualify_locked_revisions.py \
+  --source-lock .fugue/qualification/mcp-release-source-v1/evidence.lock.json \
+  --env-file /Users/ashah/Documents/common_tools/.env \
+  --output .fugue/qualification/mcp-release-mechanism-receipt.json
 ```
 
-Run both commands only from a clean, reviewed commit. `build-runtime` without
-`--push` is a local qualification aid; `lock-runtime` intentionally refuses
-its mutable image tags. Publishing the public images is a distinct protected
-release gate.
+Package release gates are separate and must produce
+`.fugue/qualification/mcp-python-package-release-gates.json`. That receipt
+binds the exact final staging tree, fresh wheels on Python 3.11 and 3.12,
+W&B-latest compatibility, CI, dependency and source-security checks, local
+conformance, and the human-maintainer actionability review.
 
-With W&B Serverless enabled for the team, prove auth, image startup, the
-embedded OpenClaw and Fugue runtimes, deletion, and zero matching orphans:
+## Preview the natural-maintainer studies
+
+The eight-cell canary is the only first paid stage:
 
 ```bash
-uv run fugue sandbox wandb doctor \
-  --lock .fugue/wandb-serverless-runtime.lock.json \
-  --env-file /Users/ashah/Documents/common_tools/.env
+SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
+ENV_FILE=/Users/ashah/Documents/common_tools/.env
+
+env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
+  --env-file "$ENV_FILE" --json
+
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
+  --preview --env-file "$ENV_FILE" --json
 ```
 
-Each real cell uses Harbor's `wandb` environment with force-build disabled.
-The runtime lock selects the exact harness image. Credentials enter through
-the two named W&B secrets; per-command aliases and OTLP authorization are
-derived inside the Sandbox. An unknown secret-shaped value fails closed.
-Every result row is ineligible unless its lifecycle attestation matches the
-lock, records deletion, and reconciles to zero remaining Sandboxes.
+Previewing does not authorize spend. An operator must approve that exact
+preview digest with a maximum of eight cells and $10 before executing it.
 
-## Exact 80-cell study
-
-The full staged study is:
-
-| Stage | Agent route | Tasks × revisions × attempts | Cells |
-|---|---|---:|---:|
-| Claude discovery | Claude Code + Anthropic Sonnet 5 | 4 × 2 × 1 | 8 |
-| W&B discovery | OpenClaw + W&B DeepSeek V4 Flash | 4 × 2 × 1 | 8 |
-| Claude primary | Claude Code + Anthropic Sonnet 5 | 8 × 2 × 2 | 32 |
-| W&B replication | OpenClaw + W&B DeepSeek V4 Flash | 8 × 2 × 2 | 32 |
-| Total | two direct provider routes | | 80 |
-
-First run the local specifications as a behavioral parity baseline. Then
-preview and approve each Serverless digest separately:
+Only if the canary is valid, non-regressing, reconciled, and useful may an
+operator generate and separately approve the 16-cell confirmation:
 
 ```bash
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml \
-  --preview
+SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-confirmation-local-v3.yaml
 
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml \
-  --preview
+env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
+  --env-file "$ENV_FILE" --json
 
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml \
-  --preview
-
-uv run fugue compare \
-  examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml \
-  --preview
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" \
+  --preview --env-file "$ENV_FILE" --json
 ```
 
-Use each preview's exact digest with `fugue approve`, including an explicit
-cell and dollar cap, before `fugue compare --run --approval ...`. Pass
-`--env-file /Users/ashah/Documents/common_tools/.env` only to the trusted
-operator commands. Do not pool away a reversal between Claude and the W&B
-Inference Agent.
+The confirmation requires a new approval capped at 16 cells and $20. Neither
+command in this document runs a model or grants approval.
 
-The protected order is:
+## What the tasks and scorer measure
 
-1. Claude discovery, eight cells.
-2. W&B Inference discovery, eight cells.
-3. Claude primary, 32 cells, only if discovery is informative and safe.
-4. W&B Inference replication, 32 cells, only after the primary result is
-   frozen.
+Each attempt produces exactly one machine-readable JSON answer plus a concise
+maintainer memo. Public prompts are stored separately from host-only expected
+facts.
 
-After each stage, require nonzero planned and completed rows, exact candidate
-and runtime identities, no critical evidence-honesty regression, complete
-traces and Evaluations, zero credential/private-label leakage, and zero
-remaining Sandboxes. Use `fugue result COMPARISON_ID --json` and open the
-linked discordant rows in Weave before approving the next stage.
+The deterministic scorer reports independent dimensions:
 
-The full study remains blocked until judge calibration, both MCP runtime locks,
-W&B Serverless organization access, and the public runtime-image lock pass.
-The current credential can prepare W&B/Weave evidence, but the organization
-must separately enable Serverless Sandboxes.
+- factual task outcome;
+- actual locked-project scope;
+- bounded evidence collection;
+- honest treatment of incomplete evidence;
+- observed release-mechanism use.
 
-## Evidence and claims
+Mechanism use cannot convert a factually wrong answer into a pass. Actual MCP
+calls and queried scopes are authoritative; an incorrect project name written
+in the Agent answer is shown separately. Human review judges whether the memo
+is actionable for a maintainer and remains distinct from deterministic scores.
 
-Fugue reports four layers separately:
+Fugue writes one stable attempt identity across the comparison design, Harbor
+cell, Claude conversation, MCP calls, Weave Evaluation chain, Study event, and
+result. A valid attempt resolves its Dataset, Evaluation root,
+prediction-and-score call, prediction call, and native Agent root in the
+result project. OTel identifiers remain diagnostic metadata and are never used
+as Weave links.
 
-1. MCP initialization and infrastructure conformance.
-2. Deterministic task outcomes.
-3. Calibrated blind-judge dimensions.
-4. Mechanism evidence: selected tools, projected and broad reads, sources
-   returned/opened/used, structured errors, latency, tokens, observed cost,
-   traces, and Evaluation reconciliation.
+## Reading the result
 
-The study may support a whole-release recommendation only within the locked
-models, Agents, tasks, attempts, runtimes, and dates. It may not attribute an
-outcome to an individual MCP feature. A null or harness-reversing result is
-valid but not presentation-ready, and missing required evidence is exit code
-`3`, never a zero score.
+Study Console should be opened on the result project. Start with the behavioral
+finding and package-release decision, then inspect each paired task:
+
+1. Compare baseline and candidate facts, scope, boundedness, honesty, tools,
+   cost, and latency.
+2. Open the primary prediction-and-score evidence action.
+3. Follow the Evaluation, prediction, Agent-root, and Dataset relationships.
+4. Confirm the actual queried project is the locked source project.
+5. Reconcile terminal cells, result rows, Evaluation rows, and native Agent
+   roots before accepting the finding.
+
+A `GO` decision additionally requires the immutable package-gate receipt and a
+release-owner signature over the final result digest. A valid `HOLD` or
+non-discriminating result remains a useful outcome and must not be rewritten
+to manufacture a release win.
+
+## Historical assets
+
+The older `discovery*.yaml`, `primary*.yaml`,
+`wandb-replication*.yaml`, and checked-in `evidence.lock.json` are retained for
+audit compatibility. They are unregistered and are not current package-release
+evidence. The Research comparison registry exposes only the canonical V3
+canary and confirmation from this directory.

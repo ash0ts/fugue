@@ -6360,7 +6360,13 @@ def _normalized_mcp_response(
         "successful": successful,
         "response_metadata_verified": True,
     }
-    for key in ("returned_count", "total_count", "rows_scanned", "total_steps"):
+    for key in (
+        "returned_count",
+        "total_count",
+        "rows_scanned",
+        "total_steps",
+        "prediction_count",
+    ):
         value = response.get(key)
         if type(value) is int and value >= 0:
             result[key] = value
