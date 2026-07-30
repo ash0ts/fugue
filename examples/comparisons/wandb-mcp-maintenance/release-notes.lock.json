@@ -20,14 +20,15 @@
     "structured-query-breaking-change",
     "operator-setting-defaults",
     "managed-staging-and-helm-validation",
-    "evaluation-prediction-reconciliation"
+    "evaluation-prediction-reconciliation",
+    "stdio-protocol-safety"
   ],
-  "bytes": 7838,
-  "commit": "3dd4447ef0054d4707aafc515e3f2ddfb11b17bd",
+  "bytes": 8187,
+  "commit": "29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
   "path": "docs/releases/v0.4.0.md",
-  "raw_url": "https://raw.githubusercontent.com/wandb/wandb-mcp-server/3dd4447ef0054d4707aafc515e3f2ddfb11b17bd/docs/releases/v0.4.0.md",
+  "raw_url": "https://raw.githubusercontent.com/wandb/wandb-mcp-server/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7/docs/releases/v0.4.0.md",
   "repository": "wandb/wandb-mcp-server",
   "schema_version": 1,
-  "sha256": "2e32e337dd6c98a5e4b3805b189af10c913ec1dd739a63b25b031ab35d786c99",
+  "sha256": "257110b2542caec6bf30c24cfb59c1a3ee1074b69ad68497b9978ba130243e12",
   "status": "release_candidate"
 }

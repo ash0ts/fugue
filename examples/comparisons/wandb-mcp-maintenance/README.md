@@ -18,16 +18,15 @@ certify W&B Serverless, managed-service, or Helm readiness.
 | Source evidence | `wandb/fugue-mcp-release-source-v1` |
 | Result evidence | `wandb/fugue-mcp-release-qualification-v1` |
 | Baseline | `wandb-mcp-main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` |
-| Provisional candidate | [`wandb-mcp-0-4-staging` at PR #126 head `3dd4447ef0054d4707aafc515e3f2ddfb11b17bd`](https://github.com/wandb/wandb-mcp-server/pull/126) |
+| Candidate | [`wandb-mcp-0-4-staging` at `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`](https://github.com/wandb/wandb-mcp-server/commit/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7) |
 | Execution | local Docker through Harbor |
 | Canary | 2 tasks × 2 arms × 2 attempts = 8 cells, maximum $10 |
 | Confirmation | 4 tasks × 2 arms × 2 attempts = 16 cells, maximum $20 |
 
-The checked-in candidate is the provisional reviewed fix-PR head, not yet the
-final `staging/0.4.0` head. It is suitable for offline contract preparation
-only. After PR #126 merges, lock the resulting staging head and regenerate
-every candidate, runtime, scorer, preview, and approval lock before running a
-behavioral study.
+The checked-in candidate is the exact `staging/0.4.0` head after the reviewed
+reconciliation and STDIO protocol-safety fixes merged. Any later staging
+change invalidates every candidate, runtime, scorer, preview, and approval lock
+and requires this source lock and qualification to be regenerated.
 
 The source project contains immutable task evidence only. Agent traces,
 Evaluations, result rows, and release decisions go to the result project.

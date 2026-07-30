@@ -23,7 +23,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server@3dd4447ef0054d4707aafc515e3f2ddfb11b17bd",
+        "git+https://github.com/wandb/wandb-mcp-server@29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
         "wandb_mcp_server"
       ],
       "env": {
@@ -36,7 +36,7 @@
         "app.wandb.ai",
         "trace.wandb.ai"
       ],
-      "version": "git:3dd4447ef0054d4707aafc515e3f2ddfb11b17bd"
+      "version": "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
     }
   }
 }
