@@ -3,27 +3,9 @@ comparisons:
   - id: source-use-skill-v1
     path: examples/comparisons/source-use-skill/comparison.yaml
     digest: 6188a5088685e9ac898ef07a092e8bab4645d0e7f5425194fb40b18b81d18322
-  - id: wandb-mcp-maintenance-discovery-claude-v1
-    path: examples/comparisons/wandb-mcp-maintenance/discovery.yaml
-    digest: 795aac3713af24437f8f87259cc793ffef5654cfc5fdf1611efe3a933fe7ac09
-  - id: wandb-mcp-maintenance-discovery-wandb-v1
-    path: examples/comparisons/wandb-mcp-maintenance/discovery-wandb.yaml
-    digest: 15985ff239ec8712641a135cbaead40a1bc605e9df73f156fd871d73c1bea090
-  - id: wandb-mcp-maintenance-primary-v1
-    path: examples/comparisons/wandb-mcp-maintenance/primary.yaml
-    digest: 8fab4b372eb3ba565d9099ebf01e9b560d379f4831b736322fd6a18880b42d30
-  - id: wandb-mcp-maintenance-wandb-replication-v1
-    path: examples/comparisons/wandb-mcp-maintenance/wandb-replication.yaml
-    digest: ec5a55b8114b7e90b6941f2d43193d30e023f48db34734d3ff62cdf81daff685
-  - id: wandb-mcp-maintenance-discovery-claude-serverless-v1
-    path: examples/comparisons/wandb-mcp-maintenance/discovery-serverless.yaml
-    digest: 5fedbe6c3c5d2578a72e41e97b7e3ec2c6a4c2c3becb26cc45d2b476d5614865
-  - id: wandb-mcp-maintenance-discovery-wandb-serverless-v1
-    path: examples/comparisons/wandb-mcp-maintenance/discovery-wandb-serverless.yaml
-    digest: 101a8e9d9ff5031108330879fc72b9f2e49ec7fbb3253fc44026a3f9a9fe377c
-  - id: wandb-mcp-maintenance-primary-serverless-v1
-    path: examples/comparisons/wandb-mcp-maintenance/primary-serverless.yaml
-    digest: bef443ab8784728b7aac86c7bcb2c45e2a1d51ec48901db0b89de6796c5663ce
-  - id: wandb-mcp-maintenance-wandb-replication-serverless-v1
-    path: examples/comparisons/wandb-mcp-maintenance/wandb-replication-serverless.yaml
-    digest: 8e6d1a3b7fd59dc18e65c3ba48aa5d7f8110f5adde4999eeebbe8305769b4149
+  - id: mcp-main-vs-0-4-natural-maintainer-canary-v3
+    path: examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
+    digest: 3990e77f2ac20bd451511d1c194c926d78f0e095ffe0c1ca10ab6c81b9c7d278
+  - id: mcp-main-vs-0-4-natural-maintainer-confirmation-v3
+    path: examples/comparisons/wandb-mcp-maintenance/natural-maintainer-confirmation-local-v3.yaml
+    digest: 1deab3c4191c08cb591ceaf4a7836167439e626cc5b16df86e696d3540110fbf

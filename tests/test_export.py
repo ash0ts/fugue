@@ -2701,6 +2701,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                     "latency_ms": 8,
                     "terminal_status": "succeeded",
                     "successful": True,
+                    "prediction_count": 16,
                 },
             )
         )
@@ -2756,6 +2757,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     assert calls[0]["project_exhaustive"] is True
     assert calls[0]["truncation_applied"] is False
     assert calls[0]["coverage_status"] == "project-exhaustive"
+    assert calls[1]["prediction_count"] == 16
     assert len(calls[0]["parent_filter_digest"]) == 64
     assert "must-not-be-exported" not in json.dumps(
         summary["mcp_tool_calls"], sort_keys=True

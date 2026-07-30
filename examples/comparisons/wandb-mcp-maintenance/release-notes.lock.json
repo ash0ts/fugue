@@ -1,0 +1,33 @@
+{
+  "behaviors": [
+    "sdk-first-structured-query",
+    "exact-count-mode",
+    "projected-summary-and-config",
+    "explicit-coverage-metadata",
+    "selective-server-side-fields",
+    "bounded-history",
+    "weighted-admission-server-busy",
+    "shared-dedicated-local-workload-profiles",
+    "tool-and-sdk-timeout-boundaries",
+    "dedicated-internal-api-routing",
+    "public-links-hide-internal-routing",
+    "raw-graphql-disabled-by-default",
+    "raw-graphql-query-only-escape-hatch",
+    "read-only-write-tool-omission",
+    "telemetry-attribution-and-privacy",
+    "security-sensitive-dependency-updates",
+    "ci-security-and-wheel-hardening",
+    "structured-query-breaking-change",
+    "operator-setting-defaults",
+    "managed-staging-and-helm-validation",
+    "evaluation-prediction-reconciliation"
+  ],
+  "bytes": 7838,
+  "commit": "3dd4447ef0054d4707aafc515e3f2ddfb11b17bd",
+  "path": "docs/releases/v0.4.0.md",
+  "raw_url": "https://raw.githubusercontent.com/wandb/wandb-mcp-server/3dd4447ef0054d4707aafc515e3f2ddfb11b17bd/docs/releases/v0.4.0.md",
+  "repository": "wandb/wandb-mcp-server",
+  "schema_version": 1,
+  "sha256": "2e32e337dd6c98a5e4b3805b189af10c913ec1dd739a63b25b031ab35d786c99",
+  "status": "release_candidate"
+}

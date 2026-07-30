@@ -165,6 +165,66 @@ def test_mcp_response_telemetry_exports_only_safe_terminal_metadata(tmp_path) ->
     assert "abc123" not in serialized
 
 
+def test_mcp_response_telemetry_sums_safe_evaluation_prediction_counts(
+    tmp_path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    recorder = _Recorder(name="wandb", path=path)
+    recorder.request(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "summarize_evaluation_tool",
+                "arguments": {
+                    "entity_name": "wandb",
+                    "project_name": "source",
+                    "max_evals": 25,
+                },
+            },
+        },
+        100,
+    )
+    recorder.response(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "evaluations": [
+                                    {
+                                        "eval_id": "private-root-a",
+                                        "total_predictions": 8,
+                                    },
+                                    {
+                                        "eval_id": "private-root-b",
+                                        "total_predictions": 8,
+                                    },
+                                ]
+                            }
+                        ),
+                    }
+                ]
+            },
+        },
+        500,
+    )
+
+    response = [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if json.loads(line)["event"] == "mcp_tool_response"
+    ][0]
+    assert response["prediction_count"] == 16
+    assert "private-root-a" not in path.read_text()
+    assert "private-root-b" not in path.read_text()
+
+
 def test_mcp_response_telemetry_normalizes_nested_graphql_and_trace_counts(
     tmp_path,
 ) -> None:

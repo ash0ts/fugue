@@ -269,6 +269,18 @@ def _safe_response_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         value = _unique_non_negative_int(objects, aliases)
         if value is not None:
             evidence[key] = value
+    prediction_count = _unique_list_integer_sum(
+        objects,
+        collection_keys=("evaluations",),
+        item_keys=(
+            "total_predictions",
+            "totalPredictions",
+            "prediction_count",
+            "predictionCount",
+        ),
+    )
+    if prediction_count is not None:
+        evidence["prediction_count"] = prediction_count
     if "returned_count" not in evidence:
         derived = _unique_list_count(
             objects,
@@ -467,6 +479,38 @@ def _unique_list_count(
         for key in keys
         if isinstance(value.get(key), list)
     }
+    return next(iter(observed)) if len(observed) == 1 else None
+
+
+def _unique_list_integer_sum(
+    values: list[Mapping[str, Any]],
+    *,
+    collection_keys: tuple[str, ...],
+    item_keys: tuple[str, ...],
+) -> int | None:
+    observed: set[int] = set()
+    for value in values:
+        for collection_key in collection_keys:
+            items = value.get(collection_key)
+            if not isinstance(items, list):
+                continue
+            counts: list[int] = []
+            valid = True
+            for item in items:
+                if not isinstance(item, Mapping):
+                    valid = False
+                    break
+                item_values = {
+                    item[key]
+                    for key in item_keys
+                    if type(item.get(key)) is int and item[key] >= 0
+                }
+                if len(item_values) != 1:
+                    valid = False
+                    break
+                counts.append(next(iter(item_values)))
+            if valid and counts:
+                observed.add(sum(counts))
     return next(iter(observed)) if len(observed) == 1 else None
 
 
