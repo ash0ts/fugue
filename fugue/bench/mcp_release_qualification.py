@@ -2522,12 +2522,20 @@ def _call_record(call: Any) -> dict[str, Any]:
 
 
 def _weave_missing_error(exc: Exception) -> bool:
-    return type(exc).__name__ in {
+    if type(exc).__name__ in {
         "NotFoundError",
         "ObjectDeletedError",
         "ProjectNotFound",
         "RefObjectsNotFoundError",
-    }
+    }:
+        return True
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    message = str(exc).lower()
+    return status == 404 or (
+        status == 403
+        and ("project not found" in message or "could not find project" in message)
+    )
 
 
 @contextmanager
@@ -2545,6 +2553,18 @@ def _source_weave_client(project: str, *, write: bool):
         if client is not None:
             client.finish()
         set_weave_client_global(None)
+
+
+def _source_weave_project_exists(client: Any, project: str) -> bool:
+    from weave.trace_server.trace_server_interface import ProjectStatsReq
+
+    try:
+        client.server.project_stats(ProjectStatsReq(project_id=project))
+    except Exception as exc:
+        if _weave_missing_error(exc):
+            return False
+        raise
+    return True
 
 
 def _weave_object_or_none(client: Any, uri: str) -> Any | None:
@@ -2956,6 +2976,8 @@ def _inventory_weave_evidence(
     seed_digest = qualification_seed_digest(source_project=project)
     try:
         with _source_weave_client(project, write=False) as client:
+            if not _source_weave_project_exists(client, project):
+                return None, [], {}, [], [], []
             calls = [_call_record(call) for call in client.get_calls(limit=None)]
             dataset = _inspect_weave_dataset(client, project)
             conversations, conversation_extras, conversation_drift = (
