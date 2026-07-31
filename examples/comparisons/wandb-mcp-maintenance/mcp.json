@@ -69,6 +69,41 @@
         "trace.wandb.ai"
       ],
       "version": "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
+    },
+    "wandb-0-4-current": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server@5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
+        "wandb_mcp_server"
+      ],
+      "env": {
+        "WANDB_API_KEY": "${WANDB_API_KEY}",
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
+      },
+      "allowed_tools": [
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
+        "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "probe_project_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "summarize_evaluation_tool"
+      ],
+      "allowed_hosts": [
+        "api.wandb.ai",
+        "app.wandb.ai",
+        "trace.wandb.ai"
+      ],
+      "version": "git:5c6cc1c9a1079296daf6613ea6d12daebdd8bcba"
     }
   }
 }

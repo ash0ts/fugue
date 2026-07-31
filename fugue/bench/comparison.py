@@ -61,6 +61,8 @@ COMPARISON_RUNTIME_ROOT = Path(".fugue/runtime/comparisons")
 COMPARISON_RESULT_ROOT = Path(".fugue/results/comparisons")
 COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
 COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
+DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC = 120
+MAX_COMPARISON_JUDGE_TIMEOUT_SEC = 900
 
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
@@ -161,6 +163,7 @@ class ComparisonEvaluatorV1:
     dimensions: tuple[str, ...] = ()
     dimension_roles: dict[str, DimensionRole] = field(default_factory=dict)
     evidence: tuple[str, ...] = ()
+    timeout_sec: int | None = None
     reserve_cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -522,10 +525,11 @@ class ComparisonSpecV1:
             if execution.get("evidence_checkpoint_cells") == 0:
                 execution.pop("evidence_checkpoint_cells", None)
         for evaluator in value.get("evaluators") or ():
-            if isinstance(evaluator, dict) and not evaluator.get(
-                "dimension_roles"
-            ):
-                evaluator.pop("dimension_roles", None)
+            if isinstance(evaluator, dict):
+                if not evaluator.get("dimension_roles"):
+                    evaluator.pop("dimension_roles", None)
+                if evaluator.get("timeout_sec") is None:
+                    evaluator.pop("timeout_sec", None)
         if value.get("decision_policy") is None:
             value.pop("decision_policy", None)
         if not value.get("supersedes"):
@@ -9511,6 +9515,8 @@ def score_comparison_rows(
                 if judge.required:
                     row["comparison_required_evaluation_complete"] = False
                 continue
+            failure_stage = "input_privacy"
+            request_policy: dict[str, Any] | None = None
             try:
                 judge_input_privacy = _comparison_judge_input_privacy_receipt(
                     evaluator=judge,
@@ -9518,6 +9524,8 @@ def score_comparison_rows(
                     row=row,
                     env=env,
                 )
+                failure_stage = "provider_request"
+                request_policy = _comparison_judge_request_policy(judge, env)
                 request = judge_request or _request_comparison_judge
                 payload, usage, receipt = request(
                     evaluator=judge,
@@ -9525,6 +9533,7 @@ def score_comparison_rows(
                     row=row,
                     env=env,
                 )
+                failure_stage = "rubric_validation"
                 parsed = _validate_comparison_judge_payload(judge, payload)
                 for dimension, value in parsed["scores"].items():
                     judge_scores[f"{judge.id}.{dimension}"] = value
@@ -9540,12 +9549,19 @@ def score_comparison_rows(
                     "cost_usd": None,
                 }
             except Exception as exc:
+                failure = _comparison_judge_failure_metadata(
+                    exc,
+                    fallback_stage=failure_stage,
+                )
+                if request_policy is not None:
+                    failure["request_policy"] = request_policy
                 judge_results[judge.id] = {
                     "status": "unavailable",
                     "reason": (
                         "judge evaluation failed: "
-                        f"{type(exc).__name__}"
+                        f"{failure['exception_type']}"
                     ),
+                    "failure": failure,
                     "qualification": qualification,
                 }
                 if judge.required:
@@ -9570,7 +9586,9 @@ def _request_comparison_judge(
     row: Mapping[str, Any],
     env: Mapping[str, str],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    from fugue.bench.evaluations import _post_judge
+    from fugue.bench.evaluations import (
+        _post_judge,
+    )
     from fugue.model_plane import (
         model_route_identity,
         provider_api_key,
@@ -9581,6 +9599,11 @@ def _request_comparison_judge(
     if not evaluator.profile or not evaluator.rubric:
         raise ValueError("comparison judge is missing its profile or public rubric")
     route = resolve_model_route(evaluator.profile, env)
+    request_policy = _comparison_judge_request_policy(
+        evaluator,
+        env,
+        route=route,
+    )
     api_key = provider_api_key(route, env)
     if not api_key:
         raise RuntimeError(
@@ -9602,7 +9625,10 @@ def _request_comparison_judge(
     )
     import httpx
 
-    with httpx.Client(timeout=120) as client:
+    timeout_sec = int(request_policy["timeout_sec"])
+    # HTTPX issues one request by default. Do not install a retrying transport:
+    # a timed-out judge remains unavailable instead of creating duplicate spend.
+    with httpx.Client(timeout=timeout_sec) as client:
         response, usage = _post_judge(client, route, api_key, env, prompt)
     return (
         response,
@@ -9614,6 +9640,7 @@ def _request_comparison_judge(
             "profile": evaluator.profile,
             "route": model_route_identity(route, env),
             "rubric_digest": _judge_contract_digest(evaluator),
+            "request_policy": request_policy,
             "blind_fields": [
                 "baseline_or_candidate",
                 "candidate_revision",
@@ -9629,6 +9656,81 @@ def _request_comparison_judge(
             "usage": usage,
         },
     )
+
+
+def _comparison_judge_request_policy(
+    evaluator: ComparisonEvaluatorV1,
+    env: Mapping[str, str],
+    *,
+    route: Any | None = None,
+) -> dict[str, Any]:
+    from fugue.bench.evaluations import (
+        JUDGE_JSON_MAX_OUTPUT_TOKENS,
+        JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION,
+    )
+    from fugue.model_plane import (
+        resolve_model_route,
+        structured_assistant_options,
+    )
+
+    resolved_route = route or resolve_model_route(evaluator.profile, env)
+    return {
+        "schema_version": JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION,
+        "timeout_sec": (
+            evaluator.timeout_sec or DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC
+        ),
+        "max_output_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
+        "structured_assistant_options": structured_assistant_options(
+            resolved_route
+        ),
+        "automatic_retries": 0,
+    }
+
+
+def _comparison_judge_failure_metadata(
+    exc: Exception,
+    *,
+    fallback_stage: str,
+) -> dict[str, Any]:
+    """Return safe failure facts without persisting model output or private labels."""
+
+    import httpx
+
+    from fugue.bench.evaluations import JudgeResponseError
+
+    if isinstance(exc, JudgeResponseError):
+        return {
+            "schema_version": 1,
+            "stage": exc.stage,
+            "code": exc.code,
+            "message": exc.safe_message,
+            "exception_type": "ValueError",
+            "response_sha256": exc.response_sha256,
+            "response_characters": exc.response_characters,
+            "usage": dict(exc.usage),
+        }
+    if fallback_stage == "input_privacy":
+        code = "input_privacy_rejected"
+        message = "judge input failed the privacy gate"
+    elif fallback_stage == "rubric_validation":
+        code = "invalid_rubric_payload"
+        message = "judge response failed strict rubric validation"
+    elif isinstance(exc, httpx.TimeoutException):
+        code = "provider_timeout"
+        message = "judge provider request timed out"
+    elif isinstance(exc, httpx.HTTPError):
+        code = "provider_http_error"
+        message = "judge provider request failed"
+    else:
+        code = "provider_request_failed"
+        message = "judge provider request failed"
+    return {
+        "schema_version": 1,
+        "stage": fallback_stage,
+        "code": code,
+        "message": message,
+        "exception_type": type(exc).__name__,
+    }
 
 
 def _comparison_judge_evidence(
@@ -10858,7 +10960,7 @@ def _require_checkpoint_judges(
     *,
     checkpoint_index: int,
 ) -> None:
-    """Fail the guarded launch if a configured judge did not produce a score."""
+    """Record whether configured judges scored at the guarded launch boundary."""
 
     if checkpoint_index >= spec.execution.evidence_checkpoint_cells:
         return
@@ -10876,12 +10978,25 @@ def _require_checkpoint_judges(
         if _mapping_or_empty(results.get(judge_id)).get("status") != "scored"
     ]
     if unavailable:
-        row["comparison_judge_checkpoint_status"] = "failed"
         row["comparison_judge_checkpoint_unavailable"] = unavailable
-        raise RuntimeError(
-            "first-cell judge checkpoint did not score: "
-            + ", ".join(unavailable)
-        )
+        required_unavailable = [
+            evaluator.id
+            for evaluator in spec.evaluators
+            if evaluator.type == "llm_judge"
+            and evaluator.required
+            and evaluator.id in unavailable
+        ]
+        if required_unavailable:
+            row["comparison_judge_checkpoint_status"] = "failed"
+            row["comparison_judge_checkpoint_required_unavailable"] = (
+                required_unavailable
+            )
+            raise RuntimeError(
+                "first-cell required judge checkpoint did not score: "
+                + ", ".join(required_unavailable)
+            )
+        row["comparison_judge_checkpoint_status"] = "advisory_unavailable"
+        return
     row["comparison_judge_checkpoint_status"] = "passed"
 
 
@@ -11114,6 +11229,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "dimensions",
             "dimension_roles",
             "evidence",
+            "timeout_sec",
             "reserve_cost_usd",
         },
         "evaluator",
@@ -11161,6 +11277,22 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     evidence = _string_tuple(
         value.get("evidence") or [], "judge evidence", allow_empty=True
     )
+    if evaluator_type == "llm_judge":
+        timeout_sec = None
+        if "timeout_sec" in value:
+            timeout_sec = _positive_int(
+                value["timeout_sec"],
+                "LLM judge timeout_sec",
+            )
+            if timeout_sec > MAX_COMPARISON_JUDGE_TIMEOUT_SEC:
+                raise ValueError(
+                    "LLM judge timeout_sec must be no greater than "
+                    f"{MAX_COMPARISON_JUDGE_TIMEOUT_SEC}"
+                )
+    else:
+        if "timeout_sec" in value:
+            raise ValueError("timeout_sec is supported only for LLM judge evaluators")
+        timeout_sec = None
     if evaluator_type == "deterministic" and bool(checks) == bool(scorer):
         raise ValueError(
             "deterministic evaluator requires exactly one of checks or scorer"
@@ -11207,6 +11339,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         dimensions=dimensions,
         dimension_roles=dimension_roles,
         evidence=evidence,
+        timeout_sec=timeout_sec,
         reserve_cost_usd=_non_negative_number(
             value.get("reserve_cost_usd", 0), "judge reserve"
         ),

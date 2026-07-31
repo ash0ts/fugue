@@ -208,6 +208,129 @@ tasks:
     assert sandbox_attestation["attestation_digest"]
 
 
+def test_render_jobs_propagates_comparison_lineage_to_host_and_agent(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "lineage.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+tasks:
+  - {id: task-a}
+"""
+    )
+    lineage = {
+        "FUGUE_WANDB_RESEARCH_ID": "mcp-release",
+        "FUGUE_WANDB_STUDY_ID": "main-vs-0-4",
+        "FUGUE_RESEARCH_EXPERIMENT_ID": "experiment-a",
+        "FUGUE_SOURCE_EVIDENCE_PROJECT": "wandb/mcp-source",
+        "FUGUE_RESULT_EVIDENCE_PROJECT": "wandb/mcp-results",
+        "FUGUE_STUDY_CONSOLE_BACKLINK": (
+            "http://127.0.0.1:18080/?study_id=main-vs-0-4"
+        ),
+    }
+
+    [job] = render_jobs(
+        experiment=ExperimentSpec(
+            id="lineage",
+            title="Lineage",
+            variants=[FeatureVariant(id="baseline", label="Baseline")],
+            source_evidence_project="wandb/mcp-source",
+            evidence_project="wandb/mcp-results",
+            agent_env=lineage,
+        ),
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={
+            "ANTHROPIC_API_KEY": "secret-anthropic",
+            "WANDB_API_KEY": "secret-wandb",
+        },
+        model="anthropic/claude-sonnet-5",
+        run_id="lineage",
+    )
+
+    assert {key: job.env[key] for key in lineage} == lineage
+    agent_env = job.config["agents"][0]["env"]
+    assert {key: agent_env[key] for key in lineage} == lineage
+
+
+def test_render_jobs_uses_canonical_evidence_projects_without_agent_duplicates(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "lineage.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+tasks:
+  - {id: task-a}
+"""
+    )
+    [job] = render_jobs(
+        experiment=ExperimentSpec(
+            id="lineage",
+            title="Lineage",
+            variants=[FeatureVariant(id="baseline", label="Baseline")],
+            source_evidence_project="wandb/mcp-source",
+            evidence_project="wandb/mcp-results",
+        ),
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env={},
+        model="anthropic/claude-sonnet-5",
+        run_id="lineage",
+    )
+
+    expected = {
+        "FUGUE_SOURCE_EVIDENCE_PROJECT": "wandb/mcp-source",
+        "FUGUE_RESULT_EVIDENCE_PROJECT": "wandb/mcp-results",
+    }
+    assert {key: job.env[key] for key in expected} == expected
+    agent_env = job.config["agents"][0]["env"]
+    assert {key: agent_env[key] for key in expected} == expected
+
+
+def test_render_jobs_rejects_conflicting_evidence_project_duplicate(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "lineage.yaml"
+    manifest_path.write_text(
+        """
+dataset: {ref: fixture/tasks}
+harnesses:
+  - {name: claude-code, agent: fugue.agents:FugueClaudeCode}
+tasks:
+  - {id: task-a}
+"""
+    )
+    with pytest.raises(
+        ValueError,
+        match="FUGUE_SOURCE_EVIDENCE_PROJECT disagrees",
+    ):
+        render_jobs(
+            experiment=ExperimentSpec(
+                id="lineage",
+                title="Lineage",
+                variants=[FeatureVariant(id="baseline", label="Baseline")],
+                source_evidence_project="wandb/mcp-source",
+                agent_env={
+                    "FUGUE_SOURCE_EVIDENCE_PROJECT": "wandb/wrong-source"
+                },
+            ),
+            manifest=load_manifest(manifest_path),
+            manifest_path=manifest_path,
+            repo_root=tmp_path,
+            env={},
+            model="anthropic/claude-sonnet-5",
+            run_id="lineage",
+        )
+
+
 def test_task_runtime_location_does_not_change_execution_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

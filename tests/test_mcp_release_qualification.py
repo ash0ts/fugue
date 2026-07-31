@@ -168,6 +168,35 @@ def test_release_note_infrastructure_coverage_names_exact_unique_gates() -> None
     )
 
 
+def test_observed_infrastructure_delta_does_not_require_agent_task() -> None:
+    receipt = _mcp_release_qualification_receipt(_lock(), [])
+    for row in receipt["release_note_classification"]:
+        if row["release_note"] == "raw-graphql-disabled-by-default":
+            row["status"] = "observed_branch_delta"
+            break
+
+    coverage = release_note_coverage_v3(
+        receipt,
+        task_ids=("maintainer-source-inventory",),
+        dimension_ids=(
+            "natural-maintainer.answer_correct",
+            "natural-maintainer.actual_query_scope",
+            "natural-maintainer.reported_project_identity",
+            "natural-maintainer.bounded_evidence",
+            "natural-maintainer.evidence_honesty",
+        ),
+    )
+    raw_default = next(
+        item
+        for item in coverage
+        if item["release_note"] == "raw-graphql-disabled-by-default"
+    )
+
+    assert raw_default["status"] == "infrastructure_only"
+    assert raw_default["task_ids"] == []
+    assert raw_default["infrastructure_gates"] == ["default-tool-manifest"]
+
+
 def test_weave_missing_project_is_distinct_from_forbidden_access() -> None:
     request = httpx.Request("POST", "https://trace.wandb.ai/project/stats")
     missing = httpx.HTTPStatusError(
@@ -865,11 +894,36 @@ def test_mechanism_receipt_keeps_public_endpoint_but_redacts_api_key(
     output = tmp_path / "mechanism.json"
     captured = {}
 
-    async def fake_observations(repo_root, evidence, runtime_env):
+    async def fake_observations(
+        repo_root,
+        evidence,
+        runtime_env,
+        *,
+        candidates,
+    ):
         captured["repo_root"] = repo_root
         captured["evidence"] = evidence
         captured["runtime_env"] = dict(runtime_env)
-        return []
+        captured["candidates"] = candidates
+        return [
+            {
+                "id": import_id,
+                "version_identity": version_identity,
+                "runtime_digest": f"sha256:{index + 1}" * 32,
+                "tool_manifest_digest": str(index + 1) * 64,
+                "server": {},
+                "initialized_tools": [],
+                "initialized_tool_schema_digest": "",
+                "locked_tools": [],
+                "locked_tool_schema_digest": "",
+                "initialized_schema_matches_lock": False,
+                "release_capabilities": {},
+                "calls": {},
+                "evaluation_child_ops": {},
+                "profile_probes": {},
+            }
+            for index, (import_id, version_identity) in enumerate(candidates)
+        ]
 
     monkeypatch.setattr(
         mcp_release_qualification,
@@ -888,6 +942,16 @@ def test_mechanism_receipt_keeps_public_endpoint_but_redacts_api_key(
         "WANDB_API_KEY": api_key,
         "WANDB_BASE_URL": "https://api.wandb.ai",
     }
+    assert captured["candidates"] == (
+        (
+            "wandb-mcp-main",
+            "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
+        ),
+        (
+            "wandb-mcp-0-4-staging",
+            "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
+        ),
+    )
     assert receipt["endpoint_binding"]["api_base_url"] == "https://api.wandb.ai"
     serialized = output.read_text(encoding="utf-8")
     assert "https://api.wandb.ai" in serialized
@@ -3357,6 +3421,8 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                     "exact_count_mode": False,
                     "projected_summary_keys": False,
                     "bounded_history_range": False,
+                    "history_target_lookup": False,
+                    "caller_raw_graphql_default": True,
                     "raw_graphql_registered_by_default": False,
                 },
                 "calls": {
@@ -3392,6 +3458,8 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
                 "exact_count_mode": True,
                 "projected_summary_keys": True,
                 "bounded_history_range": True,
+                "history_target_lookup": True,
+                "caller_raw_graphql_default": False,
                 "raw_graphql_registered_by_default": False,
             },
             "calls": {
@@ -3567,7 +3635,81 @@ def test_live_mcp_receipt_separates_reachability_from_row_reconciliation() -> No
         "observed_branch_delta",
         "infrastructure_only_not_live_induced",
     }
+    release_notes = {
+        item["release_note"]: item["status"]
+        for item in receipt["release_note_classification"]
+    }
+    assert release_notes["bounded-history"] == "observed_branch_delta"
+    assert (
+        release_notes["raw-graphql-disabled-by-default"]
+        == "observed_branch_delta"
+    )
     assert len(receipt["receipt_digest"]) == 64
+
+
+def test_release_capabilities_distinguish_raw_main_and_targeted_history() -> None:
+    main = mcp_release_qualification._release_capabilities(
+        [
+            {
+                "name": "query_wandb_tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "variables": {"type": "object"},
+                    },
+                },
+            },
+            {
+                "name": "get_run_history_tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "keys": {"type": "array"},
+                        "min_step": {"type": "number"},
+                        "max_step": {"type": "number"},
+                    },
+                },
+            },
+        ]
+    )
+    candidate = mcp_release_qualification._release_capabilities(
+        [
+            {
+                "name": "query_wandb_tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "resource": {"type": "string"},
+                        "response_mode": {"type": "string"},
+                        "summary_keys": {"type": "array"},
+                        "config_keys": {"type": "array"},
+                        "cursor": {"type": "string"},
+                    },
+                },
+            },
+            {
+                "name": "get_run_history_tool",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "keys": {"type": "array"},
+                        "min_x": {"type": "number"},
+                        "max_x": {"type": "number"},
+                        "x_axis": {"type": "string"},
+                        "target_x": {"type": "number"},
+                    },
+                },
+            },
+        ]
+    )
+
+    assert main["caller_raw_graphql_default"] is True
+    assert candidate["caller_raw_graphql_default"] is False
+    assert main["bounded_history_range"] is True
+    assert candidate["bounded_history_range"] is True
+    assert main["history_target_lookup"] is False
+    assert candidate["history_target_lookup"] is True
 
 
 def test_package_default_profile_removes_reviewed_read_only_override() -> None:

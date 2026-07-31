@@ -429,6 +429,9 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
     for attribute in (
         "fugue.run_id",
         "fugue.experiment_id",
+        "fugue.source_evidence_project",
+        "fugue.result_evidence_project",
+        "fugue.study_console_backlink",
         "fugue.workload_id",
         "fugue.harness",
         "fugue.variant_id",

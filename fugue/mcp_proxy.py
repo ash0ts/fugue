@@ -22,7 +22,68 @@ from fugue.redaction import redact_text, secrets_from_env, sensitive_key
 _MAX_TEXT = 1_000
 _MAX_EVENT_BYTES = 16_384
 _MAX_RESPONSE_INSPECTION_BYTES = 1_000_000
+_MAX_OPAQUE_VALUE_BYTES = 4_096
+_MAX_RETURNED_OBJECT_IDS = 50
 _ENV_SECRETS = secrets_from_env(os.environ)
+_REQUEST_CURSOR_KEYS = frozenset(
+    {
+        "after",
+        "cursor",
+        "page_cursor",
+        "page_token",
+        "pageCursor",
+        "pageToken",
+    }
+)
+_RESPONSE_CURSOR_KEYS = frozenset(
+    {
+        "end_cursor",
+        "endCursor",
+        "next_cursor",
+        "next_page_token",
+        "nextCursor",
+        "nextPageToken",
+    }
+)
+_RETURNED_OBJECT_COLLECTION_KEYS = (
+    "artifacts",
+    "calls",
+    "edges",
+    "evaluations",
+    "items",
+    "runs",
+    "traces",
+    "versions",
+)
+_RETURNED_OBJECT_ID_KEYS = (
+    "artifact_id",
+    "artifactId",
+    "call_id",
+    "callId",
+    "eval_id",
+    "evalId",
+    "evaluation_id",
+    "evaluationId",
+    "id",
+    "run_id",
+    "runId",
+    "trace_id",
+    "traceId",
+    "version_id",
+    "versionId",
+)
+_PRIVATE_EVIDENCE_KEYS = frozenset(
+    {
+        "answer",
+        "expected",
+        "expected_answer",
+        "expected_value",
+        "gold",
+        "gold_answer",
+        "private_expected",
+        "private_label",
+    }
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -126,6 +187,11 @@ class _Recorder:
             if method == "tools/call"
             else None
         )
+        cursor_evidence = _opaque_cursor_evidence(
+            raw_arguments,
+            keys=_REQUEST_CURSOR_KEYS,
+            prefix="cursor",
+        )
         if (
             method == "tools/call"
             and self.source_project is not None
@@ -174,6 +240,7 @@ class _Recorder:
                     "tool": tool,
                     "request_id": request_id,
                     "request_bytes": size,
+                    **cursor_evidence,
                     "arguments": _sanitize(recorded_arguments),
                 }
             )
@@ -388,6 +455,29 @@ def _safe_response_evidence(
     if returned_trace_ids:
         evidence["returned_trace_ids_digest"] = _stable_digest(list(returned_trace_ids))
         evidence["returned_trace_ids_count"] = len(returned_trace_ids)
+    next_cursor_evidence = _opaque_cursor_evidence(
+        objects,
+        keys=_RESPONSE_CURSOR_KEYS,
+        prefix="next_cursor",
+    )
+    evidence.update(next_cursor_evidence)
+    evidence["pagination_metadata_verified"] = next_cursor_evidence[
+        "next_cursor_metadata_verified"
+    ]
+    returned_object_evidence = _returned_object_id_evidence(objects)
+    if (
+        returned_object_evidence.get(
+            "returned_object_id_metadata_verified"
+        )
+        is True
+        and type(evidence.get("returned_count")) is int
+        and returned_object_evidence.get("returned_object_id_count")
+        != evidence["returned_count"]
+    ):
+        returned_object_evidence = {
+            "returned_object_id_metadata_verified": False,
+        }
+    evidence.update(returned_object_evidence)
     if (
         evidence.get("project_exhaustive") is None
         and evidence.get("has_more") is False
@@ -531,15 +621,153 @@ def _safe_request_arguments(
 ) -> Any:
     if not isinstance(raw, Mapping):
         return raw
-    result = {
-        str(key): _safe_request_arguments(value, parent_ids=())
-        for key, value in raw.items()
-        if key not in _PARENT_ID_KEYS
-    }
+    result: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in _PARENT_ID_KEYS:
+            continue
+        if _private_evidence_key(str(key)):
+            result[str(key)] = "[redacted]"
+            continue
+        if key in _REQUEST_CURSOR_KEYS:
+            result[str(key)] = (
+                "[opaque-cursor]"
+                if isinstance(value, str) and value.strip()
+                else None
+            )
+            continue
+        result[str(key)] = _safe_request_arguments(value, parent_ids=())
     if parent_ids:
         result["parent_filter_digest"] = _stable_digest(list(parent_ids))
         result["parent_filter_count"] = len(parent_ids)
     return result
+
+
+def _private_evidence_key(key: str) -> bool:
+    normalized = key.strip().lower()
+    return (
+        normalized in _PRIVATE_EVIDENCE_KEYS
+        or normalized.endswith("_label")
+        or normalized.endswith("_labels")
+    )
+
+
+def _opaque_cursor_evidence(
+    raw: Any,
+    *,
+    keys: frozenset[str],
+    prefix: str,
+) -> dict[str, Any]:
+    """Describe opaque pagination tokens without persisting their values."""
+
+    observed: list[Any] = []
+    key_count = 0
+    values = raw if isinstance(raw, list) else [raw]
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        for nested in _nested_mappings(value):
+            for key in keys:
+                if key in nested:
+                    key_count += 1
+                    observed.append(nested.get(key))
+    if key_count == 0:
+        return {
+            f"{prefix}_present": False,
+            f"{prefix}_metadata_verified": True,
+        }
+    nonempty = [
+        value
+        for value in observed
+        if value is not None and not (isinstance(value, str) and not value.strip())
+    ]
+    if not nonempty:
+        return {
+            f"{prefix}_present": False,
+            f"{prefix}_metadata_verified": True,
+        }
+    normalized: set[str] = set()
+    valid = True
+    for value in nonempty:
+        if not isinstance(value, str) or not value.strip():
+            valid = False
+            continue
+        token = value.strip()
+        try:
+            if len(token.encode()) > _MAX_OPAQUE_VALUE_BYTES:
+                valid = False
+                continue
+        except UnicodeEncodeError:
+            valid = False
+            continue
+        normalized.add(token)
+    if not valid or len(normalized) != 1:
+        return {
+            f"{prefix}_present": True,
+            f"{prefix}_metadata_verified": False,
+        }
+    return {
+        f"{prefix}_present": True,
+        f"{prefix}_digest": _opaque_digest(next(iter(normalized))),
+        f"{prefix}_metadata_verified": True,
+    }
+
+
+def _returned_object_id_evidence(
+    values: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Hash one bounded returned-object collection for page disjointness."""
+
+    candidates: list[tuple[str, ...] | None] = []
+    for value in values:
+        for key in _RETURNED_OBJECT_COLLECTION_KEYS:
+            items = value.get(key)
+            if isinstance(items, list):
+                candidates.append(_returned_collection_id_hashes(items))
+    if not candidates:
+        return {}
+    if any(candidate is None for candidate in candidates):
+        return {"returned_object_id_metadata_verified": False}
+    distinct = {candidate for candidate in candidates if candidate is not None}
+    if len(distinct) != 1:
+        return {"returned_object_id_metadata_verified": False}
+    hashes = next(iter(distinct))
+    return {
+        "returned_object_id_count": len(hashes),
+        "returned_object_id_hashes": list(hashes),
+        "returned_object_id_metadata_verified": True,
+        "returned_object_ids_unique": len(set(hashes)) == len(hashes),
+    }
+
+
+def _returned_collection_id_hashes(
+    items: list[Any],
+) -> tuple[str, ...] | None:
+    if len(items) > _MAX_RETURNED_OBJECT_IDS:
+        return None
+    hashes: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            return None
+        target = item.get("node") if isinstance(item.get("node"), Mapping) else item
+        identifiers = {
+            str(target[key]).strip()
+            for key in _RETURNED_OBJECT_ID_KEYS
+            if isinstance(target.get(key), str) and str(target[key]).strip()
+        }
+        if len(identifiers) != 1:
+            return None
+        identifier = next(iter(identifiers))
+        try:
+            if len(identifier.encode()) > _MAX_OPAQUE_VALUE_BYTES:
+                return None
+        except UnicodeEncodeError:
+            return None
+        hashes.append(_opaque_digest(identifier))
+    return tuple(hashes)
+
+
+def _opaque_digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _stable_digest(value: Any) -> str:
@@ -649,6 +877,7 @@ def _response_objects(value: Any, *, depth: int = 0) -> list[Mapping[str, Any]]:
         "pageInfo",
         "traces",
         "metadata",
+        "pagination",
         "calls",
         "evaluations",
         "artifact",

@@ -10,30 +10,40 @@ from fugue.mcp_proxy import _Recorder, _relay_requests
 MCP_CONFIG = Path(
     "examples/comparisons/wandb-mcp-maintenance/mcp.json"
 )
+CURRENT_CANDIDATE = Path(
+    "examples/comparisons/wandb-mcp-maintenance/current-candidate.json"
+)
 WRITE_TOOLS = {
     "create_wandb_report_tool",
     "log_analysis_to_wandb",
 }
-EXACT_SERVERS = {
+EXACT_V10_SERVERS = {
     "wandb-main": "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
-    "wandb-0-4-staging": "29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
+    "wandb-0-4-current": "5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
 }
 
 
 def test_exact_mcp_release_servers_are_locked_read_only() -> None:
     servers = json.loads(MCP_CONFIG.read_text())["mcpServers"]
+    selection = json.loads(CURRENT_CANDIDATE.read_text())
+    selected_servers = {
+        selection[role]["server"]: selection[role]["commit"]
+        for role in ("baseline", "candidate")
+    }
 
-    assert set(servers) == set(EXACT_SERVERS)
-    for name, revision in EXACT_SERVERS.items():
-        server = servers[name]
+    assert selected_servers == EXACT_V10_SERVERS
+    assert set(selected_servers).issubset(servers)
+    for server in servers.values():
         assert server["env"]["WANDB_MCP_READ_ONLY"] == "true"
+        assert server["allowed_tools"]
+        assert WRITE_TOOLS.isdisjoint(server["allowed_tools"])
+    for name, revision in selected_servers.items():
+        server = servers[name]
         assert any(
             f"wandb-mcp-server@{revision}" in argument
             for argument in server["args"]
         )
         assert server["version"] == f"git:{revision}"
-        assert server["allowed_tools"]
-        assert WRITE_TOOLS.isdisjoint(server["allowed_tools"])
 
 
 def test_proxy_persists_only_sanitized_weave_operation_counts(
