@@ -35,6 +35,23 @@ _MCP_RELEASE_NOTES_SHA256 = (
     "257110b2542caec6bf30c24cfb59c1a3ee1074b69ad68497b9978ba130243e12"
 )
 _MCP_RELEASE_NOTES_BYTES = 8187
+_CURRENT_MCP_RELEASE_NOTES_COMMIT = (
+    "5c6cc1c9a1079296daf6613ea6d12daebdd8bcba"
+)
+_CURRENT_MCP_RELEASE_NOTES_SHA256 = (
+    "1c90d85057d48fcb54e70e2b799566abf711f149318a86e44d45676f613d86d2"
+)
+_CURRENT_MCP_RELEASE_NOTES_BYTES = 9168
+_MCP_RELEASE_NOTES_SOURCES = {
+    _MCP_RELEASE_NOTES_COMMIT: (
+        _MCP_RELEASE_NOTES_SHA256,
+        _MCP_RELEASE_NOTES_BYTES,
+    ),
+    _CURRENT_MCP_RELEASE_NOTES_COMMIT: (
+        _CURRENT_MCP_RELEASE_NOTES_SHA256,
+        _CURRENT_MCP_RELEASE_NOTES_BYTES,
+    ),
+}
 EVIDENCE_LOCK_SCHEMA_VERSION = 1
 _REQUIRED_COUNTS = {
     "runs": 6,
@@ -53,7 +70,7 @@ _SOURCE_CONFORMANCE_EXPECTATIONS = {
     "summarize_children": 2,
     "repaired_candidate_prediction_children": 16,
 }
-_MCP_RELEASE_CANDIDATES = (
+DEFAULT_MCP_RELEASE_CANDIDATES = (
     (
         "wandb-mcp-main",
         "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
@@ -63,6 +80,9 @@ _MCP_RELEASE_CANDIDATES = (
         "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
     ),
 )
+# Backward-compatible private alias for callers that imported the original
+# module-level tuple.
+_MCP_RELEASE_CANDIDATES = DEFAULT_MCP_RELEASE_CANDIDATES
 
 _MCP_PROJECT_TASK_TOOLS: dict[str, tuple[str, ...]] = {
     "maintainer-source-inventory": (
@@ -87,6 +107,37 @@ _MCP_PROJECT_TASK_TOOLS: dict[str, tuple[str, ...]] = {
         "list_artifact_versions_tool",
     ),
 }
+_MCP_PROJECT_TOOL_TASK_ALIASES: dict[str, tuple[str, ...]] = {
+    "compare_artifact_versions_tool": ("artifact-provenance",),
+    "compare_runs_tool": ("selective-run-comparison",),
+    "count_weave_traces_tool": (
+        "evaluation-summary-accuracy",
+        "trace-source-use",
+    ),
+    "diagnose_run_tool": ("selective-run-comparison",),
+    "get_artifact_details_tool": ("artifact-provenance",),
+    "get_run_history_tool": ("exact-history-target",),
+    "infer_trace_schema_tool": (
+        "evaluation-summary-accuracy",
+        "trace-source-use",
+    ),
+    "list_artifact_versions_tool": ("artifact-provenance",),
+    "probe_project_tool": ("run-inventory-projection",),
+    "query_wandb_tool": (
+        "run-inventory-projection",
+        "filtered-failure-triage",
+        "missing-cost-honesty",
+    ),
+    "query_weave_traces_tool": (
+        "evaluation-summary-accuracy",
+        "trace-source-use",
+    ),
+    "resolve_trace_roots_tool": (
+        "evaluation-summary-accuracy",
+        "trace-source-use",
+    ),
+    "summarize_evaluation_tool": ("evaluation-summary-accuracy",),
+}
 _MCP_ZERO_MODEL_TOOLS: dict[str, str] = {
     "list_entities_tool": (
         "Account-scoped discovery is mutable and is checked by exact manifest "
@@ -105,6 +156,123 @@ _MCP_ZERO_MODEL_TOOLS: dict[str, str] = {
         "Documentation search targets an external mutable corpus."
     ),
 }
+
+
+def _validate_mcp_release_candidates(
+    candidates: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Return one exact baseline/candidate pair in declared role order."""
+
+    if isinstance(candidates, (str, bytes)) or len(candidates) != 2:
+        raise ValueError(
+            "MCP release qualification requires exactly one baseline and "
+            "one candidate"
+        )
+    normalized: list[tuple[str, str]] = []
+    for role, item in zip(("baseline", "candidate"), candidates, strict=True):
+        if (
+            isinstance(item, (str, bytes))
+            or not isinstance(item, Sequence)
+            or len(item) != 2
+        ):
+            raise ValueError(
+                f"MCP release {role} must contain import id and version identity"
+            )
+        import_id = str(item[0]).strip()
+        version_identity = str(item[1]).strip()
+        if not import_id or not version_identity:
+            raise ValueError(
+                f"MCP release {role} import id and version identity are required"
+            )
+        normalized.append((import_id, version_identity))
+    if normalized[0][0] == normalized[1][0]:
+        raise ValueError("MCP release baseline and candidate import ids must differ")
+    if normalized[0][1] == normalized[1][1]:
+        raise ValueError(
+            "MCP release baseline and candidate version identities must differ"
+        )
+    return normalized[0], normalized[1]
+
+
+def _mcp_release_candidate_commit(version_identity: str) -> str:
+    prefix = "git:"
+    commit = version_identity.removeprefix(prefix)
+    if (
+        not version_identity.startswith(prefix)
+        or len(commit) != 40
+        or any(character not in "0123456789abcdef" for character in commit)
+    ):
+        raise ValueError(
+            "MCP release qualification requires an exact lowercase git commit"
+        )
+    return commit
+
+
+def _mcp_release_candidate_bindings(
+    candidates: Sequence[tuple[str, str]],
+) -> list[dict[str, str]]:
+    selected = _validate_mcp_release_candidates(candidates)
+    return [
+        {
+            "role": role,
+            "import_id": import_id,
+            "version_identity": version_identity,
+        }
+        for role, (import_id, version_identity) in zip(
+            ("baseline", "candidate"),
+            selected,
+            strict=True,
+        )
+    ]
+
+
+def _validate_mcp_release_observations(
+    observations: Sequence[Mapping[str, Any]],
+    candidates: Sequence[tuple[str, str]],
+) -> None:
+    selected = _validate_mcp_release_candidates(candidates)
+    observed = [
+        (
+            str(item.get("id") or ""),
+            str(item.get("version_identity") or ""),
+        )
+        for item in observations
+    ]
+    if observed != list(selected):
+        raise ValueError(
+            "MCP qualification observations do not match the exact "
+            "baseline/candidate bindings"
+        )
+
+
+def _mcp_release_candidates_from_receipt(
+    receipt: Mapping[str, Any],
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    raw = receipt.get("candidate_bindings")
+    if raw is None:
+        return DEFAULT_MCP_RELEASE_CANDIDATES
+    if (
+        isinstance(raw, (str, bytes))
+        or not isinstance(raw, Sequence)
+        or len(raw) != 2
+    ):
+        raise ValueError("MCP candidate bindings are invalid")
+    expected_roles = ("baseline", "candidate")
+    pairs: list[tuple[str, str]] = []
+    for role, item in zip(expected_roles, raw, strict=True):
+        if not isinstance(item, Mapping) or item.get("role") != role:
+            raise ValueError("MCP candidate binding roles are invalid")
+        pairs.append(
+            (
+                str(item.get("import_id") or ""),
+                str(item.get("version_identity") or ""),
+            )
+        )
+    selected = _validate_mcp_release_candidates(pairs)
+    expected_digest = stable_digest(list(raw))
+    if receipt.get("candidate_bindings_digest") != expected_digest:
+        raise ValueError("MCP candidate bindings digest does not match")
+    return selected
 
 
 def _qualification_endpoint_binding(
@@ -600,6 +768,8 @@ def qualify_locked_mcp_revisions(
     output: Path,
     source_project: str | None = None,
     result_project: str | None = None,
+    candidates: Sequence[tuple[str, str]] = DEFAULT_MCP_RELEASE_CANDIDATES,
+    release_notes_lock: Path = MCP_RELEASE_NOTES_LOCK,
 ) -> dict[str, Any]:
     """Exercise both exact MCP locks against the immutable hosted evidence.
 
@@ -609,6 +779,7 @@ def qualify_locked_mcp_revisions(
     """
 
     root = repo_root.resolve()
+    selected_candidates = _validate_mcp_release_candidates(candidates)
     raw_lock = json.loads(evidence_lock.resolve().read_text(encoding="utf-8"))
     resolved_source_project = source_project or evidence_source_project(raw_lock)
     resolved_result_project = result_project or evidence_result_project(raw_lock)
@@ -618,8 +789,18 @@ def qualify_locked_mcp_revisions(
         expected_source_project=resolved_source_project,
         expected_result_project=resolved_result_project,
     )
+    selected_release_notes_lock = (
+        release_notes_lock
+        if release_notes_lock.is_absolute()
+        else root / release_notes_lock
+    )
     release_notes = validate_release_notes_lock(
-        json.loads((root / MCP_RELEASE_NOTES_LOCK).read_text(encoding="utf-8"))
+        json.loads(
+            selected_release_notes_lock.resolve().read_text(encoding="utf-8")
+        ),
+        expected_commit=_mcp_release_candidate_commit(
+            selected_candidates[1][1]
+        ),
     )
     env = load_env(env_file.resolve())
     if not str(env.get("WANDB_API_KEY") or "").strip():
@@ -629,12 +810,21 @@ def qualify_locked_mcp_revisions(
         "WANDB_API_KEY": str(env["WANDB_API_KEY"]),
         "WANDB_BASE_URL": endpoint_binding["api_base_url"],
     }
-    observations = asyncio.run(_run_mcp_release_observations(root, lock, runtime_env))
+    observations = asyncio.run(
+        _run_mcp_release_observations(
+            root,
+            lock,
+            runtime_env,
+            candidates=selected_candidates,
+        )
+    )
+    _validate_mcp_release_observations(observations, selected_candidates)
     receipt = _mcp_release_qualification_receipt(
         lock,
         observations,
         release_notes=release_notes,
         endpoint_binding=endpoint_binding,
+        candidates=selected_candidates,
     )
     serialized = json.dumps(receipt, sort_keys=True)
     for secret in (runtime_env["WANDB_API_KEY"],):
@@ -649,6 +839,8 @@ async def _run_mcp_release_observations(
     repo_root: Path,
     evidence_lock: Mapping[str, Any],
     runtime_env: Mapping[str, str],
+    *,
+    candidates: Sequence[tuple[str, str]] = DEFAULT_MCP_RELEASE_CANDIDATES,
 ) -> list[dict[str, Any]]:
     try:
         from mcp import ClientSession, StdioServerParameters
@@ -659,11 +851,13 @@ async def _run_mcp_release_observations(
         ) from exc
     from fugue.bench.component_imports import _managed_python_probe_command
 
+    selected_candidates = _validate_mcp_release_candidates(candidates)
     project = evidence_source_project(evidence_lock)
     entity, project_name = project.split("/", 1)
     evaluations = list(evidence_lock["objects"]["evaluations"])
     observations: list[dict[str, Any]] = []
-    for import_id, version_identity in _MCP_RELEASE_CANDIDATES:
+    candidate_import_id = selected_candidates[1][0]
+    for import_id, version_identity in selected_candidates:
         path = repo_root / ".fugue" / "imports" / "mcp" / "locks" / f"{import_id}.json"
         raw = json.loads(path.read_text(encoding="utf-8"))
         if (
@@ -787,7 +981,7 @@ async def _run_mcp_release_observations(
                         timeout=150,
                     )
         profile_probes: dict[str, Any] = {}
-        if import_id == "wandb-mcp-0-4-staging":
+        if import_id == candidate_import_id:
             profile_probes["package_default"] = await _probe_tool_profile(
                 runtime_source=runtime_source,
                 lock=raw,
@@ -1019,7 +1213,10 @@ def _mcp_release_qualification_receipt(
     *,
     release_notes: Mapping[str, Any] | None = None,
     endpoint_binding: Mapping[str, str] | None = None,
+    candidates: Sequence[tuple[str, str]] = DEFAULT_MCP_RELEASE_CANDIDATES,
 ) -> dict[str, Any]:
+    selected_candidates = _validate_mcp_release_candidates(candidates)
+    candidate_bindings = _mcp_release_candidate_bindings(selected_candidates)
     expected_runs = int(evidence_lock["counts"]["runs"])
     expected_rows = {
         str(item["call_id"]): int(item["prediction_rows"])
@@ -1126,8 +1323,8 @@ def _mcp_release_qualification_receipt(
         }
         candidates.append(candidate)
     by_id = {str(item["id"]): item for item in candidates}
-    baseline = by_id.get("wandb-mcp-main", {})
-    candidate = by_id.get("wandb-mcp-0-4-staging", {})
+    baseline = by_id.get(selected_candidates[0][0], {})
+    candidate = by_id.get(selected_candidates[1][0], {})
     baseline_reconciliations = list(baseline.get("evaluation_reconciliation", []))
     baseline_reconciled = bool(baseline_reconciliations) and all(
         item["prediction_rows_reconciled"] for item in baseline_reconciliations
@@ -1136,14 +1333,15 @@ def _mcp_release_qualification_receipt(
     candidate_reconciled = bool(candidate_reconciliations) and all(
         item["prediction_rows_reconciled"] for item in candidate_reconciliations
     )
-    release_note_classification = _release_note_classification(
-        baseline,
-        candidate,
-    )
-    infrastructure_conformance = _infrastructure_conformance(candidate)
     release_notes_lock = validate_release_notes_lock(
         release_notes or _default_release_notes_lock()
     )
+    release_note_classification = _release_note_classification(
+        baseline,
+        candidate,
+        locked_behaviors=tuple(release_notes_lock["behaviors"]),
+    )
+    infrastructure_conformance = _infrastructure_conformance(candidate)
     classified_behaviors = {
         str(item["release_note"]) for item in release_note_classification
     }
@@ -1164,6 +1362,8 @@ def _mcp_release_qualification_receipt(
         ),
         "release_notes_lock": release_notes_lock,
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "candidate_bindings": candidate_bindings,
+        "candidate_bindings_digest": stable_digest(candidate_bindings),
         "candidates": candidates,
         "findings": {
             "baseline_reads_hosted_evidence": bool(baseline.get("tool_calls_ok")),
@@ -1402,7 +1602,11 @@ def _valid_tool_input_schema(value: Any) -> bool:
     return isinstance(value, Mapping) and value.get("type") == "object"
 
 
-def validate_release_notes_lock(raw: Mapping[str, Any]) -> dict[str, Any]:
+def validate_release_notes_lock(
+    raw: Mapping[str, Any],
+    *,
+    expected_commit: str | None = None,
+) -> dict[str, Any]:
     expected = {
         "schema_version",
         "repository",
@@ -1417,13 +1621,15 @@ def validate_release_notes_lock(raw: Mapping[str, Any]) -> dict[str, Any]:
     if set(raw) != expected:
         raise ValueError("release-notes lock fields do not match V1")
     behaviors = raw.get("behaviors")
+    commit = str(raw.get("commit") or "")
+    allowed_source = _MCP_RELEASE_NOTES_SOURCES.get(commit)
     if (
         raw.get("schema_version") != 1
         or raw.get("repository") != "wandb/wandb-mcp-server"
-        or raw.get("commit") != _MCP_RELEASE_NOTES_COMMIT
         or raw.get("path") != "docs/releases/v0.4.0.md"
-        or raw.get("sha256") != _MCP_RELEASE_NOTES_SHA256
-        or raw.get("bytes") != _MCP_RELEASE_NOTES_BYTES
+        or allowed_source is None
+        or raw.get("sha256") != allowed_source[0]
+        or raw.get("bytes") != allowed_source[1]
         or raw.get("status") != "release_candidate"
         or not isinstance(behaviors, list)
         or not behaviors
@@ -1431,9 +1637,13 @@ def validate_release_notes_lock(raw: Mapping[str, Any]) -> dict[str, Any]:
         or any(not isinstance(item, str) or not item for item in behaviors)
     ):
         raise ValueError("release-notes lock does not bind the exact 0.4 RC source")
+    if expected_commit is not None and commit != expected_commit:
+        raise ValueError(
+            "release-notes lock does not bind the selected candidate commit"
+        )
     expected_url = (
         "https://raw.githubusercontent.com/wandb/wandb-mcp-server/"
-        f"{_MCP_RELEASE_NOTES_COMMIT}/docs/releases/v0.4.0.md"
+        f"{commit}/docs/releases/v0.4.0.md"
     )
     if raw.get("raw_url") != expected_url:
         raise ValueError("release-notes lock URL does not match its exact source")
@@ -1485,11 +1695,20 @@ def _release_capabilities(raw_manifest: Any) -> dict[str, bool]:
         "exact_count_mode": "response_mode" in query_properties,
         "projected_summary_keys": "summary_keys" in query_properties,
         "projected_config_keys": "config_keys" in query_properties,
+        "cursor_continuation": "cursor" in query_properties,
+        # Main exposes caller-authored GraphQL through query_wandb_tool itself.
+        # Looking only for the separately registered 0.4 escape-hatch tool
+        # therefore misclassifies the safer default as pre-existing.
+        "caller_raw_graphql_default": "query" in query_properties,
         "bounded_history_keys": "keys" in history_properties,
         "bounded_history_range": any(
             name in history_properties
             for name in ("min_step", "max_step", "min_x", "max_x")
         ),
+        # Basic sampling and step ranges existed on main. The 0.4 behavior is
+        # the combination of a caller-selected axis and exact target lookup.
+        "history_custom_axis": "x_axis" in history_properties,
+        "history_target_lookup": "target_x" in history_properties,
         "raw_graphql_registered_by_default": ("query_wandb_graphql_tool" in names),
         "write_tools_registered_by_default": bool(
             {"create_wandb_report_tool", "log_analysis_to_wandb"} & names
@@ -1500,6 +1719,8 @@ def _release_capabilities(raw_manifest: Any) -> dict[str, bool]:
 def _release_note_classification(
     baseline: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    *,
+    locked_behaviors: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
     baseline_capabilities = dict(baseline.get("release_capabilities") or {})
     candidate_capabilities = dict(candidate.get("release_capabilities") or {})
@@ -1517,12 +1738,12 @@ def _release_note_classification(
         ),
         (
             "bounded-history",
-            "bounded_history_range",
+            "history_target_lookup",
             "agent-and-mechanism",
         ),
         (
             "raw-graphql-disabled-by-default",
-            "raw_graphql_registered_by_default",
+            "caller_raw_graphql_default",
             "infrastructure",
         ),
     )
@@ -1530,7 +1751,7 @@ def _release_note_classification(
     for release_note, capability, evidence_kind in contracts:
         baseline_value = bool(baseline_capabilities.get(capability))
         candidate_value = bool(candidate_capabilities.get(capability))
-        if capability == "raw_graphql_registered_by_default":
+        if capability == "caller_raw_graphql_default":
             baseline_value = not baseline_value
             candidate_value = not candidate_value
         status = (
@@ -1645,6 +1866,50 @@ def _release_note_classification(
             },
         )
     )
+    if locked_behaviors is not None:
+        baseline_cursor = bool(
+            baseline_capabilities.get("cursor_continuation")
+        )
+        candidate_cursor = bool(
+            candidate_capabilities.get("cursor_continuation")
+        )
+        additional = (
+            {
+                "release_note": "cursor-continuation-pagination",
+                "status": (
+                    "observed_branch_delta"
+                    if candidate_cursor and not baseline_cursor
+                    else "already_present_on_main"
+                    if candidate_cursor and baseline_cursor
+                    else "unqualified"
+                ),
+                "evidence_kind": "agent-and-mechanism",
+            },
+            {
+                "release_note": "exact-report-name-or-display-title",
+                "status": "mechanism_probe_required",
+                "evidence_kind": "mechanism",
+            },
+            {
+                "release_note": "runtime-safety-boundaries",
+                "status": "infrastructure_only_not_live_qualified",
+                "evidence_kind": "infrastructure",
+            },
+        )
+        by_release_note = {
+            str(item["release_note"]): item for item in (*classified, *additional)
+        }
+        missing = [
+            behavior
+            for behavior in locked_behaviors
+            if behavior not in by_release_note
+        ]
+        if missing:
+            raise ValueError(
+                "release-note qualification does not classify: "
+                + ", ".join(missing)
+            )
+        return [by_release_note[behavior] for behavior in locked_behaviors]
     return classified
 
 
@@ -1658,50 +1923,87 @@ def release_note_coverage_v3(
 
     available_tasks = frozenset(str(item) for item in task_ids)
     available_dimensions = frozenset(str(item) for item in dimension_ids)
+    outcome_dimension_suffixes = (
+        "answer_correct",
+        "actual_query_scope",
+        "reported_project_identity",
+        "bounded_evidence",
+        "evidence_honesty",
+    )
+    dimension_prefixes = {
+        dimension.rsplit(".", 1)[0]
+        for dimension in available_dimensions
+        if "." in dimension
+    }
+    complete_dimension_prefixes = sorted(
+        prefix
+        for prefix in dimension_prefixes
+        if all(
+            f"{prefix}.{suffix}" in available_dimensions
+            for suffix in outcome_dimension_suffixes
+        )
+    )
+    if len(complete_dimension_prefixes) != 1:
+        raise ValueError(
+            "release-note coverage requires exactly one complete deterministic "
+            "outcome evaluator"
+        )
+    outcome_dimensions = tuple(
+        f"{complete_dimension_prefixes[0]}.{suffix}"
+        for suffix in outcome_dimension_suffixes
+    )
     task_map = {
         "sdk-first-structured-query": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
         ),
         "exact-count-mode": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
         ),
         "projected-summary-and-config": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
+        ),
+        "cursor-continuation-pagination": (
+            "filtered-failure-triage",
         ),
         "explicit-coverage-metadata": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
         ),
         "selective-server-side-fields": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
+            "filtered-failure-triage",
+            "selective-run-comparison",
+            "missing-cost-honesty",
         ),
         "bounded-history": (
             "maintainer-run-triage",
             "maintainer-history-hotspot",
             "maintainer-project-health",
+            "exact-history-target",
+            "missing-cost-honesty",
         ),
         "evaluation-prediction-reconciliation": (
             "maintainer-evaluation-trace-topology",
             "maintainer-evaluation-reconciliation",
+            "evaluation-summary-accuracy",
         ),
         "structured-query-breaking-change": (
             "maintainer-source-inventory",
             "maintainer-project-health",
+            "run-inventory-projection",
         ),
     }
     dimension_map = {
-        release_note: (
-            "natural-maintainer.answer_correct",
-            "natural-maintainer.actual_query_scope",
-            "natural-maintainer.reported_project_identity",
-            "natural-maintainer.bounded_evidence",
-            "natural-maintainer.evidence_honesty",
-        )
-        for release_note in task_map
+        release_note: outcome_dimensions for release_note in task_map
     }
     infrastructure_map = {
         "raw-graphql-disabled-by-default": ("default-tool-manifest",),
@@ -1730,6 +2032,11 @@ def release_note_coverage_v3(
         ),
         "stdio-protocol-safety": ("installed-wheel-stdio-protocol",),
         "operator-setting-defaults": ("operator-setting-defaults",),
+        "runtime-safety-boundaries": (
+            "timeout-and-bounded-response",
+            "telemetry-attribution-and-privacy",
+            "installed-wheel-stdio-protocol",
+        ),
     }
     not_applicable = {
         "shared-dedicated-local-workload-profiles",
@@ -1788,11 +2095,18 @@ def release_note_coverage_v3(
             rationale = (
                 "The exact locked manifests show this behavior on both arms."
             )
-        elif source_status == "observed_branch_delta":
+        elif source_status == "observed_branch_delta" and mapped_tasks:
             status = "observed_delta"
             rationale = (
                 "The exact locked manifests or zero-model reconciliation "
                 "probe show a branch delta; mapped tasks test its usefulness."
+            )
+        elif source_status == "observed_branch_delta" and gates:
+            status = "infrastructure_only"
+            rationale = (
+                "The exact locked manifests show a branch delta, and the "
+                "named infrastructure gate qualifies it independently of "
+                "Agent task outcomes."
             )
         elif source_status == "mechanism_probe_required":
             status = "unqualified"
@@ -1864,7 +2178,8 @@ def tool_surface_coverage_v1(
     candidates = [
         item for item in receipt.get("candidates") or () if isinstance(item, Mapping)
     ]
-    if len(candidates) != len(_MCP_RELEASE_CANDIDATES):
+    selected_candidates = _mcp_release_candidates_from_receipt(receipt)
+    if len(candidates) != len(selected_candidates):
         raise ValueError("tool coverage requires both exact MCP candidates")
     manifests = {
         str(item.get("id") or ""): tuple(
@@ -1872,8 +2187,19 @@ def tool_surface_coverage_v1(
         )
         for item in candidates
     }
-    if set(manifests) != {item[0] for item in _MCP_RELEASE_CANDIDATES}:
+    if set(manifests) != {item[0] for item in selected_candidates}:
         raise ValueError("tool coverage candidate identities do not match")
+    versions = {
+        str(item.get("id") or ""): str(item.get("version_identity") or "")
+        for item in candidates
+    }
+    explicit_bindings = receipt.get("candidate_bindings") is not None
+    if any(
+        versions.get(import_id)
+        not in ({version_identity} if explicit_bindings else {"", version_identity})
+        for import_id, version_identity in selected_candidates
+    ):
+        raise ValueError("tool coverage candidate versions do not match")
     schema_digests = {
         str(item.get("id") or ""): {
             "initialized": str(item.get("initialized_tool_schema_digest") or ""),
@@ -1901,6 +2227,10 @@ def tool_surface_coverage_v1(
         for task_id, tools in _MCP_PROJECT_TASK_TOOLS.items()
         for tool in tools
     }
+    declared_task_options = {
+        tool: (task_id, *_MCP_PROJECT_TOOL_TASK_ALIASES.get(tool, ()))
+        for tool, task_id in declared_task_tools.items()
+    }
     overlap = set(declared_task_tools) & set(_MCP_ZERO_MODEL_TOOLS)
     if overlap:
         raise ValueError(
@@ -1919,17 +2249,24 @@ def tool_surface_coverage_v1(
     available_tasks = {str(item) for item in task_ids}
     tools: list[dict[str, Any]] = []
     for tool in manifest:
-        task_id = declared_task_tools.get(tool)
-        if task_id is not None:
+        task_options = declared_task_options.get(tool)
+        if task_options is not None:
+            assigned_task = next(
+                (
+                    task_id
+                    for task_id in task_options
+                    if task_id in available_tasks
+                ),
+                None,
+            )
             tools.append(
                 {
                     "tool": tool,
                     "qualification": "agent_task",
-                    "task_id": task_id,
+                    "task_id": assigned_task or task_options[0],
+                    "accepted_task_ids": list(task_options),
                     "status": (
-                        "assigned"
-                        if task_id in available_tasks
-                        else "confirmation_required"
+                        "assigned" if assigned_task else "confirmation_required"
                     ),
                     "claim_scope": (
                         "Agent outcome and mechanism evidence only when the "

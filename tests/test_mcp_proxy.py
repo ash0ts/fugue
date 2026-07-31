@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -178,7 +179,17 @@ def test_mcp_response_telemetry_exports_only_safe_terminal_metadata(tmp_path) ->
         "event": "mcp_tool_response",
         "has_more": False,
         "layer": "upstream",
+        "next_cursor_metadata_verified": True,
+        "next_cursor_present": False,
+        "pagination_metadata_verified": True,
         "project_exhaustive": True,
+        "returned_object_id_count": 2,
+        "returned_object_id_hashes": [
+            hashlib.sha256(value.encode()).hexdigest()
+            for value in ("private-run-a", "private-run-b")
+        ],
+        "returned_object_id_metadata_verified": True,
+        "returned_object_ids_unique": True,
         "returned_count": 2,
         "server": "wandb",
         "successful": True,
