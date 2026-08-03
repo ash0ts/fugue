@@ -151,7 +151,11 @@ Each Study copies `scientific-report-template.json` only after canonical rows
 are terminal and reconciled. Reports must keep deterministic outcomes, blind
 judge labels, Skill-use mechanism evidence, and efficiency separate. They may
 not pool scores into a cross-repository ranking or claim repeatability from the
-one-attempt canary.
+one-attempt canary. Canonical V2 and V3 results are supported. V2 reports mark
+task validity, source topology, aligned analysis, score explanations, and
+sanitized excerpts as not assessed or unavailable; they never reconstruct
+those later contracts from labels or display fields. V3 retains the stronger
+lineage, topology, and task-validity checks.
 
 Generate each report independently from that Study's canonical V3 result and
 the exact checked-in spec, for example:
@@ -159,18 +163,22 @@ the exact checked-in spec, for example:
 ```bash
 uv run python \
   examples/comparisons/community-skill-upgrades/generate_scientific_report.py \
-  --result .fugue/results/superpowers-writing-plans-upgrade-canary-v4/result.json \
+  --result .fugue/results/comparisons/32de7e52a52bd4e5cb9f6a1dfdc59a73a6c95880855cbc41af70ff223e0c3913/result.json \
   --spec examples/comparisons/superpowers-writing-plans-upgrade/comparison-v4.yaml \
-  --output .fugue/results/superpowers-writing-plans-upgrade-canary-v4/scientific-report.json
+  --output .fugue/results/comparisons/32de7e52a52bd4e5cb9f6a1dfdc59a73a6c95880855cbc41af70ff223e0c3913/scientific-report.json
 ```
 
-Repeat with the Anthropic and Vercel result/spec pair. The generator refuses
-V1/V2 results, nonterminal or unreconciled attempts, unresolved Weave chains,
-or any project, taskset, scorer, behavior, runtime-policy, or exact Skill
-revision mismatch. It emits deterministic dimensions, advisory anchored judge
-labels and reasons, explicit observed-versus-reserved cost status, aggregate
-Skill assignment/registration/invocation evidence, latency and token coverage,
-and all five resolved Weave links per attempt. It reads private-label bytes only
-to verify their locked SHA-256 and never serializes private labels or authored
+Repeat with the Anthropic and Vercel result/spec pair. The generator refuses V1
+results, nonterminal or unreconciled attempts, unresolved Weave chains, or any
+identity mismatch that the source result version can prove. It emits
+deterministic dimensions, advisory anchored judge labels and reasons (or an
+explicit unavailable row for a missing optional V2 review), explicit
+observed-versus-reserved cost status, aggregate Skill
+assignment/registration/invocation evidence, latency and token coverage, and
+all five resolved Weave links per attempt. For V2, the exact candidate revision
+is checked against result metadata while the baseline revision is reported from
+the checked-in campaign contract with a mandatory limitation because V2 has no
+cohort lineage. It reads private-label bytes only through the canonical result
+verification boundary and never serializes private labels or authored
 references. Generate one report per Study; the tool intentionally has no
 multi-repository pooling mode.

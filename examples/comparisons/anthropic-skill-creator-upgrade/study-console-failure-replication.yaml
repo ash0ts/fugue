@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: fugue-anthropic-skill-creator-failure-replication-v1
+  name: Anthropic Skill Creator Failure Replication
+  description: Exact two-attempt replication of public evidence-instruction semantics across two Skill Creator revisions.
+  objective: Determine whether the earlier instruction-quality failure reproduces under an explicit semantic contract.
+wandb:
+  entity: wandb
+  project: fugue-anthropic-skill-creator-failure-replication-v1
+database: .study-console/anthropic-skill-creator-failure-replication.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: anthropic-skill-creator-instruction-failure-replication-v1
+  read_only: true

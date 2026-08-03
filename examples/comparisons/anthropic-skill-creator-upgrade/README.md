@@ -81,3 +81,44 @@ The result destination is
 `wandb/fugue-anthropic-skill-creator-upgrade-v1`. Start the generic read-only
 Study Console with `study-console.yaml` on port `18085`; do not reuse another
 campaign's database or project profile.
+
+## Instruction-failure replication
+
+`failure-replication.yaml` is a separate four-cell Study: one public task,
+the same two exact Skill revisions, and two attempts per arm. Its public
+semantic dimensions are source traceability, terminal success-or-stop
+semantics, and honest missing-evidence status. The deterministic scorer accepts
+semantic paraphrases rather than hidden literal phrases; the blinded Sonnet
+review remains advisory.
+
+Run the standard governed flow only after the exact Skill bundles and local
+Harbor runtime above are prepared:
+
+```bash
+SPEC=examples/comparisons/anthropic-skill-creator-upgrade/failure-replication.yaml
+ENV_FILE=/Users/ashah/Documents/common_tools/.env
+PREVIEW=/tmp/anthropic-skill-creator-failure-preview.json
+APPROVAL=/tmp/anthropic-skill-creator-failure-approval.json
+
+env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
+  --env-file "$ENV_FILE" --json
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --prepare \
+  --env-file "$ENV_FILE" --json
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview \
+  --env-file "$ENV_FILE" --json > "$PREVIEW"
+
+PREVIEW_DIGEST=$(jq -r .preview_digest "$PREVIEW")
+uv run fugue approve "$PREVIEW_DIGEST" \
+  --max-cells 4 --max-usd 34 --approved-by operator > "$APPROVAL"
+APPROVAL_DIGEST=$(jq -r .approval_digest "$APPROVAL")
+
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --run \
+  --approval "$APPROVAL_DIGEST" --fetch-weave \
+  --env-file "$ENV_FILE"
+```
+
+Use `study-console-failure-replication.yaml` for its dedicated read-only Study
+Console on port `18087`. The profile reads only
+`wandb/fugue-anthropic-skill-creator-failure-replication-v1`, defaults to
+`anthropic-skill-creator-instruction-failure-replication-v1`, and keeps state
+in `.study-console/anthropic-skill-creator-failure-replication.sqlite3`.

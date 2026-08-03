@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Generate one strict public report from one canonical V3 Skill Study result."""
+"""Generate one strict public report from one canonical V2/V3 Skill result.
+
+V2 results predate TaskValidityV1, EvidenceTopologyV1, aligned-analysis,
+score-explanation, and sanitized-excerpt contracts.  Reports generated from
+V2 therefore mark those claims unavailable instead of reconstructing them
+from display data.  V3 keeps the stronger contract and its existing checks.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +19,14 @@ from typing import Any
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
+    ComparisonResultV2,
     ComparisonResultV3,
     ComparisonSpecV1,
     load_comparison,
     read_comparison_result,
 )
+
+SupportedResult = ComparisonResultV2 | ComparisonResultV3
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
@@ -45,6 +54,7 @@ TASK_VALIDITY_STATUSES = {
     "drifted",
     "invalid",
     "inconclusive",
+    "not_assessed",
 }
 REPORT_FIELDS = {
     "schema_version",
@@ -66,6 +76,11 @@ LOCKED_LIMITATIONS = (
     "The initial canary has one attempt per task and treatment, so it cannot establish repeatability.",
     "The Agent and blind judge use the same model family; deterministic gates remain authoritative.",
     "Results are task- and revision-specific and do not rank repositories or Skills universally.",
+)
+V2_LIMITATIONS = (
+    "ComparisonResultV2 does not contain TaskValidityV1; task validity is not assessed or reconstructed in this report.",
+    "ComparisonResultV2 does not contain EvidenceTopologyV1 or aligned-analysis contracts; this report verifies its declared result destination and resolved attempt links without making source-topology or drift claims.",
+    "ComparisonResultV2 does not contain cohort lineage, the baseline source revision, score explanations, or sanitized answer excerpts; revisions come from the checked-in campaign contract, the candidate revision is matched to result metadata, and unavailable presentation fields remain empty.",
 )
 _SHA40 = re.compile(r"[0-9a-f]{40}")
 _FORBIDDEN_PUBLIC_KEYS = {
@@ -155,7 +170,7 @@ def _evaluator_digest(evaluator: Any, repo_root: Path) -> str:
     return stable_digest(value)
 
 
-def _verify_exact_spec(  # noqa: C901 - one bounded cross-artifact audit.
+def _verify_exact_spec_v3(  # noqa: C901 - one bounded cross-artifact audit.
     *,
     result: ComparisonResultV3,
     spec: ComparisonSpecV1,
@@ -279,7 +294,95 @@ def _verify_exact_spec(  # noqa: C901 - one bounded cross-artifact audit.
     return revisions
 
 
-def _attempts(result: ComparisonResultV3) -> list[tuple[Any, str, Any]]:
+def _verify_exact_spec_v2(
+    *,
+    result: ComparisonResultV2,
+    spec: ComparisonSpecV1,
+    study: Mapping[str, Any],
+    repo_root: Path,
+) -> dict[str, str]:
+    """Verify only identities that a canonical V2 result actually carries.
+
+    V2 has no cohort-lineage or evidence-topology object.  In particular, it
+    cannot independently prove the baseline source commit, so the public
+    report keeps that fact in its locked V2 limitations rather than inferring
+    it from labels, candidate hashes, or presentation fields.
+    """
+
+    if result.comparison_id != spec.id:
+        raise ValueError("result comparison id disagrees with the Study spec")
+    if spec.execution.evidence_project != result.evidence_project:
+        raise ValueError("result project disagrees with the Study spec")
+    if study.get("evidence_project") != result.evidence_project:
+        raise ValueError("result project disagrees with the campaign manifest")
+    destination = spec.execution.evidence_destination
+    if destination is None or result.evidence_destination != destination.to_dict():
+        raise ValueError("result evidence destination disagrees with the Study spec")
+    if spec.execution.attempts != 1:
+        raise ValueError("community canary reports require exactly one attempt")
+    judges = [item for item in spec.evaluators if item.type == "llm_judge"]
+    if len(judges) != 1 or judges[0].required is not False:
+        raise ValueError("community report requires one advisory judge")
+    if judges[0].profile != spec.execution.model:
+        raise ValueError("community report requires the locked same-family judge")
+
+    revisions = {
+        "baseline": str(study["baseline_commit"]),
+        "candidate": str(study["candidate_commit"]),
+    }
+    if len(spec.baseline.skills) != 1 or len(spec.candidate.skills) != 1:
+        raise ValueError("community Skill reports require one Skill per arm")
+    if len(result.candidate_source_revisions) != 1:
+        raise ValueError("result candidate source revision is unavailable")
+    published_candidate = result.candidate_source_revisions[0]
+    if (
+        published_candidate.kind != "skill"
+        or published_candidate.id != spec.candidate.skills[0]
+        or published_candidate.version_identity != f"git:{revisions['candidate']}"
+        or not published_candidate.runtime_digest.startswith("sha256:")
+    ):
+        raise ValueError("result candidate Skill revision disagrees with the campaign")
+
+    tasks_path = _within(repo_root / spec.taskset.tasks, repo_root, "public taskset")
+    expected_coordinates = {
+        (task_id, harness, attempt)
+        for task_id in _public_task_ids(tasks_path)
+        for harness in spec.execution.harnesses
+        for attempt in range(1, spec.execution.attempts + 1)
+    }
+    observed_coordinates = {
+        (pair.task_id, pair.harness, pair.attempt) for pair in result.paired_cases
+    }
+    if observed_coordinates != expected_coordinates:
+        raise ValueError("result task matrix disagrees with the Study spec")
+    return revisions
+
+
+def _verify_exact_spec(
+    *,
+    result: SupportedResult,
+    spec: ComparisonSpecV1,
+    study: Mapping[str, Any],
+    repo_root: Path,
+) -> dict[str, str]:
+    if isinstance(result, ComparisonResultV3):
+        return _verify_exact_spec_v3(
+            result=result,
+            spec=spec,
+            study=study,
+            repo_root=repo_root,
+        )
+    if isinstance(result, ComparisonResultV2):
+        return _verify_exact_spec_v2(
+            result=result,
+            spec=spec,
+            study=study,
+            repo_root=repo_root,
+        )
+    raise ValueError("scientific reports require ComparisonResultV2 or V3")
+
+
+def _attempts(result: SupportedResult) -> list[tuple[Any, str, Any]]:
     selected: list[tuple[Any, str, Any]] = []
     for pair in result.paired_cases:
         for arm, attempt in (("baseline", pair.baseline), ("candidate", pair.candidate)):
@@ -300,7 +403,7 @@ def _attempts(result: ComparisonResultV3) -> list[tuple[Any, str, Any]]:
     return selected
 
 
-def _deterministic_rows(result: ComparisonResultV3) -> list[dict[str, Any]]:
+def _deterministic_rows(result: SupportedResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for pair in result.paired_cases:
         assert pair.baseline is not None and pair.candidate is not None
@@ -314,6 +417,22 @@ def _deterministic_rows(result: ComparisonResultV3) -> list[dict[str, Any]]:
             for key, value in pair.candidate.scores.items()
             if not key.startswith("comparison.judge.")
         }
+        baseline_explanations = (
+            {
+                key: pair.baseline.score_explanations[key]
+                for key in baseline_scores
+            }
+            if isinstance(result, ComparisonResultV3)
+            else {}
+        )
+        candidate_explanations = (
+            {
+                key: pair.candidate.score_explanations[key]
+                for key in candidate_scores
+            }
+            if isinstance(result, ComparisonResultV3)
+            else {}
+        )
         rows.append(
             {
                 "pair_id": pair.pair_id,
@@ -328,11 +447,17 @@ def _deterministic_rows(result: ComparisonResultV3) -> list[dict[str, Any]]:
                     "passed": pair.baseline.passed,
                     "execution_status": pair.baseline.execution_status,
                     "scores": baseline_scores,
-                    "score_explanations": {
-                        key: pair.baseline.score_explanations[key]
-                        for key in baseline_scores
-                    },
-                    "sanitized_answer_excerpt": pair.baseline.sanitized_answer_excerpt,
+                    "score_explanations": baseline_explanations,
+                    "sanitized_answer_excerpt": (
+                        pair.baseline.sanitized_answer_excerpt
+                        if isinstance(result, ComparisonResultV3)
+                        else None
+                    ),
+                    "presentation_evidence_status": (
+                        "available"
+                        if isinstance(result, ComparisonResultV3)
+                        else "unavailable_in_v2"
+                    ),
                     "tools": list(pair.baseline.tools),
                 },
                 "candidate": {
@@ -340,11 +465,17 @@ def _deterministic_rows(result: ComparisonResultV3) -> list[dict[str, Any]]:
                     "passed": pair.candidate.passed,
                     "execution_status": pair.candidate.execution_status,
                     "scores": candidate_scores,
-                    "score_explanations": {
-                        key: pair.candidate.score_explanations[key]
-                        for key in candidate_scores
-                    },
-                    "sanitized_answer_excerpt": pair.candidate.sanitized_answer_excerpt,
+                    "score_explanations": candidate_explanations,
+                    "sanitized_answer_excerpt": (
+                        pair.candidate.sanitized_answer_excerpt
+                        if isinstance(result, ComparisonResultV3)
+                        else None
+                    ),
+                    "presentation_evidence_status": (
+                        "available"
+                        if isinstance(result, ComparisonResultV3)
+                        else "unavailable_in_v2"
+                    ),
                     "tools": list(pair.candidate.tools),
                 },
             }
@@ -352,12 +483,36 @@ def _deterministic_rows(result: ComparisonResultV3) -> list[dict[str, Any]]:
     return rows
 
 
-def _judge_rows(result: ComparisonResultV3, judge_id: str) -> list[dict[str, Any]]:
+def _judge_rows(result: SupportedResult, judge_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for pair, arm, attempt in _attempts(result):
-        if set(attempt.judge_reviews) != {judge_id}:
+        if isinstance(result, ComparisonResultV3) and set(attempt.judge_reviews) != {
+            judge_id
+        }:
             raise ValueError("every attempt must carry the one locked advisory judge")
-        review = attempt.judge_reviews[judge_id]
+        review = attempt.judge_reviews.get(judge_id)
+        if review is None:
+            rows.append(
+                {
+                    "pair_id": pair.pair_id,
+                    "task_id": pair.task_id,
+                    "arm": arm,
+                    "attempt_id": attempt.attempt_id,
+                    "judge_id": judge_id,
+                    "role": "advisory_same_family",
+                    "status": "unavailable",
+                    "label": None,
+                    "reason": (
+                        "ComparisonResultV2 contains no completed advisory judge "
+                        "review for this attempt."
+                    ),
+                    "missing_evidence": True,
+                    "cost_status": "unavailable",
+                    "observed_cost_usd": None,
+                    "accounted_reserve_usd": None,
+                }
+            )
+            continue
         if review.label not in JUDGE_LABELS:
             raise ValueError("judge result uses an unanchored label")
         rows.append(
@@ -368,6 +523,7 @@ def _judge_rows(result: ComparisonResultV3, judge_id: str) -> list[dict[str, Any
                 "attempt_id": attempt.attempt_id,
                 "judge_id": judge_id,
                 "role": "advisory_same_family",
+                "status": "observed",
                 "label": review.label,
                 "reason": review.reason,
                 "missing_evidence": review.missing_evidence,
@@ -380,7 +536,7 @@ def _judge_rows(result: ComparisonResultV3, judge_id: str) -> list[dict[str, Any
 
 
 def _skill_evidence(
-    result: ComparisonResultV3,
+    result: SupportedResult,
     spec: ComparisonSpecV1,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -434,10 +590,11 @@ def _coverage(values: Sequence[float | None]) -> dict[str, Any]:
     }
 
 
-def _efficiency(result: ComparisonResultV3) -> dict[str, Any]:
+def _efficiency(result: SupportedResult) -> dict[str, Any]:
     by_arm = {"baseline": [], "candidate": []}
     judge_reviews = []
-    for _pair, arm, attempt in _attempts(result):
+    selected_attempts = _attempts(result)
+    for _pair, arm, attempt in selected_attempts:
         by_arm[arm].append(attempt)
         judge_reviews.extend(attempt.judge_reviews.values())
     latency = {
@@ -503,13 +660,13 @@ def _efficiency(result: ComparisonResultV3) -> dict[str, Any]:
         "advisory_judge": {
             "status": (
                 "observed"
-                if len(judge_observed) == len(judge_reviews)
+                if len(judge_observed) == len(selected_attempts)
                 else "unavailable"
                 if not judge_observed
                 else "partial"
             ),
             "observed_reviews": len(judge_observed),
-            "expected_reviews": len(judge_reviews),
+            "expected_reviews": len(selected_attempts),
             "observed_total_usd": (
                 round(sum(judge_observed), 6) if judge_observed else None
             ),
@@ -519,7 +676,7 @@ def _efficiency(result: ComparisonResultV3) -> dict[str, Any]:
     return {"latency": latency, "tokens": tokens, "cost": cost}
 
 
-def _evidence_links(result: ComparisonResultV3) -> list[dict[str, Any]]:
+def _evidence_links(result: SupportedResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for pair, arm, attempt in _attempts(result):
         for link in attempt.evidence_links:
@@ -538,16 +695,32 @@ def _evidence_links(result: ComparisonResultV3) -> list[dict[str, Any]]:
     return rows
 
 
-def _limitations(template: Mapping[str, Any], result: ComparisonResultV3) -> list[str]:
+def _limitations(template: Mapping[str, Any], result: SupportedResult) -> list[str]:
     locked = template.get("limitations")
     if not isinstance(locked, list) or tuple(locked[:3]) != LOCKED_LIMITATIONS:
         raise ValueError("scientific report template limitations drifted")
     extras = (
+        *(V2_LIMITATIONS if isinstance(result, ComparisonResultV2) else ()),
         *result.limitations,
         *result.behavioral_summary.limitations,
         *result.decision.limitations,
     )
     return list(dict.fromkeys((*LOCKED_LIMITATIONS, *extras)))
+
+
+def _task_validity(result: SupportedResult) -> list[dict[str, Any]]:
+    if isinstance(result, ComparisonResultV3):
+        return [item.to_dict() for item in result.task_validity]
+    return [
+        {
+            "task_id": pair.task_id,
+            "status": "not_assessed",
+            "reasons": [
+                "ComparisonResultV2 does not carry TaskValidityV1; no task-validity claim is made."
+            ],
+        }
+        for pair in result.paired_cases
+    ]
 
 
 def _validate_template(value: Mapping[str, Any]) -> None:
@@ -591,7 +764,9 @@ def _reject_private_keys(value: Any) -> None:
             _reject_private_keys(item)
 
 
-def validate_report(value: Mapping[str, Any]) -> None:
+def validate_report(  # noqa: C901 - one strict report-schema boundary.
+    value: Mapping[str, Any],
+) -> None:
     unknown = sorted(set(value) - REPORT_FIELDS)
     missing = sorted(REPORT_FIELDS - set(value))
     if unknown or missing:
@@ -612,6 +787,11 @@ def validate_report(value: Mapping[str, Any]) -> None:
         raise ValueError("scientific report requires task validity")
     if any(item.get("status") not in TASK_VALIDITY_STATUSES for item in validity):
         raise ValueError("scientific report contains invalid task validity")
+    if any(
+        item.get("status") == "not_assessed" and not item.get("reasons")
+        for item in validity
+    ):
+        raise ValueError("unassessed task validity requires an explicit reason")
     finding = value["behavioral_finding"]
     if not isinstance(finding, Mapping) or finding.get("status") not in BEHAVIORAL_STATUSES:
         raise ValueError("scientific report behavioral finding is invalid")
@@ -623,8 +803,14 @@ def validate_report(value: Mapping[str, Any]) -> None:
     ):
         if not isinstance(value[field], list) or not value[field]:
             raise ValueError(f"scientific report {field} must be nonzero")
-    if any(item.get("label") not in JUDGE_LABELS for item in value["judge_results"]):
-        raise ValueError("scientific report contains an unanchored judge label")
+    for item in value["judge_results"]:
+        if item.get("status") not in {"observed", "unavailable"}:
+            raise ValueError("scientific report contains an invalid judge status")
+        if item.get("status") == "observed":
+            if item.get("label") not in JUDGE_LABELS:
+                raise ValueError("scientific report contains an unanchored judge label")
+        elif item.get("label") is not None:
+            raise ValueError("unavailable judge evidence cannot carry a label")
     efficiency = value["efficiency"]
     if not isinstance(efficiency, Mapping) or set(efficiency) != {
         "latency",
@@ -650,14 +836,14 @@ def validate_report(value: Mapping[str, Any]) -> None:
 
 def generate_report(
     *,
-    result: ComparisonResultV3,
+    result: SupportedResult,
     spec: ComparisonSpecV1,
     study: Mapping[str, Any],
     template: Mapping[str, Any],
     repo_root: Path,
 ) -> dict[str, Any]:
-    if not isinstance(result, ComparisonResultV3):
-        raise ValueError("scientific reports require ComparisonResultV3")
+    if not isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        raise ValueError("scientific reports require ComparisonResultV2 or V3")
     _validate_template(template)
     if result.integrity.get("status") != "reconciled":
         raise ValueError("scientific reports require reconciled result integrity")
@@ -677,8 +863,19 @@ def generate_report(
         "study_id": result.comparison_id,
         "evidence_project": result.evidence_project,
         "exact_revisions": revisions,
-        "task_validity": [item.to_dict() for item in result.task_validity],
+        "task_validity": _task_validity(result),
         "behavioral_finding": {
+            "source_result_schema_version": result.schema_version,
+            "task_validity_basis": (
+                "canonical_task_validity_v1"
+                if isinstance(result, ComparisonResultV3)
+                else "not_assessed_in_v2"
+            ),
+            "evidence_topology_basis": (
+                "canonical_evidence_topology_v1"
+                if isinstance(result, ComparisonResultV3)
+                else "unavailable_in_v2"
+            ),
             "status": behavior.status,
             "recommendation": behavior.recommendation,
             "supported_claim": behavior.supported_claim,
@@ -712,8 +909,8 @@ def build_report(
     resolved_result = _within(result_path, repo_root, "comparison result")
     resolved_spec = _within(spec_path, repo_root, "Study spec")
     result = read_comparison_result(resolved_result)
-    if not isinstance(result, ComparisonResultV3):
-        raise ValueError("scientific reports require ComparisonResultV3")
+    if not isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        raise ValueError("scientific reports require ComparisonResultV2 or V3")
     spec = load_comparison(resolved_spec, repo_root=repo_root)
     study = _study_contract(
         campaign_root=campaign_root,

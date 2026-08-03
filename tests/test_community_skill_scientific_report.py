@@ -12,7 +12,11 @@ from typing import Any
 import pytest
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.comparison import ComparisonResultV3, load_comparison
+from fugue.bench.comparison import (
+    ComparisonResultV2,
+    ComparisonResultV3,
+    load_comparison,
+)
 
 REPO_ROOT = Path(__file__).parents[1]
 CAMPAIGN = REPO_ROOT / "examples/comparisons/community-skill-upgrades"
@@ -222,6 +226,7 @@ def _result() -> tuple[ComparisonResultV3, Any, dict[str, Any], dict[str, Any]]:
 
     result = object.__new__(ComparisonResultV3)
     values = {
+        "schema_version": 3,
         "comparison_id": spec.id,
         "evidence_project": spec.execution.evidence_project,
         "evidence_topology": _Record(result_destination=destination),
@@ -297,6 +302,40 @@ def _result() -> tuple[ComparisonResultV3, Any, dict[str, Any], dict[str, Any]]:
     return result, spec, study, template
 
 
+def _result_v2() -> tuple[ComparisonResultV2, Any, dict[str, Any], dict[str, Any]]:
+    v3, spec, study, template = _result()
+    result = object.__new__(ComparisonResultV2)
+    values = {
+        "schema_version": 2,
+        "comparison_id": v3.comparison_id,
+        "evidence_project": v3.evidence_project,
+        "evidence_destination": spec.execution.evidence_destination.to_dict(),
+        "integrity": {"status": "reconciled"},
+        "candidate_source_revisions": v3.candidate_source_revisions,
+        "paired_cases": v3.paired_cases,
+        "rows": v3.rows,
+        "behavioral_summary": _Record(
+            status="incomplete",
+            recommendation="INCOMPLETE — required behavioral evidence is unavailable.",
+            supported_claim=None,
+            critical_blockers=("one required evaluation is incomplete",),
+            next_action="Repair the missing evaluation before comparison.",
+            limitations=("One aligned attempt is incomplete.",),
+        ),
+        "decision": v3.decision,
+        "limitations": ("This source artifact is a canonical V2 result.",),
+        "mechanism_summary": v3.mechanism_summary,
+        "operational_summary": v3.operational_summary,
+    }
+    for key, value in values.items():
+        object.__setattr__(result, key, value)
+    # V2 can carry terminal evidence without a completed optional judge review.
+    result.paired_cases[0].baseline.judge_reviews = {}
+    result.paired_cases[1].candidate.execution_status = "failed"
+    result.paired_cases[1].status = "incomplete"
+    return result, spec, study, template
+
+
 def test_report_is_decision_ready_without_private_labels() -> None:
     result, spec, study, template = _result()
 
@@ -333,6 +372,63 @@ def test_report_is_decision_ready_without_private_labels() -> None:
     assert "private_labels" not in serialized
     assert '"expected":' not in serialized
     REPORTER.validate_report(report)
+
+
+def test_v2_report_is_conservative_about_unavailable_v3_contracts() -> None:
+    result, spec, study, template = _result_v2()
+
+    report = REPORTER.generate_report(
+        result=result,
+        spec=spec,
+        study=study,
+        template=template,
+        repo_root=REPO_ROOT,
+    )
+
+    assert report["behavioral_finding"] == {
+        "source_result_schema_version": 2,
+        "task_validity_basis": "not_assessed_in_v2",
+        "evidence_topology_basis": "unavailable_in_v2",
+        "status": "incomplete",
+        "recommendation": "INCOMPLETE — required behavioral evidence is unavailable.",
+        "supported_claim": None,
+        "critical_blockers": ["one required evaluation is incomplete"],
+        "next_action": "Repair the missing evaluation before comparison.",
+        "release_decision": result.decision.to_dict(),
+    }
+    assert {item["status"] for item in report["task_validity"]} == {
+        "not_assessed"
+    }
+    assert all(item["reasons"] for item in report["task_validity"])
+    assert all(
+        arm["presentation_evidence_status"] == "unavailable_in_v2"
+        and arm["score_explanations"] == {}
+        and arm["sanitized_answer_excerpt"] is None
+        for row in report["deterministic_results"]
+        for arm in (row["baseline"], row["candidate"])
+    )
+    unavailable = [
+        item for item in report["judge_results"] if item["status"] == "unavailable"
+    ]
+    assert len(unavailable) == 1
+    assert unavailable[0]["label"] is None
+    assert report["efficiency"]["cost"]["advisory_judge"]["expected_reviews"] == 4
+    assert list(REPORTER.V2_LIMITATIONS) == report["limitations"][3:6]
+    REPORTER.validate_report(report)
+
+
+def test_v2_report_rejects_candidate_revision_mismatch() -> None:
+    result, spec, study, template = _result_v2()
+    result.candidate_source_revisions[0].version_identity = "git:" + "0" * 40
+
+    with pytest.raises(ValueError, match="candidate Skill revision disagrees"):
+        REPORTER.generate_report(
+            result=result,
+            spec=spec,
+            study=study,
+            template=template,
+            repo_root=REPO_ROOT,
+        )
 
 
 @pytest.mark.parametrize(
