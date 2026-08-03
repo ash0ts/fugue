@@ -10279,7 +10279,10 @@ def score_comparison_rows(
             failure_stage = "input_privacy"
             request_policy: dict[str, Any] | None = None
             try:
-                judge_input_privacy = _comparison_judge_input_privacy_receipt(
+                (
+                    judge_provider_payload,
+                    judge_input_privacy,
+                ) = _prepare_comparison_judge_input(
                     evaluator=judge,
                     public_task=public_tasks.get(task_id, {}),
                     row=row,
@@ -10287,14 +10290,16 @@ def score_comparison_rows(
                 )
                 failure_stage = "provider_request"
                 request_policy = _comparison_judge_request_policy(judge, env)
-                request = judge_request or _request_comparison_judge
                 judge_accounted_reserve += judge.reserve_cost_usd
                 judge_reserve_accounted = True
-                payload, usage, receipt = request(
+                payload, usage, receipt = _invoke_comparison_judge_request(
+                    judge_request=judge_request,
                     evaluator=judge,
                     public_task=public_tasks.get(task_id, {}),
                     row=row,
                     env=env,
+                    prepared_payload=judge_provider_payload,
+                    input_transform_receipt=judge_input_privacy,
                 )
                 failure_stage = "output_privacy"
                 judge_output_privacy = _comparison_judge_output_privacy_receipt(
@@ -10446,6 +10451,8 @@ def _request_comparison_judge(
     public_task: Mapping[str, Any],
     row: Mapping[str, Any],
     env: Mapping[str, str],
+    prepared_payload: Mapping[str, Any] | None = None,
+    input_transform_receipt: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from fugue.bench.evaluations import (
         _post_judge,
@@ -10470,11 +10477,38 @@ def _request_comparison_judge(
         raise RuntimeError(
             f"{provider_api_key_env(route)} is required for comparison judging"
         )
-    payload = _comparison_judge_payload(
-        evaluator=evaluator,
-        public_task=public_task,
-        row=row,
+    expected_payload, expected_transform_receipt = (
+        _prepare_comparison_judge_input(
+            evaluator=evaluator,
+            public_task=public_task,
+            row=row,
+            env=env,
+        )
     )
+    if prepared_payload is not None and dict(prepared_payload) != expected_payload:
+        raise ValueError(
+            "prepared judge payload does not match deterministic sanitization"
+        )
+    if (
+        input_transform_receipt is not None
+        and dict(input_transform_receipt) != expected_transform_receipt
+    ):
+        raise ValueError("judge input transform receipt does not match")
+    payload = expected_payload
+    payload_sha256 = stable_digest(payload)
+    transform_receipt_digest = str(
+        expected_transform_receipt["receipt_digest"]
+    )
+    if payload_sha256 != expected_transform_receipt["provider_payload_sha256"]:
+        raise ValueError("judge provider payload digest does not match")
+    if transform_receipt_digest != stable_digest(
+        {
+            key: value
+            for key, value in expected_transform_receipt.items()
+            if key != "receipt_digest"
+        }
+    ):
+        raise ValueError("judge input transform receipt digest does not match")
     prompt_prefix = (
         "Blindly evaluate one Agent attempt. You do not know whether it came from "
         "the baseline or candidate. Use only the supplied public task, final "
@@ -10537,6 +10571,8 @@ def _request_comparison_judge(
                 COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION
             ),
             "public_rubric_contract_digest": stable_digest(payload["rubric"]),
+            "provider_payload_sha256": payload_sha256,
+            "input_transform_receipt_digest": transform_receipt_digest,
             "requested_text_max_characters": (
                 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
             ),
@@ -10558,6 +10594,61 @@ def _request_comparison_judge(
             "usage": usage,
         },
     )
+
+
+def _validate_comparison_judge_request_binding(
+    *,
+    receipt: Mapping[str, Any],
+    input_transform_receipt: Mapping[str, Any],
+    required: bool,
+) -> None:
+    if not required:
+        return
+    if (
+        receipt.get("provider_payload_sha256")
+        != input_transform_receipt["provider_payload_sha256"]
+        or receipt.get("input_transform_receipt_digest")
+        != input_transform_receipt["receipt_digest"]
+    ):
+        raise ValueError("judge provider request did not bind the prepared input")
+
+
+def _invoke_comparison_judge_request(
+    *,
+    judge_request: Callable[
+        ...,
+        tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    ]
+    | None,
+    evaluator: ComparisonEvaluatorV1,
+    public_task: Mapping[str, Any],
+    row: Mapping[str, Any],
+    env: Mapping[str, str],
+    prepared_payload: Mapping[str, Any],
+    input_transform_receipt: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    if judge_request is not None:
+        # Preserve the established injection seam for offline/unit requesters.
+        return judge_request(
+            evaluator=evaluator,
+            public_task=public_task,
+            row=row,
+            env=env,
+        )
+    response = _request_comparison_judge(
+        evaluator=evaluator,
+        public_task=public_task,
+        row=row,
+        env=env,
+        prepared_payload=prepared_payload,
+        input_transform_receipt=input_transform_receipt,
+    )
+    _validate_comparison_judge_request_binding(
+        receipt=response[2],
+        input_transform_receipt=input_transform_receipt,
+        required=True,
+    )
+    return response
 
 
 def _comparison_judge_request_policy(
@@ -10704,13 +10795,61 @@ def _comparison_judge_payload(
     )
 
 
-def _comparison_judge_input_privacy_receipt(
+def _comparison_judge_contains_exact_secret(
+    value: Any,
+    *,
+    secrets: Sequence[str],
+) -> bool:
+    if isinstance(value, str):
+        return any(secret and secret in value for secret in secrets)
+    if isinstance(value, Mapping):
+        return any(
+            _comparison_judge_contains_exact_secret(name, secrets=secrets)
+            or _comparison_judge_contains_exact_secret(item, secrets=secrets)
+            for name, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return any(
+            _comparison_judge_contains_exact_secret(item, secrets=secrets)
+            for item in value
+        )
+    return False
+
+
+def _comparison_judge_transformed_value_count(source: Any, target: Any) -> int:
+    if source == target:
+        return 0
+    if isinstance(source, Mapping) and isinstance(target, Mapping):
+        if set(source) != set(target):
+            raise ValueError("judge input sanitization changed payload fields")
+        return sum(
+            _comparison_judge_transformed_value_count(source[key], target[key])
+            for key in source
+        )
+    if (
+        isinstance(source, Sequence)
+        and not isinstance(source, str | bytes)
+        and isinstance(target, Sequence)
+        and not isinstance(target, str | bytes)
+    ):
+        if len(source) != len(target):
+            raise ValueError("judge input sanitization changed payload length")
+        return sum(
+            _comparison_judge_transformed_value_count(before, after)
+            for before, after in zip(source, target, strict=True)
+        )
+    if type(source) is not type(target):
+        raise ValueError("judge input sanitization changed payload type")
+    return 1
+
+
+def _prepare_comparison_judge_input(
     *,
     evaluator: ComparisonEvaluatorV1,
     public_task: Mapping[str, Any],
     row: Mapping[str, Any],
     env: Mapping[str, str],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if row.get("credential_leak") is True or row.get("private_label_leak") is True:
         raise ValueError(
             "judge input is ineligible because a privacy leak was detected"
@@ -10720,14 +10859,45 @@ def _comparison_judge_input_privacy_receipt(
         public_task=public_task,
         row=row,
     )
-    redacted = redact_value(payload, secrets=secrets_from_env(env))
-    if redacted != payload:
-        raise ValueError("judge input failed the pre-provider privacy scan")
-    return {
+    configured_secrets = secrets_from_env(env)
+    if _comparison_judge_contains_exact_secret(
+        payload,
+        secrets=configured_secrets,
+    ):
+        raise ValueError("judge input contains an exact configured credential")
+    sanitized = redact_value(payload, secrets=())
+    if not isinstance(sanitized, dict):
+        raise ValueError("judge input sanitization produced an invalid payload")
+    if redact_value(sanitized, secrets=()) != sanitized:
+        raise ValueError("judge input sanitization is not idempotent")
+    if _comparison_judge_contains_exact_secret(
+        sanitized,
+        secrets=configured_secrets,
+    ):
+        raise ValueError("judge input sanitization retained a configured credential")
+    transformed_value_count = _comparison_judge_transformed_value_count(
+        payload,
+        sanitized,
+    )
+    source_payload_sha256 = stable_digest(payload)
+    provider_payload_sha256 = stable_digest(sanitized)
+    unsigned_receipt = {
         "schema_version": 1,
         "status": "passed",
-        "contract": "fugue-redaction-v1",
-        "payload_sha256": stable_digest(payload),
+        "contract": "fugue-judge-input-sanitization-v1",
+        "transform": "generic-credential-placeholder-redaction-v1",
+        "source_payload_sha256": source_payload_sha256,
+        "provider_payload_sha256": provider_payload_sha256,
+        # Retain the established field as the exact provider-visible digest.
+        "payload_sha256": provider_payload_sha256,
+        "transformed": transformed_value_count > 0,
+        "transformed_value_count": transformed_value_count,
+        "exact_configured_secret_scan": "passed",
+        "preexisting_leak_scan": "passed",
+    }
+    return sanitized, {
+        **unsigned_receipt,
+        "receipt_digest": stable_digest(unsigned_receipt),
     }
 
 

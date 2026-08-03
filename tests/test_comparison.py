@@ -32,6 +32,7 @@ from fugue.bench.comparison import (
     _judge_review_label,
     _paired_attempt_view,
     _paired_attempt_view_v3,
+    _prepare_comparison_judge_input,
     _request_comparison_judge,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
@@ -3466,6 +3467,142 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     }
 
 
+def test_blind_judge_sanitizes_safe_credential_placeholders_before_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    allow_unit_judge_execution: None,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("inspected_paths",),
+        reserve_cost_usd=0.1,
+    )
+    captured: dict[str, object] = {"calls": 0}
+
+    def capture_post(
+        _client: object,
+        _route: object,
+        _key: str,
+        _env: object,
+        prompt: str,
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], dict[str, int]]:
+        captured["calls"] = int(captured["calls"]) + 1
+        captured["prompt"] = prompt
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.75},
+                "overall_assessment": "Useful and grounded.",
+                "uncertainty": 0.2,
+                "missing_evidence": False,
+                "rationale": "The plan is reviewable and appropriately bounded.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", capture_post)
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {
+                    "plan": (
+                        "Use API_KEY=example-placeholder in the local fixture, "
+                        "then verify the credential is not committed."
+                    )
+                },
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "inspected_paths": ["README.md"],
+                "inspected_paths_status": "available",
+            }
+        ],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "configured-secret-value"},
+    )
+
+    assert captured["calls"] == 1
+    prompt = str(captured["prompt"])
+    provider_payload = json.loads(prompt.split("\n\n", 1)[1])
+    serialized_payload = json.dumps(provider_payload, sort_keys=True)
+    assert "example-placeholder" not in serialized_payload
+    assert "API_KEY=[redacted]" in serialized_payload
+    assert "configured-secret-value" not in serialized_payload
+    assert "private_expected_values" not in serialized_payload
+    assert "variant_id" not in serialized_payload
+    result = rows[0]["comparison_judges"]["maintainer-review"]
+    assert result["status"] == "scored"
+    route = result["route_receipt"]
+    privacy = route["judge_input_privacy"]
+    assert privacy["contract"] == "fugue-judge-input-sanitization-v1"
+    assert privacy["transformed"] is True
+    assert privacy["transformed_value_count"] == 1
+    assert privacy["source_payload_sha256"] != privacy["provider_payload_sha256"]
+    assert privacy["provider_payload_sha256"] == stable_digest(provider_payload)
+    assert route["provider_payload_sha256"] == privacy["provider_payload_sha256"]
+    assert route["input_transform_receipt_digest"] == privacy["receipt_digest"]
+    assert privacy["receipt_digest"] == stable_digest(
+        {key: value for key, value in privacy.items() if key != "receipt_digest"}
+    )
+
+
+def test_blind_judge_rejects_untracked_prepared_payload_transformation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("inspected_paths",),
+    )
+    public_task = {"input": "Review the repair plan.", "tags": ["maintenance"]}
+    row = {
+        "answer": {"plan": "Set API_KEY=example-placeholder in the test fixture."},
+        "inspected_paths": ["README.md"],
+        "inspected_paths_status": "available",
+    }
+    env = {"ANTHROPIC_API_KEY": "configured-secret-value"}
+    prepared, receipt = _prepare_comparison_judge_input(
+        evaluator=judge,
+        public_task=public_task,
+        row=row,
+        env=env,
+    )
+    tampered = json.loads(json.dumps(prepared))
+    tampered["response"]["plan"] += " untracked"
+    provider_calls: list[str] = []
+
+    def forbidden_post(*_args: object, **_kwargs: object) -> None:
+        provider_calls.append("called")
+        raise AssertionError("untracked input must stop before the provider")
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", forbidden_post)
+    with pytest.raises(
+        ValueError,
+        match="prepared judge payload does not match deterministic sanitization",
+    ):
+        _request_comparison_judge(
+            evaluator=judge,
+            public_task=public_task,
+            row=row,
+            env=env,
+            prepared_payload=tampered,
+            input_transform_receipt=receipt,
+        )
+    assert provider_calls == []
+
+
 def test_blind_judge_rejects_secret_in_provider_response_without_persisting_it(
     allow_unit_judge_execution: None,
 ) -> None:
@@ -3483,7 +3620,14 @@ def test_blind_judge_rejects_secret_in_provider_response_without_persisting_it(
     )
     secret = "response-secret-value"
 
-    def secret_response(**_kwargs: object):
+    def secret_response(
+        *,
+        evaluator: ComparisonEvaluatorV1,
+        public_task: dict[str, object],
+        row: dict[str, object],
+        env: dict[str, str],
+    ):
+        del evaluator, public_task, row, env
         return (
             {
                 "scores": {"maintenance_actionability": 0.75},
@@ -3569,6 +3713,10 @@ def test_blind_judge_rejects_secret_before_provider_call(
     assert provider_calls == []
     assert rows[0]["comparison_judge_status"] == "unavailable"
     assert rows[0]["comparison_required_evaluation_complete"] is False
+    failure = rows[0]["comparison_judges"]["maintainer-review"]["failure"]
+    assert failure["stage"] == "input_privacy"
+    assert failure["code"] == "input_privacy_rejected"
+    assert "super-secret-value" not in json.dumps(failure, sort_keys=True)
 
 
 def test_blind_judge_read_timeout_is_not_retried(
