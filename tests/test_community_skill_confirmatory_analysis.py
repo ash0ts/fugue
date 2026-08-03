@@ -90,12 +90,12 @@ def _superpowers_base_inputs() -> dict[str, Any]:
         ANALYSIS._load_profile_preregistration(
             profile,
             profile_path=PROFILES,
-            study_id=str(profile["pending_study_id"]),
+            study_id=str(profile["study_ids"][0]),
         )
     )
     spec = ANALYSIS.load_comparison(
         REPO_ROOT
-        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v1.yaml",
+        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v3.yaml",
         repo_root=REPO_ROOT,
     )
     tasks = ANALYSIS._public_tasks(REPO_ROOT / spec.taskset.tasks)
@@ -221,6 +221,7 @@ def test_confirmatory_contract_is_frozen_before_execution() -> None:
 @pytest.mark.parametrize(
     ("study_id", "samples", "families", "requirement"),
     [
+        ("superpowers-writing-plans-confirmatory-v3", 20_000, 4, "all"),
         ("anthropic-skill-creator-confirmatory-v1", 10_000, 3, "any"),
         ("vercel-react-best-practices-confirmatory-v1", 10_000, 2, "any"),
     ],
@@ -266,21 +267,29 @@ def test_preregistered_locked_input_drift_fails_closed() -> None:
         )
 
 
-def test_superpowers_v1_v2_are_rejected_and_v3_fails_closed_until_bound() -> None:
+def test_superpowers_v1_v2_are_rejected_and_v3_is_exactly_bound() -> None:
     for study_id in (
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
     ):
         with pytest.raises(ValueError, match="identify exactly one"):
             ANALYSIS._profile_for_study(PROFILES, study_id)
-    with pytest.raises(ValueError, match="pending an exact amendment"):
-        ANALYSIS._profile_for_study(
-            PROFILES,
-            "superpowers-writing-plans-confirmatory-v3",
-        )
+    profile, profile_sha = ANALYSIS._profile_for_study(
+        PROFILES,
+        "superpowers-writing-plans-confirmatory-v3",
+    )
+    assert len(profile_sha) == 64
+    assert profile["study_ids"] == ["superpowers-writing-plans-confirmatory-v3"]
+    assert profile["amendments"]["superpowers-writing-plans-confirmatory-v3"] == {
+        "path": (
+            "../superpowers-writing-plans-upgrade/"
+            "preregistration-confirmatory-v3-amendment.json"
+        ),
+        "sha256": "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f",
+    }
     inputs = _superpowers_base_inputs()
-    assert inputs["profile"]["enablement_status"] == (
-        "blocked_pending_exact_v3_amendment_manifest_and_spec"
+    assert inputs["preregistration_binding"]["amendment"]["sha256"] == (
+        "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f"
     )
     assert inputs["profile"]["historical_rejected_study_ids"] == [
         "superpowers-writing-plans-confirmatory-v1",

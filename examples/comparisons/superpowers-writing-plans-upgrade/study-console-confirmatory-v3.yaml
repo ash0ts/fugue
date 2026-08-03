@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: superpowers-writing-plans-confirmatory-v3
+  name: Superpowers Writing Plans Confirmatory Study V3
+  description: Integrity-repaired rerun of the frozen V1 behavioral design; V1 and V2 remain invalid audit history.
+  objective: Estimate task-level paired behavior changes without treating repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-confirmatory-v3
+database: .study-console/superpowers-writing-plans-confirmatory-v3.sqlite3
+primary_metric:
+  name: holdout_task_level_paired_pass_delta
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-confirmatory-v3
+  read_only: true

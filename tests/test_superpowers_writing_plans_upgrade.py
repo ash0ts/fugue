@@ -28,6 +28,7 @@ V3_SCORER = EXAMPLE / "plan_quality_scorer.py"
 V3_PRIVATE = EXAMPLE / "private-labels-v3.jsonl"
 CONFIRMATORY = EXAMPLE / "confirmatory-v1.yaml"
 CONFIRMATORY_V2 = EXAMPLE / "confirmatory-v2.yaml"
+CONFIRMATORY_V3 = EXAMPLE / "confirmatory-v3.yaml"
 CONFIRMATORY_TASKS = EXAMPLE / "tasks-conference-v1.jsonl"
 CONFIRMATORY_PRIVATE = EXAMPLE / "private-labels-conference-v1.jsonl"
 CONFIRMATORY_SCORER = EXAMPLE / "plan_quality_scorer_v2.py"
@@ -36,6 +37,10 @@ CONFIRMATORY_V2_AMENDMENT = (
     EXAMPLE / "preregistration-confirmatory-v2-amendment.json"
 )
 CONFIRMATORY_V2_CONSOLE = EXAMPLE / "study-console-confirmatory-v2.yaml"
+CONFIRMATORY_V3_AMENDMENT = (
+    EXAMPLE / "preregistration-confirmatory-v3-amendment.json"
+)
+CONFIRMATORY_V3_CONSOLE = EXAMPLE / "study-console-confirmatory-v3.yaml"
 CONFIRMATORY_PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"
 CONFIRMATORY_DIMENSIONS = {
     "artifact_validity",
@@ -492,6 +497,70 @@ def test_confirmatory_v2_amendment_and_console_preserve_v1_audit_lineage() -> No
     }
     assert console["presentation"] == {
         "default_study_id": "superpowers-writing-plans-confirmatory-v2",
+        "read_only": True,
+    }
+
+
+def test_confirmatory_v3_freezes_integrity_rerun_without_behavioral_drift() -> None:
+    v1_raw = yaml.safe_load(CONFIRMATORY.read_text(encoding="utf-8"))
+    v3_raw = yaml.safe_load(CONFIRMATORY_V3.read_text(encoding="utf-8"))
+    v3 = load_comparison(CONFIRMATORY_V3, repo_root=Path.cwd())
+    amendment = json.loads(CONFIRMATORY_V3_AMENDMENT.read_text(encoding="utf-8"))
+    unsigned = dict(amendment)
+    amendment_digest = unsigned.pop("amendment_digest")
+    console = yaml.safe_load(CONFIRMATORY_V3_CONSOLE.read_text(encoding="utf-8"))
+
+    for field in ("question", "taskset", "baseline", "candidate", "changed", "evaluators"):
+        assert v3_raw[field] == v1_raw[field]
+    assert v3.id == "superpowers-writing-plans-confirmatory-v3"
+    assert v3.execution.research_id == v3.id
+    assert v3.execution.evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v3"
+    )
+    assert v3.execution.evidence_checkpoint_cells == 2
+    assert v3.execution.scheduling_seed == (
+        "community-skill-upgrade-confirmatory-campaign-v1"
+    )
+    assert set(v3.execution.qualification_inputs) == {
+        "confirmatory_analysis_profile_sha256",
+        "campaign_preregistration_sha256",
+        "campaign_manifest_sha256",
+        "repository_preregistration_sha256",
+        "repository_amendment_sha256",
+    }
+
+    assert amendment_digest == stable_digest(unsigned)
+    assert amendment["replacement_execution"]["comparison_id"] == v3.id
+    assert amendment["replacement_execution"]["minimum_fugue_revision"] == (
+        "0a7bc4ea00acc735f26eb298b2d09602129a5e65"
+    )
+    assert [item["comparison_id"] for item in amendment["superseded_executions"]] == [
+        "superpowers-writing-plans-confirmatory-v1",
+        "superpowers-writing-plans-confirmatory-v2",
+    ]
+    assert all(
+        item["behavioral_result_eligible"] is False
+        for item in amendment["superseded_executions"]
+    )
+    assert all(
+        amendment["changes"][field] is False
+        for field in (
+            "hypotheses",
+            "taskset",
+            "holdout_membership",
+            "private_expected_values",
+            "treatments",
+            "evaluators",
+            "model_or_harness",
+        )
+    )
+    assert console["research"]["id"] == v3.id
+    assert console["wandb"] == {
+        "entity": "wandb",
+        "project": "fugue-superpowers-writing-plans-confirmatory-v3",
+    }
+    assert console["presentation"] == {
+        "default_study_id": v3.id,
         "read_only": True,
     }
 

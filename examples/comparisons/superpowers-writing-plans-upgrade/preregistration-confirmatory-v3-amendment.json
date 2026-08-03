@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "amendment_id": "superpowers-writing-plans-confirmatory-v3-integrity-rerun",
+  "status": "frozen_before_v3_preview",
+  "amendment_kind": "execution_integrity_only_rerun_identity",
+  "prior_preregistration": {
+    "id": "superpowers-writing-plans-confirmatory-v1",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+    "sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7"
+  },
+  "superseded_executions": [
+    {
+      "comparison_id": "superpowers-writing-plans-confirmatory-v1",
+      "run_id": "20260803T145545-4fdfb32be1",
+      "status": "cancelled",
+      "reason_code": "pty_broken_pipe_infrastructure",
+      "behavioral_result_eligible": false
+    },
+    {
+      "comparison_id": "superpowers-writing-plans-confirmatory-v2",
+      "run_id": "20260803T160236-e6ec1b5d7f",
+      "status": "invalid",
+      "reason_code": "harbor_cleanup_and_execution_integrity_unproven",
+      "behavioral_result_eligible": false
+    }
+  ],
+  "replacement_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v3",
+    "research_id": "superpowers-writing-plans-confirmatory-v3",
+    "result_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v3",
+    "minimum_fugue_revision": "0a7bc4ea00acc735f26eb298b2d09602129a5e65",
+    "repairs": [
+      "durable_cell_log_streams",
+      "fail_fast_infrastructure_abort",
+      "run_scoped_harbor_cleanup_receipts",
+      "prepared_evaluator_runtime_identity",
+      "approval_bound_qualification_inputs",
+      "counterbalanced_pair_adjacent_schedule"
+    ]
+  },
+  "frozen_behavioral_inputs": {
+    "public_tasks_sha256": "9612919179b86b62b381712f5e6f79bd686beed3e3b0fb431a66248976a2382f",
+    "private_labels_sha256": "5c2110565b8622dd4d5d89047c462906675b138e022af4e8c8edff8e5f890fa0",
+    "deterministic_scorer_sha256": "5af965f77ad96e90f36a49db57ce41f60bcbb8729cfb32fdeb49642e2a727fe1",
+    "skill_revision_lock_sha256": "47f56e275f85d80193f5f7c5647a92c4689aeb12f493ecd06de61c37036bf583",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "source_project": "wandb/fugue-superpowers-writing-plans-source-v1",
+    "model_route": "anthropic/claude-sonnet-5",
+    "harness": "claude-code",
+    "tasks": 24,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": false,
+    "holdout_membership": false,
+    "private_expected_values": false,
+    "treatments": false,
+    "evaluators": false,
+    "model_or_harness": false,
+    "execution_identity": true,
+    "result_destination": true,
+    "minimum_fugue_revision": true,
+    "scheduling_order": true,
+    "approval_evidence_contract": true
+  },
+  "claim_boundary": "V3 may be analyzed only under the frozen V1 hypotheses, holdouts, outcomes, and decision rules. V1 and V2 contribute infrastructure diagnostics only and no behavioral outcomes.",
+  "amendment_digest": "7a46f7f67c142736e2ab96f137dbbbc0617de58599a490ccc7e3902b254c5279"
+}

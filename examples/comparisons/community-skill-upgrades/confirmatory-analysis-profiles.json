@@ -5,16 +5,21 @@
   "profiles": [
     {
       "id": "superpowers-writing-plans",
-      "study_ids": [],
-      "pending_study_id": "superpowers-writing-plans-confirmatory-v3",
-      "enablement_status": "blocked_pending_exact_v3_amendment_manifest_and_spec",
+      "study_ids": [
+        "superpowers-writing-plans-confirmatory-v3"
+      ],
       "historical_rejected_study_ids": [
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2"
       ],
       "preregistration": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
       "preregistration_sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7",
-      "amendments": {},
+      "amendments": {
+        "superpowers-writing-plans-confirmatory-v3": {
+          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v3-amendment.json",
+          "sha256": "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f"
+        }
+      },
       "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
       "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
       "partition": {
