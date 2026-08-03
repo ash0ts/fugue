@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -328,7 +329,10 @@ def test_weave_adapter_uses_registered_project_and_bounded_payload(
     assert "project" not in str(registry.catalog())
 
 
-def test_approval_is_exact_expiring_and_not_self_issued(tmp_path: Path) -> None:
+def test_approval_is_exact_expiring_and_not_self_issued(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = _study_service(tmp_path, TraceSourceRegistry())
     preview_digest = "a" * 64
     approval = service.approvals.approve(
@@ -348,6 +352,37 @@ def test_approval_is_exact_expiring_and_not_self_issued(tmp_path: Path) -> None:
         estimated_cost_usd=20,
     )
     assert claimed == approval
+    monkeypatch.setattr(
+        "fugue.research.approvals._parse_time",
+        lambda _value: datetime.now(UTC) - timedelta(seconds=1),
+    )
+    assert service.approvals.claim(
+        approval_digest=approval.approval_digest,
+        subject_kind="experiment",
+        preview_digest=preview_digest,
+        subject_id="study-1.proposal-1",
+        estimated_cells=4,
+        estimated_cost_usd=20,
+    ) == approval
+    expired_preview = "c" * 64
+    expired_approval = service.approvals.approve(
+        subject_kind="experiment",
+        preview_digest=expired_preview,
+        maximum_cost_usd=1,
+        maximum_cells=1,
+        approved_by="human-operator",
+        operation_id="approve-expired-first-claim",
+    )
+    with pytest.raises(ResearchError) as expired:
+        service.approvals.claim(
+            approval_digest=expired_approval.approval_digest,
+            subject_kind="experiment",
+            preview_digest=expired_preview,
+            subject_id="study-1.expired-proposal",
+            estimated_cells=1,
+            estimated_cost_usd=1,
+        )
+    assert expired.value.code == "approval_expired"
     with pytest.raises(ResearchError, match="does not match"):
         service.approvals.claim(
             approval_digest=approval.approval_digest,

@@ -665,6 +665,10 @@ class ComparisonControlService:
         *,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        idempotency_key = validate_id(
+            idempotency_key,
+            kind="comparison start operation id",
+        )
         entry, preview = self._accepted_preview(study_id, comparison_id, preview_digest)
         try:
             approval = self.approvals.get_for_preview(
@@ -679,14 +683,11 @@ class ComparisonControlService:
                 "the exact comparison preview requires prior operator approval",
                 category="policy",
             ) from exc
-        readiness = preview.readiness
-        approval = self.approvals.claim(
-            approval_digest=approval.approval_digest,
-            subject_kind="experiment",
+        execution_instance_id = _comparison_execution_instance_id(
+            study_id=study_id,
+            comparison_id=entry.id,
             preview_digest=preview.preview_digest,
-            subject_id=f"comparison-{preview.preview_digest[:20]}",
-            estimated_cells=int(readiness["estimated_cells"]),
-            estimated_cost_usd=float(readiness["estimated_cost_usd"]),
+            operation_id=idempotency_key,
         )
         directory = self._run_dir(preview.preview_digest)
         directory.mkdir(parents=True, exist_ok=True)
@@ -695,24 +696,45 @@ class ComparisonControlService:
             state_path = directory / "state.json"
             if state_path.is_file():
                 state = _read_state(state_path)
-                if state["comparison_id"] != entry.id or state["study_id"] != study_id:
+                if (
+                    state["comparison_id"] != entry.id
+                    or state["study_id"] != study_id
+                    or state["preview_digest"] != preview.preview_digest
+                    or state.get("operation_id") != idempotency_key
+                    or (
+                        state.get("execution_instance_id") is not None
+                        and state["execution_instance_id"]
+                        != execution_instance_id
+                    )
+                ):
                     raise ResearchError(
                         "comparison_start_conflict",
-                        "preview is already attached to another comparison or Study",
+                        "preview is already attached to another comparison "
+                        "execution operation",
                         category="conflict",
                     )
                 return _public_state(state)
+            readiness = preview.readiness
+            approval = self.approvals.claim(
+                approval_digest=approval.approval_digest,
+                subject_kind="experiment",
+                preview_digest=preview.preview_digest,
+                subject_id=execution_instance_id,
+                estimated_cells=int(readiness["estimated_cells"]),
+                estimated_cost_usd=float(readiness["estimated_cost_usd"]),
+            )
             worker_input = directory / "worker-input.json"
             atomic_write_json(
                 worker_input,
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "repo_root": self.repo_root.as_posix(),
                     "study_id": study_id,
                     "comparison_id": entry.id,
                     "spec_digest": entry.digest,
                     "preview_digest": preview.preview_digest,
                     "approval_digest": approval.approval_digest,
+                    "execution_instance_id": execution_instance_id,
                     "env_file": (
                         self.env_file.as_posix() if self.env_file is not None else None
                     ),
@@ -722,11 +744,12 @@ class ComparisonControlService:
             worker_input.chmod(0o600)
             state = _signed_state(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "study_id": study_id,
                     "comparison_id": entry.id,
                     "spec_digest": entry.digest,
                     "preview_digest": preview.preview_digest,
+                    "execution_instance_id": execution_instance_id,
                     "status": "starting",
                     "pid": None,
                     "created_at": _now(),
@@ -1000,8 +1023,6 @@ class ComparisonControlService:
 
 
 def run_comparison_worker(input_path: Path) -> int:
-    from fugue.bench.comparison import execute_comparison
-
     raw = json.loads(input_path.resolve(strict=True).read_text(encoding="utf-8"))
     required = {
         "schema_version",
@@ -1011,17 +1032,75 @@ def run_comparison_worker(input_path: Path) -> int:
         "spec_digest",
         "preview_digest",
         "approval_digest",
+        "execution_instance_id",
         "env_file",
         "state_path",
     }
     if (
         not isinstance(raw, Mapping)
         or set(raw) != required
-        or raw["schema_version"] != 1
+        or raw["schema_version"] != 2
     ):
         raise RuntimeError("comparison worker input has an invalid shape")
     repo_root = Path(str(raw["repo_root"])).resolve(strict=True)
     state_path = Path(str(raw["state_path"])).resolve()
+    worker_lock = FileLock(str(state_path.parent / "worker.lock"))
+    with worker_lock:
+        return _run_comparison_worker_locked(
+            raw,
+            repo_root=repo_root,
+            state_path=state_path,
+        )
+
+
+def _run_comparison_worker_locked(
+    raw: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    state_path: Path,
+) -> int:
+    from fugue.bench.comparison import execute_comparison
+
+    current = _read_state(state_path)
+    execution_instance_id = validate_id(
+        str(raw["execution_instance_id"]),
+        kind="comparison execution instance id",
+    )
+    if (
+        current.get("study_id") != raw["study_id"]
+        or current.get("comparison_id") != raw["comparison_id"]
+        or current.get("spec_digest") != raw["spec_digest"]
+        or current.get("preview_digest") != raw["preview_digest"]
+        or current.get("execution_instance_id") != execution_instance_id
+    ):
+        raise RuntimeError("comparison worker input does not match durable state")
+    if current["status"] == "completed":
+        return 0
+    if current["status"] in {"failed", "interrupted"}:
+        return 1
+    active_pid = current.get("pid")
+    if (
+        current["status"] == "running"
+        and isinstance(active_pid, int)
+        and active_pid != os.getpid()
+    ):
+        if _process_exists(active_pid):
+            raise RuntimeError("comparison execution instance is already active")
+        interrupted = _signed_state(
+            {
+                **current,
+                "status": "interrupted",
+                "updated_at": _now(),
+                "error": {
+                    "code": "worker_interrupted",
+                    "message": (
+                        "comparison worker exited before durable handoff completed"
+                    ),
+                },
+            }
+        )
+        atomic_write_json(state_path, interrupted)
+        return 1
     store = StudyStore(repo_root)
     service = ComparisonControlService(
         repo_root,
@@ -1036,7 +1115,6 @@ def run_comparison_worker(input_path: Path) -> int:
     )
     if entry.digest != raw["spec_digest"]:
         raise RuntimeError("comparison worker input no longer matches the registry")
-    current = _read_state(state_path)
     atomic_write_json(
         state_path,
         _signed_state(
@@ -1055,6 +1133,7 @@ def run_comparison_worker(input_path: Path) -> int:
             repo_root=repo_root,
             env_file=Path(str(raw["env_file"])) if raw["env_file"] else None,
             publish_research=False,
+            run_id=execution_instance_id,
         )
     except BaseException as exc:
         safe_message = redact_text(str(exc), secrets_from_env(os.environ))[:1000]
@@ -1550,6 +1629,23 @@ def _comparison_experiment_id(preview_digest: str) -> str:
     return f"comparison-{preview_digest[:20]}"
 
 
+def _comparison_execution_instance_id(
+    *,
+    study_id: str,
+    comparison_id: str,
+    preview_digest: str,
+    operation_id: str,
+) -> str:
+    return "comparison-execution-" + stable_digest(
+        {
+            "study_id": study_id,
+            "comparison_id": comparison_id,
+            "preview_digest": preview_digest,
+            "operation_id": operation_id,
+        }
+    )[:24]
+
+
 def _read_state(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -1582,6 +1678,7 @@ def _public_state(state: Mapping[str, Any]) -> dict[str, Any]:
         "comparison_id",
         "spec_digest",
         "preview_digest",
+        "execution_instance_id",
         "status",
         "pid",
         "created_at",

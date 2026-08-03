@@ -61,6 +61,7 @@ from fugue.bench.evaluations import (
 from fugue.bench.operator import OperatorService, PreviewCellSummary
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
+from fugue.research.contracts import ResearchError
 from fugue.research.experiment_views import (
     ExperimentViewV2,
     ExperimentViewV3,
@@ -122,7 +123,53 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
         preview,
         approval_digest=approval.approval_digest,
         repo_root=tmp_path,
+        execution_instance_id="comparison-run-one",
     )
+    claim_comparison_approval(
+        preview,
+        approval_digest=approval.approval_digest,
+        repo_root=tmp_path,
+        execution_instance_id="comparison-run-one",
+    )
+    with pytest.raises(ResearchError) as reused:
+        claim_comparison_approval(
+            preview,
+            approval_digest=approval.approval_digest,
+            repo_root=tmp_path,
+            execution_instance_id="comparison-run-two",
+        )
+    assert reused.value.code == "approval_consumed"
+
+
+def test_execute_comparison_allocates_run_identity_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preview = SimpleNamespace(preview_digest="a" * 64)
+    captured: dict[str, object] = {}
+    expected = (object(), tmp_path / "result.json", tmp_path / "result.md")
+
+    monkeypatch.setattr(
+        "fugue.bench.execution.new_run_id",
+        lambda: "comparison-run-direct",
+    )
+
+    def execute(*args: object, **kwargs: object) -> object:
+        captured["run_id"] = kwargs["run_id"]
+        captured["context_run_id"] = kwargs["projection_context"].run_id
+        return expected
+
+    monkeypatch.setattr("fugue.bench.comparison._execute_comparison", execute)
+
+    assert execute_comparison(
+        preview,  # type: ignore[arg-type]
+        approval_digest="b" * 64,
+        repo_root=tmp_path,
+    ) == expected
+    assert captured == {
+        "run_id": "comparison-run-direct",
+        "context_run_id": "comparison-run-direct",
+    }
 
 
 def test_materialization_reuses_preview_operator_context(

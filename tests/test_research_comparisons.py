@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import fugue.bench.comparison as comparison_module
+import fugue.research.comparisons as research_comparisons_module
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
     ComparisonPublicationError,
@@ -36,6 +37,7 @@ from fugue.research.comparisons import (
     append_comparison_invalidation,
     project_direct_comparison_result,
     project_direct_comparison_start,
+    run_comparison_worker,
 )
 from fugue.research.contracts import ResearchError
 from fugue.research.experiment_views import experiment_view_from_dict
@@ -194,14 +196,35 @@ def test_exact_approval_is_required_and_launch_is_idempotent(
         digest,
         idempotency_key="start-comparison",
     )
+    with pytest.raises(ResearchError) as conflicting_start:
+        service.start(
+            "study-1",
+            _COMPARISON_ID,
+            digest,
+            idempotency_key="start-comparison-again",
+        )
 
     assert started == repeated
+    assert conflicting_start.value.code == "comparison_start_conflict"
     assert started["status"] == "running"
+    assert str(started["execution_instance_id"]).startswith(
+        "comparison-execution-"
+    )
     assert len(launches) == 1
     assert "approval" not in json.dumps(started, sort_keys=True)
     worker_input = json.loads(launches[0].read_text(encoding="utf-8"))
+    assert worker_input["schema_version"] == 2
     assert len(str(worker_input["approval_digest"])) == 64
+    assert worker_input["execution_instance_id"] == started["execution_instance_id"]
     assert stat.S_IMODE(launches[0].stat().st_mode) == 0o600
+    approvals.verify_claim(
+        approval_digest=worker_input["approval_digest"],
+        subject_kind="experiment",
+        preview_digest=digest,
+        subject_id=started["execution_instance_id"],
+        required_cells=int(preview["readiness"]["estimated_cells"]),
+        required_cost_usd=float(preview["readiness"]["estimated_cost_usd"]),
+    )
     [progress] = [
         item
         for item in service.store.research_log_events()
@@ -212,6 +235,171 @@ def test_exact_approval_is_required_and_launch_is_idempotent(
         "completed": 0,
         "total": preview["readiness"]["estimated_cells"],
     }
+
+
+def test_comparison_worker_handoff_reuses_exact_execution_instance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[Path] = []
+    service, store, approvals = _control(
+        tmp_path,
+        launcher=lambda path: launches.append(path) or os.getpid(),
+    )
+    public_preview = service.preview("study-1", _COMPARISON_ID)
+    digest = str(public_preview["preview_digest"])
+    approval = approvals.approve(
+        subject_kind="experiment",
+        preview_digest=digest,
+        maximum_cost_usd=float(
+            public_preview["readiness"]["estimated_cost_usd"]
+        ),
+        maximum_cells=int(public_preview["readiness"]["estimated_cells"]),
+        approved_by="operator",
+        operation_id="approve-worker-handoff",
+    )
+    started = service.start(
+        "study-1",
+        _COMPARISON_ID,
+        digest,
+        idempotency_key="start-worker-handoff",
+    )
+    entry, preview = service._accepted_preview("study-1", _COMPARISON_ID, digest)
+    captured: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        research_comparisons_module,
+        "StudyStore",
+        lambda _root: store,
+    )
+    monkeypatch.setattr(
+        ComparisonControlService,
+        "_accepted_preview",
+        lambda _self, *_args: (entry, preview),
+    )
+    monkeypatch.setattr(
+        research_comparisons_module,
+        "_project_failure",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def stop_after_claim(
+        selected_preview,
+        *,
+        approval_digest: str,
+        repo_root: Path,
+        run_id: str,
+        **_kwargs: Any,
+    ) -> None:
+        captured["run_id"] = run_id
+        comparison_module.claim_comparison_approval(
+            selected_preview,
+            approval_digest=approval_digest,
+            repo_root=tmp_path,
+            execution_instance_id=run_id,
+        )
+        raise RuntimeError("stop after exact approval handoff")
+
+    monkeypatch.setattr(comparison_module, "execute_comparison", stop_after_claim)
+
+    with pytest.raises(RuntimeError, match="exact approval handoff"):
+        run_comparison_worker(launches[0])
+
+    assert captured["run_id"] == started["execution_instance_id"]
+    approvals.verify_claim(
+        approval_digest=approval.approval_digest,
+        subject_kind="experiment",
+        preview_digest=digest,
+        subject_id=captured["run_id"],
+    )
+
+
+def test_completed_comparison_worker_input_cannot_reexecute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[Path] = []
+    service, _, approvals = _control(
+        tmp_path,
+        launcher=lambda path: launches.append(path) or os.getpid(),
+    )
+    preview = service.preview("study-1", _COMPARISON_ID)
+    digest = str(preview["preview_digest"])
+    approvals.approve(
+        subject_kind="experiment",
+        preview_digest=digest,
+        maximum_cost_usd=float(preview["readiness"]["estimated_cost_usd"]),
+        maximum_cells=int(preview["readiness"]["estimated_cells"]),
+        approved_by="operator",
+        operation_id="approve-terminal-worker",
+    )
+    service.start(
+        "study-1",
+        _COMPARISON_ID,
+        digest,
+        idempotency_key="start-terminal-worker",
+    )
+    worker_input = json.loads(launches[0].read_text(encoding="utf-8"))
+    state_path = Path(worker_input["state_path"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    atomic_write_json(
+        state_path,
+        _signed_state(
+            {
+                **state,
+                "status": "completed",
+                "result_digest": "d" * 64,
+                "rows": 4,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "execute_comparison",
+        lambda *_args, **_kwargs: pytest.fail("terminal worker re-executed"),
+    )
+
+    assert run_comparison_worker(launches[0]) == 0
+
+
+def test_active_duplicate_comparison_worker_input_cannot_reexecute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches: list[Path] = []
+    service, _, approvals = _control(
+        tmp_path,
+        launcher=lambda path: launches.append(path) or 424242,
+    )
+    preview = service.preview("study-1", _COMPARISON_ID)
+    digest = str(preview["preview_digest"])
+    approvals.approve(
+        subject_kind="experiment",
+        preview_digest=digest,
+        maximum_cost_usd=float(preview["readiness"]["estimated_cost_usd"]),
+        maximum_cells=int(preview["readiness"]["estimated_cells"]),
+        approved_by="operator",
+        operation_id="approve-active-worker",
+    )
+    service.start(
+        "study-1",
+        _COMPARISON_ID,
+        digest,
+        idempotency_key="start-active-worker",
+    )
+    monkeypatch.setattr(
+        research_comparisons_module,
+        "_process_exists",
+        lambda _pid: True,
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "execute_comparison",
+        lambda *_args, **_kwargs: pytest.fail("duplicate worker re-executed"),
+    )
+
+    with pytest.raises(RuntimeError, match="already active"):
+        run_comparison_worker(launches[0])
 
 
 def test_approval_limits_are_checked_before_worker_launch(tmp_path: Path) -> None:

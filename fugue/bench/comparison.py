@@ -3964,7 +3964,12 @@ def claim_comparison_approval(
     *,
     approval_digest: str,
     repo_root: Path,
+    execution_instance_id: str,
 ) -> None:
+    execution_instance_id = validate_id(
+        execution_instance_id,
+        kind="comparison execution instance id",
+    )
     readiness = ComparisonReadinessV1(**preview.readiness)
     if readiness.status not in {"ready", "needs_review"}:
         raise ValueError(
@@ -3976,7 +3981,7 @@ def claim_comparison_approval(
         approval_digest=approval_digest,
         subject_kind="experiment",
         preview_digest=preview.preview_digest,
-        subject_id=f"comparison-{preview.preview_digest[:20]}",
+        subject_id=execution_instance_id,
         estimated_cells=readiness.estimated_cells,
         estimated_cost_usd=readiness.estimated_cost_usd,
     )
@@ -11991,6 +11996,7 @@ def execute_comparison(
     env_file: Path | None = None,
     fetch_weave: bool = True,
     publish_research: bool = True,
+    run_id: str | None = None,
 ) -> tuple[ComparisonResult, Path, Path]:
     """Execute one approved comparison.
 
@@ -11998,7 +12004,13 @@ def execute_comparison(
     Research worker disables this path because its control service already
     owns the start, failure, and terminal-result projections.
     """
-    context = _DirectComparisonExecutionContext()
+    from fugue.bench.execution import new_run_id
+
+    selected_run_id = validate_id(
+        run_id or new_run_id(),
+        kind="comparison execution instance id",
+    )
+    context = _DirectComparisonExecutionContext(run_id=selected_run_id)
     try:
         return _execute_comparison(
             preview,
@@ -12008,6 +12020,7 @@ def execute_comparison(
             fetch_weave=fetch_weave,
             publish_research=publish_research,
             projection_context=context,
+            run_id=selected_run_id,
         )
     except BaseException as exc:
         if context.started and not context.canonical_result_published:
@@ -12035,6 +12048,7 @@ def _execute_comparison(
     fetch_weave: bool,
     publish_research: bool,
     projection_context: _DirectComparisonExecutionContext,
+    run_id: str,
 ) -> tuple[ComparisonResult, Path, Path]:
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
@@ -12090,6 +12104,7 @@ def _execute_comparison(
             preview,
             approval_digest=approval_digest,
             repo_root=repo_root,
+            execution_instance_id=run_id,
         )
     experiment, request = materialize_comparison(
         preview,
@@ -12124,10 +12139,6 @@ def _execute_comparison(
         repo_root=repo_root,
         approved_inputs=approved_inputs,
     )
-    from fugue.bench.execution import new_run_id
-
-    run_id = new_run_id()
-    projection_context.run_id = run_id
     evaluated_cells = 0
     source_checkpoint_drift: EvidenceDriftCheckV1 | None = None
     runtime_budget = _ComparisonRuntimeBudget(

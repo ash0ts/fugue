@@ -249,6 +249,13 @@ class ApprovalLedger:
         estimated_cells: int = 0,
         estimated_cost_usd: float = 0.0,
     ) -> ExecutionApprovalV1:
+        """Consume an approval for one exact execution instance.
+
+        Replays by that same instance remain valid after expiry so a durable
+        controller can hand work to its worker. A different instance can never
+        reuse the approval.
+        """
+
         subject_id = validate_id(subject_id, kind="approved subject id")
         with connect_database(self.path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -276,12 +283,6 @@ class ApprovalLedger:
                     "execution approval does not match the accepted preview",
                     category="policy",
                 )
-            if _parse_time(approval.expires_at) <= datetime.now(UTC):
-                raise ResearchError(
-                    "approval_expired",
-                    "execution approval has expired",
-                    category="policy",
-                )
             if (
                 approval.maximum_cells is not None
                 and estimated_cells > approval.maximum_cells
@@ -297,14 +298,21 @@ class ApprovalLedger:
                     "accepted preview exceeds the approved cost limit",
                     category="policy",
                 )
-            consumed_by = row[1]
+            consumed_by = str(row[1] or "")
             if consumed_by and consumed_by != subject_id:
                 raise ResearchError(
                     "approval_consumed",
-                    "execution approval was already consumed by another operation",
+                    "execution approval was already consumed by another "
+                    "execution instance",
                     category="policy",
                 )
             if not consumed_by:
+                if _parse_time(approval.expires_at) <= datetime.now(UTC):
+                    raise ResearchError(
+                        "approval_expired",
+                        "execution approval has expired",
+                        category="policy",
+                    )
                 conn.execute(
                     "UPDATE execution_approvals SET consumed_by=? "
                     "WHERE approval_digest=? AND consumed_by IS NULL",
