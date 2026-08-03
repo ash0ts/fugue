@@ -14,10 +14,22 @@ from typing import Any
 
 import yaml
 
+from fugue.bench.comparison import (
+    COMPARISON_JUDGE_BALANCED_ACCURACY_SCOPES,
+    COMPARISON_JUDGE_CRITICAL_POLICY,
+    COMPARISON_JUDGE_METRIC_POLICY,
+    COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY,
+    COMPARISON_JUDGE_PASSING_LABELS,
+    COMPARISON_JUDGE_PASSING_SCORE,
+    comparison_judge_public_rubric_contract,
+)
+
 ROOT = Path(__file__).resolve().parent
 HEX_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-MIN_RATE = 0.85
+MIN_RATE = COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY
+BALANCED_ACCURACY_SCOPES = COMPARISON_JUDGE_BALANCED_ACCURACY_SCOPES
+METRIC_POLICY_ID = COMPARISON_JUDGE_METRIC_POLICY
 EXPECTED_DIMENSIONS = (
     "useful_actionability",
     "repository_grounding",
@@ -31,17 +43,46 @@ EXPECTED_REPOSITORIES = (
     "vercel-react-best-practices",
 )
 LABELS = ("unusable", "weak", "adequate", "strong", "exceptional")
-PASSING_LABELS = {"strong", "exceptional"}
+PASSING_LABELS = set(COMPARISON_JUDGE_PASSING_LABELS)
 CALIBRATION_CAMPAIGN_ALLOCATION_USD = 8.0
-CALIBRATION_PRIOR_FAILED_REQUESTS = 3
-CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD = 3.046369
-CALIBRATION_RUN_MAXIMUM_COST_USD = 4.953631
+CALIBRATION_PRIOR_RUNS_LEDGER_PATH = (
+    "examples/comparisons/community-skill-upgrades/calibration-prior-runs.json"
+)
+_CANONICAL_PRIOR_RUNS_LEDGER_PATH = ROOT / "calibration-prior-runs.json"
+_CANONICAL_PRIOR_RUNS_LEDGER = json.loads(
+    _CANONICAL_PRIOR_RUNS_LEDGER_PATH.read_text(encoding="utf-8")
+)
+CALIBRATION_PRIOR_RUNS_LEDGER_SHA256 = hashlib.sha256(
+    _CANONICAL_PRIOR_RUNS_LEDGER_PATH.read_bytes()
+).hexdigest()
+CALIBRATION_PRIOR_RUNS_LEDGER_DIGEST = hashlib.sha256(
+    json.dumps(
+        _CANONICAL_PRIOR_RUNS_LEDGER,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+).hexdigest()
+CALIBRATION_PRIOR_RUNS = int(_CANONICAL_PRIOR_RUNS_LEDGER["prior_runs"])
+CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD = float(
+    _CANONICAL_PRIOR_RUNS_LEDGER["total_accounted_reserve_usd"]
+)
+CALIBRATION_RUN_MAXIMUM_COST_USD = float(
+    _CANONICAL_PRIOR_RUNS_LEDGER["remaining_budget_usd"]
+)
+# V1 synthetic result artifacts used this misleading field name for a count of
+# runs, not requests. Keep the reader/writer projection until those artifacts
+# migrate, but source its value from the auditable prior-run ledger.
+CALIBRATION_PRIOR_FAILED_REQUESTS = CALIBRATION_PRIOR_RUNS
 CALIBRATION_RESPONSE_REQUEST_MODE = "anthropic_json_schema_no_thinking_v2"
 PROVIDER_RESPONSE_VALIDATOR_VERSION = 2
 PROVIDER_RESPONSE_TEXT_REQUESTED_MAX_CHARACTERS = 500
 PROVIDER_RESPONSE_MAX_CHARACTERS = 16_000
 RUNNER_ARTIFACT_PATH = (
     "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py"
+)
+VALIDATOR_ARTIFACT_PATH = (
+    "examples/comparisons/community-skill-upgrades/validate_campaign.py"
 )
 PROVIDER_RESPONSE_TOP_LEVEL_FIELDS = (
     "scores",
@@ -73,6 +114,39 @@ CALIBRATION_FIELDS = {
     "holdout_examples",
     "budget_usd",
     "status",
+    "prior_runs_ledger",
+    "prior_runs_ledger_sha256",
+    "prior_runs_ledger_digest",
+}
+PRIOR_RUNS_LEDGER_FIELDS = {
+    "schema_version",
+    "kind",
+    "campaign_id",
+    "calibration_id",
+    "currency",
+    "campaign_allocation_usd",
+    "runs",
+    "prior_runs",
+    "total_accounted_reserve_usd",
+    "remaining_budget_usd",
+    "note",
+}
+PRIOR_RUN_FIELDS = {
+    "run_id",
+    "sequence",
+    "preview_digest",
+    "approval_digest",
+    "terminal_status",
+    "reason_code",
+    "completed_cases",
+    "attempted_requests",
+    "accounted_reserve_usd",
+    "cumulative_accounted_reserve_usd",
+    "artifact_kind",
+    "artifact_sha256",
+    "artifact_document_digest",
+    "receipt_status",
+    "limitation",
 }
 SYNTHETIC_RESULT_FIELDS = {
     "schema_version",
@@ -238,6 +312,9 @@ CALIBRATION_REPORT_FIELDS = {
     "calibration_true_negative_rate",
     "holdout_true_positive_rate",
     "holdout_true_negative_rate",
+    "balanced_accuracy",
+    "calibration_balanced_accuracy",
+    "holdout_balanced_accuracy",
     "critical_false_passes",
     "passed",
     "distinct_reviewers",
@@ -351,6 +428,24 @@ def calibration_runner_artifact(root: Path) -> dict[str, str]:
     return {"path": repository_relative, "sha256": file_sha256(path)}
 
 
+def calibration_validator_artifact(root: Path) -> dict[str, str]:
+    """Bind the exact offline implementation that recomputes judge metrics."""
+
+    path = (root / "validate_campaign.py").resolve()
+    if not path.is_file():
+        raise ValueError("synthetic calibration validator does not exist")
+    repository_root = root.resolve().parents[2]
+    try:
+        repository_relative = path.relative_to(repository_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "synthetic calibration validator is outside the repository"
+        ) from exc
+    if repository_relative != VALIDATOR_ARTIFACT_PATH:
+        raise ValueError("synthetic calibration validator path is not canonical")
+    return {"path": repository_relative, "sha256": file_sha256(path)}
+
+
 def calibration_preview_document(
     *,
     cases_artifact_path: str,
@@ -359,9 +454,15 @@ def calibration_preview_document(
     rubric_digest: str,
     runner_artifact_path: str,
     runner_artifact_sha256: str,
+    validator_artifact_path: str,
+    validator_artifact_sha256: str,
     response_schema_digest: str,
     response_request_mode: str,
     response_validator_version: int,
+    prior_runs_ledger_path: str = CALIBRATION_PRIOR_RUNS_LEDGER_PATH,
+    prior_runs_ledger_sha256: str = CALIBRATION_PRIOR_RUNS_LEDGER_SHA256,
+    prior_runs_ledger_digest: str = CALIBRATION_PRIOR_RUNS_LEDGER_DIGEST,
+    prior_runs: int = CALIBRATION_PRIOR_RUNS,
 ) -> dict[str, Any]:
     unsigned = {
         "schema_version": 1,
@@ -374,6 +475,14 @@ def calibration_preview_document(
         "rubric_digest": rubric_digest,
         "runner_artifact_path": runner_artifact_path,
         "runner_artifact_sha256": runner_artifact_sha256,
+        "validator_artifact_path": validator_artifact_path,
+        "validator_artifact_sha256": validator_artifact_sha256,
+        "passing_labels": list(COMPARISON_JUDGE_PASSING_LABELS),
+        "score_threshold": COMPARISON_JUDGE_PASSING_SCORE,
+        "critical_policy": COMPARISON_JUDGE_CRITICAL_POLICY,
+        "metric_policy": METRIC_POLICY_ID,
+        "minimum_balanced_accuracy": MIN_RATE,
+        "balanced_accuracy_scopes": list(BALANCED_ACCURACY_SCOPES),
         "response_schema_digest": response_schema_digest,
         "response_request_mode": response_request_mode,
         "response_validator_version": response_validator_version,
@@ -382,6 +491,11 @@ def calibration_preview_document(
         "maximum_output_tokens_per_request": 1_200,
         "automatic_retries": 0,
         "campaign_allocation_usd": CALIBRATION_CAMPAIGN_ALLOCATION_USD,
+        "prior_runs_ledger_path": prior_runs_ledger_path,
+        "prior_runs_ledger_sha256": prior_runs_ledger_sha256,
+        "prior_runs_ledger_digest": prior_runs_ledger_digest,
+        "prior_runs": prior_runs,
+        # Backward-compatible V1 projection; the value is the prior run count.
         "prior_failed_requests": CALIBRATION_PRIOR_FAILED_REQUESTS,
         "prior_accounted_reserve_usd": (CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD),
         "maximum_cost_usd": CALIBRATION_RUN_MAXIMUM_COST_USD,
@@ -404,9 +518,15 @@ def synthetic_execution_gate(
     rubric_digest: str,
     runner_artifact_path: str,
     runner_artifact_sha256: str,
+    validator_artifact_path: str,
+    validator_artifact_sha256: str,
     response_schema_digest: str,
     response_request_mode: str,
     response_validator_version: int,
+    prior_runs_ledger_path: str = CALIBRATION_PRIOR_RUNS_LEDGER_PATH,
+    prior_runs_ledger_sha256: str = CALIBRATION_PRIOR_RUNS_LEDGER_SHA256,
+    prior_runs_ledger_digest: str = CALIBRATION_PRIOR_RUNS_LEDGER_DIGEST,
+    prior_runs: int = CALIBRATION_PRIOR_RUNS,
 ) -> dict[str, Any]:
     preview = calibration_preview_document(
         cases_artifact_path=cases_artifact_path,
@@ -415,9 +535,15 @@ def synthetic_execution_gate(
         rubric_digest=rubric_digest,
         runner_artifact_path=runner_artifact_path,
         runner_artifact_sha256=runner_artifact_sha256,
+        validator_artifact_path=validator_artifact_path,
+        validator_artifact_sha256=validator_artifact_sha256,
         response_schema_digest=response_schema_digest,
         response_request_mode=response_request_mode,
         response_validator_version=response_validator_version,
+        prior_runs_ledger_path=prior_runs_ledger_path,
+        prior_runs_ledger_sha256=prior_runs_ledger_sha256,
+        prior_runs_ledger_digest=prior_runs_ledger_digest,
+        prior_runs=prior_runs,
     )
     return {
         "kind": "synthetic_blinded_advisory_v1",
@@ -433,16 +559,27 @@ def synthetic_execution_gate(
         "rubric_digest": rubric_digest,
         "runner_artifact_path": runner_artifact_path,
         "runner_artifact_sha256": runner_artifact_sha256,
+        "validator_artifact_path": validator_artifact_path,
+        "validator_artifact_sha256": validator_artifact_sha256,
+        "passing_labels": preview["passing_labels"],
+        "score_threshold": preview["score_threshold"],
+        "critical_policy": preview["critical_policy"],
+        "metric_policy": preview["metric_policy"],
+        "minimum_balanced_accuracy": preview["minimum_balanced_accuracy"],
+        "balanced_accuracy_scopes": preview["balanced_accuracy_scopes"],
         "response_schema_digest": response_schema_digest,
         "response_request_mode": response_request_mode,
         "response_validator_version": response_validator_version,
         "examples": 48,
         "calibration_examples": 36,
         "holdout_examples": 12,
-        "minimum_true_positive_rate": MIN_RATE,
-        "minimum_true_negative_rate": MIN_RATE,
         "maximum_critical_false_passes": 0,
         "campaign_allocation_usd": preview["campaign_allocation_usd"],
+        "prior_runs_ledger_path": preview["prior_runs_ledger_path"],
+        "prior_runs_ledger_sha256": preview["prior_runs_ledger_sha256"],
+        "prior_runs_ledger_digest": preview["prior_runs_ledger_digest"],
+        "prior_runs": preview["prior_runs"],
+        # Backward-compatible V1 projection; the value is the prior run count.
         "prior_failed_requests": preview["prior_failed_requests"],
         "prior_accounted_reserve_usd": preview["prior_accounted_reserve_usd"],
         "maximum_cost_usd": preview["maximum_cost_usd"],
@@ -527,6 +664,170 @@ def frozen_cases_artifact(
     }
 
 
+def frozen_prior_runs_ledger(  # noqa: C901 - strict audit is deliberately explicit.
+    *,
+    root: Path,
+    calibration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve and strictly audit the conservative prior-run reserve ledger."""
+
+    ledger_path = _safe_relative_file(
+        root,
+        calibration.get("prior_runs_ledger"),
+        "calibration prior_runs_ledger",
+    )
+    if not ledger_path.is_file():
+        raise ValueError("calibration prior-runs ledger does not exist")
+    expected_sha256 = str(calibration.get("prior_runs_ledger_sha256") or "")
+    if not SHA256.fullmatch(expected_sha256):
+        raise ValueError(
+            "calibration prior_runs_ledger_sha256 must be a lowercase SHA-256"
+        )
+    actual_sha256 = file_sha256(ledger_path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError("calibration prior-runs ledger artifact SHA-256 drifted")
+
+    ledger = _load_json(ledger_path, "calibration prior-runs ledger")
+    _reject_unknown(ledger, PRIOR_RUNS_LEDGER_FIELDS, "calibration prior-runs ledger")
+    if (
+        ledger["schema_version"] != 1
+        or ledger["kind"] != "synthetic_calibration_prior_runs_ledger"
+        or ledger["campaign_id"] != "community-skill-upgrade-campaign-v1"
+        or ledger["calibration_id"] != "community-skill-judge-calibration-v1"
+        or ledger["currency"] != "USD"
+    ):
+        raise ValueError("calibration prior-runs ledger identity is unsupported")
+
+    expected_digest = str(calibration.get("prior_runs_ledger_digest") or "")
+    actual_digest = stable_digest(ledger)
+    if not SHA256.fullmatch(expected_digest) or actual_digest != expected_digest:
+        raise ValueError("calibration prior-runs ledger content digest drifted")
+
+    allocation = _money(
+        ledger["campaign_allocation_usd"],
+        "calibration prior-runs campaign allocation",
+    )
+    if allocation != CALIBRATION_CAMPAIGN_ALLOCATION_USD:
+        raise ValueError("calibration prior-runs allocation must equal $8")
+    runs = ledger["runs"]
+    if not isinstance(runs, list) or not runs:
+        raise ValueError("calibration prior-runs ledger must contain runs")
+
+    cumulative = 0.0
+    run_ids: list[str] = []
+    for index, run in enumerate(runs, 1):
+        if not isinstance(run, Mapping):
+            raise ValueError(f"calibration prior run {index} must be an object")
+        _reject_unknown(run, PRIOR_RUN_FIELDS, f"calibration prior run {index}")
+        if run["sequence"] != index:
+            raise ValueError("calibration prior-run sequence is not contiguous")
+        run_id = str(run["run_id"] or "")
+        if not run_id:
+            raise ValueError("calibration prior-run id is empty")
+        run_ids.append(run_id)
+        preview_digest = run["preview_digest"]
+        if preview_digest is not None and not SHA256.fullmatch(str(preview_digest)):
+            raise ValueError(f"{run_id} preview digest is invalid")
+        approval_digest = run["approval_digest"]
+        if approval_digest is not None and not SHA256.fullmatch(str(approval_digest)):
+            raise ValueError(f"{run_id} approval digest is invalid")
+        if run["terminal_status"] not in {"failed", "operator_cancelled"}:
+            raise ValueError(f"{run_id} terminal status is unsupported")
+        reason_code = run["reason_code"]
+        if reason_code not in {None, "operator_cancelled", "thresholds_unreachable"}:
+            raise ValueError(f"{run_id} reason code is unsupported")
+        if reason_code == "thresholds_unreachable" and approval_digest is None:
+            raise ValueError(f"{run_id} threshold failure must bind its approval")
+        completed = run["completed_cases"]
+        attempted = run["attempted_requests"]
+        if (
+            not isinstance(completed, int)
+            or isinstance(completed, bool)
+            or completed < 0
+            or not isinstance(attempted, int)
+            or isinstance(attempted, bool)
+            or attempted <= 0
+            or completed > attempted
+        ):
+            raise ValueError(f"{run_id} request counts are invalid")
+        reserve = _money(run["accounted_reserve_usd"], f"{run_id} reserve")
+        cumulative = round(cumulative + reserve, 6)
+        if run["cumulative_accounted_reserve_usd"] != cumulative:
+            raise ValueError(f"{run_id} cumulative reserve disagrees")
+
+        artifact_kind = run["artifact_kind"]
+        receipt_status = run["receipt_status"]
+        if artifact_kind not in {
+            "unavailable",
+            "failure_receipt",
+            "partial_result",
+            "termination_receipt",
+        }:
+            raise ValueError(f"{run_id} artifact kind is unsupported")
+        if receipt_status not in {"available", "unavailable"}:
+            raise ValueError(f"{run_id} receipt status is unsupported")
+        artifact_sha256 = run["artifact_sha256"]
+        document_digest = run["artifact_document_digest"]
+        for value, label in (
+            (artifact_sha256, "artifact SHA-256"),
+            (document_digest, "artifact document digest"),
+        ):
+            if value is not None and not SHA256.fullmatch(str(value)):
+                raise ValueError(f"{run_id} {label} is invalid")
+        limitation = run["limitation"]
+        if receipt_status == "available":
+            if (
+                artifact_kind not in {"failure_receipt", "termination_receipt"}
+                or artifact_sha256 is None
+                or document_digest is None
+                or limitation is not None
+            ):
+                raise ValueError(f"{run_id} available receipt evidence is incomplete")
+        elif not isinstance(limitation, str) or not limitation.strip():
+            raise ValueError(f"{run_id} unavailable receipt needs a limitation")
+        if artifact_kind == "unavailable" and (
+            artifact_sha256 is not None or document_digest is not None
+        ):
+            raise ValueError(f"{run_id} unavailable artifact cannot have digests")
+
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("calibration prior-run ids must be unique")
+    if ledger["prior_runs"] != len(runs):
+        raise ValueError("calibration prior-run count disagrees")
+    if ledger["total_accounted_reserve_usd"] != cumulative:
+        raise ValueError("calibration prior-run total reserve disagrees")
+    remaining = round(allocation - cumulative, 6)
+    if ledger["remaining_budget_usd"] != remaining or remaining <= 0:
+        raise ValueError("calibration prior-run remaining budget disagrees")
+    if not str(ledger["note"] or "").strip():
+        raise ValueError("calibration prior-runs ledger note is required")
+
+    repository_root = root.resolve().parents[2]
+    try:
+        repository_relative = ledger_path.relative_to(repository_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "calibration prior-runs ledger is outside the repository"
+        ) from exc
+    if (
+        repository_relative != CALIBRATION_PRIOR_RUNS_LEDGER_PATH
+        or actual_sha256 != CALIBRATION_PRIOR_RUNS_LEDGER_SHA256
+        or actual_digest != CALIBRATION_PRIOR_RUNS_LEDGER_DIGEST
+        or len(runs) != CALIBRATION_PRIOR_RUNS
+        or cumulative != CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD
+        or remaining != CALIBRATION_RUN_MAXIMUM_COST_USD
+    ):
+        raise ValueError("calibration prior-runs ledger is not the canonical ledger")
+    return {
+        "path": repository_relative,
+        "sha256": actual_sha256,
+        "digest": actual_digest,
+        "prior_runs": len(runs),
+        "accounted_reserve_usd": cumulative,
+        "remaining_budget_usd": remaining,
+    }
+
+
 def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
     value: Mapping[str, Any],
     *,
@@ -554,12 +855,17 @@ def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
     for field, expected in expected_calibration.items():
         if calibration[field] != expected:
             raise ValueError(f"campaign calibration {field} must equal {expected!r}")
-    for field in ("rubric", "cases", "report"):
+    for field in ("rubric", "cases", "report", "prior_runs_ledger"):
         path = _safe_relative_file(root, calibration[field], f"calibration {field}")
         if not path.is_file():
             raise ValueError(f"calibration {field} does not exist")
     cases_artifact = frozen_cases_artifact(root=root, calibration=calibration)
+    prior_runs_ledger = frozen_prior_runs_ledger(
+        root=root,
+        calibration=calibration,
+    )
     runner_artifact = calibration_runner_artifact(root)
+    validator_artifact = calibration_validator_artifact(root)
 
     studies = value["studies"]
     if not isinstance(studies, list) or len(studies) != 3:
@@ -637,8 +943,16 @@ def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
         "campaign_ceiling_usd": total_budget,
         "cases_artifact_path": cases_artifact["path"],
         "cases_artifact_sha256": cases_artifact["sha256"],
+        "prior_runs_ledger_path": prior_runs_ledger["path"],
+        "prior_runs_ledger_sha256": prior_runs_ledger["sha256"],
+        "prior_runs_ledger_digest": prior_runs_ledger["digest"],
+        "prior_runs": prior_runs_ledger["prior_runs"],
+        "prior_accounted_reserve_usd": prior_runs_ledger["accounted_reserve_usd"],
+        "calibration_remaining_budget_usd": prior_runs_ledger["remaining_budget_usd"],
         "runner_artifact_path": runner_artifact["path"],
         "runner_artifact_sha256": runner_artifact["sha256"],
+        "validator_artifact_path": validator_artifact["path"],
+        "validator_artifact_sha256": validator_artifact["sha256"],
         "response_schema_digest": provider_response_schema_digest(),
         "response_request_mode": CALIBRATION_RESPONSE_REQUEST_MODE,
         "response_validator_version": PROVIDER_RESPONSE_VALIDATOR_VERSION,
@@ -660,7 +974,9 @@ def validate_rubric(value: Mapping[str, Any]) -> dict[str, Any]:
     if tuple(value["evidence"]) != EXPECTED_EVIDENCE:
         raise ValueError("judge evidence does not match the campaign contract")
     if set(value["passing_labels"]) != PASSING_LABELS:
-        raise ValueError("judge passing labels must be strong and exceptional")
+        raise ValueError(
+            "judge passing labels must make adequate the minimum acceptable label"
+        )
     labels = value["labels"]
     if not isinstance(labels, list) or len(labels) != 5:
         raise ValueError("judge rubric must define five label anchors")
@@ -683,6 +999,24 @@ def validate_rubric(value: Mapping[str, Any]) -> dict[str, Any]:
             or not str(item["description"]).strip()
         ):
             raise ValueError(f"judge label {index} does not match its locked anchor")
+    public_rubric = comparison_judge_public_rubric_contract(
+        rubric=str(value["rubric"]),
+        dimensions=tuple(str(item) for item in value["dimensions"]),
+    )
+    declared_label_bands = [
+        {
+            "id": str(item["id"]),
+            "score_band": str(item["score_band"]),
+            "description": str(item["description"]),
+        }
+        for item in labels
+    ]
+    if declared_label_bands != public_rubric["label_bands"]:
+        raise ValueError("judge label anchors drifted from the live contract")
+    if list(value["passing_labels"]) != public_rubric["passing_labels"]:
+        raise ValueError("judge passing-label order drifted from the live contract")
+    if value["critical_policy"] != COMPARISON_JUDGE_CRITICAL_POLICY:
+        raise ValueError("judge critical policy drifted from the live contract")
     blinded = value["blinded_fields"]
     if not isinstance(blinded, list) or not {
         "variant_id",
@@ -1010,6 +1344,11 @@ def validate_cases(  # noqa: C901 - one pass validates cross-case invariants.
         ],
         "holdout_true_positive_rate": split_rates["holdout"]["true_positive_rate"],
         "holdout_true_negative_rate": split_rates["holdout"]["true_negative_rate"],
+        "balanced_accuracy": rates["balanced_accuracy"],
+        "calibration_balanced_accuracy": split_rates["calibration"][
+            "balanced_accuracy"
+        ],
+        "holdout_balanced_accuracy": split_rates["holdout"]["balanced_accuracy"],
         "critical_false_passes": critical_false_passes,
         "reviewer_ids": reviewer_ids,
         "disagreements": disagreements,
@@ -1030,6 +1369,131 @@ def _classification_rates(
     return {
         "true_positive_rate": true_positives / positives if positives else 0.0,
         "true_negative_rate": true_negatives / negatives if negatives else 0.0,
+        "balanced_accuracy": (
+            (
+                (true_positives / positives if positives else 0.0)
+                + (true_negatives / negatives if negatives else 0.0)
+            )
+            / 2
+        ),
+    }
+
+
+def _synthetic_predicted_label(result: Mapping[str, Any]) -> str:
+    return (
+        "pass"
+        if result["overall_label"] in PASSING_LABELS and not result["missing_evidence"]
+        else "fail"
+    )
+
+
+def synthetic_threshold_reachability(
+    rows: Sequence[Mapping[str, Any]],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return whether every locked synthetic gate can still be satisfied.
+
+    The upper bound uses the complete frozen cohort and assumes every remaining
+    case is classified correctly. It therefore stops paid work only when even
+    that best possible continuation cannot satisfy a locked gate.
+    """
+
+    if len(results) > len(rows):
+        raise ValueError("synthetic reachability has more results than cases")
+    completed: list[tuple[Mapping[str, Any], str]] = []
+    critical_false_passes = 0
+    for index, result in enumerate(results):
+        row = rows[index]
+        case_id = str(result.get("case_id") or "")
+        if case_id != str(row["id"]):
+            raise ValueError("synthetic reachability case sequence or identity drifted")
+        predicted_label = _synthetic_predicted_label(result)
+        completed.append((row, predicted_label))
+        if (
+            row["authored_reference"]["critical_false_pass"]
+            and row["authored_reference"]["label"] == "fail"
+            and predicted_label == "pass"
+        ):
+            critical_false_passes += 1
+
+    gates: list[dict[str, Any]] = []
+    blockers: list[str] = []
+    for scope, split in (
+        ("overall", None),
+        ("calibration", "calibration"),
+        ("holdout", "holdout"),
+    ):
+        frozen_scope = [row for row in rows if split is None or row["split"] == split]
+        completed_scope = [
+            (row, predicted)
+            for row, predicted in completed
+            if split is None or row["split"] == split
+        ]
+        gate_id = f"{scope}_balanced_accuracy"
+        positive_examples = sum(
+            row["authored_reference"]["label"] == "pass" for row in frozen_scope
+        )
+        negative_examples = sum(
+            row["authored_reference"]["label"] == "fail" for row in frozen_scope
+        )
+        if not positive_examples or not negative_examples:
+            raise ValueError("synthetic reachability scope is missing a class")
+        completed_positives = sum(
+            row["authored_reference"]["label"] == "pass"
+            for row, _ in completed_scope
+        )
+        completed_negatives = sum(
+            row["authored_reference"]["label"] == "fail"
+            for row, _ in completed_scope
+        )
+        current_true_positives = sum(
+            row["authored_reference"]["label"] == predicted == "pass"
+            for row, predicted in completed_scope
+        )
+        current_true_negatives = sum(
+            row["authored_reference"]["label"] == predicted == "fail"
+            for row, predicted in completed_scope
+        )
+        remaining_positives = positive_examples - completed_positives
+        remaining_negatives = negative_examples - completed_negatives
+        maximum_true_positive_rate = (
+            current_true_positives + remaining_positives
+        ) / positive_examples
+        maximum_true_negative_rate = (
+            current_true_negatives + remaining_negatives
+        ) / negative_examples
+        maximum_balanced_accuracy = (
+            maximum_true_positive_rate + maximum_true_negative_rate
+        ) / 2
+        reachable = maximum_balanced_accuracy + 1e-12 >= MIN_RATE
+        gate = {
+            "id": gate_id,
+            "scope": scope,
+            "metric": "balanced_accuracy",
+            "threshold": MIN_RATE,
+            "positive_examples": positive_examples,
+            "negative_examples": negative_examples,
+            "completed_examples": len(completed_scope),
+            "current_true_positives": current_true_positives,
+            "current_true_negatives": current_true_negatives,
+            "remaining_positives": remaining_positives,
+            "remaining_negatives": remaining_negatives,
+            "maximum_true_positive_rate": round(maximum_true_positive_rate, 6),
+            "maximum_true_negative_rate": round(maximum_true_negative_rate, 6),
+            "maximum_balanced_accuracy": round(maximum_balanced_accuracy, 6),
+            "reachable": reachable,
+        }
+        gates.append(gate)
+        if not reachable:
+            blockers.append(gate_id)
+    if critical_false_passes:
+        blockers.append("critical_false_passes")
+    return {
+        "reachable": not blockers,
+        "completed_cases": len(results),
+        "critical_false_passes": critical_false_passes,
+        "gates": gates,
+        "blockers": blockers,
     }
 
 
@@ -1050,12 +1514,7 @@ def recompute_synthetic_metrics(
             raise ValueError(f"synthetic result has unknown case id {case_id!r}")
         row = by_id[case_id]
         actual_label = str(row["authored_reference"]["label"])
-        predicted_label = (
-            "pass"
-            if result["overall_label"] in PASSING_LABELS
-            and not result["missing_evidence"]
-            else "fail"
-        )
+        predicted_label = _synthetic_predicted_label(result)
         actual.append(actual_label)
         predicted.append(predicted_label)
         splits.append(str(row["split"]))
@@ -1082,13 +1541,8 @@ def recompute_synthetic_metrics(
     complete = len(results) == len(rows) == 48
     passed = bool(
         complete
-        and rates["true_positive_rate"] >= MIN_RATE
-        and rates["true_negative_rate"] >= MIN_RATE
-        and all(
-            values["true_positive_rate"] >= MIN_RATE
-            and values["true_negative_rate"] >= MIN_RATE
-            for values in split_rates.values()
-        )
+        and rates["balanced_accuracy"] >= MIN_RATE
+        and all(values["balanced_accuracy"] >= MIN_RATE for values in split_rates.values())
         and critical_false_passes == 0
     )
     return {
@@ -1108,9 +1562,12 @@ def recompute_synthetic_metrics(
             split_rates["holdout"]["true_negative_rate"], 6
         ),
         "critical_false_passes": critical_false_passes,
-        "balanced_accuracy": round(
-            (rates["true_positive_rate"] + rates["true_negative_rate"]) / 2,
-            6,
+        "balanced_accuracy": round(rates["balanced_accuracy"], 6),
+        "calibration_balanced_accuracy": round(
+            split_rates["calibration"]["balanced_accuracy"], 6
+        ),
+        "holdout_balanced_accuracy": round(
+            split_rates["holdout"]["balanced_accuracy"], 6
         ),
         "synthetic_thresholds_passed": passed,
     }
@@ -1207,8 +1664,14 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
         rubric,
         cases_artifact_path=manifest_summary["cases_artifact_path"],
         cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+        prior_runs_ledger_path=manifest_summary["prior_runs_ledger_path"],
+        prior_runs_ledger_sha256=manifest_summary["prior_runs_ledger_sha256"],
+        prior_runs_ledger_digest=manifest_summary["prior_runs_ledger_digest"],
+        prior_runs=manifest_summary["prior_runs"],
         runner_artifact_path=manifest_summary["runner_artifact_path"],
         runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+        validator_artifact_path=manifest_summary["validator_artifact_path"],
+        validator_artifact_sha256=manifest_summary["validator_artifact_sha256"],
         response_schema_digest=manifest_summary["response_schema_digest"],
         response_request_mode=manifest_summary["response_request_mode"],
         response_validator_version=manifest_summary["response_validator_version"],
@@ -1342,20 +1805,23 @@ def build_calibration_report(
     *,
     cases_artifact_path: str,
     cases_artifact_sha256: str,
+    prior_runs_ledger_path: str,
+    prior_runs_ledger_sha256: str,
+    prior_runs_ledger_digest: str,
+    prior_runs: int,
     runner_artifact_path: str,
     runner_artifact_sha256: str,
+    validator_artifact_path: str,
+    validator_artifact_sha256: str,
     response_schema_digest: str,
     response_request_mode: str,
     response_validator_version: int,
 ) -> dict[str, Any]:
     passed = bool(
         cases["completed"]
-        and cases["true_positive_rate"] >= MIN_RATE
-        and cases["true_negative_rate"] >= MIN_RATE
-        and cases["calibration_true_positive_rate"] >= MIN_RATE
-        and cases["calibration_true_negative_rate"] >= MIN_RATE
-        and cases["holdout_true_positive_rate"] >= MIN_RATE
-        and cases["holdout_true_negative_rate"] >= MIN_RATE
+        and cases["balanced_accuracy"] >= MIN_RATE
+        and cases["calibration_balanced_accuracy"] >= MIN_RATE
+        and cases["holdout_balanced_accuracy"] >= MIN_RATE
         and cases["critical_false_passes"] == 0
     )
     return {
@@ -1368,7 +1834,7 @@ def build_calibration_report(
         "judge_profile": "anthropic/claude-sonnet-5",
         "rubric_digest": rubric["contract_digest"],
         "cases_digest": cases["cases_digest"],
-        "score_threshold": 0.75,
+        "score_threshold": COMPARISON_JUDGE_PASSING_SCORE,
         "examples": cases["examples"],
         "calibration_examples": cases["calibration_examples"],
         "holdout_examples": cases["holdout_examples"],
@@ -1382,6 +1848,13 @@ def build_calibration_report(
         ),
         "holdout_true_positive_rate": round(cases["holdout_true_positive_rate"], 6),
         "holdout_true_negative_rate": round(cases["holdout_true_negative_rate"], 6),
+        "balanced_accuracy": round(cases["balanced_accuracy"], 6),
+        "calibration_balanced_accuracy": round(
+            cases["calibration_balanced_accuracy"], 6
+        ),
+        "holdout_balanced_accuracy": round(
+            cases["holdout_balanced_accuracy"], 6
+        ),
         "critical_false_passes": cases["critical_false_passes"],
         "passed": passed,
         "distinct_reviewers": len(cases["reviewer_ids"]),
@@ -1391,14 +1864,22 @@ def build_calibration_report(
             cases_artifact_sha256=cases_artifact_sha256,
             cases_digest=cases["cases_digest"],
             rubric_digest=rubric["contract_digest"],
+            prior_runs_ledger_path=prior_runs_ledger_path,
+            prior_runs_ledger_sha256=prior_runs_ledger_sha256,
+            prior_runs_ledger_digest=prior_runs_ledger_digest,
+            prior_runs=prior_runs,
             runner_artifact_path=runner_artifact_path,
             runner_artifact_sha256=runner_artifact_sha256,
+            validator_artifact_path=validator_artifact_path,
+            validator_artifact_sha256=validator_artifact_sha256,
             response_schema_digest=response_schema_digest,
             response_request_mode=response_request_mode,
             response_validator_version=response_validator_version,
         ),
         "note": (
-            "Calibration passed the locked two-reviewer and held-out thresholds."
+            "Calibration passed the locked overall, calibration-split, and "
+            "holdout-split balanced-accuracy thresholds with zero critical "
+            "false passes."
             if passed
             else "The blinded 48-case synthetic result gates advisory same-family "
             "judging before any Agent trial. It does not replace the two-reviewer "
@@ -1534,8 +2015,14 @@ def validate_all(root: Path, *, require_specs: bool = False) -> dict[str, Any]:
         rubric,
         cases_artifact_path=manifest_summary["cases_artifact_path"],
         cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+        prior_runs_ledger_path=manifest_summary["prior_runs_ledger_path"],
+        prior_runs_ledger_sha256=manifest_summary["prior_runs_ledger_sha256"],
+        prior_runs_ledger_digest=manifest_summary["prior_runs_ledger_digest"],
+        prior_runs=manifest_summary["prior_runs"],
         runner_artifact_path=manifest_summary["runner_artifact_path"],
         runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+        validator_artifact_path=manifest_summary["validator_artifact_path"],
+        validator_artifact_sha256=manifest_summary["validator_artifact_sha256"],
         response_schema_digest=manifest_summary["response_schema_digest"],
         response_request_mode=manifest_summary["response_request_mode"],
         response_validator_version=manifest_summary["response_validator_version"],
@@ -1558,6 +2045,22 @@ def validate_all(root: Path, *, require_specs: bool = False) -> dict[str, Any]:
         "calibration_digest": report["cases_digest"],
         "calibration_cases_artifact_path": manifest_summary["cases_artifact_path"],
         "calibration_cases_artifact_sha256": manifest_summary["cases_artifact_sha256"],
+        "calibration_prior_runs_ledger_path": manifest_summary[
+            "prior_runs_ledger_path"
+        ],
+        "calibration_prior_runs_ledger_sha256": manifest_summary[
+            "prior_runs_ledger_sha256"
+        ],
+        "calibration_prior_runs_ledger_digest": manifest_summary[
+            "prior_runs_ledger_digest"
+        ],
+        "calibration_prior_runs": manifest_summary["prior_runs"],
+        "calibration_prior_accounted_reserve_usd": manifest_summary[
+            "prior_accounted_reserve_usd"
+        ],
+        "calibration_remaining_budget_usd": manifest_summary[
+            "calibration_remaining_budget_usd"
+        ],
         "rubric_digest": report["rubric_digest"],
         "agent_cells": manifest_summary["total_cells"],
         "campaign_ceiling_usd": manifest_summary["campaign_ceiling_usd"],
@@ -1594,8 +2097,18 @@ def main() -> int:
                 rubric,
                 cases_artifact_path=manifest_summary["cases_artifact_path"],
                 cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+                prior_runs_ledger_path=manifest_summary["prior_runs_ledger_path"],
+                prior_runs_ledger_sha256=manifest_summary["prior_runs_ledger_sha256"],
+                prior_runs_ledger_digest=manifest_summary["prior_runs_ledger_digest"],
+                prior_runs=manifest_summary["prior_runs"],
                 runner_artifact_path=manifest_summary["runner_artifact_path"],
                 runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+                validator_artifact_path=manifest_summary[
+                    "validator_artifact_path"
+                ],
+                validator_artifact_sha256=manifest_summary[
+                    "validator_artifact_sha256"
+                ],
                 response_schema_digest=manifest_summary["response_schema_digest"],
                 response_request_mode=manifest_summary["response_request_mode"],
                 response_validator_version=manifest_summary[

@@ -14,8 +14,11 @@ import pytest
 from fugue.bench.comparison import (
     COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
     COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION,
+    ComparisonEvaluatorV1,
+    _comparison_judge_payload,
     _comparison_judge_response_schema,
     _judge_execution_calibration_issue,
+    comparison_judge_public_rubric_contract,
     load_comparison,
 )
 from fugue.bench.evaluations import JUDGE_JSON_MAX_RESPONSE_CHARACTERS
@@ -50,9 +53,12 @@ def _json(name: str) -> dict[str, object]:
 
 def _runner_bindings() -> dict[str, object]:
     runner = CONTRACT.calibration_runner_artifact(EXAMPLE)
+    validator = CONTRACT.calibration_validator_artifact(EXAMPLE)
     return {
         "runner_artifact_path": runner["path"],
         "runner_artifact_sha256": runner["sha256"],
+        "validator_artifact_path": validator["path"],
+        "validator_artifact_sha256": validator["sha256"],
         "response_schema_digest": CONTRACT.provider_response_schema_digest(),
         "response_request_mode": CONTRACT.CALIBRATION_RESPONSE_REQUEST_MODE,
         "response_validator_version": CONTRACT.PROVIDER_RESPONSE_VALIDATOR_VERSION,
@@ -93,17 +99,29 @@ def test_campaign_assets_are_strict_valid_but_not_execution_eligible() -> None:
         "calibration_status": "pending_human_review",
         "calibration_cases": 48,
         "calibration_digest": (
-            "ea30aaa7a55fff90aec7921c891162ab1f30acfb5eba395c0e09f8c92b5031cb"
+                "f4634b7dee0898e2bfc8104961ad2f1bdd70be5feda1081214457257b9215a15"
         ),
         "calibration_cases_artifact_path": (
             "examples/comparisons/community-skill-upgrades/"
             "judge-calibration-cases.jsonl"
         ),
         "calibration_cases_artifact_sha256": (
-            "239eaafc06ebccb6bef86adaa940cb54bafec8b3a8b4677c64e75f7dd1191776"
+                "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e"
         ),
+        "calibration_prior_runs_ledger_path": (
+            "examples/comparisons/community-skill-upgrades/calibration-prior-runs.json"
+        ),
+        "calibration_prior_runs_ledger_sha256": (
+            "06bbd801c0fd29704dfb0e1641e737e9a3e976e3e2049ac4da8f0e10b143a3de"
+        ),
+        "calibration_prior_runs_ledger_digest": (
+            "6e6ecb7c25efa8bb81c61def334bfdddc26b74afe6dc887741f95cdd57f0fcae"
+        ),
+        "calibration_prior_runs": 7,
+        "calibration_prior_accounted_reserve_usd": 7.094273,
+        "calibration_remaining_budget_usd": 0.905727,
         "rubric_digest": (
-            "4c14bb0021f0e2fdcc37f2fec46e5afeadd8fb0d8cce12084810ba4078605188"
+            "6706b2a5dbbc0850b0f1b904920d14ae9df54a212b34f745540efc4d3f3ef74b"
         ),
         "agent_cells": 12,
         "campaign_ceiling_usd": 110.0,
@@ -119,9 +137,10 @@ def test_campaign_assets_are_strict_valid_but_not_execution_eligible() -> None:
         rubric_digest=summary["rubric_digest"],
         **_runner_bindings(),
     )
-    assert calibration["execution_gate"]["maximum_cost_usd"] == 4.953631
-    assert calibration["execution_gate"]["prior_failed_requests"] == 3
-    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 3.046369
+    assert calibration["execution_gate"]["maximum_cost_usd"] == 0.905727
+    assert calibration["execution_gate"]["prior_runs"] == 7
+    assert calibration["execution_gate"]["prior_failed_requests"] == 7
+    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 7.094273
     assert calibration["execution_gate"]["campaign_allocation_usd"] == 8
 
 
@@ -140,6 +159,87 @@ def test_campaign_has_balanced_16_case_repository_strata() -> None:
         assert [row["authored_reference"]["label"] for row in repository_rows].count(
             "pass"
         ) == 8
+
+    superpowers_holdout = [
+        row
+        for row in rows
+        if row["repository_id"] == "superpowers-writing-plans"
+        and row["split"] == "holdout"
+    ]
+    assert {row["id"] for row in superpowers_holdout} == {
+        "superpowers-provider-task-importer-pass-01",
+        "superpowers-provider-task-importer-pass-02",
+        "superpowers-provider-task-importer-fail-01",
+        "superpowers-provider-task-importer-fail-02",
+    }
+    assert all(
+        row["scenario_id"] == "superpowers-provider-task-importer-plan"
+        for row in superpowers_holdout
+    )
+    assert (
+        sum(
+            row["authored_reference"]["critical_false_pass"]
+            for row in superpowers_holdout
+        )
+        == 1
+    )
+
+
+def test_prior_run_ledger_is_frozen_and_derives_remaining_budget() -> None:
+    manifest = _json("campaign-manifest.json")
+    calibration = manifest["calibration"]
+    ledger = CONTRACT.frozen_prior_runs_ledger(
+        root=EXAMPLE,
+        calibration=calibration,
+    )
+
+    assert ledger == {
+        "path": (
+            "examples/comparisons/community-skill-upgrades/calibration-prior-runs.json"
+        ),
+        "sha256": ("06bbd801c0fd29704dfb0e1641e737e9a3e976e3e2049ac4da8f0e10b143a3de"),
+        "digest": ("6e6ecb7c25efa8bb81c61def334bfdddc26b74afe6dc887741f95cdd57f0fcae"),
+        "prior_runs": 7,
+        "accounted_reserve_usd": 7.094273,
+        "remaining_budget_usd": 0.905727,
+    }
+    raw = _json("calibration-prior-runs.json")
+    assert sum(run["attempted_requests"] for run in raw["runs"]) == 79
+    assert [run["receipt_status"] for run in raw["runs"]] == [
+        "unavailable",
+        "available",
+        "available",
+        "unavailable",
+        "available",
+        "available",
+        "available",
+    ]
+    latest = raw["runs"][-1]
+    assert latest["preview_digest"] == (
+        "e9f15bebc211aa0f94aa2f7f305c7a801ac72bba0840957aed07d835c45fb670"
+    )
+    assert latest["approval_digest"] == (
+        "240105d4f93939f702ecee413613b78149cc59a21af0505a791a4b64b49f8833"
+    )
+    assert latest["reason_code"] == "thresholds_unreachable"
+    assert latest["artifact_document_digest"] == (
+        "23c39ca60a8863d2db608bcdf2ffeb361acf388ee7f935a336268595d24f1ad1"
+    )
+
+
+def test_prior_run_ledger_byte_and_content_drift_are_rejected(tmp_path: Path) -> None:
+    comparisons = tmp_path / "examples/comparisons"
+    shutil.copytree(REPO_ROOT / "examples/comparisons", comparisons)
+    root = comparisons / "community-skill-upgrades"
+    manifest = json.loads((root / "campaign-manifest.json").read_text())
+    ledger_path = root / "calibration-prior-runs.json"
+    ledger_path.write_bytes(ledger_path.read_bytes() + b"\n")
+
+    with pytest.raises(ValueError, match="artifact SHA-256 drifted"):
+        CONTRACT.frozen_prior_runs_ledger(
+            root=root,
+            calibration=manifest["calibration"],
+        )
 
 
 def test_frozen_cases_artifact_is_bound_to_preview_and_gate() -> None:
@@ -172,8 +272,17 @@ def test_frozen_cases_artifact_is_bound_to_preview_and_gate() -> None:
         rubric_digest=preview["rubric_digest"],
         **_runner_bindings(),
     )
+    changed_ledger = CONTRACT.calibration_preview_document(
+        cases_artifact_path=preview["cases_artifact_path"],
+        cases_artifact_sha256=preview["cases_artifact_sha256"],
+        cases_digest=preview["cases_digest"],
+        rubric_digest=preview["rubric_digest"],
+        prior_runs_ledger_digest="0" * 64,
+        **_runner_bindings(),
+    )
     assert changed_path["preview_digest"] != preview["preview_digest"]
     assert changed_sha["preview_digest"] != preview["preview_digest"]
+    assert changed_ledger["preview_digest"] != preview["preview_digest"]
 
 
 def test_case_byte_drift_is_rejected_before_a_judge_request(tmp_path: Path) -> None:
@@ -323,6 +432,76 @@ def test_synthetic_and_live_judges_share_the_response_envelope_contract() -> Non
     )
 
 
+def test_synthetic_and_live_judges_share_the_exact_public_rubric_contract() -> None:
+    rubric = _json("judge-rubric.json")
+    row = CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl")[0]
+    synthetic_payload = json.loads(RUNNER._prompt(rubric, row).split("\n\n", 1)[1])
+    evaluator = ComparisonEvaluatorV1(
+        id=str(rubric["id"]),
+        type="llm_judge",
+        required=False,
+        profile=str(rubric["profile"]),
+        rubric=str(rubric["rubric"]),
+        dimensions=tuple(str(item) for item in rubric["dimensions"]),
+        evidence=tuple(str(item) for item in rubric["evidence"]),
+    )
+    live_payload = _comparison_judge_payload(
+        evaluator=evaluator,
+        public_task=row["public_task"],
+        row={
+            "answer": row["response"],
+            **{
+                field: row["permitted_evidence"].get(field, [])
+                for field in evaluator.evidence
+            },
+        },
+    )
+    expected = comparison_judge_public_rubric_contract(
+        rubric=str(rubric["rubric"]),
+        dimensions=tuple(str(item) for item in rubric["dimensions"]),
+    )
+
+    assert synthetic_payload["rubric"] == expected
+    assert live_payload["rubric"] == expected
+    assert set(synthetic_payload) == set(live_payload) == {
+        "public_task",
+        "response",
+        "permitted_evidence",
+        "rubric",
+    }
+    assert expected["passing_labels"] == ["adequate", "strong", "exceptional"]
+    assert expected["passing_score"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("label", "missing_evidence", "expected"),
+    [
+        ("weak", False, "fail"),
+        ("adequate", False, "pass"),
+        ("strong", False, "pass"),
+        ("exceptional", False, "pass"),
+        ("adequate", True, "fail"),
+    ],
+)
+def test_adequate_is_the_minimum_acceptable_synthetic_label(
+    label: str,
+    missing_evidence: bool,
+    expected: str,
+) -> None:
+    assert CONTRACT._synthetic_predicted_label(
+        {"overall_label": label, "missing_evidence": missing_evidence}
+    ) == expected
+
+
+def test_synthetic_prompt_rejects_label_description_drift_from_live_contract() -> None:
+    rubric = _json("judge-rubric.json")
+    rubric["labels"][0]["description"] = "A calibration-only interpretation."
+    row = CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl")[0]
+
+    with pytest.raises(ValueError, match="label bands drifted"):
+        RUNNER._prompt(rubric, row)
+
+
 def test_synthetic_provider_payload_rejects_unknown_explanation_field() -> None:
     payload = CONTRACT.provider_response_example()
     payload["scores_explanation"] = {
@@ -345,9 +524,7 @@ def test_synthetic_provider_payload_keeps_long_but_bounded_explanation() -> None
 
 def test_synthetic_provider_payload_rejects_explanation_above_hard_bound() -> None:
     payload = CONTRACT.provider_response_example()
-    payload["rationale"] = "r" * (
-        CONTRACT.PROVIDER_RESPONSE_MAX_CHARACTERS + 1
-    )
+    payload["rationale"] = "r" * (CONTRACT.PROVIDER_RESPONSE_MAX_CHARACTERS + 1)
 
     with pytest.raises(ValueError, match="rationale"):
         RUNNER._validate_provider_payload(payload)
@@ -361,6 +538,8 @@ def test_runner_and_response_schema_drift_change_the_preview() -> None:
         "cases_artifact_sha256": preview["cases_artifact_sha256"],
         "cases_digest": preview["cases_digest"],
         "rubric_digest": preview["rubric_digest"],
+        "validator_artifact_path": bindings["validator_artifact_path"],
+        "validator_artifact_sha256": bindings["validator_artifact_sha256"],
         "response_request_mode": preview["response_request_mode"],
         "response_validator_version": preview["response_validator_version"],
     }
@@ -389,14 +568,14 @@ def test_synthetic_dry_run_is_bounded_and_preserves_human_gate() -> None:
     assert summary["requests"] == 48
     assert summary["automatic_retries"] == 0
     assert summary["maximum_output_tokens_per_request"] == 1200
-    assert summary["budget_ceiling_usd"] == 4.953631
+    assert summary["budget_ceiling_usd"] == 0.905727
     assert summary["calibration_status"] == "pending_human_review"
     assert summary["human_calibration_satisfied"] is False
     assert summary["preview_digest"] == preview["preview_digest"]
     unsigned = {key: value for key, value in preview.items() if key != "preview_digest"}
     assert preview["preview_digest"] == CONTRACT.stable_digest(unsigned)
-    assert preview["maximum_cost_usd"] == 4.953631
-    assert preview["prior_accounted_reserve_usd"] == 3.046369
+    assert preview["maximum_cost_usd"] == 0.905727
+    assert preview["prior_accounted_reserve_usd"] == 7.094273
     assert preview["campaign_allocation_usd"] == 8
     assert preview["requests"] == 48
 
@@ -441,7 +620,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert result["human_review_status"] == "pending_human_review"
     assert result["human_calibration_satisfied"] is False
     assert result["observed_cost_usd"] is None
-    assert result["accounted_cost_usd"] == 4.953631
+    assert result["accounted_cost_usd"] == 0.905727
     assert result["cumulative_accounted_cost_usd"] == 8
     assert result["cases_artifact_path"] == (
         "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl"
@@ -466,7 +645,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert receipt["cases_artifact_sha256"] == result["cases_artifact_sha256"]
     assert receipt["runner_artifact_sha256"] == result["runner_artifact_sha256"]
     assert receipt["response_schema_digest"] == result["response_schema_digest"]
-    assert receipt["run_accounted_cost_usd"] == 4.953631
+    assert receipt["run_accounted_cost_usd"] == 0.905727
     assert receipt["cumulative_accounted_cost_usd"] == 8
     assert json.loads(output.read_text(encoding="utf-8")) == result
     assert (EXAMPLE / "judge-calibration.json").read_bytes() == human_report_before
@@ -530,13 +709,272 @@ def test_second_request_failure_preserves_partial_and_writes_safe_receipt(
     assert failure["usage"] == {"input_tokens": 100, "output_tokens": 20}
     assert failure["raw_response_persisted"] is False
     assert failure["run_accounted_reserve_usd"] == round(
-        2 * 4.953631 / 48,
+        2 * 0.905727 / 48,
         6,
     )
     assert failure["cumulative_accounted_reserve_usd"] <= 8
     serialized_failure = json.dumps(failure, sort_keys=True)
     assert "must be rejected" not in serialized_failure
     assert "scores_explanation" not in serialized_failure
+
+
+def test_all_fail_calibration_stops_when_split_balanced_accuracy_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def requester(_: str) -> tuple[dict[str, object], dict[str, int]]:
+        nonlocal calls
+        calls += 1
+        return (
+            {
+                "scores": {
+                    dimension: 0.1 for dimension in CONTRACT.EXPECTED_DIMENSIONS
+                },
+                "overall_assessment": "Insufficiently grounded.",
+                "uncertainty": 0.1,
+                "missing_evidence": False,
+                "rationale": "The response does not satisfy the rubric.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+        )
+
+    output = tmp_path / "synthetic.json"
+    with pytest.raises(
+        RUNNER.SyntheticThresholdsUnreachable,
+        match="mathematically unreachable",
+    ):
+        RUNNER.run_synthetic_calibration(
+            root=EXAMPLE,
+            output=output,
+            requester=requester,
+        )
+
+    assert calls == 10
+    partial = json.loads(output.read_text(encoding="utf-8"))
+    assert partial["status"] == "incomplete"
+    assert partial["completed_cases"] == 10
+    reachability = CONTRACT.synthetic_threshold_reachability(
+        CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl"),
+        partial["results"],
+    )
+    assert reachability["reachable"] is False
+    assert reachability["blockers"] == ["calibration_balanced_accuracy"]
+    calibration_balanced_accuracy = next(
+        gate
+        for gate in reachability["gates"]
+        if gate["id"] == "calibration_balanced_accuracy"
+    )
+    assert calibration_balanced_accuracy == {
+        "id": "calibration_balanced_accuracy",
+        "scope": "calibration",
+        "metric": "balanced_accuracy",
+        "threshold": 0.85,
+        "positive_examples": 18,
+        "negative_examples": 18,
+        "completed_examples": 10,
+        "current_true_positives": 0,
+        "current_true_negatives": 4,
+        "remaining_positives": 12,
+        "remaining_negatives": 14,
+        "maximum_true_positive_rate": 0.666667,
+        "maximum_true_negative_rate": 1.0,
+        "maximum_balanced_accuracy": 0.833333,
+        "reachable": False,
+    }
+    preview = RUNNER.calibration_preview(EXAMPLE)
+    termination_path = RUNNER._termination_output_path(
+        output,
+        preview_digest=preview["preview_digest"],
+        attempted_requests=10,
+        reason_code="thresholds_unreachable",
+    )
+    termination = json.loads(termination_path.read_text(encoding="utf-8"))
+    RUNNER._validate_termination_document(
+        termination,
+        preview=preview,
+        expected_reachability=reachability,
+        expected_partial_result_digest=partial["result_digest"],
+    )
+    assert termination["status"] == "failed"
+    assert termination["completed_cases"] == 10
+    assert termination["attempted_requests"] == 10
+    assert termination["partial_result_digest"] == partial["result_digest"]
+
+
+def test_critical_false_pass_stops_before_the_next_request(tmp_path: Path) -> None:
+    calls = 0
+
+    def requester(_: str) -> tuple[dict[str, object], dict[str, int]]:
+        nonlocal calls
+        calls += 1
+        score = 0.95 if calls in {1, 2, 4} else 0.1
+        return (
+            {
+                "scores": {
+                    dimension: score for dimension in CONTRACT.EXPECTED_DIMENSIONS
+                },
+                "overall_assessment": "Synthetic critical-policy fixture.",
+                "uncertainty": 0.1,
+                "missing_evidence": False,
+                "rationale": "Fixture judgment for reachability testing.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+        )
+
+    output = tmp_path / "synthetic.json"
+    with pytest.raises(RUNNER.SyntheticThresholdsUnreachable):
+        RUNNER.run_synthetic_calibration(
+            root=EXAMPLE,
+            output=output,
+            requester=requester,
+        )
+
+    assert calls == 4
+    partial = json.loads(output.read_text(encoding="utf-8"))
+    reachability = CONTRACT.synthetic_threshold_reachability(
+        CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl"),
+        partial["results"],
+    )
+    assert reachability["critical_false_passes"] == 1
+    assert reachability["blockers"] == ["critical_false_passes"]
+
+
+def test_operator_interrupt_on_request_nine_reserves_nine_and_writes_receipt(
+    tmp_path: Path,
+) -> None:
+    rows = CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl")
+    label_by_response = {
+        row["response"]: row["authored_reference"]["label"] for row in rows
+    }
+    fixture_requester = _fixture_judge_requester(label_by_response)
+    calls = 0
+
+    def requester(prompt: str) -> tuple[dict[str, object], dict[str, int]]:
+        nonlocal calls
+        calls += 1
+        if calls == 9:
+            raise KeyboardInterrupt
+        return fixture_requester(prompt)
+
+    output = tmp_path / "synthetic.json"
+    with pytest.raises(KeyboardInterrupt):
+        RUNNER.run_synthetic_calibration(
+            root=EXAMPLE,
+            output=output,
+            requester=requester,
+        )
+
+    assert calls == 9
+    partial = json.loads(output.read_text(encoding="utf-8"))
+    assert partial["completed_cases"] == 8
+    preview = RUNNER.calibration_preview(EXAMPLE)
+    termination_path = RUNNER._termination_output_path(
+        output,
+        preview_digest=preview["preview_digest"],
+        attempted_requests=9,
+        reason_code="operator_cancelled",
+    )
+    termination = json.loads(termination_path.read_text(encoding="utf-8"))
+    reachability = CONTRACT.synthetic_threshold_reachability(rows, partial["results"])
+    RUNNER._validate_termination_document(
+        termination,
+        preview=preview,
+        expected_reachability=reachability,
+        expected_partial_result_digest=partial["result_digest"],
+    )
+    assert termination["status"] == "cancelled"
+    assert termination["completed_cases"] == 8
+    assert termination["attempted_requests"] == 9
+    assert termination["current_case_id"] == rows[8]["id"]
+    assert termination["current_case_ordinal"] == 9
+    assert termination["response_returned"] is False
+    assert termination["run_accounted_reserve_usd"] == round(
+        9 * 0.905727 / 48,
+        6,
+    )
+    assert termination["cumulative_accounted_reserve_usd"] == 7.264097
+
+    tampered = copy.deepcopy(termination)
+    tampered["run_accounted_reserve_usd"] = 0
+    unsigned = {
+        key: value for key, value in tampered.items() if key != "termination_digest"
+    }
+    tampered["termination_digest"] = CONTRACT.stable_digest(unsigned)
+    with pytest.raises(ValueError, match="cost contract disagrees"):
+        RUNNER._validate_termination_document(
+            tampered,
+            preview=preview,
+            expected_reachability=reachability,
+            expected_partial_result_digest=partial["result_digest"],
+        )
+
+    wrong_partial = copy.deepcopy(termination)
+    wrong_partial["partial_result_digest"] = "0" * 64
+    unsigned = {
+        key: value
+        for key, value in wrong_partial.items()
+        if key != "termination_digest"
+    }
+    wrong_partial["termination_digest"] = CONTRACT.stable_digest(unsigned)
+    with pytest.raises(ValueError, match="partial digest disagrees"):
+        RUNNER._validate_termination_document(
+            wrong_partial,
+            preview=preview,
+            expected_reachability=reachability,
+            expected_partial_result_digest=partial["result_digest"],
+        )
+
+
+def test_interrupt_after_atomic_replace_binds_reloaded_durable_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl")
+    label_by_response = {
+        row["response"]: row["authored_reference"]["label"] for row in rows
+    }
+    output = tmp_path / "synthetic.json"
+    atomic_write = RUNNER._atomic_write
+    interrupted = False
+
+    def interrupt_after_replace(path: Path, value: dict[str, object]) -> None:
+        nonlocal interrupted
+        atomic_write(path, value)
+        if (
+            not interrupted
+            and path == output
+            and value.get("kind") == "synthetic_gold_diagnostic"
+            and value.get("completed_cases") == 1
+        ):
+            interrupted = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(RUNNER, "_atomic_write", interrupt_after_replace)
+    with pytest.raises(KeyboardInterrupt):
+        RUNNER.run_synthetic_calibration(
+            root=EXAMPLE,
+            output=output,
+            requester=_fixture_judge_requester(label_by_response),
+        )
+
+    partial = json.loads(output.read_text(encoding="utf-8"))
+    preview = RUNNER.calibration_preview(EXAMPLE)
+    termination_path = RUNNER._termination_output_path(
+        output,
+        preview_digest=preview["preview_digest"],
+        attempted_requests=1,
+        reason_code="operator_cancelled",
+    )
+    termination = json.loads(termination_path.read_text(encoding="utf-8"))
+
+    assert interrupted is True
+    assert partial["completed_cases"] == 1
+    assert termination["completed_cases"] == 1
+    assert termination["attempted_requests"] == 1
+    assert termination["partial_result_digest"] == partial["result_digest"]
+    assert termination["current_case_id"] is None
+    assert termination["current_case_ordinal"] is None
 
 
 def test_forged_self_consistent_summary_is_rejected_against_frozen_cases(
@@ -604,6 +1042,14 @@ def test_core_gate_recomputes_frozen_cases_and_verifies_claimed_approval(
     shutil.copy2(EXAMPLE / "judge-calibration-cases.jsonl", campaign_cases)
     campaign_runner = campaign_cases.parent / "run_synthetic_calibration.py"
     shutil.copy2(EXAMPLE / "run_synthetic_calibration.py", campaign_runner)
+    campaign_validator = campaign_cases.parent / "validate_campaign.py"
+    shutil.copy2(EXAMPLE / "validate_campaign.py", campaign_validator)
+    campaign_ledger = campaign_cases.parent / "calibration-prior-runs.json"
+    shutil.copy2(EXAMPLE / "calibration-prior-runs.json", campaign_ledger)
+    shutil.copy2(
+        EXAMPLE / "calibration-prior-runs.json",
+        campaign_cases.parent / "calibration-prior-runs.json",
+    )
     calibration = _json("judge-calibration.json")
     (tmp_path / "calibration.json").write_text(
         json.dumps(calibration, sort_keys=True),

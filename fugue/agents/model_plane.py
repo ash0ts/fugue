@@ -838,6 +838,8 @@ done
 
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
         changed_paths: list[str] = []
+        changed_paths_status = "unavailable"
+        changed_paths_error: str | None = None
         # Harbor runs the prepared verifier after the Agent exits. Restore the
         # immutable image's tool modes only after no Agent shell remains.
         await self._restore_verifier_runtime(environment)
@@ -856,24 +858,31 @@ done
             result = await self.exec_as_agent(
                 environment,
                 command=(
-                    f"git -C {shlex.quote(repo_root)} diff --name-only --relative; "
+                    "set -eu\n"
+                    f"git -C {shlex.quote(repo_root)} diff --name-only --relative\n"
                     f"git -C {shlex.quote(repo_root)} ls-files --others "
                     "--exclude-standard"
                 ),
                 timeout_sec=30,
             )
-            changed_paths = list(
-                dict.fromkeys(
-                    line.strip()
-                    for line in (result.stdout or "").splitlines()
-                    if line.strip()
+            if result.return_code == 0:
+                changed_paths = list(
+                    dict.fromkeys(
+                        line.strip()
+                        for line in (result.stdout or "").splitlines()
+                        if line.strip()
+                    )
                 )
-            )
-        except Exception:
-            pass
+                changed_paths_status = "available"
+            else:
+                changed_paths_error = f"git_status_collection_exit_{result.return_code}"
+        except Exception as exc:
+            changed_paths_error = f"{type(exc).__name__}"
         try:
             self._meta_end(
                 changed_paths=changed_paths,
+                changed_paths_status=changed_paths_status,
+                changed_paths_error=changed_paths_error,
                 artifact_normalization=artifact_normalization,
             )
         finally:
@@ -925,6 +934,8 @@ done
         self,
         *,
         changed_paths: list[str] | None = None,
+        changed_paths_status: str = "unavailable",
+        changed_paths_error: str | None = None,
         artifact_normalization: list[dict[str, str]] | None = None,
     ) -> None:
         try:
@@ -932,7 +943,16 @@ done
         except (OSError, json.JSONDecodeError):
             meta = {}
         meta["ended_at"] = datetime.now(UTC).isoformat()
-        meta["changed_paths"] = changed_paths or []
+        meta["changed_paths_status"] = changed_paths_status
+        meta["changed_paths"] = (
+            list(changed_paths or [])
+            if changed_paths_status == "available"
+            else []
+        )
+        if changed_paths_error:
+            meta["changed_paths_error"] = changed_paths_error
+        else:
+            meta.pop("changed_paths_error", None)
         meta["artifact_normalization"] = artifact_normalization or []
         fingerprints = getattr(self, "_runtime_fingerprints", {})
         meta["runtime_fingerprints"] = fingerprints

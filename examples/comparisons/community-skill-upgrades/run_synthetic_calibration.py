@@ -17,6 +17,11 @@ from typing import Any
 
 import validate_campaign as contract
 
+from fugue.bench.comparison import (
+    comparison_judge_public_rubric_contract,
+    comparison_judge_request_payload,
+)
+
 MODEL = "anthropic/claude-sonnet-5"
 SYNTHETIC_BUDGET_CEILING_USD = contract.CALIBRATION_RUN_MAXIMUM_COST_USD
 CAMPAIGN_ALLOCATION_USD = contract.CALIBRATION_CAMPAIGN_ALLOCATION_USD
@@ -25,26 +30,67 @@ PRIOR_ACCOUNTED_RESERVE_USD = contract.CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD
 MAX_REQUESTS = 48
 MAX_PROMPT_CHARACTERS = 12_000
 MAX_OUTPUT_TOKENS_PER_REQUEST = 1_200
+TERMINATION_REASON_CODES = {"operator_cancelled", "thresholds_unreachable"}
+
+
+class SyntheticThresholdsUnreachable(RuntimeError):
+    """Raised after the locked synthetic thresholds cannot be recovered."""
+
+
+def _run_accounted_reserve(attempted_requests: int) -> float:
+    if (
+        not isinstance(attempted_requests, int)
+        or isinstance(attempted_requests, bool)
+        or not 0 <= attempted_requests <= MAX_REQUESTS
+    ):
+        raise ValueError("synthetic judge attempted request count is invalid")
+    return round(
+        attempted_requests * SYNTHETIC_BUDGET_CEILING_USD / MAX_REQUESTS,
+        6,
+    )
+
+
+def _cumulative_accounted_reserve(attempted_requests: int) -> float:
+    return round(
+        PRIOR_ACCOUNTED_RESERVE_USD + _run_accounted_reserve(attempted_requests),
+        6,
+    )
 
 
 def _prompt(rubric: Mapping[str, Any], row: Mapping[str, Any]) -> str:
-    payload = {
-        "public_task": row["public_task"],
-        "response": row["response"],
-        "permitted_evidence": row["permitted_evidence"],
-        "rubric": {
-            "text": rubric["rubric"],
-            "dimensions": rubric["dimensions"],
-            "label_bands": [
-                {
-                    "id": item["id"],
-                    "score_band": item["score_band"],
-                    "description": item["description"],
-                }
-                for item in rubric["labels"]
-            ],
-        },
-    }
+    public_rubric = comparison_judge_public_rubric_contract(
+        rubric=str(rubric["rubric"]),
+        dimensions=tuple(str(item) for item in rubric["dimensions"]),
+    )
+    declared_label_bands = [
+        {
+            "id": item["id"],
+            "score_band": item["score_band"],
+            "description": item["description"],
+        }
+        for item in rubric["labels"]
+    ]
+    if declared_label_bands != public_rubric["label_bands"]:
+        raise ValueError("synthetic judge label bands drifted from the live contract")
+    if list(rubric["passing_labels"]) != public_rubric["passing_labels"]:
+        raise ValueError(
+            "synthetic judge passing labels drifted from the live contract"
+        )
+    if rubric["critical_policy"] != public_rubric["critical_policy"]:
+        raise ValueError(
+            "synthetic judge critical policy drifted from the live contract"
+        )
+    permitted_evidence = dict(row["permitted_evidence"])
+    for field_name in ("inspected_paths", "changed_paths"):
+        if field_name in permitted_evidence:
+            permitted_evidence[f"{field_name}_status"] = "available"
+    payload = comparison_judge_request_payload(
+        public_task=row["public_task"],
+        response=row["response"],
+        permitted_evidence=permitted_evidence,
+        rubric=str(rubric["rubric"]),
+        dimensions=tuple(str(item) for item in rubric["dimensions"]),
+    )
     exact_shape = json.dumps(
         contract.provider_response_example(),
         sort_keys=True,
@@ -142,6 +188,54 @@ def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _reload_durable_partial(
+    *,
+    root: Path,
+    output: Path,
+    preview_digest: str,
+    approval_digest: str | None,
+    in_memory_results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Reload and authenticate the last result actually replaced on disk.
+
+    A signal may arrive after ``Path.replace`` but before the caller updates an
+    in-memory pointer. The durable file is authoritative in that interval, but
+    only after the complete result contract and its prefix of this process's
+    observed responses have been verified.
+    """
+
+    if not output.is_file():
+        return None
+    try:
+        value = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("durable synthetic calibration partial is unreadable") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("durable synthetic calibration partial must be an object")
+    contract.validate_synthetic_result(
+        root=root,
+        value=value,
+        require_complete=False,
+        require_approval=approval_digest is not None,
+    )
+    if value.get("preview_digest") != preview_digest:
+        raise ValueError("durable synthetic calibration preview digest drifted")
+    if value.get("approval_digest") != approval_digest:
+        raise ValueError("durable synthetic calibration approval digest drifted")
+    completed = value.get("completed_cases")
+    if (
+        not isinstance(completed, int)
+        or isinstance(completed, bool)
+        or completed > len(in_memory_results)
+    ):
+        raise ValueError("durable synthetic calibration count exceeds observed results")
+    durable_results = value.get("results")
+    expected_results = [dict(item) for item in in_memory_results[:completed]]
+    if durable_results != expected_results:
+        raise ValueError("durable synthetic calibration result prefix drifted")
+    return dict(value)
+
+
 def _synthetic_metrics(
     rows: Sequence[Mapping[str, Any]], results: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -174,101 +268,199 @@ def run_synthetic_calibration(
     if approval_digest is not None and not contract.SHA256.fullmatch(approval_digest):
         raise ValueError("synthetic calibration approval digest is invalid")
     results: list[dict[str, Any]] = []
-    for ordinal, row in enumerate(rows, start=1):
-        prompt = _prompt(rubric_value, row)
-        _reject_secret_values(prompt, secret_values, "synthetic judge prompt")
-        payload: dict[str, Any] | None = None
-        usage: dict[str, Any] = {}
-        try:
-            payload, usage = requester(prompt)
-        except Exception as exc:
-            failure = _failure_document(
-                preview=preview,
-                approval_digest=approval_digest,
-                case_id=str(row["id"]),
-                case_ordinal=ordinal,
-                completed_cases=len(results),
-                error=exc,
-                payload=None,
-                response_returned=False,
-                usage=getattr(exc, "usage", {}),
-            )
-            _validate_failure_document(failure, preview=preview)
-            failure_output = _failure_output_path(
-                output,
-                preview_digest=str(preview["preview_digest"]),
-                case_ordinal=ordinal,
-            )
-            _atomic_write(failure_output, failure)
-            exc.add_note(f"failure receipt: {failure_output.as_posix()}")
-            raise
-        try:
+    latest_partial: dict[str, Any] | None = None
+    attempted_requests = 0
+    active_case_id: str | None = None
+    active_case_ordinal: int | None = None
+    response_returned = False
+    try:
+        for ordinal, row in enumerate(rows, start=1):
+            active_case_id = str(row["id"])
+            active_case_ordinal = ordinal
+            response_returned = False
+            prompt = _prompt(rubric_value, row)
+            _reject_secret_values(prompt, secret_values, "synthetic judge prompt")
+            payload: dict[str, Any] | None = None
+            usage: dict[str, Any] = {}
+            attempted_requests = ordinal
+            try:
+                payload, usage = requester(prompt)
+                response_returned = True
+            except Exception as exc:
+                failure = _failure_document(
+                    preview=preview,
+                    approval_digest=approval_digest,
+                    case_id=str(row["id"]),
+                    case_ordinal=ordinal,
+                    completed_cases=len(results),
+                    error=exc,
+                    payload=None,
+                    response_returned=False,
+                    usage=getattr(exc, "usage", {}),
+                )
+                _validate_failure_document(failure, preview=preview)
+                failure_output = _failure_output_path(
+                    output,
+                    preview_digest=str(preview["preview_digest"]),
+                    case_ordinal=ordinal,
+                )
+                _atomic_write(failure_output, failure)
+                exc.add_note(f"failure receipt: {failure_output.as_posix()}")
+                raise
+            try:
+                _reject_secret_values(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    secret_values,
+                    "synthetic judge raw result",
+                )
+                validated = _validate_provider_payload(payload)
+            except (TypeError, ValueError) as exc:
+                failure = _failure_document(
+                    preview=preview,
+                    approval_digest=approval_digest,
+                    case_id=str(row["id"]),
+                    case_ordinal=ordinal,
+                    completed_cases=len(results),
+                    error=exc,
+                    payload=payload,
+                    response_returned=True,
+                    usage=usage,
+                )
+                _validate_failure_document(failure, preview=preview)
+                failure_output = _failure_output_path(
+                    output,
+                    preview_digest=str(preview["preview_digest"]),
+                    case_ordinal=ordinal,
+                )
+                _atomic_write(failure_output, failure)
+                exc.add_note(f"failure receipt: {failure_output.as_posix()}")
+                raise
             _reject_secret_values(
-                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                json.dumps(validated, sort_keys=True),
                 secret_values,
-                "synthetic judge raw result",
+                "synthetic judge result",
             )
-            validated = _validate_provider_payload(payload)
-        except (TypeError, ValueError) as exc:
-            failure = _failure_document(
-                preview=preview,
+            results.append(
+                {
+                    "case_id": row["id"],
+                    "repository_id": row["repository_id"],
+                    "split": row["split"],
+                    **validated,
+                    "usage": {
+                        "input_tokens": usage.get("input_tokens"),
+                        "output_tokens": usage.get("output_tokens"),
+                    },
+                }
+            )
+            partial = _result_document(
+                cases_artifact_path=summary["calibration_cases_artifact_path"],
+                cases_artifact_sha256=summary["calibration_cases_artifact_sha256"],
+                cases_digest=cases_summary["cases_digest"],
+                rubric_digest=rubric_summary["contract_digest"],
+                runner_artifact_path=str(preview["runner_artifact_path"]),
+                runner_artifact_sha256=str(preview["runner_artifact_sha256"]),
+                response_schema_digest=str(preview["response_schema_digest"]),
+                response_request_mode=str(preview["response_request_mode"]),
+                response_validator_version=int(preview["response_validator_version"]),
+                rows=rows,
+                results=results,
+                preview_digest=resolved_preview_digest,
                 approval_digest=approval_digest,
-                case_id=str(row["id"]),
-                case_ordinal=ordinal,
-                completed_cases=len(results),
-                error=exc,
-                payload=payload,
-                response_returned=True,
-                usage=usage,
             )
-            _validate_failure_document(failure, preview=preview)
-            failure_output = _failure_output_path(
-                output,
-                preview_digest=str(preview["preview_digest"]),
-                case_ordinal=ordinal,
+            contract.validate_synthetic_result(
+                root=root,
+                value=partial,
+                require_complete=False,
+                require_approval=approval_digest is not None,
             )
-            _atomic_write(failure_output, failure)
-            exc.add_note(f"failure receipt: {failure_output.as_posix()}")
-            raise
-        _reject_secret_values(
-            json.dumps(validated, sort_keys=True),
-            secret_values,
-            "synthetic judge result",
-        )
-        results.append(
-            {
-                "case_id": row["id"],
-                "repository_id": row["repository_id"],
-                "split": row["split"],
-                **validated,
-                "usage": {
-                    "input_tokens": usage.get("input_tokens"),
-                    "output_tokens": usage.get("output_tokens"),
-                },
-            }
-        )
-        partial = _result_document(
-            cases_artifact_path=summary["calibration_cases_artifact_path"],
-            cases_artifact_sha256=summary["calibration_cases_artifact_sha256"],
-            cases_digest=cases_summary["cases_digest"],
-            rubric_digest=rubric_summary["contract_digest"],
-            runner_artifact_path=str(preview["runner_artifact_path"]),
-            runner_artifact_sha256=str(preview["runner_artifact_sha256"]),
-            response_schema_digest=str(preview["response_schema_digest"]),
-            response_request_mode=str(preview["response_request_mode"]),
-            response_validator_version=int(preview["response_validator_version"]),
-            rows=rows,
-            results=results,
+            _atomic_write(output, partial)
+            latest_partial = partial
+            reachability = contract.synthetic_threshold_reachability(rows, results)
+            if not reachability["reachable"]:
+                termination = _termination_document(
+                    preview=preview,
+                    approval_digest=approval_digest,
+                    status="failed",
+                    reason_code="thresholds_unreachable",
+                    completed_cases=len(results),
+                    attempted_requests=attempted_requests,
+                    current_case_id=None,
+                    current_case_ordinal=None,
+                    response_returned=False,
+                    partial_result_digest=str(partial["result_digest"]),
+                    threshold_reachability=reachability,
+                )
+                _validate_termination_document(
+                    termination,
+                    preview=preview,
+                    expected_reachability=reachability,
+                    expected_partial_result_digest=str(partial["result_digest"]),
+                )
+                termination_output = _termination_output_path(
+                    output,
+                    preview_digest=str(preview["preview_digest"]),
+                    attempted_requests=attempted_requests,
+                    reason_code="thresholds_unreachable",
+                )
+                _atomic_write(termination_output, termination)
+                exc = SyntheticThresholdsUnreachable(
+                    "synthetic calibration thresholds are mathematically unreachable"
+                )
+                exc.add_note(f"termination receipt: {termination_output.as_posix()}")
+                raise exc
+    except KeyboardInterrupt as exc:
+        # Reload after the atomic replace instead of trusting ``latest_partial``.
+        # This closes the signal window between durable replacement and the
+        # following in-memory assignment, and rejects output from another run.
+        latest_partial = _reload_durable_partial(
+            root=root,
+            output=output,
             preview_digest=resolved_preview_digest,
             approval_digest=approval_digest,
+            in_memory_results=results,
         )
-        contract.validate_synthetic_result(
-            root=root,
-            value=partial,
-            require_complete=False,
-            require_approval=approval_digest is not None,
+        durable_completed = (
+            int(latest_partial["completed_cases"]) if latest_partial is not None else 0
         )
-        _atomic_write(output, partial)
+        durable_results = results[:durable_completed]
+        reachability = contract.synthetic_threshold_reachability(rows, durable_results)
+        request_started = attempted_requests > durable_completed
+        termination = _termination_document(
+            preview=preview,
+            approval_digest=approval_digest,
+            status="cancelled",
+            reason_code="operator_cancelled",
+            completed_cases=durable_completed,
+            attempted_requests=attempted_requests,
+            current_case_id=active_case_id if request_started else None,
+            current_case_ordinal=active_case_ordinal if request_started else None,
+            response_returned=response_returned if request_started else False,
+            partial_result_digest=(
+                str(latest_partial["result_digest"])
+                if latest_partial is not None
+                else None
+            ),
+            threshold_reachability=reachability,
+        )
+        _validate_termination_document(
+            termination,
+            preview=preview,
+            expected_reachability=reachability,
+            expected_partial_result_digest=(
+                str(latest_partial["result_digest"])
+                if latest_partial is not None
+                else None
+            ),
+        )
+        termination_output = _termination_output_path(
+            output,
+            preview_digest=str(preview["preview_digest"]),
+            attempted_requests=attempted_requests,
+            reason_code="operator_cancelled",
+        )
+        _atomic_write(termination_output, termination)
+        exc.add_note(f"termination receipt: {termination_output.as_posix()}")
+        raise
     final = _result_document(
         cases_artifact_path=summary["calibration_cases_artifact_path"],
         cases_artifact_sha256=summary["calibration_cases_artifact_sha256"],
@@ -311,14 +503,8 @@ def _result_document(
     approval_digest: str | None,
 ) -> dict[str, Any]:
     complete = len(results) == len(rows) == 48
-    run_accounted_cost = round(
-        len(results) * SYNTHETIC_BUDGET_CEILING_USD / MAX_REQUESTS,
-        6,
-    )
-    cumulative_accounted_cost = round(
-        PRIOR_ACCOUNTED_RESERVE_USD + run_accounted_cost,
-        6,
-    )
+    run_accounted_cost = _run_accounted_reserve(len(results))
+    cumulative_accounted_cost = _cumulative_accounted_reserve(len(results))
     receipt_unsigned = {
         "schema_version": 1,
         "role": "advisory_synthetic_calibration",
@@ -419,9 +605,206 @@ def _failure_output_path(
     if not 1 <= case_ordinal <= MAX_REQUESTS:
         raise ValueError("synthetic judge failure case ordinal is invalid")
     return output.with_name(
-        f"{output.name}.{preview_digest[:16]}."
-        f"case-{case_ordinal:02d}.failure.json"
+        f"{output.name}.{preview_digest[:16]}.case-{case_ordinal:02d}.failure.json"
     )
+
+
+def _termination_output_path(
+    output: Path,
+    *,
+    preview_digest: str,
+    attempted_requests: int,
+    reason_code: str,
+) -> Path:
+    if not contract.SHA256.fullmatch(preview_digest):
+        raise ValueError("synthetic judge termination preview digest is invalid")
+    _run_accounted_reserve(attempted_requests)
+    if reason_code not in TERMINATION_REASON_CODES:
+        raise ValueError("synthetic judge termination reason is invalid")
+    return output.with_name(
+        f"{output.name}.{preview_digest[:16]}.after-{attempted_requests:02d}."
+        f"{reason_code}.json"
+    )
+
+
+def _termination_document(
+    *,
+    preview: Mapping[str, Any],
+    approval_digest: str | None,
+    status: str,
+    reason_code: str,
+    completed_cases: int,
+    attempted_requests: int,
+    current_case_id: str | None,
+    current_case_ordinal: int | None,
+    response_returned: bool,
+    partial_result_digest: str | None,
+    threshold_reachability: Mapping[str, Any],
+) -> dict[str, Any]:
+    unsigned = {
+        "schema_version": 1,
+        "kind": "synthetic_judge_run_termination",
+        "status": status,
+        "reason_code": reason_code,
+        "model": MODEL,
+        "completed_cases": completed_cases,
+        "attempted_requests": attempted_requests,
+        "maximum_requests": MAX_REQUESTS,
+        "automatic_retries": 0,
+        "current_case_id": current_case_id,
+        "current_case_ordinal": current_case_ordinal,
+        "response_returned": response_returned,
+        "partial_result_digest": partial_result_digest,
+        "threshold_reachability": dict(threshold_reachability),
+        "preview_digest": preview["preview_digest"],
+        "approval_digest": approval_digest,
+        "runner_artifact_path": preview["runner_artifact_path"],
+        "runner_artifact_sha256": preview["runner_artifact_sha256"],
+        "response_schema_digest": preview["response_schema_digest"],
+        "response_request_mode": preview["response_request_mode"],
+        "response_validator_version": preview["response_validator_version"],
+        "campaign_allocation_usd": CAMPAIGN_ALLOCATION_USD,
+        "prior_failed_requests": PRIOR_FAILED_REQUESTS,
+        "prior_accounted_reserve_usd": PRIOR_ACCOUNTED_RESERVE_USD,
+        "run_accounted_reserve_usd": _run_accounted_reserve(attempted_requests),
+        "cumulative_accounted_reserve_usd": _cumulative_accounted_reserve(
+            attempted_requests
+        ),
+        "raw_response_persisted": False,
+    }
+    return {**unsigned, "termination_digest": contract.stable_digest(unsigned)}
+
+
+def _validate_termination_document(
+    value: Mapping[str, Any],
+    *,
+    preview: Mapping[str, Any],
+    expected_reachability: Mapping[str, Any],
+    expected_partial_result_digest: str | None,
+) -> None:
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "status",
+        "reason_code",
+        "model",
+        "completed_cases",
+        "attempted_requests",
+        "maximum_requests",
+        "automatic_retries",
+        "current_case_id",
+        "current_case_ordinal",
+        "response_returned",
+        "partial_result_digest",
+        "threshold_reachability",
+        "preview_digest",
+        "approval_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+        "response_schema_digest",
+        "response_request_mode",
+        "response_validator_version",
+        "campaign_allocation_usd",
+        "prior_failed_requests",
+        "prior_accounted_reserve_usd",
+        "run_accounted_reserve_usd",
+        "cumulative_accounted_reserve_usd",
+        "raw_response_persisted",
+        "termination_digest",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("synthetic judge termination receipt fields do not match")
+    unsigned = dict(value)
+    supplied_digest = str(unsigned.pop("termination_digest", "") or "")
+    if not contract.SHA256.fullmatch(supplied_digest) or supplied_digest != (
+        contract.stable_digest(unsigned)
+    ):
+        raise ValueError("synthetic judge termination receipt digest disagrees")
+    for field in (
+        "preview_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+        "response_schema_digest",
+        "response_request_mode",
+        "response_validator_version",
+    ):
+        if value[field] != preview[field]:
+            raise ValueError(f"synthetic judge termination receipt {field} drifted")
+    if (
+        value["schema_version"] != 1
+        or value["kind"] != "synthetic_judge_run_termination"
+        or value["model"] != MODEL
+        or value["automatic_retries"] != 0
+        or value["maximum_requests"] != MAX_REQUESTS
+        or value["raw_response_persisted"] is not False
+        or not isinstance(value["response_returned"], bool)
+    ):
+        raise ValueError("synthetic judge termination receipt contract disagrees")
+    completed = value["completed_cases"]
+    attempted = value["attempted_requests"]
+    if (
+        not isinstance(completed, int)
+        or isinstance(completed, bool)
+        or not 0 <= completed <= MAX_REQUESTS
+        or not isinstance(attempted, int)
+        or isinstance(attempted, bool)
+        or not completed <= attempted <= min(completed + 1, MAX_REQUESTS)
+    ):
+        raise ValueError("synthetic judge termination request counts disagree")
+    partial_digest = value["partial_result_digest"]
+    if partial_digest != expected_partial_result_digest:
+        raise ValueError("synthetic judge termination partial digest disagrees")
+    if completed:
+        if not isinstance(partial_digest, str) or not contract.SHA256.fullmatch(
+            partial_digest
+        ):
+            raise ValueError("synthetic judge termination partial digest is invalid")
+    elif partial_digest is not None:
+        raise ValueError("synthetic judge termination cannot bind an absent partial")
+    if value["threshold_reachability"] != dict(expected_reachability) or (
+        expected_reachability.get("completed_cases") != completed
+    ):
+        raise ValueError("synthetic judge termination reachability disagrees")
+    reason_code = value["reason_code"]
+    if reason_code == "thresholds_unreachable":
+        if (
+            value["status"] != "failed"
+            or attempted != completed
+            or value["current_case_id"] is not None
+            or value["current_case_ordinal"] is not None
+            or value["response_returned"] is not False
+            or expected_reachability.get("reachable") is not False
+        ):
+            raise ValueError("synthetic threshold termination contract disagrees")
+    elif reason_code == "operator_cancelled":
+        request_started = attempted == completed + 1
+        if value["status"] != "cancelled":
+            raise ValueError("synthetic cancellation status disagrees")
+        if request_started:
+            if (
+                not str(value["current_case_id"] or "")
+                or value["current_case_ordinal"] != attempted
+            ):
+                raise ValueError("synthetic cancellation active request disagrees")
+        elif (
+            value["current_case_id"] is not None
+            or value["current_case_ordinal"] is not None
+            or value["response_returned"] is not False
+        ):
+            raise ValueError("synthetic cancellation idle state disagrees")
+    else:
+        raise ValueError("synthetic judge termination reason is invalid")
+    expected_run_reserve = _run_accounted_reserve(attempted)
+    expected_cumulative = _cumulative_accounted_reserve(attempted)
+    if (
+        value["campaign_allocation_usd"] != CAMPAIGN_ALLOCATION_USD
+        or value["prior_failed_requests"] != PRIOR_FAILED_REQUESTS
+        or value["prior_accounted_reserve_usd"] != PRIOR_ACCOUNTED_RESERVE_USD
+        or value["run_accounted_reserve_usd"] != expected_run_reserve
+        or value["cumulative_accounted_reserve_usd"] != expected_cumulative
+        or expected_cumulative > CAMPAIGN_ALLOCATION_USD
+    ):
+        raise ValueError("synthetic judge termination cost contract disagrees")
 
 
 def _failure_document(
@@ -473,14 +856,8 @@ def _failure_document(
             else "provider_request_failed"
         )
     attempted_requests = completed_cases + 1
-    run_accounted_reserve = round(
-        attempted_requests * SYNTHETIC_BUDGET_CEILING_USD / MAX_REQUESTS,
-        6,
-    )
-    cumulative_accounted_reserve = round(
-        PRIOR_ACCOUNTED_RESERVE_USD + run_accounted_reserve,
-        6,
-    )
+    run_accounted_reserve = _run_accounted_reserve(attempted_requests)
+    cumulative_accounted_reserve = _cumulative_accounted_reserve(attempted_requests)
     unsigned = {
         "schema_version": 1,
         "kind": "synthetic_judge_request_failure",
@@ -629,6 +1006,7 @@ def dry_run_summary(root: Path) -> dict[str, Any]:
 def calibration_preview(root: Path) -> dict[str, Any]:
     summary = contract.validate_all(root)
     runner = contract.calibration_runner_artifact(root)
+    validator = contract.calibration_validator_artifact(root)
     return contract.calibration_preview_document(
         cases_artifact_path=summary["calibration_cases_artifact_path"],
         cases_artifact_sha256=summary["calibration_cases_artifact_sha256"],
@@ -636,6 +1014,8 @@ def calibration_preview(root: Path) -> dict[str, Any]:
         rubric_digest=summary["rubric_digest"],
         runner_artifact_path=runner["path"],
         runner_artifact_sha256=runner["sha256"],
+        validator_artifact_path=validator["path"],
+        validator_artifact_sha256=validator["sha256"],
         response_schema_digest=contract.provider_response_schema_digest(),
         response_request_mode=contract.CALIBRATION_RESPONSE_REQUEST_MODE,
         response_validator_version=contract.PROVIDER_RESPONSE_VALIDATOR_VERSION,

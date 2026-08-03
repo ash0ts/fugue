@@ -188,6 +188,8 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["n_cache_tokens"] == 0
     assert row["n_output_tokens"] == 5
     assert row["cost_usd"] == 0.01
+    assert row["changed_paths_status"] == "unavailable"
+    assert row["inspected_paths_status"] == "unavailable"
 
     out = tmp_path / "pilot.jsonl"
     write_jsonl(rows, out)
@@ -271,9 +273,9 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.failed = exception
 
     fake_weave = SimpleNamespace(
-            init=lambda project, **kwargs: calls.append(
-                ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
-            ),
+        init=lambda project, **kwargs: calls.append(
+            ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
+        ),
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
     )
@@ -1016,15 +1018,14 @@ def test_weave_publication_shares_dataset_across_candidates(
         "memory-ab | coding | codex | none",
         "memory-ab | coding | codex | rag-bm25",
     }
-    assert len(
-        {
-            logger.eval_attributes["fugue.evaluation_scope_id"]
-            for logger in loggers
-        }
-    ) == 1
-    assert {
-        logger.eval_attributes["fugue.candidate_id"] for logger in loggers
-    } == {"candidate-none", "candidate-rag"}
+    assert (
+        len({logger.eval_attributes["fugue.evaluation_scope_id"] for logger in loggers})
+        == 1
+    )
+    assert {logger.eval_attributes["fugue.candidate_id"] for logger in loggers} == {
+        "candidate-none",
+        "candidate-rag",
+    }
     assert loggers[0].scorers == loggers[1].scorers
     assert {logger.model["name"] for logger in loggers} == {
         "codex__none__test-model",
@@ -1138,9 +1139,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 parent_id=evaluate_call.id,
                 trace_id=evaluate_call.trace_id,
                 summary=None,
-                ref=SimpleNamespace(
-                    uri=f"weave:///entity/project/call/{call_id}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///entity/project/call/{call_id}"),
                 ui_url=f"https://wandb.test/calls/{call_id}",
             )
             self.predict_call = SimpleNamespace(
@@ -1172,9 +1171,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             self.ui_url = None
             self._pseudo_evaluation = SimpleNamespace(
                 dataset=self.dataset,
-                ref=SimpleNamespace(
-                    uri="weave:///entity/project/object/eval:shared"
-                ),
+                ref=SimpleNamespace(uri="weave:///entity/project/object/eval:shared"),
             )
             self._evaluate_call = SimpleNamespace(
                 id="evaluation-root-1",
@@ -1422,10 +1419,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["agent_graph_verified"] is True
     assert live_row["evaluation_judge_status"] == "not_requested"
     assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
-    assert (
-        predictions[0].scores["comparison.deterministic.citation-quality"]
-        == 0.75
-    )
+    assert predictions[0].scores["comparison.deterministic.citation-quality"] == 0.75
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
@@ -1458,9 +1452,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
 ) -> None:
     project = "entity/project"
     dataset = SimpleNamespace(
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/object/tasks:dataset-v1"
-        )
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
     )
     evaluation = SimpleNamespace(
         dataset=dataset,
@@ -1472,18 +1464,14 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         parent_id=None,
         trace_id="weave-trace",
         inputs={"self": evaluation},
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/evaluation-root"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
     )
     predict_and_score = SimpleNamespace(
         id="predict-and-score",
         project_id=project,
         parent_id=evaluation_call.id,
         trace_id=evaluation_call.trace_id,
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/predict-and-score"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/predict-and-score"),
         ui_url="https://wandb.test/calls/predict-and-score",
     )
     predict = SimpleNamespace(
@@ -1508,9 +1496,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         evaluation_call.inputs = {"self": SimpleNamespace(dataset=dataset)}
     elif drift == "dataset_owner":
         evaluation.dataset = SimpleNamespace(
-            ref=SimpleNamespace(
-                uri="weave:///entity/project/object/other-dataset:v1"
-            )
+            ref=SimpleNamespace(uri="weave:///entity/project/object/other-dataset:v1")
         )
     elif drift == "predict_and_score_parent":
         predict_and_score.parent_id = "other-evaluation"
@@ -2021,9 +2007,7 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
                 parent_id=parent.id,
                 project_id=project,
                 trace_id=parent.trace_id,
-                ref=SimpleNamespace(
-                    uri=f"weave:///{project}/call/{_call_id_override}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///{project}/call/{_call_id_override}"),
             )
 
         @staticmethod
@@ -2269,16 +2253,14 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     coordinator.project = "entity/project"
     coordinator._wait_for_trace = lambda row, **kwargs: {}
     coordinator._append_event = lambda *args, **kwargs: None
-    coordinator._record_verified_agent_root = (
-        lambda **kwargs: (
-            events.append("verified"),
-            kwargs["row"].update(
-                {
-                    "trace_link_status": "linked",
-                    "trace_link_error": None,
-                }
-            ),
-        )
+    coordinator._record_verified_agent_root = lambda **kwargs: (
+        events.append("verified"),
+        kwargs["row"].update(
+            {
+                "trace_link_status": "linked",
+                "trace_link_error": None,
+            }
+        ),
     )
     monkeypatch.setattr(
         export,
@@ -2293,9 +2275,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     monkeypatch.setattr(
         export,
         "_verify_authoritative_agent_graph",
-        lambda row: row.update(
-            {"weave_authoritative_call_graph_verified": True}
-        ),
+        lambda row: row.update({"weave_authoritative_call_graph_verified": True}),
     )
     cell = SimpleNamespace(
         harness=harness,
@@ -2309,9 +2289,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     }
     active = export._LivePrediction(
         session=SimpleNamespace(),
-        prediction=SimpleNamespace(
-            predict_and_score_call=SimpleNamespace(summary={})
-        ),
+        prediction=SimpleNamespace(predict_and_score_call=SimpleNamespace(summary={})),
         bridge_call=SimpleNamespace(
             id="bridge",
             project_id="entity/project",
@@ -2345,9 +2323,7 @@ def test_live_evaluation_marks_exact_prediction_ops_eager() -> None:
     logger_type = type("EvaluationLogger", (), {})
     logger_type.__module__ = "weave.evaluation.eval_imperative"
     logger = logger_type()
-    logger._pseudo_evaluation = SimpleNamespace(
-        predict_and_score=predict_and_score
-    )
+    logger._pseudo_evaluation = SimpleNamespace(predict_and_score=predict_and_score)
     logger._context_predict_method = predict
 
     assert export._enable_eager_evaluation_starts(logger) is True
@@ -2441,8 +2417,7 @@ def test_claude_begin_failure_closes_entered_prediction(
     statuses = [
         json.loads(line)["status"]
         for line in (
-            tmp_path
-            / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
+            tmp_path / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
         )
         .read_text()
         .splitlines()
@@ -3113,17 +3088,17 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                         "max_evals": 20,
                         "run_id": "maint-r18-06",
                         "keys": ["_step", "latency_ms"],
-                            "samples": 5,
-                            "parent_filter_digest": "a" * 64,
-                            "parent_filter_count": 1,
-                            "columns": [
+                        "samples": 5,
+                        "parent_filter_digest": "a" * 64,
+                        "parent_filter_count": 1,
+                        "columns": [
                             "id",
                             "config.attempt_label",
                             "summary.latency_ms",
                         ],
-                            "filters": {
-                                "limit": 6,
-                                "op_name_contains": "predict_and_score",
+                        "filters": {
+                            "limit": 6,
+                            "op_name_contains": "predict_and_score",
                             "private_query": "must-not-be-exported",
                         },
                     },
@@ -3136,9 +3111,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                     "request_id": "summary-1",
                     "arguments": {
                         "scope": {
-                            "project_ref": (
-                                "wandb/fugue-mcp-release-qualification-v1"
-                            )
+                            "project_ref": ("wandb/fugue-mcp-release-qualification-v1")
                         }
                     },
                 },
@@ -3191,9 +3164,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
         "query_wandb_tool",
         "summarize_evaluation_tool",
     ]
-    assert calls[0]["queried_project"] == (
-        "wandb/fugue-mcp-release-qualification-v1"
-    )
+    assert calls[0]["queried_project"] == ("wandb/fugue-mcp-release-qualification-v1")
     assert calls[0]["resource"] == "run"
     assert calls[0]["response_mode"] == "items"
     assert calls[0]["target_x"] == 3
@@ -3212,9 +3183,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ]
     assert calls[0]["limit"] == 6
     assert calls[0]["parent_filter_count"] == 1
-    assert calls[0]["op_name_filter"] == {
-        "op_name_contains": ["predict_and_score"]
-    }
+    assert calls[0]["op_name_filter"] == {"op_name_contains": ["predict_and_score"]}
     assert calls[0]["terminal_status"] == "succeeded"
     assert calls[0]["successful"] is True
     assert calls[0]["response_metadata_verified"] is True
@@ -4028,11 +3997,7 @@ def _verified_checkpoint_links(destination: Mapping[str, object]) -> dict[str, o
 
 def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() -> None:
     destination = export.trace_destination_identity(
-        {
-            "FUGUE_WEAVE_PROJECT": (
-                "wandb/fugue-mcp-release-qualification-v1"
-            )
-        }
+        {"FUGUE_WEAVE_PROJECT": ("wandb/fugue-mcp-release-qualification-v1")}
     )
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4077,9 +4042,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     advisory_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "advisory_unavailable",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
     }
     assert (
         export._live_evidence_checkpoint_failures(
@@ -4092,9 +4055,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     required_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "failed",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
         "comparison_judge_checkpoint_required_unavailable": [
             "maintainer-actionability"
         ],
@@ -4109,8 +4070,9 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     )
 
 
-def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure(
-) -> None:
+def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure() -> (
+    None
+):
     destination = export.trace_destination_identity(
         {"FUGUE_WEAVE_PROJECT": "wandb/qualification"}
     )
@@ -4128,9 +4090,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     }
     coordinator._negative_routing_receipt = lambda row: {"status": "passed"}
     events: list[tuple[str, dict[str, object]]] = []
-    coordinator._append_event = (
-        lambda status, **values: events.append((status, values))
-    )
+    coordinator._append_event = lambda status, **values: events.append((status, values))
     cell = SimpleNamespace(id="cell-a")
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4179,7 +4139,9 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     assert "evidence_checkpoint_status" not in after_limit
 
 
-def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> None:
+def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> (
+    None
+):
     class Ref:
         def __init__(self, uri: str) -> None:
             self._uri = uri
@@ -5354,9 +5316,7 @@ def test_agent_root_accepts_external_bridge_parent_but_excludes_nested_agent() -
     )
 
     assert summary["otel_root_span_ids"] == ["a" * 16]
-    assert [root["span_id"] for root in summary["weave_root_spans"]] == [
-        "a" * 16
-    ]
+    assert [root["span_id"] for root in summary["weave_root_spans"]] == ["a" * 16]
 
 
 def test_observed_identity_accepts_benchmark_task_namespace() -> None:
@@ -5651,10 +5611,14 @@ def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
                         "observation": {
                             "results": [
                                 {
+                                    "source_call_id": "read",
+                                    "content": "source text",
+                                },
+                                {
                                     "source_call_id": "write",
                                     "content": "'content' must be a string, got dict",
                                     "extra": {"tool_result_is_error": True},
-                                }
+                                },
                             ]
                         },
                     }
@@ -5666,7 +5630,8 @@ def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
     activity = export._trajectory_activity(trial)
 
     assert activity["inspected_paths"] == ["src/app.py", "src/other.py"]
-    assert activity["changed_paths"] == ["src/app.py"]
+    assert activity["inspected_paths_status"] == "available"
+    assert activity["changed_paths"] == []
     assert activity["error_events"][0]["kind"] == "invalid_tool_arguments"
 
 
@@ -5849,28 +5814,28 @@ def test_agent_spans_are_authoritative_when_calls_repeat_same_activity() -> None
     }
     summary = _summarize_spans(
         [
-                {
-                    **shared_tool,
-                    "span_id": "otel-tool",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_tool,
-                    "id": "weave-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "span_id": "otel-chat",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "id": "weave-chat-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-            ]
-        )
+            {
+                **shared_tool,
+                "span_id": "otel-tool",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_tool,
+                "id": "weave-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+            {
+                **shared_chat,
+                "span_id": "otel-chat",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_chat,
+                "id": "weave-chat-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+        ]
+    )
 
     assert summary["weave_span_count"] == 2
     assert summary["weave_tool_call_count"] == 1
@@ -6017,9 +5982,7 @@ def test_export_synthesizes_interrupted_trial_preserving_planned_identity(
 ) -> None:
     jobs = tmp_path / "jobs"
     jobs.mkdir()
-    run_key = (
-        "run-1:harbor:cell:routing-plan:claude-code:none:candidate:t001"
-    )
+    run_key = "run-1:harbor:cell:routing-plan:claude-code:none:candidate:t001"
     shared = {
         "cell_id": "cell-1",
         "run_key": run_key,

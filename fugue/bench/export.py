@@ -2945,12 +2945,14 @@ _LOCAL_RESULT_FIELDS = {
     "agent_runtime_completed",
     "agent_evidence_paths",
     "changed_paths",
+    "changed_paths_status",
     "citation_correctness",
     "evaluation_scope_id",
     "evidence_paths",
     "evidence_recall",
     "evaluation_asset_lock_sha256",
     "inspected_paths",
+    "inspected_paths_status",
     "local_error_events",
     "relevant_retrieval_returned",
     "relevant_retrieval_used",
@@ -6059,9 +6061,16 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         }
         - assigned_integration_ids
     )
+    changed_paths_status = str(meta.get("changed_paths_status") or "unavailable")
+    if changed_paths_status not in {"available", "unavailable"}:
+        changed_paths_status = "unavailable"
     evidence = _evidence_summary(
         trial_dir,
-        changed_paths=meta.get("changed_paths") or [],
+        changed_paths=(
+            meta.get("changed_paths") or []
+            if changed_paths_status == "available"
+            else []
+        ),
     )
     trajectory_activity = _trajectory_activity(trial_dir)
     inspected_paths = trajectory_activity["inspected_paths"]
@@ -6235,7 +6244,9 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         **retrieval_activity,
         **evidence,
         "inspected_paths": inspected_paths,
+        "inspected_paths_status": trajectory_activity["inspected_paths_status"],
         "changed_paths": changed_paths,
+        "changed_paths_status": changed_paths_status,
         "local_error_events": [
             *trajectory_activity["error_events"],
             *([terminal_error] if terminal_error else []),
@@ -7452,7 +7463,21 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
     try:
         trajectory = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
-        return {"inspected_paths": [], "changed_paths": [], "error_events": []}
+        return {
+            "inspected_paths": [],
+            "inspected_paths_status": "unavailable",
+            "changed_paths": [],
+            "error_events": [],
+        }
+    if not isinstance(trajectory, dict) or not isinstance(
+        trajectory.get("steps", []), list
+    ):
+        return {
+            "inspected_paths": [],
+            "inspected_paths_status": "unavailable",
+            "changed_paths": [],
+            "error_events": [],
+        }
     inspected: list[str] = []
     changed: list[str] = []
     errors: list[dict[str, Any]] = []
@@ -7472,16 +7497,6 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
                 call.get("function_name") or call.get("tool_name") or "unknown"
             )
             arguments = call.get("arguments") or {}
-            paths = _paths_from_tool_arguments(arguments)
-            normalized_name = tool_name.lower()
-            if normalized_name in _WRITE_TOOLS:
-                changed.extend(paths)
-            elif normalized_name in _READ_TOOLS:
-                inspected.extend(paths)
-            if isinstance(arguments, dict):
-                command = arguments.get("command")
-                if isinstance(command, str):
-                    inspected.extend(_paths_from_command(command))
             call_id = str(call.get("tool_call_id") or call.get("id") or "")
             result = results.get(call_id)
             if result and _local_tool_result_failed(result):
@@ -7494,8 +7509,25 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
                         event_key=call_id,
                     )
                 )
+                continue
+            # A requested path is not evidence that the operation occurred.
+            # Count it only when the trajectory contains a correlated,
+            # successful result for the call.
+            if result is None:
+                continue
+            paths = _paths_from_tool_arguments(arguments)
+            normalized_name = tool_name.lower()
+            if normalized_name in _WRITE_TOOLS:
+                changed.extend(paths)
+            elif normalized_name in _READ_TOOLS:
+                inspected.extend(paths)
+            if isinstance(arguments, dict):
+                command = arguments.get("command")
+                if isinstance(command, str):
+                    inspected.extend(_paths_from_command(command))
     return {
         "inspected_paths": list(dict.fromkeys(inspected)),
+        "inspected_paths_status": "available",
         "changed_paths": list(dict.fromkeys(changed)),
         "error_events": errors,
     }

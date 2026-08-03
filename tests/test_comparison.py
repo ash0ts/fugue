@@ -38,6 +38,7 @@ from fugue.bench.comparison import (
     check_comparison,
     claim_comparison_approval,
     comparison_from_dict,
+    comparison_judge_public_rubric_contract,
     compile_comparison,
     execute_comparison,
     load_comparison,
@@ -69,9 +70,7 @@ from fugue.research.store import StudyStore
 
 EXAMPLE = Path("examples/comparisons/source-use-replay")
 LIVE_SKILL_EXAMPLE = Path("examples/comparisons/source-use-skill")
-MCP_MAINTENANCE_EXAMPLE = Path(
-    "examples/comparisons/wandb-mcp-maintenance"
-)
+MCP_MAINTENANCE_EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
 
 
 def test_source_use_comparison_is_ready_and_exact() -> None:
@@ -148,9 +147,7 @@ def test_materialization_reuses_preview_operator_context(
 
 def test_live_source_use_skill_comparison_has_locked_holdout_resources() -> None:
     root = Path.cwd()
-    spec = load_comparison(
-        LIVE_SKILL_EXAMPLE / "comparison.yaml", repo_root=root
-    )
+    spec = load_comparison(LIVE_SKILL_EXAMPLE / "comparison.yaml", repo_root=root)
 
     readiness = check_comparison(spec, repo_root=root)
     preview = preview_comparison(spec, repo_root=root)
@@ -162,9 +159,7 @@ def test_live_source_use_skill_comparison_has_locked_holdout_resources() -> None
     assert readiness.actual_changes == ("skills",)
     assert readiness.estimated_cells == 32
     assert preview.matrix["estimated_trials"] == 32
-    assert {cell["harness"] for cell in preview.matrix["matrix_cells"]} == {
-        "codex"
-    }
+    assert {cell["harness"] for cell in preview.matrix["matrix_cells"]} == {"codex"}
 
 
 @pytest.mark.parametrize(
@@ -348,9 +343,7 @@ def test_comparison_evidence_project_is_locked_into_readiness_and_preview() -> N
 
     assert first_readiness.evidence_project == "wandb/fugue-comparison-a"
     assert first_preview.matrix["evidence_project"] == "wandb/fugue-comparison-a"
-    assert first_preview.experiment["evidence_project"] == (
-        "wandb/fugue-comparison-a"
-    )
+    assert first_preview.experiment["evidence_project"] == ("wandb/fugue-comparison-a")
     design = build_comparison_design_view(first_preview.to_dict())
     progress = build_comparison_progress_view(
         first_preview.to_dict(),
@@ -373,9 +366,7 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
 ) -> None:
     root = Path.cwd()
     raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
-    raw["execution"]["evidence_project"] = (
-        "wandb/fugue-mcp-release-qualification-v1"
-    )
+    raw["execution"]["evidence_project"] = "wandb/fugue-mcp-release-qualification-v1"
     raw["execution"]["evidence_destination"] = {
         "entity": "wandb",
         "project": "fugue-mcp-release-qualification-v1",
@@ -561,9 +552,7 @@ def _decision_row(
         "candidate_digest": f"sha256:{variant}",
         "runtime_lock_digest": "sha256:runtime",
         "trace_project": project,
-        "trace_receipt": trace_destination_identity(
-            {"FUGUE_WEAVE_PROJECT": project}
-        ),
+        "trace_receipt": trace_destination_identity({"FUGUE_WEAVE_PROJECT": project}),
         "queried_projects": list(queried_projects),
         "pass": passed,
         "status": "passed",
@@ -585,16 +574,13 @@ def _decision_row(
                 "kind": "mcp",
                 "id": f"wandb-mcp-{variant}",
                 "version_identity": (
-                    "git:"
-                    + ("5" if variant == "candidate" else "3") * 40
+                    "git:" + ("5" if variant == "candidate" else "3") * 40
                 ),
                 "runtime_digest": (
-                    "sha256:"
-                    + ("6" if variant == "candidate" else "4") * 64
+                    "sha256:" + ("6" if variant == "candidate" else "4") * 64
                 ),
                 "lock_digest": (
-                    "sha256:"
-                    + ("7" if variant == "candidate" else "2") * 64
+                    "sha256:" + ("7" if variant == "candidate" else "2") * 64
                 ),
             }
         ],
@@ -604,16 +590,12 @@ def _decision_row(
         },
         "evaluation_id": f"evaluation-{task_id}",
         "weave_evaluation_root_call_id": f"{call_prefix}-evaluation",
-        "weave_evaluation_root_ref": call_ref(
-            f"{call_prefix}-evaluation"
-        ),
+        "weave_evaluation_root_ref": call_ref(f"{call_prefix}-evaluation"),
         "evaluation_url": f"{base_url}/evaluations/{task_id}",
         "evaluation_root_object_verified": True,
         "evaluation_root_dataset_relationship_verified": True,
         "evaluation_root_prediction_relationship_verified": True,
-        "dataset_id": (
-            "weave:///wandb/release-project/object/release-dataset:v1"
-        ),
+        "dataset_id": ("weave:///wandb/release-project/object/release-dataset:v1"),
         "dataset_url": f"{base_url}/objects/release-dataset/versions/v1",
         "dataset_version_object_verified": True,
         "eval_predict_and_score_call_id": f"{call_prefix}-eval",
@@ -621,9 +603,7 @@ def _decision_row(
         "eval_predict_and_score_url": f"{base_url}/call/{call_prefix}-eval",
         "eval_predict_and_score_object_verified": True,
         "prediction_call_id": f"{call_prefix}-prediction",
-        "weave_prediction_ref": call_ref(
-            f"{call_prefix}-prediction"
-        ),
+        "weave_prediction_ref": call_ref(f"{call_prefix}-prediction"),
         "prediction_url": f"{base_url}/call/{call_prefix}-prediction",
         "weave_prediction_object_verified": True,
         "prediction_child_relationship_verified": True,
@@ -838,10 +818,13 @@ def test_shared_release_note_infrastructure_gate_is_emitted_once() -> None:
     )
     decision = _release_note_gate_decision("passed", coverage=coverage)
 
-    assert sum(
-        item.id == "release-note-infrastructure-bounded-timeout"
-        for item in decision.gates
-    ) == 1
+    assert (
+        sum(
+            item.id == "release-note-infrastructure-bounded-timeout"
+            for item in decision.gates
+        )
+        == 1
+    )
 
 
 def test_v2_decision_requires_exact_human_attestation() -> None:
@@ -946,8 +929,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     result_base = "https://wandb.ai/wandb/result-project/weave"
     rows: list[dict[str, object]] = []
     preview_by_attempt = {
-        str(cell["attempt_id"]): cell
-        for cell in preview.matrix["matrix_cells"]
+        str(cell["attempt_id"]): cell for cell in preview.matrix["matrix_cells"]
     }
     for cell in approved["expected_cells"]:
         variant = str(cell["variant_id"])
@@ -1017,44 +999,29 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             "answer": "safe maintainer summary",
         }
         call_prefix = f"{variant}-{cell['trial_index']}"
-        row["evaluation_url"] = (
-            f"{result_base}/calls/{call_prefix}-evaluation"
-        )
-        row["weave_evaluation_root_call_id"] = (
-            f"{call_prefix}-evaluation"
-        )
+        row["evaluation_url"] = f"{result_base}/calls/{call_prefix}-evaluation"
+        row["weave_evaluation_root_call_id"] = f"{call_prefix}-evaluation"
         row["weave_evaluation_root_ref"] = (
-            "weave:///wandb/result-project/call/"
-            f"{call_prefix}-evaluation"
+            f"weave:///wandb/result-project/call/{call_prefix}-evaluation"
         )
-        row["dataset_url"] = (
-            f"{result_base}/objects/release-dataset/versions/v1"
-        )
+        row["dataset_url"] = f"{result_base}/objects/release-dataset/versions/v1"
         row["weave_dataset_id"] = (
-            "weave:///wandb/result-project/object/"
-            "release-dataset:v1"
+            "weave:///wandb/result-project/object/release-dataset:v1"
         )
-        row["eval_predict_and_score_url"] = (
-            f"{result_base}/calls/{call_prefix}-eval"
-        )
+        row["eval_predict_and_score_url"] = f"{result_base}/calls/{call_prefix}-eval"
         row["eval_predict_and_score_call_id"] = f"{call_prefix}-eval"
         row["eval_predict_and_score_ref"] = (
-            "weave:///wandb/result-project/call/"
-            f"{call_prefix}-eval"
+            f"weave:///wandb/result-project/call/{call_prefix}-eval"
         )
-        row["prediction_url"] = (
-            f"{result_base}/calls/{call_prefix}-prediction"
-        )
+        row["prediction_url"] = f"{result_base}/calls/{call_prefix}-prediction"
         row["prediction_call_id"] = f"{call_prefix}-prediction"
         row["weave_prediction_ref"] = (
-            "weave:///wandb/result-project/call/"
-            f"{call_prefix}-prediction"
+            f"weave:///wandb/result-project/call/{call_prefix}-prediction"
         )
         row["agent_url"] = f"{result_base}/calls/{call_prefix}-agent"
         row["native_agent_root_call_id"] = f"{call_prefix}-agent"
         row["weave_agent_root_ref"] = (
-            "weave:///wandb/result-project/call/"
-            f"{call_prefix}-agent"
+            f"weave:///wandb/result-project/call/{call_prefix}-agent"
         )
         rows.append(row)
 
@@ -1073,28 +1040,19 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     assert isinstance(result, ComparisonResultV3)
     assert result.schema_version == 3
-    assert result.evidence_topology.source_destination.project_slug == (
-        source_project
-    )
-    assert result.evidence_topology.result_destination.project_slug == (
-        result_project
-    )
+    assert result.evidence_topology.source_destination.project_slug == (source_project)
+    assert result.evidence_topology.result_destination.project_slug == (result_project)
     assert result.behavioral_summary.status == "improved"
     assert result.supersedes[0].result_digest == "6" * 64
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
-    assert (
-        result.paired_cases[0].candidate.actual_query_scope
-        == (source_project,)
-    )
+    assert result.paired_cases[0].candidate.actual_query_scope == (source_project,)
 
     role_drift = json.loads(json.dumps(rows))
-    candidate_row = next(
-        row for row in role_drift if row["variant_id"] == "candidate"
+    candidate_row = next(row for row in role_drift if row["variant_id"] == "candidate")
+    candidate_row["comparison_dimension_roles"]["release.factual_correctness"] = (
+        "mechanism"
     )
-    candidate_row["comparison_dimension_roles"][
-        "release.factual_correctness"
-    ] = "mechanism"
     with pytest.raises(ValueError, match="one consistent locked role"):
         analyze_comparison_rows(
             comparison_id=spec.id,
@@ -1130,9 +1088,9 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         return path
 
     forged_identity = result.to_dict()
-    forged_identity["paired_cases"][0]["candidate"]["identity"][
-        "candidate"
-    ] = "forged-candidate"
+    forged_identity["paired_cases"][0]["candidate"]["identity"]["candidate"] = (
+        "forged-candidate"
+    )
     with pytest.raises(ValueError, match="attempt identity disagrees"):
         read_comparison_result(
             write_rehashed_result(
@@ -1142,9 +1100,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
 
     incomplete_evidence_chain = result.to_dict()
-    incomplete_evidence_chain["paired_cases"][0]["candidate"][
-        "evidence_links"
-    ].pop()
+    incomplete_evidence_chain["paired_cases"][0]["candidate"]["evidence_links"].pop()
     with pytest.raises(ValueError, match="exactly five unique evidence links"):
         read_comparison_result(
             write_rehashed_result(
@@ -1154,9 +1110,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
 
     wrong_evidence_status = result.to_dict()
-    wrong_evidence_status["paired_cases"][0]["candidate"][
-        "evidence_status"
-    ] = "missing"
+    wrong_evidence_status["paired_cases"][0]["candidate"]["evidence_status"] = "missing"
     with pytest.raises(ValueError, match="evidence status disagrees"):
         read_comparison_result(
             write_rehashed_result(
@@ -1168,15 +1122,11 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     wrong_call_route = result.to_dict()
     evaluation_link = next(
         item
-        for item in wrong_call_route["paired_cases"][0]["candidate"][
-            "evidence_links"
-        ]
+        for item in wrong_call_route["paired_cases"][0]["candidate"]["evidence_links"]
         if item["kind"] == "evaluation_root"
     )
     evaluation_link["ref"] = "weave:///wandb/other-project/call/forged"
-    evaluation_link["url"] = (
-        "https://wandb.ai/wandb/other-project/weave/calls/forged"
-    )
+    evaluation_link["url"] = "https://wandb.ai/wandb/other-project/weave/calls/forged"
     with pytest.raises(ValueError, match="result topology"):
         read_comparison_result(
             write_rehashed_result(
@@ -1186,9 +1136,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
 
     wrong_query_scope = result.to_dict()
-    wrong_query_scope["paired_cases"][0]["candidate"][
-        "actual_query_scope"
-    ] = [source_project, "wandb/other-project"]
+    wrong_query_scope["paired_cases"][0]["candidate"]["actual_query_scope"] = [
+        source_project,
+        "wandb/other-project",
+    ]
     with pytest.raises(ValueError, match="actual query scope disagrees"):
         read_comparison_result(
             write_rehashed_result(
@@ -1213,12 +1164,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     contradictory_pair = result.to_dict()
     contradictory_pair["paired_cases"][0]["status"] = "regressed"
-    contradictory_pair["qualification_digest"] = (
-        _comparison_qualification_digest(contradictory_pair)
+    contradictory_pair["qualification_digest"] = _comparison_qualification_digest(
+        contradictory_pair
     )
-    contradictory_pair["result_digest"] = contradictory_pair[
-        "qualification_digest"
-    ]
+    contradictory_pair["result_digest"] = contradictory_pair["qualification_digest"]
     contradictory_pair_path = destination / "contradictory-pair-result.json"
     contradictory_pair_path.write_text(
         json.dumps(contradictory_pair),
@@ -1229,15 +1178,13 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     contradictory_behavior = result.to_dict()
     contradictory_behavior["behavioral_summary"]["status"] = "regressed"
-    contradictory_behavior["qualification_digest"] = (
-        _comparison_qualification_digest(contradictory_behavior)
+    contradictory_behavior["qualification_digest"] = _comparison_qualification_digest(
+        contradictory_behavior
     )
     contradictory_behavior["result_digest"] = contradictory_behavior[
         "qualification_digest"
     ]
-    contradictory_behavior_path = (
-        destination / "contradictory-behavior-result.json"
-    )
+    contradictory_behavior_path = destination / "contradictory-behavior-result.json"
     contradictory_behavior_path.write_text(
         json.dumps(contradictory_behavior),
         encoding="utf-8",
@@ -1247,8 +1194,8 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     unknown_decision_field = result.to_dict()
     unknown_decision_field["decision"]["invented"] = True
-    unknown_decision_field["qualification_digest"] = (
-        _comparison_qualification_digest(unknown_decision_field)
+    unknown_decision_field["qualification_digest"] = _comparison_qualification_digest(
+        unknown_decision_field
     )
     unknown_decision_field["result_digest"] = unknown_decision_field[
         "qualification_digest"
@@ -1267,12 +1214,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert view.completed_cells == result.rows
     assert view.evidence_scope is not None
     assert (
-        f"{view.evidence_scope.entity}/{view.evidence_scope.project}"
-        == result_project
+        f"{view.evidence_scope.entity}/{view.evidence_scope.project}" == result_project
     )
-    assert (
-        view.paired_cases[0]["candidate"]["evidence_links"][0]["url"]
-        .startswith("https://wandb.ai/wandb/result-project/weave/calls/")
+    assert view.paired_cases[0]["candidate"]["evidence_links"][0]["url"].startswith(
+        "https://wandb.ai/wandb/result-project/weave/calls/"
     )
     assert experiment_view_from_dict(view.to_dict()) == view
     assert view.supersedes[0]["result_digest"] == "6" * 64
@@ -1293,9 +1238,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         experiment_view_from_dict(missing_attempts)
 
     running_attempt = json.loads(json.dumps(view.to_dict()))
-    running_attempt["paired_cases"][0]["candidate"][
-        "execution_status"
-    ] = "running"
+    running_attempt["paired_cases"][0]["candidate"]["execution_status"] = "running"
     with pytest.raises(ValueError, match="must be terminal"):
         experiment_view_from_dict(running_attempt)
 
@@ -1310,12 +1253,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             "rationale": "This mapping is deliberately invalid.",
         }
     ]
-    unknown_coverage["qualification_digest"] = (
-        _comparison_qualification_digest(unknown_coverage)
+    unknown_coverage["qualification_digest"] = _comparison_qualification_digest(
+        unknown_coverage
     )
-    unknown_coverage["result_digest"] = unknown_coverage[
-        "qualification_digest"
-    ]
+    unknown_coverage["result_digest"] = unknown_coverage["qualification_digest"]
     unknown_coverage_path = destination / "unknown-coverage-result.json"
     unknown_coverage_path.write_text(
         json.dumps(unknown_coverage),
@@ -1385,9 +1326,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     )
     assert signed_release_result.decision.status == "go"
     rejected_actionability = signed_release_result.to_dict()
-    rejected_actionability["decision"]["attestation"]["review_status"] = (
-        "rejected"
-    )
+    rejected_actionability["decision"]["attestation"]["review_status"] = "rejected"
     rejected_actionability["result_digest"] = _comparison_result_digest(
         rejected_actionability
     )
@@ -1405,8 +1344,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     for row in both_pass_rows:
         row["pass"] = True
         row["comparison_deterministic_scores"] = {
-            key: True
-            for key in row["comparison_deterministic_scores"]
+            key: True for key in row["comparison_deterministic_scores"]
         }
     non_discriminating = analyze_comparison_rows(
         comparison_id=spec.id,
@@ -1421,9 +1359,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         supersedes=spec.supersedes,
     )
     assert non_discriminating.paired_cases[0].status == "unchanged"
-    assert non_discriminating.task_validity[0].status == (
-        "non_discriminating"
-    )
+    assert non_discriminating.task_validity[0].status == ("non_discriminating")
     assert non_discriminating.task_validity[0].blockers == ()
     assert non_discriminating.behavioral_summary.status == "unchanged"
     assert non_discriminating.behavioral_summary.improved_pairs == 0
@@ -1478,9 +1414,7 @@ def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
         read_comparison_result(path)
 
     wrong_signed_digest = signed.to_dict()
-    wrong_signed_digest["decision"]["attestation"]["signed_result_digest"] = (
-        "0" * 64
-    )
+    wrong_signed_digest["decision"]["attestation"]["signed_result_digest"] = "0" * 64
     wrong_signed_digest["result_digest"] = _comparison_result_digest(
         wrong_signed_digest
     )
@@ -1527,13 +1461,13 @@ def test_local_behavioral_verdict_is_separate_from_package_release() -> None:
         "resolved"
     }
     assert (
-        result.paired_cases[0]
-        .baseline.infrastructure["private_label_boundary_verified"]
+        result.paired_cases[0].baseline.infrastructure[
+            "private_label_boundary_verified"
+        ]
         is True
     )
     assert (
-        "label_boundary_verified"
-        not in result.paired_cases[0].baseline.infrastructure
+        "label_boundary_verified" not in result.paired_cases[0].baseline.infrastructure
     )
     view = build_comparison_evaluation_view(result.to_dict())
     assert isinstance(view, ExperimentViewV2)
@@ -1632,9 +1566,14 @@ def test_unverified_agent_relationship_invalidates_behavioral_evidence() -> None
     assert result.behavioral_summary.status == "invalid"
     candidate_attempt = result.paired_cases[0].candidate
     assert candidate_attempt is not None
-    assert next(
-        link for link in candidate_attempt.evidence_links if link.kind == "agent_root"
-    ).status == "invalid"
+    assert (
+        next(
+            link
+            for link in candidate_attempt.evidence_links
+            if link.kind == "agent_root"
+        ).status
+        == "invalid"
+    )
     view = build_comparison_evaluation_view(result.to_dict())
     assert isinstance(view, ExperimentViewV2)
     assert view.paired_cases == ()
@@ -1710,15 +1649,18 @@ def test_cross_project_tool_use_invalidates_behavior_and_study_navigation() -> N
     assert view.backend == "local_harbor_docker"
     assert view.evidence_eligible is False
     assert view.paired_cases == ()
-    assert not {
-        "cells",
-        "arm_totals",
-        "aligned_comparisons",
-        "behavioral_measures",
-        "mechanism_funnel",
-        "outcome_summaries",
-        "score_summaries",
-    } & view.to_dict().keys()
+    assert (
+        not {
+            "cells",
+            "arm_totals",
+            "aligned_comparisons",
+            "behavioral_measures",
+            "mechanism_funnel",
+            "outcome_summaries",
+            "score_summaries",
+        }
+        & view.to_dict().keys()
+    )
 
 
 def test_unavailable_dimension_makes_the_aligned_pair_incomplete() -> None:
@@ -1794,9 +1736,7 @@ def test_missing_infrastructure_privacy_or_cleanup_is_blocked() -> None:
 
     assert result.decision.status == "blocked"
     assert {
-        gate.id
-        for gate in result.decision.gates
-        if gate.status == "unavailable"
+        gate.id for gate in result.decision.gates if gate.status == "unavailable"
     } >= {
         "infrastructure",
         "credentials-and-private-labels",
@@ -1916,9 +1856,7 @@ def test_attempt_identity_is_stable_and_duplicates_invalidate_result() -> None:
     assert duplicated.decision.status == "invalid"
 
 
-def test_supplied_attempt_identity_drift_is_rejected_before_normalization() -> (
-    None
-):
+def test_supplied_attempt_identity_drift_is_rejected_before_normalization() -> None:
     baseline = _decision_row(variant="baseline")
     candidate = _decision_row(variant="candidate")
     baseline["attempt_identity"] = attempt_identity(
@@ -2035,12 +1973,11 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     assert approved["candidate_source_revisions_required"] is True
     assert len(approved["candidate_source_revisions"]) == 1
     assert approved["candidate_source_revisions"][0]["kind"] == "skill"
-    assert approved["candidate_source_revisions"][0][
-        "version_identity"
-    ].startswith("digest:sha256:")
+    assert approved["candidate_source_revisions"][0]["version_identity"].startswith(
+        "digest:sha256:"
+    )
     preview_by_attempt = {
-        str(cell["attempt_id"]): cell
-        for cell in preview.matrix["matrix_cells"]
+        str(cell["attempt_id"]): cell for cell in preview.matrix["matrix_cells"]
     }
     rows = [
         {
@@ -2112,9 +2049,7 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
 
     drifted = json.loads(json.dumps(approved))
     baseline_cells = [
-        cell
-        for cell in drifted["expected_cells"]
-        if cell["variant_id"] == "baseline"
+        cell for cell in drifted["expected_cells"] if cell["variant_id"] == "baseline"
     ]
     drifted_cell = baseline_cells[-1]
     drifted_cell["candidate_id"] = "e" * 64
@@ -2216,29 +2151,20 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
         {"candidate_ids": candidate_ids, "source_revisions": []}
     )
     source_required["lock_digest"] = stable_digest(
-        {
-            key: value
-            for key, value in source_required.items()
-            if key != "lock_digest"
-        }
+        {key: value for key, value in source_required.items() if key != "lock_digest"}
     )
     with pytest.raises(ValueError, match="no approved candidate source revision"):
         analyze_comparison_rows(
             comparison_id=spec.id,
             preview_digest=preview.preview_digest,
-            rows=[
-                {**row, "approved_comparison": source_required}
-                for row in rows
-            ],
+            rows=[{**row, "approved_comparison": source_required} for row in rows],
             source="approved-run",
             approved_comparison=source_required,
         )
 
     private_digest = approved["approved_inputs"]["private_labels_sha256"]
     frozen_private = (
-        root
-        / ".fugue/private/comparison-inputs/labels"
-        / f"{private_digest}.jsonl"
+        root / ".fugue/private/comparison-inputs/labels" / f"{private_digest}.jsonl"
     )
     frozen_private.chmod(0o600)
     frozen_private.write_text('{"id":"drifted","expected":true}\n')
@@ -2279,8 +2205,7 @@ def test_result_write_recomputes_final_exported_rows(tmp_path: Path) -> None:
     changed_rows = [dict(row) for row in rows]
     changed_rows[1]["pass"] = False
     (destination / "attempts.jsonl").write_text(
-        "\n".join(json.dumps(row, sort_keys=True) for row in changed_rows)
-        + "\n",
+        "\n".join(json.dumps(row, sort_keys=True) for row in changed_rows) + "\n",
         encoding="utf-8",
     )
     with pytest.raises(
@@ -2405,9 +2330,7 @@ def test_source_use_demo_uses_packaged_assets_outside_checkout(
 
     output = json.loads(capsys.readouterr().out)
     written = json.loads((destination / "result.json").read_text())
-    reproduction = json.loads(
-        (destination / "reproduction.json").read_text()
-    )
+    reproduction = json.loads((destination / "reproduction.json").read_text())
     assert output == written
     assert output["source"] == "bundled-replay"
     assert output["rows"] == 16
@@ -2416,9 +2339,7 @@ def test_source_use_demo_uses_packaged_assets_outside_checkout(
 
 
 def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -> None:
-    (tmp_path / "configs/fugue/skills/verify-current-source").mkdir(
-        parents=True
-    )
+    (tmp_path / "configs/fugue/skills/verify-current-source").mkdir(parents=True)
     (tmp_path / "configs/fugue/skills/verify-current-source/SKILL.md").write_text(
         "---\nname: verify-current-source\ndescription: Verify sources.\n---\n"
     )
@@ -2545,9 +2466,9 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
         "applicable": 1,
         "unavailable": 0,
     }
-    assert result.mechanism_summary["relevant_source_used"]["candidate"][
-        "observed"
-    ] == 1
+    assert (
+        result.mechanism_summary["relevant_source_used"]["candidate"]["observed"] == 1
+    )
 
 
 def test_candidate_source_revisions_include_exact_git_skill() -> None:
@@ -2736,18 +2657,19 @@ def test_llm_judge_timeout_is_strict_defaulted_and_bound_to_spec() -> None:
         source=path.parent,
     )
     defaulted_judge = next(
-        evaluator
-        for evaluator in defaulted.evaluators
-        if evaluator.type == "llm_judge"
+        evaluator for evaluator in defaulted.evaluators if evaluator.type == "llm_judge"
     )
 
     assert configured_judge.timeout_sec == 300
     assert defaulted_judge.timeout_sec is None
-    assert next(
-        evaluator
-        for evaluator in configured.to_dict()["evaluators"]
-        if evaluator["type"] == "llm_judge"
-    )["timeout_sec"] == 300
+    assert (
+        next(
+            evaluator
+            for evaluator in configured.to_dict()["evaluators"]
+            if evaluator["type"] == "llm_judge"
+        )["timeout_sec"]
+        == 300
+    )
     assert "timeout_sec" not in next(
         evaluator
         for evaluator in defaulted.to_dict()["evaluators"]
@@ -2766,9 +2688,7 @@ def test_llm_judge_timeout_rejects_invalid_values(timeout_sec: object) -> None:
     path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
     raw = yaml.safe_load(path.read_text())
     next(
-        evaluator
-        for evaluator in raw["evaluators"]
-        if evaluator["type"] == "llm_judge"
+        evaluator for evaluator in raw["evaluators"] if evaluator["type"] == "llm_judge"
     )["timeout_sec"] = timeout_sec
 
     with pytest.raises(ValueError, match="LLM judge timeout_sec"):
@@ -2829,9 +2749,7 @@ def test_v3_attempt_exports_safe_anchored_blind_judge_review() -> None:
     attempt = _paired_attempt_view_v3(row)
 
     assert legacy_attempt is not None
-    assert legacy_attempt.judge_reviews[
-        "maintainer-actionability"
-    ].label == "strong"
+    assert legacy_attempt.judge_reviews["maintainer-actionability"].label == "strong"
     assert attempt is not None
     assert attempt.scores == {
         "natural-maintainer.answer_correct": True,
@@ -2925,12 +2843,15 @@ def test_blind_judge_response_schema_is_exact_and_describes_soft_text_bound() ->
         "usefulness",
         "grounding",
     ]
-    assert "requested maximum 500 characters" in schema["properties"][
-        "rationale"
-    ]["description"]
+    assert (
+        "requested maximum 500 characters"
+        in schema["properties"]["rationale"]["description"]
+    )
 
 
-def test_blind_judge_accepts_long_but_bounded_reason_and_rejects_hard_overflow() -> None:
+def test_blind_judge_accepts_long_but_bounded_reason_and_rejects_hard_overflow() -> (
+    None
+):
     judge = ComparisonEvaluatorV1(
         id="maintainer-review",
         type="llm_judge",
@@ -3001,15 +2922,40 @@ def test_anthropic_blind_judge_sends_the_bound_response_schema(
     assert receipt["response_schema_digest"] == stable_digest(
         captured["response_schema"]
     )
-    assert receipt["response_request_mode"] == (
-        "anthropic_json_schema_no_thinking_v2"
-    )
+    assert receipt["response_request_mode"] == ("anthropic_json_schema_no_thinking_v2")
     assert receipt["response_validator_version"] == 2
+    assert receipt["public_rubric_contract_digest"] == stable_digest(
+        comparison_judge_public_rubric_contract(
+            rubric=str(judge.rubric or ""),
+            dimensions=judge.dimensions,
+        )
+    )
     assert receipt["requested_text_max_characters"] == 500
     assert receipt["response_max_characters"] == JUDGE_JSON_MAX_RESPONSE_CHARACTERS
+    assert receipt["maximum_prompt_characters"] == 48_000
     assert receipt["request_policy"]["structured_assistant_options"] == {
         "thinking": {"type": "disabled"}
     }
+
+
+def test_live_blind_judge_fails_closed_instead_of_truncating_payload() -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+    )
+
+    with pytest.raises(ValueError, match="prompt exceeds the locked bound"):
+        _request_comparison_judge(
+            evaluator=judge,
+            public_task={"input": "Review this change."},
+            row={"answer": "x" * 60_000},
+            env={"ANTHROPIC_API_KEY": "test-secret"},
+        )
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
@@ -3033,7 +2979,7 @@ def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
                 "status": "unavailable",
                 "reason": "judge evaluation failed: ReadTimeout",
             }
-        }
+        },
     }
 
     _require_checkpoint_judges(
@@ -3051,11 +2997,7 @@ def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
     assert row["comparison_required_evaluation_complete"] is True
     assert row["host_evaluator_status"] == "passed"
 
-    scored = {
-        "comparison_judges": {
-            "maintainer-actionability": {"status": "scored"}
-        }
-    }
+    scored = {"comparison_judges": {"maintainer-actionability": {"status": "scored"}}}
     _require_checkpoint_judges(
         spec,
         scored,
@@ -3111,9 +3053,7 @@ def test_checkpoint_stops_when_required_judge_does_not_score() -> None:
     ]
 
 
-def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> (
-    None
-):
+def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> None:
     policies = _canonical_decision_gate_policies(
         (),
         implicit=(),
@@ -3156,9 +3096,7 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
             "details": {"fact_correct": passed},
         }
 
-    monkeypatch.setattr(
-        "fugue.bench.task_authoring.run_inline_scorer", fake_runner
-    )
+    monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
     evaluator = replace(
         spec.evaluators[0],
@@ -3197,8 +3135,7 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
             "id": "expense-limit",
             "input": {
                 "question": (
-                    "Return JSON containing the current expense amount "
-                    "and its source."
+                    "Return JSON containing the current expense amount and its source."
                 )
             },
             "resources": [],
@@ -3288,6 +3225,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                 ],
                 "mcp_tool_names": ["summarize_evaluation_tool"],
                 "inspected_paths": ["expense-policy-v4.md"],
+                "inspected_paths_status": "available",
                 "comparison_deterministic_scores": {"private": True},
                 "cost_usd": 1.0,
             }
@@ -3305,6 +3243,10 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     assert (
         '"tool_names": ["query_wandb_tool", "search", "summarize_evaluation_tool"]'
     ) in prompt
+    assert "Path lists are audited activity, not proof of correctness" in prompt
+    assert "available empty changed_paths list is expected" in prompt
+    assert "implementation proof that the public task did not request" in prompt
+    assert '"inspected_paths_status": "available"' in prompt
     assert rows[0]["comparison_judge_status"] == "scored"
     assert rows[0]["comparison_required_evaluation_complete"] is True
     assert captured["requests"] == 1
@@ -3320,9 +3262,9 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     ]
     assert privacy["status"] == "passed"
     assert len(privacy["payload_sha256"]) == 64
-    request_policy = rows[0]["comparison_judges"]["maintainer-review"][
-        "route_receipt"
-    ]["request_policy"]
+    request_policy = rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
+        "request_policy"
+    ]
     assert request_policy == {
         "schema_version": 2,
         "timeout_sec": 300,
@@ -3597,7 +3539,9 @@ def test_blind_judge_distinguishes_strict_rubric_validation_failure(
         reserve_cost_usd=0.1,
     )
 
-    def invalid_payload(**_kwargs: object) -> tuple[
+    def invalid_payload(
+        **_kwargs: object,
+    ) -> tuple[
         dict[str, object],
         dict[str, object],
         dict[str, object],
@@ -3652,8 +3596,7 @@ def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:
     scaffold_comparison(destination)
     assert (destination / "comparison.yaml").is_file()
     assert (
-        destination
-        / "configs/fugue/skills/verify-current-source/SKILL.md"
+        destination / "configs/fugue/skills/verify-current-source/SKILL.md"
     ).is_file()
     spec = load_comparison(
         destination / "comparison.yaml",
@@ -3749,9 +3692,10 @@ def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
 
     assert receipt_path.is_file()
     assert second.preview_digest == preview.preview_digest
-    assert second.readiness["runtime_lock_digests"][
-        "comparison_preparation"
-    ] == receipt["receipt_digest"]
+    assert (
+        second.readiness["runtime_lock_digests"]["comparison_preparation"]
+        == receipt["receipt_digest"]
+    )
 
     runtime_digest["value"] = "c" * 64
     drifted = preview_comparison(
@@ -3827,9 +3771,7 @@ def test_runtime_budget_cancels_before_remaining_cells_when_projection_drifts() 
 
 def test_reserved_cost_per_attempt_includes_advisory_judge() -> None:
     spec = load_comparison(
-        Path(
-            "examples/comparisons/anthropic-skill-creator-upgrade/comparison.yaml"
-        ),
+        Path("examples/comparisons/anthropic-skill-creator-upgrade/comparison.yaml"),
         repo_root=Path.cwd(),
     )
 

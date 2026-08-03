@@ -67,6 +67,53 @@ MAX_COMPARISON_JUDGE_TIMEOUT_SEC = 900
 COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION = 2
 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS = 500
 COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS = 16_000
+COMPARISON_JUDGE_MAX_PROMPT_CHARACTERS = 48_000
+COMPARISON_JUDGE_PASSING_LABELS = ("adequate", "strong", "exceptional")
+COMPARISON_JUDGE_PASSING_SCORE = 0.5
+COMPARISON_JUDGE_METRIC_POLICY = "balanced_accuracy_by_split_v1"
+COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY = 0.85
+COMPARISON_JUDGE_BALANCED_ACCURACY_SCOPES = (
+    "overall",
+    "calibration",
+    "holdout",
+)
+COMPARISON_JUDGE_CRITICAL_POLICY = (
+    "Missing required evidence makes the qualitative judgment unavailable, and "
+    "a qualitative label can never override a deterministic critical failure."
+)
+_COMPARISON_JUDGE_LABEL_BAND_ROWS = (
+    (
+        "unusable",
+        "0.00 <= mean < 0.25",
+        "No safe, actionable result, or a critical claim conflicts with the "
+        "supplied evidence.",
+    ),
+    (
+        "weak",
+        "0.25 <= mean < 0.50",
+        "Some relevant content, but it is materially generic, ungrounded, "
+        "unsafe, or not reviewable.",
+    ),
+    (
+        "adequate",
+        "0.50 <= mean < 0.75",
+        "Minimum acceptable with explicit limitations: plausible, bounded, and "
+        "reviewable enough to use, but missing depth in repository evidence, "
+        "review detail, or risk handling.",
+    ),
+    (
+        "strong",
+        "0.75 <= mean < 0.90",
+        "Actionable, repository-grounded, reviewable, and appropriately "
+        "calibrated, with only minor omissions.",
+    ),
+    (
+        "exceptional",
+        "0.90 <= mean <= 1.00",
+        "Strong on every dimension and unusually clear about evidence, "
+        "tradeoffs, verification, and limits.",
+    ),
+)
 
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
@@ -121,6 +168,61 @@ _MCP_RELEASE_READ_ONLY_TOOLS = frozenset(
         "summarize_evaluation_tool",
     }
 )
+
+
+def comparison_judge_label_bands() -> list[dict[str, str]]:
+    """Return the canonical provider-visible meaning of judge score bands."""
+
+    return [
+        {"id": label, "score_band": score_band, "description": description}
+        for label, score_band, description in _COMPARISON_JUDGE_LABEL_BAND_ROWS
+    ]
+
+
+def comparison_judge_public_rubric_contract(
+    *,
+    rubric: str,
+    dimensions: Sequence[str],
+) -> dict[str, Any]:
+    """Build the one public rubric contract used by calibration and live judges."""
+
+    normalized_rubric = str(rubric).strip()
+    normalized_dimensions = [str(item).strip() for item in dimensions]
+    if not normalized_rubric:
+        raise ValueError("comparison judge public rubric must not be empty")
+    if not normalized_dimensions or any(not item for item in normalized_dimensions):
+        raise ValueError("comparison judge public rubric dimensions must not be empty")
+    if len(set(normalized_dimensions)) != len(normalized_dimensions):
+        raise ValueError("comparison judge public rubric dimensions must be unique")
+    return {
+        "text": normalized_rubric,
+        "dimensions": normalized_dimensions,
+        "label_bands": comparison_judge_label_bands(),
+        "passing_labels": list(COMPARISON_JUDGE_PASSING_LABELS),
+        "passing_score": COMPARISON_JUDGE_PASSING_SCORE,
+        "critical_policy": COMPARISON_JUDGE_CRITICAL_POLICY,
+    }
+
+
+def comparison_judge_request_payload(
+    *,
+    public_task: Mapping[str, Any],
+    response: Any,
+    permitted_evidence: Mapping[str, Any],
+    rubric: str,
+    dimensions: Sequence[str],
+) -> dict[str, Any]:
+    """Return the normalized provider-visible request used in every judge mode."""
+
+    return {
+        "public_task": dict(public_task),
+        "response": response,
+        "permitted_evidence": dict(permitted_evidence),
+        "rubric": comparison_judge_public_rubric_contract(
+            rubric=rubric,
+            dimensions=dimensions,
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -10182,16 +10284,24 @@ def _request_comparison_judge(
         public_task=public_task,
         row=row,
     )
-    prompt = (
+    prompt_prefix = (
         "Blindly evaluate one Agent attempt. You do not know whether it came from "
         "the baseline or candidate. Use only the supplied public task, final "
         "response, permitted evidence, and rubric. Return one JSON object with: "
         "scores (one 0..1 number per dimension), overall_assessment (brief text), "
         "uncertainty (0..1), missing_evidence (boolean), and rationale (at most "
-        "500 characters). Do not return "
+        "500 characters). Judge evidence applicability against the requested "
+        "artifact type. Path lists are audited activity, not proof of correctness. "
+        "Use each path status: available means collection succeeded; unavailable "
+        "means the list is not evidence. An available empty changed_paths list is "
+        "expected for a plan or recommendation and is not, by itself, missing "
+        "evidence. Do not require implementation proof that the public task did "
+        "not request. Do not return "
         "hidden reasoning or a chain of thought.\n\n"
-        + json.dumps(payload, sort_keys=True, default=str)[:48_000]
     )
+    prompt = prompt_prefix + json.dumps(payload, sort_keys=True, default=str)
+    if len(prompt) > COMPARISON_JUDGE_MAX_PROMPT_CHARACTERS:
+        raise ValueError("comparison judge prompt exceeds the locked bound")
     import httpx
 
     timeout_sec = int(request_policy["timeout_sec"])
@@ -10235,10 +10345,12 @@ def _request_comparison_judge(
             "response_validator_version": (
                 COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION
             ),
+            "public_rubric_contract_digest": stable_digest(payload["rubric"]),
             "requested_text_max_characters": (
                 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
             ),
             "response_max_characters": COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
+            "maximum_prompt_characters": COMPARISON_JUDGE_MAX_PROMPT_CHARACTERS,
             "request_policy": request_policy,
             "blind_fields": [
                 "baseline_or_candidate",
@@ -10363,6 +10475,18 @@ def _comparison_judge_evidence(
             "changed_paths",
         }:
             values = row.get(field_name)
+            status_name = f"{field_name}_status"
+            status = row.get(status_name)
+            if field_name in {"inspected_paths", "changed_paths"}:
+                normalized_status = (
+                    str(status)
+                    if status in {"available", "unavailable"}
+                    else "unavailable"
+                )
+                result[status_name] = normalized_status
+                if normalized_status != "available":
+                    result[field_name] = []
+                    continue
             if isinstance(values, list):
                 result[field_name] = [str(value)[:500] for value in values[:100]]
     return result
@@ -10374,19 +10498,19 @@ def _comparison_judge_payload(
     public_task: Mapping[str, Any],
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "public_task": {
+    return comparison_judge_request_payload(
+        public_task={
             "input": public_task.get("input"),
             "tags": public_task.get("tags") or [],
         },
-        "final_response": _comparison_output(row),
-        "permitted_evidence": _comparison_judge_evidence(
+        response=_comparison_output(row),
+        permitted_evidence=_comparison_judge_evidence(
             row,
             evaluator.evidence,
         ),
-        "rubric": evaluator.rubric,
-        "dimensions": list(evaluator.dimensions),
-    }
+        rubric=str(evaluator.rubric or ""),
+        dimensions=evaluator.dimensions,
+    )
 
 
 def _comparison_judge_input_privacy_receipt(
@@ -12681,11 +12805,18 @@ def _evaluator_digest(
             "schema_digest": stable_digest(
                 _comparison_judge_response_schema(evaluator.dimensions)
             ),
+            "public_rubric_contract_digest": stable_digest(
+                comparison_judge_public_rubric_contract(
+                    rubric=str(evaluator.rubric or ""),
+                    dimensions=evaluator.dimensions,
+                )
+            ),
             "validator_version": COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION,
             "requested_text_max_characters": (
                 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
             ),
             "response_max_characters": COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
+            "maximum_prompt_characters": COMPARISON_JUDGE_MAX_PROMPT_CHARACTERS,
         }
     return stable_digest(value)
 
@@ -13084,9 +13215,28 @@ def _judge_calibration_value_issue(
         return f"judge {judge.id} calibration has fewer than 48 examples"
     if calibration_examples < 36 or holdout_examples < 12:
         return f"judge {judge.id} calibration lacks the 36/12 split"
-    if true_positive < 0.85 or true_negative < 0.85:
+    balanced_fields = (
+        "balanced_accuracy",
+        "calibration_balanced_accuracy",
+        "holdout_balanced_accuracy",
+    )
+    supplied_balanced_fields = [field for field in balanced_fields if field in value]
+    if supplied_balanced_fields:
+        if len(supplied_balanced_fields) != len(balanced_fields):
+            return f"judge {judge.id} calibration balanced accuracy is incomplete"
+        if any(
+            float(value.get(field) or 0)
+            < COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY
+            for field in balanced_fields
+        ):
+            return (
+                f"judge {judge.id} calibration or holdout is below 0.85 "
+                "balanced accuracy"
+            )
+    elif true_positive < 0.85 or true_negative < 0.85:
+        # Historical V1 calibration artifacts gated TPR and TNR separately.
         return f"judge {judge.id} calibration is below 0.85 TPR/TNR"
-    if (
+    elif (
         calibration_true_positive < 0.85
         or calibration_true_negative < 0.85
         or holdout_true_positive < 0.85
@@ -13100,7 +13250,7 @@ def _judge_calibration_value_issue(
     return None
 
 
-def _judge_execution_calibration_issue(
+def _judge_execution_calibration_issue(  # noqa: C901 - strict artifact audit.
     judge: ComparisonEvaluatorV1,
     *,
     repo_root: Path,
@@ -13138,6 +13288,14 @@ def _judge_execution_calibration_issue(
         "rubric_digest",
         "runner_artifact_path",
         "runner_artifact_sha256",
+        "validator_artifact_path",
+        "validator_artifact_sha256",
+        "passing_labels",
+        "score_threshold",
+        "critical_policy",
+        "metric_policy",
+        "minimum_balanced_accuracy",
+        "balanced_accuracy_scopes",
         "response_schema_digest",
         "response_request_mode",
         "response_validator_version",
@@ -13145,14 +13303,22 @@ def _judge_execution_calibration_issue(
         "calibration_examples",
         "holdout_examples",
         "maximum_cost_usd",
-        "minimum_true_positive_rate",
-        "minimum_true_negative_rate",
         "maximum_critical_false_passes",
         "campaign_allocation_usd",
         "prior_failed_requests",
         "prior_accounted_reserve_usd",
     }
-    if set(gate) != expected_fields:
+    ledger_fields = {
+        "prior_runs_ledger_path",
+        "prior_runs_ledger_sha256",
+        "prior_runs_ledger_digest",
+        "prior_runs",
+    }
+    allowed_field_sets = {
+        frozenset(expected_fields),
+        frozenset(expected_fields | ledger_fields),
+    }
+    if frozenset(gate) not in allowed_field_sets:
         return f"judge {judge.id} synthetic execution gate fields do not match"
     if gate.get("kind") != "synthetic_blinded_advisory_v1":
         return f"judge {judge.id} synthetic execution gate kind is unsupported"
@@ -13180,12 +13346,27 @@ def _judge_execution_calibration_issue(
         or int(gate.get("holdout_examples") or 0) != 12
     ):
         return f"judge {judge.id} synthetic execution gate has the wrong cohort"
-    minimum_tpr = float(gate.get("minimum_true_positive_rate") or 0)
-    minimum_tnr = float(gate.get("minimum_true_negative_rate") or 0)
-    if minimum_tpr < 0.85 or minimum_tnr < 0.85:
+    if gate.get("metric_policy") != COMPARISON_JUDGE_METRIC_POLICY:
+        return f"judge {judge.id} synthetic metric policy drifted"
+    if list(gate.get("balanced_accuracy_scopes") or []) != list(
+        COMPARISON_JUDGE_BALANCED_ACCURACY_SCOPES
+    ):
+        return f"judge {judge.id} synthetic balanced-accuracy scopes drifted"
+    minimum_balanced_accuracy = float(
+        gate.get("minimum_balanced_accuracy") or 0
+    )
+    if minimum_balanced_accuracy < COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY:
         return f"judge {judge.id} synthetic execution thresholds are too weak"
     if gate.get("maximum_critical_false_passes") != 0:
         return f"judge {judge.id} synthetic critical-failure threshold is unsafe"
+    if list(gate.get("passing_labels") or []) != list(
+        COMPARISON_JUDGE_PASSING_LABELS
+    ):
+        return f"judge {judge.id} synthetic passing-label policy drifted"
+    if gate.get("score_threshold") != COMPARISON_JUDGE_PASSING_SCORE:
+        return f"judge {judge.id} synthetic passing-score threshold drifted"
+    if gate.get("critical_policy") != COMPARISON_JUDGE_CRITICAL_POLICY:
+        return f"judge {judge.id} synthetic critical policy drifted"
     raw_result_path = str(gate.get("result_path") or "")
     result_path = Path(raw_result_path)
     if (
@@ -13250,10 +13431,32 @@ def _synthetic_calibration_binding_issue(
             return f"judge {judge.id} synthetic calibration runner drifted"
     except (FileNotFoundError, ValueError):
         return f"judge {judge.id} synthetic calibration runner is unavailable"
+    raw_validator_path = str(gate.get("validator_artifact_path") or "")
+    if raw_validator_path != (
+        "examples/comparisons/community-skill-upgrades/validate_campaign.py"
+    ):
+        return f"judge {judge.id} synthetic calibration validator path is invalid"
+    validator_sha256 = str(gate.get("validator_artifact_sha256") or "")
+    if not _is_sha256(validator_sha256):
+        return f"judge {judge.id} synthetic calibration validator digest is invalid"
+    try:
+        validator_path = _safe_input_path(
+            Path(raw_validator_path),
+            repo_root,
+            "judge synthetic calibration metrics validator",
+        )
+        if _sha256_path(validator_path) != validator_sha256:
+            return f"judge {judge.id} synthetic calibration validator drifted"
+    except (FileNotFoundError, ValueError):
+        return f"judge {judge.id} synthetic calibration validator is unavailable"
     if str(gate.get("preview_digest") or "") != (
         _synthetic_calibration_preview_digest(gate)
     ):
         return f"judge {judge.id} synthetic execution preview digest is invalid"
+    if "prior_runs" in gate:
+        ledger_issue = _synthetic_prior_runs_ledger_issue(gate, repo_root=repo_root)
+        if ledger_issue:
+            return f"judge {judge.id} {ledger_issue}"
     allocation = gate.get("campaign_allocation_usd")
     prior_failures = gate.get("prior_failed_requests")
     prior_reserve = gate.get("prior_accounted_reserve_usd")
@@ -13275,6 +13478,56 @@ def _synthetic_calibration_binding_issue(
         != round(float(allocation), 6)
     ):
         return f"judge {judge.id} synthetic execution budget is invalid"
+    return None
+
+
+def _synthetic_prior_runs_ledger_issue(
+    gate: Mapping[str, Any], *, repo_root: Path
+) -> str | None:
+    raw_path = str(gate.get("prior_runs_ledger_path") or "")
+    relative = Path(raw_path)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.as_posix()
+        != "examples/comparisons/community-skill-upgrades/calibration-prior-runs.json"
+    ):
+        return "synthetic prior-runs ledger path is invalid"
+    expected_sha256 = str(gate.get("prior_runs_ledger_sha256") or "")
+    expected_digest = str(gate.get("prior_runs_ledger_digest") or "")
+    if not _is_sha256(expected_sha256) or not _is_sha256(expected_digest):
+        return "synthetic prior-runs ledger digest is invalid"
+    try:
+        path = _safe_input_path(relative, repo_root, "synthetic prior-runs ledger")
+        if _sha256_path(path) != expected_sha256:
+            return "synthetic prior-runs ledger bytes drifted"
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return "synthetic prior-runs ledger is unavailable"
+    if not isinstance(value, Mapping) or stable_digest(value) != expected_digest:
+        return "synthetic prior-runs ledger content drifted"
+    runs = value.get("runs")
+    prior_runs = gate.get("prior_runs")
+    if (
+        value.get("kind") != "synthetic_calibration_prior_runs_ledger"
+        or not isinstance(runs, list)
+        or not isinstance(prior_runs, int)
+        or isinstance(prior_runs, bool)
+        or prior_runs != len(runs)
+        or prior_runs != gate.get("prior_failed_requests")
+        or value.get("prior_runs") != prior_runs
+        or float(value.get("total_accounted_reserve_usd") or -1)
+        != float(gate.get("prior_accounted_reserve_usd") or -2)
+        or round(
+            float(value.get("total_accounted_reserve_usd") or 0)
+            + float(value.get("remaining_budget_usd") or 0),
+            6,
+        )
+        != round(float(gate.get("campaign_allocation_usd") or 0), 6)
+        or float(value.get("remaining_budget_usd") or 0)
+        != float(gate.get("maximum_cost_usd") or -1)
+    ):
+        return "synthetic prior-runs ledger accounting is invalid"
     return None
 
 
@@ -13322,40 +13575,56 @@ def _synthetic_response_schema_digest(dimensions: Sequence[str]) -> str:
 
 
 def _synthetic_calibration_preview_digest(gate: Mapping[str, Any]) -> str:
-    return stable_digest(
-        {
-            "schema_version": 1,
-            "kind": "synthetic_judge_calibration_preview",
-            "id": "community-skill-judge-calibration-v1",
-            "model": gate["model"],
-            "cases_artifact_path": gate["cases_artifact_path"],
-            "cases_artifact_sha256": gate["cases_artifact_sha256"],
-            "cases_digest": gate["cases_digest"],
-            "rubric_digest": gate["rubric_digest"],
-            "runner_artifact_path": gate["runner_artifact_path"],
-            "runner_artifact_sha256": gate["runner_artifact_sha256"],
-            "response_schema_digest": gate["response_schema_digest"],
-            "response_request_mode": gate["response_request_mode"],
-            "response_validator_version": gate["response_validator_version"],
-            "requests": 48,
-            "maximum_prompt_characters": 12_000,
-            "maximum_output_tokens_per_request": 1_200,
-            "automatic_retries": 0,
-            "campaign_allocation_usd": gate["campaign_allocation_usd"],
-            "prior_failed_requests": gate["prior_failed_requests"],
-            "prior_accounted_reserve_usd": gate[
-                "prior_accounted_reserve_usd"
-            ],
-            "maximum_cost_usd": gate["maximum_cost_usd"],
-            "serialized_input_fields": [
-                "public_task",
-                "response",
-                "permitted_evidence",
-                "rubric",
-            ],
-            "human_calibration_satisfied": False,
-        }
-    )
+    value = {
+        "schema_version": 1,
+        "kind": "synthetic_judge_calibration_preview",
+        "id": "community-skill-judge-calibration-v1",
+        "model": gate["model"],
+        "cases_artifact_path": gate["cases_artifact_path"],
+        "cases_artifact_sha256": gate["cases_artifact_sha256"],
+        "cases_digest": gate["cases_digest"],
+        "rubric_digest": gate["rubric_digest"],
+        "runner_artifact_path": gate["runner_artifact_path"],
+        "runner_artifact_sha256": gate["runner_artifact_sha256"],
+        "validator_artifact_path": gate["validator_artifact_path"],
+        "validator_artifact_sha256": gate["validator_artifact_sha256"],
+        "passing_labels": gate["passing_labels"],
+        "score_threshold": gate["score_threshold"],
+        "critical_policy": gate["critical_policy"],
+        "metric_policy": gate["metric_policy"],
+        "minimum_balanced_accuracy": gate["minimum_balanced_accuracy"],
+        "balanced_accuracy_scopes": gate["balanced_accuracy_scopes"],
+        "response_schema_digest": gate["response_schema_digest"],
+        "response_request_mode": gate["response_request_mode"],
+        "response_validator_version": gate["response_validator_version"],
+        "requests": 48,
+        "maximum_prompt_characters": 12_000,
+        "maximum_output_tokens_per_request": 1_200,
+        "automatic_retries": 0,
+        "campaign_allocation_usd": gate["campaign_allocation_usd"],
+        "prior_failed_requests": gate["prior_failed_requests"],
+        "prior_accounted_reserve_usd": gate[
+            "prior_accounted_reserve_usd"
+        ],
+        "maximum_cost_usd": gate["maximum_cost_usd"],
+        "serialized_input_fields": [
+            "public_task",
+            "response",
+            "permitted_evidence",
+            "rubric",
+        ],
+        "human_calibration_satisfied": False,
+    }
+    if "prior_runs" in gate:
+        value.update(
+            {
+                "prior_runs_ledger_path": gate["prior_runs_ledger_path"],
+                "prior_runs_ledger_sha256": gate["prior_runs_ledger_sha256"],
+                "prior_runs_ledger_digest": gate["prior_runs_ledger_digest"],
+                "prior_runs": gate["prior_runs"],
+            }
+        )
+    return stable_digest(value)
 
 
 def _frozen_synthetic_calibration_cases(
@@ -13427,6 +13696,10 @@ def _synthetic_classification_rates(
     return {
         "true_positive_rate": true_positives / positives,
         "true_negative_rate": true_negatives / negatives,
+        "balanced_accuracy": (
+            (true_positives / positives) + (true_negatives / negatives)
+        )
+        / 2,
     }
 
 
@@ -13475,7 +13748,7 @@ def _recompute_synthetic_calibration_metrics(
             raise ValueError("synthetic calibration missing-evidence flag is invalid")
         predicted_label = (
             "pass"
-            if label in {"strong", "exceptional"} and not missing_evidence
+            if label in COMPARISON_JUDGE_PASSING_LABELS and not missing_evidence
             else "fail"
         )
         reference = _mapping(case.get("authored_reference"), "authored reference")
@@ -13506,11 +13779,11 @@ def _recompute_synthetic_calibration_metrics(
         for split in ("calibration", "holdout")
     }
     passed = bool(
-        rates["true_positive_rate"] >= 0.85
-        and rates["true_negative_rate"] >= 0.85
+        rates["balanced_accuracy"]
+        >= COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY
         and all(
-            item["true_positive_rate"] >= 0.85
-            and item["true_negative_rate"] >= 0.85
+            item["balanced_accuracy"]
+            >= COMPARISON_JUDGE_MINIMUM_BALANCED_ACCURACY
             for item in split_rates.values()
         )
         and critical_false_passes == 0
@@ -13532,9 +13805,12 @@ def _recompute_synthetic_calibration_metrics(
             split_rates["holdout"]["true_negative_rate"], 6
         ),
         "critical_false_passes": critical_false_passes,
-        "balanced_accuracy": round(
-            (rates["true_positive_rate"] + rates["true_negative_rate"]) / 2,
-            6,
+        "balanced_accuracy": round(rates["balanced_accuracy"], 6),
+        "calibration_balanced_accuracy": round(
+            split_rates["calibration"]["balanced_accuracy"], 6
+        ),
+        "holdout_balanced_accuracy": round(
+            split_rates["holdout"]["balanced_accuracy"], 6
         ),
         "synthetic_thresholds_passed": passed,
     }
@@ -13613,17 +13889,13 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
         return f"judge {judge.id} synthetic calibration metrics are unavailable"
     if dict(metrics) != recomputed_metrics:
         return f"judge {judge.id} synthetic calibration metrics disagree"
-    minimum_tpr = float(gate["minimum_true_positive_rate"])
-    minimum_tnr = float(gate["minimum_true_negative_rate"])
-    for key, minimum in (
-        ("true_positive_rate", minimum_tpr),
-        ("calibration_true_positive_rate", minimum_tpr),
-        ("holdout_true_positive_rate", minimum_tpr),
-        ("true_negative_rate", minimum_tnr),
-        ("calibration_true_negative_rate", minimum_tnr),
-        ("holdout_true_negative_rate", minimum_tnr),
+    minimum_balanced_accuracy = float(gate["minimum_balanced_accuracy"])
+    for key in (
+        "balanced_accuracy",
+        "calibration_balanced_accuracy",
+        "holdout_balanced_accuracy",
     ):
-        if float(metrics.get(key) or 0) < minimum:
+        if float(metrics.get(key) or 0) < minimum_balanced_accuracy:
             return f"judge {judge.id} synthetic calibration is below {key} threshold"
     if int(metrics.get("critical_false_passes") or 0) > int(
         gate["maximum_critical_false_passes"]
