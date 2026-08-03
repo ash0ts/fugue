@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from fugue.bench.comparison import load_comparison
+from fugue.bench.comparison import check_comparison, load_comparison
 
 EXAMPLE = Path("examples/comparisons/vercel-react-best-practices-upgrade")
 SPEC = EXAMPLE / "confirmatory-v1.yaml"
@@ -132,7 +132,7 @@ def test_confirmatory_spec_freezes_v3_identity_projects_and_192_cells() -> None:
     assert spec.execution.attempts == 4
     assert spec.execution.concurrency == 1
     assert spec.execution.evidence_checkpoint_cells == 1
-    assert spec.execution.max_cost_usd == 1620
+    assert spec.execution.max_cost_usd == 1640
     assert spec.execution.reserve_per_attempt_usd == 8.4
     assert len(tasks) * 2 * spec.execution.attempts == 192
 
@@ -148,6 +148,7 @@ def test_confirmatory_has_exact_frozen_development_and_holdout_task_ids() -> Non
     assert sum(item["partition"] == "discovery" for item in tasks) == 8
     assert sum(item["partition"] == "holdout" for item in tasks) == 16
     assert all("expected" not in task and "gold" not in task for task in tasks)
+    assert all("base_output" in label and "gold_output" in label for label in labels)
     assert all("target rule" not in task["input"]["question"].casefold() for task in tasks)
     assert all(len(item["critical_dimensions"]) == 6 for item in tasks)
 
@@ -203,6 +204,38 @@ def test_independent_scorer_rejects_every_base_and_accepts_every_gold() -> None:
         assert set(gold) == DIMENSIONS
         assert not all(base.values()), (fixture["id"], base)
         assert all(gold.values()), (fixture["id"], gold)
+
+
+def test_canonical_readiness_proves_all_base_fail_gold_pass_fixtures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    score = _scorer()
+
+    def fake_inline_runner(*, source, evidence, reference, profile, limits):
+        assert 'if __name__ == "__main__":' in source
+        assert profile.id == "python312-sandbox-v1"
+        details = score(
+            reference["task"],
+            reference["output"],
+            {**evidence, "expected": reference["expected"]},
+        )
+        return {
+            "score": 1.0 if all(details.values()) else 0.0,
+            "reason": "offline qualification fixture",
+            "details": details,
+        }
+
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer", fake_inline_runner
+    )
+    readiness = check_comparison(
+        load_comparison(SPEC, repo_root=Path.cwd()), repo_root=Path.cwd()
+    )
+
+    assert readiness.base_failures == 24
+    assert readiness.gold_passes == 24
+    assert not any("missing base_output" in warning for warning in readiness.warnings)
+    assert not any("missing gold_output" in warning for warning in readiness.warnings)
 
 
 def test_forged_public_receipt_cannot_turn_base_source_into_a_pass() -> None:

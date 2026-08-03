@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "10f283a053d42f48622146127608e83b7a8ce1da37f64b6a486f3f4ad8ced559",
+  "manifest_digest": "2514fd02ec990a2c5a70e9e5876a9a7b5380a9ae2c25a25451ce6c23d3a512cd",
   "schema_version": 1,
   "sources": [
     {
@@ -14,8 +14,8 @@
     },
     {
       "path": "confirmatory-private-labels.jsonl",
-      "sha256": "fc68e552e08ae6b3261de90c260f48670a81a1c24c1b6bf9621cb9c34d22bbe6",
-      "size": 13019
+      "sha256": "1548cc7dfbdbd9e9d67c20a40b7cb2b8940c25c8974f949b3c71b23b8ac2534f",
+      "size": 64607
     },
     {
       "path": "vercel_confirmatory_scorer.py",

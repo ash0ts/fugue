@@ -37,16 +37,30 @@ evaluators:
     profile: anthropic/claude-sonnet-5
     calibration: ../community-skill-upgrades/judge-calibration.json
     rubric: >-
-      Judge the submitted maintenance change only for actionability,
-      repository grounding, maintainer reviewability, and calibrated risk using
-      the supplied public artifact and audited path activity. Do not infer task
-      correctness, security, performance, treatment identity, or Skill quality
-      from fluency. Deterministic host-side verification owns those gates. The
-      labels are unusable, weak, adequate, strong, and exceptional; adequate is
-      the minimum qualitatively useful artifact. Set missing_evidence only when
-      evidence necessary to judge usefulness is absent. This same-model judge
-      is advisory until the separate two-reviewer calibration passes and cannot
-      override any deterministic or privacy failure.
+      Judge the artifact type requested (plan, implemented change, or
+      recommendation) for its usefulness on the stated repository task. Score
+      only whether it is actionable, grounds claims in the inspected repository,
+      is reviewable by a maintainer, and calibrates risk and uncertainty to the
+      available evidence. The inspected_paths and changed_paths values are
+      audited activity, not proof of repository contents or task correctness.
+      Their status fields state whether collection was available. An available
+      empty changed_paths list means the collector observed no edits and is
+      expected for plans and recommendations; an unavailable status is not an
+      empty receipt. Judge the requested artifact modality; do not require
+      diffs, line numbers, file bodies, test output, or completed implementation
+      when the task requests a plan or recommendation. Credit repository
+      grounding when concrete components, contracts, sequencing, verification,
+      and rollback are internally consistent with the available path activity.
+      Set missing_evidence true only when evidence materially required to assess
+      actionability, grounding, reviewability, or risk is absent, not because
+      deterministic evidence is out of scope. Do not infer correctness from
+      fluency, treatment identity, repository popularity, or Skill assignment.
+      For this acceptable-versus-defective calibration, adequate is the minimum
+      acceptable qualitative label and its limitations must remain visible;
+      weak and unusable are defective, while strong and exceptional exceed the
+      minimum. Deterministic scorers own build, test, schema, security, scope,
+      and task-correctness gates. A qualitative label cannot override a
+      deterministic critical failure.
     dimensions:
       - useful_actionability
       - repository_grounding
@@ -82,7 +96,7 @@ execution:
   attempts: 4
   concurrency: 1
   evidence_checkpoint_cells: 1
-  max_cost_usd: 1620
+  max_cost_usd: 1640
   reserve_per_attempt_usd: 8.4
   approval_required: true
   preparation_required: true
