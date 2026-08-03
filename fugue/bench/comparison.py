@@ -3303,10 +3303,21 @@ def prepare_comparison(
         spec,
         repo_root=repo_root,
     )
+    local_source_digests, local_source_blockers = (
+        _local_source_lock_readiness(spec, repo_root=repo_root)
+    )
     qualification_input_digests, qualification_blockers = (
         _qualification_input_readiness(spec, repo_root=repo_root)
     )
-    preparation_blockers = [*runtime_blockers, *qualification_blockers]
+    qualification_input_digests = {
+        **local_source_digests,
+        **qualification_input_digests,
+    }
+    preparation_blockers = [
+        *runtime_blockers,
+        *local_source_blockers,
+        *qualification_blockers,
+    ]
     if preparation_blockers:
         raise RuntimeError(
             "comparison preparation did not produce a usable lock set:\n- "

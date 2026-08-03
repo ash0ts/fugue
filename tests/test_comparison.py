@@ -3867,6 +3867,14 @@ def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
         "fugue.bench.comparison._runtime_readiness",
         runtime_readiness,
     )
+    local_source_digests = {
+        "source_lock": "c" * 64,
+        "source_lock_file": "d" * 64,
+    }
+    monkeypatch.setattr(
+        "fugue.bench.comparison._local_source_lock_readiness",
+        lambda *_args, **_kwargs: (local_source_digests, []),
+    )
     monkeypatch.setattr(OperatorService, "prepare", lambda *_args, **_kwargs: None)
     operator = OperatorService(root)
 
@@ -3882,6 +3890,7 @@ def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
     )
 
     assert receipt_path.is_file()
+    assert receipt["qualification_input_digests"] == local_source_digests
     assert second.preview_digest == preview.preview_digest
     assert (
         second.readiness["runtime_lock_digests"]["comparison_preparation"]
