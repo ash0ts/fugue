@@ -44,6 +44,7 @@ from fugue.bench.operator import (
     OperatorService,
     load_env,
 )
+from fugue.bench.streams import write_stdout_best_effort
 from fugue.bench.workloads import (
     load_workload_dataset,
     run_retrieval_workload,
@@ -2312,13 +2313,10 @@ def _runs_list(args: argparse.Namespace, service: Any, as_json: Any) -> int:
 
 def _runs_logs(args: argparse.Namespace, service: Any, _: Any) -> int:
     if not args.follow:
-        print(
+        write_stdout_best_effort(
             service.supervisor.read_log(
-                args.run_id,
-                cell_id=args.cell,
-                recover=False,
-            ),
-            end="",
+                args.run_id, cell_id=args.cell, recover=False
+            )
         )
         return 0
     try:
@@ -2327,7 +2325,8 @@ def _runs_logs(args: argparse.Namespace, service: Any, _: Any) -> int:
             cell_id=args.cell,
             recover=False,
         ):
-            print(chunk, end="", flush=True)
+            if not write_stdout_best_effort(chunk):
+                return 0
     except KeyboardInterrupt:
         return 130
     return 0
@@ -2571,7 +2570,10 @@ def _wait_for_run(service: OperatorService, run_id: str) -> int:
     if not CONSOLE.is_terminal:
         try:
             for chunk in service.supervisor.follow_log(run_id):
-                print(chunk, end="", flush=True)
+                if not write_stdout_best_effort(chunk):
+                    # The run worker is detached. Losing this observer must not
+                    # cancel or otherwise change the durable run.
+                    return 0
         except KeyboardInterrupt:
             service.supervisor.cancel(run_id)
             return 130

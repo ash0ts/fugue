@@ -20,6 +20,7 @@ from fugue.bench.candidates import attempt_id, attempt_identity
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
 from fugue.bench.sandbox_policy import verify_harbor_job_attestation
+from fugue.bench.streams import write_stdout_best_effort
 from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
@@ -748,14 +749,24 @@ def _run_cell_process(
         stdout = process.stdout
 
         def drain_output() -> None:
+            console_output_available = True
             try:
                 with stdout:
                     for line in stdout:
                         safe_line = redact_text(line, secrets)
                         log.write(safe_line)
                         log.flush()
-                        print(safe_line, end="", flush=True)
                         store.append_event("log", cell=cell, chunk=safe_line)
+                        if console_output_available and not write_stdout_best_effort(
+                            safe_line
+                        ):
+                            console_output_available = False
+                            store.append_event(
+                                "cell_log_stream_detached",
+                                cell=cell,
+                                sink="stdout",
+                                reason="stdout consumer closed",
+                            )
             except BaseException as exc:  # pragma: no cover - defensive I/O guard
                 reader_error.append(exc)
 
