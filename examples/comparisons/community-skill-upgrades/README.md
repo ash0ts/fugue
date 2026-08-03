@@ -75,7 +75,7 @@ uv run python \
 
 uv run fugue approve \
   "$(jq -r .preview_digest /tmp/community-skill-calibration-preview.json)" \
-  --max-cells 48 --max-usd 7.833333 --approved-by operator \
+  --max-cells 48 --max-usd 7.670139 --approved-by operator \
   > /tmp/community-skill-calibration-approval.json
 ```
 
@@ -93,11 +93,15 @@ uv run python \
 
 It performs 48 sequential, non-retrying requests and incrementally writes a
 separate `synthetic_gold_diagnostic`. Anthropic is constrained to the exact
-JSON schema, and a malformed or failed response produces a body-free failure
-receipt without overwriting completed rows. It never edits
+JSON shape. Because Anthropic structured outputs do not enforce string-length
+constraints, the prompt requests 500-character explanations and the transport
+plus local validator independently enforce a 16,000-character response
+envelope. Public Study explanations remain redacted and capped at 500. A
+malformed or failed response produces a body-free failure receipt without
+overwriting completed rows. It never edits
 `judge-calibration.json`, invents reviewers, or satisfies the human gate. Its
-replacement-run ceiling is $7.833333. Together with the conservatively
-accounted $0.166667 reserve for the failed first request, the campaign's
+replacement-run ceiling is $7.670139. Together with the conservatively
+accounted $0.329861 reserve for the two failed requests, the campaign's
 calibration allocation remains $8. The provider response does not currently
 return authoritative dollar cost; the artifact therefore keeps observed cost
 unavailable and accounts the locked reserve instead of fabricating spend. The
@@ -107,7 +111,7 @@ critical false passes. Validation reloads the frozen cases, checks every case
 identity, repository, split, score schema, and label, and recomputes all
 metrics from the host-only authored references; self-reported summary metrics
 are not trusted. The execution boundary must also resolve the approval digest
-to the exact preview with limits of 48 requests and $7.833333 before accepting
+to the exact preview with limits of 48 requests and $7.670139 before accepting
 the result. Their deterministic gates remain authoritative while human judge
 calibration is pending.
 

@@ -64,6 +64,9 @@ COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
 COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
 DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC = 120
 MAX_COMPARISON_JUDGE_TIMEOUT_SEC = 900
+COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION = 2
+COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS = 500
+COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS = 16_000
 
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
@@ -9994,6 +9997,12 @@ def score_comparison_rows(
                     row=row,
                     env=env,
                 )
+                failure_stage = "output_privacy"
+                judge_output_privacy = _comparison_judge_output_privacy_receipt(
+                    payload=payload,
+                    usage=usage,
+                    env=env,
+                )
                 failure_stage = "rubric_validation"
                 parsed = _validate_comparison_judge_payload(judge, payload)
                 observed_judge_cost = _row_number(
@@ -10013,6 +10022,7 @@ def score_comparison_rows(
                 route_receipt = {
                     **dict(receipt),
                     "judge_input_privacy": judge_input_privacy,
+                    "judge_output_privacy": judge_output_privacy,
                 }
                 if parsed["missing_evidence"]:
                     judge_results[judge.id] = {
@@ -10087,6 +10097,56 @@ def score_comparison_rows(
     return scored
 
 
+def _comparison_judge_response_schema(
+    dimensions: Sequence[str],
+) -> dict[str, Any]:
+    """Return the exact provider-visible shape for one blind judge response.
+
+    Anthropic does not enforce string-length or numeric-range JSON Schema
+    constraints. Those remain local fail-closed checks; descriptions communicate
+    the requested concise form to the provider.
+    """
+
+    requested = COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "scores",
+            "overall_assessment",
+            "uncertainty",
+            "missing_evidence",
+            "rationale",
+        ],
+        "properties": {
+            "scores": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(dimensions),
+                "properties": {
+                    dimension: {"type": "number"} for dimension in dimensions
+                },
+            },
+            "overall_assessment": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded assessment; requested maximum "
+                    f"{requested} characters."
+                ),
+            },
+            "uncertainty": {"type": "number"},
+            "missing_evidence": {"type": "boolean"},
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded rationale; requested maximum "
+                    f"{requested} characters."
+                ),
+            },
+        },
+    }
+
+
 def _request_comparison_judge(
     *,
     evaluator: ComparisonEvaluatorV1,
@@ -10137,8 +10197,25 @@ def _request_comparison_judge(
     timeout_sec = int(request_policy["timeout_sec"])
     # HTTPX issues one request by default. Do not install a retrying transport:
     # a timed-out judge remains unavailable instead of creating duplicate spend.
+    response_schema = _comparison_judge_response_schema(evaluator.dimensions)
     with httpx.Client(timeout=timeout_sec) as client:
-        response, usage = _post_judge(client, route, api_key, env, prompt)
+        if route.messages_base_url:
+            response, usage = _post_judge(
+                client,
+                route,
+                api_key,
+                env,
+                prompt,
+                response_schema=response_schema,
+            )
+        else:
+            response, usage = _post_judge(
+                client,
+                route,
+                api_key,
+                env,
+                prompt,
+            )
     return (
         response,
         usage,
@@ -10149,6 +10226,19 @@ def _request_comparison_judge(
             "profile": evaluator.profile,
             "route": model_route_identity(route, env),
             "rubric_digest": _judge_contract_digest(evaluator),
+            "response_schema_digest": stable_digest(response_schema),
+            "response_request_mode": (
+                "anthropic_json_schema_v1"
+                if route.messages_base_url
+                else "provider_json_object_v1"
+            ),
+            "response_validator_version": (
+                COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION
+            ),
+            "requested_text_max_characters": (
+                COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
+            ),
+            "response_max_characters": COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
             "request_policy": request_policy,
             "blind_fields": [
                 "baseline_or_candidate",
@@ -10175,6 +10265,7 @@ def _comparison_judge_request_policy(
 ) -> dict[str, Any]:
     from fugue.bench.evaluations import (
         JUDGE_JSON_MAX_OUTPUT_TOKENS,
+        JUDGE_JSON_MAX_RESPONSE_CHARACTERS,
         JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION,
     )
     from fugue.model_plane import (
@@ -10189,6 +10280,7 @@ def _comparison_judge_request_policy(
             evaluator.timeout_sec or DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC
         ),
         "max_output_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
+        "max_response_characters": JUDGE_JSON_MAX_RESPONSE_CHARACTERS,
         "structured_assistant_options": structured_assistant_options(
             resolved_route
         ),
@@ -10328,6 +10420,37 @@ def _comparison_judge_input_privacy_receipt(
     }
 
 
+def _comparison_judge_output_privacy_receipt(
+    *,
+    payload: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if redact_value(payload, secrets=secrets_from_env(env)) != payload:
+        from fugue.bench.evaluations import JudgeResponseError
+
+        raise JudgeResponseError(
+            stage="output_privacy",
+            code="output_privacy_rejected",
+            message="judge response failed the post-provider privacy scan",
+            response_sha256=hashlib.sha256(canonical_payload.encode()).hexdigest(),
+            response_characters=len(canonical_payload),
+            usage=usage,
+        )
+    return {
+        "schema_version": 1,
+        "status": "passed",
+        "contract": "fugue-redaction-v1",
+        "payload_sha256": hashlib.sha256(canonical_payload.encode()).hexdigest(),
+    }
+
+
 def _comparison_output(row: Mapping[str, Any]) -> Any:
     for key in ("final_output", "answer", "agent_response"):
         if row.get(key) is not None:
@@ -10357,6 +10480,20 @@ def _comparison_trial_output(row: Mapping[str, Any]) -> Any:
 def _validate_comparison_judge_payload(
     evaluator: ComparisonEvaluatorV1, payload: Mapping[str, Any]
 ) -> dict[str, Any]:
+    expected_fields = {
+        "scores",
+        "overall_assessment",
+        "uncertainty",
+        "missing_evidence",
+        "rationale",
+    }
+    unknown = sorted(set(payload) - expected_fields)
+    missing = sorted(expected_fields - set(payload))
+    if unknown or missing:
+        raise ValueError(
+            "judge response fields do not match: "
+            f"unknown={unknown}, missing={missing}"
+        )
     expected = set(evaluator.dimensions)
     raw_scores = payload.get("scores")
     if not isinstance(raw_scores, Mapping) or set(raw_scores) != expected:
@@ -10366,18 +10503,28 @@ def _validate_comparison_judge_payload(
         if (
             not isinstance(raw, int | float)
             or isinstance(raw, bool)
+            or not math.isfinite(float(raw))
             or not 0 <= float(raw) <= 1
         ):
             raise ValueError(f"judge score {dimension!r} must be between zero and one")
         scores[str(dimension)] = float(raw)
-    assessment = str(payload.get("overall_assessment") or "").strip()
-    rationale = str(payload.get("rationale") or "").strip()
+    raw_assessment = payload.get("overall_assessment")
+    raw_rationale = payload.get("rationale")
+    if not isinstance(raw_assessment, str):
+        raise ValueError("judge overall_assessment must be text")
+    if not isinstance(raw_rationale, str):
+        raise ValueError("judge rationale must be text")
+    assessment = raw_assessment.strip()
+    rationale = raw_rationale.strip()
     uncertainty = payload.get("uncertainty")
     missing_evidence = payload.get("missing_evidence")
-    if not assessment or len(assessment) > 500:
-        raise ValueError("judge overall_assessment must be 1..500 characters")
-    if not rationale or len(rationale) > 500:
-        raise ValueError("judge rationale must be 1..500 characters")
+    hard_limit = COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS
+    if not assessment or len(assessment) > hard_limit:
+        raise ValueError(
+            f"judge overall_assessment must be 1..{hard_limit} characters"
+        )
+    if not rationale or len(rationale) > hard_limit:
+        raise ValueError(f"judge rationale must be 1..{hard_limit} characters")
     if (
         not isinstance(uncertainty, int | float)
         or isinstance(uncertainty, bool)
@@ -12533,6 +12680,17 @@ def _evaluator_digest(
                 Path(evaluator.calibration), repo_root, "judge calibration"
             )
         )
+    if evaluator.type == "llm_judge":
+        value["response_contract"] = {
+            "schema_digest": stable_digest(
+                _comparison_judge_response_schema(evaluator.dimensions)
+            ),
+            "validator_version": COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION,
+            "requested_text_max_characters": (
+                COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
+            ),
+            "response_max_characters": COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
+        }
     return stable_digest(value)
 
 
@@ -13069,7 +13227,7 @@ def _synthetic_calibration_binding_issue(
 ) -> str | None:
     if gate.get("response_request_mode") != "anthropic_json_schema_v1":
         return f"judge {judge.id} synthetic response request mode is unsupported"
-    if gate.get("response_validator_version") != 1:
+    if gate.get("response_validator_version") != 2:
         return f"judge {judge.id} synthetic response validator is unsupported"
     if gate.get("response_schema_digest") != _synthetic_response_schema_digest(
         judge.dimensions
@@ -13144,10 +13302,22 @@ def _synthetic_response_schema_digest(dimensions: Sequence[str]) -> str:
                         for dimension in dimensions
                     },
                 },
-                "overall_assessment": {"type": "string"},
+                "overall_assessment": {
+                    "type": "string",
+                    "description": (
+                        "Brief evidence-bounded assessment; requested maximum "
+                        "500 characters."
+                    ),
+                },
                 "uncertainty": {"type": "number"},
                 "missing_evidence": {"type": "boolean"},
-                "rationale": {"type": "string"},
+                "rationale": {
+                    "type": "string",
+                    "description": (
+                        "Brief evidence-bounded rationale; requested maximum "
+                        "500 characters."
+                    ),
+                },
             },
         }
     )

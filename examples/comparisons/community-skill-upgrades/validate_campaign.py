@@ -33,11 +33,13 @@ EXPECTED_REPOSITORIES = (
 LABELS = ("unusable", "weak", "adequate", "strong", "exceptional")
 PASSING_LABELS = {"strong", "exceptional"}
 CALIBRATION_CAMPAIGN_ALLOCATION_USD = 8.0
-CALIBRATION_PRIOR_FAILED_REQUESTS = 1
-CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD = 0.166667
-CALIBRATION_RUN_MAXIMUM_COST_USD = 7.833333
+CALIBRATION_PRIOR_FAILED_REQUESTS = 2
+CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD = 0.329861
+CALIBRATION_RUN_MAXIMUM_COST_USD = 7.670139
 CALIBRATION_RESPONSE_REQUEST_MODE = "anthropic_json_schema_v1"
-PROVIDER_RESPONSE_VALIDATOR_VERSION = 1
+PROVIDER_RESPONSE_VALIDATOR_VERSION = 2
+PROVIDER_RESPONSE_TEXT_REQUESTED_MAX_CHARACTERS = 500
+PROVIDER_RESPONSE_MAX_CHARACTERS = 16_000
 RUNNER_ARTIFACT_PATH = (
     "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py"
 )
@@ -295,10 +297,22 @@ def provider_response_schema() -> dict[str, Any]:
                     dimension: {"type": "number"} for dimension in EXPECTED_DIMENSIONS
                 },
             },
-            "overall_assessment": {"type": "string"},
+            "overall_assessment": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded assessment; requested maximum "
+                    f"{PROVIDER_RESPONSE_TEXT_REQUESTED_MAX_CHARACTERS} characters."
+                ),
+            },
             "uncertainty": {"type": "number"},
             "missing_evidence": {"type": "boolean"},
-            "rationale": {"type": "string"},
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded rationale; requested maximum "
+                    f"{PROVIDER_RESPONSE_TEXT_REQUESTED_MAX_CHARACTERS} characters."
+                ),
+            },
         },
     }
 
@@ -1136,9 +1150,10 @@ def _validate_synthetic_result_row(
         raise ValueError(f"synthetic result {case_id} label disagrees with scores")
     for field in ("reason", "rationale"):
         text = str(value[field]).strip()
-        if not text or len(text) > 500:
+        if not text or len(text) > PROVIDER_RESPONSE_MAX_CHARACTERS:
             raise ValueError(
-                f"synthetic result {case_id} {field} must contain 1-500 characters"
+                f"synthetic result {case_id} {field} must contain 1-"
+                f"{PROVIDER_RESPONSE_MAX_CHARACTERS} characters"
             )
     uncertainty = value["uncertainty"]
     if (

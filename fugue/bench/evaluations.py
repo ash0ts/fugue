@@ -59,6 +59,7 @@ MAX_GENERATED_CASE_BYTES = 12_000
 MAX_GENERATED_RUBRIC_BYTES = 12_000
 JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION = 1
 JUDGE_JSON_MAX_OUTPUT_TOKENS = 1_200
+JUDGE_JSON_MAX_RESPONSE_CHARACTERS = 16_000
 
 EvaluationAssetKind = Literal[
     "evaluation_cases",
@@ -842,6 +843,15 @@ def _post_judge(
             "input_tokens": raw_usage.get("prompt_tokens"),
             "output_tokens": raw_usage.get("completion_tokens"),
         }
+    if len(content) > JUDGE_JSON_MAX_RESPONSE_CHARACTERS:
+        raise JudgeResponseError(
+            stage="response_validation",
+            code="response_too_large",
+            message="judge response exceeded the bounded response envelope",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        )
     match = re.search(r"\{.*\}", content, flags=re.DOTALL)
     if not match:
         raise JudgeResponseError(

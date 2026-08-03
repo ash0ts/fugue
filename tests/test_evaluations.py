@@ -990,3 +990,38 @@ def test_json_judge_no_object_error_retains_only_safe_response_metadata() -> Non
     assert error.response_characters == len(response_text)
     assert error.usage == {"input_tokens": 12, "output_tokens": 1_200}
     assert response_text not in vars(error).values()
+
+
+def test_json_judge_rejects_response_above_the_bounded_envelope() -> None:
+    client = _RecordingChatJudgeClient()
+    route = resolve_model_route("wandb/zai-org/GLM-5.2", {})
+    response_text = "x" * (evaluations.JUDGE_JSON_MAX_RESPONSE_CHARACTERS + 1)
+
+    def oversized_response(url: str, **kwargs: Any) -> httpx.Response:
+        client.request = {"url": url, **kwargs}
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": response_text}}],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1_200},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client.post = oversized_response  # type: ignore[method-assign]
+    with pytest.raises(evaluations.JudgeResponseError) as caught:
+        evaluations._post_judge(
+            client,  # type: ignore[arg-type]
+            route,
+            "test-key",
+            {},
+            "Return JSON.",
+        )
+
+    error = caught.value
+    assert error.stage == "response_validation"
+    assert error.code == "response_too_large"
+    assert error.response_characters == len(response_text)
+    assert error.response_sha256 == hashlib.sha256(response_text.encode()).hexdigest()
+    assert error.usage == {"input_tokens": 12, "output_tokens": 1_200}
+    assert response_text not in vars(error).values()

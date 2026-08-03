@@ -61,7 +61,8 @@ def _prompt(rubric: Mapping[str, Any], row: Mapping[str, Any]) -> str:
         f"{top_level_fields}. The scores object must contain exactly these "
         f"dimensions and no others: {dimensions}. Every score and uncertainty "
         "must be a JSON number from 0 through 1, missing_evidence must be a JSON "
-        "boolean, and overall_assessment and rationale must each contain 1-500 "
+        "boolean, and overall_assessment and rationale should each contain no "
+        f"more than {contract.PROVIDER_RESPONSE_TEXT_REQUESTED_MAX_CHARACTERS} "
         "characters. Replace only the example values in this exact JSON shape: "
         f"{exact_shape}. Never return scores_explanation, hidden reasoning, or "
         "chain of thought.\n\n"
@@ -97,14 +98,21 @@ def _validate_provider_payload(value: Any) -> dict[str, Any]:
         ):
             raise ValueError(f"judge score {dimension} must be between zero and one")
         normalized_scores[dimension] = float(score)
-    assessment = str(value["overall_assessment"]).strip()
-    rationale = str(value["rationale"]).strip()
+    if not isinstance(value["overall_assessment"], str):
+        raise ValueError("judge overall_assessment must be text")
+    if not isinstance(value["rationale"], str):
+        raise ValueError("judge rationale must be text")
+    assessment = value["overall_assessment"].strip()
+    rationale = value["rationale"].strip()
     uncertainty = value["uncertainty"]
     missing_evidence = value["missing_evidence"]
-    if not assessment or len(assessment) > 500:
-        raise ValueError("judge overall_assessment must contain 1-500 characters")
-    if not rationale or len(rationale) > 500:
-        raise ValueError("judge rationale must contain 1-500 characters")
+    hard_limit = contract.PROVIDER_RESPONSE_MAX_CHARACTERS
+    if not assessment or len(assessment) > hard_limit:
+        raise ValueError(
+            f"judge overall_assessment must contain 1-{hard_limit} characters"
+        )
+    if not rationale or len(rationale) > hard_limit:
+        raise ValueError(f"judge rationale must contain 1-{hard_limit} characters")
     if (
         not isinstance(uncertainty, int | float)
         or isinstance(uncertainty, bool)
@@ -186,11 +194,20 @@ def run_synthetic_calibration(
                 usage=getattr(exc, "usage", {}),
             )
             _validate_failure_document(failure, preview=preview)
-            failure_output = _failure_output_path(output)
+            failure_output = _failure_output_path(
+                output,
+                preview_digest=str(preview["preview_digest"]),
+                case_ordinal=ordinal,
+            )
             _atomic_write(failure_output, failure)
             exc.add_note(f"failure receipt: {failure_output.as_posix()}")
             raise
         try:
+            _reject_secret_values(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                secret_values,
+                "synthetic judge raw result",
+            )
             validated = _validate_provider_payload(payload)
         except (TypeError, ValueError) as exc:
             failure = _failure_document(
@@ -205,7 +222,11 @@ def run_synthetic_calibration(
                 usage=usage,
             )
             _validate_failure_document(failure, preview=preview)
-            failure_output = _failure_output_path(output)
+            failure_output = _failure_output_path(
+                output,
+                preview_digest=str(preview["preview_digest"]),
+                case_ordinal=ordinal,
+            )
             _atomic_write(failure_output, failure)
             exc.add_note(f"failure receipt: {failure_output.as_posix()}")
             raise
@@ -387,8 +408,20 @@ def _safe_usage(value: Any) -> dict[str, int | None]:
     return normalized
 
 
-def _failure_output_path(output: Path) -> Path:
-    return output.with_suffix(output.suffix + ".failure.json")
+def _failure_output_path(
+    output: Path,
+    *,
+    preview_digest: str,
+    case_ordinal: int,
+) -> Path:
+    if not contract.SHA256.fullmatch(preview_digest):
+        raise ValueError("synthetic judge failure preview digest is invalid")
+    if not 1 <= case_ordinal <= MAX_REQUESTS:
+        raise ValueError("synthetic judge failure case ordinal is invalid")
+    return output.with_name(
+        f"{output.name}.{preview_digest[:16]}."
+        f"case-{case_ordinal:02d}.failure.json"
+    )
 
 
 def _failure_document(

@@ -12,9 +12,13 @@ from types import ModuleType
 import pytest
 
 from fugue.bench.comparison import (
+    COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS,
+    COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION,
+    _comparison_judge_response_schema,
     _judge_execution_calibration_issue,
     load_comparison,
 )
+from fugue.bench.evaluations import JUDGE_JSON_MAX_RESPONSE_CHARACTERS
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.store import StudyStore
 
@@ -115,9 +119,9 @@ def test_campaign_assets_are_strict_valid_but_not_execution_eligible() -> None:
         rubric_digest=summary["rubric_digest"],
         **_runner_bindings(),
     )
-    assert calibration["execution_gate"]["maximum_cost_usd"] == 7.833333
-    assert calibration["execution_gate"]["prior_failed_requests"] == 1
-    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 0.166667
+    assert calibration["execution_gate"]["maximum_cost_usd"] == 7.670139
+    assert calibration["execution_gate"]["prior_failed_requests"] == 2
+    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 0.329861
     assert calibration["execution_gate"]["campaign_allocation_usd"] == 8
 
 
@@ -284,12 +288,39 @@ def test_synthetic_prompt_contains_only_blinded_public_inputs_and_rubric() -> No
                     for dimension in CONTRACT.EXPECTED_DIMENSIONS
                 },
             },
-            "overall_assessment": {"type": "string"},
+            "overall_assessment": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded assessment; requested maximum "
+                    "500 characters."
+                ),
+            },
             "uncertainty": {"type": "number"},
             "missing_evidence": {"type": "boolean"},
-            "rationale": {"type": "string"},
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Brief evidence-bounded rationale; requested maximum "
+                    "500 characters."
+                ),
+            },
         },
     }
+
+
+def test_synthetic_and_live_judges_share_the_response_envelope_contract() -> None:
+    assert CONTRACT.PROVIDER_RESPONSE_VALIDATOR_VERSION == (
+        COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION
+    )
+    assert CONTRACT.PROVIDER_RESPONSE_MAX_CHARACTERS == (
+        COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS
+    )
+    assert CONTRACT.PROVIDER_RESPONSE_MAX_CHARACTERS == (
+        JUDGE_JSON_MAX_RESPONSE_CHARACTERS
+    )
+    assert CONTRACT.provider_response_schema() == _comparison_judge_response_schema(
+        CONTRACT.EXPECTED_DIMENSIONS
+    )
 
 
 def test_synthetic_provider_payload_rejects_unknown_explanation_field() -> None:
@@ -300,6 +331,25 @@ def test_synthetic_provider_payload_rejects_unknown_explanation_field() -> None:
     }
 
     with pytest.raises(ValueError, match="scores_explanation"):
+        RUNNER._validate_provider_payload(payload)
+
+
+def test_synthetic_provider_payload_keeps_long_but_bounded_explanation() -> None:
+    payload = CONTRACT.provider_response_example()
+    payload["rationale"] = "r" * 800
+
+    validated = RUNNER._validate_provider_payload(payload)
+
+    assert validated["rationale"] == "r" * 800
+
+
+def test_synthetic_provider_payload_rejects_explanation_above_hard_bound() -> None:
+    payload = CONTRACT.provider_response_example()
+    payload["rationale"] = "r" * (
+        CONTRACT.PROVIDER_RESPONSE_MAX_CHARACTERS + 1
+    )
+
+    with pytest.raises(ValueError, match="rationale"):
         RUNNER._validate_provider_payload(payload)
 
 
@@ -339,14 +389,14 @@ def test_synthetic_dry_run_is_bounded_and_preserves_human_gate() -> None:
     assert summary["requests"] == 48
     assert summary["automatic_retries"] == 0
     assert summary["maximum_output_tokens_per_request"] == 1200
-    assert summary["budget_ceiling_usd"] == 7.833333
+    assert summary["budget_ceiling_usd"] == 7.670139
     assert summary["calibration_status"] == "pending_human_review"
     assert summary["human_calibration_satisfied"] is False
     assert summary["preview_digest"] == preview["preview_digest"]
     unsigned = {key: value for key, value in preview.items() if key != "preview_digest"}
     assert preview["preview_digest"] == CONTRACT.stable_digest(unsigned)
-    assert preview["maximum_cost_usd"] == 7.833333
-    assert preview["prior_accounted_reserve_usd"] == 0.166667
+    assert preview["maximum_cost_usd"] == 7.670139
+    assert preview["prior_accounted_reserve_usd"] == 0.329861
     assert preview["campaign_allocation_usd"] == 8
     assert preview["requests"] == 48
 
@@ -391,7 +441,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert result["human_review_status"] == "pending_human_review"
     assert result["human_calibration_satisfied"] is False
     assert result["observed_cost_usd"] is None
-    assert result["accounted_cost_usd"] == 7.833333
+    assert result["accounted_cost_usd"] == 7.670139
     assert result["cumulative_accounted_cost_usd"] == 8
     assert result["cases_artifact_path"] == (
         "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl"
@@ -416,7 +466,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert receipt["cases_artifact_sha256"] == result["cases_artifact_sha256"]
     assert receipt["runner_artifact_sha256"] == result["runner_artifact_sha256"]
     assert receipt["response_schema_digest"] == result["response_schema_digest"]
-    assert receipt["run_accounted_cost_usd"] == 7.833333
+    assert receipt["run_accounted_cost_usd"] == 7.670139
     assert receipt["cumulative_accounted_cost_usd"] == 8
     assert json.loads(output.read_text(encoding="utf-8")) == result
     assert (EXAMPLE / "judge-calibration.json").read_bytes() == human_report_before
@@ -459,11 +509,16 @@ def test_second_request_failure_preserves_partial_and_writes_safe_receipt(
     assert partial["status"] == "incomplete"
     assert partial["completed_cases"] == 1
     assert len(partial["results"]) == 1
-    failure_path = output.with_suffix(output.suffix + ".failure.json")
+    preview = RUNNER.calibration_preview(EXAMPLE)
+    failure_path = RUNNER._failure_output_path(
+        output,
+        preview_digest=preview["preview_digest"],
+        case_ordinal=2,
+    )
     failure = json.loads(failure_path.read_text(encoding="utf-8"))
     RUNNER._validate_failure_document(
         failure,
-        preview=RUNNER.calibration_preview(EXAMPLE),
+        preview=preview,
     )
     assert failure["case_id"] == rows[1]["id"]
     assert failure["case_ordinal"] == 2
@@ -475,7 +530,7 @@ def test_second_request_failure_preserves_partial_and_writes_safe_receipt(
     assert failure["usage"] == {"input_tokens": 100, "output_tokens": 20}
     assert failure["raw_response_persisted"] is False
     assert failure["run_accounted_reserve_usd"] == round(
-        2 * 7.833333 / 48,
+        2 * 7.670139 / 48,
         6,
     )
     assert failure["cumulative_accounted_reserve_usd"] <= 8

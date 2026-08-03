@@ -19,6 +19,7 @@ from fugue.bench.comparison import (
     _apply_decision_attestation,
     _candidate_source_revisions,
     _canonical_decision_gate_policies,
+    _comparison_judge_response_schema,
     _comparison_qualification_digest,
     _comparison_reserved_cost_per_attempt,
     _comparison_result_digest,
@@ -29,8 +30,10 @@ from fugue.bench.comparison import (
     _judge_review_label,
     _paired_attempt_view,
     _paired_attempt_view_v3,
+    _request_comparison_judge,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
+    _validate_comparison_judge_payload,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -47,7 +50,10 @@ from fugue.bench.comparison import (
     write_comparison_result,
 )
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
-from fugue.bench.evaluations import JudgeResponseError
+from fugue.bench.evaluations import (
+    JUDGE_JSON_MAX_RESPONSE_CHARACTERS,
+    JudgeResponseError,
+)
 from fugue.bench.operator import OperatorService, PreviewCellSummary
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
@@ -2903,6 +2909,104 @@ def test_blind_judge_labels_have_stable_public_anchors(
     assert _judge_review_label(score) == label
 
 
+def test_blind_judge_response_schema_is_exact_and_describes_soft_text_bound() -> None:
+    schema = _comparison_judge_response_schema(("usefulness", "grounding"))
+
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == [
+        "scores",
+        "overall_assessment",
+        "uncertainty",
+        "missing_evidence",
+        "rationale",
+    ]
+    assert schema["properties"]["scores"]["additionalProperties"] is False
+    assert schema["properties"]["scores"]["required"] == [
+        "usefulness",
+        "grounding",
+    ]
+    assert "requested maximum 500 characters" in schema["properties"][
+        "rationale"
+    ]["description"]
+
+
+def test_blind_judge_accepts_long_but_bounded_reason_and_rejects_hard_overflow() -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+    )
+    payload = {
+        "scores": {"maintenance_actionability": 0.75},
+        "overall_assessment": "Useful and grounded.",
+        "uncertainty": 0.2,
+        "missing_evidence": False,
+        "rationale": "r" * 800,
+    }
+
+    assert _validate_comparison_judge_payload(judge, payload)["rationale"] == (
+        "r" * 800
+    )
+    payload["scores_explanation"] = "unsupported"
+    with pytest.raises(ValueError, match="scores_explanation"):
+        _validate_comparison_judge_payload(judge, payload)
+    payload.pop("scores_explanation")
+    payload["rationale"] = "r" * (JUDGE_JSON_MAX_RESPONSE_CHARACTERS + 1)
+    with pytest.raises(ValueError, match="rationale"):
+        _validate_comparison_judge_payload(judge, payload)
+
+
+def test_anthropic_blind_judge_sends_the_bound_response_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+    )
+    captured: dict[str, object] = {}
+
+    def post_judge(*_args: object, **kwargs: object):
+        captured.update(kwargs)
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.75},
+                "overall_assessment": "Useful and grounded.",
+                "uncertainty": 0.2,
+                "missing_evidence": False,
+                "rationale": "The response cites the inspected path.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", post_judge)
+    _, _, receipt = _request_comparison_judge(
+        evaluator=judge,
+        public_task={"input": "Review this change."},
+        row={"answer": "A grounded response."},
+        env={"ANTHROPIC_API_KEY": "test-secret"},
+    )
+
+    assert captured["response_schema"] == _comparison_judge_response_schema(
+        judge.dimensions
+    )
+    assert receipt["response_schema_digest"] == stable_digest(
+        captured["response_schema"]
+    )
+    assert receipt["response_request_mode"] == "anthropic_json_schema_v1"
+    assert receipt["response_validator_version"] == 2
+    assert receipt["requested_text_max_characters"] == 500
+    assert receipt["response_max_characters"] == JUDGE_JSON_MAX_RESPONSE_CHARACTERS
+
+
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
     root = Path.cwd()
     spec = load_comparison(
@@ -3218,9 +3322,65 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
         "schema_version": 1,
         "timeout_sec": 300,
         "max_output_tokens": 1_200,
+        "max_response_characters": 16_000,
         "structured_assistant_options": {"thinking": {"type": "disabled"}},
         "automatic_retries": 0,
     }
+
+
+def test_blind_judge_rejects_secret_in_provider_response_without_persisting_it(
+    allow_unit_judge_execution: None,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        reserve_cost_usd=0.1,
+    )
+    secret = "response-secret-value"
+
+    def secret_response(**_kwargs: object):
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.75},
+                "overall_assessment": "Useful and grounded.",
+                "uncertainty": 0.2,
+                "missing_evidence": False,
+                "rationale": f"The response unexpectedly repeated {secret}.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+            {"request_policy": {"automatic_retries": 0}},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+            }
+        ],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": secret},
+        judge_request=secret_response,
+    )
+
+    failure = rows[0]["comparison_judges"]["maintainer-review"]["failure"]
+    assert failure["stage"] == "output_privacy"
+    assert failure["code"] == "output_privacy_rejected"
+    assert failure["usage"] == {"input_tokens": 100, "output_tokens": 20}
+    assert failure["response_characters"] > 0
+    assert len(failure["response_sha256"]) == 64
+    assert secret not in json.dumps(rows[0], sort_keys=True)
 
 
 def test_blind_judge_rejects_secret_before_provider_call(
@@ -3333,6 +3493,7 @@ def test_blind_judge_read_timeout_is_not_retried(
             "schema_version": 1,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
+            "max_response_characters": 16_000,
             "structured_assistant_options": {},
             "automatic_retries": 0,
         },
@@ -3406,6 +3567,7 @@ def test_blind_judge_records_safe_no_json_failure_metadata(
             "schema_version": 1,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
+            "max_response_characters": 16_000,
             "structured_assistant_options": {"thinking": {"type": "disabled"}},
             "automatic_retries": 0,
         },
@@ -3472,6 +3634,7 @@ def test_blind_judge_distinguishes_strict_rubric_validation_failure(
             "schema_version": 1,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
+            "max_response_characters": 16_000,
             "structured_assistant_options": {"thinking": {"type": "disabled"}},
             "automatic_retries": 0,
         },
