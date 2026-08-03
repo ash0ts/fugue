@@ -174,6 +174,82 @@ class _CellWallTimeExceeded(RuntimeError):
     pass
 
 
+class _ExecutionAbortController:
+    def __init__(
+        self,
+        event: threading.Event | None,
+        message: str,
+        store: _RunStore | None,
+    ) -> None:
+        self.event = event
+        self.message = message
+        self.store = store
+        self._lock = threading.Lock()
+
+    def stop_request(
+        self,
+        cancellation_event: threading.Event | None,
+        cancellation_message: str,
+    ) -> tuple[str, str] | None:
+        if self.event is not None and self.event.is_set():
+            return self.message, "internal"
+        if cancellation_event is not None and cancellation_event.is_set():
+            return cancellation_message, "operator"
+        return None
+
+    def request(self, cell: PlannedCell, outcome: CellOutcome) -> None:
+        if self.event is None or outcome.status != "failed":
+            return
+        with self._lock:
+            if self.event.is_set():
+                return
+            self.event.set()
+            assert self.store is not None
+            self.store.append_event(
+                "run_abort_requested",
+                cell=cell,
+                status="failed",
+                message=outcome.error or self.message,
+                runtime_outcome=outcome.runtime_outcome,
+                cancellation_origin="internal",
+            )
+
+
+def _cancellation_origin_fields(origin: str | None) -> dict[str, str]:
+    return {"cancellation_origin": origin} if origin is not None else {}
+
+
+def _finish_cell_evidence(
+    cell: PlannedCell,
+    outcome: CellOutcome,
+    *,
+    store: _RunStore,
+    cell_finished: CellFinishedCallback | None,
+    require_success: bool,
+    abort: _ExecutionAbortController,
+) -> CellOutcome:
+    if cell_finished is None:
+        return outcome
+    try:
+        cell_finished(cell, outcome)
+        return outcome
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        store.append_event("observability_error", cell=cell, message=error)
+        if not require_success:
+            return outcome
+        failed = CellOutcome(
+            cell.id,
+            "failed",
+            returncode=outcome.returncode,
+            error=f"required live-evidence finalization failed: {error}",
+            benchmark_outcome="unscored",
+            runtime_outcome=outcome.runtime_outcome,
+        )
+        abort.request(cell, failed)
+        return failed
+
+
 def new_run_id() -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     return f"{timestamp}-{uuid.uuid4().hex[:10]}"
@@ -295,6 +371,10 @@ def execute_cells(
     cell_finished: CellFinishedCallback | None = None,
     cancellation_event: threading.Event | None = None,
     cancellation_message: str = "Run cancelled by the operator.",
+    internal_abort_event: threading.Event | None = None,
+    internal_abort_message: str = (
+        "Run stopped after an execution or infrastructure failure."
+    ),
 ) -> list[CellOutcome]:
     if max_workers < 1:
         raise ValueError("cell concurrency must be positive")
@@ -311,6 +391,11 @@ def execute_cells(
     )
     runnable: list[PlannedCell] = []
     outcomes: list[CellOutcome] = []
+    abort = _ExecutionAbortController(
+        internal_abort_event,
+        internal_abort_message,
+        store,
+    )
     for cell in cells:
         assert store is not None
         store.append_cell(cell.record("pending"))
@@ -342,20 +427,26 @@ def execute_cells(
 
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
-        if cancellation_event is not None and cancellation_event.is_set():
+        requested_stop = abort.stop_request(
+            cancellation_event,
+            cancellation_message,
+        )
+        if requested_stop is not None:
+            stop_message, stop_origin = requested_stop
             outcome = CellOutcome(
                 cell.id,
                 "cancelled",
-                error=cancellation_message,
-                runtime_outcome="cancelled",
+                error=stop_message,
+                runtime_outcome="not_started",
             )
             ended = datetime.now(UTC)
             store.append_cell(
                 cell.record(
                     "cancelled",
-                    error=cancellation_message,
+                    error=stop_message,
                     benchmark_outcome=outcome.benchmark_outcome,
-                    runtime_outcome="cancelled",
+                    runtime_outcome="not_started",
+                    cancellation_origin=stop_origin,
                     ended_at=ended.isoformat(),
                 )
             )
@@ -363,7 +454,9 @@ def execute_cells(
                 "cell_state",
                 cell=cell,
                 status="cancelled",
-                message=cancellation_message,
+                message=stop_message,
+                runtime_outcome="not_started",
+                cancellation_origin=stop_origin,
             )
             return outcome
         try:
@@ -381,6 +474,7 @@ def execute_cells(
                 )
             )
             store.append_event("cell_state", cell=cell, status="failed", message=error)
+            abort.request(cell, outcome)
             return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
@@ -393,16 +487,23 @@ def execute_cells(
                 cell_started=cell_started,
                 require_success=require_cell_started_success,
                 cancellation_event=cancellation_event,
+                internal_abort_event=abort.event,
             )
         )
         if start_failure is not None:
+            abort.request(cell, start_failure)
             return start_failure
-        if cancellation_event is not None and cancellation_event.is_set():
+        requested_stop = abort.stop_request(
+            cancellation_event,
+            cancellation_message,
+        )
+        if requested_stop is not None:
+            stop_message, stop_origin = requested_stop
             outcome = CellOutcome(
                 cell.id,
                 "cancelled",
-                error=cancellation_message,
-                runtime_outcome="cancelled",
+                error=stop_message,
+                runtime_outcome="not_started",
             )
             ended = datetime.now(UTC)
             if cell_started_called and cell_finished is not None:
@@ -417,9 +518,10 @@ def execute_cells(
             store.append_cell(
                 cell.record(
                     "cancelled",
-                    error=cancellation_message,
+                    error=stop_message,
                     benchmark_outcome=outcome.benchmark_outcome,
-                    runtime_outcome="cancelled",
+                    runtime_outcome="not_started",
+                    cancellation_origin=stop_origin,
                     started_at=started.isoformat(),
                     ended_at=ended.isoformat(),
                     wall_time_sec=(ended - started).total_seconds(),
@@ -429,11 +531,14 @@ def execute_cells(
                 "cell_state",
                 cell=cell,
                 status="cancelled",
-                message=cancellation_message,
+                message=stop_message,
+                runtime_outcome="not_started",
+                cancellation_origin=stop_origin,
                 wall_time_sec=(ended - started).total_seconds(),
             )
             return outcome
         try:
+            terminal_origin: str | None = None
             if runner is None:
                 returncode = _run_cell_process(
                     cell,
@@ -445,6 +550,7 @@ def execute_cells(
                         if cancellation_event is not None
                         else {}
                     ),
+                    internal_abort_event=abort.event,
                 )
             else:
                 result = runner(
@@ -460,12 +566,16 @@ def execute_cells(
                 else _HarborJobResult(None, "unscored")
             )
             trial_error = harbor_result.error
-            cancellation_requested = bool(
-                cancellation_event is not None and cancellation_event.is_set()
+            requested_stop = abort.stop_request(
+                cancellation_event,
+                cancellation_message,
             )
-            if cancellation_requested and (returncode != 0 or trial_error is not None):
+            if requested_stop is not None and (
+                returncode != 0 or trial_error is not None
+            ):
                 status: CellStatus = "cancelled"
-                trial_error = cancellation_message
+                trial_error = requested_stop[0]
+                terminal_origin = requested_stop[1]
             else:
                 status = (
                     "passed" if returncode == 0 and trial_error is None else "failed"
@@ -496,16 +606,16 @@ def execute_cells(
                 error=f"{type(exc).__name__}: {exc}",
                 runtime_outcome="not_started",
             )
+        abort.request(cell, outcome)
         ended = datetime.now(UTC)
-        if cell_finished is not None:
-            try:
-                cell_finished(cell, outcome)
-            except Exception as exc:
-                store.append_event(
-                    "observability_error",
-                    cell=cell,
-                    message=f"{type(exc).__name__}: {exc}",
-                )
+        outcome = _finish_cell_evidence(
+            cell,
+            outcome,
+            store=store,
+            cell_finished=cell_finished,
+            require_success=require_cell_started_success,
+            abort=abort,
+        )
         store.append_cell(
             cell.record(
                 outcome.status,
@@ -514,6 +624,7 @@ def execute_cells(
                 benchmark_outcome=outcome.benchmark_outcome,
                 reward=outcome.reward,
                 runtime_outcome=outcome.runtime_outcome,
+                **_cancellation_origin_fields(terminal_origin),
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=(ended - started).total_seconds(),
@@ -528,6 +639,7 @@ def execute_cells(
             benchmark_outcome=outcome.benchmark_outcome,
             reward=outcome.reward,
             runtime_outcome=outcome.runtime_outcome,
+            **_cancellation_origin_fields(terminal_origin),
             wall_time_sec=(ended - started).total_seconds(),
         )
         return outcome
@@ -547,10 +659,13 @@ def _initialize_cell_evidence(
     cell_started: CellStartedCallback | None,
     require_success: bool,
     cancellation_event: threading.Event | None,
+    internal_abort_event: threading.Event | None,
 ) -> tuple[dict[str, str], bool, CellOutcome | None]:
     execution_env = dict(cell.env)
     if cell_started is None or (
         cancellation_event is not None and cancellation_event.is_set()
+    ) or (
+        internal_abort_event is not None and internal_abort_event.is_set()
     ):
         return execution_env, False, None
     try:
@@ -597,6 +712,7 @@ def _run_cell_process(
     env: Mapping[str, str],
     *,
     cancellation_event: threading.Event | None = None,
+    internal_abort_event: threading.Event | None = None,
 ) -> int:
     if cell.execution_kind == "agent":
         verify_harbor_job_attestation(cell.config_path, repo_root)
@@ -650,7 +766,11 @@ def _run_cell_process(
         )
         reader.start()
         while process.poll() is None:
-            if cancellation_event is not None and cancellation_event.wait(0.1):
+            if (
+                cancellation_event is not None and cancellation_event.is_set()
+            ) or (
+                internal_abort_event is not None and internal_abort_event.is_set()
+            ):
                 _terminate_process_group(process)
                 break
             if deadline is not None and time.monotonic() >= deadline:

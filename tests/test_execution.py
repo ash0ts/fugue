@@ -143,7 +143,9 @@ def test_real_cell_fails_when_harbor_reports_trial_errors(
     result_path.write_text(
         json.dumps({"stats": {"n_errored_trials": 1, "n_cancelled_trials": 0}})
     )
-    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+    monkeypatch.setattr(
+        "fugue.bench.execution._run_cell_process", lambda *args, **kwargs: 0
+    )
 
     [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
 
@@ -182,7 +184,9 @@ def test_harbor_benchmark_outcome_is_separate_from_execution_status(
             }
         )
     )
-    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+    monkeypatch.setattr(
+        "fugue.bench.execution._run_cell_process", lambda *args, **kwargs: 0
+    )
 
     [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
 
@@ -196,6 +200,114 @@ def test_harbor_benchmark_outcome_is_separate_from_execution_status(
     assert record["reward"] == reward
 
 
+def test_deterministic_benchmark_failure_remains_evidence_and_allows_next_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-benchmark-failure"
+    failed_task = _cell(run_id, "deterministic-failure")
+    passing_task = _cell(run_id, "passing-task")
+    for cell, reward in ((failed_task, 0.0), (passing_task, 1.0)):
+        path = tmp_path / cell.result_path
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "stats": {
+                        "n_errored_trials": 0,
+                        "n_cancelled_trials": 0,
+                        "evals": {
+                            "agent__model__dataset": {
+                                "reward_stats": {"reward": {str(reward): ["trial"]}}
+                            }
+                        },
+                    }
+                }
+            )
+        )
+    started: list[str] = []
+
+    def run_cell(cell, *args, **kwargs):
+        started.append(cell.id)
+        return 0
+
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", run_cell)
+    internal_abort = threading.Event()
+
+    outcomes = execute_cells(
+        [failed_task, passing_task],
+        repo_root=tmp_path,
+        max_workers=1,
+        internal_abort_event=internal_abort,
+    )
+
+    assert started == [failed_task.id, passing_task.id]
+    assert internal_abort.is_set() is False
+    assert {
+        outcome.cell_id: (outcome.status, outcome.benchmark_outcome)
+        for outcome in outcomes
+    } == {
+        failed_task.id: ("passed", "failed"),
+        passing_task.id: ("passed", "passed"),
+    }
+
+
+def test_infrastructure_collection_failure_aborts_queued_paid_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-infrastructure-failure"
+    failed_cell = _cell(run_id, "broken-log-reader")
+    queued_cell = _cell(run_id, "must-not-start")
+    started: list[str] = []
+    finished: list[tuple[str, str]] = []
+
+    def run_cell(cell, *args, **kwargs):
+        started.append(cell.id)
+        if cell.id == failed_cell.id:
+            raise RuntimeError("cell log reader failed: [Errno 32] Broken pipe")
+        return 0
+
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", run_cell)
+    internal_abort = threading.Event()
+
+    outcomes = execute_cells(
+        [failed_cell, queued_cell],
+        repo_root=tmp_path,
+        max_workers=1,
+        cell_finished=lambda cell, outcome: finished.append(
+            (cell.id, outcome.status)
+        ),
+        internal_abort_event=internal_abort,
+    )
+
+    assert started == [failed_cell.id]
+    assert finished == [(failed_cell.id, "failed")]
+    assert internal_abort.is_set() is True
+    assert {outcome.cell_id: outcome.status for outcome in outcomes} == {
+        failed_cell.id: "failed",
+        queued_cell.id: "cancelled",
+    }
+    records = {
+        row["cell_id"]: row
+        for row in latest_cell_records(
+            tmp_path / ".fugue/runtime/run-infrastructure-failure/cells.jsonl"
+        )
+    }
+    assert records[failed_cell.id]["error"] == (
+        "RuntimeError: cell log reader failed: [Errno 32] Broken pipe"
+    )
+    assert records[queued_cell.id]["runtime_outcome"] == "not_started"
+    assert records[queued_cell.id]["cancellation_origin"] == "internal"
+    events = [
+        json.loads(line)
+        for line in (
+            tmp_path / ".fugue/runtime/run-infrastructure-failure/events.jsonl"
+        ).read_text().splitlines()
+    ]
+    [abort] = [event for event in events if event["event"] == "run_abort_requested"]
+    assert abort["cell_id"] == failed_cell.id
+    assert abort["cancellation_origin"] == "internal"
+
+
 def test_provider_diagnostic_does_not_require_a_harbor_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -205,7 +317,9 @@ def test_provider_diagnostic_does_not_require_a_harbor_result(
         execution_kind="provider_diagnostic",
         harness="direct",
     )
-    monkeypatch.setattr("fugue.bench.execution._run_cell_process", lambda *args: 0)
+    monkeypatch.setattr(
+        "fugue.bench.execution._run_cell_process", lambda *args, **kwargs: 0
+    )
 
     [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
 

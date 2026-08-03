@@ -1136,6 +1136,77 @@ def test_execute_run_internal_abort_after_terminal_cell_is_not_operator_cancel(
     assert manifest["evaluation_failures"] == []
 
 
+def test_governed_execution_failure_is_an_internal_abort_not_operator_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment_path = tmp_path / "configs/fugue/experiments/demo.yaml"
+    experiment_path.write_text(
+        experiment_path.read_text() + "\nrequire_live_evidence: true\n"
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    aborted: list[str] = []
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell) -> None:
+            pass
+
+        def finish_cell(self, cell, outcome) -> None:
+            pass
+
+        def finalize(self, *, cancelled: bool = False) -> PublicationResult:
+            raise AssertionError("an internally aborted run must not finalize")
+
+        def abort(self, reason: str) -> PublicationResult:
+            aborted.append(reason)
+            return PublicationResult(published=0, skipped=0)
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
+
+    def fail_governed_cells(cells, **kwargs):
+        internal_abort = kwargs.get("internal_abort_event")
+        assert isinstance(internal_abort, threading.Event)
+        internal_abort.set()
+        return [
+            CellOutcome(
+                cells[0].id,
+                "failed",
+                error="RuntimeError: cell log reader failed: Broken pipe",
+            )
+        ]
+
+    monkeypatch.setattr(operator_module, "execute_cells", fail_governed_cells)
+    run_id = "governed-execution-abort"
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id=run_id,
+        cell_runner=lambda *args, **kwargs: None,
+    )
+
+    assert result.status == "failed"
+    assert result.cancelled == 0
+    assert len(aborted) == 1
+    assert "cell log reader failed: Broken pipe" in aborted[0]
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
+    assert manifest is not None
+    assert manifest["status"] == "failed"
+    assert manifest["internal_abort"] is True
+    assert manifest["cancelled_cells"] == 0
+    assert manifest["internally_aborted_cells"] == 0
+    assert manifest["operator_cancelled_cells"] == 0
+    assert "cell log reader failed: Broken pipe" in manifest["internal_abort_reason"]
+
+
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

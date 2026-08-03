@@ -2301,6 +2301,12 @@ class OperatorService:
                 )
                 else None
             )
+            governed_fail_fast = bool(
+                request.approved_comparison or resolved.require_live_evidence
+            )
+            execution_abort_event = (
+                threading.Event() if governed_fail_fast else None
+            )
             outcomes = execute_cells(
                 cells,
                 repo_root=self.repo_root,
@@ -2321,6 +2327,11 @@ class OperatorService:
                     if cancellation_origin == "internal"
                     else "Run cancelled by the operator."
                 ),
+                **(
+                    {"internal_abort_event": execution_abort_event}
+                    if execution_abort_event is not None
+                    else {}
+                ),
             )
             failed = sum(item.status == "failed" for item in outcomes)
             skipped = sum(item.status == "not_applicable" for item in outcomes)
@@ -2329,14 +2340,35 @@ class OperatorService:
             operator_cancel_requested = bool(
                 (read_run_manifest(run_dir) or {}).get("cancellation_requested_at")
             )
+            execution_abort = bool(
+                execution_abort_event is not None
+                and execution_abort_event.is_set()
+            )
             internal_abort = bool(
-                cancel_event.is_set()
-                and cancellation_origin == "internal"
-                and not operator_cancel_requested
+                execution_abort
+                or (
+                    cancel_event.is_set()
+                    and cancellation_origin == "internal"
+                    and not operator_cancel_requested
+                )
             )
             cancelled = bool(cancelled_cells) and not internal_abort
+            fatal_outcome = next(
+                (item for item in outcomes if item.status == "failed"),
+                None,
+            )
+            internal_abort_reason = (
+                "Run stopped after an execution or infrastructure failure"
+                + (
+                    f" in {fatal_outcome.cell_id}: {fatal_outcome.error}"
+                    if fatal_outcome is not None and fatal_outcome.error
+                    else "."
+                )
+                if execution_abort
+                else "Run stopped by an internal safety gate."
+            )
             publication = (
-                live.abort("Run stopped by an internal safety gate.")
+                live.abort(internal_abort_reason)
                 if live is not None and internal_abort
                 else live.finalize(cancelled=True)
                 if live is not None and cancelled
@@ -2391,7 +2423,7 @@ class OperatorService:
                 error=(
                     "Run cancelled by the operator."
                     if cancelled
-                    else "Run stopped by an internal safety gate."
+                    else internal_abort_reason
                     if internal_abort
                     else (
                         "Local Harbor conformance receipt did not pass: "
@@ -2418,6 +2450,16 @@ class OperatorService:
                     "failed_cells": failed,
                     "cancelled_cells": cancelled_cells,
                     "not_applicable_cells": skipped,
+                    "internal_abort": internal_abort,
+                    "internal_abort_reason": (
+                        internal_abort_reason if internal_abort else None
+                    ),
+                    "internally_aborted_cells": (
+                        cancelled_cells if internal_abort else 0
+                    ),
+                    "operator_cancelled_cells": (
+                        cancelled_cells if cancelled else 0
+                    ),
                     "observability_status": "failed"
                     if failures or internal_abort
                     else "cancelled"
