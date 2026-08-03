@@ -57,7 +57,7 @@ MAX_MCP_ITEMS = 50
 MAX_MCP_DISCOVERY_SECONDS = 30
 MAX_GENERATED_CASE_BYTES = 12_000
 MAX_GENERATED_RUBRIC_BYTES = 12_000
-JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION = 1
+JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION = 2
 JUDGE_JSON_MAX_OUTPUT_TOKENS = 1_200
 JUDGE_JSON_MAX_RESPONSE_CHARACTERS = 16_000
 
@@ -756,6 +756,14 @@ def request_json_judge(
         )
 
 
+def bounded_judge_request_options(route: ModelRoute) -> dict[str, object]:
+    """Return request controls bound to Fugue's non-agent JSON judge policy."""
+
+    if route.messages_base_url:
+        return {"thinking": {"type": "disabled"}}
+    return structured_assistant_options(route)
+
+
 def _post_judge(
     client: httpx.Client,
     route: ModelRoute,
@@ -785,6 +793,7 @@ def _post_judge(
             "model": route.model_id,
             "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
+            **bounded_judge_request_options(route),
         }
         if normalized_schema is not None:
             request_body["output_config"] = {
@@ -807,13 +816,15 @@ def _post_judge(
         content = "".join(
             str(item.get("text") or "")
             for item in body.get("content", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and item.get("type") == "text"
         )
         raw_usage = body.get("usage") or {}
         usage = {
             "input_tokens": raw_usage.get("input_tokens"),
             "output_tokens": raw_usage.get("output_tokens"),
         }
+        stop_reason = body.get("stop_reason")
+        expected_stop_reason = "end_turn"
     else:
         if normalized_schema is not None:
             raise ValueError(
@@ -830,19 +841,49 @@ def _post_judge(
                 "temperature": 0,
                 "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
                 "messages": [{"role": "user", "content": prompt}],
-                **structured_assistant_options(route),
+                **bounded_judge_request_options(route),
             },
         )
         response.raise_for_status()
         body = response.json()
+        choice = (body.get("choices") or [{}])[0]
         content = str(
-            ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            (choice.get("message") or {}).get("content") or ""
         )
         raw_usage = body.get("usage") or {}
         usage = {
             "input_tokens": raw_usage.get("prompt_tokens"),
             "output_tokens": raw_usage.get("completion_tokens"),
         }
+        finish_reason = choice.get("finish_reason")
+        stop_reason = "max_tokens" if finish_reason == "length" else finish_reason
+        expected_stop_reason = "stop"
+    if stop_reason == "max_tokens":
+        raise JudgeResponseError(
+            stage="response_generation",
+            code="max_tokens",
+            message="judge response reached the bounded output-token ceiling",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        )
+    if stop_reason != expected_stop_reason:
+        normalized_reason = (
+            stop_reason
+            if isinstance(stop_reason, str)
+            and stop_reason
+            and len(stop_reason) <= 48
+            and all(character.isalnum() or character == "_" for character in stop_reason)
+            else "unsupported"
+        )
+        raise JudgeResponseError(
+            stage="response_generation",
+            code=f"stop_{normalized_reason}",
+            message="judge response ended with an unsupported provider stop reason",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        )
     if len(content) > JUDGE_JSON_MAX_RESPONSE_CHARACTERS:
         raise JudgeResponseError(
             stage="response_validation",

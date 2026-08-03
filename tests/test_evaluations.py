@@ -862,6 +862,7 @@ class _RecordingJudgeClient:
             200,
             json={
                 "content": [{"type": "text", "text": '{"conditions": []}'}],
+                "stop_reason": "end_turn",
                 "usage": {"input_tokens": 8, "output_tokens": 4},
             },
             request=httpx.Request("POST", url),
@@ -881,6 +882,7 @@ def test_anthropic_judge_request_omits_deprecated_temperature() -> None:
     )
 
     assert "temperature" not in client.request["json"]
+    assert client.request["json"]["thinking"] == {"type": "disabled"}
     assert payload == {"conditions": []}
     assert usage == {"input_tokens": 8, "output_tokens": 4}
 
@@ -915,6 +917,46 @@ def test_anthropic_judge_request_uses_exact_json_schema_output_config() -> None:
             "schema": response_schema,
         }
     }
+    assert client.request["json"]["thinking"] == {"type": "disabled"}
+
+
+def test_anthropic_judge_max_tokens_is_a_body_free_protocol_error() -> None:
+    client = _RecordingJudgeClient()
+    route = resolve_model_route("anthropic/claude-sonnet-5", {})
+    response_text = '{"conditions": ['
+
+    def truncated_response(url: str, **kwargs: Any) -> httpx.Response:
+        client.request = {"url": url, **kwargs}
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": response_text}],
+                "stop_reason": "max_tokens",
+                "usage": {"input_tokens": 42, "output_tokens": 1_200},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client.post = truncated_response  # type: ignore[method-assign]
+    with pytest.raises(evaluations.JudgeResponseError) as caught:
+        evaluations._post_judge(
+            client,  # type: ignore[arg-type]
+            route,
+            "test-key",
+            {},
+            "Return JSON.",
+        )
+
+    error = caught.value
+    assert error.stage == "response_generation"
+    assert error.code == "max_tokens"
+    assert error.safe_message == (
+        "judge response reached the bounded output-token ceiling"
+    )
+    assert error.response_sha256 == hashlib.sha256(response_text.encode()).hexdigest()
+    assert error.response_characters == len(response_text)
+    assert error.usage == {"input_tokens": 42, "output_tokens": 1_200}
+    assert response_text not in vars(error).values()
 
 
 class _RecordingChatJudgeClient:
@@ -927,7 +969,10 @@ class _RecordingChatJudgeClient:
             200,
             json={
                 "choices": [
-                    {"message": {"content": '{"scores": {"useful": 1}}'}}
+                    {
+                        "message": {"content": '{"scores": {"useful": 1}}'},
+                        "finish_reason": "stop",
+                    }
                 ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 7},
             },
@@ -951,7 +996,7 @@ def test_wandb_json_judge_request_uses_versioned_structured_controls() -> None:
     assert request_json["max_tokens"] == evaluations.JUDGE_JSON_MAX_OUTPUT_TOKENS
     assert request_json["thinking"] == {"type": "disabled"}
     assert request_json["temperature"] == 0
-    assert evaluations.JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION == 1
+    assert evaluations.JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION == 2
     assert payload == {"scores": {"useful": 1}}
     assert usage == {"input_tokens": 12, "output_tokens": 7}
 
@@ -966,7 +1011,9 @@ def test_json_judge_no_object_error_retains_only_safe_response_metadata() -> Non
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": response_text}}],
+                "choices": [
+                    {"message": {"content": response_text}, "finish_reason": "stop"}
+                ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 1_200},
             },
             request=httpx.Request("POST", url),
@@ -1002,7 +1049,9 @@ def test_json_judge_rejects_response_above_the_bounded_envelope() -> None:
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": response_text}}],
+                "choices": [
+                    {"message": {"content": response_text}, "finish_reason": "stop"}
+                ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 1_200},
             },
             request=httpx.Request("POST", url),

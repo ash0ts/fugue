@@ -75,7 +75,7 @@ uv run python \
 
 uv run fugue approve \
   "$(jq -r .preview_digest /tmp/community-skill-calibration-preview.json)" \
-  --max-cells 48 --max-usd 7.670139 --approved-by operator \
+  --max-cells 48 --max-usd 4.953631 --approved-by operator \
   > /tmp/community-skill-calibration-approval.json
 ```
 
@@ -96,13 +96,16 @@ separate `synthetic_gold_diagnostic`. Anthropic is constrained to the exact
 JSON shape. Because Anthropic structured outputs do not enforce string-length
 constraints, the prompt requests 500-character explanations and the transport
 plus local validator independently enforce a 16,000-character response
-envelope. Public Study explanations remain redacted and capped at 500. A
-malformed or failed response produces a body-free failure receipt without
-overwriting completed rows. It never edits
+envelope. Judge reasoning is explicitly disabled so the bounded output budget
+is reserved for the schema-constrained result; a `max_tokens` stop remains a
+named fail-closed protocol error. Public Study explanations remain redacted and
+capped at 500. A malformed or failed response produces a body-free failure
+receipt without overwriting completed rows. It never edits
 `judge-calibration.json`, invents reviewers, or satisfies the human gate. Its
-replacement-run ceiling is $7.670139. Together with the conservatively
-accounted $0.329861 reserve for the two failed requests, the campaign's
-calibration allocation remains $8. The provider response does not currently
+replacement-run ceiling is $4.953631. Together with the conservatively
+accounted $3.046369 reserve for three failed calibration runs, including the 16
+completed requests abandoned with the third run, the campaign's calibration
+allocation remains exactly $8. The provider response does not currently
 return authoritative dollar cost; the artifact therefore keeps observed cost
 unavailable and accounts the locked reserve instead of fabricating spend. The
 three canaries may proceed only when this exact result is digest-valid, bound
@@ -111,7 +114,7 @@ critical false passes. Validation reloads the frozen cases, checks every case
 identity, repository, split, score schema, and label, and recomputes all
 metrics from the host-only authored references; self-reported summary metrics
 are not trusted. The execution boundary must also resolve the approval digest
-to the exact preview with limits of 48 requests and $7.670139 before accepting
+to the exact preview with limits of 48 requests and $4.953631 before accepting
 the result. Their deterministic gates remain authoritative while human judge
 calibration is pending.
 

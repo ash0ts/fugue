@@ -10228,7 +10228,7 @@ def _request_comparison_judge(
             "rubric_digest": _judge_contract_digest(evaluator),
             "response_schema_digest": stable_digest(response_schema),
             "response_request_mode": (
-                "anthropic_json_schema_v1"
+                "anthropic_json_schema_no_thinking_v2"
                 if route.messages_base_url
                 else "provider_json_object_v1"
             ),
@@ -10267,11 +10267,9 @@ def _comparison_judge_request_policy(
         JUDGE_JSON_MAX_OUTPUT_TOKENS,
         JUDGE_JSON_MAX_RESPONSE_CHARACTERS,
         JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION,
+        bounded_judge_request_options,
     )
-    from fugue.model_plane import (
-        resolve_model_route,
-        structured_assistant_options,
-    )
+    from fugue.model_plane import resolve_model_route
 
     resolved_route = route or resolve_model_route(evaluator.profile, env)
     return {
@@ -10281,9 +10279,7 @@ def _comparison_judge_request_policy(
         ),
         "max_output_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
         "max_response_characters": JUDGE_JSON_MAX_RESPONSE_CHARACTERS,
-        "structured_assistant_options": structured_assistant_options(
-            resolved_route
-        ),
+        "structured_assistant_options": bounded_judge_request_options(resolved_route),
         "automatic_retries": 0,
     }
 
@@ -13225,7 +13221,9 @@ def _synthetic_calibration_binding_issue(
     gate: Mapping[str, Any],
     repo_root: Path,
 ) -> str | None:
-    if gate.get("response_request_mode") != "anthropic_json_schema_v1":
+    if gate.get("response_request_mode") != (
+        "anthropic_json_schema_no_thinking_v2"
+    ):
         return f"judge {judge.id} synthetic response request mode is unsupported"
     if gate.get("response_validator_version") != 2:
         return f"judge {judge.id} synthetic response validator is unsupported"

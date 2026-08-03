@@ -3001,10 +3001,15 @@ def test_anthropic_blind_judge_sends_the_bound_response_schema(
     assert receipt["response_schema_digest"] == stable_digest(
         captured["response_schema"]
     )
-    assert receipt["response_request_mode"] == "anthropic_json_schema_v1"
+    assert receipt["response_request_mode"] == (
+        "anthropic_json_schema_no_thinking_v2"
+    )
     assert receipt["response_validator_version"] == 2
     assert receipt["requested_text_max_characters"] == 500
     assert receipt["response_max_characters"] == JUDGE_JSON_MAX_RESPONSE_CHARACTERS
+    assert receipt["request_policy"]["structured_assistant_options"] == {
+        "thinking": {"type": "disabled"}
+    }
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
@@ -3319,7 +3324,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
         "route_receipt"
     ]["request_policy"]
     assert request_policy == {
-        "schema_version": 1,
+        "schema_version": 2,
         "timeout_sec": 300,
         "max_output_tokens": 1_200,
         "max_response_characters": 16_000,
@@ -3490,7 +3495,7 @@ def test_blind_judge_read_timeout_is_not_retried(
         "message": "judge provider request timed out",
         "exception_type": "ReadTimeout",
         "request_policy": {
-            "schema_version": 1,
+            "schema_version": 2,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
             "max_response_characters": 16_000,
@@ -3564,7 +3569,7 @@ def test_blind_judge_records_safe_no_json_failure_metadata(
         "response_characters": 321,
         "usage": {"input_tokens": 100, "output_tokens": 1_200},
         "request_policy": {
-            "schema_version": 1,
+            "schema_version": 2,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
             "max_response_characters": 16_000,
@@ -3631,7 +3636,7 @@ def test_blind_judge_distinguishes_strict_rubric_validation_failure(
         "message": "judge response failed strict rubric validation",
         "exception_type": "ValueError",
         "request_policy": {
-            "schema_version": 1,
+            "schema_version": 2,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
             "max_response_characters": 16_000,

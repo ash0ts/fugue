@@ -119,9 +119,9 @@ def test_campaign_assets_are_strict_valid_but_not_execution_eligible() -> None:
         rubric_digest=summary["rubric_digest"],
         **_runner_bindings(),
     )
-    assert calibration["execution_gate"]["maximum_cost_usd"] == 7.670139
-    assert calibration["execution_gate"]["prior_failed_requests"] == 2
-    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 0.329861
+    assert calibration["execution_gate"]["maximum_cost_usd"] == 4.953631
+    assert calibration["execution_gate"]["prior_failed_requests"] == 3
+    assert calibration["execution_gate"]["prior_accounted_reserve_usd"] == 3.046369
     assert calibration["execution_gate"]["campaign_allocation_usd"] == 8
 
 
@@ -389,14 +389,14 @@ def test_synthetic_dry_run_is_bounded_and_preserves_human_gate() -> None:
     assert summary["requests"] == 48
     assert summary["automatic_retries"] == 0
     assert summary["maximum_output_tokens_per_request"] == 1200
-    assert summary["budget_ceiling_usd"] == 7.670139
+    assert summary["budget_ceiling_usd"] == 4.953631
     assert summary["calibration_status"] == "pending_human_review"
     assert summary["human_calibration_satisfied"] is False
     assert summary["preview_digest"] == preview["preview_digest"]
     unsigned = {key: value for key, value in preview.items() if key != "preview_digest"}
     assert preview["preview_digest"] == CONTRACT.stable_digest(unsigned)
-    assert preview["maximum_cost_usd"] == 7.670139
-    assert preview["prior_accounted_reserve_usd"] == 0.329861
+    assert preview["maximum_cost_usd"] == 4.953631
+    assert preview["prior_accounted_reserve_usd"] == 3.046369
     assert preview["campaign_allocation_usd"] == 8
     assert preview["requests"] == 48
 
@@ -441,7 +441,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert result["human_review_status"] == "pending_human_review"
     assert result["human_calibration_satisfied"] is False
     assert result["observed_cost_usd"] is None
-    assert result["accounted_cost_usd"] == 7.670139
+    assert result["accounted_cost_usd"] == 4.953631
     assert result["cumulative_accounted_cost_usd"] == 8
     assert result["cases_artifact_path"] == (
         "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl"
@@ -466,7 +466,7 @@ def test_synthetic_fixture_run_emits_separate_immutable_diagnostic(
     assert receipt["cases_artifact_sha256"] == result["cases_artifact_sha256"]
     assert receipt["runner_artifact_sha256"] == result["runner_artifact_sha256"]
     assert receipt["response_schema_digest"] == result["response_schema_digest"]
-    assert receipt["run_accounted_cost_usd"] == 7.670139
+    assert receipt["run_accounted_cost_usd"] == 4.953631
     assert receipt["cumulative_accounted_cost_usd"] == 8
     assert json.loads(output.read_text(encoding="utf-8")) == result
     assert (EXAMPLE / "judge-calibration.json").read_bytes() == human_report_before
@@ -530,7 +530,7 @@ def test_second_request_failure_preserves_partial_and_writes_safe_receipt(
     assert failure["usage"] == {"input_tokens": 100, "output_tokens": 20}
     assert failure["raw_response_persisted"] is False
     assert failure["run_accounted_reserve_usd"] == round(
-        2 * 7.670139 / 48,
+        2 * 4.953631 / 48,
         6,
     )
     assert failure["cumulative_accounted_reserve_usd"] <= 8
