@@ -885,6 +885,38 @@ def test_anthropic_judge_request_omits_deprecated_temperature() -> None:
     assert usage == {"input_tokens": 8, "output_tokens": 4}
 
 
+def test_anthropic_judge_request_uses_exact_json_schema_output_config() -> None:
+    client = _RecordingJudgeClient()
+    route = resolve_model_route("anthropic/claude-sonnet-5", {})
+    response_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["conditions"],
+        "properties": {
+            "conditions": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+    }
+
+    evaluations._post_judge(
+        client,  # type: ignore[arg-type]
+        route,
+        "test-key",
+        {},
+        "Return JSON.",
+        response_schema=response_schema,
+    )
+
+    assert client.request["json"]["output_config"] == {
+        "format": {
+            "type": "json_schema",
+            "schema": response_schema,
+        }
+    }
+
+
 class _RecordingChatJudgeClient:
     def __init__(self) -> None:
         self.request: dict[str, Any] = {}

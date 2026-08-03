@@ -32,6 +32,22 @@ EXPECTED_REPOSITORIES = (
 )
 LABELS = ("unusable", "weak", "adequate", "strong", "exceptional")
 PASSING_LABELS = {"strong", "exceptional"}
+CALIBRATION_CAMPAIGN_ALLOCATION_USD = 8.0
+CALIBRATION_PRIOR_FAILED_REQUESTS = 1
+CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD = 0.166667
+CALIBRATION_RUN_MAXIMUM_COST_USD = 7.833333
+CALIBRATION_RESPONSE_REQUEST_MODE = "anthropic_json_schema_v1"
+PROVIDER_RESPONSE_VALIDATOR_VERSION = 1
+RUNNER_ARTIFACT_PATH = (
+    "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py"
+)
+PROVIDER_RESPONSE_TOP_LEVEL_FIELDS = (
+    "scores",
+    "overall_assessment",
+    "uncertainty",
+    "missing_evidence",
+    "rationale",
+)
 
 MANIFEST_FIELDS = {
     "schema_version",
@@ -65,6 +81,11 @@ SYNTHETIC_RESULT_FIELDS = {
     "cases_artifact_sha256",
     "cases_digest",
     "rubric_digest",
+    "runner_artifact_path",
+    "runner_artifact_sha256",
+    "response_schema_digest",
+    "response_request_mode",
+    "response_validator_version",
     "preview_digest",
     "approval_digest",
     "requested_cases",
@@ -72,6 +93,10 @@ SYNTHETIC_RESULT_FIELDS = {
     "budget_ceiling_usd",
     "observed_cost_usd",
     "accounted_cost_usd",
+    "campaign_allocation_usd",
+    "prior_failed_requests",
+    "prior_accounted_reserve_usd",
+    "cumulative_accounted_cost_usd",
     "results",
     "synthetic_metrics",
     "human_review_status",
@@ -100,11 +125,21 @@ SYNTHETIC_RECEIPT_FIELDS = {
     "cases_artifact_sha256",
     "cases_digest",
     "rubric_digest",
+    "runner_artifact_path",
+    "runner_artifact_sha256",
+    "response_schema_digest",
+    "response_request_mode",
+    "response_validator_version",
     "request_count",
     "maximum_requests",
     "maximum_prompt_characters",
     "maximum_output_tokens_per_request",
     "automatic_retries",
+    "campaign_allocation_usd",
+    "prior_failed_requests",
+    "prior_accounted_reserve_usd",
+    "run_accounted_cost_usd",
+    "cumulative_accounted_cost_usd",
     "preview_digest",
     "approval_digest",
     "serialized_input_fields",
@@ -244,12 +279,75 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def provider_response_schema() -> dict[str, Any]:
+    """Return the exact fail-closed JSON contract used by the paid judge."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(PROVIDER_RESPONSE_TOP_LEVEL_FIELDS),
+        "properties": {
+            "scores": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(EXPECTED_DIMENSIONS),
+                "properties": {
+                    dimension: {"type": "number"} for dimension in EXPECTED_DIMENSIONS
+                },
+            },
+            "overall_assessment": {"type": "string"},
+            "uncertainty": {"type": "number"},
+            "missing_evidence": {"type": "boolean"},
+            "rationale": {"type": "string"},
+        },
+    }
+
+
+def provider_response_schema_digest() -> str:
+    return stable_digest(provider_response_schema())
+
+
+def provider_response_example() -> dict[str, Any]:
+    """Return one compact valid shape for the provider prompt."""
+
+    return {
+        "scores": {dimension: 0.0 for dimension in EXPECTED_DIMENSIONS},
+        "overall_assessment": "brief evidence-bounded assessment",
+        "uncertainty": 0.0,
+        "missing_evidence": False,
+        "rationale": "brief evidence-bounded rationale",
+    }
+
+
+def calibration_runner_artifact(root: Path) -> dict[str, str]:
+    """Bind the exact paid runner bytes that implement prompt and parsing."""
+
+    path = (root / "run_synthetic_calibration.py").resolve()
+    if not path.is_file():
+        raise ValueError("synthetic calibration runner does not exist")
+    repository_root = root.resolve().parents[2]
+    try:
+        repository_relative = path.relative_to(repository_root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            "synthetic calibration runner is outside the repository"
+        ) from exc
+    if repository_relative != RUNNER_ARTIFACT_PATH:
+        raise ValueError("synthetic calibration runner path is not canonical")
+    return {"path": repository_relative, "sha256": file_sha256(path)}
+
+
 def calibration_preview_document(
     *,
     cases_artifact_path: str,
     cases_artifact_sha256: str,
     cases_digest: str,
     rubric_digest: str,
+    runner_artifact_path: str,
+    runner_artifact_sha256: str,
+    response_schema_digest: str,
+    response_request_mode: str,
+    response_validator_version: int,
 ) -> dict[str, Any]:
     unsigned = {
         "schema_version": 1,
@@ -260,11 +358,19 @@ def calibration_preview_document(
         "cases_artifact_sha256": cases_artifact_sha256,
         "cases_digest": cases_digest,
         "rubric_digest": rubric_digest,
+        "runner_artifact_path": runner_artifact_path,
+        "runner_artifact_sha256": runner_artifact_sha256,
+        "response_schema_digest": response_schema_digest,
+        "response_request_mode": response_request_mode,
+        "response_validator_version": response_validator_version,
         "requests": 48,
         "maximum_prompt_characters": 12_000,
         "maximum_output_tokens_per_request": 1_200,
         "automatic_retries": 0,
-        "maximum_cost_usd": 8,
+        "campaign_allocation_usd": CALIBRATION_CAMPAIGN_ALLOCATION_USD,
+        "prior_failed_requests": CALIBRATION_PRIOR_FAILED_REQUESTS,
+        "prior_accounted_reserve_usd": (CALIBRATION_PRIOR_ACCOUNTED_RESERVE_USD),
+        "maximum_cost_usd": CALIBRATION_RUN_MAXIMUM_COST_USD,
         "serialized_input_fields": [
             "public_task",
             "response",
@@ -282,19 +388,28 @@ def synthetic_execution_gate(
     cases_artifact_sha256: str,
     cases_digest: str,
     rubric_digest: str,
+    runner_artifact_path: str,
+    runner_artifact_sha256: str,
+    response_schema_digest: str,
+    response_request_mode: str,
+    response_validator_version: int,
 ) -> dict[str, Any]:
     preview = calibration_preview_document(
         cases_artifact_path=cases_artifact_path,
         cases_artifact_sha256=cases_artifact_sha256,
         cases_digest=cases_digest,
         rubric_digest=rubric_digest,
+        runner_artifact_path=runner_artifact_path,
+        runner_artifact_sha256=runner_artifact_sha256,
+        response_schema_digest=response_schema_digest,
+        response_request_mode=response_request_mode,
+        response_validator_version=response_validator_version,
     )
     return {
         "kind": "synthetic_blinded_advisory_v1",
         "required_before_agent_trials": True,
         "result_path": (
-            ".fugue/runtime/community-skill-upgrades/"
-            "judge-calibration.result.json"
+            ".fugue/runtime/community-skill-upgrades/judge-calibration.result.json"
         ),
         "preview_digest": preview["preview_digest"],
         "model": preview["model"],
@@ -302,12 +417,20 @@ def synthetic_execution_gate(
         "cases_artifact_sha256": cases_artifact_sha256,
         "cases_digest": cases_digest,
         "rubric_digest": rubric_digest,
+        "runner_artifact_path": runner_artifact_path,
+        "runner_artifact_sha256": runner_artifact_sha256,
+        "response_schema_digest": response_schema_digest,
+        "response_request_mode": response_request_mode,
+        "response_validator_version": response_validator_version,
         "examples": 48,
         "calibration_examples": 36,
         "holdout_examples": 12,
         "minimum_true_positive_rate": MIN_RATE,
         "minimum_true_negative_rate": MIN_RATE,
         "maximum_critical_false_passes": 0,
+        "campaign_allocation_usd": preview["campaign_allocation_usd"],
+        "prior_failed_requests": preview["prior_failed_requests"],
+        "prior_accounted_reserve_usd": preview["prior_accounted_reserve_usd"],
         "maximum_cost_usd": preview["maximum_cost_usd"],
     }
 
@@ -339,7 +462,9 @@ def _money(value: Any, label: str, *, allow_zero: bool = False) -> float:
         raise ValueError(f"{label} must be numeric")
     result = float(value)
     if result < 0 or (result == 0 and not allow_zero):
-        raise ValueError(f"{label} must be {'non-negative' if allow_zero else 'positive'}")
+        raise ValueError(
+            f"{label} must be {'non-negative' if allow_zero else 'positive'}"
+        )
     return result
 
 
@@ -379,7 +504,9 @@ def frozen_cases_artifact(
     try:
         repository_relative = cases_path.relative_to(repository_root).as_posix()
     except ValueError as exc:
-        raise ValueError("calibration cases artifact is outside the repository") from exc
+        raise ValueError(
+            "calibration cases artifact is outside the repository"
+        ) from exc
     return {
         "path": repository_relative,
         "sha256": actual_sha256,
@@ -418,6 +545,7 @@ def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
         if not path.is_file():
             raise ValueError(f"calibration {field} does not exist")
     cases_artifact = frozen_cases_artifact(root=root, calibration=calibration)
+    runner_artifact = calibration_runner_artifact(root)
 
     studies = value["studies"]
     if not isinstance(studies, list) or len(studies) != 3:
@@ -484,7 +612,9 @@ def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
         calibration["budget_usd"], "calibration budget"
     )
     if total_budget != float(execution["cumulative_budget_usd"]):
-        raise ValueError("campaign Study and calibration budgets do not sum to the ceiling")
+        raise ValueError(
+            "campaign Study and calibration budgets do not sum to the ceiling"
+        )
     if total_cells != 12:
         raise ValueError("campaign must contain exactly twelve Agent cells")
     return {
@@ -493,6 +623,11 @@ def validate_manifest(  # noqa: C901 - strict schema validation is explicit.
         "campaign_ceiling_usd": total_budget,
         "cases_artifact_path": cases_artifact["path"],
         "cases_artifact_sha256": cases_artifact["sha256"],
+        "runner_artifact_path": runner_artifact["path"],
+        "runner_artifact_sha256": runner_artifact["sha256"],
+        "response_schema_digest": provider_response_schema_digest(),
+        "response_request_mode": CALIBRATION_RESPONSE_REQUEST_MODE,
+        "response_validator_version": PROVIDER_RESPONSE_VALIDATOR_VERSION,
     }
 
 
@@ -791,9 +926,7 @@ def validate_cases(  # noqa: C901 - one pass validates cross-case invariants.
             final_label = review_labels[0]
         judge_label, missing_evidence = judge
         predicted = (
-            "pass"
-            if judge_label in PASSING_LABELS and not missing_evidence
-            else "fail"
+            "pass" if judge_label in PASSING_LABELS and not missing_evidence else "fail"
         )
         final_labels.append(final_label)
         predicted_labels.append(predicted)
@@ -813,13 +946,19 @@ def validate_cases(  # noqa: C901 - one pass validates cross-case invariants.
         calibration_labels = repo_split_labels[(repository_id, "calibration")]
         holdout_labels = repo_split_labels[(repository_id, "holdout")]
         if Counter(calibration_labels) != {"pass": 6, "fail": 6}:
-            raise ValueError(f"{repository_id} must have a balanced 12-case calibration")
+            raise ValueError(
+                f"{repository_id} must have a balanced 12-case calibration"
+            )
         if Counter(holdout_labels) != {"pass": 2, "fail": 2}:
             raise ValueError(f"{repository_id} must have a balanced four-case holdout")
     if any(len(splits) != 1 for splits in scenario_splits.values()):
         raise ValueError("scenario families may not cross calibration splits")
-    if any(Counter(labels) != {"pass": 2, "fail": 2} for labels in scenario_labels.values()):
-        raise ValueError("each scenario family must contain two passes and two failures")
+    if any(
+        Counter(labels) != {"pass": 2, "fail": 2} for labels in scenario_labels.values()
+    ):
+        raise ValueError(
+            "each scenario family must contain two passes and two failures"
+        )
 
     rates = _classification_rates(final_labels, predicted_labels)
     split_rates = {
@@ -849,8 +988,12 @@ def validate_cases(  # noqa: C901 - one pass validates cross-case invariants.
         "holdout_examples": sum(row["split"] == "holdout" for row in rows),
         "true_positive_rate": rates["true_positive_rate"],
         "true_negative_rate": rates["true_negative_rate"],
-        "calibration_true_positive_rate": split_rates["calibration"]["true_positive_rate"],
-        "calibration_true_negative_rate": split_rates["calibration"]["true_negative_rate"],
+        "calibration_true_positive_rate": split_rates["calibration"][
+            "true_positive_rate"
+        ],
+        "calibration_true_negative_rate": split_rates["calibration"][
+            "true_negative_rate"
+        ],
         "holdout_true_positive_rate": split_rates["holdout"]["true_positive_rate"],
         "holdout_true_negative_rate": split_rates["holdout"]["true_negative_rate"],
         "critical_false_passes": critical_false_passes,
@@ -859,7 +1002,9 @@ def validate_cases(  # noqa: C901 - one pass validates cross-case invariants.
     }
 
 
-def _classification_rates(actual: Sequence[str], predicted: Sequence[str]) -> dict[str, float]:
+def _classification_rates(
+    actual: Sequence[str], predicted: Sequence[str]
+) -> dict[str, float]:
     positives = actual.count("pass")
     negatives = actual.count("fail")
     true_positives = sum(
@@ -984,9 +1129,7 @@ def _validate_synthetic_result_row(
             or isinstance(score, bool)
             or not 0 <= float(score) <= 1
         ):
-            raise ValueError(
-                f"synthetic result {case_id} score {dimension} is invalid"
-            )
+            raise ValueError(f"synthetic result {case_id} score {dimension} is invalid")
         numeric.append(float(score))
     expected_label = label_from_mean(sum(numeric) / len(numeric))
     if value["overall_label"] != expected_label:
@@ -1033,7 +1176,9 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
     supplied_digest = str(value["result_digest"] or "")
     unsigned = dict(value)
     unsigned.pop("result_digest")
-    if not SHA256.fullmatch(supplied_digest) or supplied_digest != stable_digest(unsigned):
+    if not SHA256.fullmatch(supplied_digest) or supplied_digest != stable_digest(
+        unsigned
+    ):
         raise ValueError("synthetic calibration result digest disagrees")
 
     manifest = _load_json(root / "campaign-manifest.json", "campaign manifest")
@@ -1047,6 +1192,11 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
         rubric,
         cases_artifact_path=manifest_summary["cases_artifact_path"],
         cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+        runner_artifact_path=manifest_summary["runner_artifact_path"],
+        runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+        response_schema_digest=manifest_summary["response_schema_digest"],
+        response_request_mode=manifest_summary["response_request_mode"],
+        response_validator_version=manifest_summary["response_validator_version"],
     )
     report = _load_json(root / manifest["calibration"]["report"], "calibration report")
     validate_calibration_report(report, expected_report)
@@ -1061,6 +1211,14 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
         "cases_artifact_sha256": gate["cases_artifact_sha256"],
         "cases_digest": gate["cases_digest"],
         "rubric_digest": gate["rubric_digest"],
+        "runner_artifact_path": gate["runner_artifact_path"],
+        "runner_artifact_sha256": gate["runner_artifact_sha256"],
+        "response_schema_digest": gate["response_schema_digest"],
+        "response_request_mode": gate["response_request_mode"],
+        "response_validator_version": gate["response_validator_version"],
+        "campaign_allocation_usd": gate["campaign_allocation_usd"],
+        "prior_failed_requests": gate["prior_failed_requests"],
+        "prior_accounted_reserve_usd": gate["prior_accounted_reserve_usd"],
         "preview_digest": gate["preview_digest"],
     }
     for field, expected in bindings.items():
@@ -1086,11 +1244,27 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
         raise ValueError("synthetic calibration result status disagrees")
     if require_complete and not complete:
         raise ValueError("synthetic calibration result is incomplete")
-    if value["budget_ceiling_usd"] != 8 or value["observed_cost_usd"] is not None:
+    if (
+        value["budget_ceiling_usd"] != gate["maximum_cost_usd"]
+        or value["observed_cost_usd"] is not None
+    ):
         raise ValueError("synthetic calibration cost contract drifted")
-    expected_accounted = round(completed * 8 / 48, 6)
+    expected_accounted = round(
+        completed * float(gate["maximum_cost_usd"]) / int(gate["examples"]),
+        6,
+    )
     if value["accounted_cost_usd"] != expected_accounted:
         raise ValueError("synthetic calibration accounted cost disagrees")
+    expected_cumulative = round(
+        float(gate["prior_accounted_reserve_usd"]) + expected_accounted,
+        6,
+    )
+    if value[
+        "cumulative_accounted_cost_usd"
+    ] != expected_cumulative or expected_cumulative > float(
+        gate["campaign_allocation_usd"]
+    ):
+        raise ValueError("synthetic calibration cumulative cost exceeds allocation")
 
     recomputed = recompute_synthetic_metrics(rows, results)
     if value["synthetic_metrics"] != recomputed:
@@ -1125,6 +1299,8 @@ def validate_synthetic_result(  # noqa: C901 - explicit artifact audit.
         "maximum_prompt_characters": 12_000,
         "maximum_output_tokens_per_request": 1_200,
         "automatic_retries": 0,
+        "run_accounted_cost_usd": expected_accounted,
+        "cumulative_accounted_cost_usd": expected_cumulative,
         "approval_digest": approval_digest,
         "serialized_input_fields": [
             "public_task",
@@ -1151,6 +1327,11 @@ def build_calibration_report(
     *,
     cases_artifact_path: str,
     cases_artifact_sha256: str,
+    runner_artifact_path: str,
+    runner_artifact_sha256: str,
+    response_schema_digest: str,
+    response_request_mode: str,
+    response_validator_version: int,
 ) -> dict[str, Any]:
     passed = bool(
         cases["completed"]
@@ -1164,7 +1345,9 @@ def build_calibration_report(
     )
     return {
         "schema_version": 1,
-        "review_status": "adjudicated" if cases["completed"] else "pending_human_review",
+        "review_status": "adjudicated"
+        if cases["completed"]
+        else "pending_human_review",
         "reviewers_per_example": 2 if cases["completed"] else 0,
         "disagreements_adjudicated": bool(cases["completed"]),
         "judge_profile": "anthropic/claude-sonnet-5",
@@ -1193,6 +1376,11 @@ def build_calibration_report(
             cases_artifact_sha256=cases_artifact_sha256,
             cases_digest=cases["cases_digest"],
             rubric_digest=rubric["contract_digest"],
+            runner_artifact_path=runner_artifact_path,
+            runner_artifact_sha256=runner_artifact_sha256,
+            response_schema_digest=response_schema_digest,
+            response_request_mode=response_request_mode,
+            response_validator_version=response_validator_version,
         ),
         "note": (
             "Calibration passed the locked two-reviewer and held-out thresholds."
@@ -1240,7 +1428,9 @@ def validate_ledger(value: Mapping[str, Any], manifest: Mapping[str, Any]) -> No
             or allocation["approval_digest"] is not None
             or allocation["observed_usd"] != 0
         ):
-            raise ValueError("checked-in budget allocations cannot claim approval or spend")
+            raise ValueError(
+                "checked-in budget allocations cannot claim approval or spend"
+            )
     total = sum(_money(item["cap_usd"], "allocation cap") for item in allocations)
     if not (
         total
@@ -1288,7 +1478,9 @@ def validate_report_template(value: Mapping[str, Any]) -> None:
 def _atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     temporary.replace(path)
 
 
@@ -1327,6 +1519,11 @@ def validate_all(root: Path, *, require_specs: bool = False) -> dict[str, Any]:
         rubric,
         cases_artifact_path=manifest_summary["cases_artifact_path"],
         cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+        runner_artifact_path=manifest_summary["runner_artifact_path"],
+        runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+        response_schema_digest=manifest_summary["response_schema_digest"],
+        response_request_mode=manifest_summary["response_request_mode"],
+        response_validator_version=manifest_summary["response_validator_version"],
     )
     report = _load_json(root / manifest["calibration"]["report"], "calibration report")
     validate_calibration_report(report, expected_report)
@@ -1345,9 +1542,7 @@ def validate_all(root: Path, *, require_specs: bool = False) -> dict[str, Any]:
         "calibration_cases": report["examples"],
         "calibration_digest": report["cases_digest"],
         "calibration_cases_artifact_path": manifest_summary["cases_artifact_path"],
-        "calibration_cases_artifact_sha256": manifest_summary[
-            "cases_artifact_sha256"
-        ],
+        "calibration_cases_artifact_sha256": manifest_summary["cases_artifact_sha256"],
         "rubric_digest": report["rubric_digest"],
         "agent_cells": manifest_summary["total_cells"],
         "campaign_ceiling_usd": manifest_summary["campaign_ceiling_usd"],
@@ -1384,6 +1579,13 @@ def main() -> int:
                 rubric,
                 cases_artifact_path=manifest_summary["cases_artifact_path"],
                 cases_artifact_sha256=manifest_summary["cases_artifact_sha256"],
+                runner_artifact_path=manifest_summary["runner_artifact_path"],
+                runner_artifact_sha256=manifest_summary["runner_artifact_sha256"],
+                response_schema_digest=manifest_summary["response_schema_digest"],
+                response_request_mode=manifest_summary["response_request_mode"],
+                response_validator_version=manifest_summary[
+                    "response_validator_version"
+                ],
             ),
         )
     summary = validate_all(root, require_specs=args.require_specs)

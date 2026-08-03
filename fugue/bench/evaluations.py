@@ -732,6 +732,7 @@ def request_json_judge(
     model: str,
     env: Mapping[str, str],
     prompt: str,
+    response_schema: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one bounded JSON judge request through Fugue's model plane."""
 
@@ -742,7 +743,16 @@ def request_json_judge(
             f"{provider_api_key_env(route)} is required for evaluation judging"
         )
     with httpx.Client(timeout=120) as client:
-        return _post_judge(client, route, api_key, env, prompt)
+        if response_schema is None:
+            return _post_judge(client, route, api_key, env, prompt)
+        return _post_judge(
+            client,
+            route,
+            api_key,
+            env,
+            prompt,
+            response_schema=response_schema,
+        )
 
 
 def _post_judge(
@@ -751,8 +761,37 @@ def _post_judge(
     api_key: str,
     env: Mapping[str, str],
     prompt: str,
+    *,
+    response_schema: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    normalized_schema: dict[str, Any] | None = None
+    if response_schema is not None:
+        try:
+            normalized_schema = json.loads(
+                json.dumps(
+                    response_schema,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("judge response schema must be JSON serializable") from exc
+        if normalized_schema.get("type") != "object":
+            raise ValueError("judge response schema must describe an object")
     if route.messages_base_url:
+        request_body: dict[str, Any] = {
+            "model": route.model_id,
+            "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if normalized_schema is not None:
+            request_body["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": normalized_schema,
+                }
+            }
         response = client.post(
             f"{route.messages_base_url}/v1/messages",
             headers={
@@ -760,11 +799,7 @@ def _post_judge(
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
-            json={
-                "model": route.model_id,
-                "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
-                "messages": [{"role": "user", "content": prompt}],
-            },
+            json=request_body,
         )
         response.raise_for_status()
         body = response.json()
@@ -779,6 +814,10 @@ def _post_judge(
             "output_tokens": raw_usage.get("output_tokens"),
         }
     else:
+        if normalized_schema is not None:
+            raise ValueError(
+                "judge response schemas are unsupported by this model route"
+            )
         response = client.post(
             f"{route.chat_base_url}/chat/completions",
             headers={

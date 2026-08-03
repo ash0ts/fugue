@@ -12982,6 +12982,11 @@ def _judge_execution_calibration_issue(
         "cases_artifact_sha256",
         "cases_digest",
         "rubric_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+        "response_schema_digest",
+        "response_request_mode",
+        "response_validator_version",
         "examples",
         "calibration_examples",
         "holdout_examples",
@@ -12989,6 +12994,9 @@ def _judge_execution_calibration_issue(
         "minimum_true_positive_rate",
         "minimum_true_negative_rate",
         "maximum_critical_false_passes",
+        "campaign_allocation_usd",
+        "prior_failed_requests",
+        "prior_accounted_reserve_usd",
     }
     if set(gate) != expected_fields:
         return f"judge {judge.id} synthetic execution gate fields do not match"
@@ -13002,6 +13010,13 @@ def _judge_execution_calibration_issue(
         return f"judge {judge.id} synthetic execution gate rubric does not match"
     if gate.get("cases_digest") != value.get("cases_digest"):
         return f"judge {judge.id} synthetic execution gate cases do not match"
+    binding_issue = _synthetic_calibration_binding_issue(
+        judge,
+        gate=gate,
+        repo_root=repo_root,
+    )
+    if binding_issue:
+        return binding_issue
     preview_digest = str(gate.get("preview_digest") or "")
     if not _is_sha256(preview_digest):
         return f"judge {judge.id} synthetic execution preview digest is invalid"
@@ -13017,8 +13032,6 @@ def _judge_execution_calibration_issue(
         return f"judge {judge.id} synthetic execution thresholds are too weak"
     if gate.get("maximum_critical_false_passes") != 0:
         return f"judge {judge.id} synthetic critical-failure threshold is unsafe"
-    if float(gate.get("maximum_cost_usd") or 0) != 8:
-        return f"judge {judge.id} synthetic execution budget is invalid"
     raw_result_path = str(gate.get("result_path") or "")
     result_path = Path(raw_result_path)
     if (
@@ -13046,6 +13059,135 @@ def _judge_execution_calibration_issue(
 
 def _is_sha256(value: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{64}", value))
+
+
+def _synthetic_calibration_binding_issue(
+    judge: ComparisonEvaluatorV1,
+    *,
+    gate: Mapping[str, Any],
+    repo_root: Path,
+) -> str | None:
+    if gate.get("response_request_mode") != "anthropic_json_schema_v1":
+        return f"judge {judge.id} synthetic response request mode is unsupported"
+    if gate.get("response_validator_version") != 1:
+        return f"judge {judge.id} synthetic response validator is unsupported"
+    if gate.get("response_schema_digest") != _synthetic_response_schema_digest(
+        judge.dimensions
+    ):
+        return f"judge {judge.id} synthetic response schema digest does not match"
+    raw_runner_path = str(gate.get("runner_artifact_path") or "")
+    if raw_runner_path != (
+        "examples/comparisons/community-skill-upgrades/"
+        "run_synthetic_calibration.py"
+    ):
+        return f"judge {judge.id} synthetic calibration runner path is invalid"
+    runner_sha256 = str(gate.get("runner_artifact_sha256") or "")
+    if not _is_sha256(runner_sha256):
+        return f"judge {judge.id} synthetic calibration runner digest is invalid"
+    try:
+        runner_path = _safe_input_path(
+            Path(raw_runner_path),
+            repo_root,
+            "judge synthetic calibration runner",
+        )
+        if _sha256_path(runner_path) != runner_sha256:
+            return f"judge {judge.id} synthetic calibration runner drifted"
+    except (FileNotFoundError, ValueError):
+        return f"judge {judge.id} synthetic calibration runner is unavailable"
+    if str(gate.get("preview_digest") or "") != (
+        _synthetic_calibration_preview_digest(gate)
+    ):
+        return f"judge {judge.id} synthetic execution preview digest is invalid"
+    allocation = gate.get("campaign_allocation_usd")
+    prior_failures = gate.get("prior_failed_requests")
+    prior_reserve = gate.get("prior_accounted_reserve_usd")
+    run_cap = gate.get("maximum_cost_usd")
+    if (
+        not isinstance(allocation, int | float)
+        or isinstance(allocation, bool)
+        or float(allocation) <= 0
+        or not isinstance(prior_failures, int)
+        or isinstance(prior_failures, bool)
+        or prior_failures < 0
+        or not isinstance(prior_reserve, int | float)
+        or isinstance(prior_reserve, bool)
+        or float(prior_reserve) < 0
+        or not isinstance(run_cap, int | float)
+        or isinstance(run_cap, bool)
+        or float(run_cap) <= 0
+        or round(float(prior_reserve) + float(run_cap), 6)
+        != round(float(allocation), 6)
+    ):
+        return f"judge {judge.id} synthetic execution budget is invalid"
+    return None
+
+
+def _synthetic_response_schema_digest(dimensions: Sequence[str]) -> str:
+    return stable_digest(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "scores",
+                "overall_assessment",
+                "uncertainty",
+                "missing_evidence",
+                "rationale",
+            ],
+            "properties": {
+                "scores": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": list(dimensions),
+                    "properties": {
+                        dimension: {"type": "number"}
+                        for dimension in dimensions
+                    },
+                },
+                "overall_assessment": {"type": "string"},
+                "uncertainty": {"type": "number"},
+                "missing_evidence": {"type": "boolean"},
+                "rationale": {"type": "string"},
+            },
+        }
+    )
+
+
+def _synthetic_calibration_preview_digest(gate: Mapping[str, Any]) -> str:
+    return stable_digest(
+        {
+            "schema_version": 1,
+            "kind": "synthetic_judge_calibration_preview",
+            "id": "community-skill-judge-calibration-v1",
+            "model": gate["model"],
+            "cases_artifact_path": gate["cases_artifact_path"],
+            "cases_artifact_sha256": gate["cases_artifact_sha256"],
+            "cases_digest": gate["cases_digest"],
+            "rubric_digest": gate["rubric_digest"],
+            "runner_artifact_path": gate["runner_artifact_path"],
+            "runner_artifact_sha256": gate["runner_artifact_sha256"],
+            "response_schema_digest": gate["response_schema_digest"],
+            "response_request_mode": gate["response_request_mode"],
+            "response_validator_version": gate["response_validator_version"],
+            "requests": 48,
+            "maximum_prompt_characters": 12_000,
+            "maximum_output_tokens_per_request": 1_200,
+            "automatic_retries": 0,
+            "campaign_allocation_usd": gate["campaign_allocation_usd"],
+            "prior_failed_requests": gate["prior_failed_requests"],
+            "prior_accounted_reserve_usd": gate[
+                "prior_accounted_reserve_usd"
+            ],
+            "maximum_cost_usd": gate["maximum_cost_usd"],
+            "serialized_input_fields": [
+                "public_task",
+                "response",
+                "permitted_evidence",
+                "rubric",
+            ],
+            "human_calibration_satisfied": False,
+        }
+    )
 
 
 def _frozen_synthetic_calibration_cases(
@@ -13255,6 +13397,14 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
         "cases_artifact_sha256",
         "cases_digest",
         "rubric_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+        "response_schema_digest",
+        "response_request_mode",
+        "response_validator_version",
+        "campaign_allocation_usd",
+        "prior_failed_requests",
+        "prior_accounted_reserve_usd",
         "preview_digest",
     ):
         if result.get(field_name) != gate.get(field_name):
@@ -13319,6 +13469,14 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
         or result.get("observed_cost_usd") is not None
         or float(result.get("accounted_cost_usd") or 0)
         != float(gate["maximum_cost_usd"])
+        or float(result.get("cumulative_accounted_cost_usd") or 0)
+        != float(gate["campaign_allocation_usd"])
+        or round(
+            float(result.get("accounted_cost_usd") or 0)
+            + float(result.get("prior_accounted_reserve_usd") or 0),
+            6,
+        )
+        != float(result.get("cumulative_accounted_cost_usd") or 0)
     ):
         return f"judge {judge.id} synthetic calibration cost contract disagrees"
     receipt = result.get("receipt")
@@ -13338,6 +13496,26 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
         != gate.get("cases_artifact_sha256")
         or receipt.get("cases_digest") != gate.get("cases_digest")
         or receipt.get("rubric_digest") != gate.get("rubric_digest")
+        or receipt.get("runner_artifact_path")
+        != gate.get("runner_artifact_path")
+        or receipt.get("runner_artifact_sha256")
+        != gate.get("runner_artifact_sha256")
+        or receipt.get("response_schema_digest")
+        != gate.get("response_schema_digest")
+        or receipt.get("response_request_mode")
+        != gate.get("response_request_mode")
+        or receipt.get("response_validator_version")
+        != gate.get("response_validator_version")
+        or receipt.get("campaign_allocation_usd")
+        != gate.get("campaign_allocation_usd")
+        or receipt.get("prior_failed_requests")
+        != gate.get("prior_failed_requests")
+        or receipt.get("prior_accounted_reserve_usd")
+        != gate.get("prior_accounted_reserve_usd")
+        or float(receipt.get("run_accounted_cost_usd") or 0)
+        != float(gate["maximum_cost_usd"])
+        or float(receipt.get("cumulative_accounted_cost_usd") or 0)
+        != float(gate["campaign_allocation_usd"])
         or int(receipt.get("request_count") or 0) != int(gate["examples"])
         or int(receipt.get("maximum_requests") or 0) != int(gate["examples"])
     ):

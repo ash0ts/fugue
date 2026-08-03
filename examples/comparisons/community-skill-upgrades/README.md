@@ -14,8 +14,9 @@ adjudication.
 
 The gate freezes both representations of its private case cohort: a canonical
 parsed-content digest and the repository-relative case artifact path plus its
-exact byte SHA-256. Those bindings, the rubric, model route, request bounds, and
-$8 ceiling are part of the preview digest. Moving or changing the case file
+exact byte SHA-256. It also binds the paid runner bytes and the transmitted
+JSON response schema. Those bindings, the rubric, model route, request bounds,
+and budget are part of the preview digest. Moving or changing any bound input
 therefore invalidates the preview and every approval derived from it.
 
 ## Offline validation
@@ -74,7 +75,7 @@ uv run python \
 
 uv run fugue approve \
   "$(jq -r .preview_digest /tmp/community-skill-calibration-preview.json)" \
-  --max-cells 48 --max-usd 8 --approved-by operator \
+  --max-cells 48 --max-usd 7.833333 --approved-by operator \
   > /tmp/community-skill-calibration-approval.json
 ```
 
@@ -91,20 +92,24 @@ uv run python \
 ```
 
 It performs 48 sequential, non-retrying requests and incrementally writes a
-separate `synthetic_gold_diagnostic`. It never edits
+separate `synthetic_gold_diagnostic`. Anthropic is constrained to the exact
+JSON schema, and a malformed or failed response produces a body-free failure
+receipt without overwriting completed rows. It never edits
 `judge-calibration.json`, invents reviewers, or satisfies the human gate. Its
-configured ceiling is $8, but the provider response does not currently return
-authoritative dollar cost; the artifact therefore keeps observed cost
+replacement-run ceiling is $7.833333. Together with the conservatively
+accounted $0.166667 reserve for the failed first request, the campaign's
+calibration allocation remains $8. The provider response does not currently
+return authoritative dollar cost; the artifact therefore keeps observed cost
 unavailable and accounts the locked reserve instead of fabricating spend. The
-three canaries may proceed only when this exact result is digest-valid, bound to
-the approved preview, and passes overall plus held-out TPR/TNR with zero critical
-false passes. Validation reloads the frozen cases, checks every case identity,
-repository, split, score schema, and label, and recomputes all metrics from the
-host-only authored references; self-reported summary metrics are not trusted.
-The execution boundary must also resolve the approval digest to the exact
-preview with limits of 48 requests and $8 before accepting the result. Their
-deterministic gates remain authoritative while human judge calibration is
-pending.
+three canaries may proceed only when this exact result is digest-valid, bound
+to the approved preview, and passes overall plus held-out TPR/TNR with zero
+critical false passes. Validation reloads the frozen cases, checks every case
+identity, repository, split, score schema, and label, and recomputes all
+metrics from the host-only authored references; self-reported summary metrics
+are not trusted. The execution boundary must also resolve the approval digest
+to the exact preview with limits of 48 requests and $7.833333 before accepting
+the result. Their deterministic gates remain authoritative while human judge
+calibration is pending.
 
 ## Reporting
 
