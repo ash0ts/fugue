@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import webbrowser
@@ -147,6 +148,14 @@ def _parser() -> FugueArgumentParser:
     approve.add_argument("--approved-by", default="operator")
     approve.add_argument("--expires-in", type=int, default=3600)
     approve.add_argument("--operation-id")
+    approve.add_argument(
+        "--bind",
+        dest="input_bindings",
+        action="append",
+        default=[],
+        metavar="NAME=SHA256",
+        help="Bind an immutable post-preview qualification input into approval",
+    )
     approve.add_argument("--repo-root", type=Path, default=Path.cwd())
     approve.set_defaults(handler=_comparison_approve)
 
@@ -633,6 +642,13 @@ def _parser() -> FugueArgumentParser:
     approve.add_argument("--approved-by", default="operator")
     approve.add_argument("--expires-in", type=int, default=3600)
     approve.add_argument("--operation-id")
+    approve.add_argument(
+        "--bind",
+        dest="input_bindings",
+        action="append",
+        default=[],
+        metavar="NAME=SHA256",
+    )
     approve.add_argument("--repo-root", type=Path, default=Path.cwd())
     approve.set_defaults(handler=_research)
     publications = research_actions.add_parser(
@@ -740,6 +756,7 @@ def _research(args: argparse.Namespace) -> int:
             approved_by=args.approved_by,
             operation_id=operation_id,
             expires_in_seconds=args.expires_in,
+            input_bindings=_approval_input_bindings(args.input_bindings),
         )
         print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
     elif args.research_action == "publications":
@@ -1023,9 +1040,27 @@ def _comparison_approve(args: argparse.Namespace) -> int:
         approved_by=args.approved_by,
         operation_id=operation_id,
         expires_in_seconds=args.expires_in,
+        input_bindings=_approval_input_bindings(args.input_bindings),
     )
     print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
     return 0
+
+
+def _approval_input_bindings(values: list[str]) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for raw in values:
+        name, separator, digest = raw.partition("=")
+        if (
+            not separator
+            or not name
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,99}", name)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ValueError("--bind must use NAME=SHA256")
+        prior = bindings.setdefault(name, digest)
+        if prior != digest:
+            raise ValueError(f"--bind {name!r} was supplied with two digests")
+    return dict(sorted(bindings.items()))
 
 
 def _comparison_result(args: argparse.Namespace) -> int:

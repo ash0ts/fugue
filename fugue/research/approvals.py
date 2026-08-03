@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -56,12 +57,14 @@ class ApprovalLedger:
         approved_by: str,
         operation_id: str,
         expires_in_seconds: int = 3600,
+        input_bindings: Mapping[str, str] | None = None,
     ) -> ExecutionApprovalV1:
         operation_id = validate_id(operation_id, kind="approval operation id")
         if expires_in_seconds < 60 or expires_in_seconds > 86_400:
             raise ValueError("approval expiry must be between 60 and 86400 seconds")
         created = datetime.now(UTC)
         approval_id = f"approval-{preview_digest[:20]}"
+        normalized_bindings = dict(sorted((input_bindings or {}).items()))
         unsigned = ExecutionApprovalV1(
             schema_version=RESEARCH_SCHEMA_VERSION,
             approval_id=approval_id,
@@ -75,6 +78,7 @@ class ApprovalLedger:
             expires_at=(created + timedelta(seconds=expires_in_seconds))
             .isoformat()
             .replace("+00:00", "Z"),
+            input_bindings=normalized_bindings,
         )
         approval = execution_approval_from_dict(
             sign_execution_approval(unsigned).to_dict()
@@ -88,6 +92,7 @@ class ApprovalLedger:
                 "maximum_cells": maximum_cells,
                 "approved_by": approved_by,
                 "expires_in_seconds": expires_in_seconds,
+                "input_bindings": normalized_bindings,
             }
         )
         with connect_database(self.path) as conn:

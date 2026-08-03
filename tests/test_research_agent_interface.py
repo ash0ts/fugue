@@ -399,6 +399,46 @@ def test_approval_is_exact_expiring_and_not_self_issued(
         )
 
 
+def test_approval_input_binding_is_signed_and_idempotency_checked(
+    tmp_path: Path,
+) -> None:
+    service = _study_service(tmp_path, TraceSourceRegistry())
+    approval = service.approvals.approve(
+        subject_kind="experiment",
+        preview_digest="a" * 64,
+        maximum_cost_usd=20,
+        maximum_cells=4,
+        approved_by="human-operator",
+        operation_id="approve-bound-input",
+        input_bindings={"trace_audit_selection_digest": "b" * 64},
+    )
+    assert approval.input_bindings == {
+        "trace_audit_selection_digest": "b" * 64
+    }
+    assert service.approvals.get(approval.approval_digest) == approval
+
+    with pytest.raises(ResearchError) as conflict:
+        service.approvals.approve(
+            subject_kind="experiment",
+            preview_digest="a" * 64,
+            maximum_cost_usd=20,
+            maximum_cells=4,
+            approved_by="human-operator",
+            operation_id="approve-bound-input",
+            input_bindings={"trace_audit_selection_digest": "c" * 64},
+        )
+    assert conflict.value.code == "operation_conflict"
+
+    with pytest.raises(ValueError, match="digest"):
+        service.approvals.approve(
+            subject_kind="experiment",
+            preview_digest="d" * 64,
+            maximum_cost_usd=1,
+            maximum_cells=1,
+            approved_by="human-operator",
+            operation_id="approve-invalid-binding",
+            input_bindings={"trace_audit_selection_digest": "not-a-digest"},
+        )
 def test_candidate_reference_requires_immutable_registered_identity() -> None:
     candidate = candidate_ref_from_dict(
         CandidateRefV1(

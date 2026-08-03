@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -176,6 +177,7 @@ class ScorerRuntimeProfileV1:
     id: str
     title: str
     image: str
+    platform: str
     command: tuple[str, ...]
     profile_digest: str = ""
 
@@ -1514,17 +1516,26 @@ def run_inline_scorer(
         raise RuntimeError("Docker is required for isolated inline scoring")
     with tempfile.TemporaryDirectory(prefix="fugue-task-scorer-") as value:
         root = Path(value)
-        (root / "scorer.py").write_text(source, encoding="utf-8")
-        (root / "input.json").write_text(
+        scorer_path = root / "scorer.py"
+        input_path = root / "input.json"
+        scorer_path.write_text(source, encoding="utf-8")
+        input_path.write_text(
             json.dumps({"evidence": evidence, "reference": reference}, sort_keys=True),
             encoding="utf-8",
         )
+        scorer_path.chmod(0o400)
+        input_path.chmod(0o400)
+        container_name = f"fugue-inline-scorer-{uuid.uuid4().hex}"
         command = [
             docker,
             "run",
-            "--rm",
+            "--name",
+            container_name,
+            "--init",
             "--pull",
             "never",
+            "--platform",
+            profile.platform,
             "--network",
             "none",
             "--read-only",
@@ -1545,14 +1556,22 @@ def run_inline_scorer(
             profile.image,
             *profile.command,
         ]
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=limits.scorer_timeout_sec,
-            check=False,
-            env={"PATH": os.environ.get("PATH", "")},
-        )
+        cleanup_receipt: dict[str, Any] | None = None
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=limits.scorer_timeout_sec,
+                check=False,
+                env={"PATH": os.environ.get("PATH", "")},
+            )
+        finally:
+            cleanup_receipt = _cleanup_inline_scorer_container(
+                docker=docker,
+                container_name=container_name,
+                timeout_sec=limits.scorer_timeout_sec,
+            )
         output = completed.stdout.encode()
         if len(output) > limits.scorer_output_bytes:
             raise ValueError("inline scorer output exceeds the configured limit")
@@ -1564,7 +1583,56 @@ def run_inline_scorer(
         if not isinstance(payload, dict):
             raise ValueError("inline scorer must return one JSON object")
         _scorer_payload(payload)
-        return payload
+        if cleanup_receipt is None:  # pragma: no cover - defensive invariant
+            raise RuntimeError("inline scorer cleanup receipt is unavailable")
+        return {**payload, "fugue_runtime_receipt": cleanup_receipt}
+
+
+def _cleanup_inline_scorer_container(
+    *, docker: str, container_name: str, timeout_sec: int
+) -> dict[str, Any]:
+    """Remove one exact scorer container and prove no matching container remains."""
+
+    cleanup_timeout = max(1, min(timeout_sec, 30))
+    try:
+        subprocess.run(
+            [docker, "rm", "--force", container_name],
+            capture_output=True,
+            text=True,
+            timeout=cleanup_timeout,
+            check=False,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        proof = subprocess.run(
+            [
+                docker,
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"name=^/{container_name}$",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=cleanup_timeout,
+            check=False,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"inline scorer container cleanup could not be proven for {container_name}"
+        ) from exc
+    if proof.returncode != 0 or proof.stdout.strip():
+        raise RuntimeError(
+            f"inline scorer container cleanup could not be proven for {container_name}"
+        )
+    unsigned = {
+        "schema_version": 1,
+        "status": "verified_absent",
+        "container_name_sha256": hashlib.sha256(container_name.encode()).hexdigest(),
+    }
+    return {**unsigned, "receipt_digest": stable_digest(unsigned)}
 
 
 def _environment_profile(raw: Any) -> EnvironmentProfileV1:
@@ -1749,7 +1817,7 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
     value = _mapping(raw, "scorer runtime")
     _reject_unknown(
         value,
-        {"id", "title", "image", "command", "profile_digest"},
+        {"id", "title", "image", "platform", "command", "profile_digest"},
         "scorer runtime",
     )
     image = _bounded_text(value.get("image"), "scorer image", 500)
@@ -1762,10 +1830,18 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
         id=validate_id(value.get("id") or "", kind="scorer runtime id"),
         title=_bounded_text(value.get("title"), "scorer runtime title", 200),
         image=image,
+        platform=_scorer_runtime_platform(value.get("platform")),
         command=command,
         profile_digest=str(value.get("profile_digest") or ""),
     )
     return _with_profile_digest(profile, value)
+
+
+def _scorer_runtime_platform(raw: Any) -> str:
+    platform = _bounded_text(raw, "scorer runtime platform", 100)
+    if platform not in {"linux/amd64", "linux/arm64"}:
+        raise ValueError("scorer runtime platform must be linux/amd64 or linux/arm64")
+    return platform
 
 
 def _authored_task(raw: Any) -> AuthoredTaskV1:

@@ -102,6 +102,10 @@ def test_v3_confirmatory_spec_has_frozen_192_cell_design() -> None:
     )
     assert spec.execution.attempts == 4
     assert spec.execution.concurrency == 1
+    assert (
+        spec.execution.scheduling_seed
+        == "community-skill-upgrade-confirmatory-campaign-v1"
+    )
     assert spec.execution.evidence_checkpoint_cells == 1
     assert spec.execution.max_cost_usd == 1640
     assert len(tasks) == len(labels) == 24

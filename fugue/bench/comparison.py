@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import urllib.parse
@@ -37,7 +40,7 @@ from fugue.bench.analysis_contracts import (
     task_validity_from_dict,
 )
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
-from fugue.bench.files import atomic_write_json
+from fugue.bench.files import atomic_write_json, inspect_docker_image
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
 from fugue.bench.operator import (
     ExperimentRequest,
@@ -62,6 +65,7 @@ COMPARISON_RUNTIME_ROOT = Path(".fugue/runtime/comparisons")
 COMPARISON_RESULT_ROOT = Path(".fugue/results/comparisons")
 COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
 COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
+COMPARISON_EVALUATOR_RUNTIME_ROOT = Path(".fugue/runtime/evaluator-runtimes")
 DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC = 120
 MAX_COMPARISON_JUDGE_TIMEOUT_SEC = 900
 COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION = 2
@@ -256,6 +260,17 @@ class ComparisonCandidateV1:
 
 
 @dataclass(frozen=True)
+class ComparisonPostTrialVerifierV1:
+    type: Literal["node_test"]
+    source: str
+    runtime: str
+    dimension: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class ComparisonEvaluatorV1:
     id: str
     type: Literal["deterministic", "llm_judge"]
@@ -263,6 +278,7 @@ class ComparisonEvaluatorV1:
     checks: tuple[str, ...] = ()
     scorer: str | None = None
     runtime: str | None = None
+    verifier: ComparisonPostTrialVerifierV1 | None = None
     profile: str | None = None
     calibration: str | None = None
     rubric: str | None = None
@@ -304,6 +320,8 @@ class ComparisonExecutionPolicyV1:
     prerequisite_spec: str | None = None
     preparation_required: bool = False
     evidence_checkpoint_cells: int = 0
+    scheduling_seed: str | None = None
+    qualification_inputs: dict[str, str] = field(default_factory=dict)
     environment: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1077,6 +1095,19 @@ def comparison_from_dict(
                 if evaluator.scorer
                 else None
             ),
+            verifier=(
+                replace(
+                    evaluator.verifier,
+                    source=_portable_input_path(
+                        evaluator.verifier.source,
+                        base,
+                        repo_root,
+                        "host verifier",
+                    ),
+                )
+                if evaluator.verifier
+                else None
+            ),
             calibration=(
                 _portable_input_path(
                     evaluator.calibration,
@@ -1181,14 +1212,19 @@ def check_comparison(
     local_source_digests, local_source_blockers = (
         _local_source_lock_readiness(spec, repo_root=repo_root)
     )
+    declared_input_digests, declared_input_blockers = (
+        _declared_qualification_input_readiness(spec, repo_root=repo_root)
+    )
     qualification_input_digests, qualification_blockers = (
         _qualification_input_readiness(spec, repo_root=repo_root)
     )
     qualification_input_digests = {
         **local_source_digests,
+        **declared_input_digests,
         **qualification_input_digests,
     }
     blockers.extend(local_source_blockers)
+    blockers.extend(declared_input_blockers)
     blockers.extend(qualification_blockers)
     task_ids = tuple(str(item["id"]) for item in tasks)
     blockers.extend(_task_label_issues(task_ids, labels))
@@ -2704,6 +2740,55 @@ def _qualification_input_readiness(
         return {}, [f"mechanism qualification inputs are not usable: {exc}"]
 
 
+def _declared_qualification_input_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], list[str]]:
+    if not spec.execution.qualification_inputs:
+        return {}, []
+    source_files: dict[str, str] = {}
+    if spec.execution.source_lock:
+        try:
+            from fugue.bench.source_locks import read_local_source_lock
+
+            source_lock = read_local_source_lock(
+                repo_root / spec.execution.source_lock,
+                repo_root=repo_root,
+                expected_source_project=str(
+                    spec.execution.source_evidence_project or ""
+                ),
+                expected_result_project=str(spec.execution.evidence_project or ""),
+                verify_files=True,
+            )
+            source_files = {
+                str(item["path"]): str(item["sha256"])
+                for item in source_lock["files"]
+            }
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+            return {}, [f"declared qualification source lock is unusable: {exc}"]
+    digests: dict[str, str] = {}
+    blockers: list[str] = []
+    for name, relative in sorted(spec.execution.qualification_inputs.items()):
+        try:
+            path = _safe_input_path(
+                Path(relative),
+                repo_root,
+                f"qualification input {name}",
+            )
+            digest = _sha256_path(path)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            blockers.append(f"qualification input {name!r} is unusable: {exc}")
+            continue
+        if source_files and source_files.get(relative) != digest:
+            blockers.append(
+                f"qualification input {name!r} is not bound by the local source lock"
+            )
+            continue
+        digests[name] = digest
+    return dict(sorted(digests.items())), blockers
+
+
 def _candidate_asset_readiness(
     spec: ComparisonSpecV1, *, repo_root: Path
 ) -> tuple[list[str], list[str]]:
@@ -2809,6 +2894,12 @@ def _local_runtime_readiness(
 
     digests: dict[str, str] = {}
     blockers: list[str] = []
+    evaluator_digests, evaluator_blockers = _evaluator_runtime_readiness(
+        spec,
+        repo_root=repo_root,
+    )
+    digests.update(evaluator_digests)
+    blockers.extend(evaluator_blockers)
     architectures = sorted(
         {task_architecture(task) for task in manifest.tasks}
     )
@@ -2843,6 +2934,200 @@ def _local_runtime_readiness(
             except ValueError as exc:
                 blockers.append(f"local {key} lock is not portable: {exc}")
     return dict(sorted(digests.items())), blockers
+
+
+def _comparison_evaluator_runtime_profiles(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[Any, ...]:
+    """Resolve every trusted scorer/verifier runtime used by one comparison."""
+    from fugue.bench.task_authoring import load_task_profiles
+
+    profile_ids = {
+        runtime_id
+        for evaluator in spec.evaluators
+        for runtime_id in (
+            evaluator.runtime if evaluator.scorer else None,
+            evaluator.verifier.runtime if evaluator.verifier else None,
+        )
+        if runtime_id
+    }
+    if not profile_ids:
+        return ()
+    catalog = load_task_profiles(repo_root)
+    return tuple(catalog.scorer_runtime(item) for item in sorted(profile_ids))
+
+
+def _evaluator_runtime_lock_path(
+    profile: Any,
+    *,
+    repo_root: Path,
+) -> Path:
+    platform = str(profile.platform).replace("/", "-")
+    return (
+        repo_root
+        / COMPARISON_EVALUATOR_RUNTIME_ROOT
+        / str(profile.id)
+        / f"{profile.profile_digest}-{platform}.json"
+    )
+
+
+def _read_evaluator_runtime_lock(
+    profile: Any,
+    *,
+    repo_root: Path,
+    inspect_image: bool,
+) -> dict[str, Any] | None:
+    path = _evaluator_runtime_lock_path(profile, repo_root=repo_root)
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    required = {
+        "schema_version": 1,
+        "kind": "comparison_evaluator_runtime",
+        "profile_id": profile.id,
+        "profile_digest": profile.profile_digest,
+        "image": profile.image,
+        "platform": profile.platform,
+        "command": list(profile.command),
+    }
+    if not isinstance(value, dict) or any(
+        value.get(key) != expected for key, expected in required.items()
+    ):
+        return None
+    unsigned = {key: item for key, item in value.items() if key != "lock_digest"}
+    if value.get("lock_digest") != stable_digest(unsigned):
+        return None
+    image_id = str(value.get("image_id") or "")
+    if not image_id.startswith("sha256:"):
+        return None
+    expected_os, expected_architecture = str(profile.platform).split("/", 1)
+    if (
+        value.get("os") != expected_os
+        or value.get("architecture") != expected_architecture
+    ):
+        return None
+    if inspect_image:
+        try:
+            inspected = inspect_docker_image(image_id)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        if (
+            inspected.get("Id") != image_id
+            or inspected.get("Os") != expected_os
+            or inspected.get("Architecture") != expected_architecture
+        ):
+            return None
+    return value
+
+
+def _evaluator_runtime_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], list[str]]:
+    digests: dict[str, str] = {}
+    blockers: list[str] = []
+    try:
+        profiles = _comparison_evaluator_runtime_profiles(
+            spec,
+            repo_root=repo_root,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        return {}, [f"comparison evaluator runtime cannot be resolved: {exc}"]
+    for profile in profiles:
+        lock = _read_evaluator_runtime_lock(
+            profile,
+            repo_root=repo_root,
+            inspect_image=True,
+        )
+        key = f"evaluator:{profile.id}:{profile.platform}"
+        if lock is None:
+            blockers.append(
+                f"local {key} is not prepared and locked; run "
+                "`fugue compare SPEC --prepare`"
+            )
+        else:
+            digests[key] = str(lock["lock_digest"])
+    return dict(sorted(digests.items())), blockers
+
+
+def _prepare_evaluator_runtimes(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], ...]:
+    """Materialize exact evaluator images in the trusted preparation boundary."""
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError("Docker is required to prepare evaluator runtimes")
+    locks: list[dict[str, str]] = []
+    for profile in _comparison_evaluator_runtime_profiles(
+        spec,
+        repo_root=repo_root,
+    ):
+        existing = _read_evaluator_runtime_lock(
+            profile,
+            repo_root=repo_root,
+            inspect_image=True,
+        )
+        if existing is not None:
+            locks.append(existing)
+            continue
+        completed = subprocess.run(
+            [
+                docker,
+                "pull",
+                "--platform",
+                str(profile.platform),
+                str(profile.image),
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=900,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"could not prepare evaluator runtime {profile.id}: "
+                + (completed.stderr or completed.stdout or "docker pull failed").strip()
+            )
+        inspected = inspect_docker_image(str(profile.image))
+        expected_os, expected_architecture = str(profile.platform).split("/", 1)
+        if (
+            inspected.get("Os") != expected_os
+            or inspected.get("Architecture") != expected_architecture
+        ):
+            raise RuntimeError(
+                f"evaluator runtime {profile.id} resolved "
+                f"{inspected.get('Os')}/{inspected.get('Architecture')} instead of "
+                f"{profile.platform}"
+            )
+        unsigned: dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "comparison_evaluator_runtime",
+            "profile_id": profile.id,
+            "profile_digest": profile.profile_digest,
+            "image": profile.image,
+            "image_id": inspected.get("Id"),
+            "platform": profile.platform,
+            "os": inspected.get("Os"),
+            "architecture": inspected.get("Architecture"),
+            "command": list(profile.command),
+        }
+        lock = {**unsigned, "lock_digest": stable_digest(unsigned)}
+        atomic_write_json(
+            _evaluator_runtime_lock_path(profile, repo_root=repo_root),
+            lock,
+        )
+        locks.append(lock)
+    return tuple(locks)
 
 
 def _comparison_preparation_receipt_path(
@@ -2956,7 +3241,7 @@ def _qualification_results(
             warnings.append(f"{task_id}: missing base_output qualification fixture")
         else:
             try:
-                base_passed, _ = _score_deterministic_output(
+                base_passed, _, _ = _score_deterministic_output(
                     task=task,
                     output=label["base_output"],
                     expected=label.get("expected"),
@@ -2979,7 +3264,7 @@ def _qualification_results(
             warnings.append(f"{task_id}: missing gold_output qualification fixture")
         else:
             try:
-                gold_passed, _ = _score_deterministic_output(
+                gold_passed, _, _ = _score_deterministic_output(
                     task=task,
                     output=label["gold_output"],
                     expected=label.get("expected"),
@@ -3164,6 +3449,17 @@ def compile_comparison(
             "n_concurrent": spec.execution.concurrency,
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
+            "presets": [
+                {
+                    "id": "counterbalanced",
+                    "scheduling_seed": spec.execution.scheduling_seed,
+                }
+            ]
+            if spec.execution.scheduling_seed
+            else [],
+            "default_preset": (
+                "counterbalanced" if spec.execution.scheduling_seed else None
+            ),
             "trace_content": spec.execution.trace_content,
             "source_evidence_project": spec.execution.source_evidence_project,
             "source_evidence_destination": (
@@ -3269,6 +3565,11 @@ def prepare_comparison(
         label="prepared comparison manifest",
     )
 
+    # Trusted evaluators execute during readiness qualification. Materialize
+    # their exact platform images before the provisional (read-only) preview;
+    # pure preview never pulls or mutates runtime state.
+    _prepare_evaluator_runtimes(spec, repo_root=repo_root)
+
     # A provisional preview is never approval-eligible. It exists solely to
     # bind and freeze the source-side input manifest before Docker builds.
     provisional = preview_comparison(
@@ -3319,16 +3620,21 @@ def prepare_comparison(
     local_source_digests, local_source_blockers = (
         _local_source_lock_readiness(spec, repo_root=repo_root)
     )
+    declared_input_digests, declared_input_blockers = (
+        _declared_qualification_input_readiness(spec, repo_root=repo_root)
+    )
     qualification_input_digests, qualification_blockers = (
         _qualification_input_readiness(spec, repo_root=repo_root)
     )
     qualification_input_digests = {
         **local_source_digests,
+        **declared_input_digests,
         **qualification_input_digests,
     }
     preparation_blockers = [
         *runtime_blockers,
         *local_source_blockers,
+        *declared_input_blockers,
         *qualification_blockers,
     ]
     if preparation_blockers:
@@ -3394,6 +3700,7 @@ def materialize_comparison(
     repo_root: Path,
     operator: OperatorService | None = None,
     approval_digest: str = "",
+    approval_input_bindings: Mapping[str, str] | None = None,
 ) -> tuple[ExperimentSpec, ExperimentRequest]:
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
@@ -3451,6 +3758,7 @@ def materialize_comparison(
     approved_comparison = _approved_comparison_execution_lock(
         preview,
         approval_digest=approval_digest,
+        approval_input_bindings=approval_input_bindings,
         repo_root=repo_root,
         public_rows=public_rows,
     )
@@ -3500,6 +3808,14 @@ def _approved_input_manifest(
                     Path(evaluator.scorer),
                     repo_root,
                     "deterministic scorer",
+                )
+            )
+        if evaluator.verifier:
+            artifacts["verifier_sha256"] = _sha256_path(
+                _safe_input_path(
+                    Path(evaluator.verifier.source),
+                    repo_root,
+                    "host verifier",
                 )
             )
         if evaluator.calibration:
@@ -3595,6 +3911,24 @@ def _materialize_approved_comparison_inputs(
                 mode=0o400,
                 label=f"approved scorer {evaluator.id}",
             )
+        if evaluator.verifier:
+            digest = str(artifacts.get("verifier_sha256") or "")
+            source = _safe_input_path(
+                Path(evaluator.verifier.source),
+                repo_root,
+                "host verifier",
+            )
+            _write_immutable_bytes(
+                _frozen_evaluator_artifact_path(
+                    repo_root,
+                    digest,
+                    kind="verifier",
+                ),
+                source.read_bytes(),
+                expected_sha256=digest,
+                mode=0o400,
+                label=f"approved host verifier {evaluator.id}",
+            )
         if evaluator.calibration:
             digest = str(artifacts.get("calibration_sha256") or "")
             source = _safe_input_path(
@@ -3654,9 +3988,11 @@ def _frozen_evaluator_artifact_path(
     repo_root: Path,
     digest: str,
     *,
-    kind: Literal["scorer", "calibration"],
+    kind: Literal["scorer", "verifier", "calibration"],
 ) -> Path:
-    suffix = ".py" if kind == "scorer" else ".json"
+    suffix = {"scorer": ".py", "verifier": ".cjs", "calibration": ".json"}[
+        kind
+    ]
     return repo_root / COMPARISON_PRIVATE_INPUT_ROOT / kind / f"{digest}{suffix}"
 
 
@@ -3703,6 +4039,7 @@ def _verify_frozen_comparison_inputs(
         values = _mapping(raw, f"prepared evaluator {evaluator_id} artifacts")
         for digest_field, kind in (
             ("scorer_sha256", "scorer"),
+            ("verifier_sha256", "verifier"),
             ("calibration_sha256", "calibration"),
         ):
             digest = str(values.get(digest_field) or "")
@@ -3747,6 +4084,7 @@ def _approved_comparison_execution_lock(
     preview: ComparisonPreviewV1,
     *,
     approval_digest: str,
+    approval_input_bindings: Mapping[str, str] | None,
     repo_root: Path,
     public_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -3834,10 +4172,32 @@ def _approved_comparison_execution_lock(
     evaluator_digests = _mapping(
         readiness.get("evaluator_digests"), "preview evaluator digests"
     )
-    qualification_input_digests = _mapping(
+    runtime_lock_digests = _mapping(
+        readiness.get("runtime_lock_digests") or {},
+        "preview runtime lock digests",
+    )
+    preview_qualification_input_digests = _mapping(
         readiness.get("qualification_input_digests") or {},
         "preview qualification input digests",
     )
+    normalized_approval_bindings = dict(
+        sorted((approval_input_bindings or {}).items())
+    )
+    conflicts = {
+        name
+        for name, digest in normalized_approval_bindings.items()
+        if name in preview_qualification_input_digests
+        and preview_qualification_input_digests[name] != digest
+    }
+    if conflicts:
+        raise ValueError(
+            "approval input bindings conflict with preview qualification inputs: "
+            + ", ".join(sorted(conflicts))
+        )
+    qualification_input_digests = {
+        **preview_qualification_input_digests,
+        **normalized_approval_bindings,
+    }
     approved_inputs = _approved_input_manifest(
         preview,
         repo_root=repo_root,
@@ -3878,6 +4238,11 @@ def _approved_comparison_execution_lock(
             readiness.get("private_labels_digest") or ""
         ),
         "scorer_digests": dict(sorted(evaluator_digests.items())),
+        "runtime_locks_required": bool(
+            comparison_execution.get("preparation_required")
+        ),
+        "runtime_lock_digests": dict(sorted(runtime_lock_digests.items())),
+        "approval_input_bindings": normalized_approval_bindings,
         "qualification_input_digests": dict(
             sorted(qualification_input_digests.items())
         ),
@@ -3899,6 +4264,9 @@ def _approved_comparison_execution_lock(
         "evidence_destination": evidence_destination,
         "evidence_checkpoint_cells": int(
             comparison_execution.get("evidence_checkpoint_cells") or 0
+        ),
+        "scheduling_seed": str(
+            comparison_execution.get("scheduling_seed") or ""
         ),
         "candidate_source_revisions_required": source_change,
         "candidate_source_revisions": [
@@ -3965,7 +4333,7 @@ def claim_comparison_approval(
     approval_digest: str,
     repo_root: Path,
     execution_instance_id: str,
-) -> None:
+) -> Any:
     execution_instance_id = validate_id(
         execution_instance_id,
         kind="comparison execution instance id",
@@ -3977,7 +4345,7 @@ def claim_comparison_approval(
             "comparisons may not run"
         )
     store = StudyStore(repo_root)
-    ApprovalLedger(store.path).claim(
+    return ApprovalLedger(store.path).claim(
         approval_digest=approval_digest,
         subject_kind="experiment",
         preview_digest=preview.preview_digest,
@@ -4342,7 +4710,10 @@ def analyze_comparison_rows(
             task_validity=task_validity,
             release_note_coverage=resolved_release_note_coverage,
             scorer_revisions=_scorer_revisions_v3(execution_lock),
-            runtime_locks=_runtime_locks_v3(normalized),
+            runtime_locks=_runtime_locks_v3(
+                normalized,
+                execution_lock=execution_lock,
+            ),
             cohort_lineage=dict(
                 _mapping(
                     execution_lock.get("cohort_lineage")
@@ -5035,6 +5406,8 @@ def _scorer_revisions_v3(
 
 def _runtime_locks_v3(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    execution_lock: Mapping[str, Any] | None = None,
 ) -> tuple[LockDescriptorV1, ...]:
     values: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -5068,6 +5441,22 @@ def _runtime_locks_v3(
         )
         if values[key]["digest"] != digest:
             raise ValueError(f"runtime execution identity drifted for {key}")
+    for key, digest in sorted(
+        _mapping_or_empty(
+            execution_lock.get("runtime_lock_digests")
+            if execution_lock is not None
+            else None
+        ).items()
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+            raise ValueError(f"approved runtime lock digest is invalid for {key}")
+        values[f"approved-{key}"] = {
+            "digest": str(digest),
+            "details": {
+                "kind": "approved_runtime_lock",
+                "runtime_lock_id": str(key),
+            },
+        }
     return tuple(
         LockDescriptorV1(
             id=key,
@@ -5294,6 +5683,7 @@ def _verify_approved_comparison_execution_lock(
             or any(char not in "0123456789abcdef" for char in str(digest))
         ):
             raise ValueError("approved comparison scorer digest is invalid")
+    _verify_approved_runtime_locks(approved)
     qualification_inputs = approved.get("qualification_input_digests") or {}
     if not isinstance(qualification_inputs, Mapping) or any(
         not str(name)
@@ -5303,6 +5693,14 @@ def _verify_approved_comparison_execution_lock(
         raise ValueError(
             "approved comparison qualification input digest is invalid"
         )
+    approval_bindings = approved.get("approval_input_bindings") or {}
+    if not isinstance(approval_bindings, Mapping) or any(
+        not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,99}", str(name))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+        or qualification_inputs.get(name) != digest
+        for name, digest in approval_bindings.items()
+    ):
+        raise ValueError("approved comparison approval input binding is invalid")
     _verify_approved_source_contract(
         approved,
         expected_cells=expected_cells,
@@ -5324,6 +5722,21 @@ def _verify_approved_comparison_execution_lock(
         _verify_approved_expected_cell(
             _mapping(item, "approved comparison expected cell")
         )
+
+
+def _verify_approved_runtime_locks(approved: Mapping[str, Any]) -> None:
+    required = approved.get("runtime_locks_required", False)
+    if not isinstance(required, bool):
+        raise ValueError("approved runtime lock requirement must be boolean")
+    locks = approved.get("runtime_lock_digests") or {}
+    if not isinstance(locks, Mapping) or any(
+        not str(name)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+        for name, digest in locks.items()
+    ):
+        raise ValueError("approved comparison runtime lock digest is invalid")
+    if required and not locks:
+        raise ValueError("approved comparison requires exact runtime locks")
 
 
 def _verified_source_topology_lock(
@@ -5503,6 +5916,7 @@ def _verified_approved_inputs(
         values = _mapping(raw, f"approved evaluator {evaluator_id} artifacts")
         for digest_field, kind in (
             ("scorer_sha256", "scorer"),
+            ("verifier_sha256", "verifier"),
             ("calibration_sha256", "calibration"),
         ):
             digest = str(values.get(digest_field) or "")
@@ -6202,6 +6616,11 @@ def _paired_attempt_view(
             ),
             "decision_facts": dict(
                 _mapping_or_empty(row.get("decision_facts"))
+            ),
+            "host_verifier_receipts": dict(
+                _mapping_or_empty(
+                    row.get("comparison_host_verifier_receipts")
+                )
             ),
             "privacy_contract_version": row.get("privacy_contract_version"),
             "local_artifact_privacy_scan_status": row.get(
@@ -9466,7 +9885,12 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:
                 f"{key!r} disagrees with canonical attempts"
             )
     expected_runtime_locks = _runtime_locks_v3(canonical_rows)
-    if tuple(item.to_dict() for item in result.runtime_locks) != tuple(
+    observed_attempt_locks = tuple(
+        item
+        for item in result.runtime_locks
+        if item.details.get("kind") != "approved_runtime_lock"
+    )
+    if tuple(item.to_dict() for item in observed_attempt_locks) != tuple(
         item.to_dict() for item in expected_runtime_locks
     ):
         raise ValueError(
@@ -10133,6 +10557,128 @@ def scaffold_comparison(destination: Path, *, force: bool = False) -> Path:
     return root / "comparison.yaml"
 
 
+def _approved_evaluator_artifact_digests(
+    approved_inputs: Mapping[str, Any] | None,
+    evaluators: Sequence[ComparisonEvaluatorV1],
+    *,
+    artifact: Literal["scorer", "verifier"],
+) -> dict[str, str] | None:
+    if approved_inputs is None:
+        return None
+    artifacts = _mapping(
+        approved_inputs["evaluator_artifacts"],
+        "approved evaluator artifacts",
+    )
+    enabled = (
+        (lambda evaluator: bool(evaluator.scorer))
+        if artifact == "scorer"
+        else (lambda evaluator: bool(evaluator.verifier))
+    )
+    return {
+        evaluator.id: str(
+            _mapping(
+                artifacts.get(evaluator.id),
+                f"approved evaluator {evaluator.id} artifacts",
+            ).get(f"{artifact}_sha256")
+            or ""
+        )
+        for evaluator in evaluators
+        if enabled(evaluator)
+    }
+
+
+def _bind_host_verifier_receipts(
+    row: dict[str, Any], receipts: Mapping[str, Mapping[str, Any]]
+) -> None:
+    if receipts:
+        attempt = str(row.get("attempt_id") or "")
+        task_id = str(row.get("task_id") or "")
+        bound: dict[str, dict[str, Any]] = {}
+        for evaluator_id, raw in receipts.items():
+            value = dict(raw)
+            _verify_bound_host_verifier_receipt(
+                value,
+                evaluator_id=str(evaluator_id),
+                attempt_id=attempt,
+                task_id=task_id,
+            )
+            bound[str(evaluator_id)] = value
+        row["comparison_host_verifier_receipts"] = bound
+
+
+def _verify_bound_host_verifier_receipt(
+    value: Mapping[str, Any],
+    *,
+    evaluator_id: str,
+    attempt_id: str,
+    task_id: str,
+) -> None:
+    required = {
+        "schema_version",
+        "kind",
+        "evaluator_id",
+        "task_id",
+        "attempt_id",
+        "status",
+        "failure_kind",
+        "runtime",
+        "command",
+        "exit_code",
+        "test_count",
+        "pass_count",
+        "fail_count",
+        "output_sha256",
+        "base_archive_sha256",
+        "public_test_sha256",
+        "submitted_artifact_sha256",
+        "final_tree_sha256",
+        "verifier_source_sha256",
+        "runtime_profile_id",
+        "runtime_profile_digest",
+        "runtime_image",
+        "runtime_platform",
+        "runtime_image_id",
+        "runtime_lock_digest",
+        "runtime_cleanup",
+        "receipt_digest",
+    }
+    if set(value) != required:
+        raise ValueError("bound host verifier receipt fields do not match")
+    unsigned = {key: item for key, item in value.items() if key != "receipt_digest"}
+    if value.get("receipt_digest") != stable_digest(unsigned):
+        raise ValueError("host verifier receipt digest does not match")
+    if (
+        value.get("schema_version") != 2
+        or value.get("kind") != "post_trial_verifier_receipt"
+        or value.get("evaluator_id") != evaluator_id
+        or value.get("attempt_id") != attempt_id
+        or value.get("task_id") != task_id
+    ):
+        raise ValueError("host verifier receipt belongs to another attempt")
+    for name in (
+        "output_sha256",
+        "base_archive_sha256",
+        "public_test_sha256",
+        "submitted_artifact_sha256",
+        "final_tree_sha256",
+        "verifier_source_sha256",
+        "runtime_profile_digest",
+        "runtime_lock_digest",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(name) or "")):
+            raise ValueError(f"host verifier receipt {name} is invalid")
+    cleanup = _mapping(value.get("runtime_cleanup"), "verifier runtime cleanup")
+    cleanup_unsigned = {
+        key: item for key, item in cleanup.items() if key != "receipt_digest"
+    }
+    if (
+        cleanup.get("schema_version") != 1
+        or cleanup.get("status") != "verified_absent"
+        or cleanup.get("receipt_digest") != stable_digest(cleanup_unsigned)
+    ):
+        raise ValueError("host verifier runtime cleanup receipt is invalid")
+
+
 def score_comparison_rows(
     spec: ComparisonSpecV1,
     rows: Sequence[Mapping[str, Any]],
@@ -10175,6 +10721,16 @@ def score_comparison_rows(
         for evaluator in spec.evaluators
         if evaluator.type == "deterministic"
     )
+    scorer_source_digests = _approved_evaluator_artifact_digests(
+        approved_inputs,
+        deterministic,
+        artifact="scorer",
+    )
+    verifier_source_digests = _approved_evaluator_artifact_digests(
+        approved_inputs,
+        deterministic,
+        artifact="verifier",
+    )
     scored: list[dict[str, Any]] = []
     for source in rows:
         row = _bind_attempt_identity(source)
@@ -10193,30 +10749,15 @@ def score_comparison_rows(
             row["comparison_required_evaluation_complete"] = False
         else:
             try:
-                passed, dimensions = _score_deterministic_output(
+                passed, dimensions, verifier_receipts = _score_deterministic_output(
                     task=public_tasks.get(task_id, {}),
                     output=output,
                     expected=label["expected"],
                     evidence=_custom_scorer_evidence(row),
                     evaluators=deterministic,
                     repo_root=repo_root,
-                    scorer_source_digests={
-                        evaluator_id: str(
-                            _mapping(
-                                _mapping(
-                                    approved_inputs["evaluator_artifacts"],
-                                    "approved evaluator artifacts",
-                                ).get(evaluator_id),
-                                f"approved evaluator {evaluator_id} artifacts",
-                            ).get("scorer_sha256")
-                            or ""
-                        )
-                        for evaluator_id in (
-                            item.id for item in deterministic if item.scorer
-                        )
-                    }
-                    if approved_inputs is not None
-                    else None,
+                    scorer_source_digests=scorer_source_digests,
+                    verifier_source_digests=verifier_source_digests,
                 )
             except Exception as exc:
                 row["pass"] = None
@@ -10230,6 +10771,7 @@ def score_comparison_rows(
                 row["pass"] = passed
                 row["comparison_evaluation_status"] = "scored"
                 row["comparison_deterministic_scores"] = dimensions
+                _bind_host_verifier_receipts(row, verifier_receipts)
                 row["comparison_dimension_roles"] = {
                     f"{evaluator.id}.{dimension}": role
                     for evaluator in deterministic
@@ -12097,10 +12639,11 @@ def _execute_comparison(
             "immutable source evidence did not match before execution; no "
             "comparison cells were launched"
         )
+    claimed_approval = None
     if spec.execution.approval_required:
         if not approval_digest:
             raise ValueError("comparison execution requires an approval digest")
-        claim_comparison_approval(
+        claimed_approval = claim_comparison_approval(
             preview,
             approval_digest=approval_digest,
             repo_root=repo_root,
@@ -12111,6 +12654,9 @@ def _execute_comparison(
         repo_root=repo_root,
         operator=service,
         approval_digest=approval_digest,
+        approval_input_bindings=(
+            claimed_approval.input_bindings if claimed_approval is not None else {}
+        ),
     )
     destination = repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest
     research_publication_path, research_projection = (
@@ -12613,6 +13159,47 @@ def _integration(raw: Any, index: int) -> dict[str, Any]:
     )
 
 
+def _post_trial_verifier(
+    raw: Any,
+    *,
+    evaluator_type: str,
+    scorer: str | None,
+    dimensions: Sequence[str],
+) -> ComparisonPostTrialVerifierV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "post-trial verifier")
+    _reject_unknown(
+        value,
+        {"type", "source", "runtime", "dimension"},
+        "post-trial verifier",
+    )
+    if evaluator_type != "deterministic":
+        raise ValueError("only deterministic evaluators may use a host verifier")
+    if not scorer:
+        raise ValueError("host verifier requires a custom deterministic scorer")
+    verifier_type = str(value.get("type") or "")
+    if verifier_type != "node_test":
+        raise ValueError("post-trial verifier type must be node_test")
+    source = str(value.get("source") or "")
+    if not source:
+        raise ValueError("post-trial verifier source is required")
+    runtime = validate_id(
+        str(value.get("runtime") or ""), kind="verifier runtime id"
+    )
+    dimension = str(value.get("dimension") or "")
+    if dimension not in dimensions:
+        raise ValueError(
+            "host verifier dimension must be one declared evaluator dimension"
+        )
+    return ComparisonPostTrialVerifierV1(
+        type="node_test",
+        source=source,
+        runtime=runtime,
+        dimension=dimension,
+    )
+
+
 def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     value = _mapping(raw, "evaluator")
     _reject_unknown(
@@ -12624,6 +13211,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "checks",
             "scorer",
             "runtime",
+            "verifier",
             "profile",
             "calibration",
             "rubric",
@@ -12702,6 +13290,12 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         runtime = "python312-sandbox-v1"
     if evaluator_type == "deterministic" and runtime and not scorer:
         raise ValueError("deterministic evaluator runtime requires scorer")
+    verifier = _post_trial_verifier(
+        value.get("verifier"),
+        evaluator_type=evaluator_type,
+        scorer=scorer,
+        dimensions=dimensions,
+    )
     if evaluator_type == "deterministic" and scorer:
         validate_id(str(runtime), kind="scorer runtime id")
         if not dimensions:
@@ -12734,6 +13328,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         checks=checks,
         scorer=scorer,
         runtime=runtime,
+        verifier=verifier,
         profile=profile,
         calibration=calibration,
         rubric=rubric,
@@ -12783,6 +13378,8 @@ def _execution(
             "prerequisite_spec",
             "preparation_required",
             "evidence_checkpoint_cells",
+            "scheduling_seed",
+            "qualification_inputs",
             "environment",
         },
         "execution policy",
@@ -12833,6 +13430,20 @@ def _execution(
         raise ValueError(
             "prerequisite result, attestation, and comparison id must be "
             "declared together"
+        )
+    qualification_inputs: dict[str, str] = {}
+    for raw_name, raw_path in _mapping(
+        value.get("qualification_inputs") or {},
+        "execution qualification inputs",
+    ).items():
+        name = str(raw_name)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,99}", name):
+            raise ValueError("qualification input names must be stable identifiers")
+        qualification_inputs[name] = _portable_input_path(
+            raw_path,
+            source,
+            repo_root,
+            f"qualification input {name}",
         )
     return ComparisonExecutionPolicyV1(
         model=_text(value.get("model"), "execution model", 300),
@@ -12961,6 +13572,12 @@ def _execution(
         ),
         preparation_required=bool(value.get("preparation_required", False)),
         evidence_checkpoint_cells=evidence_checkpoint_cells,
+        scheduling_seed=_optional_text(
+            value.get("scheduling_seed"),
+            "comparison scheduling seed",
+            300,
+        ),
+        qualification_inputs=dict(sorted(qualification_inputs.items())),
         environment=dict(
             _mapping(value.get("environment") or {}, "execution environment")
         ),
@@ -13376,13 +13993,34 @@ def _load_private_labels(path: Path) -> list[dict[str, Any]]:
 def _evaluator_digest(
     evaluator: ComparisonEvaluatorV1, repo_root: Path
 ) -> str:
+    from fugue.bench.task_authoring import load_task_profiles
+
     value = evaluator.to_dict()
+    profiles = (
+        load_task_profiles(repo_root)
+        if evaluator.scorer or evaluator.verifier
+        else None
+    )
     if evaluator.scorer:
         value["scorer_sha256"] = _sha256_path(
             _safe_input_path(
                 Path(evaluator.scorer), repo_root, "deterministic scorer"
             )
         )
+        assert profiles is not None
+        value["scorer_runtime_profile_digest"] = profiles.scorer_runtime(
+            str(evaluator.runtime)
+        ).profile_digest
+    if evaluator.verifier:
+        value["verifier_sha256"] = _sha256_path(
+            _safe_input_path(
+                Path(evaluator.verifier.source), repo_root, "host verifier"
+            )
+        )
+        assert profiles is not None
+        value["verifier_runtime_profile_digest"] = profiles.scorer_runtime(
+            evaluator.verifier.runtime
+        ).profile_digest
     if evaluator.calibration:
         value["calibration_sha256"] = _sha256_path(
             _safe_input_path(
@@ -13419,16 +14057,47 @@ def _score_deterministic_output(
     evaluators: Sequence[ComparisonEvaluatorV1],
     repo_root: Path,
     scorer_source_digests: Mapping[str, str] | None = None,
-) -> tuple[bool, dict[str, bool | float]]:
+    verifier_source_digests: Mapping[str, str] | None = None,
+) -> tuple[
+    bool,
+    dict[str, bool | float],
+    dict[str, dict[str, Any]],
+]:
     scores: dict[str, bool | float] = {}
+    verifier_receipts: dict[str, dict[str, Any]] = {}
     evaluator_passes: list[bool] = []
     for evaluator in evaluators:
+        evaluator_evidence = dict(evidence)
+        verifier_passed: bool | None = None
+        if evaluator.verifier:
+            verifier_payload = _run_custom_verifier(
+                evaluator,
+                task=task,
+                output=_extract_structured_result(output),
+                expected=expected,
+                evidence=evidence,
+                repo_root=repo_root,
+                approved_source_digest=(
+                    str(verifier_source_digests.get(evaluator.id) or "")
+                    if verifier_source_digests is not None
+                    else None
+                ),
+            )
+            verifier_passed = float(verifier_payload["score"]) == 1.0
+            receipt = dict(
+                _mapping(
+                    verifier_payload.get("details"),
+                    "host verifier receipt",
+                )
+            )
+            verifier_receipts[evaluator.id] = receipt
+            evaluator_evidence["host_verifier_receipt"] = receipt
         if evaluator.scorer:
             payload = _run_custom_scorer(
                 evaluator,
                 task=task,
                 output=_extract_structured_result(output),
-                evidence=evidence,
+                evidence=evaluator_evidence,
                 expected=expected,
                 repo_root=repo_root,
                 approved_source_digest=(
@@ -13444,7 +14113,15 @@ def _score_deterministic_output(
                 raise ValueError(
                     "custom scorer output does not match its declared dimensions"
                 )
-            for name, value in details.items():
+            normalized_details = dict(details)
+            if evaluator.verifier:
+                verifier_dimension = evaluator.verifier.dimension
+                scorer_value = normalized_details.get(verifier_dimension)
+                if _bool_score(scorer_value) is not verifier_passed:
+                    raise ValueError(
+                        "custom scorer and host verifier dimension disagree"
+                    )
+            for name, value in normalized_details.items():
                 dimension = str(name)
                 if (
                     not 1 <= len(dimension) <= 100
@@ -13471,7 +14148,10 @@ def _score_deterministic_output(
                         f"scorer dimension {dimension!r} must be bool or 0..1"
                     )
                 scores[f"{evaluator.id}.{dimension}"] = normalized
-            evaluator_passes.append(float(payload["score"]) == 1.0)
+            evaluator_passes.append(
+                float(payload["score"]) == 1.0
+                and (verifier_passed is None or verifier_passed)
+            )
             continue
         check_scores = {
             "answer_present": bool(
@@ -13489,7 +14169,11 @@ def _score_deterministic_output(
         }
         scores.update(selected)
         evaluator_passes.append(all(selected.values()))
-    return bool(evaluator_passes) and all(evaluator_passes), scores
+    return (
+        bool(evaluator_passes) and all(evaluator_passes),
+        scores,
+        verifier_receipts,
+    )
 
 
 def _run_custom_scorer(
@@ -13599,6 +14283,310 @@ if __name__ == "__main__":
     )
 
 
+def _run_custom_verifier(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    task: Mapping[str, Any],
+    output: Any,
+    expected: Any,
+    evidence: Mapping[str, Any],
+    repo_root: Path,
+    approved_source_digest: str | None = None,
+) -> dict[str, Any]:
+    """Run a frozen post-trial verifier without exposing its oracle to the Agent."""
+
+    from fugue.bench.task_authoring import (
+        TaskAuthoringLimitsV1,
+        load_task_profiles,
+        run_inline_scorer,
+    )
+
+    if not evaluator.verifier:
+        raise ValueError("custom host verifier is missing its source or runtime")
+    path = (
+        _frozen_evaluator_artifact_path(
+            repo_root,
+            approved_source_digest,
+            kind="verifier",
+        )
+        if approved_source_digest
+        else _safe_input_path(
+            Path(evaluator.verifier.source), repo_root, "host verifier"
+        )
+    )
+    if not path.is_file():
+        raise FileNotFoundError(f"approved host verifier not found: {path}")
+    if approved_source_digest and _sha256_path(path) != approved_source_digest:
+        raise ValueError("approved host verifier immutable copy changed")
+    source = path.read_text(encoding="utf-8")
+    if not source.strip() or len(source.encode()) > 64_000 or "\x00" in source:
+        raise ValueError("host verifier source must be non-empty and at most 64 KiB")
+    profiles = load_task_profiles(repo_root)
+    profile = profiles.scorer_runtime(evaluator.verifier.runtime)
+    runtime_lock = _read_evaluator_runtime_lock(
+        profile,
+        repo_root=repo_root,
+        inspect_image=True,
+    )
+    if runtime_lock is None:
+        raise RuntimeError(
+            f"host verifier runtime {profile.id!r} is not prepared and locked"
+        )
+    archive, archive_digest = _verifier_base_archive(
+        task,
+        expected=expected,
+        repo_root=repo_root,
+    )
+    limits = TaskAuthoringLimitsV1(
+        max_tasks=1,
+        max_scenarios=1,
+        max_prompt_bytes=1,
+        max_authored_asset_bytes=1,
+        max_user_turns=1,
+        max_agent_turns=1,
+        max_interactor_calls=0,
+        max_judge_calls=0,
+        scorer_timeout_sec=30,
+        scorer_memory_mb=256,
+        scorer_cpus=1.0,
+        scorer_output_bytes=64_000,
+    )
+    payload = run_inline_scorer(
+        source=source,
+        evidence={},
+        reference={
+            "task": dict(task),
+            "output": output,
+            "expected": {
+                **dict(_mapping(expected, "host verifier expected contract")),
+                "base_archive_base64": base64.b64encode(archive).decode("ascii"),
+            },
+        },
+        profile=profile,
+        limits=limits,
+    )
+    receipt = _host_verifier_receipt(
+        payload,
+        evaluator=evaluator,
+        task=task,
+        output=output,
+        evidence=evidence,
+        expected=expected,
+        archive_digest=archive_digest,
+        verifier_source_digest=_sha256_path(path),
+        runtime_profile=profile,
+        runtime_lock=runtime_lock,
+    )
+    return {**payload, "details": receipt}
+
+
+def _verifier_base_archive(
+    task: Mapping[str, Any],
+    *,
+    expected: Any,
+    repo_root: Path,
+) -> tuple[bytes, str]:
+    contract = _mapping(expected, "host verifier expected contract")
+    digest = str(contract.get("base_archive_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("host verifier base archive digest is unavailable")
+    resources = [
+        _mapping(item, "host verifier task resource")
+        for item in _sequence(
+            task.get("resources") or (),
+            "host verifier task resources",
+            allow_empty=True,
+        )
+    ]
+    candidates: list[Path] = []
+    for resource in resources:
+        relative = _safe_resource_relative_path(
+            resource.get("path"),
+            label="host verifier task resource",
+        )
+        original = repo_root / relative
+        candidates.extend(
+            (
+                _frozen_resource_path(repo_root, digest, original.name),
+                original,
+            )
+        )
+    for path in candidates:
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and _sha256_path(path) == digest
+        ):
+            return path.read_bytes(), digest
+    raise ValueError("host verifier exact frozen base archive is unavailable")
+
+
+def _host_verifier_receipt(
+    payload: Mapping[str, Any],
+    *,
+    evaluator: ComparisonEvaluatorV1,
+    task: Mapping[str, Any],
+    output: Any,
+    evidence: Mapping[str, Any],
+    expected: Any,
+    archive_digest: str,
+    verifier_source_digest: str,
+    runtime_profile: Any,
+    runtime_lock: Mapping[str, Any],
+) -> dict[str, Any]:
+    runtime_cleanup = _verified_runtime_cleanup_receipt(payload)
+    details = _mapping(payload.get("details"), "host verifier details")
+    expected_fields = {
+        "schema_version",
+        "status",
+        "failure_kind",
+        "runtime",
+        "command",
+        "exit_code",
+        "test_count",
+        "pass_count",
+        "fail_count",
+        "output_sha256",
+        "base_archive_sha256",
+        "public_test_sha256",
+        "submitted_artifact_sha256",
+        "final_tree_sha256",
+    }
+    if set(details) != expected_fields:
+        raise ValueError("host verifier receipt fields do not match the V2 contract")
+    if details.get("schema_version") != 2:
+        raise ValueError("host verifier receipt schema is unsupported")
+    status = str(details.get("status") or "")
+    if status not in {"passed", "failed"}:
+        raise ValueError("host verifier status must be passed or failed")
+    runtime = str(details.get("runtime") or "")
+    command = details.get("command")
+    if not runtime or len(runtime) > 200:
+        raise ValueError("host verifier runtime identity is invalid")
+    if command != ["node", "--test", "tests/task.test.mjs"]:
+        raise ValueError("host verifier command is not the locked Node test command")
+    exit_code = details.get("exit_code")
+    test_count = details.get("test_count")
+    pass_count = details.get("pass_count")
+    fail_count = details.get("fail_count")
+    if any(
+        type(item) is not int
+        for item in (exit_code, test_count, pass_count, fail_count)
+    ):
+        raise ValueError("host verifier receipt counts must be integers")
+    if (
+        test_count != 1
+        or pass_count < 0
+        or fail_count < 0
+        or pass_count + fail_count != test_count
+    ):
+        raise ValueError("host verifier receipt counts do not reconcile")
+    output_sha256 = str(details.get("output_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", output_sha256):
+        raise ValueError("host verifier output digest is invalid")
+    score_passed = float(payload.get("score") or 0) == 1.0
+    failure_kind = details.get("failure_kind")
+    if failure_kind is not None and (
+        not isinstance(failure_kind, str) or not failure_kind
+    ):
+        raise ValueError("host verifier failure kind is invalid")
+    if status == "passed":
+        valid = (
+            failure_kind is None
+            and exit_code == 0
+            and fail_count == 0
+            and pass_count == test_count
+        )
+    else:
+        valid = (
+            isinstance(failure_kind, str)
+            and bool(failure_kind)
+            and exit_code in {1, 2, 124}
+            and fail_count > 0
+            and pass_count < test_count
+        )
+    if not valid or score_passed != (status == "passed"):
+        raise ValueError("host verifier result and receipt disagree")
+    contract = _mapping(expected, "host verifier expected contract")
+    public_test_digest = str(contract.get("public_test_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", public_test_digest):
+        raise ValueError("host verifier public test digest is unavailable")
+    if details.get("base_archive_sha256") != archive_digest:
+        raise ValueError("host verifier base archive receipt disagrees")
+    if details.get("public_test_sha256") != public_test_digest:
+        raise ValueError("host verifier public test receipt disagrees")
+    submitted_digest = stable_digest(output)
+    if details.get("submitted_artifact_sha256") != submitted_digest:
+        raise ValueError("host verifier submitted artifact receipt disagrees")
+    for name in ("final_tree_sha256", "output_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", str(details.get(name) or "")):
+            raise ValueError(f"host verifier {name} is invalid")
+    task_id = validate_id(str(task.get("id") or ""), kind="task id")
+    attempt = str(evidence.get("attempt_id") or "")
+    live_task_id = str(evidence.get("task_id") or "")
+    if live_task_id:
+        if live_task_id != task_id or not re.fullmatch(r"[0-9a-f]{64}", attempt):
+            raise ValueError("host verifier evidence identity is invalid")
+    else:
+        attempt = stable_digest(
+            {
+                "kind": "qualification_fixture",
+                "task_id": task_id,
+                "submitted_artifact_sha256": submitted_digest,
+            }
+        )
+    unsigned = {
+        "schema_version": 2,
+        "kind": "post_trial_verifier_receipt",
+        "evaluator_id": evaluator.id,
+        "task_id": task_id,
+        "attempt_id": attempt,
+        "status": status,
+        "failure_kind": failure_kind,
+        "runtime": runtime,
+        "command": command,
+        "exit_code": exit_code,
+        "test_count": test_count,
+        "pass_count": pass_count,
+        "fail_count": fail_count,
+        "output_sha256": output_sha256,
+        "base_archive_sha256": archive_digest,
+        "public_test_sha256": public_test_digest,
+        "submitted_artifact_sha256": submitted_digest,
+        "final_tree_sha256": details["final_tree_sha256"],
+        "verifier_source_sha256": verifier_source_digest,
+        "runtime_profile_id": runtime_profile.id,
+        "runtime_profile_digest": runtime_profile.profile_digest,
+        "runtime_image": runtime_profile.image,
+        "runtime_platform": runtime_profile.platform,
+        "runtime_image_id": runtime_lock["image_id"],
+        "runtime_lock_digest": runtime_lock["lock_digest"],
+        "runtime_cleanup": dict(runtime_cleanup),
+    }
+    return {**unsigned, "receipt_digest": stable_digest(unsigned)}
+
+
+def _verified_runtime_cleanup_receipt(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    receipt = dict(
+        _mapping(
+            payload.get("fugue_runtime_receipt"),
+            "host verifier runtime cleanup receipt",
+        )
+    )
+    unsigned = {
+        key: value for key, value in receipt.items() if key != "receipt_digest"
+    }
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("status") != "verified_absent"
+        or receipt.get("receipt_digest") != stable_digest(unsigned)
+    ):
+        raise ValueError("host verifier runtime cleanup receipt is invalid")
+    return receipt
+
+
 def _validate_custom_scorer_source(source: str) -> None:
     if len(source.encode()) > 32_768:
         raise ValueError("custom scorer source exceeds 32 KiB")
@@ -13630,6 +14618,13 @@ def _validate_custom_scorer_source(source: str) -> None:
 
 def _custom_scorer_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     permitted = (
+        "attempt_id",
+        "task_id",
+        "variant_id",
+        "harness",
+        "trial_index",
+        "candidate_id",
+        "execution_fingerprint",
         "artifacts",
         "artifact_paths",
         "changed_paths",

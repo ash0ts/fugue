@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -159,6 +159,7 @@ class ExecutionApprovalV1:
     operation_id: str
     created_at: str
     expires_at: str
+    input_bindings: dict[str, str] = field(default_factory=dict)
     approval_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -420,6 +421,14 @@ def execution_approval_from_dict(raw: Mapping[str, Any]) -> ExecutionApprovalV1:
     subject_kind = str(raw.get("subject_kind") or "")
     if subject_kind not in {"experiment", "trace_audit"}:
         raise ValueError("approval subject_kind must be experiment or trace_audit")
+    raw_bindings = _mapping(raw.get("input_bindings") or {}, "approval input bindings")
+    input_bindings: dict[str, str] = {}
+    for raw_name, raw_digest in raw_bindings.items():
+        name = validate_id(str(raw_name), kind="approval input binding")
+        input_bindings[name] = _digest_value(
+            raw_digest,
+            f"approval input binding {name}",
+        )
     approval = ExecutionApprovalV1(
         schema_version=_schema(raw, "execution approval"),
         approval_id=validate_id(str(raw.get("approval_id") or ""), kind="approval id"),
@@ -439,6 +448,7 @@ def execution_approval_from_dict(raw: Mapping[str, Any]) -> ExecutionApprovalV1:
         ),
         created_at=_timestamp(raw.get("created_at"), "approval creation time"),
         expires_at=_timestamp(raw.get("expires_at"), "approval expiry"),
+        input_bindings=dict(sorted(input_bindings.items())),
         approval_digest=_digest_value(raw.get("approval_digest"), "approval digest"),
     )
     if approval.expires_at <= approval.created_at:

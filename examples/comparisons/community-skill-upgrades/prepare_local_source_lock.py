@@ -86,6 +86,16 @@ def collect_source_files(  # noqa: C901 - one bounded cross-input lock collector
                     root=repo_root,
                     role=role,
                 )
+        verifier = evaluator.get("verifier")
+        if verifier is not None:
+            if not isinstance(verifier, dict) or not verifier.get("source"):
+                raise ValueError("comparison verifier must declare a source")
+            _append_file(
+                records,
+                source / str(verifier["source"]),
+                root=repo_root,
+                role="host_post_trial_verifier",
+            )
     for arm in ("baseline", "candidate"):
         candidate = raw.get(arm)
         if not isinstance(candidate, dict):
@@ -121,6 +131,18 @@ def collect_source_files(  # noqa: C901 - one bounded cross-input lock collector
     execution = raw.get("execution")
     if not isinstance(execution, dict):
         raise ValueError("comparison execution policy is unavailable")
+    qualification_inputs = execution.get("qualification_inputs") or {}
+    if not isinstance(qualification_inputs, dict):
+        raise ValueError("comparison qualification inputs must be a mapping")
+    for name, relative in sorted(qualification_inputs.items()):
+        if not isinstance(name, str) or not isinstance(relative, str):
+            raise ValueError("comparison qualification input is malformed")
+        _append_file(
+            records,
+            source / relative,
+            root=repo_root,
+            role=f"qualification_input.{name}",
+        )
     return raw, [{"path": path, "role": role} for path, role in sorted(records.items())]
 
 

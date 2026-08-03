@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -8,6 +9,7 @@ import pytest
 import yaml
 
 from fugue.bench.campaigns import get_campaign
+from fugue.bench.candidates import stable_digest
 from fugue.bench.manifest import load_manifest
 from fugue.bench.task_authoring import (
     AuthoredTaskMaterializer,
@@ -136,6 +138,7 @@ def _profiles(tmp_path: Path):
                     "id": "scorer-v1",
                     "title": "Pinned scorer",
                     "image": "example/scorer@sha256:" + "b" * 64,
+                    "platform": "linux/arm64",
                     "command": ["python", "/input/scorer.py", "/input/input.json"],
                 }
             ],
@@ -541,12 +544,26 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     profile = profiles.scorer_runtime("scorer-v1")
     limits = _policy().limits
     observed: dict[str, object] = {}
+    commands: list[list[str]] = []
 
     monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
 
     def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout=command[-1], stderr="")
+        if command[1:4] == ["container", "ls", "--all"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         observed["command"] = command
         observed["kwargs"] = kwargs
+        mount = next(
+            item
+            for item in command
+            if isinstance(item, str) and item.startswith("type=bind,src=")
+        )
+        source = Path(mount.split(",dst=", 1)[0].split("src=", 1)[1])
+        observed["input_mode"] = (source / "input.json").stat().st_mode & 0o777
+        observed["scorer_mode"] = (source / "scorer.py").stat().st_mode & 0o777
         return subprocess.CompletedProcess(
             command,
             0,
@@ -567,6 +584,10 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     command = observed["command"]
     assert isinstance(command, list)
     for expected in (
+        "--name",
+        "--init",
+        "--platform",
+        profile.platform,
         "--network",
         "none",
         "--read-only",
@@ -580,6 +601,76 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     assert isinstance(kwargs, dict)
     assert set(kwargs["env"]) == {"PATH"}
     assert kwargs["timeout"] == limits.scorer_timeout_sec
+    assert observed["input_mode"] == 0o400
+    assert observed["scorer_mode"] == 0o400
+    container_name = command[command.index("--name") + 1]
+    assert container_name.startswith("fugue-inline-scorer-")
+    assert commands[1][1:] == ["rm", "--force", container_name]
+    assert commands[2][-1] == f"name=^/{container_name}$"
+    cleanup = payload["fugue_runtime_receipt"]
+    assert cleanup["status"] == "verified_absent"
+    assert cleanup["container_name_sha256"] == hashlib.sha256(
+        container_name.encode()
+    ).hexdigest()
+    assert cleanup["receipt_digest"] == stable_digest(
+        {key: value for key, value in cleanup.items() if key != "receipt_digest"}
+    )
+
+
+def test_inline_scorer_timeout_removes_exact_container_and_proves_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _profiles(tmp_path).scorer_runtime("scorer-v1")
+    commands: list[list[str]] = []
+    monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        if command[1:3] == ["rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout=command[-1], stderr="")
+        if command[1:4] == ["container", "ls", "--all"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr("fugue.bench.task_authoring.subprocess.run", fake_run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_inline_scorer(
+            source="print('{}')",
+            evidence={},
+            reference={},
+            profile=profile,
+            limits=_policy().limits,
+        )
+
+    container_name = commands[0][commands[0].index("--name") + 1]
+    assert commands[1][1:] == ["rm", "--force", container_name]
+    assert commands[2][-1] == f"name=^/{container_name}$"
+
+
+def test_inline_scorer_fails_when_cleanup_cannot_be_proven(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = _profiles(tmp_path).scorer_runtime("scorer-v1")
+    monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
+
+    def fake_run(command, **kwargs):
+        if command[1:3] == ["rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout=command[-1], stderr="")
+        if command[1:4] == ["container", "ls", "--all"]:
+            return subprocess.CompletedProcess(command, 0, stdout="container-id\n", stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout='{"score": 1, "reason": "passed"}', stderr=""
+        )
+
+    monkeypatch.setattr("fugue.bench.task_authoring.subprocess.run", fake_run)
+    with pytest.raises(RuntimeError, match="cleanup could not be proven"):
+        run_inline_scorer(
+            source="print('{}')",
+            evidence={},
+            reference={},
+            profile=profile,
+            limits=_policy().limits,
+        )
 
 
 def test_adaptive_task_preview_rejects_non_discovery_partitions(
@@ -713,9 +804,15 @@ def test_inline_scorer_rejects_malformed_output(
 ) -> None:
     profile = _profiles(tmp_path).scorer_runtime("scorer-v1")
     monkeypatch.setattr("fugue.bench.task_authoring.shutil.which", lambda _: "/docker")
-    monkeypatch.setattr(
-        "fugue.bench.task_authoring.subprocess.run", lambda *args, **kwargs: completed
-    )
+
+    def fake_run(command, **kwargs):
+        if command[1:3] == ["rm", "--force"]:
+            return subprocess.CompletedProcess(command, 0, stdout=command[-1], stderr="")
+        if command[1:4] == ["container", "ls", "--all"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        return completed
+
+    monkeypatch.setattr("fugue.bench.task_authoring.subprocess.run", fake_run)
     with pytest.raises(error):
         run_inline_scorer(
             source="print('{}')",
@@ -724,6 +821,23 @@ def test_inline_scorer_rejects_malformed_output(
             profile=profile,
             limits=_policy().limits,
         )
+
+
+@pytest.mark.parametrize("platform", [None, "darwin/arm64", "linux/s390x"])
+def test_scorer_runtime_requires_supported_explicit_platform(
+    tmp_path: Path, platform: str | None
+) -> None:
+    raw = _profiles(tmp_path).to_dict()
+    raw.pop("catalog_digest")
+    runtime = raw["scorer_runtimes"][0]
+    runtime.pop("profile_digest")
+    if platform is None:
+        runtime.pop("platform")
+    else:
+        runtime["platform"] = platform
+
+    with pytest.raises(ValueError, match="scorer runtime platform"):
+        task_profile_catalog_from_dict(raw)
 
 
 def test_checked_in_multiturn_qualification_is_exactly_eight_cells() -> None:

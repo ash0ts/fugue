@@ -14,6 +14,7 @@ from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.comparison import (
     COMPARISON_RUNTIME_ROOT,
     ComparisonEvaluatorV1,
+    ComparisonPostTrialVerifierV1,
     ComparisonResultV3,
     ComparisonSpecV1,
     DecisionAttestationV1,
@@ -29,10 +30,12 @@ from fugue.bench.comparison import (
     _ComparisonRuntimeBudget,
     _evaluate_decision,
     _evaluator_digest,
+    _evaluator_runtime_readiness,
     _judge_review_label,
     _paired_attempt_view,
     _paired_attempt_view_v3,
     _prepare_comparison_judge_input,
+    _prepare_evaluator_runtimes,
     _request_comparison_judge,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
@@ -77,6 +80,97 @@ LIVE_SKILL_EXAMPLE = Path("examples/comparisons/source-use-skill")
 MCP_MAINTENANCE_EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
 
 
+def test_evaluator_runtime_preparation_locks_exact_profile_image_and_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = SimpleNamespace(
+        id="node22-verifier-v1",
+        profile_digest="a" * 64,
+        image="example/verifier@sha256:" + "b" * 64,
+        platform="linux/arm64",
+        command=("node", "/input/scorer.py", "/input/input.json"),
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        "fugue.bench.comparison._comparison_evaluator_runtime_profiles",
+        lambda spec, repo_root: (profile,),
+    )
+    monkeypatch.setattr("fugue.bench.comparison.shutil.which", lambda _: "/docker")
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return __import__("subprocess").CompletedProcess(command, 0, "pulled", "")
+
+    image = {
+        "Id": "sha256:" + "c" * 64,
+        "Os": "linux",
+        "Architecture": "arm64",
+    }
+    monkeypatch.setattr("fugue.bench.comparison.subprocess.run", fake_run)
+    monkeypatch.setattr("fugue.bench.comparison.inspect_docker_image", lambda _: image)
+
+    locks = _prepare_evaluator_runtimes(SimpleNamespace(), repo_root=tmp_path)
+    assert len(locks) == 1
+    assert locks[0]["profile_digest"] == profile.profile_digest
+    assert locks[0]["image_id"] == image["Id"]
+    assert locks[0]["platform"] == "linux/arm64"
+    assert commands == [
+        ["/docker", "pull", "--platform", "linux/arm64", profile.image]
+    ]
+    digests, blockers = _evaluator_runtime_readiness(
+        SimpleNamespace(), repo_root=tmp_path
+    )
+    assert not blockers
+    assert digests == {
+        "evaluator:node22-verifier-v1:linux/arm64": locks[0]["lock_digest"]
+    }
+
+
+def test_evaluator_runtime_profile_drift_invalidates_prepared_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = SimpleNamespace(
+        id="node22-verifier-v1",
+        profile_digest="a" * 64,
+        image="example/verifier@sha256:" + "b" * 64,
+        platform="linux/arm64",
+        command=("node", "/input/scorer.py", "/input/input.json"),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._comparison_evaluator_runtime_profiles",
+        lambda spec, repo_root: (original,),
+    )
+    monkeypatch.setattr("fugue.bench.comparison.shutil.which", lambda _: "/docker")
+    monkeypatch.setattr(
+        "fugue.bench.comparison.subprocess.run",
+        lambda command, **kwargs: __import__("subprocess").CompletedProcess(
+            command, 0, "pulled", ""
+        ),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison.inspect_docker_image",
+        lambda _: {
+            "Id": "sha256:" + "c" * 64,
+            "Os": "linux",
+            "Architecture": "arm64",
+        },
+    )
+    _prepare_evaluator_runtimes(SimpleNamespace(), repo_root=tmp_path)
+    drifted = SimpleNamespace(**{**vars(original), "command": ("node", "changed")})
+    monkeypatch.setattr(
+        "fugue.bench.comparison._comparison_evaluator_runtime_profiles",
+        lambda spec, repo_root: (drifted,),
+    )
+    digests, blockers = _evaluator_runtime_readiness(
+        SimpleNamespace(), repo_root=tmp_path
+    )
+    assert not digests
+    assert blockers == [
+        "local evaluator:node22-verifier-v1:linux/arm64 is not prepared and "
+        "locked; run `fugue compare SPEC --prepare`"
+    ]
+
+
 def test_source_use_comparison_is_ready_and_exact() -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
@@ -117,14 +211,20 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
         maximum_cells=8,
         approved_by="test-reviewer",
         operation_id="approve-reviewable-canary",
+        input_bindings={
+            "trace_audit_selection_digest": "d" * 64,
+        },
     )
 
-    claim_comparison_approval(
+    claimed = claim_comparison_approval(
         preview,
         approval_digest=approval.approval_digest,
         repo_root=tmp_path,
         execution_instance_id="comparison-run-one",
     )
+    assert claimed.input_bindings == {
+        "trace_audit_selection_digest": "d" * 64,
+    }
     claim_comparison_approval(
         preview,
         approval_digest=approval.approval_digest,
@@ -139,6 +239,72 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
             execution_instance_id="comparison-run-two",
         )
     assert reused.value.code == "approval_consumed"
+
+
+def test_approval_input_bindings_flow_into_the_attempt_execution_lock(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    spec = load_comparison(comparison_path, repo_root=tmp_path)
+    preview = preview_comparison(spec, repo_root=tmp_path)
+    _experiment, request = materialize_comparison(
+        preview,
+        repo_root=tmp_path,
+        approval_digest="a" * 64,
+        approval_input_bindings={
+            "trace_audit_selection_digest": "b" * 64,
+            "trace_audit_selection_file_sha256": "c" * 64,
+        },
+    )
+
+    lock = request.approved_comparison
+    assert lock["approval_input_bindings"] == {
+        "trace_audit_selection_digest": "b" * 64,
+        "trace_audit_selection_file_sha256": "c" * 64,
+    }
+    assert lock["qualification_input_digests"] == lock[
+        "approval_input_bindings"
+    ]
+
+
+def test_declared_qualification_input_is_preview_and_approval_bound(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    input_path = tmp_path / "analysis-profile.json"
+    input_path.write_text('{"status":"frozen"}\n', encoding="utf-8")
+    spec = load_comparison(comparison_path, repo_root=tmp_path)
+    spec = comparison_from_dict(
+        replace(
+            spec,
+            spec_digest="",
+            execution=replace(
+                spec.execution,
+                qualification_inputs={
+                    "confirmatory_analysis_profile_sha256": input_path.name,
+                },
+            ),
+        ).to_dict(),
+        repo_root=tmp_path,
+        source=tmp_path,
+    )
+    preview = preview_comparison(spec, repo_root=tmp_path)
+    expected = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    assert preview.readiness["qualification_input_digests"] == {
+        "confirmatory_analysis_profile_sha256": expected,
+    }
+    _experiment, request = materialize_comparison(
+        preview,
+        repo_root=tmp_path,
+        approval_digest="a" * 64,
+    )
+    assert request.approved_comparison["qualification_input_digests"] == {
+        "confirmatory_analysis_profile_sha256": expected,
+    }
+
+    input_path.write_text('{"status":"changed"}\n', encoding="utf-8")
+    changed = preview_comparison(spec, repo_root=tmp_path)
+    assert changed.preview_digest != preview.preview_digest
 
 
 def test_execute_comparison_allocates_run_identity_before_execution(
@@ -255,6 +421,20 @@ def test_evidence_checkpoint_requires_serial_execution() -> None:
         match="evidence checkpoint cells require comparison concurrency 1",
     ):
         comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
+
+
+def test_comparison_compiles_declared_counterbalanced_schedule() -> None:
+    root = Path.cwd()
+    raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
+    raw["execution"]["scheduling_seed"] = "comparison-confirmatory-v1"
+    spec = comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
+
+    experiment, _, _ = compile_comparison(spec, repo_root=root)
+
+    assert spec.execution.scheduling_seed == "comparison-confirmatory-v1"
+    assert experiment.default_preset == "counterbalanced"
+    assert len(experiment.presets) == 1
+    assert experiment.presets[0].scheduling_seed == "comparison-confirmatory-v1"
 
 
 def test_runtime_budget_blocks_parallel_paid_launches() -> None:
@@ -3382,8 +3562,167 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
         "output": {"amount": 125, "source": "expense-policy-v4.md"},
         "expected": {"amount": 125, "source": "expense-policy-v4.md"},
     }
-    assert observed["evidence"] == {}
+    assert observed["evidence"] == {
+        "attempt_id": rows[0]["attempt_id"],
+        "task_id": "expense-limit",
+        "variant_id": "candidate",
+        "harness": "codex",
+        "trial_index": 1,
+    }
     assert "--network" not in str(observed["source"])
+
+
+def test_custom_host_verifier_is_frozen_and_overrides_its_bound_dimension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    scorer_path = root / ".fugue" / "test-host-verifier-scorer.py"
+    verifier_path = root / ".fugue" / "test-host-verifier.mjs"
+    scorer_path.parent.mkdir(parents=True, exist_ok=True)
+    scorer_path.write_text(
+        "def score(task, output, evidence):\n"
+        "    return {'fact_correct': output == evidence['expected']}\n"
+    )
+    verifier_path.write_text("process.stdout.write('{}')\n")
+    calls: list[dict[str, object]] = []
+
+    def fake_runner(*, source, evidence, reference, profile, limits):
+        calls.append(
+            {
+                "source": source,
+                "evidence": evidence,
+                "reference": reference,
+                "profile": profile,
+                "limits": limits,
+            }
+        )
+        passed = reference["output"] == reference["expected"]
+        assert evidence["host_verifier_receipt"]["status"] == "passed"
+        return {
+            "score": 1.0 if passed else 0.0,
+            "reason": "custom deterministic scorer",
+            "details": {"fact_correct": passed},
+        }
+
+    monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
+
+    def fake_verifier(evaluator, *, task, output, evidence, **kwargs):
+        cleanup_unsigned = {
+            "schema_version": 1,
+            "status": "verified_absent",
+            "container_name_sha256": "4" * 64,
+        }
+        cleanup = {
+            **cleanup_unsigned,
+            "receipt_digest": stable_digest(cleanup_unsigned),
+        }
+        unsigned = {
+            "schema_version": 2,
+            "kind": "post_trial_verifier_receipt",
+            "evaluator_id": evaluator.id,
+            "task_id": task["id"],
+            "attempt_id": evidence["attempt_id"],
+            "status": "passed",
+            "failure_kind": None,
+            "runtime": "node-v22.23.1",
+            "command": ["node", "--test", "tests/task.test.mjs"],
+            "exit_code": 0,
+            "test_count": 1,
+            "pass_count": 1,
+            "fail_count": 0,
+            "output_sha256": "a" * 64,
+            "base_archive_sha256": "b" * 64,
+            "public_test_sha256": "c" * 64,
+            "submitted_artifact_sha256": stable_digest(output),
+            "final_tree_sha256": "d" * 64,
+            "verifier_source_sha256": "e" * 64,
+            "runtime_profile_id": "node22-verifier-v1",
+            "runtime_profile_digest": "f" * 64,
+            "runtime_image": "example/verifier@sha256:" + "1" * 64,
+            "runtime_platform": "linux/arm64",
+            "runtime_image_id": "sha256:" + "2" * 64,
+            "runtime_lock_digest": "3" * 64,
+            "runtime_cleanup": cleanup,
+        }
+        return {
+            "score": 1.0,
+            "reason": "frozen host verification passed",
+            "details": {**unsigned, "receipt_digest": stable_digest(unsigned)},
+        }
+
+    monkeypatch.setattr("fugue.bench.comparison._run_custom_verifier", fake_verifier)
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    evaluator = replace(
+        spec.evaluators[0],
+        checks=(),
+        scorer=scorer_path.relative_to(root).as_posix(),
+        runtime="python312-sandbox-v1",
+        verifier=ComparisonPostTrialVerifierV1(
+            type="node_test",
+            source=verifier_path.relative_to(root).as_posix(),
+            runtime="node22-verifier-v1",
+            dimension="fact_correct",
+        ),
+        dimensions=("fact_correct",),
+    )
+    try:
+        rows = score_comparison_rows(
+            replace(spec, evaluators=(evaluator,)),
+            [
+                {
+                    "task_id": "expense-limit",
+                    "variant_id": "candidate",
+                    "harness": "codex",
+                    "trial_index": 1,
+                    "answer": {
+                        "amount": 125,
+                        "source": "expense-policy-v4.md",
+                    },
+                }
+            ],
+            repo_root=root,
+        )
+    finally:
+        scorer_path.unlink(missing_ok=True)
+        verifier_path.unlink(missing_ok=True)
+
+    assert [call["profile"].id for call in calls] == ["python312-sandbox-v1"]
+    assert rows[0]["pass"] is True
+    assert rows[0]["comparison_host_verifier_receipts"] == {
+        "fact-and-source": {
+            "schema_version": 2,
+            "kind": "post_trial_verifier_receipt",
+            "evaluator_id": "fact-and-source",
+            "task_id": "expense-limit",
+            "attempt_id": rows[0]["attempt_id"],
+            "status": "passed",
+            "failure_kind": None,
+            "runtime": "node-v22.23.1",
+            "command": ["node", "--test", "tests/task.test.mjs"],
+            "exit_code": 0,
+            "test_count": 1,
+            "pass_count": 1,
+            "fail_count": 0,
+            "output_sha256": "a" * 64,
+            "base_archive_sha256": "b" * 64,
+            "public_test_sha256": "c" * 64,
+            "submitted_artifact_sha256": stable_digest(
+                {"amount": 125, "source": "expense-policy-v4.md"}
+            ),
+            "final_tree_sha256": "d" * 64,
+            "verifier_source_sha256": "e" * 64,
+            "runtime_profile_id": "node22-verifier-v1",
+            "runtime_profile_digest": "f" * 64,
+            "runtime_image": "example/verifier@sha256:" + "1" * 64,
+            "runtime_platform": "linux/arm64",
+            "runtime_image_id": "sha256:" + "2" * 64,
+            "runtime_lock_digest": "3" * 64,
+            "runtime_cleanup": rows[0]["comparison_host_verifier_receipts"]
+            ["fact-and-source"]["runtime_cleanup"],
+            "receipt_digest": rows[0]["comparison_host_verifier_receipts"]
+            ["fact-and-source"]["receipt_digest"],
+        }
+    }
 
 
 @pytest.fixture
