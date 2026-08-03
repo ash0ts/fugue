@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: anthropic-skill-creator-confirmatory-v1
+  name: Anthropic Skill Creator Confirmatory Study
+  description: Four-attempt, task-stratified comparison of exact compatibility-aware Skill Creator revisions.
+  objective: Estimate holdout task effects while keeping safety, mechanism, judge, and infrastructure evidence separate.
+wandb:
+  entity: wandb
+  project: fugue-anthropic-skill-creator-confirmatory-v1
+database: .study-console/anthropic-skill-creator-confirmatory-v1.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: anthropic-skill-creator-confirmatory-v1
+  read_only: true

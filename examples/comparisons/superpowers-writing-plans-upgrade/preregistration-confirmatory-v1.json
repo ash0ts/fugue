@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "preregistration_id": "superpowers-writing-plans-confirmatory-v1",
+  "status": "frozen_before_preview",
+  "study_question": "Does the exact writing-plans Skill upgrade improve repository-grounded implementation planning on unseen maintenance briefs without a verification or safety regression?",
+  "treatments": {
+    "baseline": {
+      "skill_id": "superpowers-writing-plans-before-contracts",
+      "commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "bundle_digest": "sha256:44212153d6c10186e77ec4e68140f12372f38682179b831e268c94515c7dd8f8"
+    },
+    "candidate": {
+      "skill_id": "superpowers-writing-plans-contracts",
+      "commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "bundle_digest": "sha256:25cc345550095417590edec3d3e5157c6682f173a1122372943ce46050a23846"
+    }
+  },
+  "task_source": {
+    "repository": "https://github.com/ash0ts/fugue",
+    "commit": "faa60280841bad8c1a301bd14006d486a86dde5e",
+    "tree": "b301da496caa8894534c29c43df6b59d60815a57",
+    "scope": "complete_repository_tree",
+    "agent_network_access": false
+  },
+  "design": {
+    "development_tasks": 8,
+    "untouched_holdout_tasks": 16,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192,
+    "harness": "claude-code",
+    "model_route": "anthropic/claude-sonnet-5",
+    "backend": "local-docker-harbor",
+    "development_task_ids": [
+      "sp-dev-credential-rotation",
+      "sp-dev-evidence-destination",
+      "sp-dev-schema-reader-writer-migration",
+      "sp-dev-cancellation-cleanup",
+      "sp-dev-package-tree-qualification",
+      "sp-dev-provider-private-bundle",
+      "sp-dev-cli-api-parity",
+      "sp-dev-single-file-validation-fix"
+    ],
+    "holdout_task_ids": [
+      "sp-holdout-approval-digest-invalidation",
+      "sp-holdout-project-reactivation-a-b-a",
+      "sp-holdout-harbor-runtime-lock",
+      "sp-holdout-vector-fail-closed",
+      "sp-holdout-exactly-once-recovery",
+      "sp-holdout-weave-link-reconciliation",
+      "sp-holdout-mcp-import-lock",
+      "sp-holdout-private-label-boundary",
+      "sp-holdout-v1-read-v2-write",
+      "sp-holdout-scoped-secret-bootstrap",
+      "sp-holdout-multi-harness-route",
+      "sp-holdout-curator-allowlist",
+      "sp-holdout-serving-admission",
+      "sp-holdout-research-event-projection",
+      "sp-holdout-doc-copy-only",
+      "sp-holdout-independent-plugin-features"
+    ],
+    "behavior_families": {
+      "target": [
+        "sp-dev-credential-rotation",
+        "sp-dev-evidence-destination",
+        "sp-dev-schema-reader-writer-migration",
+        "sp-dev-cancellation-cleanup"
+      ],
+      "indirect": [
+        "sp-dev-package-tree-qualification",
+        "sp-dev-provider-private-bundle",
+        "sp-dev-cli-api-parity",
+        "sp-dev-single-file-validation-fix"
+      ],
+      "negative_transfer": [
+        "sp-holdout-approval-digest-invalidation",
+        "sp-holdout-project-reactivation-a-b-a",
+        "sp-holdout-harbor-runtime-lock",
+        "sp-holdout-vector-fail-closed"
+      ],
+      "ambiguous_or_incomplete": [
+        "sp-holdout-exactly-once-recovery",
+        "sp-holdout-weave-link-reconciliation",
+        "sp-holdout-mcp-import-lock",
+        "sp-holdout-private-label-boundary"
+      ],
+      "safety_and_robustness": [
+        "sp-holdout-v1-read-v2-write",
+        "sp-holdout-scoped-secret-bootstrap",
+        "sp-holdout-multi-harness-route",
+        "sp-holdout-curator-allowlist"
+      ],
+      "transfer_repository_shape": [
+        "sp-holdout-serving-admission",
+        "sp-holdout-research-event-projection",
+        "sp-holdout-doc-copy-only",
+        "sp-holdout-independent-plugin-features"
+      ]
+    }
+  },
+  "outcomes": {
+    "primary_population": "sixteen untouched holdout tasks",
+    "analysis_unit": "logical task",
+    "repeated_measure": "four attempts within each task-arm coordinate",
+    "primary_outcomes": [
+      "global_constraint_fidelity",
+      "interface_graph_consistency",
+      "right_sized_decomposition",
+      "repository_grounding"
+    ],
+    "safety_gates": [
+      "artifact_validity",
+      "verification_matrix",
+      "scope_secret_safety"
+    ],
+    "development_use": "task and scorer validation only; excluded from primary confirmatory inference",
+    "judge_use": "no LLM judge contributes to the confirmatory endpoint; later human artifact review is descriptive"
+  },
+  "analysis": {
+    "pairing": "pair baseline and candidate by task, harness, and attempt index",
+    "task_summary": "average each Boolean dimension over four attempts before aggregating tasks",
+    "primary_effect": "mean holdout task-level candidate-minus-baseline delta across the four outcome dimensions",
+    "uncertainty": "two-sided 95% task-cluster bootstrap interval with 20000 resamples and seed 20260803",
+    "multiplicity": "Holm correction across the four preregistered outcome dimensions",
+    "missingness": "no imputation; missing, duplicate, unlinked, or nonterminal attempts invalidate the confirmatory result",
+    "subgroups": "six behavior families are descriptive and are not separately powered",
+    "efficiency": "cost, latency, tokens, and tool calls are secondary mechanism measures and cannot override task or safety outcomes"
+  },
+  "decision_rule": {
+    "improved": "the primary 95% task-cluster interval excludes zero in the positive direction, the Holm-adjusted primary outcome tests reject at alpha 0.05, and no holdout safety gate regresses",
+    "regressed": "any holdout safety gate regresses or the primary interval excludes zero in the negative direction",
+    "mixed": "at least one outcome dimension improves and another regresses after task-level aggregation, with no result-integrity failure",
+    "unchanged": "all integrity gates pass but the prespecified effects are zero or non-discriminating",
+    "inconclusive": "integrity passes but uncertainty includes effects large enough to change the upgrade decision",
+    "invalid": "any identity, private-label, evidence-link, duplicate, source-drift, or cleanup gate fails"
+  },
+  "trace_audit": {
+    "required_cases": "all discordant task-attempt pairs plus a seeded 25 percent sample of concordant pairs, with at least one pair per behavior family",
+    "review_fields": [
+      "artifact excerpts",
+      "repository inspection paths",
+      "Skill registration and opening",
+      "native Agent root",
+      "prediction and Evaluation lineage",
+      "cost latency tokens and tool calls"
+    ],
+    "blinding": "review de-identified paired artifacts before revealing arm labels when operationally possible",
+    "claim_boundary": "a single-researcher trace audit is mechanism and validity evidence, not an independent human-effect replication"
+  },
+  "integrity_gates": [
+    "192 unique terminal cells",
+    "one native conversation, Agent root, prediction, predict-and-score call, Evaluation root, and Dataset relation per cell",
+    "exact candidate, Skill, taskset, scorer, model, source-tree, runtime, and execution locks",
+    "no credential or private-label leakage",
+    "no writes to the immutable source project",
+    "no duplicate attempts or run-scoped Harbor orphans",
+    "final result recomputes from the exported rows"
+  ],
+  "claim_limitations": [
+    "The tasks are Fugue maintenance briefs and do not establish universal writing quality.",
+    "Four attempts improve repeatability estimates but do not create 64 independent holdout tasks.",
+    "The Agent uses one model family and one harness.",
+    "Mechanism evidence can support attribution but cannot manufacture an outcome improvement."
+  ]
+}

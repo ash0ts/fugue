@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-upgrade-confirmatory-campaign-v1",
+  "title": "Confirmatory public Skill revision studies",
+  "preregistration": "conference-preregistration.json",
+  "execution_order": [
+    "community-skill-judge-calibration-v1",
+    "superpowers-writing-plans-confirmatory-v1",
+    "anthropic-skill-creator-confirmatory-v1",
+    "vercel-react-best-practices-confirmatory-v1"
+  ],
+  "final_four": [
+    {
+      "id": "community-skill-judge-calibration-v1",
+      "kind": "blinded_judge_diagnostic",
+      "expected_examples": 48,
+      "preview_digest": "329f8c57223007620b7428aed0df3471b95fc8281d9693216cde8e8ed0437e57",
+      "approval_digest": "81c511c9843cf3beb7522361620152ca5b6b206d9be7c52131c69763479b7bcd",
+      "result_digest": "7e0e93d4d6180d3216004e51d36da6486b491de6721d1302289ebcf25627a45b",
+      "status": "completed",
+      "claim_role": "advisory_only_pending_human_review"
+    },
+    {
+      "id": "superpowers-writing-plans-confirmatory-v1",
+      "kind": "governed_comparison",
+      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v1.yaml",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v1",
+      "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_preview"
+    },
+    {
+      "id": "anthropic-skill-creator-confirmatory-v1",
+      "kind": "governed_comparison",
+      "spec": "../anthropic-skill-creator-upgrade/confirmatory-v1.yaml",
+      "evidence_project": "wandb/fugue-anthropic-skill-creator-confirmatory-v1",
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_preview"
+    },
+    {
+      "id": "vercel-react-best-practices-confirmatory-v1",
+      "kind": "governed_comparison",
+      "spec": "../vercel-react-best-practices-upgrade/confirmatory-v1.yaml",
+      "evidence_project": "wandb/fugue-vercel-react-best-practices-confirmatory-v1",
+      "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+      "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_preview"
+    }
+  ],
+  "execution": {
+    "backend": "local_docker_harbor",
+    "harness": "claude-code",
+    "model": "anthropic/claude-sonnet-5",
+    "approval_required": true,
+    "preparation_required": true,
+    "finite_per_preview_ceiling_required": true,
+    "user_budget_constraint": "no_campaign_limit_requested",
+    "openai_required": false,
+    "serverless_required": false
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "analysis": {
+    "advisory_analysis": [
+      "same-family blinded qualitative labels and reasons",
+      "tokens, latency, tool calls, and cost",
+      "Skill registration, opening, invocation, and source-use evidence"
+    ],
+    "confirmatory_population": "sixteen untouched holdout tasks only",
+    "development_population": "eight development tasks reported separately and excluded from the primary effect estimate",
+    "estimand": "task-clustered paired candidate-minus-baseline pass-rate difference across the sixteen holdouts",
+    "multiplicity": "Holm correction across the two intended delta families; all control-family safety gates are conjunction gates rather than discovery claims",
+    "pairing": "exact task, harness, and attempt identity",
+    "primary_endpoint": "all six required deterministic dimensions pass",
+    "primary_inference": "paired task-stratified bootstrap confidence interval with task, not attempt, as the independent sampling unit",
+    "secondary_endpoints": [
+      "requested_change paired difference by task family",
+      "critical safety-gate regressions",
+      "candidate-to-baseline cost, latency, token, and tool-call ratios"
+    ]
+  },
+  "arms": {
+    "baseline": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "candidate": "20987af2f1bc17857b55e7758af8bed91c364ff5"
+  },
+  "decision_policy": {
+    "candidate_improved": "at least one intended-delta holdout outcome improves, no holdout safety gate regresses, and every candidate critical dimension passes on all four attempts",
+    "candidate_regressed": "any critical holdout safety dimension passes less often for the candidate or any control task acquires a candidate-only failure",
+    "inconclusive": "integrity is valid but the repeated task evidence cannot distinguish the arms",
+    "invalid": "identity, private-label isolation, evidence links, publication routing, duplicate attempts, or cleanup reconciliation fails"
+  },
+  "execution": {
+    "attempts_per_arm_task": 4,
+    "backend": "local Docker/Harbor",
+    "cells": 192,
+    "checkpoint_policy": "run one cell first and continue only after destination, Evaluation chain, Agent root, Dataset, privacy, cost, and cleanup reconcile",
+    "harness": "claude-code",
+    "model": "anthropic/claude-sonnet-5",
+    "stopping_policy": "after checkpoint, stop only for integrity, privacy, budget, or infrastructure failure; do not stop for a favorable or unfavorable outcome"
+  },
+  "id": "vercel-react-best-practices-confirmatory-v1",
+  "limitations": [
+    "The Agent and advisory judge use the same model family.",
+    "The 24 locked fixtures cover specific maintenance behaviors and do not establish a universal Skill ranking.",
+    "Repeated attempts estimate stochastic execution variance but do not turn attempts into independent task samples.",
+    "Local Harbor evidence does not certify a remote isolation service."
+  ],
+  "preregistration_digest": "a536535b3bf704f1115122e505a5d2d7b3601574b5cc6a4aae17653e3036f2b2",
+  "schema_version": 1,
+  "status": "frozen_before_execution",
+  "tasks": {
+    "development": 8,
+    "holdout": 16,
+    "total": 24,
+    "families": {
+      "dom-batching-control": 3,
+      "event-signature-control": 3,
+      "hook-timing-control": 3,
+      "large-array-control": 3,
+      "rsc-serialization": 6,
+      "server-action-security": 6
+    }
+  }
+}

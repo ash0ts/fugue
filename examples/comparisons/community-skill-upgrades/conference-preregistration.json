@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-upgrade-confirmatory-campaign-v1",
+  "status": "frozen_before_execution",
+  "research_question": "For each repository separately, does the exact candidate Skill revision improve task behavior over the exact baseline revision under Claude Code, Anthropic Sonnet 5, and the locked Harbor runtime?",
+  "claims_scope": "Exact Skill revisions, task sampling frame, Claude Code harness, Anthropic Sonnet 5 route, and locked local Harbor execution only.",
+  "repositories_are_pooled": false,
+  "primary_contrast": "candidate_minus_baseline",
+  "diagnostic_no_skill_contrast": {
+    "status": "not_run_in_v1",
+    "reason": "The governed ComparisonSpecV1 contract is two-arm. A generic three-arm run would not preserve comparison approval and result contracts.",
+    "claim_limitation": "Prompt-ceiling and absolute Skill benefit cannot be estimated without a separately governed no-Skill contrast."
+  },
+  "sampling": {
+    "tasks_per_repository": 24,
+    "development_tasks": 8,
+    "untouched_holdout_tasks": 16,
+    "attempts_per_task_per_arm": 4,
+    "arms": 2,
+    "cells_per_repository": 192,
+    "total_agent_cells": 576,
+    "inference_unit": "task",
+    "attempt_role": "within-task replication",
+    "task_replacement_after_unblinding": false
+  },
+  "randomization": {
+    "blocked_by": [
+      "repository",
+      "task_id",
+      "attempt"
+    ],
+    "arm_order": "deterministically counterbalanced from the immutable attempt identity",
+    "outcome_dependent_retries": false,
+    "time_window_balance_required": true
+  },
+  "endpoints": {
+    "primary": "Task-level mean completion of every preregistered critical deterministic outcome, verified by the host outside the Agent workspace.",
+    "minimum_meaningful_improvement": 0.15,
+    "equivalence_margin": 0.1,
+    "confidence": 0.95,
+    "familywise_correction": "Holm within repository",
+    "cross_repository_exploration": "Benjamini-Hochberg only when explicitly labeled exploratory",
+    "judge_role": "secondary_advisory",
+    "mechanism_role": "assignment, opening, and invocation evidence; never a task-outcome pass"
+  },
+  "analysis": {
+    "primary_model": "task-clustered paired candidate-minus-baseline difference",
+    "sensitivity_model": "mixed-effects logistic model with task random intercept when available",
+    "interval": "deterministic task-cluster bootstrap with 10000 resamples",
+    "paired_test": "two-sided exact sign/permutation test over nonzero task-level differences",
+    "report_task_and_attempt_effects_separately": true,
+    "unchanged_rule": "The full 95% confidence interval is contained in [-0.10, 0.10].",
+    "improved_rule": "The Holm-adjusted primary result clears the preregistered effect threshold, its confidence interval excludes zero, and no safety outcome regresses.",
+    "regressed_rule": "A critical deterministic outcome or safety gate regresses, or a confidence interval supports a negative effect beyond the equivalence margin.",
+    "inconclusive_rule": "The confidence interval crosses both zero and a meaningful-effect boundary, or missing/invalid evidence prevents the preregistered analysis."
+  },
+  "missingness": {
+    "infrastructure_failure_is_task_failure": false,
+    "invalid_evidence_is_task_failure": false,
+    "silent_exclusion_allowed": false,
+    "rerun_policy": "Only the exact interrupted or infrastructure-failed attempt may resume under the locked retry contract; no outcome-dependent retry is permitted."
+  },
+  "judge": {
+    "model": "anthropic/claude-sonnet-5",
+    "agent_model_family_is_same": true,
+    "minimum_tpr": 0.85,
+    "minimum_tnr": 0.85,
+    "maximum_critical_false_passes": 0,
+    "human_review_required_for_qualified_claim": true,
+    "human_review_protocol": "Two blinded reviewers plus adjudication on all calibration examples, a preselected stratified 25 percent holdout sample, and every discordant or critical artifact.",
+    "current_status": "advisory_pending_human_review"
+  },
+  "trace_audit": {
+    "minimum_stratified_fraction": 0.1,
+    "include_all_discordant_pairs": true,
+    "include_all_critical_failures": true,
+    "required_links": [
+      "evaluation_root",
+      "prediction_and_score",
+      "prediction",
+      "agent_root",
+      "dataset"
+    ],
+    "required_checks": [
+      "attempt_identity",
+      "result_project",
+      "candidate_and_runtime_locks",
+      "skill_registered_opened_and_invoked",
+      "host_verifier_receipt",
+      "privacy",
+      "cleanup"
+    ]
+  },
+  "stopping": {
+    "interim_efficacy_stopping": false,
+    "null_result_is_valid": true,
+    "equivalence_result_is_valid": true,
+    "first_cell_integrity_checkpoint": true,
+    "stop_on_cross_project_leak_or_cleanup_failure": true
+  },
+  "release_gates": [
+    "Clean committed Fugue source head and digest-pinned runtime",
+    "Exact public task, private label, scorer, Skill, model, and runtime locks",
+    "Base fixture failure and gold fixture success for every executable verifier family",
+    "All planned terminal cells reconcile uniquely to canonical rows",
+    "All five evidence links resolve in the declared W&B project",
+    "No private-label or credential value appears in Agent-visible evidence",
+    "No duplicate attempts or run-scoped Harbor orphans",
+    "Manual trace audit is complete and signed",
+    "Every limitation and missing row is reported"
+  ]
+}

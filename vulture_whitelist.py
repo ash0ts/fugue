@@ -274,6 +274,9 @@ read_comparison_failure_lock
 # scripts and by third-party operator automation outside the package tree.
 write_intervention_component_lock
 verify_intervention_component_checkout
+# Public local-source-lock builder used by checked-in comparison preparation
+# scripts outside the package tree.
+build_local_source_lock
 
 # Protocol, stdlib server, FastAPI state, and Textual callback/member access.
 _.input_messages

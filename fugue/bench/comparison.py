@@ -293,6 +293,7 @@ class ComparisonExecutionPolicyV1:
     study_console_base_url: str | None = None
     research_id: str | None = None
     infrastructure_receipt: str | None = None
+    source_lock: str | None = None
     evidence_lock: str | None = None
     source_conformance_receipt: str | None = None
     release_notes_lock: str | None = None
@@ -731,6 +732,7 @@ class ComparisonSpecV1:
                 "study_console_base_url",
                 "research_id",
                 "infrastructure_receipt",
+                "source_lock",
                 "evidence_lock",
                 "source_conformance_receipt",
                 "release_notes_lock",
@@ -1163,9 +1165,17 @@ def check_comparison(
         )
     else:
         blockers.extend(infrastructure_blockers)
+    local_source_digests, local_source_blockers = (
+        _local_source_lock_readiness(spec, repo_root=repo_root)
+    )
     qualification_input_digests, qualification_blockers = (
         _qualification_input_readiness(spec, repo_root=repo_root)
     )
+    qualification_input_digests = {
+        **local_source_digests,
+        **qualification_input_digests,
+    }
+    blockers.extend(local_source_blockers)
     blockers.extend(qualification_blockers)
     task_ids = tuple(str(item["id"]) for item in tasks)
     blockers.extend(_task_label_issues(task_ids, labels))
@@ -1470,7 +1480,33 @@ def _verify_v3_source_drift(
     repo_root: Path,
     env: Mapping[str, str],
 ) -> EvidenceDriftCheckV1 | None:
-    if spec.schema_version < 3 or not spec.execution.evidence_lock:
+    if spec.schema_version < 3:
+        return None
+    if spec.execution.source_lock:
+        from fugue.bench.source_locks import verify_local_source_drift
+
+        expected_digest = str(
+            _mapping_or_empty(
+                readiness.get("qualification_input_digests")
+            ).get("source_lock")
+            or ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+            return EvidenceDriftCheckV1(
+                status="unavailable",
+                expected_digest="0" * 64,
+                reason="the approved local source lock digest is unavailable",
+            )
+        return verify_local_source_drift(
+            repo_root / spec.execution.source_lock,
+            repo_root=repo_root,
+            expected_source_project=str(
+                spec.execution.source_evidence_project or ""
+            ),
+            expected_result_project=str(spec.execution.evidence_project or ""),
+            expected_digest=expected_digest,
+        )
+    if not spec.execution.evidence_lock:
         return None
     evidence_path = _safe_input_path(
         Path(spec.execution.evidence_lock),
@@ -2404,6 +2440,48 @@ def _validate_release_candidate_binding(
         raise ValueError(
             "decision-policy candidate SHA does not match the candidate MCP lock"
         )
+
+
+def _local_source_lock_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], list[str]]:
+    """Bind immutable local task/source inputs for non-hosted V3 studies."""
+
+    if not spec.execution.source_lock:
+        if spec.schema_version >= 3 and not spec.execution.evidence_lock:
+            return {}, [
+                "V3 comparison requires a local source lock or hosted evidence lock"
+            ]
+        return {}, []
+    if spec.execution.evidence_lock:
+        return {}, [
+            "comparison cannot declare local and hosted source locks together"
+        ]
+    try:
+        from fugue.bench.source_locks import read_local_source_lock
+
+        lock_path = _safe_input_path(
+            Path(spec.execution.source_lock),
+            repo_root,
+            "local source lock",
+        )
+        lock = read_local_source_lock(
+            lock_path,
+            repo_root=repo_root,
+            expected_source_project=str(
+                spec.execution.source_evidence_project or ""
+            ),
+            expected_result_project=str(spec.execution.evidence_project or ""),
+            verify_files=True,
+        )
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+        return {}, [f"local source lock is not usable: {exc}"]
+    return {
+        "source_lock": str(lock["source_lock_digest"]),
+        "source_lock_file": _sha256_path(lock_path),
+    }, []
 
 
 def _qualification_input_readiness(
@@ -3784,7 +3862,8 @@ def _approved_comparison_execution_lock(
         "source_evidence_project": source_project,
         "source_evidence_destination": source_destination,
         "source_lock_digest": str(
-            qualification_input_digests.get("evidence_lock")
+            qualification_input_digests.get("source_lock")
+            or qualification_input_digests.get("evidence_lock")
             or (
                 readiness.get("taskset_digest")
                 if source_project and source_destination
@@ -12366,6 +12445,7 @@ def _execution(
             "study_console_base_url",
             "research_id",
             "infrastructure_receipt",
+            "source_lock",
             "evidence_lock",
             "source_conformance_receipt",
             "release_notes_lock",
@@ -12462,6 +12542,16 @@ def _execution(
                 "infrastructure receipt",
             )
             if value.get("infrastructure_receipt")
+            else None
+        ),
+        source_lock=(
+            _portable_input_path(
+                value.get("source_lock"),
+                source,
+                repo_root,
+                "local source lock",
+            )
+            if value.get("source_lock")
             else None
         ),
         evidence_lock=(

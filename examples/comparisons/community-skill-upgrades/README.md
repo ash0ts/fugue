@@ -1,5 +1,72 @@
 # Community Skill upgrade campaign
 
+## Confirmatory campaign V1
+
+The original four-cell canaries are exploratory audit history. They are not
+pooled with the confirmatory campaign and they do not support a general Skill
+upgrade claim. The frozen confirmatory design is in
+`conference-preregistration.json`; the four operator stages are enumerated in
+`conference-campaign-manifest.json`.
+
+Each repository Study contains 24 tasks (8 scorer-development tasks and 16
+untouched holdouts), two exact Skill revisions, and four attempts per task and
+arm: 192 cells per Study and 576 Agent cells in total. The inference unit is a
+task. Repeated attempts estimate within-task variability and are not counted as
+independently sampled tasks.
+
+The governed comparison contract is intentionally two-arm. V1 estimates the
+exact candidate-minus-baseline revision effect. It does not estimate absolute
+benefit relative to no Skill, and the report must retain that limitation. A
+generic three-arm `fugue run` is not a substitute because it does not have the
+same comparison approval and result contracts.
+
+The blinded Sonnet judge is descriptive and secondary. It shares a model family
+with the Agent and remains `pending_human_review`; deterministic host-side
+verification is the primary endpoint. A judge-qualified claim requires the
+two-reviewer protocol in the preregistration.
+
+Before execution, prepare every immutable source/task archive and independently
+prove each executable verifier's base-fail/gold-pass contract. Then, for each
+Study, run `check`, `compare --prepare`, and `compare --preview` twice. The two
+preview digests must match. Freeze the blinded trace sample from that exact
+preview before approving it:
+
+```bash
+uv run python \
+  examples/comparisons/community-skill-upgrades/freeze_trace_audit.py \
+  /tmp/STUDY.preview.json \
+  --output /tmp/STUDY.trace-audit-selection.json
+```
+
+Approval always binds the exact final preview and its finite worst-case ceiling,
+even when campaign budget is not a limiting factor:
+
+```bash
+PREVIEW=/tmp/STUDY.preview.json
+APPROVAL=/tmp/STUDY.approval.json
+PREVIEW_DIGEST=$(jq -er .preview_digest "$PREVIEW")
+MAX_CELLS=$(jq -er .readiness.estimated_cells "$PREVIEW")
+MAX_USD=$(jq -er .readiness.estimated_cost_usd "$PREVIEW")
+
+uv run fugue approve "$PREVIEW_DIGEST" \
+  --max-cells "$MAX_CELLS" \
+  --max-usd "$MAX_USD" \
+  --approved-by operator \
+  --operation-id "approve-STUDY-${PREVIEW_DIGEST}" \
+  --expires-in 86400 > "$APPROVAL"
+```
+
+Regenerate the preview immediately before execution and reject any digest
+change. Run only with the one-use approval receipt, exact `.env` path, and no
+OpenAI credential. The first terminal cell is an automatic fail-closed evidence
+checkpoint. A failed checkpoint cancels the remaining cells.
+
+After execution, reload the canonical result and attempt rows, run
+`analyze_confirmatory.py`, and manually review the frozen 10% paired trace sample
+plus every discordant or critical pair. A report is incomplete until the five
+Weave relationships, task/runtime locks, host verifier, privacy receipt, and
+Harbor cleanup are checked for every audited attempt.
+
 This directory binds three independent, task-specific Skill upgrade canaries
 under one offline-validated campaign ceiling. It does not create an alternate
 runner: each lane remains an ordinary Fugue comparison with its own preview,

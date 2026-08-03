@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: superpowers-writing-plans-confirmatory-v1
+  name: Superpowers Writing Plans Confirmatory Study
+  description: Preregistered exact-revision comparison across development and untouched holdout maintenance briefs.
+  objective: Estimate task-level paired behavior changes without treating repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-confirmatory-v1
+database: .study-console/superpowers-writing-plans-confirmatory-v1.sqlite3
+primary_metric:
+  name: holdout_task_level_paired_pass_delta
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-confirmatory-v1
+  read_only: true

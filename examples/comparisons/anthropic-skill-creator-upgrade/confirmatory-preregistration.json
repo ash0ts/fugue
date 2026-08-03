@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "id": "anthropic-skill-creator-confirmatory-v1",
+  "campaign_id": "community-skill-upgrade-confirmatory-campaign-v1",
+  "status": "frozen_before_execution",
+  "repository": "https://github.com/anthropics/skills",
+  "source_path": "skills/skill-creator",
+  "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+  "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+  "hypotheses": {
+    "primary": "The candidate improves task-level completion of frontmatter semantics, compatibility selection, and name/help consistency on the sixteen untouched holdouts.",
+    "safety": "The candidate does not regress artifact validity, behavior preservation, packaging, or dependency and secret safety.",
+    "mechanism": "Assigned Skill registration and actual opening of the relevant Skill Creator guidance or scripts are reported separately and cannot create a task pass.",
+    "judge": "Same-family Sonnet usefulness labels are descriptive only until the declared two-reviewer calibration is adjudicated."
+  },
+  "design": {
+    "development_tasks": 8,
+    "untouched_holdout_tasks": 16,
+    "arms": 2,
+    "attempts_per_task_per_arm": 4,
+    "planned_cells": 192,
+    "inference_unit": "task",
+    "attempt_role": "within-task replication",
+    "primary_partition": "holdout",
+    "development_partition_is_confirmatory_evidence": false,
+    "outcome_dependent_retries": false,
+    "task_replacement_after_unblinding": false
+  },
+  "development_task_ids": [
+    "as-dev-create-platform-bound-skill",
+    "as-dev-preserve-runtime-metadata",
+    "as-dev-repair-runtime-metadata",
+    "as-dev-mandated-name-alpha",
+    "as-dev-mandated-name-beta",
+    "as-dev-no-platform-requirement",
+    "as-dev-repair-unknown-metadata",
+    "as-dev-init-help-diagnosis"
+  ],
+  "holdout_task_ids": [
+    "as-holdout-system-package-bound",
+    "as-holdout-product-version-bound",
+    "as-holdout-offline-platform-bound",
+    "as-holdout-update-add-platform-requirements",
+    "as-holdout-preserve-license-metadata",
+    "as-holdout-preserve-allowed-tools",
+    "as-holdout-existing-metadata-audit",
+    "as-holdout-runtime-metadata-repair",
+    "as-holdout-metadata-boundary-alpha",
+    "as-holdout-metadata-boundary-beta",
+    "as-holdout-mandated-name-gamma",
+    "as-holdout-mandated-name-delta",
+    "as-holdout-mandated-name-epsilon",
+    "as-holdout-mandated-name-zeta",
+    "as-holdout-generic-runtime-skill",
+    "as-holdout-repair-unknown-metadata"
+  ],
+  "analysis": {
+    "primary_estimator": "Task-level paired candidate-minus-baseline critical-outcome completion averaged over four attempts.",
+    "interval": "Deterministic task-cluster bootstrap with 10000 resamples.",
+    "paired_test": "Two-sided exact sign or permutation test over nonzero holdout task differences.",
+    "multiplicity": "Holm correction across the three primary outcome families within this repository.",
+    "minimum_meaningful_improvement": 0.15,
+    "equivalence_margin": 0.10,
+    "confidence": 0.95,
+    "judge_is_primary": false,
+    "mechanism_is_primary": false
+  },
+  "gates": {
+    "zero_model_conformance_required": true,
+    "canonical_host_validation_required": true,
+    "self_reported_validation_accepted": false,
+    "private_labels_agent_visible": false,
+    "all_safety_dimensions_non_regressing": true,
+    "all_five_weave_links_required": true,
+    "first_cell_integrity_checkpoint": true,
+    "stop_on_cross_project_or_cleanup_failure": true
+  },
+  "locked_inputs": {
+    "public_tasks_sha256": "0cd90f0214108bb0c49aa7b25c279eb980057a9ec1142ab46349ac8b272ec641",
+    "private_labels_sha256": "2297fe640c51aafa5d7fbd57b90baaab457f56c8f4482b178abc0c0998cfeede",
+    "scorer_sha256": "c98fe2a020e8d96542a5611966a430d2828257f837bc565573e534b997005977",
+    "qualification_fixture_generator_sha256": "953a041ea71175020bfd8465c68a17147f4a382b4601b8041fbeeed85d1056e2",
+    "host_only_task_family_lock": "confirmatory-task-family-lock.json",
+    "host_only_task_family_lock_sha256": "0b804d2bc62d8f0435f97ff4ce932d2505315603d8fd85bfcbf10d8d0bfe51d2"
+  },
+  "claim_scope": "These exact revisions, tasks, Claude Code harness, Anthropic Sonnet 5 route, and locked Harbor runtime only; no universal Skill Creator ranking."
+}

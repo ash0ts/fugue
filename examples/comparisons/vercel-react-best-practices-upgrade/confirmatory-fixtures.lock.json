@@ -1,0 +1,36 @@
+{
+  "manifest_digest": "10f283a053d42f48622146127608e83b7a8ce1da37f64b6a486f3f4ad8ced559",
+  "schema_version": 1,
+  "sources": [
+    {
+      "path": "conference_fixture_catalog.py",
+      "sha256": "19a7a5e224d23a384670c972477235938c6922ee1bf9ea01a36c8a091e148071",
+      "size": 41720
+    },
+    {
+      "path": "confirmatory-tasks.jsonl",
+      "sha256": "3c1b386ebf191550032509960bb33c4b71f28faebdf027d1c2c138abe15efb65",
+      "size": 49960
+    },
+    {
+      "path": "confirmatory-private-labels.jsonl",
+      "sha256": "fc68e552e08ae6b3261de90c260f48670a81a1c24c1b6bf9621cb9c34d22bbe6",
+      "size": 13019
+    },
+    {
+      "path": "vercel_confirmatory_scorer.py",
+      "sha256": "44687ed021cb3aae78a13c6d4526b44ca0e1f2dcdec717da2751b5ecfe333637",
+      "size": 11488
+    },
+    {
+      "path": "confirmatory-preregistration.json",
+      "sha256": "2893b25932acb5c3d5c742cbce8efe7b89802181fdb2315b5c912c884df30254",
+      "size": 3349
+    },
+    {
+      "path": "prepare_confirmatory_fixtures.py",
+      "sha256": "5c91e5996dfacb6beb0409644db65ca599afa60a2bb7e41bcded323984592159",
+      "size": 18074
+    }
+  ]
+}

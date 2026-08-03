@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: fugue-vercel-react-best-practices-confirmatory-v1
+  name: Vercel React Best Practices Confirmatory Study
+  description: Exact upstream Skill revisions on 24 locked, repeated maintenance tasks.
+  objective: Test the two added rules and pre-registered non-regression controls without pooling attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-vercel-react-best-practices-confirmatory-v1
+database: .study-console/confirmatory-studies.sqlite3
+primary_metric:
+  name: deterministic_behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: vercel-react-best-practices-confirmatory-v1
+  read_only: true

@@ -161,3 +161,72 @@ The four rows formed two aligned pairs and found no behavioral difference on
 this one locked task. That narrow `unchanged` result does not retroactively
 repair V1, qualify a general Skill Creator upgrade claim, or provide a valid
 loop-engineering failure card.
+
+## Conference-grade confirmatory Study (V3)
+
+`confirmatory-v1.yaml` is a new, preregistered V3 Study over the same exact
+source revisions. It contains eight development tasks and sixteen untouched
+holdouts, two arms, and four attempts per task: **192 governed cells**. Attempts
+are within-task replication; the task is the inference unit. The primary
+analysis is the candidate-minus-baseline effect on the holdout partition, with
+safety regressions, mechanism evidence, infrastructure, and the advisory judge
+reported separately.
+
+The Agent-visible task identities, prompts, and mounted archives do not name a
+frontmatter field or disclose boundary answers. The answer-bearing family
+mapping and expected values live only in `confirmatory-task-family-lock.json`
+and `confirmatory-private-labels.jsonl`; neither is mounted into a trial. Task
+archives contain no validator. `confirmatory_scorer.py` independently parses
+the returned frontmatter, applies the canonical schema and boundary rules,
+checks preservation hashes and allowed paths, and ignores self-reported pass
+booleans.
+
+Before a preview, preparation must run the exact upstream zero-model matrix for
+frontmatter absence, empty and bounded scalar values, over-bound and non-string
+values, unknown fields, name lengths 40/41/64/65, and initializer help. It also
+builds one deterministic, read-only archive per task from checked-in inputs:
+
+```bash
+uv run python \
+  examples/comparisons/anthropic-skill-creator-upgrade/prepare_confirmatory.py \
+  --anthropic-repo /PATH/TO/anthropics-skills
+
+uv run python \
+  examples/comparisons/community-skill-upgrades/prepare_local_source_lock.py \
+  examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v1.yaml \
+  --extra .fugue/comparison-resources/anthropic-skill-creator-upgrade/confirmatory-preparation.lock.json \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-preregistration.json \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-task-family-lock.json \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/qualification_fixtures.py \
+  --output .fugue/qualification/community-skill-confirmatory/anthropic/source.lock.json
+```
+
+The V3 source topology declares
+`wandb/fugue-anthropic-skill-creator-source-v1` for the public task/source-lock
+Dataset and `wandb/fugue-anthropic-skill-creator-confirmatory-v1` for results.
+Cells use the digest-locked mounted archives as their actual inputs; they do
+not query the hosted source project. Result publication must never write into
+the source project.
+
+Use the normal governed flow with a fresh preview and approval. The exact
+finite ceiling is `$1640` for 192 Agent calls plus advisory judge reserve; it
+is an approval identity, not a spending target:
+
+```bash
+SPEC=examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v1.yaml
+ENV_FILE=/Users/ashah/Documents/common_tools/.env
+
+env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
+  --env-file "$ENV_FILE" --json
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --prepare \
+  --env-file "$ENV_FILE" --json
+env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview \
+  --env-file "$ENV_FILE" --json
+```
+
+Run the first cell as the integrity checkpoint. Continue only after its exact
+result project, five Weave links, candidate/runtime identity, private-label
+scan, cost, and Harbor cleanup reconcile. The same-family Sonnet judge remains
+descriptive until two independent reviewers adjudicate the frozen calibration;
+it cannot satisfy or override a deterministic gate. The read-only Study Console
+profile is `study-console-confirmatory-v1.yaml` on port `18101`.

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "anthropic-skill-creator-confirmatory-task-families-v1",
+  "visibility": "host_only",
+  "families": {
+    "as-dev-create-platform-bound-skill": "create_platform_bound_skill",
+    "as-dev-preserve-runtime-metadata": "preserve_valid_compatibility",
+    "as-dev-repair-runtime-metadata": "repair_overlong_compatibility",
+    "as-dev-mandated-name-alpha": "name_boundary_41",
+    "as-dev-mandated-name-beta": "name_boundary_64",
+    "as-dev-no-platform-requirement": "compatibility_not_applicable",
+    "as-dev-repair-unknown-metadata": "unknown_frontmatter_key",
+    "as-dev-init-help-diagnosis": "initializer_help_consistency",
+    "as-holdout-system-package-bound": "system_package_compatibility",
+    "as-holdout-product-version-bound": "product_version_compatibility",
+    "as-holdout-offline-platform-bound": "offline_platform_compatibility",
+    "as-holdout-update-add-platform-requirements": "add_compatibility_metadata",
+    "as-holdout-preserve-license-metadata": "preserve_license_metadata",
+    "as-holdout-preserve-allowed-tools": "preserve_allowed_tools",
+    "as-holdout-existing-metadata-audit": "valid_compatibility_noop",
+    "as-holdout-runtime-metadata-repair": "invalid_compatibility_type",
+    "as-holdout-metadata-boundary-alpha": "compatibility_boundary_500",
+    "as-holdout-metadata-boundary-beta": "compatibility_boundary_501",
+    "as-holdout-mandated-name-gamma": "name_boundary_40",
+    "as-holdout-mandated-name-delta": "name_boundary_42",
+    "as-holdout-mandated-name-epsilon": "name_boundary_63",
+    "as-holdout-mandated-name-zeta": "name_boundary_65_reject",
+    "as-holdout-generic-runtime-skill": "compatibility_not_applicable",
+    "as-holdout-repair-unknown-metadata": "unknown_frontmatter_key"
+  },
+  "agent_visible": false,
+  "mounted_in_trials": false
+}
