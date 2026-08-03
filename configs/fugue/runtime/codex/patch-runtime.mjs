@@ -19,7 +19,14 @@ if (source.split(agentNeedle).length - 1 !== 1) {
 source = source.replace(
   agentNeedle,
   "const AGENT_NAME = process.env.WEAVE_CODEX_AGENT_NAME || 'codex';\n" +
-    "const FUGUE_TRACE_ATTRIBUTES = (() => { try { return JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}'); } catch { return {}; } })();",
+    "const FUGUE_TRACE_ATTRIBUTES = (() => { try { return JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}'); } catch { return {}; } })();\n" +
+    "function fugueParentContext() {\n" +
+    "    const raw = (process.env.FUGUE_WEAVE_TRACEPARENT || '').trim();\n" +
+    "    if (!raw) return ROOT_CONTEXT;\n" +
+    "    const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(raw);\n" +
+    "    if (!match || /^0+$/.test(match[1]) || /^0+$/.test(match[2])) throw new Error('invalid FUGUE_WEAVE_TRACEPARENT');\n" +
+    "    return trace.setSpanContext(ROOT_CONTEXT, { traceId: match[1].toLowerCase(), spanId: match[2].toLowerCase(), traceFlags: Number.parseInt(match[3], 16) & 1, isRemote: true });\n" +
+    "}",
 );
 
 const attributesNeedle = "const spanAttributes = {";
@@ -29,6 +36,33 @@ if (source.split(attributesNeedle).length - 1 !== 3) {
 source = source.split(attributesNeedle).join(
   "const spanAttributes = { ...FUGUE_TRACE_ATTRIBUTES,",
 );
+
+const apiImportNeedle =
+  "import { context, SpanKind, SpanStatusCode, trace, } from '@opentelemetry/api';";
+const apiImportReplacement =
+  "import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace, } from '@opentelemetry/api';";
+if (source.split(apiImportNeedle).length - 1 !== 1) {
+  throw new Error("weave-codex OpenTelemetry import patch target changed");
+}
+source = source.replace(apiImportNeedle, apiImportReplacement);
+
+const rootSpanNeedle = `    const root = tracer.startSpan(\`\${GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT} \${AGENT_NAME}\`, {
+        kind: SpanKind.INTERNAL, // in-process agent (GenAI-spec span kind)
+        startTime: turn.startTime,
+        attributes: invokeAgentAttributes(turn, captureContent),
+    });
+    const parentCtx = trace.setSpan(context.active(), root);`;
+const rootSpanReplacement = `    const rootParentContext = fugueParentContext();
+    const root = tracer.startSpan(\`\${GEN_AI_OPERATION_NAME_VALUE_INVOKE_AGENT} \${AGENT_NAME}\`, {
+        kind: SpanKind.INTERNAL, // in-process agent (GenAI-spec span kind)
+        startTime: turn.startTime,
+        attributes: invokeAgentAttributes(turn, captureContent),
+    }, rootParentContext);
+    const parentCtx = trace.setSpan(rootParentContext, root);`;
+if (source.split(rootSpanNeedle).length - 1 !== 1) {
+  throw new Error("weave-codex evaluation parent patch target changed");
+}
+source = source.replace(rootSpanNeedle, rootSpanReplacement);
 writeFileSync(path, source);
 
 const parserPath = join(root, "dist/rollout/parser.js");

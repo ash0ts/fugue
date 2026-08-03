@@ -2,7 +2,7 @@
 
 This is a governed loop-engineering workflow, not a fixture replay and not an
 MCP release decision. Claude Code diagnoses one repeated failure from the
-source-isolated MCP V3 canary, authors or selects an intervention, and asks
+source-isolated MCP V10 confirmation, authors or selects an intervention, and asks
 Fugue to compare exact locked behavior.
 
 The result project is:
@@ -23,18 +23,41 @@ either source project.
 
 ## 1. Lock a real repeated failure
 
-First complete the separately approved eight-cell canary
-`mcp-main-vs-0-4-natural-maintainer-canary-v3`. Do not continue from an
-invalid, drifted, non-discriminating, or single-attempt task.
+Use authoritative result
+`mcp-main-vs-0-4-tool-surface-confirmation-v10` with digest
+`e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38`.
+Its `exact-history-target` baseline failed the same critical bounded-evidence
+and evidence-honesty dimensions in both attempts. Do not continue from an
+invalid, drifted, non-discriminating, single-attempt, or superseded result.
 
 After a human reviews one task that failed on the same arm in both attempts:
 
+A clean clone includes the reviewed, sanitized
+[`mcp-v10-exact-history-baseline.failure-lock.json`](fixtures/mcp-v10-exact-history-baseline.failure-lock.json).
+It contains immutable V10 result, preview, candidate, runtime, scorer, and Weave
+references, but no Agent answer or private truth. Validate it before copying it
+to the operator state directory:
+
+```bash
+CHECKED_FAILURE_LOCK=examples/loop-engineering/wandb-evidence-loop/fixtures/mcp-v10-exact-history-baseline.failure-lock.json
+
+uv run python -c \
+  'import json, sys; from pathlib import Path; from fugue.bench.loop_failure import validate_comparison_failure_lock; validate_comparison_failure_lock(json.loads(Path(sys.argv[1]).read_text()))' \
+  "$CHECKED_FAILURE_LOCK"
+
+mkdir -p .fugue/loop-engineering
+cp "$CHECKED_FAILURE_LOCK" .fugue/loop-engineering/failure.lock.json
+```
+
+Maintainers can recreate that lock from the authoritative local result and
+prepared preview with:
+
 ```bash
 uv run python \
-	  examples/loop-engineering/wandb-evidence-loop/lock_failure.py \
-	  --result .fugue/results/comparisons/RESULT/result.json \
-	  --preview .fugue/comparisons/RUN/prepared-preview.json \
-  --task-id TASK_ID \
+  examples/loop-engineering/wandb-evidence-loop/lock_failure.py \
+  --result .fugue/results/comparisons/RESULT/result.json \
+  --preview .fugue/comparisons/RUN/prepared-preview.json \
+  --task-id exact-history-target \
   --arm baseline \
   --primary-attempt-id ATTEMPT_ID \
   --reviewed \
@@ -43,13 +66,15 @@ uv run python \
 
 The helper accepts only `ComparisonResultV3`, the exact digest-verified preview
 and spec that produced it, exact source/result topology, matched pre/post source
-drift checks, eight unique reconciled attempts, one stable candidate identity
+drift checks, sixteen unique reconciled attempts, one stable candidate identity
 per arm, exact runtime/scorer/MCP locks, a valid task, two repeated critical
 failures, and five resolved Weave links. It copies no Agent answer or private
-expected value.
+expected value. Those links must be real Weave Call or Dataset identities;
+OTel trace and span IDs remain diagnostic metadata and never satisfy a link.
 
 If the final `staging/0.4.0` head changes, the MCP preview and result change and
-the failure lock must be recreated.
+the checked lock must be superseded by a newly reviewed lock under a new result
+identity; do not edit its references in place.
 
 ## 2. Diagnose, author, review, and lock
 

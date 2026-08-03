@@ -66,7 +66,9 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
             assert forbidden not in adapter, (harness, forbidden)
 
     hermes_adapter = ranges["hermes"]
-    assert agent_runtime.RUNTIMES["hermes"].version.endswith("+single-turn.2")
+    assert agent_runtime.RUNTIMES["hermes"].version.endswith(
+        "+single-turn.2"
+    )
     hermes_runtime = agent_runtime.RUNTIMES["hermes"]
     assert "FROM " + agent_runtime._NODE_IMAGE + " AS node-runtime" in (
         hermes_runtime.dockerfile
@@ -106,6 +108,10 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     ).read_text()
     assert "_finalize_fugue_single_turns" in hermes_patch
     assert "Fugue trial root retained" in hermes_patch
+    assert 'os.environ.get("FUGUE_WEAVE_TRACEPARENT", "").strip()' in hermes_patch
+    assert "NonRecordingSpan(parent)" in hermes_patch
+    assert 'raise ValueError("invalid FUGUE_WEAVE_TRACEPARENT")' in hermes_patch
+    assert "is_remote=True" in hermes_patch
     openclaw_runtime = agent_runtime.RUNTIMES["openclaw"]
     assert openclaw_runtime.version == (
         "openclaw@2026.7.1+weave-openclaw@0.1.1+"
@@ -134,6 +140,11 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
         if path.name == "patch-runtime.mjs"
     ).read_text()
     assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch_source
+    assert "FUGUE_WEAVE_TRACEPARENT" in patch_source
+    assert "trace.setSpanContext(ROOT_CONTEXT" in patch_source
+    assert "trace.setSpan(fugueParentContext, span)" in patch_source
+    assert "invalid FUGUE_WEAVE_TRACEPARENT" in patch_source
+    assert "isRemote: true" in patch_source
     assert "stableTurn.end();" in patch_source
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
     assert claude_runtime.version.endswith("+eval-parent.1")
@@ -198,6 +209,11 @@ def test_weave_codex_patch_preserves_gateway_metadata() -> None:
     assert "dist/rollout/parser.js" in source
     assert "tool.kind !== 'mcp'" in source
     assert "7c5c83f0b79d9505c3501b70fc90c96e0bf40156ca1ccd10d8442c3700e05869" in source
+    assert "FUGUE_WEAVE_TRACEPARENT" in source
+    assert "trace.setSpanContext(ROOT_CONTEXT" in source
+    assert "trace.setSpan(rootParentContext, root)" in source
+    assert "invalid FUGUE_WEAVE_TRACEPARENT" in source
+    assert "isRemote: true" in source
 
 
 def test_codex_mcp_patch_flattens_only_the_model_tool_boundary() -> None:

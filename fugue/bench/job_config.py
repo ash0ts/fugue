@@ -413,6 +413,19 @@ def _build_jobs(
                     },
                     "trace_content": experiment.trace_content,
                     "instrumentation": "weave",
+                    **(
+                        {
+                            "live_evidence_policy": {
+                                "required": experiment.require_live_evidence,
+                                "checkpoint_cells": (
+                                    experiment.evidence_checkpoint_cells
+                                ),
+                            }
+                        }
+                        if experiment.require_live_evidence
+                        or experiment.evidence_checkpoint_cells
+                        else {}
+                    ),
                     "evidence_destination": trace_destination_identity(env),
                     **(
                         {

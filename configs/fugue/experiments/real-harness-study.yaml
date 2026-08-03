@@ -1,6 +1,6 @@
 id: real-harness-study
 title: Real harness behavior canary
-description: Compare Hermes, OpenClaw, Claude Code, and Codex on the same two locked SWE-bench tasks while holding the W&B-routed GLM-5.2 model, task inputs, runtime policy, and attempt count fixed.
+description: Compare Hermes, OpenClaw, Claude Code, and Codex on the same two locked SWE-bench tasks while holding Anthropic Sonnet 5, task inputs, runtime policy, and attempt count fixed.
 research_view:
   observation: Different harnesses may complete the same maintenance task with different task outcomes, failure modes, trajectories, and costs.
   rationale: Hold model, tasks, context, runtime policy, and limits fixed so the Study reports task-specific harness behavior without claiming a universal ranking.
@@ -13,7 +13,7 @@ research_view:
   task_summary: Run Hermes, OpenClaw, Claude Code, and Codex against identical task and model inputs in local Harbor.
   interaction_mode: Single-turn isolated Agent cells
   tools: [Shell, repository checkout]
-  resources: [Locked task images, locked harness runtimes, W&B-routed GLM-5.2]
+  resources: [Locked task images, locked harness runtimes, Anthropic Sonnet 5]
   base_instruction_summary: Solve the assigned repository maintenance task and leave the checkout in a verifiable state.
   treatment_summaries:
     baseline: Keep task, model, context, execution policy, and limits fixed while the harness varies.
@@ -30,7 +30,7 @@ research_view:
       dimensions:
         - {id: task-pass, label: Task outcome, source_key: pass, target: true, primary: true}
         - {id: runtime-complete, label: Runtime completed, source_key: agent_runtime_completed, target: true}
-model: wandb/zai-org/GLM-5.2
+model: anthropic/claude-sonnet-5
 run_name: real-harness-study
 evidence_project: wandb/fugue-harness-experiments-v1
 evidence_destination:
@@ -39,6 +39,8 @@ evidence_destination:
   api_base_url: https://api.wandb.ai
   trace_base_url: https://trace.wandb.ai
   app_base_url: https://wandb.ai
+require_live_evidence: true
+evidence_checkpoint_cells: 1
 default_preset: canary
 tags: [agent-eval, harness-comparison, real-study-lane-v1]
 harnesses: [hermes, openclaw, claude-code, codex]

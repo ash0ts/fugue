@@ -74,6 +74,28 @@ def test_experiment_evidence_project_requires_exact_entity_project_slug() -> Non
         )
 
 
+def test_experiment_can_require_a_bounded_live_evidence_checkpoint() -> None:
+    experiment = experiment_from_data(
+        {
+            "id": "strict-evidence",
+            "title": "Strict evidence",
+            "require_live_evidence": True,
+            "evidence_checkpoint_cells": 1,
+        }
+    )
+
+    assert experiment.require_live_evidence is True
+    assert experiment.evidence_checkpoint_cells == 1
+    with pytest.raises(ValueError, match="must be non-negative"):
+        experiment_from_data(
+            {
+                "id": "invalid-checkpoint",
+                "title": "Invalid checkpoint",
+                "evidence_checkpoint_cells": -1,
+            }
+        )
+
+
 def test_agent_preset_loads_strict_evidence_backed_configuration(tmp_path):
     prompt = tmp_path / "configs/fugue/prompts/fugue-maintainer.md"
     prompt.parent.mkdir(parents=True)

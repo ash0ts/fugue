@@ -102,6 +102,8 @@ def test_claude_loop_lane_is_dedicated_local_eight_plus_eight() -> None:
     presets = {item.id: item for item in experiment.presets}
 
     assert experiment.evidence_project == LOOP_PROJECT
+    assert experiment.require_live_evidence is True
+    assert experiment.evidence_checkpoint_cells == 1
     assert experiment.model == SONNET_5
     assert experiment.harnesses == ["claude-code"]
     assert [item.id for item in experiment.variants] == [
@@ -130,7 +132,7 @@ def test_claude_loop_lane_is_dedicated_local_eight_plus_eight() -> None:
     assert campaign.require_clean_source is True
 
 
-def test_harness_lane_resolves_exact_fixed_glm_matrix(
+def test_harness_lane_resolves_exact_fixed_sonnet_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     experiment = get_experiment("real-harness-study", REPO_ROOT)
@@ -142,7 +144,7 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
         service=service,
         campaign_id=campaign.id,
         experiment_id=experiment.id,
-        model=GLM_5_2,
+        model=SONNET_5,
         harnesses=("hermes", "openclaw", "claude-code", "codex"),
         context_systems=("none",),
         variants=("baseline",),
@@ -151,6 +153,8 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
     assert experiment.evidence_project == HARNESS_PROJECT
     assert experiment.evidence_destination is not None
     assert experiment.evidence_destination.project_slug == HARNESS_PROJECT
+    assert experiment.require_live_evidence is True
+    assert experiment.evidence_checkpoint_cells == 1
     assert len(jobs) == plan.cell_count == plan.expected_predictions == 8
     assert {job.task_id for job in jobs} == {
         "sympy__sympy-13031",
@@ -162,8 +166,8 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
         "claude-code",
         "codex",
     }
-    assert {job.route.provider for job in jobs} == {"wandb"}
-    assert {job.route.display_model for job in jobs} == {GLM_5_2}
+    assert {job.route.provider for job in jobs} == {"anthropic"}
+    assert {job.route.display_model for job in jobs} == {SONNET_5}
     assert {job.context_system_id for job in jobs} == {"none"}
     assert {job.config["environment"]["type"] for job in jobs} == {"docker"}
     assert experiment.execution_limits is not None
@@ -172,6 +176,11 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
     assert len(limits_digest) == 64
     assert {job.outer_wall_time_sec for job in jobs} == {900}
     assert {job.execution_limits_digest for job in jobs} == {limits_digest}
+    assert all(
+        job.resolved_candidate.execution_definition["live_evidence_policy"]
+        == {"required": True, "checkpoint_cells": 1}
+        for job in jobs
+    )
     assert {
         job.resolved_candidate.execution_definition["execution_limits"][
             "limits_digest"
@@ -194,7 +203,7 @@ def test_harness_lane_resolves_exact_fixed_glm_matrix(
         "runtime_lock",
         "terminal_rows",
     }
-    assert campaign.allowed_models == (GLM_5_2,)
+    assert campaign.allowed_models == (SONNET_5,)
     assert campaign.limits.total_cost_usd == 10
     assert campaign.limits.max_total_cells == 8
     assert campaign.require_clean_source is True
@@ -249,6 +258,8 @@ def test_memory_lane_resolves_exact_locked_sonnet_factorial(
     )
 
     assert experiment.evidence_project == MEMORY_PROJECT
+    assert experiment.require_live_evidence is True
+    assert experiment.evidence_checkpoint_cells == 1
     assert experiment.evidence_destination is not None
     assert experiment.evidence_destination.project_slug == MEMORY_PROJECT
     assert len(jobs) == plan.cell_count == plan.expected_predictions == 8
@@ -443,7 +454,7 @@ def test_rag_dense_failure_cannot_fall_back_to_bm25(
         (
             "real-harness-study-v1",
             "real-harness-study",
-            SONNET_5,
+            GLM_5_2,
             ("hermes", "openclaw", "claude-code", "codex"),
             ("none",),
             ("baseline",),

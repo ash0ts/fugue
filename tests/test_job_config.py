@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -616,6 +617,31 @@ tasks:
     assert job.resolved_candidate.definition["harness"] == "codex"
     assert config["fugue"]["trace_content"] == "full"
     assert job.env["FUGUE_TRACE_CONTENT"] == "full"
+
+    strict_jobs = render_jobs(
+        experiment=replace(
+            experiment,
+            require_live_evidence=True,
+            evidence_checkpoint_cells=1,
+        ),
+        manifest=load_manifest(manifest_path),
+        manifest_path=manifest_path,
+        repo_root=tmp_path,
+        env=env,
+        model="openai/gpt-5",
+        run_id="unit-strict-evidence",
+    )
+    strict_job = next(
+        item for item in strict_jobs if item.variant_id == "prompt-skill"
+    )
+    assert strict_job.candidate_id == job.candidate_id
+    assert (
+        strict_job.resolved_candidate.execution_fingerprint
+        != job.resolved_candidate.execution_fingerprint
+    )
+    assert strict_job.resolved_candidate.execution_definition[
+        "live_evidence_policy"
+    ] == {"required": True, "checkpoint_cells": 1}
 
 
 def test_task_outputs_do_not_change_candidate_identity_or_overlap_harbor_artifacts(

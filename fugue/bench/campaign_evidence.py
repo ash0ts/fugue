@@ -789,6 +789,12 @@ _SAFE_PREDICTION_FIELDS = (
     "weave_agent_root_call_id",
     "weave_agent_root_ref",
     "weave_agent_root_url",
+    "weave_agent_root_evidence_kind",
+    "weave_agent_root_is_native_call",
+    "agent_cross_transport_edge",
+    "weave_agent_bridge_cross_transport_edge",
+    "weave_agent_receipt_supersession",
+    "weave_agent_receipt_cross_transport_edge",
     "agent_graph_verified",
     "weave_dataset_id",
     "weave_dataset_ref",
@@ -1015,6 +1021,17 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
         ):
             failures.append(f"does not verify the {slot} Weave link")
             continue
+        evidence_kind = None
+        if slot == "agent_root":
+            evidence_kind = _agent_evidence_kind(row)
+            evidence_failure = _agent_evidence_failure(
+                row,
+                evidence_kind=evidence_kind,
+                call_id=call_id,
+            )
+            if evidence_failure:
+                failures.append(evidence_failure)
+                continue
         links.append(
             {
                 "slot": slot,
@@ -1024,6 +1041,7 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
                 "call_id": call_id,
                 "uri": url,
                 "verification_status": "verified",
+                **({"evidence_kind": evidence_kind} if slot == "agent_root" else {}),
             }
         )
     dataset_ref = str(
@@ -1062,6 +1080,54 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
         "failures": list(dict.fromkeys(failures)),
         "verified": not failures,
     }
+
+
+def _agent_evidence_kind(row: Mapping[str, Any]) -> str:
+    declared = str(row.get("weave_agent_root_evidence_kind") or "")
+    if declared:
+        return declared
+    if row.get("weave_agent_root_is_native_call") is True:
+        return "native_weave_call_v1"
+    if (
+        row.get("weave_agent_root_is_native_call") is False
+        or row.get("agent_cross_transport_edge")
+        or row.get("weave_agent_root_call_materialization_source")
+    ):
+        return "native_otel_cross_transport_receipt_v1"
+    return "unclassified_legacy_agent_evidence_v1"
+
+
+def _agent_evidence_failure(
+    row: Mapping[str, Any],
+    *,
+    evidence_kind: str,
+    call_id: str,
+) -> str | None:
+    if evidence_kind == "native_weave_call_v1":
+        if row.get("weave_agent_root_is_native_call") is not True:
+            return "does not verify native Agent Call provenance"
+        return None
+    if evidence_kind != "native_otel_cross_transport_receipt_v1":
+        return "does not recognize the Agent evidence kind"
+    if row.get("weave_agent_root_is_native_call") is not False:
+        return "does not verify cross-transport receipt provenance"
+    edge = row.get("agent_cross_transport_edge")
+    if not isinstance(edge, Mapping):
+        return "does not verify the Agent receipt cross-transport edge"
+    expected_trace = str(row.get("otel_trace_id") or row.get("trace_id") or "")
+    expected_span = str(row.get("otel_root_span_id") or row.get("root_span_id") or "")
+    if (
+        not expected_trace
+        or not expected_span
+        or edge.get("status") != "verified"
+        or str(edge.get("source_system") or "") != "otel"
+        or str(edge.get("source_trace_id") or "") != expected_trace
+        or str(edge.get("source_span_id") or "") != expected_span
+        or str(edge.get("receipt_system") or "") != "weave"
+        or str(edge.get("receipt_call_id") or "") != call_id
+    ):
+        return "does not verify the Agent receipt cross-transport edge"
+    return None
 
 
 def _weave_call_ref_matches(ref: str, project: str, call_id: str) -> bool:

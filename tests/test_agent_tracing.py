@@ -472,6 +472,11 @@ def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
     assert "self.config.resource_attributes or {}" in patch
     assert "hermes-otel tracer patch target mismatch" in patch
     assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch
+    assert "FUGUE_WEAVE_TRACEPARENT" in patch
+    assert "NonRecordingSpan" in patch
+    assert "SpanContext" in patch
+    assert "TraceFlags" in patch
+    assert "set_span_in_context(NonRecordingSpan(parent))" in patch
     assert "_finalize_fugue_single_turns" in patch
     assert "hermes-otel turn-end patch target mismatch" in patch
 
@@ -509,6 +514,12 @@ def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:
     assert "set -o pipefail" in source
     assert "pinned patch target mismatch" in runtime_patches
     assert "key.startsWith('fugue.')" in runtime_patches
+    assert "FUGUE_WEAVE_TRACEPARENT" in codex_runtime
+    assert "trace.setSpanContext(ROOT_CONTEXT" in codex_runtime
+    assert "trace.setSpan(rootParentContext, root)" in codex_runtime
+    assert "FUGUE_WEAVE_TRACEPARENT" in runtime_patches
+    assert "trace.setSpanContext(ROOT_CONTEXT" in runtime_patches
+    assert "trace.setSpan(fugueParentContext, span)" in runtime_patches
     assert "self._resolved_env_vars.update(" in source
     assert "!== 3" in codex_runtime
     assert "codex mcp list --json" in source
