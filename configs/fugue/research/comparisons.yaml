@@ -2,7 +2,7 @@ schema_version: 1
 comparisons:
   - id: source-use-skill-v1
     path: examples/comparisons/source-use-skill/comparison.yaml
-    digest: 6188a5088685e9ac898ef07a092e8bab4645d0e7f5425194fb40b18b81d18322
+    digest: 8ce981e3a942a68ab00e3b8df6f762bfa40ce83e3c3f667cb64a95449a94bb55
   - id: mcp-main-vs-0-4-natural-maintainer-canary-v3
     path: examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
-    digest: 79b91d283dd1d51bb2d794e8539fa9c4cd0704e52330e244ab5402fdccea2584
+    digest: c6a94d85352856a3b60c41e48d2fcf2b38acb5be7f0ad9814e61a3f9fdf0f688
