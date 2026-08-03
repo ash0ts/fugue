@@ -28,7 +28,7 @@ HARBOR_CONFORMANCE_RECEIPT = "harbor-conformance.json"
 HOSTED_EVIDENCE_PRIVACY_RECEIPT = "hosted-evidence-privacy.json"
 PRIVACY_CONTRACT_VERSION = 2
 _MAX_SCAN_FILES = 20_000
-_MAX_SCAN_FILE_BYTES = 16 * 1024 * 1024
+_SCAN_CHUNK_BYTES = 1024 * 1024
 _MAX_SCAN_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_NEW_CONTAINER_INSPECTIONS = 512
 _MAX_HOSTED_PAYLOADS = 50_000
@@ -1267,26 +1267,52 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
     matched: list[dict[str, Any]] = []
     scanned = 0
     total_bytes = 0
-    secret_bytes = tuple(secret.encode("utf-8") for secret in secrets)
+    secret_bytes = tuple(secret.encode("utf-8") for secret in secrets if secret)
+    if not secret_bytes:
+        return {
+            "status": "unavailable",
+            "reason": "no nonempty secret values were available to verify",
+            "scope": {
+                "kind": "exact_local_run_artifacts",
+                "included": sorted(_safe_path(root, repo_root) for root in roots),
+                "excluded": [
+                    "hosted Weave objects",
+                    "external services",
+                    "removed container filesystems",
+                ],
+            },
+            "configured_secret_count": 0,
+            "files_scanned": 0,
+            "bytes_scanned": 0,
+            "files_with_matches": [],
+        }
     for path in sorted(files):
         try:
             size = path.stat().st_size
         except OSError:
             errors.append(f"could not stat {_safe_path(path, repo_root)}")
             continue
-        if size > _MAX_SCAN_FILE_BYTES:
-            errors.append(f"file exceeded scan limit: {_safe_path(path, repo_root)}")
-            continue
-        total_bytes += size
-        if total_bytes > _MAX_SCAN_TOTAL_BYTES:
+        if total_bytes + size > _MAX_SCAN_TOTAL_BYTES:
             errors.append("run-scoped secret scan exceeded the total byte limit")
             break
         try:
-            content = path.read_bytes()
+            bytes_read, count = _stream_secret_matches(
+                path,
+                patterns=secret_bytes,
+                expected_size=size,
+            )
         except OSError:
             errors.append(f"could not read {_safe_path(path, repo_root)}")
             continue
-        count = sum(content.count(secret) for secret in secret_bytes)
+        try:
+            final_size = path.stat().st_size
+        except OSError:
+            errors.append(f"could not restat {_safe_path(path, repo_root)}")
+            continue
+        if bytes_read != size or final_size != size:
+            errors.append(f"file changed while scanning: {_safe_path(path, repo_root)}")
+            continue
+        total_bytes += bytes_read
         scanned += 1
         if count:
             matched.append(
@@ -1319,6 +1345,51 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
         "files_with_matches": matched,
         "errors": errors,
     }
+
+
+def _stream_secret_matches(
+    path: Path,
+    *,
+    patterns: Sequence[bytes],
+    expected_size: int,
+) -> tuple[int, int]:
+    """Count non-overlapping byte patterns without loading a whole artifact.
+
+    A retained suffix makes matches that cross read boundaries visible.  The
+    absolute per-pattern cursor prevents that overlap from counting a prior
+    match twice and preserves ``bytes.count`` non-overlap semantics.
+    """
+
+    if expected_size < 0:
+        raise ValueError("expected scan size must be non-negative")
+    if not patterns or any(not pattern for pattern in patterns):
+        raise ValueError("secret scan patterns must be nonempty")
+    overlap_bytes = max(len(pattern) for pattern in patterns) - 1
+    next_allowed = [0] * len(patterns)
+    tail = b""
+    bytes_read = 0
+    matches = 0
+    with path.open("rb") as stream:
+        while bytes_read < expected_size:
+            chunk = stream.read(min(_SCAN_CHUNK_BYTES, expected_size - bytes_read))
+            if not chunk:
+                break
+            combined = tail + chunk
+            combined_offset = bytes_read - len(tail)
+            for pattern_index, pattern in enumerate(patterns):
+                cursor = 0
+                while True:
+                    found = combined.find(pattern, cursor)
+                    if found < 0:
+                        break
+                    absolute_start = combined_offset + found
+                    if absolute_start >= next_allowed[pattern_index]:
+                        matches += 1
+                        next_allowed[pattern_index] = absolute_start + len(pattern)
+                    cursor = found + 1
+            bytes_read += len(chunk)
+            tail = combined[-overlap_bytes:] if overlap_bytes else b""
+    return bytes_read, matches
 
 
 def _private_label_boundary(

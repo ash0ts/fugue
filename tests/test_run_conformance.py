@@ -435,6 +435,99 @@ def test_harbor_receipt_records_exact_identity_and_zero_orphans(
     ) == value
 
 
+def test_local_privacy_scan_streams_artifact_larger_than_sixteen_mib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-large-artifact"
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "large-output.jsonl"
+    block = b"public-output\n" * 65_536
+    with artifact.open("wb") as handle:
+        while handle.tell() <= 16 * 1024 * 1024:
+            handle.write(block)
+
+    original_read_bytes = Path.read_bytes
+
+    def reject_whole_file_read(path: Path) -> bytes:
+        if path == artifact:
+            raise AssertionError("large artifacts must be streamed")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
+    receipt = conformance_module._scan_run_artifacts(
+        repo_root=tmp_path,
+        run_id=run_id,
+        run_dir=run_dir,
+        jobs=[],
+        secrets=("configured-secret-not-present",),
+    )
+
+    assert artifact.stat().st_size > 16 * 1024 * 1024
+    assert receipt["status"] == "passed"
+    assert receipt["files_scanned"] == 1
+    assert receipt["bytes_scanned"] == artifact.stat().st_size
+    assert receipt["files_with_matches"] == []
+    assert receipt["errors"] == []
+
+
+def test_local_privacy_scan_detects_secret_across_stream_boundary(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-boundary-secret"
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "boundary-output.log"
+    secret = "boundary-spanning-secret-value"
+    split = 11
+    artifact.write_bytes(
+        b"x" * (conformance_module._SCAN_CHUNK_BYTES - split)
+        + secret[:split].encode()
+        + secret[split:].encode()
+        + b"\n"
+    )
+
+    receipt = conformance_module._scan_run_artifacts(
+        repo_root=tmp_path,
+        run_id=run_id,
+        run_dir=run_dir,
+        jobs=[],
+        secrets=(secret,),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["files_scanned"] == 1
+    assert receipt["files_with_matches"] == [
+        {
+            "path": ".fugue/runtime/run-boundary-secret/boundary-output.log",
+            "match_count": 1,
+        }
+    ]
+    assert secret not in json.dumps(receipt)
+
+
+def test_local_privacy_scan_retains_total_byte_bound(tmp_path: Path) -> None:
+    run_id = "run-total-bound"
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "oversized-output.bin"
+    with artifact.open("wb") as handle:
+        handle.truncate(conformance_module._MAX_SCAN_TOTAL_BYTES + 1)
+
+    receipt = conformance_module._scan_run_artifacts(
+        repo_root=tmp_path,
+        run_id=run_id,
+        run_dir=run_dir,
+        jobs=[],
+        secrets=("configured-secret-not-present",),
+    )
+
+    assert receipt["status"] == "unavailable"
+    assert receipt["files_scanned"] == 0
+    assert receipt["bytes_scanned"] == 0
+    assert receipt["errors"] == ["run-scoped secret scan exceeded the total byte limit"]
+
+
 def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
