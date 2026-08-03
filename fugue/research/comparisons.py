@@ -1340,6 +1340,128 @@ def project_direct_comparison_result(
     }
 
 
+def project_direct_comparison_failure(
+    repo_root: Path,
+    research_id: str,
+    preview: ComparisonPreviewV1,
+    *,
+    error: BaseException,
+    env: Mapping[str, str],
+    run_id: str | None = None,
+    status: str = "failed",
+    completed_cells: int = 0,
+) -> dict[str, Any]:
+    """Append one claim-free terminal event for a failed direct execution."""
+
+    if status not in {"failed", "cancelled"}:
+        raise ValueError("direct comparison failure status must be failed or cancelled")
+    root = repo_root.resolve()
+    selected_research_id = validate_id(research_id, kind="research id")
+    comparison_id = validate_id(
+        str(preview.comparison.get("id") or ""),
+        kind="experiment id",
+    )
+    selected_run_id = (
+        validate_id(run_id, kind="run id") if run_id is not None else None
+    )
+    store = StudyStore(root)
+    _ensure_direct_comparison_research(store, selected_research_id)
+    safe_error = redact_text(str(error), secrets_from_env(env)).strip()[:1000]
+    safe_error = safe_error or type(error).__name__
+    next_action = (
+        "Inspect the run and infrastructure evidence, repair the execution "
+        "failure, then create a fresh preview and approval before retrying."
+    )
+    execution_identity = selected_run_id or "pre-run"
+    source = EvidenceRefV1(
+        kind="artifact",
+        ref=f"comparison-preview:{preview.preview_digest}",
+        digest=preview.preview_digest,
+    )
+    run_refs = (
+        (EvidenceRefV1(kind="run", ref=selected_run_id),)
+        if selected_run_id is not None
+        else ()
+    )
+    study = store.update_study(
+        selected_research_id,
+        StudyUpdateV1(
+            message=(
+                f"Comparison {comparison_id} execution {status} for preview "
+                f"{preview.preview_digest} (run {execution_identity}). No "
+                f"canonical result was published to the Study. Failure: "
+                f"{safe_error}. "
+                f"Next action: {next_action}"
+            ),
+            note_kind="execution_error",
+            note_sources=(source,),
+            run_refs=run_refs,
+            attribution=_service_attribution(),
+        ),
+        operation_id=(
+            f"direct-comparison-terminal-{preview.preview_digest[:20]}-"
+            f"{execution_identity}"
+        ),
+    )
+    matrix_size = int(preview.readiness["estimated_cells"])
+    completed = min(max(int(completed_cells), 0), matrix_size)
+    view = build_comparison_progress_view(
+        preview.to_dict(),
+        phase=status,
+        completed_cells=completed,
+        state_counts={status: 1},
+    )
+    event_evidence = [
+        ResearchEvidenceRefV1(
+            kind="artifact",
+            ref=f"comparison-preview:{preview.preview_digest}",
+            system="fugue",
+            digest=preview.preview_digest,
+        )
+    ]
+    if selected_run_id is not None:
+        event_evidence.append(
+            ResearchEvidenceRefV1(
+                kind="run",
+                ref=selected_run_id,
+                system="fugue",
+                selector={"run_id": selected_run_id},
+            )
+        )
+    event = store.record_experiment_view_event(
+        research_id=selected_research_id,
+        experiment_id=comparison_id,
+        producer_event_id=(
+            f"fugue:{selected_research_id}:{comparison_id}:"
+            f"comparison-terminal-{preview.preview_digest}-{execution_identity}"
+        ),
+        classification="limitation",
+        state=status,
+        message=(
+            f"Comparison execution {status}; no canonical result was published "
+            f"to the Study. Next action: {next_action}"
+        ),
+        progress={"completed": completed, "total": matrix_size},
+        reserved_cost_usd=float(preview.readiness["estimated_cost_usd"]),
+        evidence=tuple(event_evidence),
+        view=view,
+        attribution=_service_attribution(),
+    )
+    return {
+        "schema_version": 1,
+        "research_id": selected_research_id,
+        "experiment_id": comparison_id,
+        "comparison_id": comparison_id,
+        "preview_digest": preview.preview_digest,
+        "run_id": selected_run_id,
+        "status": status,
+        "study_revision": study.revision,
+        "event_digest": event.event_digest,
+        "sequence": event.sequence,
+        "next_action": next_action,
+    }
+
+
 def _ensure_direct_comparison_research(
     store: StudyStore,
     research_id: str,

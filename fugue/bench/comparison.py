@@ -1005,6 +1005,19 @@ class ComparisonPublicationError(RuntimeError):
         self.markdown_path = markdown_path
 
 
+@dataclass
+class _DirectComparisonExecutionContext:
+    spec: ComparisonSpecV1 | None = None
+    environment: dict[str, str] = field(default_factory=dict)
+    publication_path: Path | None = None
+    start_projection: dict[str, Any] | None = None
+    started: bool = False
+    run_id: str | None = None
+    run_status: str | None = None
+    completed_cells: int = 0
+    canonical_result_published: bool = False
+
+
 def load_comparison(path: Path, *, repo_root: Path) -> ComparisonSpecV1:
     resolved = _safe_input_path(path, repo_root, "comparison")
     raw = yaml.safe_load(resolved.read_text(encoding="utf-8")) or {}
@@ -11716,6 +11729,74 @@ def _project_comparison_start(
     return publication_path, started
 
 
+def _project_direct_comparison_failure(
+    *,
+    context: _DirectComparisonExecutionContext,
+    preview: ComparisonPreviewV1,
+    repo_root: Path,
+    error: BaseException,
+) -> None:
+    spec = context.spec
+    publication_path = context.publication_path
+    if spec is None or publication_path is None or not spec.execution.research_id:
+        return
+    run_status = context.run_status
+    completed_cells = context.completed_cells
+    if context.run_id and run_status is None:
+        from fugue.bench.execution import read_run_manifest
+
+        manifest = read_run_manifest(
+            repo_root / ".fugue" / "runtime" / context.run_id
+        ) or {}
+        run_status = str(manifest.get("status") or "") or None
+        completed_cells = sum(
+            int(manifest.get(key) or 0)
+            for key in ("passed_cells", "failed_cells")
+        )
+    terminal_status = (
+        "cancelled"
+        if run_status in {"cancelled", "interrupted"}
+        or isinstance(error, (KeyboardInterrupt, SystemExit))
+        else "failed"
+    )
+    try:
+        from fugue.research.comparisons import (
+            project_direct_comparison_failure,
+        )
+
+        projected = project_direct_comparison_failure(
+            repo_root,
+            spec.execution.research_id,
+            preview,
+            error=error,
+            env=context.environment,
+            run_id=context.run_id,
+            status=terminal_status,
+            completed_cells=completed_cells,
+        )
+        receipt = {
+            **dict(context.start_projection or {}),
+            **projected,
+            "publication_complete": True,
+            "status": terminal_status,
+            "stage": "failure",
+        }
+    except Exception as projection_error:
+        receipt = {
+            **dict(context.start_projection or {}),
+            "schema_version": 1,
+            "research_id": spec.execution.research_id,
+            "comparison_id": spec.id,
+            "preview_digest": preview.preview_digest,
+            "run_id": context.run_id,
+            "publication_complete": False,
+            "status": "publication_incomplete",
+            "stage": "failure",
+            "error_type": type(projection_error).__name__,
+        }
+    atomic_write_json(publication_path, receipt)
+
+
 def _score_and_bind_exported_comparison_rows(
     *,
     spec: ComparisonSpecV1,
@@ -11917,13 +11998,53 @@ def execute_comparison(
     Research worker disables this path because its control service already
     owns the start, failure, and terminal-result projections.
     """
+    context = _DirectComparisonExecutionContext()
+    try:
+        return _execute_comparison(
+            preview,
+            approval_digest=approval_digest,
+            repo_root=repo_root,
+            env_file=env_file,
+            fetch_weave=fetch_weave,
+            publish_research=publish_research,
+            projection_context=context,
+        )
+    except BaseException as exc:
+        if context.started and not context.canonical_result_published:
+            try:
+                _project_direct_comparison_failure(
+                    context=context,
+                    preview=preview,
+                    repo_root=repo_root,
+                    error=exc,
+                )
+            except Exception as projection_error:  # pragma: no cover - disk failure
+                exc.add_note(
+                    "direct comparison failure projection also failed: "
+                    f"{type(projection_error).__name__}"
+                )
+        raise
+
+
+def _execute_comparison(
+    preview: ComparisonPreviewV1,
+    *,
+    approval_digest: str,
+    repo_root: Path,
+    env_file: Path | None,
+    fetch_weave: bool,
+    publish_research: bool,
+    projection_context: _DirectComparisonExecutionContext,
+) -> tuple[ComparisonResult, Path, Path]:
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
         preview.comparison,
         repo_root=repo_root,
         source=repo_root,
     )
+    projection_context.spec = spec
     service = OperatorService(repo_root, env_file)
+    projection_context.environment = dict(service.env)
     current = preview_comparison(
         spec,
         repo_root=repo_root,
@@ -11986,6 +12107,13 @@ def execute_comparison(
             publish_research=publish_research,
         )
     )
+    projection_context.publication_path = research_publication_path
+    projection_context.start_projection = (
+        dict(research_projection) if research_projection is not None else None
+    )
+    projection_context.started = bool(
+        publish_research and spec.execution.research_id and research_projection
+    )
 
     approved_inputs = _verified_approved_inputs(
         request.approved_comparison,
@@ -11999,6 +12127,7 @@ def execute_comparison(
     from fugue.bench.execution import new_run_id
 
     run_id = new_run_id()
+    projection_context.run_id = run_id
     evaluated_cells = 0
     source_checkpoint_drift: EvidenceDriftCheckV1 | None = None
     runtime_budget = _ComparisonRuntimeBudget(
@@ -12071,6 +12200,11 @@ def execute_comparison(
         host_evaluator=evaluate_attempt,
         host_scorer_names=_comparison_scorer_names(spec),
     )
+    if run_summary is not None:
+        projection_context.run_status = str(run_summary.status or "") or None
+        projection_context.completed_cells = int(run_summary.passed) + int(
+            run_summary.failed
+        )
     if runtime_budget.failure_reason:
         raise RuntimeError(runtime_budget.failure_reason)
     run_issue = _comparison_run_exportability_issue(run_summary)
@@ -12206,6 +12340,7 @@ def execute_comparison(
         publish_research=publish_research,
         repo_root=repo_root,
     )
+    projection_context.canonical_result_published = True
     return result, json_path, markdown_path
 
 

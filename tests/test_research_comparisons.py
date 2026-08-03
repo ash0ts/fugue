@@ -703,19 +703,31 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
     publication = json.loads(
         (result_path.parent / "research-publication.json").read_text()
     )
-    assert publication == {
-        "schema_version": 1,
-        "research_id": research_id,
-        "experiment_id": "comparison-test",
-        "design_event_digest": "d" * 64,
-        "progress_event_digest": "p" * 64,
-        "publication_complete": False,
-        "status": "publication_incomplete",
-        "stage": "result",
-        "error_type": "RuntimeError",
-        "result_digest": result.result_digest,
-        "result": result_path.relative_to(repo_root).as_posix(),
-    }
+    assert publication["schema_version"] == 1
+    assert publication["research_id"] == research_id
+    assert publication["experiment_id"] == spec.id
+    assert publication["comparison_id"] == spec.id
+    assert publication["preview_digest"] == preview.preview_digest
+    assert publication["run_id"] == "projection-failure-run"
+    assert publication["design_event_digest"] == "d" * 64
+    assert publication["progress_event_digest"] == "p" * 64
+    assert publication["publication_complete"] is True
+    assert publication["status"] == "failed"
+    assert publication["stage"] == "failure"
+    assert "result" not in publication
+    assert "result_digest" not in publication
+    store = StudyStore(repo_root)
+    terminal = [
+        event
+        for event in store.research_log_events()
+        if event.research_id == research_id
+        and event.study_id == spec.id
+        and event.state in {"failed", "cancelled"}
+    ]
+    assert len(terminal) == 1
+    assert terminal[0].state == "failed"
+    assert terminal[0].summary["experiment_view"]["phase"] == "failed"
+    assert store.get_study(research_id).results == ()
     latest = json.loads(
         (repo_root / comparison_module.COMPARISON_RESULT_ROOT / "latest.json").read_text()
     )
@@ -803,6 +815,150 @@ def test_execute_comparison_requires_research_start_before_preparation_or_run(
     }
     assert not (
         repo_root / comparison_module.COMPARISON_RESULT_ROOT / "latest.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("run_behavior", "terminal_state"),
+    (("raises", "failed"), ("cancelled", "cancelled")),
+)
+def test_direct_comparison_execution_failure_projects_one_redacted_terminal_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_behavior: str,
+    terminal_state: str,
+) -> None:
+    repo_root = tmp_path / f"direct-{terminal_state}"
+    comparison_path = scaffold_comparison(repo_root)
+    secret = "anthropic-secret-must-not-persist"
+    env_file = repo_root / ".env"
+    env_file.write_text(f"ANTHROPIC_API_KEY={secret}\n", encoding="utf-8")
+    spec = load_comparison(comparison_path, repo_root=repo_root)
+    research_id = f"direct-terminal-{terminal_state}"
+    spec = replace(
+        spec,
+        spec_digest="",
+        execution=replace(
+            spec.execution,
+            research_id=research_id,
+            approval_required=False,
+            evidence_project="wandb/direct-terminal-test",
+        ),
+    )
+    spec = comparison_module.comparison_from_dict(
+        spec.to_dict(),
+        repo_root=repo_root,
+        source=repo_root,
+    )
+    preview_operator = comparison_module.OperatorService(repo_root, env_file)
+    preview = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=preview_operator,
+    )
+    materialized = materialize_comparison(preview, repo_root=repo_root)
+
+    class FakeOperator:
+        def __init__(self, _repo_root: Path, _env_file: Path | None) -> None:
+            self.env = dict(preview_operator.env)
+
+        def prepare(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def preview_experiment(self, *args: Any, **kwargs: Any) -> Any:
+            return preview_operator.preview_experiment(*args, **kwargs)
+
+        def execute_run(self, *_args: Any, **_kwargs: Any) -> Any:
+            if run_behavior == "raises":
+                raise RuntimeError(f"Harbor transport failed with {secret}")
+            return SimpleNamespace(
+                status="cancelled",
+                passed=0,
+                failed=0,
+                cancelled=1,
+                interrupted=0,
+                pending=0,
+                evaluation_failures=(),
+                observability_status="cancelled",
+            )
+
+        def export_run(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("a terminal execution failure must not export")
+
+    monkeypatch.setattr(comparison_module, "OperatorService", FakeOperator)
+    monkeypatch.setattr(
+        comparison_module,
+        "materialize_comparison",
+        lambda *_args, **_kwargs: materialized,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution.new_run_id",
+        lambda: "direct-terminal-run",
+    )
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            execute_comparison(
+                preview,
+                approval_digest="",
+                repo_root=repo_root,
+                env_file=env_file,
+                fetch_weave=False,
+            )
+
+    store = StudyStore(repo_root)
+    study = store.get_study(research_id)
+    assert study.revision == 2
+    assert study.results == ()
+    events = [
+        event
+        for event in store.research_log_events()
+        if event.research_id == research_id and event.study_id == spec.id
+    ]
+    terminal = [
+        event for event in events if event.state in {"failed", "cancelled"}
+    ]
+    assert len(terminal) == 1
+    assert terminal[0].state == terminal_state
+    assert terminal[0].summary["experiment_view"]["kind"] == "progress"
+    assert terminal[0].summary["experiment_view"]["phase"] == terminal_state
+    assert terminal[0].summary["experiment_view"]["preview_digest"] == (
+        preview.preview_digest
+    )
+    assert any(
+        item.kind == "run" and item.ref == "direct-terminal-run"
+        for item in terminal[0].evidence
+    )
+    assert "Next action:" in terminal[0].message
+    persisted = json.dumps(
+        {
+            "study": study.to_dict(),
+            "events": [event.to_dict() for event in events],
+        },
+        sort_keys=True,
+    )
+    assert secret not in persisted
+    publication = json.loads(
+        (
+            repo_root
+            / comparison_module.COMPARISON_RESULT_ROOT
+            / preview.preview_digest
+            / "research-publication.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert secret not in json.dumps(publication, sort_keys=True)
+    assert publication["publication_complete"] is True
+    assert publication["stage"] == "failure"
+    assert publication["status"] == terminal_state
+    assert publication["comparison_id"] == spec.id
+    assert publication["preview_digest"] == preview.preview_digest
+    assert publication["run_id"] == "direct-terminal-run"
+    assert "result" not in publication
+    assert not (
+        repo_root
+        / comparison_module.COMPARISON_RESULT_ROOT
+        / preview.preview_digest
+        / "result.json"
     ).exists()
 
 
