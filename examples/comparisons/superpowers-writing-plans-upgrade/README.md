@@ -79,10 +79,21 @@ Console profile.
 
 ## Preregistered confirmatory Study
 
-`confirmatory-v1.yaml` is a new Study identity; it does not reinterpret the
-four-cell canaries. It freezes eight scorer-development briefs and sixteen
-untouched holdouts across target, indirect-transfer, negative-transfer,
-ambiguous-evidence, safety, and repository-shape strata:
+> **Current rerun identity — V2.** V1 run
+> `20260803T145545-4fdfb32be1` was cancelled after PTY BrokenPipe
+> infrastructure and has no eligible behavioral result. `confirmatory-v2.yaml`
+> keeps every behavioral input unchanged, routes output to a fresh Study and
+> project, and requires Fugue `c275dfa+` with durable-stream and fail-fast
+> repairs.
+
+`confirmatory-v1.yaml` froze the design without reinterpreting the four-cell
+canaries. `preregistration-confirmatory-v2-amendment.json` hashes that exact V1
+preregistration and changes only execution identity, result destination, and
+the minimum Fugue revision. The hypotheses, taskset, holdout membership,
+treatments, evaluators, model, harness, and decision rules remain frozen. The
+design contains eight scorer-development briefs and sixteen untouched holdouts
+across target, indirect-transfer, negative-transfer, ambiguous-evidence,
+safety, and repository-shape strata:
 
 ```text
 24 tasks × 2 exact Skill revisions × 4 repeated attempts = 192 cells
@@ -91,8 +102,8 @@ ambiguous-evidence, safety, and repository-shape strata:
 The logical task—not each repeated attempt—is the inferential unit. The
 preregistered task-cluster analysis, multiplicity correction, missing-data
 policy, trace-audit sample, decision rules, and claim limits are recorded in
-`preregistration-confirmatory-v1.json` before preview. Development tasks may
-validate the scorer but are excluded from the primary holdout effect.
+`preregistration-confirmatory-v1.json` before the original preview. Development
+tasks may validate the scorer but are excluded from the primary holdout effect.
 
 The deterministic V2 scorer uses host-only repository oracles. It verifies
 exact modification paths and inspected symbols, cross-component producer and
@@ -102,12 +113,12 @@ headings and rejects unsupported self-reports. The documentation-only holdout
 marks an invented code interface as negative transfer rather than requiring
 interface ceremony.
 
-There is intentionally no LLM judge in the confirmatory endpoint. The existing
-same-family synthetic calibration is not reviewer-qualified and Fugue correctly
-blocks Agent trials when any declared judge calibration fails. A later judge
-revision requires a reviewed calibration, a new scorer/spec digest, and a new
-preview. The frozen human trace audit is descriptive mechanism and validity
-evidence; it cannot override deterministic safety failures.
+The same-family LLM judge remains optional and advisory. Its synthetic
+calibration is not reviewer-qualified, so it cannot satisfy the confirmatory
+endpoint or override deterministic correctness and safety failures. A qualified
+judge revision would require reviewed calibration, a new scorer/spec digest,
+and a new preview. The frozen human trace audit is descriptive mechanism and
+validity evidence; it cannot override deterministic safety failures.
 
 Trusted preparation uses a local Git object only:
 
@@ -117,10 +128,11 @@ uv run python \
 
 uv run python \
   examples/comparisons/community-skill-upgrades/prepare_local_source_lock.py \
-  examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v1.yaml \
+  examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v2.yaml \
   --extra examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json \
+  --extra examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v2-amendment.json \
   --extra .fugue/comparison-resources/superpowers-writing-plans-conference-v1/preparation.receipt.json \
-  --output .fugue/qualification/community-skill-confirmatory/superpowers/source.lock.json
+  --output .fugue/qualification/community-skill-confirmatory/superpowers-v2/source.lock.json
 ```
 
 The first command verifies the exact source commit and tree, validates every
@@ -138,13 +150,13 @@ The source topology is public metadata in
 brief/resource digests, source tree/archive digests, and exact Skill commits.
 It contains no expected values and remains read-only during execution. All
 Agent traces, Evaluations, results, and decisions go to
-`wandb/fugue-superpowers-writing-plans-confirmatory-v1`. Mounted archives remain
+`wandb/fugue-superpowers-writing-plans-confirmatory-v2`. Mounted archives remain
 the actual locked task inputs; cells do not query the hosted source catalogue.
 
 Use the governed flow with the new identity:
 
 ```bash
-SPEC=examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v1.yaml
+SPEC=examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
@@ -159,6 +171,5 @@ The finite $1,700 ceiling is an admission guard, not a spending target. It
 covers the previously observed worst-case per-cell reservation while preserving
 an exact approval identity. The first cell remains an evidence checkpoint; the
 other 191 cells cannot start until its project, Agent/Evaluation/Dataset links,
-privacy scan, spend, and run-scoped Harbor cleanup reconcile. The dedicated
-read-only Study Console profile is `study-console-confirmatory-v1.yaml` on port
-`18089`.
+privacy scan, spend, and run-scoped Harbor cleanup reconcile. Use the dedicated
+read-only `study-console-confirmatory-v2.yaml` profile on port `18089`.

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import runpy
 from pathlib import Path
 
+import yaml
+
+from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import load_comparison
 
 EXAMPLE = Path("examples/comparisons/superpowers-writing-plans-upgrade")
@@ -23,10 +27,15 @@ DIMENSIONS = {
 V3_SCORER = EXAMPLE / "plan_quality_scorer.py"
 V3_PRIVATE = EXAMPLE / "private-labels-v3.jsonl"
 CONFIRMATORY = EXAMPLE / "confirmatory-v1.yaml"
+CONFIRMATORY_V2 = EXAMPLE / "confirmatory-v2.yaml"
 CONFIRMATORY_TASKS = EXAMPLE / "tasks-conference-v1.jsonl"
 CONFIRMATORY_PRIVATE = EXAMPLE / "private-labels-conference-v1.jsonl"
 CONFIRMATORY_SCORER = EXAMPLE / "plan_quality_scorer_v2.py"
 CONFIRMATORY_PREREGISTRATION = EXAMPLE / "preregistration-confirmatory-v1.json"
+CONFIRMATORY_V2_AMENDMENT = (
+    EXAMPLE / "preregistration-confirmatory-v2-amendment.json"
+)
+CONFIRMATORY_V2_CONSOLE = EXAMPLE / "study-console-confirmatory-v2.yaml"
 CONFIRMATORY_PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"
 CONFIRMATORY_DIMENSIONS = {
     "artifact_validity",
@@ -92,6 +101,25 @@ def _confirmatory_labels() -> dict[str, dict]:
             if line.strip()
         )
     }
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _behavioral_comparison_contract(path: Path) -> dict:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.pop("id")
+    execution = raw["execution"]
+    for field in (
+        "source_lock",
+        "evidence_project",
+        "evidence_destination",
+        "research_id",
+        "study_console_base_url",
+    ):
+        execution.pop(field)
+    return raw
 
 
 def _render_oracle_plan(expected: dict) -> str:
@@ -380,6 +408,91 @@ def test_confirmatory_design_locks_twenty_four_tasks_and_192_cells() -> None:
     }
     assert set(preregistration["design"]["holdout_task_ids"]) == {
         task["id"] for task in tasks if task["partition"] == "holdout"
+    }
+
+
+def test_confirmatory_v2_changes_only_execution_identity_after_cancelled_v1() -> None:
+    v1 = load_comparison(CONFIRMATORY, repo_root=Path.cwd())
+    v2 = load_comparison(CONFIRMATORY_V2, repo_root=Path.cwd())
+    tasks = [
+        json.loads(line)
+        for line in CONFIRMATORY_TASKS.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert v2.id == "superpowers-writing-plans-confirmatory-v2"
+    assert v2.execution.research_id == "superpowers-writing-plans-confirmatory-v2"
+    assert v2.execution.evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v2"
+    )
+    assert v2.execution.source_evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-source-v1"
+    )
+    assert v2.execution.source_evidence_destination == (
+        v1.execution.source_evidence_destination
+    )
+    assert v2.execution.source_lock == (
+        ".fugue/qualification/community-skill-confirmatory/"
+        "superpowers-v2/source.lock.json"
+    )
+    assert v2.execution.study_console_base_url == "http://127.0.0.1:18089"
+    assert _behavioral_comparison_contract(CONFIRMATORY_V2) == (
+        _behavioral_comparison_contract(CONFIRMATORY)
+    )
+    assert len(tasks) * 2 * v2.execution.attempts == 192
+
+
+def test_confirmatory_v2_amendment_and_console_preserve_v1_audit_lineage() -> None:
+    amendment = json.loads(CONFIRMATORY_V2_AMENDMENT.read_text(encoding="utf-8"))
+    unsigned = dict(amendment)
+    amendment_digest = unsigned.pop("amendment_digest")
+    frozen = amendment["frozen_behavioral_inputs"]
+    changes = amendment["changes"]
+    console = yaml.safe_load(CONFIRMATORY_V2_CONSOLE.read_text(encoding="utf-8"))
+
+    assert amendment_digest == stable_digest(unsigned)
+    assert amendment["prior_preregistration"] == {
+        "id": "superpowers-writing-plans-confirmatory-v1",
+        "path": (
+            "examples/comparisons/superpowers-writing-plans-upgrade/"
+            "preregistration-confirmatory-v1.json"
+        ),
+        "sha256": _sha256(CONFIRMATORY_PREREGISTRATION),
+    }
+    assert amendment["superseded_execution"] == {
+        "comparison_id": "superpowers-writing-plans-confirmatory-v1",
+        "run_id": "20260803T145545-4fdfb32be1",
+        "status": "cancelled",
+        "reason_code": "pty_broken_pipe_infrastructure",
+        "behavioral_result_eligible": False,
+    }
+    assert frozen["public_tasks_sha256"] == _sha256(CONFIRMATORY_TASKS)
+    assert frozen["private_labels_sha256"] == _sha256(CONFIRMATORY_PRIVATE)
+    assert frozen["deterministic_scorer_sha256"] == _sha256(CONFIRMATORY_SCORER)
+    assert frozen["tasks"] * frozen["arms"] * frozen["attempts_per_task_arm"] == (
+        frozen["planned_cells"]
+    ) == 192
+    assert all(
+        changes[field] is False
+        for field in (
+            "hypotheses",
+            "taskset",
+            "holdout_membership",
+            "private_expected_values",
+            "treatments",
+            "evaluators",
+            "model_or_harness",
+        )
+    )
+    assert changes["execution_identity"] is True
+    assert console["research"]["id"] == "superpowers-writing-plans-confirmatory-v2"
+    assert console["wandb"] == {
+        "entity": "wandb",
+        "project": "fugue-superpowers-writing-plans-confirmatory-v2",
+    }
+    assert console["presentation"] == {
+        "default_study_id": "superpowers-writing-plans-confirmatory-v2",
+        "read_only": True,
     }
 
 

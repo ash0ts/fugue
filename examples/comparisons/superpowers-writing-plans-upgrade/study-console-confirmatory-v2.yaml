@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: superpowers-writing-plans-confirmatory-v2
+  name: Superpowers Writing Plans Confirmatory Study V2
+  description: Infrastructure-only rerun of the frozen V1 behavioral design after PTY BrokenPipe cancellation.
+  objective: Estimate task-level paired behavior changes without treating repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-confirmatory-v2
+database: .study-console/superpowers-writing-plans-confirmatory-v2.sqlite3
+primary_metric:
+  name: holdout_task_level_paired_pass_delta
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-confirmatory-v2
+  read_only: true
