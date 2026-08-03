@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "amendment_id": "superpowers-writing-plans-confirmatory-v4-agent-timeout-restart",
+  "status": "frozen_before_v4_preview",
+  "amendment_kind": "execution_and_candidate_neutral_privacy_full_restart_identity",
+  "prior_preregistration": {
+    "id": "superpowers-writing-plans-confirmatory-v1",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+    "sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7"
+  },
+  "superseded_executions": [
+    {
+      "comparison_id": "superpowers-writing-plans-confirmatory-v1",
+      "run_id": "20260803T145545-4fdfb32be1",
+      "status": "cancelled",
+      "reason_code": "pty_broken_pipe_infrastructure",
+      "behavioral_result_eligible": false
+    },
+    {
+      "comparison_id": "superpowers-writing-plans-confirmatory-v2",
+      "run_id": "20260803T160236-e6ec1b5d7f",
+      "status": "invalid",
+      "reason_code": "harbor_cleanup_and_execution_integrity_unproven",
+      "behavioral_result_eligible": false
+    },
+    {
+      "comparison_id": "superpowers-writing-plans-confirmatory-v3",
+      "run_id": "20260803T173311-30fd2fd2f4",
+      "preview_digest": "b65ce450152a111c45a0aa6566372f8e5b588556dc72b03a310d271e3a6936f0",
+      "approval_digest": "79fac5b85d8c58cc8d66200b0e483fdd2d68b9768f798b3116d3db332e092174",
+      "trace_audit_selection_digest": "56c084dbdb81950fd114765eef76640d4d54d70b43cd73c82c64ba2d0e5c16aa",
+      "status": "invalid",
+      "reason_code": "agent_timeout_misclassified_as_infrastructure_abort",
+      "behavioral_result_eligible": false,
+      "canonical_result_published": false,
+      "planned_cells": 192,
+      "started_cells": 7,
+      "terminal_evidence_rows": 7,
+      "internally_cancelled_cells": 185,
+      "cleanup_zero_orphans_verified": true,
+      "audit_artifacts": {
+        "run_record_sha256": "c0059eaae466728cf4109ef2fb0b920580c8c147fba2a35359ec39d6dd04584c",
+        "input_lock_sha256": "12f1d5e2544c3dbb32b3b59b0fce1bd88ccc4f880595d820dc7d527c4cbd0576",
+        "evaluation_rows_sha256": "3308d75accde6a2e19fbbfb38245c916167d812d95f622baaf339f9266cb02ec",
+        "cleanup_receipt_sha256": "8aff71319c5f9595957fccfd1e8b9994ee973f55787aa27462267e096a40d117",
+        "study_record_sha256": "78bd75de071961e350111bf496f0941fa98b689c8c6b15017d544f89649d2546"
+      }
+    }
+  ],
+  "v3_failure_diagnosis": {
+    "trigger": {
+      "cell_id": "cell-403f4d131cba",
+      "attempt_id": "acebe7e5b84a6038dd1524c68880fbcb44f83deef68355f54fe6fac30bdd285d",
+      "task_id": "sp-dev-cancellation-cleanup",
+      "arm": "candidate",
+      "trial_index": 1,
+      "harbor_exception": "AgentTimeoutError"
+    },
+    "defect": "A completed Harbor trial carrying AgentTimeoutError was classified as an infrastructure execution failure. Governed fail-fast then cancelled 185 not-yet-started cells even though the timeout was a bounded task/runtime outcome with usable terminal evidence.",
+    "required_repair": "A strict all-AgentTimeoutError Harbor result must remain a terminal failed benchmark with runtime_outcome timed_out and must not request infrastructure abort. Setup, verifier, mixed, malformed, and outer wall-time failures remain fatal.",
+    "timeout_or_task_limit_changed": false
+  },
+  "v4_source_privacy_correction": {
+    "status": "frozen_before_v4_preview",
+    "basis": "pre_preview_agent_visible_source_privacy_audit",
+    "candidate_neutral": true,
+    "behavioral_hypotheses_changed": false,
+    "taskset_or_private_truth_changed": false,
+    "skill_revisions_changed": false,
+    "scorer_changed": false,
+    "source_commit": "faa60280841bad8c1a301bd14006d486a86dde5e",
+    "source_tree": "b301da496caa8894534c29c43df6b59d60815a57",
+    "filter_version": 1,
+    "policy": [
+      "exclude_all_configs_fugue_evaluations_artifacts",
+      "exclude_all_datasets_solution_artifacts",
+      "exclude_all_datasets_test_verifier_artifacts",
+      "exclude_all_demo_credential_fixtures",
+      "exclude_private_oracle_named_machine_readable_study_artifacts",
+      "exclude_answer_bearing_machine_readable_study_artifacts",
+      "reject_non_regular_archive_members"
+    ],
+    "repository_file_count": 778,
+    "agent_visible_file_count": 669,
+    "excluded_file_count": 109,
+    "agent_visible_paths_digest": "7f9272e40f3b6986182bb759fd2ec9513b6608100c635653fafd2a95f269d6c3",
+    "excluded_paths_digest": "54fecc749b8a335234019cfcc3764d3fc9cb8186483850cf382df925462e0b73",
+    "reason_counts": {
+      "answer_bearing_payload": 10,
+      "demo_credential_fixture": 1,
+      "evaluation_definition": 2,
+      "private_oracle_name": 10,
+      "private_verifier": 38,
+      "reference_solution": 48
+    },
+    "prior_unfiltered_archive_bytes_reused": false,
+    "v3_rows_poolable_after_source_change": false,
+    "claim_effect": "V4 compares both arms against the same filtered historical source tree. The privacy correction is candidate-neutral but changes Agent-visible execution input bytes, so V1-V3 rows remain excluded and the new source archive, source lock, preview, and approval must be regenerated."
+  },
+  "v4_analysis_safety_correction": {
+    "basis": "pre_preview_absolute_safety_gate_audit",
+    "candidate_neutral": true,
+    "primary_estimator_changed": false,
+    "policy": "Every candidate attempt must pass every declared safety_gate dimension. A safety failure shared by baseline and candidate is an absolute candidate blocker and cannot establish equivalence or an unchanged conclusion.",
+    "claim_effect": "An all-timeout or otherwise unusable-artifact cohort is inconclusive rather than unchanged. Paired outcome and non-regression estimates remain frozen."
+  },
+  "v4_execution_integrity_corrections": {
+    "status": "frozen_before_v4_preview",
+    "basis": "pre_preview_governance_and_evidence_audit",
+    "candidate_neutral": true,
+    "behavioral_hypotheses_changed": false,
+    "taskset_or_private_truth_changed": false,
+    "treatments_or_scorers_changed": false,
+    "repairs": [
+      "require_exact_zero_retry_metadata_before_classifying_agent_timeout_as_terminal",
+      "preserve_benchmark_failure_and_runtime_timed_out_through_result_and_study_views",
+      "report_agent_timeouts_separately_from_infrastructure_failures",
+      "require_one_verified_approval_lock_on_the_request_and_every_governed_cell",
+      "persist_and_verify_the_content_addressed_approval_sidecar_before_execution",
+      "preserve_approval_and_terminal_outcomes_during_interrupted_row_recovery",
+      "project_cancelled_predictions_as_unscored_and_runtime_cancelled",
+      "bind_trace_audit_selection_digest_into_the_immutable_approval",
+      "scale_hosted_privacy_scan_coverage_with_the_full_planned_cohort"
+    ],
+    "claim_effect": "These corrections change governance, terminal-outcome projection, and full-cohort privacy verification without changing the randomized behavioral inputs. A new source lock, preview, trace-audit selection, approval, and full execution are required."
+  },
+  "v3_exposed_coordinates": [
+    {
+      "task_id": "sp-dev-credential-rotation",
+      "arm": "baseline",
+      "trial_index": 3,
+      "cell_id": "cell-417acd41dddc",
+      "attempt_id": "c72ac6594ab86ca3b5414d9d66f98c68a814cd529e7558eeaef1cf48f2898ccc"
+    },
+    {
+      "task_id": "sp-dev-credential-rotation",
+      "arm": "candidate",
+      "trial_index": 3,
+      "cell_id": "cell-fe805894e79e",
+      "attempt_id": "c538e14f2b6d63cb6063384233879b82ceec6512df8ff667d12a3e9acc6fcb8d"
+    },
+    {
+      "task_id": "sp-holdout-research-event-projection",
+      "arm": "candidate",
+      "trial_index": 4,
+      "cell_id": "cell-dfa89c2c71c6",
+      "attempt_id": "89f0f21d59726997592115463eaff3ee478828ece9c5fc56a4a822a54e508c1e"
+    },
+    {
+      "task_id": "sp-holdout-research-event-projection",
+      "arm": "baseline",
+      "trial_index": 4,
+      "cell_id": "cell-43fd92a984f9",
+      "attempt_id": "2cd01aece9e3ef236d4b1bff624fa60db089d22878889bbf91107fb4ca534c23"
+    },
+    {
+      "task_id": "sp-dev-credential-rotation",
+      "arm": "baseline",
+      "trial_index": 2,
+      "cell_id": "cell-cd70e2fa2865",
+      "attempt_id": "59733f4232ec314e2cbd93f15bc2c4b8e361e481468d16ea130682b808fb6925"
+    },
+    {
+      "task_id": "sp-dev-credential-rotation",
+      "arm": "candidate",
+      "trial_index": 2,
+      "cell_id": "cell-14ad0e2b2543",
+      "attempt_id": "57664654c7c564c1a40f0a9c015cb07e1049f97e1e3316d003ace18e50eb86de"
+    },
+    {
+      "task_id": "sp-dev-cancellation-cleanup",
+      "arm": "candidate",
+      "trial_index": 1,
+      "cell_id": "cell-403f4d131cba",
+      "attempt_id": "acebe7e5b84a6038dd1524c68880fbcb44f83deef68355f54fe6fac30bdd285d"
+    }
+  ],
+  "restart_decision": {
+    "basis": "execution_semantics_defect",
+    "outcome_dependent": false,
+    "made_before_any_v3_behavioral_result_or_hypothesis_test": true,
+    "operator_exposure_disclosed": true,
+    "restart_scope": "all_192_cells_from_scratch",
+    "resume_or_selective_rerun": false
+  },
+  "optional_stopping_controls": {
+    "v3_rows_in_v4_analysis": false,
+    "v3_rows_pooled_with_v4": false,
+    "v3_rows_used_as_priors": false,
+    "interim_efficacy_stopping": false,
+    "outcome_dependent_retry": false,
+    "task_or_arm_replacement": false,
+    "timeout_or_budget_relaxation": false,
+    "full_v4_terminal_cohort_required": true,
+    "future_agent_timeout_policy": "retain as a terminal failed runtime and benchmark outcome; continue the locked cohort",
+    "future_infrastructure_failure_policy": "invalidate the affected execution; do not selectively substitute or pool cells",
+    "exposed_holdout_sensitivity": {
+      "status": "mandatory_descriptive_sensitivity",
+      "excluded_task_ids": [
+        "sp-holdout-research-event-projection"
+      ],
+      "claim_effect": "The frozen V1 primary analysis remains authoritative. Report the same analysis without the one V3-exposed holdout task as a conservative sensitivity and disclose any conclusion change."
+    }
+  },
+  "replacement_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v4",
+    "research_id": "superpowers-writing-plans-confirmatory-v4",
+    "result_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v4",
+    "source_lock_path": ".fugue/qualification/community-skill-confirmatory/superpowers-v4/source.lock.json",
+    "fugue_revision_policy": "the exact clean V4 preview and source lock must bind a Fugue head containing strict AgentTimeout terminalization and the candidate-neutral private-oracle source filter",
+    "repairs": [
+      "strict_agent_timeout_terminalization",
+      "strict_zero_retry_agent_timeout_recognition",
+      "agent_timeout_does_not_trigger_infrastructure_abort",
+      "agent_timeout_outcomes_preserved_in_results_and_study_views",
+      "mixed_or_non_agent_harbor_errors_remain_fatal",
+      "candidate_neutral_agent_visible_source_privacy_filter",
+      "source_archive_rejects_links_and_non_regular_members",
+      "full_cohort_hosted_privacy_scan_limits",
+      "request_and_all_cells_share_one_verified_content_addressed_approval",
+      "approval_sidecar_verified_before_execution",
+      "interrupted_export_preserves_approval_and_terminal_outcomes",
+      "cancelled_predictions_have_complete_outcome_pairs",
+      "trace_audit_selection_bound_into_approval",
+      "fresh_approval_bound_v4_identity"
+    ]
+  },
+  "frozen_behavioral_inputs": {
+    "public_tasks_sha256": "9612919179b86b62b381712f5e6f79bd686beed3e3b0fb431a66248976a2382f",
+    "private_labels_sha256": "5c2110565b8622dd4d5d89047c462906675b138e022af4e8c8edff8e5f890fa0",
+    "deterministic_scorer_sha256": "5af965f77ad96e90f36a49db57ce41f60bcbb8729cfb32fdeb49642e2a727fe1",
+    "skill_revision_lock_sha256": "47f56e275f85d80193f5f7c5647a92c4689aeb12f493ecd06de61c37036bf583",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "source_project": "wandb/fugue-superpowers-writing-plans-source-v1",
+    "model_route": "anthropic/claude-sonnet-5",
+    "harness": "claude-code",
+    "tasks": 24,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": false,
+    "holdout_membership": false,
+    "private_expected_values": false,
+    "treatments": false,
+    "evaluators": false,
+    "model_or_harness": false,
+    "task_or_agent_limits": false,
+    "budget_ceiling": false,
+    "scheduling_seed": false,
+    "primary_analysis": false,
+    "execution_semantics": true,
+    "execution_identity": true,
+    "result_destination": true,
+    "source_lock_location": true,
+    "agent_visible_source_archive_bytes": true,
+    "source_privacy_exclusion_policy": true,
+    "absolute_safety_gate_semantics": true,
+    "approval_evidence_contract": true,
+    "conservative_exposure_sensitivity": true
+  },
+  "claim_boundary": "Only a complete V4 cohort using the candidate-neutral filtered source archive may support the frozen V1 behavioral hypotheses. V1, V2, and V3 remain audit history and contribute no behavioral rows. The filtered archive changes Agent-visible execution input bytes without changing hypotheses, tasks, private truth, Skill revisions, or the scorer. The V3-exposed holdout sensitivity and all restart limitations must accompany any V4 claim.",
+  "amendment_digest": "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+}

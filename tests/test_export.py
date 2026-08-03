@@ -2801,6 +2801,8 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
     assert publication.failures == ()
     assert predictions[0].exit_count == 1
     assert predictions[0].output["status"] == "cancelled"
+    assert predictions[0].output["benchmark_outcome"] == "unscored"
+    assert predictions[0].output["runtime_outcome"] == "cancelled"
     assert predictions[0].output["trace_link_status"] == "cancelled"
     assert predictions[0].output["trace_link_reason"] == "operator cancellation"
     assert all(logger.failed is not None for logger in loggers)
@@ -2903,6 +2905,8 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
     assert not worker.is_alive()
     assert prediction.exit_count == 1
     assert prediction.output["status"] == "cancelled"
+    assert prediction.output["benchmark_outcome"] == "unscored"
+    assert prediction.output["runtime_outcome"] == "cancelled"
     assert prediction.output["trace_link_status"] == "cancelled"
     statuses = [
         json.loads(line)["status"]
@@ -3936,6 +3940,48 @@ def test_trial_row_separates_runtime_completion_from_task_outcome(
     failed["exception_info"] = {"exception_type": "AgentRuntimeError"}
     result_path.write_text(json.dumps(failed), encoding="utf-8")
     assert export._row_from_trial(result_path)["agent_runtime_completed"] is False
+
+
+def test_completed_evaluation_row_persists_runtime_and_benchmark_outcomes(
+    tmp_path: Path,
+) -> None:
+    cell = PlannedCell(
+        id="cell-timeout",
+        run_id="run-timeout",
+        run_name="timeout-study",
+        workload_id="harbor",
+        task_id="task-timeout",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-timeout",
+        candidate_id="candidate-timeout",
+        execution_fingerprint="execution-timeout",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "missing" / "result.json",
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+    )
+    outcome = CellOutcome(
+        cell_id=cell.id,
+        status="passed",
+        benchmark_outcome="failed",
+        runtime_outcome="timed_out",
+    )
+
+    row = export._completed_evaluation_row(
+        cell,
+        outcome,
+        export._planned_evaluation_row(cell),
+    )
+
+    assert row["status"] == "passed"
+    assert row["benchmark_outcome"] == "failed"
+    assert row["runtime_outcome"] == "timed_out"
 
 
 def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
@@ -5805,6 +5851,22 @@ def test_terminal_harness_install_failure_is_owned_by_adapter() -> None:
     assert event["recoverable"] is False
 
 
+def test_terminal_agent_timeout_is_owned_by_agent() -> None:
+    event = export._terminal_exception_event(
+        {
+            "exception_type": "AgentTimeoutError",
+            "exception_message": "Agent timed out after 900 seconds",
+            "exception_traceback": "fugue/runtime/invoke.py in invoke_agent",
+        }
+    )
+
+    assert event is not None
+    assert event["origin"] == "agent"
+    assert event["kind"] == "agent_timeout"
+    assert event["terminal"] is True
+    assert event["recoverable"] is False
+
+
 def test_error_events_merge_native_and_weave_occurrences_without_double_counting() -> (
     None
 ):
@@ -6246,7 +6308,9 @@ def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
         "attempt_identity": identity,
         "run_name": "skill-upgrade",
         "status": "interrupted",
+        "benchmark_outcome": "unscored",
         "runtime_outcome": "cancelled",
+        "approved_comparison_lock_digest": "f" * 64,
     }
 
     _merge_planned_cell_identities([trial, cell])
@@ -6257,7 +6321,9 @@ def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
     assert trial["attempt_id"] == "a" * 64
     assert trial["attempt_identity"] == identity
     assert trial["status"] == "interrupted"
+    assert trial["benchmark_outcome"] == "unscored"
     assert trial["runtime_outcome"] == "cancelled"
+    assert trial["approved_comparison_lock_digest"] == "f" * 64
     assert trial["planned_cell_identity_status"] == "reconciled"
 
 
@@ -6291,9 +6357,18 @@ def test_export_synthesizes_interrupted_trial_preserving_planned_identity(
             "candidate": "c" * 64,
             "runtime": "e" * 64,
         },
+        "approved_comparison_lock_digest": "f" * 64,
     }
     (jobs / "cells.jsonl").write_text(
-        json.dumps({**shared, "status": "interrupted"}) + "\n",
+        json.dumps(
+            {
+                **shared,
+                "status": "interrupted",
+                "benchmark_outcome": "unscored",
+                "runtime_outcome": "cancelled",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (jobs / "evaluation-results.jsonl").write_text(
@@ -6305,6 +6380,7 @@ def test_export_synthesizes_interrupted_trial_preserving_planned_identity(
                 "attempt_identity": None,
                 "candidate_id": "",
                 "execution_fingerprint": None,
+                "approved_comparison_lock_digest": "",
                 "status": "interrupted",
                 "runtime_outcome": "cancelled",
                 "comparison_evaluation_status": "unavailable",
@@ -6324,7 +6400,9 @@ def test_export_synthesizes_interrupted_trial_preserving_planned_identity(
     assert trials[0]["candidate_id"] == "c" * 64
     assert trials[0]["execution_fingerprint"] == "e" * 64
     assert trials[0]["status"] == "interrupted"
+    assert trials[0]["benchmark_outcome"] == "unscored"
     assert trials[0]["runtime_outcome"] == "cancelled"
+    assert trials[0]["approved_comparison_lock_digest"] == "f" * 64
     assert trials[0]["planned_cell_identity_status"] == (
         "synthesized_from_live_terminal"
     )

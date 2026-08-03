@@ -1454,6 +1454,8 @@ class LiveEvaluationCoordinator:
             {
                 "status": "cancelled",
                 "pass": None,
+                "benchmark_outcome": "unscored",
+                "runtime_outcome": "cancelled",
                 "trace_link_status": "cancelled",
                 "trace_link_error": None,
                 "trace_link_reason": reason,
@@ -1937,7 +1939,11 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "evaluation_rubrics": list(cell.evaluation_rubrics),
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
         **(
-            {"approved_comparison": cell.approved_comparison}
+            {
+                "approved_comparison_lock_digest": str(
+                    cell.approved_comparison.get("lock_digest") or ""
+                )
+            }
             if cell.approved_comparison
             else {}
         ),
@@ -1991,6 +1997,8 @@ def _completed_evaluation_row(
     for key, value in planned.items():
         row.setdefault(key, value)
     row["status"] = outcome.status
+    row["benchmark_outcome"] = outcome.benchmark_outcome
+    row["runtime_outcome"] = outcome.runtime_outcome
     for key in (
         "attempt_id",
         "attempt_identity",
@@ -2029,6 +2037,7 @@ def _completed_evaluation_row(
         "source_tree",
         "source_dirty_digest",
         "approved_comparison",
+        "approved_comparison_lock_digest",
     ):
         if key in planned:
             row[key] = planned[key]
@@ -2588,6 +2597,7 @@ _PLANNED_CELL_IDENTITY_FIELDS = (
     "variant_id",
     "model_provider",
     "model",
+    "approved_comparison_lock_digest",
 )
 
 
@@ -2707,7 +2717,12 @@ def _merge_planned_cell_identities(rows: list[dict[str, Any]]) -> None:
             row["task_name"] = task_id
         elif not task_name and task_id:
             row["task_name"] = task_id
-        for outcome_field in ("status", "runtime_outcome", "error"):
+        for outcome_field in (
+            "status",
+            "benchmark_outcome",
+            "runtime_outcome",
+            "error",
+        ):
             if row.get(outcome_field) in (None, "") and planned.get(
                 outcome_field
             ) not in (None, ""):
@@ -4130,6 +4145,8 @@ def _evaluation_output(
     return _drop_none(
         {
             "status": _outcome_status(row),
+            "benchmark_outcome": row.get("benchmark_outcome"),
+            "runtime_outcome": row.get("runtime_outcome"),
             "run_key": row.get("run_key"),
             "observed_conversation_id": next(iter(dict.fromkeys(conversations)), None),
             "planned_conversation_id": row.get("planned_conversation_id")
@@ -5819,7 +5836,9 @@ def _classify_error(
     text = " ".join(message.split())[:2_000]
     lowered = text.lower()
     tool = tool_name.lower()
-    if "context" in tool or "fugue-context" in lowered:
+    if "agenttimeouterror" in lowered:
+        origin, kind = "agent", "agent_timeout"
+    elif "context" in tool or "fugue-context" in lowered:
         origin, kind = "context_system", "context_failure"
     elif any(
         token in lowered

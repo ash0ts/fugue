@@ -122,6 +122,23 @@ def test_run_ids_are_immutable_and_unique() -> None:
     assert new_run_id() != new_run_id()
 
 
+def test_cell_records_content_address_the_approved_comparison() -> None:
+    approved = {
+        "lock_digest": "a" * 64,
+        "expected_cells": [{"large": "payload" * 1_000}],
+    }
+    cell = replace(
+        _cell("run-content-addressed", "cell"),
+        approved_comparison=approved,
+    )
+
+    record = cell.record("pending")
+
+    assert record["approved_comparison_lock_digest"] == "a" * 64
+    assert "approved_comparison" not in record
+    assert "expected_cells" not in json.dumps(record)
+
+
 def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:
     first = [_cell("run-a", name) for name in ("one", "two", "three", "four")]
     second = [_cell("run-b", name) for name in ("four", "three", "two", "one")]
@@ -191,6 +208,196 @@ def test_real_cell_fails_when_harbor_reports_trial_errors(
     assert outcome.status == "failed"
     assert outcome.error == "1 Harbor trial(s) errored"
     assert outcome.benchmark_outcome == "unscored"
+
+
+def test_agent_timeout_is_terminal_task_evidence_and_allows_next_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-agent-timeout"
+    timed_out = _cell(run_id, "agent-timeout")
+    passing = _cell(run_id, "after-agent-timeout")
+    timeout_path = tmp_path / timed_out.result_path
+    timeout_path.parent.mkdir(parents=True)
+    timeout_path.write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "stats": {
+                    "n_completed_trials": 1,
+                    "n_errored_trials": 1,
+                    "n_retries": 0,
+                    "n_cancelled_trials": 0,
+                    "n_running_trials": 0,
+                    "n_pending_trials": 0,
+                    "evals": {
+                        "agent__model__dataset": {
+                            "n_trials": 1,
+                            "n_errors": 1,
+                            "exception_stats": {
+                                "AgentTimeoutError": ["trial-timeout"]
+                            },
+                        }
+                    },
+                }
+            }
+        )
+    )
+    passing_path = tmp_path / passing.result_path
+    passing_path.parent.mkdir(parents=True, exist_ok=True)
+    passing_path.write_text(
+        json.dumps(
+            {
+                "stats": {
+                    "n_errored_trials": 0,
+                    "n_cancelled_trials": 0,
+                    "evals": {
+                        "agent__model__dataset": {
+                            "reward_stats": {"reward": {"1.0": ["trial-pass"]}}
+                        }
+                    },
+                }
+            }
+        )
+    )
+    started: list[str] = []
+
+    def run_cell(cell, *args, **kwargs):
+        started.append(cell.id)
+        return 0
+
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", run_cell)
+    internal_abort = threading.Event()
+
+    outcomes = execute_cells(
+        [timed_out, passing],
+        repo_root=tmp_path,
+        max_workers=1,
+        internal_abort_event=internal_abort,
+    )
+
+    assert started == [timed_out.id, passing.id]
+    assert internal_abort.is_set() is False
+    assert {
+        outcome.cell_id: (
+            outcome.status,
+            outcome.benchmark_outcome,
+            outcome.runtime_outcome,
+            outcome.reward,
+        )
+        for outcome in outcomes
+    } == {
+        timed_out.id: ("passed", "failed", "timed_out", None),
+        passing.id: ("passed", "passed", "completed", 1.0),
+    }
+    records = {
+        row["cell_id"]: row
+        for row in latest_cell_records(
+            tmp_path / ".fugue/runtime/run-agent-timeout/cells.jsonl"
+        )
+    }
+    assert records[timed_out.id]["status"] == "passed"
+    assert records[timed_out.id]["benchmark_outcome"] == "failed"
+    assert records[timed_out.id]["runtime_outcome"] == "timed_out"
+    assert records[timed_out.id]["error"] is None
+
+
+@pytest.mark.parametrize(
+    ("stats_update", "reported_total"),
+    (
+        ({"n_completed_trials": 0}, 1),
+        ({"n_running_trials": 1}, 1),
+        ({"n_retries": 1}, 1),
+        ({"n_retries": None}, 1),
+        ({"n_completed_trials": "1"}, 1),
+        ({"n_errored_trials": True}, 1),
+        ({"n_cancelled_trials": False}, 1),
+        ({"n_total_trials": 2}, 1),
+        ({"n_total_trials": "1"}, 1),
+        (
+            {
+                "evals": {
+                    "agent__model__dataset": {
+                        "n_trials": True,
+                        "n_errors": 1,
+                        "exception_stats": {
+                            "AgentTimeoutError": ["trial-timeout"]
+                        },
+                    }
+                }
+            },
+            1,
+        ),
+        (
+            {
+                "evals": {
+                    "agent__model__dataset": {
+                        "n_trials": 1,
+                        "n_errors": 1,
+                        "exception_stats": {
+                            "VerifierTimeoutError": ["trial-timeout"]
+                        },
+                    }
+                }
+            },
+            1,
+        ),
+        (
+            {
+                "evals": {
+                    "agent__model__dataset": {
+                        "n_trials": 1,
+                        "n_errors": 1,
+                        "exception_stats": {
+                            "AgentTimeoutError": ["trial-timeout"],
+                            "RuntimeError": ["trial-other"],
+                        },
+                    }
+                }
+            },
+            1,
+        ),
+        ({}, None),
+        ({}, 2),
+    ),
+)
+def test_agent_timeout_classification_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stats_update: dict,
+    reported_total: int | None,
+) -> None:
+    cell = _cell("run-malformed-agent-timeout", "agent-timeout")
+    stats = {
+        "n_completed_trials": 1,
+        "n_errored_trials": 1,
+        "n_retries": 0,
+        "n_cancelled_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "evals": {
+            "agent__model__dataset": {
+                "n_trials": 1,
+                "n_errors": 1,
+                "exception_stats": {"AgentTimeoutError": ["trial-timeout"]},
+            }
+        },
+    }
+    stats.update(stats_update)
+    result_path = tmp_path / cell.result_path
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps({"n_total_trials": reported_total, "stats": stats})
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution._run_cell_process", lambda *args, **kwargs: 0
+    )
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "failed"
+    assert outcome.benchmark_outcome == "unscored"
+    assert outcome.runtime_outcome == "completed"
+    assert outcome.error == "1 Harbor trial(s) errored"
 
 
 @pytest.mark.parametrize(

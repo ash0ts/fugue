@@ -12,7 +12,7 @@ import hashlib
 import io
 import json
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from prepare_sources import DECLARATION, _source_record
 from zero_model_conformance import run_conformance
@@ -45,6 +45,60 @@ _REFERENCE = """\
 Inputs are local and immutable. Do not install packages, contact the network,
 or serialize credentials. Treat unavailable evidence as unavailable, not zero.
 """
+
+_CONFIRMATORY_TASK_IDS = (
+    "as-dev-create-platform-bound-skill",
+    "as-dev-preserve-runtime-metadata",
+    "as-dev-repair-runtime-metadata",
+    "as-dev-mandated-name-alpha",
+    "as-dev-mandated-name-beta",
+    "as-dev-no-platform-requirement",
+    "as-dev-repair-unknown-metadata",
+    "as-dev-init-help-diagnosis",
+    "as-holdout-system-package-bound",
+    "as-holdout-product-version-bound",
+    "as-holdout-offline-platform-bound",
+    "as-holdout-update-add-platform-requirements",
+    "as-holdout-preserve-license-metadata",
+    "as-holdout-preserve-allowed-tools",
+    "as-holdout-existing-metadata-audit",
+    "as-holdout-runtime-metadata-repair",
+    "as-holdout-metadata-boundary-alpha",
+    "as-holdout-metadata-boundary-beta",
+    "as-holdout-mandated-name-gamma",
+    "as-holdout-mandated-name-delta",
+    "as-holdout-mandated-name-epsilon",
+    "as-holdout-mandated-name-zeta",
+    "as-holdout-generic-runtime-skill",
+    "as-holdout-repair-unknown-metadata",
+)
+
+_EMPTY_WORKSPACE_TASK_IDS = frozenset(
+    {
+        "as-dev-create-platform-bound-skill",
+        "as-dev-mandated-name-alpha",
+        "as-dev-mandated-name-beta",
+        "as-dev-no-platform-requirement",
+        "as-holdout-system-package-bound",
+        "as-holdout-product-version-bound",
+        "as-holdout-offline-platform-bound",
+        "as-holdout-mandated-name-gamma",
+        "as-holdout-mandated-name-delta",
+        "as-holdout-mandated-name-epsilon",
+        "as-holdout-mandated-name-zeta",
+        "as-holdout-generic-runtime-skill",
+    }
+)
+
+_PRIVATE_ORACLE_PATH_MARKERS = (
+    "answer-key",
+    "expected-output",
+    "gold-output",
+    "oracle",
+    "private-label",
+    "scorer",
+    "validator",
+)
 
 
 def _skill(
@@ -166,13 +220,50 @@ def _initial_files(task_id: str) -> dict[str, str]:
             ),
         },
     }
-    return cases.get(task_id, {})
+    if task_id in cases:
+        return dict(cases[task_id])
+    if task_id in _EMPTY_WORKSPACE_TASK_IDS:
+        return {}
+    raise RuntimeError(f"unknown confirmatory task archive input: {task_id}")
 
 
-def _archive(path: Path, files: dict[str, str]) -> dict[str, object]:
-    entries = {"README.md": "# Immutable task workspace\n\nWork only in this extracted tree.\n"}
-    entries.update(files)
-    with tarfile.open(path, "w") as archive:
+def _validated_archive_files(files: dict[str, str]) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    casefolded: set[str] = {"readme.md"}
+    for raw_path, content in files.items():
+        if not isinstance(raw_path, str) or not isinstance(content, str):
+            raise RuntimeError("task archive paths and contents must be strings")
+        relative = PurePosixPath(raw_path)
+        if (
+            not raw_path
+            or "\\" in raw_path
+            or relative.is_absolute()
+            or raw_path != relative.as_posix()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise RuntimeError(f"unsafe task archive path: {raw_path}")
+        folded = relative.as_posix().casefold()
+        marker_form = folded.replace("_", "-")
+        if folded in casefolded:
+            raise RuntimeError(f"colliding task archive path: {raw_path}")
+        if any(marker in marker_form for marker in _PRIVATE_ORACLE_PATH_MARKERS):
+            raise RuntimeError(f"private or evaluator path in task archive: {raw_path}")
+        casefolded.add(folded)
+        entries[relative.as_posix()] = content
+    return entries
+
+
+def _archive(
+    path: Path,
+    files: dict[str, str],
+    *,
+    receipt_root: Path | None = None,
+) -> dict[str, object]:
+    entries = {
+        "README.md": "# Immutable task workspace\n\nWork only in this extracted tree.\n"
+    }
+    entries.update(_validated_archive_files(files))
+    with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
         for relative, content in sorted(entries.items()):
             payload = content.encode()
             info = tarfile.TarInfo((Path("workspace") / relative).as_posix())
@@ -184,8 +275,13 @@ def _archive(path: Path, files: dict[str, str]) -> dict[str, object]:
             info.mtime = 0
             info.mode = 0o644
             archive.addfile(info, io.BytesIO(payload))
+    root = receipt_root or path.parent
+    try:
+        display_path = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as exc:
+        raise RuntimeError("task archive is outside its receipt root") from exc
     return {
-        "archive": path.as_posix(),
+        "archive": display_path,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "file_count": len(entries),
         "paths_digest": hashlib.sha256(
@@ -234,11 +330,20 @@ def prepare(anthropic_repo: Path, output: Path) -> dict[str, object]:
         for line in TASKS.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    task_ids = tuple(str(task.get("id") or "") for task in task_rows)
+    if task_ids != _CONFIRMATORY_TASK_IDS:
+        raise RuntimeError(
+            "public confirmatory task IDs or order differ from the frozen archive map"
+        )
     archives: list[dict[str, object]] = []
     for task in task_rows:
         task_id = str(task["id"])
         path = task_output / f"{task_id}.tar"
-        record = _archive(path, _initial_files(task_id))
+        record = _archive(
+            path,
+            _initial_files(task_id),
+            receipt_root=output,
+        )
         record["task_id"] = task_id
         archives.append(record)
 

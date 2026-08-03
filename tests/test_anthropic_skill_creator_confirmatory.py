@@ -8,6 +8,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+import pytest
+
 from fugue.bench.comparison import load_comparison
 
 EXAMPLE = Path("examples/comparisons/anthropic-skill-creator-upgrade")
@@ -307,6 +309,104 @@ def test_confirmatory_archives_are_deterministic_and_contain_no_validator(
         paths = archive.getnames()
     assert not any("validate" in path.lower() for path in paths)
     assert paths == sorted(paths)
+
+
+def test_confirmatory_archive_map_is_exhaustive_and_unknown_ids_fail() -> None:
+    prepare = _module("anthropic_prepare_archive_map", EXAMPLE / "prepare_confirmatory.py")
+    task_ids = tuple(row["id"] for row in _jsonl(TASKS))
+
+    assert task_ids == prepare._CONFIRMATORY_TASK_IDS
+    for task_id in task_ids:
+        assert isinstance(prepare._initial_files(task_id), dict)
+    with pytest.raises(RuntimeError, match="unknown confirmatory task"):
+        prepare._initial_files("as-holdout-unreviewed-new-task")
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "../confirmatory-private-labels.jsonl",
+        "/tmp/answer-key.json",
+        "nested\\oracle.json",
+        "README.md",
+        "nested/validator.py",
+    ),
+)
+def test_confirmatory_archive_rejects_unsafe_or_private_paths(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    prepare = _module(
+        "anthropic_prepare_unsafe_archive", EXAMPLE / "prepare_confirmatory.py"
+    )
+
+    with pytest.raises(RuntimeError, match="archive path|evaluator path"):
+        prepare._archive(tmp_path / "unsafe.tar", {relative: "private"})
+
+
+def test_confirmatory_archive_receipts_are_checkout_path_portable(
+    tmp_path: Path,
+) -> None:
+    prepare = _module(
+        "anthropic_prepare_portable_archive", EXAMPLE / "prepare_confirmatory.py"
+    )
+    first_root = tmp_path / "clone-one" / "prepared"
+    second_root = tmp_path / "clone-two" / "prepared"
+    first_path = first_root / "confirmatory" / "task.tar"
+    second_path = second_root / "confirmatory" / "task.tar"
+    first_path.parent.mkdir(parents=True)
+    second_path.parent.mkdir(parents=True)
+    files = prepare._initial_files("as-holdout-runtime-metadata-repair")
+
+    first = prepare._archive(first_path, files, receipt_root=first_root)
+    second = prepare._archive(second_path, files, receipt_root=second_root)
+
+    assert first_path.read_bytes() == second_path.read_bytes()
+    assert first == second
+    assert first["archive"] == "confirmatory/task.tar"
+
+
+def test_confirmatory_archives_do_not_contain_changed_private_gold_bodies(
+    tmp_path: Path,
+) -> None:
+    prepare = _module(
+        "anthropic_prepare_private_boundary", EXAMPLE / "prepare_confirmatory.py"
+    )
+    labels = _labels()
+    for task_id in prepare._CONFIRMATORY_TASK_IDS:
+        path = tmp_path / f"{task_id}.tar"
+        prepare._archive(path, prepare._initial_files(task_id))
+        with tarfile.open(path) as archive:
+            members = archive.getmembers()
+            assert all(member.isfile() for member in members)
+            assert all(
+                member.name.startswith("workspace/")
+                and not Path(member.name).is_absolute()
+                and ".." not in Path(member.name).parts
+                for member in members
+            )
+            payload = b"\n".join(
+                archive.extractfile(member).read()  # type: ignore[union-attr]
+                for member in members
+            )
+        label = labels[task_id]
+        base_files = label["base_output"].get("files", {})
+        for relative, gold_body in label["gold_output"].get("files", {}).items():
+            if gold_body != base_files.get(relative):
+                assert gold_body.encode() not in payload
+
+
+def test_source_lock_recipe_binds_preparation_and_conformance_code() -> None:
+    readme = (EXAMPLE / "README.md").read_text(encoding="utf-8")
+    for name in (
+        "prepare_confirmatory.py",
+        "prepare_sources.py",
+        "zero_model_conformance.py",
+    ):
+        assert (
+            "--extra examples/comparisons/anthropic-skill-creator-upgrade/" + name
+            in readme
+        )
 
 
 def test_zero_model_matrix_and_preregistered_digests_are_frozen() -> None:

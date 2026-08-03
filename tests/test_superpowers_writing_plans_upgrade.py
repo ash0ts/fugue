@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import runpy
+import tarfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from fugue.bench.candidates import stable_digest
@@ -29,6 +31,7 @@ V3_PRIVATE = EXAMPLE / "private-labels-v3.jsonl"
 CONFIRMATORY = EXAMPLE / "confirmatory-v1.yaml"
 CONFIRMATORY_V2 = EXAMPLE / "confirmatory-v2.yaml"
 CONFIRMATORY_V3 = EXAMPLE / "confirmatory-v3.yaml"
+CONFIRMATORY_V4 = EXAMPLE / "confirmatory-v4.yaml"
 CONFIRMATORY_TASKS = EXAMPLE / "tasks-conference-v1.jsonl"
 CONFIRMATORY_PRIVATE = EXAMPLE / "private-labels-conference-v1.jsonl"
 CONFIRMATORY_SCORER = EXAMPLE / "plan_quality_scorer_v2.py"
@@ -41,6 +44,8 @@ CONFIRMATORY_V3_AMENDMENT = (
     EXAMPLE / "preregistration-confirmatory-v3-amendment.json"
 )
 CONFIRMATORY_V3_CONSOLE = EXAMPLE / "study-console-confirmatory-v3.yaml"
+CONFIRMATORY_V4_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v4-amendment.json"
+CONFIRMATORY_V4_CONSOLE = EXAMPLE / "study-console-confirmatory-v4.yaml"
 CONFIRMATORY_PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"
 CONFIRMATORY_DIMENSIONS = {
     "artifact_validity",
@@ -565,6 +570,144 @@ def test_confirmatory_v3_freezes_integrity_rerun_without_behavioral_drift() -> N
     }
 
 
+def test_confirmatory_v4_freezes_full_restart_without_behavioral_drift() -> None:
+    v1_raw = yaml.safe_load(CONFIRMATORY.read_text(encoding="utf-8"))
+    v4_raw = yaml.safe_load(CONFIRMATORY_V4.read_text(encoding="utf-8"))
+    v4 = load_comparison(CONFIRMATORY_V4, repo_root=Path.cwd())
+    amendment = json.loads(CONFIRMATORY_V4_AMENDMENT.read_text(encoding="utf-8"))
+    unsigned = dict(amendment)
+    amendment_digest = unsigned.pop("amendment_digest")
+    console = yaml.safe_load(CONFIRMATORY_V4_CONSOLE.read_text(encoding="utf-8"))
+
+    for field in (
+        "question",
+        "taskset",
+        "baseline",
+        "candidate",
+        "changed",
+        "evaluators",
+    ):
+        assert v4_raw[field] == v1_raw[field]
+    assert v4.id == "superpowers-writing-plans-confirmatory-v4"
+    assert v4.execution.research_id == v4.id
+    assert v4.execution.evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v4"
+    )
+    assert v4.execution.source_lock == (
+        ".fugue/qualification/community-skill-confirmatory/"
+        "superpowers-v4/source.lock.json"
+    )
+    assert v4.execution.study_console_base_url == "http://127.0.0.1:18102"
+    assert v4.execution.attempts == 4
+    assert v4.execution.max_cost_usd == 1700
+    assert v4.execution.reserve_per_attempt_usd == 8.4
+    assert v4.execution.scheduling_seed == (
+        "community-skill-upgrade-confirmatory-campaign-v1"
+    )
+    assert set(v4.execution.qualification_inputs) == {
+        "confirmatory_analysis_profile_sha256",
+        "confirmatory_analyzer_sha256",
+        "campaign_preregistration_sha256",
+        "campaign_manifest_sha256",
+        "repository_preregistration_sha256",
+        "repository_amendment_sha256",
+        "source_preparer_sha256",
+    }
+    assert v4.execution.qualification_inputs["confirmatory_analyzer_sha256"] == (
+        "examples/comparisons/community-skill-upgrades/analyze_confirmatory.py"
+    )
+    assert v4.execution.qualification_inputs["source_preparer_sha256"] == (
+        "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "prepare_confirmatory_sources.py"
+    )
+
+    assert amendment_digest == stable_digest(unsigned)
+    assert amendment["replacement_execution"]["comparison_id"] == v4.id
+    assert amendment["replacement_execution"]["result_project"] == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v4"
+    )
+    assert [item["comparison_id"] for item in amendment["superseded_executions"]] == [
+        "superpowers-writing-plans-confirmatory-v1",
+        "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3",
+    ]
+    v3 = amendment["superseded_executions"][-1]
+    assert v3["preview_digest"] == (
+        "b65ce450152a111c45a0aa6566372f8e5b588556dc72b03a310d271e3a6936f0"
+    )
+    assert v3["started_cells"] == v3["terminal_evidence_rows"] == 7
+    assert v3["internally_cancelled_cells"] == 185
+    assert v3["canonical_result_published"] is False
+    assert v3["cleanup_zero_orphans_verified"] is True
+    exposed = amendment["v3_exposed_coordinates"]
+    assert len(exposed) == 7
+    assert len({item["attempt_id"] for item in exposed}) == 7
+    assert len({item["cell_id"] for item in exposed}) == 7
+    assert all(len(item["attempt_id"]) == 64 for item in exposed)
+    assert amendment["restart_decision"] == {
+        "basis": "execution_semantics_defect",
+        "outcome_dependent": False,
+        "made_before_any_v3_behavioral_result_or_hypothesis_test": True,
+        "operator_exposure_disclosed": True,
+        "restart_scope": "all_192_cells_from_scratch",
+        "resume_or_selective_rerun": False,
+    }
+    controls = amendment["optional_stopping_controls"]
+    assert controls["v3_rows_in_v4_analysis"] is False
+    assert controls["v3_rows_pooled_with_v4"] is False
+    assert controls["interim_efficacy_stopping"] is False
+    assert controls["outcome_dependent_retry"] is False
+    assert controls["full_v4_terminal_cohort_required"] is True
+    assert controls["exposed_holdout_sensitivity"]["excluded_task_ids"] == [
+        "sp-holdout-research-event-projection"
+    ]
+    privacy = amendment["v4_source_privacy_correction"]
+    assert privacy["candidate_neutral"] is True
+    assert privacy["behavioral_hypotheses_changed"] is False
+    assert privacy["taskset_or_private_truth_changed"] is False
+    assert privacy["skill_revisions_changed"] is False
+    assert privacy["scorer_changed"] is False
+    assert privacy["repository_file_count"] == 778
+    assert privacy["agent_visible_file_count"] == 669
+    assert privacy["excluded_file_count"] == 109
+    assert privacy["agent_visible_paths_digest"] == (
+        "7f9272e40f3b6986182bb759fd2ec9513b6608100c635653fafd2a95f269d6c3"
+    )
+    assert privacy["excluded_paths_digest"] == (
+        "54fecc749b8a335234019cfcc3764d3fc9cb8186483850cf382df925462e0b73"
+    )
+    assert sum(privacy["reason_counts"].values()) == privacy["excluded_file_count"]
+    assert privacy["prior_unfiltered_archive_bytes_reused"] is False
+    assert privacy["v3_rows_poolable_after_source_change"] is False
+    assert all(
+        amendment["changes"][field] is False
+        for field in (
+            "hypotheses",
+            "taskset",
+            "holdout_membership",
+            "private_expected_values",
+            "treatments",
+            "evaluators",
+            "model_or_harness",
+            "task_or_agent_limits",
+            "budget_ceiling",
+            "scheduling_seed",
+            "primary_analysis",
+        )
+    )
+    assert amendment["changes"]["agent_visible_source_archive_bytes"] is True
+    assert amendment["changes"]["source_privacy_exclusion_policy"] is True
+    assert console["research"]["id"] == v4.id
+    assert console["wandb"] == {
+        "entity": "wandb",
+        "project": "fugue-superpowers-writing-plans-confirmatory-v4",
+    }
+    assert console["presentation"] == {
+        "default_study_id": v4.id,
+        "read_only": True,
+    }
+
+
 def test_confirmatory_prompts_are_natural_and_keep_oracles_private() -> None:
     tasks = [
         json.loads(line)
@@ -647,7 +790,7 @@ def test_confirmatory_non_applicable_interface_penalizes_invented_api() -> None:
 def test_confirmatory_preparation_verifies_full_tree_and_private_oracles() -> None:
     preparer = runpy.run_path(CONFIRMATORY_PREPARER.as_posix())
     tasks, labels = preparer["_validate_design"]()
-    source_paths = set(
+    repository_paths = set(
         preparer["_git"](
             "ls-tree",
             "-r",
@@ -655,6 +798,7 @@ def test_confirmatory_preparation_verifies_full_tree_and_private_oracles() -> No
             preparer["SOURCE_COMMIT"],
         ).splitlines()
     )
+    source_paths, excluded = preparer["_partition_source_paths"](repository_paths)
 
     preparer["_validate_private_oracles"](labels, source_paths=source_paths)
 
@@ -663,5 +807,114 @@ def test_confirmatory_preparation_verifies_full_tree_and_private_oracles() -> No
     assert len(tasks) == len(labels) == 24
     assert not any(
         path.startswith("examples/comparisons/superpowers-writing-plans-upgrade/")
-        for path in source_paths
+        for path in repository_paths
     )
+    required_paths = {
+        path
+        for label in labels
+        for path in label["expected"]["allowed_paths"]
+    }
+    assert required_paths <= source_paths
+    assert source_paths | excluded.keys() == repository_paths
+    assert not source_paths & excluded.keys()
+
+
+def test_confirmatory_source_archive_excludes_every_private_evaluation_artifact(
+    tmp_path: Path,
+) -> None:
+    preparer = runpy.run_path(CONFIRMATORY_PREPARER.as_posix())
+    repository_paths = set(
+        preparer["_git"](
+            "ls-tree",
+            "-r",
+            "--name-only",
+            preparer["SOURCE_COMMIT"],
+        ).splitlines()
+    )
+    source_paths, excluded = preparer["_partition_source_paths"](repository_paths)
+    archive = tmp_path / "filtered-source.tar"
+
+    preparer["_write_filtered_archive"](archive, source_paths=source_paths)
+
+    with tarfile.open(archive, mode="r:") as handle:
+        archived = {
+            member.name.removeprefix("repo/")
+            for member in handle.getmembers()
+            if member.isfile() or member.issym()
+        }
+    assert archived == source_paths
+    assert not archived & excluded.keys()
+    assert "schemas/fugue/providers/private-evaluation-bundle-v1.schema.json" in (
+        archived
+    )
+    assert "tests/fixtures/experiment-view-v3-study-console-golden.json" in archived
+
+    expected_private_artifacts = {
+        "configs/fugue/evaluations/skillsbench-pdf-v1/cases.jsonl",
+        "configs/fugue/evaluations/skillsbench-pdf-v1/rubric.yaml",
+        "datasets/enterprise-evidence-use-v1.yaml",
+        "datasets/fugue-self-eval/maintainer-dev.yaml",
+        "datasets/fugue-self-eval/maintainer-holdout.yaml",
+        "datasets/fugue-self-eval/v1/maintainer/"
+        "fugue-maintainer-candidate-identity/solution/solve.sh",
+        "datasets/enterprise-evidence-use-v1/expense-policy-limit/tests/test.sh",
+        "datasets/prompt-injection-action-gate-v1/poisoned-repository/"
+        "environment/repository/.demo_credentials/api_token",
+        "examples/comparisons/source-use-replay/attempts.jsonl",
+        "examples/comparisons/source-use-replay/private-labels.jsonl",
+        "examples/comparisons/wandb-mcp-maintenance/"
+        "judge-calibration-cases.jsonl",
+        "examples/comparisons/wandb-mcp-maintenance/"
+        "natural-maintainer-canary-private.jsonl",
+        "examples/comparisons/wandb-mcp-maintenance/"
+        "tool-surface-confirmation-private-v8.jsonl",
+        "fugue/resources/source-use-replay/attempts.jsonl",
+        "fugue/resources/source-use-replay/private-labels.jsonl",
+    }
+    assert expected_private_artifacts <= excluded.keys()
+    assert all(excluded[path] for path in expected_private_artifacts)
+    assert not any(
+        path.startswith("datasets/") and "/solution/" in path
+        for path in archived
+    )
+    assert not any(
+        path.startswith("datasets/") and "/tests/" in path for path in archived
+    )
+    assert not any("/.demo_credentials/" in f"/{path}" for path in archived)
+    assert excluded[
+        "datasets/prompt-injection-action-gate-v1/poisoned-repository/"
+        "environment/repository/.demo_credentials/api_token"
+    ] == "demo_credential_fixture"
+
+
+def test_confirmatory_filtered_archive_is_content_addressed_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    preparer = runpy.run_path(CONFIRMATORY_PREPARER.as_posix())
+    paths = {"README.md", "fugue/__init__.py", "tests/test_library.py"}
+    first = tmp_path / "first.tar"
+    second = tmp_path / "second.tar"
+
+    preparer["_write_filtered_archive"](first, source_paths=paths)
+    preparer["_write_filtered_archive"](second, source_paths=paths)
+
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_confirmatory_archive_rejects_symlink_members(tmp_path: Path) -> None:
+    preparer = runpy.run_path(CONFIRMATORY_PREPARER.as_posix())
+    archive = tmp_path / "unsafe.tar"
+    with tarfile.open(archive, mode="w:") as handle:
+        root = tarfile.TarInfo("repo/")
+        root.type = tarfile.DIRTYPE
+        handle.addfile(root)
+        link = tarfile.TarInfo("repo/source.py")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../private-labels.jsonl"
+        handle.addfile(link)
+
+    with pytest.raises(RuntimeError, match="did not verify"):
+        preparer["_verify_filtered_archive"](
+            archive,
+            source_paths={"source.py"},
+        )

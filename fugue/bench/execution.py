@@ -144,7 +144,11 @@ class PlannedCell:
             "source_dirty_digest": self.source_dirty_digest or None,
             "integration_provenance": list(self.integration_provenance),
             **(
-                {"approved_comparison": self.approved_comparison}
+                {
+                    "approved_comparison_lock_digest": str(
+                        self.approved_comparison.get("lock_digest") or ""
+                    )
+                }
                 if self.approved_comparison
                 else {}
             ),
@@ -169,6 +173,7 @@ class _HarborJobResult:
     error: str | None
     benchmark_outcome: BenchmarkOutcome
     reward: float | None = None
+    runtime_outcome: RuntimeOutcome = "completed"
 
 
 class _CellWallTimeExceeded(RuntimeError):
@@ -610,7 +615,9 @@ def execute_cells(
                 benchmark_outcome=harbor_result.benchmark_outcome,
                 reward=harbor_result.reward,
                 runtime_outcome=(
-                    "cancelled" if status == "cancelled" else "completed"
+                    "cancelled"
+                    if status == "cancelled"
+                    else harbor_result.runtime_outcome
                 ),
             )
         except _CellWallTimeExceeded as exc:
@@ -860,6 +867,21 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
     if errored:
+        if _all_harbor_errors_are_agent_timeouts(
+            stats,
+            expected_trials=cell.n_attempts,
+            reported_total=result.get("n_total_trials"),
+        ):
+            # A bounded Agent timeout is a task/runtime outcome, not a Harbor
+            # infrastructure failure.  Preserve it as a failed benchmark row
+            # and let the governed cohort continue; the exported attempt still
+            # carries AgentTimeoutError and the partial trace for analysis.
+            return _HarborJobResult(
+                None,
+                "failed",
+                None,
+                runtime_outcome="timed_out",
+            )
         return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
         return _HarborJobResult(
@@ -897,6 +919,105 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         None,
         "passed" if reward == 1.0 else "failed",
         reward,
+    )
+
+
+def _all_harbor_errors_are_agent_timeouts(
+    stats: Mapping[str, Any],
+    *,
+    expected_trials: int,
+    reported_total: Any,
+) -> bool:
+    """Recognize a complete cell whose only terminal error was Agent timeout.
+
+    Harbor uses the same errored-trial counter for bounded Agent timeouts and
+    infrastructure failures.  Only the former is an expected experimental
+    outcome.  Fail closed unless the result accounts for every planned trial,
+    every exception is exactly ``AgentTimeoutError``, and no trial is missing
+    or duplicated across evaluation summaries.
+    """
+
+    if (
+        not isinstance(reported_total, int)
+        or isinstance(reported_total, bool)
+        or reported_total != expected_trials
+    ):
+        return False
+    counter_names = (
+        "n_errored_trials",
+        "n_completed_trials",
+        "n_retries",
+        "n_cancelled_trials",
+        "n_running_trials",
+        "n_pending_trials",
+    )
+    counters: dict[str, int] = {}
+    for name in counter_names:
+        value = stats.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+        counters[name] = value
+    errored = counters["n_errored_trials"]
+    completed = counters["n_completed_trials"]
+    raw_total = stats.get("n_total_trials")
+    if raw_total is not None and (
+        isinstance(raw_total, bool)
+        or not isinstance(raw_total, int)
+        or raw_total < 0
+    ):
+        return False
+    total = raw_total
+    if (
+        expected_trials < 1
+        or errored != expected_trials
+        or completed != expected_trials
+        or (total is not None and total != expected_trials)
+        or counters["n_retries"] != 0
+        or counters["n_cancelled_trials"] != 0
+        or counters["n_running_trials"] != 0
+        or counters["n_pending_trials"] != 0
+    ):
+        return False
+    evaluations = stats.get("evals")
+    if not isinstance(evaluations, Mapping) or not evaluations:
+        return False
+    timed_out_trials: set[str] = set()
+    evaluation_trial_count = 0
+    evaluation_error_count = 0
+    for raw_evaluation in evaluations.values():
+        if not isinstance(raw_evaluation, Mapping):
+            return False
+        raw_trial_count = raw_evaluation.get("n_trials")
+        raw_error_count = raw_evaluation.get("n_errors")
+        if (
+            isinstance(raw_trial_count, bool)
+            or not isinstance(raw_trial_count, int)
+            or raw_trial_count < 0
+            or isinstance(raw_error_count, bool)
+            or not isinstance(raw_error_count, int)
+            or raw_error_count < 0
+        ):
+            return False
+        evaluation_trial_count += raw_trial_count
+        evaluation_error_count += raw_error_count
+        raw_exceptions = raw_evaluation.get("exception_stats") or {}
+        if not isinstance(raw_exceptions, Mapping) or not raw_exceptions:
+            return False
+        for exception_name, raw_trial_ids in raw_exceptions.items():
+            if exception_name != "AgentTimeoutError" or not isinstance(
+                raw_trial_ids, list
+            ):
+                return False
+            for raw_trial_id in raw_trial_ids:
+                if not isinstance(raw_trial_id, str) or not raw_trial_id:
+                    return False
+                if raw_trial_id in timed_out_trials:
+                    return False
+                timed_out_trials.add(raw_trial_id)
+    return (
+        evaluation_trial_count == expected_trials
+        and evaluation_error_count == expected_trials
+        and len(timed_out_trials) == expected_trials
     )
 
 

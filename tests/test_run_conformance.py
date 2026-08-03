@@ -194,6 +194,12 @@ def test_hosted_privacy_receipt_scans_exact_evidence_without_raw_values(
     assert value["descendant_call_count"] == 2
     assert value["result_payload_count"] == 1
     assert value["study_payload_count"] == 1
+    assert value["hosted_scan_planned_attempt_count"] == 1
+    assert value["hosted_payload_limit"] == conformance_module._MAX_HOSTED_PAYLOADS
+    assert (
+        value["hosted_payload_byte_limit"]
+        == conformance_module._MAX_HOSTED_PAYLOAD_BYTES
+    )
     assert value["secret_match_count"] == 0
     assert value["private_corpus_match_count"] == 0
     assert value["private_structure_match_count"] == 0
@@ -364,6 +370,88 @@ def test_hosted_privacy_receipt_fails_on_secret_or_private_structure(
     assert value["affected_payload_count"] == 2
     assert secret not in receipt.path.read_text()
     assert private_fact not in receipt.path.read_text()
+
+
+def test_hosted_privacy_scan_preserves_small_run_default_limits() -> None:
+    assert conformance_module._hosted_payload_scan_limits(1) == (
+        conformance_module._MAX_HOSTED_PAYLOADS,
+        conformance_module._MAX_HOSTED_PAYLOAD_BYTES,
+    )
+
+
+def test_hosted_privacy_scan_scales_full_coverage_for_192_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conformance_module, "_MAX_HOSTED_PAYLOADS", 8)
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOADS_PER_PLANNED_ATTEMPT",
+        2,
+    )
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOADS_ABSOLUTE",
+        512,
+    )
+    monkeypatch.setattr(conformance_module, "_MAX_HOSTED_PAYLOAD_BYTES", 128)
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOAD_BYTES_PER_PLANNED_ATTEMPT",
+        64,
+    )
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOAD_BYTES_ABSOLUTE",
+        16_384,
+    )
+    payloads = [
+        ("call", {"attempt_id": f"attempt-{index}", "output": "public"})
+        for index in range(192)
+    ]
+
+    scan = conformance_module._scan_hosted_payloads(
+        payloads,
+        secrets=("configured-secret-not-present",),
+        private_patterns=(b"private-fact-not-present",),
+        planned_attempt_count=192,
+    )
+
+    assert scan["status"] == "passed"
+    assert scan["planned_attempt_count"] == 192
+    assert scan["payload_limit"] == 384
+    assert scan["byte_limit"] == 12_288
+    assert scan["payload_count"] == 192
+    assert scan["payload_bytes_scanned"] > 0
+    assert scan["match_count"] == 0
+
+
+def test_hosted_privacy_scan_absolute_cap_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(conformance_module, "_MAX_HOSTED_PAYLOADS", 8)
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOADS_PER_PLANNED_ATTEMPT",
+        2,
+    )
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_HOSTED_PAYLOADS_ABSOLUTE",
+        100,
+    )
+    payloads = [("call", {"attempt_id": index}) for index in range(101)]
+
+    scan = conformance_module._scan_hosted_payloads(
+        payloads,
+        secrets=("configured-secret-not-present",),
+        private_patterns=(),
+        planned_attempt_count=192,
+    )
+
+    assert scan["status"] == "unavailable"
+    assert scan["payload_limit"] == 100
+    assert scan["payload_count"] == 0
+    assert scan["match_count"] == 0
 
 
 def test_harbor_receipt_records_exact_identity_and_zero_orphans(
@@ -567,6 +655,44 @@ def test_local_privacy_scan_retains_total_byte_bound(tmp_path: Path) -> None:
     assert receipt["files_scanned"] == 0
     assert receipt["bytes_scanned"] == 0
     assert receipt["errors"] == ["run-scoped secret scan exceeded the total byte limit"]
+
+
+def test_local_privacy_scan_scales_bound_for_the_exact_planned_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(conformance_module, "_MAX_SCAN_TOTAL_BYTES", 32)
+    monkeypatch.setattr(
+        conformance_module,
+        "_MAX_SCAN_BYTES_PER_PLANNED_JOB",
+        16,
+    )
+    monkeypatch.setattr(conformance_module, "_MAX_SCAN_ABSOLUTE_BYTES", 128)
+    run_id = "run-planned-scale"
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    jobs_dir = run_dir / "jobs"
+    jobs_dir.mkdir(parents=True)
+    (run_dir / "bounded-output.bin").write_bytes(b"x" * 80)
+    jobs = [
+        SimpleNamespace(
+            job_name=f"job-{index}",
+            config={"jobs_dir": jobs_dir.as_posix()},
+        )
+        for index in range(5)
+    ]
+
+    receipt = conformance_module._scan_run_artifacts(
+        repo_root=tmp_path,
+        run_id=run_id,
+        run_dir=run_dir,
+        jobs=jobs,
+        secrets=("configured-secret-not-present",),
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["planned_jobs"] == 5
+    assert receipt["byte_limit"] == 80
+    assert receipt["bytes_scanned"] == 80
+    assert receipt["files_scanned"] == 1
 
 
 def test_first_cell_conformance_proves_cleanup_and_private_boundary(

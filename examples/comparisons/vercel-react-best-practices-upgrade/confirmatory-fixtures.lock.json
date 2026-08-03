@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "525ea7a8e113df67eb7b44b2c3d2f03e6358f92fdd86dd5e30f58b5c0c377c8a",
+  "manifest_digest": "faa8347d3803e32bd330e293ff82dc50e86cf05e16b9a8393a984ad9c2ea1290",
   "schema_version": 1,
   "sources": [
     {
@@ -34,8 +34,8 @@
     },
     {
       "path": "prepare_confirmatory_fixtures.py",
-      "sha256": "4468c3749c7a91d6594201c1f1f018bed15499f32ecaa99e565aee8358d3d315",
-      "size": 20729
+      "sha256": "6e9cc7b2f51ca1ff7ba21ae33a3c24e49a2f10348c89433ff6a7890ca6abbadb",
+      "size": 24028
     }
   ]
 }

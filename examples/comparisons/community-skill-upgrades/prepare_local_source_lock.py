@@ -12,6 +12,12 @@ import yaml
 
 from fugue.bench.source_locks import build_local_source_lock
 
+CAMPAIGN_SUPPORT_FILES = {
+    "analyze_confirmatory.py": "confirmatory_analysis_implementation",
+    "freeze_trace_audit.py": "trace_audit_selection_implementation",
+    "prepare_local_source_lock.py": "source_lock_implementation",
+}
+
 
 def _relative(path: Path, root: Path) -> str:
     resolved = path.resolve()
@@ -49,6 +55,9 @@ def collect_source_files(  # noqa: C901 - one bounded cross-input lock collector
         raise ValueError("comparison spec must be a mapping")
     source = spec_path.parent
     records: dict[str, str] = {}
+    campaign_root = Path(__file__).resolve().parent
+    for name, role in CAMPAIGN_SUPPORT_FILES.items():
+        _append_file(records, campaign_root / name, root=repo_root, role=role)
     taskset = raw.get("taskset")
     if not isinstance(taskset, dict):
         raise ValueError("comparison taskset is unavailable")

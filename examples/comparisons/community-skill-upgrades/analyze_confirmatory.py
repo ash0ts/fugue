@@ -22,6 +22,7 @@ from typing import Any
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
+    APPROVED_COMPARISON_LOCK_NAME,
     ComparisonResultV3,
     _comparison_cohort_lineage,
     analyze_comparison_rows,
@@ -238,13 +239,24 @@ def _load_profile_preregistration(
             profile_path.parent / str(amendment.get("path") or "")
         ).resolve()
         amendment_sha = str(amendment.get("sha256") or "")
+        expected_amendment_digest = str(amendment.get("amendment_digest") or "")
         if (
             not _is_digest(amendment_sha)
+            or not _is_digest(expected_amendment_digest)
             or not amendment_path.is_file()
             or _sha256(amendment_path) != amendment_sha
         ):
             raise ValueError("repository preregistration amendment drifted")
         amendment_value = _load_json(amendment_path, "preregistration amendment")
+        amendment_unsigned = dict(amendment_value)
+        supplied_amendment_digest = str(
+            amendment_unsigned.pop("amendment_digest", "") or ""
+        )
+        if (
+            supplied_amendment_digest != expected_amendment_digest
+            or supplied_amendment_digest != stable_digest(amendment_unsigned)
+        ):
+            raise ValueError("repository preregistration amendment digest drifted")
         replacement = amendment_value.get("replacement_execution")
         if (
             not isinstance(replacement, Mapping)
@@ -258,9 +270,34 @@ def _load_profile_preregistration(
         binding["amendment"] = {
             "path": amendment_path.as_posix(),
             "sha256": amendment_sha,
-            "amendment_digest": amendment_value.get("amendment_digest"),
+            "amendment_digest": supplied_amendment_digest,
         }
     return preregistration, binding
+
+
+def _validate_manifest_amendment_binding(
+    *,
+    study: Mapping[str, Any],
+    preregistration_binding: Mapping[str, Any],
+    manifest_path: Path,
+) -> None:
+    expected = preregistration_binding.get("amendment")
+    observed = study.get("amendment")
+    if expected is None and observed is None:
+        return
+    if not isinstance(expected, Mapping) or not isinstance(observed, Mapping):
+        raise ValueError("campaign amendment binding is incomplete")
+    if set(observed) != {"path", "sha256", "amendment_digest"}:
+        raise ValueError("campaign amendment binding fields changed")
+    path = (manifest_path.parent / str(observed.get("path") or "")).resolve()
+    if (
+        not path.is_file()
+        or _sha256(path) != observed.get("sha256")
+        or observed.get("sha256") != expected.get("sha256")
+        or observed.get("amendment_digest") != expected.get("amendment_digest")
+        or path.as_posix() != expected.get("path")
+    ):
+        raise ValueError("campaign amendment binding drifted")
 
 
 def _campaign_study(
@@ -392,21 +429,49 @@ def _partition_tasks(
     return tuple(development), tuple(holdout), tags
 
 
-def _approved_execution_lock(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    locks = [row.get("approved_comparison") for row in rows]
-    if any(not isinstance(item, Mapping) for item in locks):
-        raise ValueError("every attempt must carry its approved execution lock")
-    assert all(isinstance(item, Mapping) for item in locks)
-    digests = {stable_digest(item) for item in locks}
-    if len(digests) != 1:
-        raise ValueError("attempt rows disagree on the approved execution lock")
-    approved = dict(locks[0])
-    supplied = str(approved.get("lock_digest") or "")
-    unsigned = {key: value for key, value in approved.items() if key != "lock_digest"}
+def _verified_approved_execution_lock(
+    approved: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = dict(approved)
+    supplied = str(value.get("lock_digest") or "")
+    unsigned = {key: item for key, item in value.items() if key != "lock_digest"}
     if not _is_digest(supplied) or supplied != stable_digest(unsigned):
         raise ValueError("approved execution lock digest does not match")
-    if not _is_digest(approved.get("approval_digest")):
+    if not _is_digest(value.get("approval_digest")):
         raise ValueError("approved execution lock has no exact approval digest")
+    return value
+
+
+def _approved_execution_lock(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    lock_path: Path | None = None,
+) -> dict[str, Any]:
+    embedded = [row.get("approved_comparison") for row in rows]
+    has_embedded = [isinstance(item, Mapping) for item in embedded]
+    references = [
+        str(row.get("approved_comparison_lock_digest") or "") for row in rows
+    ]
+    if all(has_embedded):
+        assert all(isinstance(item, Mapping) for item in embedded)
+        digests = {stable_digest(item) for item in embedded}
+        if len(digests) != 1:
+            raise ValueError("attempt rows disagree on the approved execution lock")
+        approved = _verified_approved_execution_lock(embedded[0])
+        if any(reference and reference != approved["lock_digest"] for reference in references):
+            raise ValueError("attempt approval references disagree with the embedded lock")
+        return approved
+    if any(has_embedded):
+        raise ValueError("attempt rows mix embedded and referenced approval locks")
+    if lock_path is None or not lock_path.is_file():
+        raise ValueError("referenced approval lock sidecar is missing")
+    approved = _verified_approved_execution_lock(
+        _load_json(lock_path, "approved execution lock sidecar")
+    )
+    if not references or any(
+        reference != approved["lock_digest"] for reference in references
+    ):
+        raise ValueError("attempt approval references disagree with the sidecar lock")
     return approved
 
 
@@ -1324,14 +1389,30 @@ def _validate_trace_audit(  # noqa: C901 - one fail-closed review gate.
     }
 
 
-def _preregistered_analysis(
+def _validate_trace_audit_approval_binding(
+    approved: Mapping[str, Any],
+    trace_audit: Mapping[str, Any],
+) -> None:
+    bindings = approved.get("approval_input_bindings")
+    if not isinstance(bindings, Mapping):
+        raise ValueError("approved execution lock has no input bindings")
+    selection_digest = str(trace_audit.get("selection_digest") or "")
+    if (
+        not _is_digest(selection_digest)
+        or bindings.get("trace_audit_selection") != selection_digest
+    ):
+        raise ValueError(
+            "approved execution lock does not bind the exact trace-audit selection"
+        )
+
+
+def _holdout_analysis(
     *,
     rows: Sequence[Mapping[str, Any]],
     profile: Mapping[str, Any],
-    development: Sequence[str],
     holdout: Sequence[str],
     tags: Mapping[str, Sequence[str]],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     bootstrap = profile["bootstrap"]
     samples = int(bootstrap["samples"])
     seed = int(bootstrap["seed"])
@@ -1393,10 +1474,23 @@ def _preregistered_analysis(
         samples=samples,
         seed=seed,
     )
+    # A safety_gate is an absolute candidate requirement, not merely a paired
+    # non-regression measure.  Otherwise two arms that both time out or return
+    # unusable artifacts can look statistically equivalent and be mislabeled
+    # ``unchanged``.  Repository profiles may add stricter outcome gates, but
+    # they cannot opt out of their declared safety dimensions.
+    absolute_candidate_dimensions = tuple(
+        dict.fromkeys(
+            [
+                *(profile.get("safety_dimensions") or []),
+                *(profile.get("candidate_all_attempt_dimensions") or []),
+            ]
+        )
+    )
     gate_failures = _candidate_gate_failures(
         rows=rows,
         holdout=holdout,
-        dimensions=profile.get("candidate_all_attempt_dimensions") or [],
+        dimensions=absolute_candidate_dimensions,
     )
     finding = _decision(
         profile=profile,
@@ -1405,12 +1499,8 @@ def _preregistered_analysis(
         safety=safety,
         candidate_gate_failures=gate_failures,
     )
-    return {
-        "primary_partition": "holdout",
-        "inference_unit": "task",
-        "attempt_role": "within_task_replication",
-        "development_is_primary_evidence": False,
-        "holdout": {
+    return (
+        {
             "task_count": len(holdout),
             "task_ids": list(holdout),
             "primary_families": families,
@@ -1419,6 +1509,113 @@ def _preregistered_analysis(
             "candidate_all_attempt_gate_failures": gate_failures,
             "primary_test_attainability": attainability,
         },
+        finding,
+    )
+
+
+def _restart_exposure_sensitivity(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    profile: Mapping[str, Any],
+    holdout: Sequence[str],
+    tags: Mapping[str, Sequence[str]],
+    primary_finding: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = profile.get("sensitivity_analysis")
+    if not isinstance(raw, Mapping):
+        raise ValueError("confirmatory sensitivity analysis contract is unavailable")
+    sensitivity = dict(raw)
+    restart = sensitivity.get("restart_exposure")
+    if restart is None:
+        return sensitivity
+    if not isinstance(restart, Mapping):
+        raise ValueError("restart-exposure sensitivity contract is malformed")
+    expected_fields = {
+        "status",
+        "source_execution",
+        "excluded_holdout_task_ids",
+        "claim_effect",
+    }
+    if set(restart) != expected_fields:
+        raise ValueError("restart-exposure sensitivity contract fields changed")
+    if restart.get("status") != "required_descriptive":
+        raise ValueError("restart-exposure sensitivity is not mandatory")
+    source_execution = restart.get("source_execution")
+    claim_effect = restart.get("claim_effect")
+    if not isinstance(source_execution, str) or not source_execution.strip():
+        raise ValueError("restart-exposure source execution is unavailable")
+    if not isinstance(claim_effect, str) or not claim_effect.strip():
+        raise ValueError("restart-exposure claim boundary is unavailable")
+    excluded_raw = restart.get("excluded_holdout_task_ids")
+    if (
+        not isinstance(excluded_raw, list)
+        or not excluded_raw
+        or any(not isinstance(item, str) or not item for item in excluded_raw)
+        or len(excluded_raw) != len(set(excluded_raw))
+    ):
+        raise ValueError("restart-exposure excluded holdout tasks are malformed")
+    excluded = tuple(excluded_raw)
+    holdout_set = set(holdout)
+    unknown = sorted(set(excluded) - holdout_set)
+    if unknown:
+        raise ValueError(
+            "restart-exposure sensitivity excludes non-holdout tasks: "
+            + ", ".join(unknown)
+        )
+    included = tuple(task_id for task_id in holdout if task_id not in set(excluded))
+    if not included:
+        raise ValueError("restart-exposure sensitivity removes every holdout task")
+    holdout_analysis, finding = _holdout_analysis(
+        rows=rows,
+        profile=profile,
+        holdout=included,
+        tags=tags,
+    )
+    primary_status = str(primary_finding.get("status") or "")
+    sensitivity_status = str(finding.get("status") or "")
+    if not primary_status or not sensitivity_status:
+        raise ValueError("restart-exposure sensitivity has no decision status")
+    sensitivity["restart_exposure"] = {
+        **dict(restart),
+        "analysis_status": "complete",
+        "included_holdout_task_ids": list(included),
+        "included_holdout_task_count": len(included),
+        "primary_finding_status": primary_status,
+        "sensitivity_finding": finding,
+        "conclusion_changed": sensitivity_status != primary_status,
+        "holdout": holdout_analysis,
+        "role": "mandatory_descriptive_sensitivity_not_primary_inference",
+    }
+    return sensitivity
+
+
+def _preregistered_analysis(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    profile: Mapping[str, Any],
+    development: Sequence[str],
+    holdout: Sequence[str],
+    tags: Mapping[str, Sequence[str]],
+) -> dict[str, Any]:
+    holdout_analysis, finding = _holdout_analysis(
+        rows=rows,
+        profile=profile,
+        holdout=holdout,
+        tags=tags,
+    )
+    sensitivity = _restart_exposure_sensitivity(
+        rows=rows,
+        profile=profile,
+        holdout=holdout,
+        tags=tags,
+        primary_finding=finding,
+    )
+    return {
+        "primary_partition": "holdout",
+        "inference_unit": "task",
+        "attempt_role": "within_task_replication",
+        "development_is_primary_evidence": False,
+        "holdout": holdout_analysis,
         "development_descriptive": {
             "task_count": len(development),
             "task_ids": list(development),
@@ -1426,7 +1623,7 @@ def _preregistered_analysis(
             "excluded_from_primary_inference": True,
         },
         "finding": finding,
-        "sensitivity_analysis": profile["sensitivity_analysis"],
+        "sensitivity_analysis": sensitivity,
     }
 
 
@@ -1461,6 +1658,11 @@ def analyze(
             profile, profile_path=profile_path, study_id=study_id
         )
     )
+    _validate_manifest_amendment_binding(
+        study=study,
+        preregistration_binding=preregistration_binding,
+        manifest_path=campaign_manifest_path,
+    )
     repo_root = campaign_manifest_path.resolve().parents[3]
     locked_input_bindings = _preregistered_input_bindings(
         profile=profile,
@@ -1484,7 +1686,10 @@ def analyze(
     result = read_comparison_result(result_path)
     if not isinstance(result, ComparisonResultV3):
         raise ValueError("confirmatory analysis requires ComparisonResultV3")
-    approved = _approved_execution_lock(rows)
+    approved = _approved_execution_lock(
+        rows,
+        lock_path=result_path.with_name(APPROVED_COMPARISON_LOCK_NAME),
+    )
     _recompute_canonical_result(result, rows, approved)
     bindings = _validate_bindings(
         result=result,
@@ -1506,6 +1711,7 @@ def analyze(
         preregistration=repository_preregistration,
         campaign_id=str(manifest["id"]),
     )
+    _validate_trace_audit_approval_binding(approved, trace_audit)
     deterministic = _preregistered_analysis(
         rows=rows,
         profile=profile,

@@ -1,0 +1,120 @@
+# V4 is a complete execution-only restart of the unchanged V1 behavioral
+# design. V3 stopped after Fugue incorrectly treated one bounded Agent timeout
+# as an infrastructure failure and cancelled the remaining cohort. The V4
+# amendment records every exposed V3 coordinate and forbids pooling, selective
+# reruns, task changes, or outcome-dependent stopping.
+schema_version: 3
+id: superpowers-writing-plans-confirmatory-v4
+question: Across a preregistered development set and sixteen untouched holdout maintenance briefs, does the exact Superpowers writing-plans upgrade improve repository-grounded plans, cross-component consistency, and cohesive decomposition without a verification or safety regression?
+taskset:
+  tasks: tasks-conference-v1.jsonl
+  private_labels: private-labels-conference-v1.jsonl
+baseline:
+  label: Superpowers writing-plans before contract additions at de4672b1
+  skills: [superpowers-writing-plans-before-contracts]
+candidate:
+  label: Superpowers writing-plans with contract additions at 8e1262a3
+  skills: [superpowers-writing-plans-contracts]
+changed: [skills]
+evaluators:
+  - id: plan-quality-confirmatory
+    type: deterministic
+    required: true
+    scorer: plan_quality_scorer_v2.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - artifact_validity
+      - global_constraint_fidelity
+      - interface_graph_consistency
+      - right_sized_decomposition
+      - repository_grounding
+      - verification_matrix
+      - scope_secret_safety
+    dimension_roles:
+      artifact_validity: safety_gate
+      global_constraint_fidelity: outcome
+      interface_graph_consistency: outcome
+      right_sized_decomposition: outcome
+      repository_grounding: outcome
+      verification_matrix: safety_gate
+      scope_secret_safety: safety_gate
+  - id: community-usefulness
+    type: llm_judge
+    required: false
+    profile: anthropic/claude-sonnet-5
+    calibration: ../community-skill-upgrades/judge-calibration.json
+    rubric: >-
+      Judge the artifact type requested (plan, implemented change, or
+      recommendation) for its usefulness on the stated repository task. Score
+      only whether it is actionable, grounds claims in the inspected repository,
+      is reviewable by a maintainer, and calibrates risk and uncertainty to the
+      available evidence. The inspected_paths and changed_paths values are
+      audited activity, not proof of repository contents or task correctness.
+      Their status fields state whether collection was available. An available
+      empty changed_paths list means the collector observed no edits and is
+      expected for plans and recommendations; an unavailable status is not an
+      empty receipt. Judge the requested artifact modality; do not require
+      diffs, line numbers, file bodies, test output, or completed implementation
+      when the task requests a plan or recommendation. Credit repository
+      grounding when concrete components, contracts, sequencing, verification,
+      and rollback are internally consistent with the available path activity.
+      Set missing_evidence true only when evidence materially required to assess
+      actionability, grounding, reviewability, or risk is absent, not because
+      deterministic evidence is out of scope. Do not infer correctness from
+      fluency, treatment identity, repository popularity, or Skill assignment.
+      For this acceptable-versus-defective calibration, adequate is the minimum
+      acceptable qualitative label and its limitations must remain visible;
+      weak and unusable are defective, while strong and exceptional exceed the
+      minimum. Deterministic scorers own build, test, schema, security, scope,
+      and task-correctness gates. A qualitative label cannot override a
+      deterministic critical failure.
+    dimensions:
+      - useful_actionability
+      - repository_grounding
+      - reviewability
+      - risk_calibration
+    dimension_roles:
+      useful_actionability: outcome
+      repository_grounding: outcome
+      reviewability: outcome
+      risk_calibration: outcome
+    evidence: [inspected_paths, changed_paths]
+    reserve_cost_usd: 0.10
+execution:
+  source_lock: ../../../.fugue/qualification/community-skill-confirmatory/superpowers-v4/source.lock.json
+  source_evidence_project: wandb/fugue-superpowers-writing-plans-source-v1
+  source_evidence_destination:
+    entity: wandb
+    project: fugue-superpowers-writing-plans-source-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-superpowers-writing-plans-confirmatory-v4
+  evidence_destination:
+    entity: wandb
+    project: fugue-superpowers-writing-plans-confirmatory-v4
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  research_id: superpowers-writing-plans-confirmatory-v4
+  study_console_base_url: http://127.0.0.1:18102
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 4
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  scheduling_seed: community-skill-upgrade-confirmatory-campaign-v1
+  qualification_inputs:
+    confirmatory_analysis_profile_sha256: ../community-skill-upgrades/confirmatory-analysis-profiles.json
+    confirmatory_analyzer_sha256: ../community-skill-upgrades/analyze_confirmatory.py
+    campaign_preregistration_sha256: ../community-skill-upgrades/conference-preregistration.json
+    campaign_manifest_sha256: ../community-skill-upgrades/conference-campaign-manifest.json
+    repository_preregistration_sha256: preregistration-confirmatory-v1.json
+    repository_amendment_sha256: preregistration-confirmatory-v4-amendment.json
+    source_preparer_sha256: prepare_confirmatory_sources.py
+  max_cost_usd: 1700
+  reserve_per_attempt_usd: 8.4
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}

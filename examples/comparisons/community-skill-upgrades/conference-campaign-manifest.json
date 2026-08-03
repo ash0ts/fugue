@@ -5,7 +5,7 @@
   "preregistration": "conference-preregistration.json",
   "execution_order": [
     "community-skill-judge-calibration-v1",
-    "superpowers-writing-plans-confirmatory-v3",
+    "superpowers-writing-plans-confirmatory-v4",
     "anthropic-skill-creator-confirmatory-v1",
     "vercel-react-best-practices-confirmatory-v1"
   ],
@@ -21,19 +21,25 @@
       "claim_role": "advisory_only_pending_human_review"
     },
     {
-      "id": "superpowers-writing-plans-confirmatory-v3",
+      "id": "superpowers-writing-plans-confirmatory-v4",
       "kind": "governed_comparison",
-      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v3.yaml",
-      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v3",
+      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v4.yaml",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v4",
       "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
       "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
       "tasks": 24,
       "attempts": 4,
       "cells": 192,
       "status": "pending_preview",
+      "amendment": {
+        "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json",
+        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+        "amendment_digest": "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+      },
       "supersedes": [
         "superpowers-writing-plans-confirmatory-v1",
-        "superpowers-writing-plans-confirmatory-v2"
+        "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3"
       ]
     },
     {
@@ -86,6 +92,17 @@
       "status": "invalid",
       "behavioral_result_eligible": false,
       "reason_code": "harbor_cleanup_and_execution_integrity_unproven"
+    },
+    {
+      "id": "superpowers-writing-plans-confirmatory-v3",
+      "run_id": "20260803T173311-30fd2fd2f4",
+      "preview_digest": "b65ce450152a111c45a0aa6566372f8e5b588556dc72b03a310d271e3a6936f0",
+      "status": "invalid",
+      "behavioral_result_eligible": false,
+      "reason_code": "agent_timeout_misclassified_as_infrastructure_abort",
+      "terminal_evidence_rows": 7,
+      "internally_cancelled_cells": 185,
+      "canonical_result_published": false
     }
   ]
 }

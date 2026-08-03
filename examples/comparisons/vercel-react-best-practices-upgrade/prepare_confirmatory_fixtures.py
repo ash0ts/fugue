@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -30,6 +30,18 @@ OUTPUT_ROOT = (
     / ".fugue/comparison-resources/vercel-react-best-practices-confirmatory-v1"
 )
 NODE_IMAGE = "node:22-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf"
+_FROZEN_SOURCE_NAMES = (
+    "conference_fixture_catalog.py",
+    "confirmatory-tasks.jsonl",
+    "confirmatory-private-labels.jsonl",
+    "vercel_confirmatory_scorer.py",
+    "host_node_verifier.cjs",
+    "confirmatory-preregistration.json",
+    "prepare_confirmatory_fixtures.py",
+)
+_RESERVED_PUBLIC_PATHS = frozenset(
+    {"readme.md", "package.json", "tests/task.test.mjs"}
+)
 
 
 def _stable_digest(value: object) -> str:
@@ -60,6 +72,8 @@ def _load_catalog() -> tuple[dict[str, Any], ...]:
         )
     if sum(item["split"] == "holdout" for item in fixtures) != 16:
         raise RuntimeError("confirmatory catalog must contain sixteen holdouts")
+    for fixture in fixtures:
+        _validated_target_files(fixture)
     return fixtures
 
 
@@ -105,15 +119,6 @@ def refresh_frozen_sources() -> dict[str, Any]:
         ),
         encoding="utf-8",
     )
-    source_names = (
-        "conference_fixture_catalog.py",
-        "confirmatory-tasks.jsonl",
-        "confirmatory-private-labels.jsonl",
-        "vercel_confirmatory_scorer.py",
-        "host_node_verifier.cjs",
-        "confirmatory-preregistration.json",
-        "prepare_confirmatory_fixtures.py",
-    )
     lock = {
         "schema_version": 1,
         "sources": [
@@ -122,7 +127,7 @@ def refresh_frozen_sources() -> dict[str, Any]:
                 "sha256": _sha256(EXAMPLE_ROOT / name),
                 "size": (EXAMPLE_ROOT / name).stat().st_size,
             }
-            for name in source_names
+            for name in _FROZEN_SOURCE_NAMES
         ],
     }
     lock["manifest_digest"] = _stable_digest(lock)
@@ -136,12 +141,27 @@ def refresh_frozen_sources() -> dict[str, Any]:
 def _load_and_verify_source_lock() -> dict[str, Any]:
     value = json.loads(SOURCE_LOCK.read_text(encoding="utf-8"))
     supplied = str(value.pop("manifest_digest", ""))
-    if value.get("schema_version") != 1 or supplied != _stable_digest(value):
+    if (
+        set(value) != {"schema_version", "sources"}
+        or value.get("schema_version") != 1
+        or supplied != _stable_digest(value)
+    ):
         raise RuntimeError("confirmatory fixture lock digest does not match")
     records = value.get("sources")
     if not isinstance(records, list) or not records:
         raise RuntimeError("confirmatory fixture lock is empty")
+    if not all(isinstance(record, dict) for record in records):
+        raise RuntimeError("confirmatory fixture lock record is invalid")
+    record_paths = tuple(str(record.get("path") or "") for record in records)
+    if record_paths != _FROZEN_SOURCE_NAMES or len(set(record_paths)) != len(
+        record_paths
+    ):
+        raise RuntimeError(
+            "confirmatory fixture lock source records are not exact and unique"
+        )
     for record in records:
+        if set(record) != {"path", "sha256", "size"}:
+            raise RuntimeError("confirmatory fixture lock record is invalid")
         relative = str(record.get("path") or "")
         path = EXAMPLE_ROOT / relative
         if (
@@ -159,8 +179,51 @@ def _load_and_verify_source_lock() -> dict[str, Any]:
     return {**value, "manifest_digest": supplied}
 
 
+def _validated_relative_path(value: object) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise RuntimeError(f"unsafe confirmatory fixture path: {value}")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or value != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise RuntimeError(f"unsafe confirmatory fixture path: {value}")
+    return path.as_posix()
+
+
+def _validated_target_files(fixture: dict[str, Any]) -> dict[str, dict[str, str]]:
+    raw_targets = fixture.get("target_files")
+    if not isinstance(raw_targets, dict) or not raw_targets:
+        raise RuntimeError("confirmatory fixture target_files must be a nonempty object")
+    targets: dict[str, dict[str, str]] = {}
+    casefolded = set(_RESERVED_PUBLIC_PATHS)
+    for raw_path, raw_sources in raw_targets.items():
+        relative = _validated_relative_path(raw_path)
+        folded = relative.casefold()
+        if folded in casefolded:
+            raise RuntimeError(
+                f"confirmatory fixture target path collides with another input: {raw_path}"
+            )
+        if (
+            not isinstance(raw_sources, dict)
+            or set(raw_sources) != {"base", "gold"}
+            or not all(isinstance(value, str) for value in raw_sources.values())
+        ):
+            raise RuntimeError(
+                f"confirmatory fixture sources are invalid for target: {raw_path}"
+            )
+        casefolded.add(folded)
+        targets[relative] = {
+            "base": raw_sources["base"],
+            "gold": raw_sources["gold"],
+        }
+    return targets
+
+
 def _public_files(fixture: dict[str, Any], *, gold: bool) -> dict[str, bytes]:
     task_id = str(fixture["id"])
+    targets = _validated_target_files(fixture)
     files: dict[str, bytes] = {
         "package.json": (
             json.dumps(
@@ -184,8 +247,8 @@ def _public_files(fixture: dict[str, Any], *, gold: bool) -> dict[str, bytes]:
         "tests/task.test.mjs": str(fixture["public_test_source"]).encode(),
     }
     side = "gold" if gold else "base"
-    for path, sources in fixture["target_files"].items():
-        files[str(path)] = str(sources[side]).encode()
+    for path, sources in targets.items():
+        files[path] = sources[side].encode()
     return files
 
 
@@ -232,8 +295,26 @@ def _archive_contract(fixture: dict[str, Any]) -> dict[str, Any]:
 
 
 def _write_tree(root: Path, files: dict[str, bytes]) -> None:
+    normalized: dict[str, bytes] = {}
+    casefolded: set[str] = set()
     for relative, data in files.items():
-        target = root / relative
+        safe_relative = _validated_relative_path(relative)
+        if not isinstance(data, bytes):
+            raise RuntimeError(f"confirmatory fixture is not bytes: {relative}")
+        folded = safe_relative.casefold()
+        if folded in casefolded:
+            raise RuntimeError(f"colliding confirmatory fixture path: {relative}")
+        casefolded.add(folded)
+        normalized[safe_relative] = data
+    resolved_root = root.resolve()
+    for relative, data in normalized.items():
+        target = (resolved_root / relative).resolve()
+        try:
+            target.relative_to(resolved_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"confirmatory fixture path escapes the workspace: {relative}"
+            ) from exc
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
 

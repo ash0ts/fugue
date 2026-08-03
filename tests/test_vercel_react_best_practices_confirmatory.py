@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import runpy
@@ -493,6 +494,105 @@ def test_preparation_builds_deterministic_dependency_free_archives(
     assert expected["public_test_sha256"] == first_record["public_test_sha256"]
     assert {item["path"] for item in expected["base_archive_files"]} == set(public)
     assert all(b"gold" not in value.lower() for value in public.values())
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "../private-labels.jsonl",
+        "/tmp/escape.mjs",
+        "app\\escape.mjs",
+        "app//escape.mjs",
+        "README.md",
+        "readme.MD",
+        "package.json",
+        "Tests/Task.Test.MJS",
+    ),
+)
+def test_preparation_rejects_unsafe_or_reserved_target_paths(relative: str) -> None:
+    module = runpy.run_path(PREPARE.as_posix())
+    fixture = copy.deepcopy(_fixtures()[0])
+    fixture["target_files"] = {
+        relative: {"base": "export const value = 0;", "gold": "export const value = 1;"}
+    }
+
+    with pytest.raises(RuntimeError, match="fixture path|target path collides"):
+        module["_public_files"](fixture, gold=False)
+    with pytest.raises(RuntimeError, match="fixture path|target path collides"):
+        module["_archive_bytes"](fixture)
+
+
+def test_preparation_rejects_casefold_target_collisions() -> None:
+    module = runpy.run_path(PREPARE.as_posix())
+    fixture = copy.deepcopy(_fixtures()[0])
+    fixture["target_files"] = {
+        "app/Team.mjs": {"base": "base", "gold": "gold"},
+        "app/team.mjs": {"base": "base", "gold": "gold"},
+    }
+
+    with pytest.raises(RuntimeError, match="target path collides"):
+        module["_public_files"](fixture, gold=False)
+
+
+def test_preparation_write_tree_rejects_escape_and_casefold_collisions(
+    tmp_path: Path,
+) -> None:
+    module = runpy.run_path(PREPARE.as_posix())
+
+    with pytest.raises(RuntimeError, match="unsafe confirmatory fixture path"):
+        module["_write_tree"](tmp_path / "tree", {"../escape": b"private"})
+    with pytest.raises(RuntimeError, match="colliding confirmatory fixture path"):
+        module["_write_tree"](
+            tmp_path / "tree",
+            {"app/Team.mjs": b"one", "app/team.mjs": b"two"},
+        )
+    assert not (tmp_path / "escape").exists()
+
+
+def test_runtime_source_lock_requires_exact_unique_source_records(
+    tmp_path: Path,
+) -> None:
+    module = runpy.run_path(PREPARE.as_posix())
+
+    def write_lock(paths: tuple[str, ...]) -> None:
+        value = {
+            "schema_version": 1,
+            "sources": [
+                {
+                    "path": relative,
+                    "sha256": hashlib.sha256((EXAMPLE / relative).read_bytes()).hexdigest(),
+                    "size": (EXAMPLE / relative).stat().st_size,
+                }
+                for relative in paths
+            ],
+        }
+        value["manifest_digest"] = _stable_digest(value)
+        lock_path.write_text(json.dumps(value), encoding="utf-8")
+
+    lock_path = tmp_path / "sources.lock.json"
+    module["_load_and_verify_source_lock"].__globals__["SOURCE_LOCK"] = lock_path
+    exact = tuple(module["_FROZEN_SOURCE_NAMES"])
+    write_lock(exact)
+    assert module["_load_and_verify_source_lock"]()["manifest_digest"]
+
+    write_lock(exact[:-1])
+    with pytest.raises(RuntimeError, match="not exact and unique"):
+        module["_load_and_verify_source_lock"]()
+    write_lock(exact[:-1] + (exact[0],))
+    with pytest.raises(RuntimeError, match="not exact and unique"):
+        module["_load_and_verify_source_lock"]()
+
+
+def test_source_lock_recipe_binds_preparation_and_verifier_implementation() -> None:
+    documentation = (EXAMPLE / "CONFIRMATORY.md").read_text(encoding="utf-8")
+    for required in (
+        "prepare_confirmatory_fixtures.py",
+        "host_node_verifier.cjs",
+        "confirmatory-fixtures.lock.json",
+        "preflight.receipt.json",
+    ):
+        assert "--extra " in documentation
+        assert required in documentation
 
 
 def test_preparation_rejects_infrastructure_errors_as_base_failures() -> None:

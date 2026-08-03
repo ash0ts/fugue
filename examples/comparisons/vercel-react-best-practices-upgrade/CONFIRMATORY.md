@@ -33,12 +33,24 @@ SPEC=examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-v1.ya
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 python3 examples/comparisons/vercel-react-best-practices-upgrade/prepare_confirmatory_fixtures.py
+uv run python \
+  examples/comparisons/community-skill-upgrades/prepare_local_source_lock.py \
+  "$SPEC" \
+  --extra .fugue/comparison-resources/vercel-react-best-practices-confirmatory-v1/fixtures.lock.json \
+  --extra .fugue/comparison-resources/vercel-react-best-practices-confirmatory-v1/preflight.receipt.json \
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/conference_fixture_catalog.py \
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-fixtures.lock.json \
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/prepare_confirmatory_fixtures.py \
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/host_node_verifier.cjs \
+  --output .fugue/qualification/community-skill-confirmatory/vercel/source.lock.json
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" --env-file "$ENV_FILE" --json
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --prepare --env-file "$ENV_FILE" --json
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview --env-file "$ENV_FILE" --json
 ```
 
-The exact preview requires a new 192-cell approval. Execute one checkpoint cell
-first. Continue only when project routing, the five-link Weave chain, Dataset,
-privacy, accounted cost, and run-scoped Harbor cleanup reconcile. Do not adapt
-the taskset, scorer, candidate, or stopping rule after inspecting outcomes.
+The exact preview requires a new 192-cell approval. The single governed run
+executes one aligned baseline/candidate pair as its automatic two-cell
+checkpoint before it can continue. Continue only when project routing, the
+five-link Weave chain, Dataset, privacy, accounted cost, and run-scoped Harbor
+cleanup reconcile. Do not adapt the taskset, scorer, candidate, or stopping
+rule after inspecting outcomes.

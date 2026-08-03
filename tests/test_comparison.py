@@ -12,6 +12,8 @@ import yaml
 
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.comparison import (
+    APPROVED_COMPARISON_LOCK_NAME,
+    COMPARISON_RESULT_ROOT,
     COMPARISON_RUNTIME_ROOT,
     ComparisonEvaluatorV1,
     ComparisonPostTrialVerifierV1,
@@ -41,6 +43,7 @@ from fugue.bench.comparison import (
     _sanitized_answer_excerpt,
     _validate_comparison_judge_payload,
     analyze_comparison_rows,
+    attest_comparison_decision,
     check_comparison,
     claim_comparison_approval,
     comparison_from_dict,
@@ -1256,6 +1259,12 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
         rows.append(row)
 
+    baseline_timeout = next(
+        row for row in rows if row["variant_id"] == "baseline"
+    )
+    baseline_timeout["benchmark_outcome"] = "failed"
+    baseline_timeout["runtime_outcome"] = "timed_out"
+
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
@@ -1278,6 +1287,15 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
     assert result.paired_cases[0].candidate.actual_query_scope == (source_project,)
+    timeout_pair = next(
+        pair
+        for pair in result.paired_cases
+        if pair.baseline.attempt_id == baseline_timeout["attempt_id"]
+    )
+    assert timeout_pair.baseline.benchmark_outcome == "failed"
+    assert timeout_pair.baseline.runtime_outcome == "timed_out"
+    assert result.operational_summary["agent_timeouts"] == 1
+    assert result.operational_summary["infrastructure_failures"] == 0
 
     role_drift = json.loads(json.dumps(rows))
     candidate_row = next(row for row in role_drift if row["variant_id"] == "candidate")
@@ -1452,6 +1470,19 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     )
     assert experiment_view_from_dict(view.to_dict()) == view
     assert view.supersedes[0]["result_digest"] == "6" * 64
+    assert view.evidence_eligible is True
+    assert view.infrastructure_health != "failed"
+    timeout_view_pair = next(
+        pair
+        for pair in view.paired_cases
+        if pair["baseline"]["attempt_id"] == baseline_timeout["attempt_id"]
+    )
+    assert timeout_view_pair["baseline"]["benchmark_outcome"] == "failed"
+    assert timeout_view_pair["baseline"]["runtime_outcome"] == "timed_out"
+    assert any(
+        "task/runtime failures, not infrastructure failures" in item
+        for item in view.limitations
+    )
 
     malformed = json.loads(json.dumps(view.to_dict()))
     malformed["paired_cases"][0]["candidate"]["actual_query_scope"] = [
@@ -1513,6 +1544,44 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         decision_policy=_decision_policy(),
     )
     assert release_result.decision.status == "ready_for_signoff"
+
+    signing_rows = []
+    for row in rows:
+        signing_row = dict(row)
+        signing_row.pop("approved_comparison")
+        signing_row["approved_comparison_lock_digest"] = approved["lock_digest"]
+        signing_rows.append(signing_row)
+    referenced_release_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=signing_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+        decision_policy=_decision_policy(),
+    )
+    assert referenced_release_result.decision.status == "ready_for_signoff"
+    signing_destination = tmp_path / "signing-result"
+    signing_destination.mkdir()
+    (signing_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in signing_rows) + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(
+        referenced_release_result,
+        destination=signing_destination,
+        approved_comparison=approved,
+    )
+    signed_from_references = attest_comparison_decision(
+        result_path=signing_destination / "result.json",
+        signer="release-owner",
+        signed_at="2026-07-29T00:00:00Z",
+    )
+    assert signed_from_references.decision.status == "go"
 
     forged_gate = release_result.to_dict()
     candidate_gate = next(
@@ -1781,6 +1850,70 @@ def test_local_behavioral_verdict_is_separate_from_package_release() -> None:
     legacy_projection["cells"] = []
     with pytest.raises(ValueError, match="experiment view has unknown fields"):
         experiment_view_from_dict(legacy_projection)
+
+
+@pytest.mark.parametrize(
+    "timeout_evidence",
+    ("explicit_outcomes", "legacy_exception", "legacy_structured_event"),
+)
+def test_agent_timeout_is_replayed_as_task_runtime_outcome_not_infrastructure(
+    tmp_path: Path,
+    timeout_evidence: str,
+) -> None:
+    baseline = _decision_row(variant="baseline", passed=False)
+    candidate = _decision_row(variant="candidate", passed=True)
+    if timeout_evidence == "explicit_outcomes":
+        baseline["benchmark_outcome"] = "failed"
+        baseline["runtime_outcome"] = "timed_out"
+    elif timeout_evidence == "legacy_exception":
+        baseline["exception_class"] = "AgentTimeoutError"
+    else:
+        baseline["error_events"] = [
+            {
+                "origin": "agent",
+                "kind": "agent_timeout",
+                "terminal": True,
+            }
+        ]
+
+    rows = [baseline, candidate]
+    result = analyze_comparison_rows(
+        comparison_id=f"agent-timeout-{timeout_evidence}",
+        preview_digest="c" * 64,
+        rows=rows,
+        source="agent-timeout-replay",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    assert result.operational_summary["agent_timeouts"] == 1
+    assert result.operational_summary["infrastructure_failures"] == 0
+    timeout_attempt = result.paired_cases[0].baseline
+    assert timeout_attempt is not None
+    assert timeout_attempt.execution_status == "completed"
+    assert timeout_attempt.passed is False
+    assert timeout_attempt.benchmark_outcome == "failed"
+    assert timeout_attempt.runtime_outcome == "timed_out"
+
+    destination = tmp_path / timeout_evidence
+    destination.mkdir()
+    (destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(result, destination=destination)
+    assert read_comparison_result(destination / "result.json") == result
+
+    view = build_comparison_evaluation_view(result.to_dict())
+    assert isinstance(view, ExperimentViewV2)
+    assert view.evidence_eligible is True
+    assert view.infrastructure_health != "failed"
+    assert view.paired_cases[0]["baseline"]["benchmark_outcome"] == "failed"
+    assert view.paired_cases[0]["baseline"]["runtime_outcome"] == "timed_out"
+    assert any(
+        "task/runtime failures, not infrastructure failures" in item
+        for item in view.limitations
+    )
+    assert experiment_view_from_dict(view.to_dict()) == view
 
 
 def test_identical_critical_failures_are_unchanged_not_mixed() -> None:
@@ -2437,6 +2570,75 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     assert result.rows == approved["expected_cell_count"]
     assert result.integrity["approved_manifest_status"] == "reconciled"
     assert result.integrity["approved_manifest_digest"] == approved["lock_digest"]
+
+    referenced_rows = []
+    for row in rows:
+        referenced = dict(row)
+        referenced.pop("approved_comparison")
+        referenced["approved_comparison_lock_digest"] = approved["lock_digest"]
+        referenced_rows.append(referenced)
+    referenced_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=referenced_rows,
+        source="approved-run",
+        approved_comparison=approved,
+    )
+    assert referenced_result.integrity["approved_manifest_status"] == "reconciled"
+    referenced_destination = tmp_path / "referenced-result"
+    referenced_destination.mkdir()
+    (referenced_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in referenced_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(
+        referenced_result,
+        destination=referenced_destination,
+        approved_comparison=approved,
+    )
+    assert json.loads(
+        (referenced_destination / "approved-comparison.lock.json").read_text()
+    ) == approved
+    write_comparison_result(
+        referenced_result,
+        destination=referenced_destination,
+    )
+    sidecar_path = referenced_destination / "approved-comparison.lock.json"
+    sidecar_payload = sidecar_path.read_text(encoding="utf-8")
+    sidecar_path.unlink()
+    with pytest.raises(ValueError, match="no approved execution lock"):
+        write_comparison_result(
+            referenced_result,
+            destination=referenced_destination,
+        )
+    tampered_sidecar = json.loads(sidecar_payload)
+    tampered_sidecar["lock_digest"] = "0" * 64
+    sidecar_path.write_text(json.dumps(tampered_sidecar), encoding="utf-8")
+    with pytest.raises(ValueError, match="digest does not match"):
+        write_comparison_result(
+            referenced_result,
+            destination=referenced_destination,
+        )
+    sidecar_path.write_text(sidecar_payload, encoding="utf-8")
+
+    wrong_reference = [dict(row) for row in referenced_rows]
+    wrong_reference[0]["approved_comparison_lock_digest"] = "f" * 64
+    with pytest.raises(ValueError, match="exact lock digest"):
+        analyze_comparison_rows(
+            comparison_id=spec.id,
+            preview_digest=preview.preview_digest,
+            rows=wrong_reference,
+            source="approved-run",
+            approved_comparison=approved,
+        )
+    with pytest.raises(ValueError, match="no approved execution lock"):
+        analyze_comparison_rows(
+            comparison_id=spec.id,
+            preview_digest=preview.preview_digest,
+            rows=referenced_rows,
+            source="approved-run",
+        )
 
     wrong_run = [dict(row) for row in rows]
     wrong_run[0]["run_id"] = "another-run"
@@ -4458,7 +4660,24 @@ def test_execute_comparison_never_prepares_after_preview(
     def forbidden_prepare(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("execution must not prepare after approval")
 
-    def stop_at_execution(*_args: object, **_kwargs: object) -> None:
+    execute_calls = 0
+
+    def stop_at_execution(*args: object, **_kwargs: object) -> None:
+        nonlocal execute_calls
+        execute_calls += 1
+        persisted_path = (
+            root
+            / COMPARISON_RESULT_ROOT
+            / preview.preview_digest
+            / APPROVED_COMPARISON_LOCK_NAME
+        )
+        persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
+        supplied = args[1].approved_comparison
+        assert persisted == supplied
+        unsigned = {
+            key: value for key, value in persisted.items() if key != "lock_digest"
+        }
+        assert persisted["lock_digest"] == stable_digest(unsigned)
         raise RuntimeError("execution reached")
 
     monkeypatch.setattr(OperatorService, "prepare", forbidden_prepare)
@@ -4472,6 +4691,26 @@ def test_execute_comparison_never_prepares_after_preview(
             fetch_weave=False,
             publish_research=False,
         )
+    assert execute_calls == 1
+
+    sidecar = (
+        root
+        / COMPARISON_RESULT_ROOT
+        / preview.preview_digest
+        / APPROVED_COMPARISON_LOCK_NAME
+    )
+    tampered = json.loads(sidecar.read_text(encoding="utf-8"))
+    tampered["lock_digest"] = "0" * 64
+    sidecar.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="different immutable content"):
+        execute_comparison(
+            preview,
+            approval_digest="",
+            repo_root=root,
+            fetch_weave=False,
+            publish_research=False,
+        )
+    assert execute_calls == 1
 
 
 def test_runtime_budget_cancels_before_remaining_cells_when_projection_drifts() -> None:

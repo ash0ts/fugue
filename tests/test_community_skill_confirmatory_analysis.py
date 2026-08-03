@@ -25,6 +25,18 @@ def _load_module() -> Any:
 ANALYSIS = _load_module()
 
 
+def _load_source_lock_module() -> Any:
+    path = CAMPAIGN / "prepare_local_source_lock.py"
+    spec = importlib.util.spec_from_file_location("confirmatory_source_lock", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+SOURCE_LOCK = _load_source_lock_module()
+
+
 def _load_audit_module() -> Any:
     path = CAMPAIGN / "freeze_trace_audit.py"
     spec = importlib.util.spec_from_file_location("freeze_trace_audit", path)
@@ -95,7 +107,7 @@ def _superpowers_base_inputs() -> dict[str, Any]:
     )
     spec = ANALYSIS.load_comparison(
         REPO_ROOT
-        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v3.yaml",
+        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml",
         repo_root=REPO_ROOT,
     )
     tasks = ANALYSIS._public_tasks(REPO_ROOT / spec.taskset.tasks)
@@ -218,10 +230,19 @@ def test_confirmatory_contract_is_frozen_before_execution() -> None:
     assert all(item["cells"] == 192 for item in studies)
 
 
+def test_source_lock_always_binds_campaign_analysis_and_selection_code() -> None:
+    assert SOURCE_LOCK.CAMPAIGN_SUPPORT_FILES == {
+        "analyze_confirmatory.py": "confirmatory_analysis_implementation",
+        "freeze_trace_audit.py": "trace_audit_selection_implementation",
+        "prepare_local_source_lock.py": "source_lock_implementation",
+    }
+    assert all((CAMPAIGN / name).is_file() for name in SOURCE_LOCK.CAMPAIGN_SUPPORT_FILES)
+
+
 @pytest.mark.parametrize(
     ("study_id", "samples", "families", "requirement"),
     [
-        ("superpowers-writing-plans-confirmatory-v3", 20_000, 4, "all"),
+        ("superpowers-writing-plans-confirmatory-v4", 20_000, 4, "all"),
         ("anthropic-skill-creator-confirmatory-v1", 10_000, 3, "any"),
         ("vercel-react-best-practices-confirmatory-v1", 10_000, 2, "any"),
     ],
@@ -267,34 +288,119 @@ def test_preregistered_locked_input_drift_fails_closed() -> None:
         )
 
 
-def test_superpowers_v1_v2_are_rejected_and_v3_is_exactly_bound() -> None:
+def test_superpowers_v1_v2_v3_are_rejected_and_v4_is_exactly_bound() -> None:
     for study_id in (
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3",
     ):
         with pytest.raises(ValueError, match="identify exactly one"):
             ANALYSIS._profile_for_study(PROFILES, study_id)
     profile, profile_sha = ANALYSIS._profile_for_study(
         PROFILES,
-        "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4",
     )
     assert len(profile_sha) == 64
-    assert profile["study_ids"] == ["superpowers-writing-plans-confirmatory-v3"]
-    assert profile["amendments"]["superpowers-writing-plans-confirmatory-v3"] == {
+    assert profile["study_ids"] == ["superpowers-writing-plans-confirmatory-v4"]
+    assert profile["amendments"]["superpowers-writing-plans-confirmatory-v4"] == {
         "path": (
             "../superpowers-writing-plans-upgrade/"
-            "preregistration-confirmatory-v3-amendment.json"
+            "preregistration-confirmatory-v4-amendment.json"
         ),
-        "sha256": "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f",
+        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+        "amendment_digest": (
+            "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+        ),
     }
     inputs = _superpowers_base_inputs()
     assert inputs["preregistration_binding"]["amendment"]["sha256"] == (
-        "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f"
+        "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424"
+    )
+    assert inputs["preregistration_binding"]["amendment"][
+        "amendment_digest"
+    ] == (
+        "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
     )
     assert inputs["profile"]["historical_rejected_study_ids"] == [
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3",
     ]
+    assert inputs["profile"]["sensitivity_analysis"]["restart_exposure"] == {
+        "status": "required_descriptive",
+        "source_execution": "superpowers-writing-plans-confirmatory-v3",
+        "excluded_holdout_task_ids": ["sp-holdout-research-event-projection"],
+        "claim_effect": (
+            "Repeat the frozen primary summary without the one holdout task whose V3 "
+            "pair was exposed. Report whether the conclusion changes; this sensitivity "
+            "cannot replace the V1 primary analysis."
+        ),
+    }
+
+
+def test_superpowers_v4_manifest_binds_amendment_bytes_and_canonical_digest() -> None:
+    inputs = _study_inputs("superpowers-writing-plans-confirmatory-v4")
+    expected = {
+        "path": (
+            "../superpowers-writing-plans-upgrade/"
+            "preregistration-confirmatory-v4-amendment.json"
+        ),
+        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+        "amendment_digest": (
+            "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+        ),
+    }
+    assert inputs["study"]["amendment"] == expected
+    ANALYSIS._validate_manifest_amendment_binding(
+        study=inputs["study"],
+        preregistration_binding=inputs["preregistration_binding"],
+        manifest_path=CAMPAIGN / "conference-campaign-manifest.json",
+    )
+
+    drifted = json.loads(json.dumps(inputs["study"]))
+    drifted["amendment"]["amendment_digest"] = "0" * 64
+    with pytest.raises(ValueError, match="campaign amendment binding drifted"):
+        ANALYSIS._validate_manifest_amendment_binding(
+            study=drifted,
+            preregistration_binding=inputs["preregistration_binding"],
+            manifest_path=CAMPAIGN / "conference-campaign-manifest.json",
+        )
+
+
+def test_superpowers_v4_amendment_canonical_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(PROFILES.read_text(encoding="utf-8"))
+    profile = next(
+        item
+        for item in document["profiles"]
+        if item["id"] == "superpowers-writing-plans"
+    )
+    amendment_path = (
+        REPO_ROOT
+        / "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "preregistration-confirmatory-v4-amendment.json"
+    )
+    amendment = json.loads(amendment_path.read_text(encoding="utf-8"))
+    amendment["claim_boundary"] += " Undisclosed drift."
+    drifted_path = tmp_path / "drifted-amendment.json"
+    drifted_path.write_text(
+        json.dumps(amendment, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    binding = profile["amendments"]["superpowers-writing-plans-confirmatory-v4"]
+    binding["path"] = drifted_path.as_posix()
+    binding["sha256"] = ANALYSIS._sha256(drifted_path)
+
+    with pytest.raises(
+        ValueError,
+        match="repository preregistration amendment digest drifted",
+    ):
+        ANALYSIS._load_profile_preregistration(
+            profile,
+            profile_path=PROFILES,
+            study_id="superpowers-writing-plans-confirmatory-v4",
+        )
 
 
 def test_primary_inference_uses_holdout_only() -> None:
@@ -322,6 +428,66 @@ def test_primary_inference_uses_holdout_only() -> None:
         for item in report["development_descriptive"]["dimensions"]
         if item["dimension"] in primary
     )
+
+
+def test_superpowers_restart_exposure_sensitivity_is_computed() -> None:
+    inputs = _superpowers_base_inputs()
+    exposed = "sp-holdout-research-event-projection"
+    safety = inputs["profile"]["safety_dimensions"][0]
+
+    def score(task: str, arm: str, _attempt: int, dimension: str) -> bool:
+        if task == exposed and arm == "candidate" and dimension == safety:
+            return False
+        return True
+
+    report = ANALYSIS._preregistered_analysis(
+        rows=_rows(inputs, score),
+        profile=_fast_profile(inputs["profile"]),
+        development=inputs["development"],
+        holdout=inputs["holdout"],
+        tags=inputs["tags"],
+    )
+    restart = report["sensitivity_analysis"]["restart_exposure"]
+
+    assert report["finding"]["status"] == "regressed"
+    assert restart["analysis_status"] == "complete"
+    assert restart["excluded_holdout_task_ids"] == [exposed]
+    assert exposed not in restart["included_holdout_task_ids"]
+    assert restart["included_holdout_task_count"] == 15
+    assert restart["holdout"]["task_count"] == 15
+    assert restart["sensitivity_finding"]["status"] == "unchanged"
+    assert restart["conclusion_changed"] is True
+    assert restart["role"] == (
+        "mandatory_descriptive_sensitivity_not_primary_inference"
+    )
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    [
+        [],
+        ["sp-holdout-research-event-projection"] * 2,
+        ["sp-dev-credential-rotation"],
+        ["not-a-frozen-task"],
+    ],
+)
+def test_restart_exposure_sensitivity_rejects_invalid_exclusions(
+    excluded: list[str],
+) -> None:
+    inputs = _superpowers_base_inputs()
+    profile = _fast_profile(inputs["profile"])
+    profile["sensitivity_analysis"]["restart_exposure"][
+        "excluded_holdout_task_ids"
+    ] = excluded
+
+    with pytest.raises(ValueError, match="restart-exposure"):
+        ANALYSIS._preregistered_analysis(
+            rows=_rows(inputs),
+            profile=profile,
+            development=inputs["development"],
+            holdout=inputs["holdout"],
+            tags=inputs["tags"],
+        )
 
 
 def test_superpowers_requires_all_four_holm_adjusted_primary_families() -> None:
@@ -454,6 +620,29 @@ def test_any_paired_safety_regression_fails_closed_with_task_blocker() -> None:
     assert affected_task in report["finding"]["critical_blockers"][0]
 
 
+def test_shared_candidate_safety_failure_is_inconclusive_not_unchanged() -> None:
+    inputs = _superpowers_base_inputs()
+    affected_task = inputs["holdout"][0]
+    safety = inputs["profile"]["safety_dimensions"][0]
+
+    def score(task: str, _arm: str, _attempt: int, dimension: str) -> bool:
+        return not (task == affected_task and dimension == safety)
+
+    report = ANALYSIS._preregistered_analysis(
+        rows=_rows(inputs, score),
+        profile=_fast_profile(inputs["profile"]),
+        development=inputs["development"],
+        holdout=inputs["holdout"],
+        tags=inputs["tags"],
+    )
+    assert report["finding"]["status"] == "inconclusive"
+    assert len(report["finding"]["candidate_critical_failures"]) == 4
+    assert all(
+        item["task_id"] == affected_task and item["dimension"] == safety
+        for item in report["finding"]["candidate_critical_failures"]
+    )
+
+
 def test_matrix_requires_every_unique_preregistered_coordinate() -> None:
     inputs = _study_inputs("anthropic-skill-creator-confirmatory-v1")
     rows = _rows(inputs)
@@ -495,6 +684,57 @@ def test_attempt_rows_must_share_one_digest_verified_approval_lock() -> None:
     with pytest.raises(ValueError, match="lock digest does not match"):
         ANALYSIS._approved_execution_lock(
             [{"approved_comparison": {**approved, "lock_digest": "d" * 64}}]
+        )
+
+
+def test_attempt_rows_may_reference_one_verified_approval_sidecar(
+    tmp_path: Path,
+) -> None:
+    unsigned = {
+        "kind": "approved_comparison_execution",
+        "comparison_id": "study-v1",
+        "approval_digest": "a" * 64,
+        "preview_digest": "b" * 64,
+    }
+    approved = {**unsigned, "lock_digest": ANALYSIS.stable_digest(unsigned)}
+    lock_path = tmp_path / "approved-comparison.lock.json"
+    lock_path.write_text(json.dumps(approved), encoding="utf-8")
+    rows = [
+        {"approved_comparison_lock_digest": approved["lock_digest"]},
+        {"approved_comparison_lock_digest": approved["lock_digest"]},
+    ]
+    assert ANALYSIS._approved_execution_lock(rows, lock_path=lock_path) == approved
+    with pytest.raises(ValueError, match="sidecar lock"):
+        ANALYSIS._approved_execution_lock(
+            [{"approved_comparison_lock_digest": "c" * 64}],
+            lock_path=lock_path,
+        )
+    lock_path.unlink()
+    with pytest.raises(ValueError, match="sidecar is missing"):
+        ANALYSIS._approved_execution_lock(rows, lock_path=lock_path)
+
+
+def test_trace_audit_selection_must_be_bound_by_the_approval() -> None:
+    selection_digest = "a" * 64
+    trace_audit = {"selection_digest": selection_digest}
+    approved = {
+        "approval_input_bindings": {
+            "trace_audit_selection": selection_digest,
+        }
+    }
+    ANALYSIS._validate_trace_audit_approval_binding(approved, trace_audit)
+    with pytest.raises(ValueError, match="does not bind"):
+        ANALYSIS._validate_trace_audit_approval_binding(
+            {"approval_input_bindings": {}}, trace_audit
+        )
+    with pytest.raises(ValueError, match="does not bind"):
+        ANALYSIS._validate_trace_audit_approval_binding(
+            {
+                "approval_input_bindings": {
+                    "trace_audit_selection": "b" * 64,
+                }
+            },
+            trace_audit,
         )
 
 

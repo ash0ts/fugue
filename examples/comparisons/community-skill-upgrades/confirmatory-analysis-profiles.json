@@ -6,18 +6,20 @@
     {
       "id": "superpowers-writing-plans",
       "study_ids": [
-        "superpowers-writing-plans-confirmatory-v3"
+        "superpowers-writing-plans-confirmatory-v4"
       ],
       "historical_rejected_study_ids": [
         "superpowers-writing-plans-confirmatory-v1",
-        "superpowers-writing-plans-confirmatory-v2"
+        "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3"
       ],
       "preregistration": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
       "preregistration_sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7",
       "amendments": {
-        "superpowers-writing-plans-confirmatory-v3": {
-          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v3-amendment.json",
-          "sha256": "a5b5c4afd3df89376ec2d40ab6b160a500d36f07b29a7bbcd2a24355e92da36f"
+        "superpowers-writing-plans-confirmatory-v4": {
+          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json",
+          "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+          "amendment_digest": "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
         }
       },
       "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
@@ -82,7 +84,15 @@
       "sensitivity_analysis": {
         "model": "mixed-effects logistic model with task random intercept",
         "status": "not_implemented",
-        "claim_effect": "No mixed-effects sensitivity claim is made; it must be implemented or formally amended before execution."
+        "claim_effect": "No mixed-effects sensitivity claim is made; it must be implemented or formally amended before execution.",
+        "restart_exposure": {
+          "status": "required_descriptive",
+          "source_execution": "superpowers-writing-plans-confirmatory-v3",
+          "excluded_holdout_task_ids": [
+            "sp-holdout-research-event-projection"
+          ],
+          "claim_effect": "Repeat the frozen primary summary without the one holdout task whose V3 pair was exposed. Report whether the conclusion changes; this sensitivity cannot replace the V1 primary analysis."
+        }
       }
     },
     {

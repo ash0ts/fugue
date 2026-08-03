@@ -262,6 +262,10 @@ def build_run_snapshot(
         key: (job.config.get("fugue") or {}).get("task_authoring") or {}
         for key, job in jobs_by_config.items()
     }
+    approved_comparison, request_payload = _snapshot_approval_binding(
+        cells,
+        request,
+    )
     planned_matrix = tuple(
         {
             "cell_id": cell.id,
@@ -308,7 +312,11 @@ def build_run_snapshot(
                 jobs_by_execution.get(cell.execution_fingerprint),
             ),
             **(
-                {"approved_comparison": cell.approved_comparison}
+                {
+                    "approved_comparison_lock_digest": str(
+                        cell.approved_comparison.get("lock_digest") or ""
+                    )
+                }
                 if cell.approved_comparison
                 else {}
             ),
@@ -364,7 +372,7 @@ def build_run_snapshot(
         identity_schema_version=CANDIDATE_IDENTITY_SCHEMA_VERSION,
         run_id=run_id,
         experiment=resolved_experiment,
-        request=_portable(dict(request), required_env, secret_names),
+        request=_portable(request_payload, required_env, secret_names),
         assets=assets,
         candidates=candidates,
         candidate_runtime=runtimes,
@@ -399,6 +407,53 @@ def build_run_snapshot(
             raise ValueError(f"refusing to serialize runtime secret: {name}")
     digest = stable_digest({**base.to_dict(), "lock_sha256": ""})
     return RunSnapshotV1(**{**asdict(base), "snapshot_sha256": digest})
+
+
+def _snapshot_approval_binding(
+    cells: list[PlannedCell],
+    request: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    payload = dict(request)
+    raw_request_lock = payload.get("approved_comparison")
+    request_has_lock = raw_request_lock not in (None, {})
+    cells_with_lock = [cell for cell in cells if cell.approved_comparison]
+    if not request_has_lock and not cells_with_lock:
+        return None, payload
+
+    if not request_has_lock:
+        raise ValueError(
+            "governed planned cells require the exact approved comparison lock "
+            "on the run request"
+        )
+    if not isinstance(raw_request_lock, Mapping):
+        raise ValueError("run request approved comparison lock must be a mapping")
+    if not cells:
+        raise ValueError(
+            "run request carries an approved comparison lock but has no planned cells"
+        )
+    if len(cells_with_lock) != len(cells):
+        raise ValueError(
+            "every governed planned cell must carry the exact approved comparison lock"
+        )
+
+    approved = dict(raw_request_lock)
+    _verify_approved_comparison_content_digest(approved)
+    for cell in cells:
+        cell_lock = dict(cell.approved_comparison)
+        _verify_approved_comparison_content_digest(cell_lock)
+        if cell_lock != approved:
+            raise ValueError(
+                "run request and planned cells disagree on the approved comparison"
+            )
+    payload["approved_comparison"] = approved
+    return approved, payload
+
+
+def _verify_approved_comparison_content_digest(value: Mapping[str, Any]) -> None:
+    supplied_digest = str(value.get("lock_digest") or "")
+    unsigned = {key: item for key, item in value.items() if key != "lock_digest"}
+    if supplied_digest != stable_digest(unsigned):
+        raise ValueError("approved comparison execution lock digest does not match")
 
 
 def _execution_runtime_lock(

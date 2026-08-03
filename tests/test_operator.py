@@ -34,6 +34,7 @@ from fugue.bench.library import (
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.bench.reproducibility import (
     RunSnapshotV1,
+    _snapshot_approval_binding,
     build_evaluation_asset_lock,
     build_run_snapshot,
     read_evaluation_asset_lock,
@@ -1490,10 +1491,7 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
         repo_root=tmp_path,
         run_id="snapshot-v2",
         experiment=experiment,
-        request={
-            "experiment_id": "demo",
-            "approved_comparison": approved,
-        },
+        request={"experiment_id": "demo", "approved_comparison": approved},
         jobs=jobs,
         cells=cells,
         env=service.env,
@@ -1512,7 +1510,8 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     assert all(item["attempt_identity"] for item in snapshot.planned_matrix)
     assert snapshot.request["approved_comparison"] == approved
     assert all(
-        item["approved_comparison"] == approved
+        item["approved_comparison_lock_digest"] == approved["lock_digest"]
+        and "approved_comparison" not in item
         for item in snapshot.planned_matrix
     )
     [runtime] = snapshot.candidate_runtime.values()
@@ -1525,9 +1524,90 @@ def test_snapshot_v1_records_the_complete_resolved_plan(tmp_path: Path) -> None:
     }
     assert snapshot.runtime["bridge"] == bridge_runtime
     assert verify_snapshot(snapshot.to_dict())
+    invalid_approval = {**approved, "lock_digest": "0" * 64}
+    with pytest.raises(ValueError, match="lock digest does not match"):
+        build_run_snapshot(
+            repo_root=tmp_path,
+            run_id="snapshot-invalid-approval",
+            experiment=experiment,
+            request={
+                "experiment_id": "demo",
+                "approved_comparison": invalid_approval,
+            },
+            jobs=jobs,
+            cells=[
+                replace(cell, approved_comparison=invalid_approval)
+                for cell in cells
+            ],
+            env=service.env,
+        )
     for unsupported in (2, 3):
         payload = {**snapshot.to_dict(), "schema_version": unsupported}
         assert not verify_snapshot(payload)
+
+
+def test_snapshot_approval_binding_fails_closed_for_partial_governance(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    request = service.request_for_experiment(experiment)
+    jobs = service.rendered_jobs(
+        request,
+        run_id="snapshot-approval-binding",
+        experiment=experiment,
+    )
+    [cell] = plan_cells(
+        jobs,
+        run_id="snapshot-approval-binding",
+        run_name="snapshot approval binding",
+    )
+    unsigned = {
+        "schema_version": 1,
+        "kind": "approved_comparison_execution",
+        "expected_cells": [{"attempt_id": cell.attempt_id}],
+    }
+    approved = {**unsigned, "lock_digest": stable_digest(unsigned)}
+    governed = replace(cell, approved_comparison=approved)
+
+    with pytest.raises(ValueError, match="require the exact approved comparison"):
+        _snapshot_approval_binding(
+            [governed],
+            {"experiment_id": "demo", "approved_comparison": None},
+        )
+    with pytest.raises(ValueError, match="every governed planned cell"):
+        _snapshot_approval_binding(
+            [governed, cell],
+            {"experiment_id": "demo", "approved_comparison": approved},
+        )
+    with pytest.raises(ValueError, match="has no planned cells"):
+        _snapshot_approval_binding(
+            [],
+            {"experiment_id": "demo", "approved_comparison": approved},
+        )
+    with pytest.raises(ValueError, match="every governed planned cell"):
+        _snapshot_approval_binding(
+            [cell],
+            {"experiment_id": "demo", "approved_comparison": approved},
+        )
+
+    drifted_unsigned = {**unsigned, "expected_cells": [{"attempt_id": "drifted"}]}
+    drifted = {
+        **drifted_unsigned,
+        "lock_digest": stable_digest(drifted_unsigned),
+    }
+    with pytest.raises(ValueError, match="request and planned cells disagree"):
+        _snapshot_approval_binding(
+            [governed],
+            {"experiment_id": "demo", "approved_comparison": drifted},
+        )
+
+    invalid = {**approved, "lock_digest": "0" * 64}
+    with pytest.raises(ValueError, match="lock digest does not match"):
+        _snapshot_approval_binding(
+            [replace(cell, approved_comparison=invalid)],
+            {"experiment_id": "demo", "approved_comparison": invalid},
+        )
 
 
 def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(

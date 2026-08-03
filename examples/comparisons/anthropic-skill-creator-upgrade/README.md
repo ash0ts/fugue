@@ -73,9 +73,10 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview \
 ```
 
 Approve only that exact preview with four cells and a `$34` ceiling. Fugue
-reserves `$8.40` for each Agent attempt and `$0.10` for each judge call. Run
-the checkpoint cell first; continue only after the W&B project, Agent and
-Evaluation links, privacy scan, cost, and Harbor cleanup reconcile.
+reserves `$8.40` for each Agent attempt and `$0.10` for each judge call. The
+single governed run executes one aligned baseline/candidate pair as its
+automatic two-cell checkpoint; it continues only after the W&B project, Agent
+and Evaluation links, privacy scan, cost, and Harbor cleanup reconcile.
 
 The result destination is
 `wandb/fugue-anthropic-skill-creator-upgrade-v1`. Start the generic read-only
@@ -198,6 +199,9 @@ uv run python \
   --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-preregistration.json \
   --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-task-family-lock.json \
   --extra examples/comparisons/anthropic-skill-creator-upgrade/qualification_fixtures.py \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/prepare_confirmatory.py \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/prepare_sources.py \
+  --extra examples/comparisons/anthropic-skill-creator-upgrade/zero_model_conformance.py \
   --output .fugue/qualification/community-skill-confirmatory/anthropic/source.lock.json
 ```
 
@@ -224,9 +228,10 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview \
   --env-file "$ENV_FILE" --json
 ```
 
-Run the first cell as the integrity checkpoint. Continue only after its exact
-result project, five Weave links, candidate/runtime identity, private-label
-scan, cost, and Harbor cleanup reconcile. The same-family Sonnet judge remains
-descriptive until two independent reviewers adjudicate the frozen calibration;
-it cannot satisfy or override a deterministic gate. The read-only Study Console
-profile is `study-console-confirmatory-v1.yaml` on port `18101`.
+The single governed run executes one aligned baseline/candidate pair as its
+automatic two-cell integrity checkpoint. It continues only after both cells'
+exact result project, five Weave links, candidate/runtime identity,
+private-label scan, cost, and Harbor cleanup reconcile. The same-family Sonnet
+judge remains descriptive until two independent reviewers adjudicate the frozen
+calibration; it cannot satisfy or override a deterministic gate. The read-only
+Study Console profile is `study-console-confirmatory-v1.yaml` on port `18101`.

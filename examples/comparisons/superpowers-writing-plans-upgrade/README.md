@@ -79,19 +79,22 @@ Console profile.
 
 ## Preregistered confirmatory Study
 
-> **Current rerun identity — V2.** V1 run
-> `20260803T145545-4fdfb32be1` was cancelled after PTY BrokenPipe
-> infrastructure and has no eligible behavioral result. `confirmatory-v2.yaml`
-> keeps every behavioral input unchanged, routes output to a fresh Study and
-> project, and requires Fugue `c275dfa+` with durable-stream and fail-fast
-> repairs.
+> **Current rerun identity — V4.** V1 and V2 remain invalid infrastructure
+> audit history. V3 run `20260803T173311-30fd2fd2f4` produced seven terminal
+> evidence rows, then Fugue misclassified a bounded `AgentTimeoutError` as an
+> infrastructure failure and cancelled 185 cells. V3 has no canonical result
+> and contributes no behavioral rows. `confirmatory-v4.yaml` restarts all 192
+> cells under a fresh Study, project, source lock, preview, and approval.
 
 `confirmatory-v1.yaml` froze the design without reinterpreting the four-cell
-canaries. `preregistration-confirmatory-v2-amendment.json` hashes that exact V1
-preregistration and changes only execution identity, result destination, and
-the minimum Fugue revision. The hypotheses, taskset, holdout membership,
-treatments, evaluators, model, harness, and decision rules remain frozen. The
-design contains eight scorer-development briefs and sixteen untouched holdouts
+canaries. `preregistration-confirmatory-v4-amendment.json` hashes that exact V1
+preregistration, records all seven exposed V3 coordinates and their audit
+artifacts, and changes only execution semantics and identity. The hypotheses,
+taskset, holdout membership, treatments, evaluators, model, harness, limits,
+budget, scheduling seed, and primary decision rules remain frozen. V3 rows may
+not be pooled, used as priors, or selectively resumed. A mandatory descriptive
+sensitivity excludes the one V3-exposed holdout task and reports whether the
+V1 conclusion changes. The design contains eight scorer-development briefs and sixteen untouched holdouts
 across target, indirect-transfer, negative-transfer, ambiguous-evidence,
 safety, and repository-shape strata:
 
@@ -122,25 +125,37 @@ validity evidence; it cannot override deterministic safety failures.
 
 Trusted preparation uses a local Git object only:
 
+Run these commands only after the V4 implementation, preparation logic, and
+analysis code are committed on the exact clean head that will be previewed.
+Any later change to either script invalidates the source lock, preview, and
+approval and requires this sequence again.
+
 ```bash
 uv run python \
   examples/comparisons/superpowers-writing-plans-upgrade/prepare_confirmatory_sources.py
 
 uv run python \
   examples/comparisons/community-skill-upgrades/prepare_local_source_lock.py \
-  examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v2.yaml \
+  examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml \
   --extra examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json \
-  --extra examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v2-amendment.json \
+  --extra examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json \
+  --extra examples/comparisons/community-skill-upgrades/analyze_confirmatory.py \
+  --extra examples/comparisons/superpowers-writing-plans-upgrade/prepare_confirmatory_sources.py \
   --extra .fugue/comparison-resources/superpowers-writing-plans-conference-v1/preparation.receipt.json \
-  --output .fugue/qualification/community-skill-confirmatory/superpowers-v2/source.lock.json
+  --output .fugue/qualification/community-skill-confirmatory/superpowers-v4/source.lock.json
 ```
 
 The first command verifies the exact source commit and tree, validates every
-private path and symbol oracle against that tree, exports the complete tracked
-tree, and records the archive, path-list, taskset, private-label, scorer,
-preregistration, and Skill-lock digests. The second command binds every
-prepared local input, including both exact Skill bundles, into the generic V3
-local source lock used for pre-run, checkpoint, and post-run drift checks. The
+private path and symbol oracle against that tree, and exports the tracked
+implementation and public-test tree after removing every dataset verifier,
+reference solution, private label, recorded answer, evaluation definition, and
+demo credential fixture. Its receipt records the exact excluded paths and both
+visible/excluded path digests alongside the archive, taskset, private-label,
+scorer, preregistration, and Skill-lock digests. The second command binds every
+prepared local input, including both exact Skill bundles, the source-archive
+generator, and the confirmatory analyzer that computes the mandatory
+leave-exposed-task-out sensitivity, into the generic V4 local source lock used
+for pre-run, checkpoint, and post-run drift checks. The
 archived commit predates this taskset, so the mounted source cannot contain its
 private oracle. Trials may unpack the read-only archive but may not clone,
 install, download, or build.
@@ -150,13 +165,13 @@ The source topology is public metadata in
 brief/resource digests, source tree/archive digests, and exact Skill commits.
 It contains no expected values and remains read-only during execution. All
 Agent traces, Evaluations, results, and decisions go to
-`wandb/fugue-superpowers-writing-plans-confirmatory-v2`. Mounted archives remain
+`wandb/fugue-superpowers-writing-plans-confirmatory-v4`. Mounted archives remain
 the actual locked task inputs; cells do not query the hosted source catalogue.
 
 Use the governed flow with the new identity:
 
 ```bash
-SPEC=examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v2.yaml
+SPEC=examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
@@ -169,7 +184,8 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview \
 
 The finite $1,700 ceiling is an admission guard, not a spending target. It
 covers the previously observed worst-case per-cell reservation while preserving
-an exact approval identity. The first cell remains an evidence checkpoint; the
-other 191 cells cannot start until its project, Agent/Evaluation/Dataset links,
-privacy scan, spend, and run-scoped Harbor cleanup reconcile. Use the dedicated
-read-only `study-console-confirmatory-v2.yaml` profile on port `18089`.
+an exact approval identity. The first aligned two-cell pair is the evidence
+checkpoint; the other 190 cells cannot start until both cells' project,
+Agent/Evaluation/Dataset links, privacy scan, spend, and run-scoped Harbor
+cleanup reconcile. Use the dedicated read-only
+`study-console-confirmatory-v4.yaml` profile on port `18102`.

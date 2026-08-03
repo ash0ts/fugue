@@ -30,9 +30,15 @@ PRIVACY_CONTRACT_VERSION = 2
 _MAX_SCAN_FILES = 20_000
 _SCAN_CHUNK_BYTES = 1024 * 1024
 _MAX_SCAN_TOTAL_BYTES = 128 * 1024 * 1024
+_MAX_SCAN_BYTES_PER_PLANNED_JOB = 8 * 1024 * 1024
+_MAX_SCAN_ABSOLUTE_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_NEW_CONTAINER_INSPECTIONS = 512
 _MAX_HOSTED_PAYLOADS = 50_000
+_MAX_HOSTED_PAYLOADS_PER_PLANNED_ATTEMPT = 512
+_MAX_HOSTED_PAYLOADS_ABSOLUTE = 250_000
 _MAX_HOSTED_PAYLOAD_BYTES = 256 * 1024 * 1024
+_MAX_HOSTED_PAYLOAD_BYTES_PER_PLANNED_ATTEMPT = 8 * 1024 * 1024
+_MAX_HOSTED_PAYLOAD_BYTES_ABSOLUTE = 4 * 1024 * 1024 * 1024
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PRIVATE_INPUT_KEYS = frozenset(
@@ -467,6 +473,7 @@ def write_hosted_evidence_privacy_receipt(
         payloads,
         secrets=secrets,
         private_patterns=private_patterns,
+        planned_attempt_count=len(rows),
     )
     publication_kinds = [kind for kind, _payload in payloads]
     required_publication_payloads = {
@@ -564,6 +571,9 @@ def write_hosted_evidence_privacy_receipt(
         "observed_dataset_count": snapshot.observed_dataset_count,
         "result_payload_count": required_publication_payloads["result"],
         "study_payload_count": required_publication_payloads["study"],
+        "hosted_scan_planned_attempt_count": scan["planned_attempt_count"],
+        "hosted_payload_limit": scan["payload_limit"],
+        "hosted_payload_byte_limit": scan["byte_limit"],
         "payload_count": scan["payload_count"],
         "payload_bytes_scanned": scan["payload_bytes_scanned"],
         "payload_set_sha256": scan["payload_set_sha256"],
@@ -955,10 +965,17 @@ def _scan_hosted_payloads(
     *,
     secrets: Sequence[str],
     private_patterns: Sequence[bytes],
+    planned_attempt_count: int,
 ) -> dict[str, Any]:
-    if len(payloads) > _MAX_HOSTED_PAYLOADS:
+    payload_limit, byte_limit = _hosted_payload_scan_limits(
+        planned_attempt_count
+    )
+    if len(payloads) > payload_limit:
         return {
             "status": "unavailable",
+            "planned_attempt_count": planned_attempt_count,
+            "payload_limit": payload_limit,
+            "byte_limit": byte_limit,
             "payload_count": 0,
             "payload_bytes_scanned": 0,
             "payload_set_sha256": _stable_digest([]),
@@ -983,9 +1000,12 @@ def _scan_hosted_payloads(
             default=str,
         ).encode()
         total_bytes += len(encoded)
-        if total_bytes > _MAX_HOSTED_PAYLOAD_BYTES:
+        if total_bytes > byte_limit:
             return {
                 "status": "unavailable",
+                "planned_attempt_count": planned_attempt_count,
+                "payload_limit": payload_limit,
+                "byte_limit": byte_limit,
                 "payload_count": len(payload_digests),
                 "payload_bytes_scanned": total_bytes,
                 "payload_set_sha256": _stable_digest(payload_digests),
@@ -1015,6 +1035,9 @@ def _scan_hosted_payloads(
             affected += 1
     return {
         "status": "passed",
+        "planned_attempt_count": planned_attempt_count,
+        "payload_limit": payload_limit,
+        "byte_limit": byte_limit,
         "payload_count": len(payloads),
         "payload_bytes_scanned": total_bytes,
         "payload_set_sha256": _stable_digest(sorted(payload_digests)),
@@ -1024,6 +1047,31 @@ def _scan_hosted_payloads(
         "affected_payload_count": affected,
         "match_count": secret_matches + private_matches + structure_matches,
     }
+
+
+def _hosted_payload_scan_limits(planned_attempt_count: int) -> tuple[int, int]:
+    if (
+        isinstance(planned_attempt_count, bool)
+        or not isinstance(planned_attempt_count, int)
+        or planned_attempt_count < 0
+    ):
+        raise ValueError("planned attempt count must be a nonnegative integer")
+    payload_limit = min(
+        _MAX_HOSTED_PAYLOADS_ABSOLUTE,
+        max(
+            _MAX_HOSTED_PAYLOADS,
+            planned_attempt_count * _MAX_HOSTED_PAYLOADS_PER_PLANNED_ATTEMPT,
+        ),
+    )
+    byte_limit = min(
+        _MAX_HOSTED_PAYLOAD_BYTES_ABSOLUTE,
+        max(
+            _MAX_HOSTED_PAYLOAD_BYTES,
+            planned_attempt_count
+            * _MAX_HOSTED_PAYLOAD_BYTES_PER_PLANNED_ATTEMPT,
+        ),
+    )
+    return payload_limit, byte_limit
 
 
 def _local_agent_jobs(
@@ -1212,6 +1260,13 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
     jobs: Sequence[RenderedJob],
     secrets: Sequence[str],
 ) -> dict[str, Any]:
+    byte_limit = min(
+        _MAX_SCAN_ABSOLUTE_BYTES,
+        max(
+            _MAX_SCAN_TOTAL_BYTES,
+            len(jobs) * _MAX_SCAN_BYTES_PER_PLANNED_JOB,
+        ),
+    )
     if not secrets:
         return {
             "status": "unavailable",
@@ -1226,6 +1281,8 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
                 ],
             },
             "configured_secret_count": 0,
+            "planned_jobs": len(jobs),
+            "byte_limit": byte_limit,
             "files_scanned": 0,
             "bytes_scanned": 0,
             "files_with_matches": [],
@@ -1282,6 +1339,8 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
                 ],
             },
             "configured_secret_count": 0,
+            "planned_jobs": len(jobs),
+            "byte_limit": byte_limit,
             "files_scanned": 0,
             "bytes_scanned": 0,
             "files_with_matches": [],
@@ -1292,7 +1351,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
         except OSError:
             errors.append(f"could not stat {_safe_path(path, repo_root)}")
             continue
-        if total_bytes + size > _MAX_SCAN_TOTAL_BYTES:
+        if total_bytes + size > byte_limit:
             errors.append("run-scoped secret scan exceeded the total byte limit")
             break
         try:
@@ -1340,6 +1399,8 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
             ],
         },
         "configured_secret_count": len(secrets),
+        "planned_jobs": len(jobs),
+        "byte_limit": byte_limit,
         "files_scanned": scanned,
         "bytes_scanned": total_bytes,
         "files_with_matches": matched,

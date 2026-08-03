@@ -1257,6 +1257,7 @@ def build_comparison_evaluation_view(
         for key, value in _mapping_or_empty(operational.get("evidence_states")).items()
     }
     infrastructure_failures = int(operational.get("infrastructure_failures") or 0)
+    agent_timeouts = int(operational.get("agent_timeouts") or 0)
     integrity = _mapping_or_empty(result.get("integrity"))
     integrity_status = str(integrity.get("status") or "") or None
     harbor_conformance_failures = int(
@@ -1298,6 +1299,11 @@ def build_comparison_evaluation_view(
     if infrastructure_failures:
         limitations.append(
             f"{infrastructure_failures} attempts had infrastructure failures."
+        )
+    if agent_timeouts:
+        limitations.append(
+            f"{agent_timeouts} attempts reached the locked Agent timeout; these "
+            "are task/runtime failures, not infrastructure failures."
         )
     evidence_links = _comparison_evidence_links(
         () if suppress_attempt_navigation else result.get("evidence_links"),
@@ -1536,6 +1542,7 @@ def _build_comparison_evaluation_view_v3(
         for key, value in _mapping_or_empty(operational.get("execution_states")).items()
     }
     infrastructure_failures = int(operational.get("infrastructure_failures") or 0)
+    agent_timeouts = int(operational.get("agent_timeouts") or 0)
     integrity = _mapping_or_empty(result.get("integrity"))
     integrity_status = str(integrity.get("status") or "") or "invalid"
     behavioral_summary = _comparison_behavioral_summary(result, integrity)
@@ -1563,6 +1570,11 @@ def _build_comparison_evaluation_view_v3(
     limitations = [
         str(item) for item in result.get("limitations") or () if str(item).strip()
     ]
+    if agent_timeouts:
+        limitations.append(
+            f"{agent_timeouts} attempts reached the locked Agent timeout; these "
+            "are task/runtime failures, not infrastructure failures."
+        )
     invalid_tasks = [
         item
         for item in task_validity
@@ -1713,6 +1725,7 @@ def _build_comparison_evaluation_view_v2(
         for key, value in _mapping_or_empty(operational.get("evidence_states")).items()
     }
     infrastructure_failures = int(operational.get("infrastructure_failures") or 0)
+    agent_timeouts = int(operational.get("agent_timeouts") or 0)
     integrity = _mapping_or_empty(result.get("integrity"))
     integrity_status = str(integrity.get("status") or "") or "invalid"
     behavioral_summary = _comparison_behavioral_summary(result, integrity)
@@ -1755,6 +1768,11 @@ def _build_comparison_evaluation_view_v2(
     if infrastructure_failures:
         limitations.append(
             f"{infrastructure_failures} attempts had infrastructure failures."
+        )
+    if agent_timeouts:
+        limitations.append(
+            f"{agent_timeouts} attempts reached the locked Agent timeout; these "
+            "are task/runtime failures, not infrastructure failures."
         )
     if missing_evidence:
         limitations.append(
@@ -2254,6 +2272,8 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "runtime_lock_digest",
         "infrastructure",
         "judge_reviews",
+        "benchmark_outcome",
+        "runtime_outcome",
     }
     _reject_unknown(value, allowed, "paired_attempt")
     links = tuple(
@@ -2334,12 +2354,33 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
+        "benchmark_outcome",
+        "runtime_outcome",
     ):
         field_value = _optional_text(
             value.get(field_name), f"paired_attempt.{field_name}", 1000
         )
         if field_value:
             result[field_name] = field_value
+    benchmark_outcome = result.get("benchmark_outcome")
+    if benchmark_outcome not in {
+        None,
+        "passed",
+        "failed",
+        "unscored",
+        "not_applicable",
+    }:
+        raise ValueError("paired_attempt.benchmark_outcome is invalid")
+    runtime_outcome = result.get("runtime_outcome")
+    if runtime_outcome not in {
+        None,
+        "completed",
+        "timed_out",
+        "cancelled",
+        "not_started",
+        "not_applicable",
+    }:
+        raise ValueError("paired_attempt.runtime_outcome is invalid")
     judge_reviews = {
         str(key): _canonical_judge_review(item, judge_id=str(key))
         for key, item in _mapping_or_empty(value.get("judge_reviews")).items()
@@ -2583,6 +2624,10 @@ def _comparison_attempt_measures(
         value = attempt.get(source)
         if isinstance(value, int | float) and not isinstance(value, bool):
             result[target] = value
+    for field_name in ("benchmark_outcome", "runtime_outcome"):
+        value = attempt.get(field_name)
+        if isinstance(value, str) and value:
+            result[field_name] = value
     return result
 
 

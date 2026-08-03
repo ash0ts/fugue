@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: superpowers-writing-plans-confirmatory-v4
+  name: Superpowers Writing Plans Confirmatory Study V4
+  description: Full execution-only restart of the frozen V1 behavioral design after V3 misclassified a bounded Agent timeout as infrastructure failure.
+  objective: Estimate task-level paired behavior changes without pooling invalid V1-V3 rows or treating repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-confirmatory-v4
+database: .study-console/superpowers-writing-plans-confirmatory-v4.sqlite3
+primary_metric:
+  name: holdout_task_level_paired_pass_delta
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-confirmatory-v4
+  read_only: true

@@ -8,6 +8,14 @@ upgrade claim. The frozen confirmatory design is in
 `conference-preregistration.json`; the four operator stages are enumerated in
 `conference-campaign-manifest.json`.
 
+The active Superpowers execution is V4. V3 is retained as invalid audit
+history: seven terminal rows were exposed before a bounded Agent timeout was
+misclassified as infrastructure failure and cancelled the remaining 185 cells.
+V4 is a complete 192-cell restart with unchanged behavior inputs and a fresh
+project, source lock, preview, and approval. V3 rows are excluded from every
+effect estimate, and the V4 report must include the preregistered conservative
+sensitivity that removes the one holdout task exposed in V3.
+
 Each repository Study contains 24 tasks (8 scorer-development tasks and 16
 untouched holdouts), two exact Skill revisions, and four attempts per task and
 arm: 192 cells per Study and 576 Agent cells in total. The inference unit is a
@@ -49,25 +57,30 @@ APPROVAL=/tmp/STUDY.approval.json
 PREVIEW_DIGEST=$(jq -er .preview_digest "$PREVIEW")
 MAX_CELLS=$(jq -er .readiness.estimated_cells "$PREVIEW")
 MAX_USD=$(jq -er .readiness.estimated_cost_usd "$PREVIEW")
+SELECTION_DIGEST=$(jq -er .selection_digest /tmp/STUDY.trace-audit-selection.json)
 
 uv run fugue approve "$PREVIEW_DIGEST" \
   --max-cells "$MAX_CELLS" \
   --max-usd "$MAX_USD" \
+  --bind "trace_audit_selection=$SELECTION_DIGEST" \
   --approved-by operator \
   --operation-id "approve-STUDY-${PREVIEW_DIGEST}" \
   --expires-in 86400 > "$APPROVAL"
 ```
 
 Regenerate the preview immediately before execution and reject any digest
-change. Run only with the one-use approval receipt, exact `.env` path, and no
-OpenAI credential. The first terminal cell is an automatic fail-closed evidence
-checkpoint. A failed checkpoint cancels the remaining cells.
+change. The approval must bind the exact deterministic trace-audit selection;
+the confirmatory analyzer rejects an unbound or substituted sample. Run only
+with the one-use approval receipt, exact `.env` path, and no OpenAI credential.
+The first aligned pair is an automatic fail-closed evidence checkpoint. A
+failed checkpoint cancels the remaining cells.
 
 After execution, reload the canonical result and attempt rows, run
-`analyze_confirmatory.py`, and manually review the frozen 10% paired trace sample
-plus every discordant or critical pair. A report is incomplete until the five
-Weave relationships, task/runtime locks, host verifier, privacy receipt, and
-Harbor cleanup are checked for every audited attempt.
+`analyze_confirmatory.py`, and manually review the study-specific frozen paired
+trace sample (25% for Superpowers; 10% for Anthropic and Vercel) plus every
+discordant or critical pair. A report is incomplete until the five Weave
+relationships, task/runtime locks, host verifier, privacy receipt, and Harbor
+cleanup are checked for every audited attempt.
 
 This directory binds three independent, task-specific Skill upgrade canaries
 under one offline-validated campaign ceiling. It does not create an alternate
@@ -236,7 +249,7 @@ the exact checked-in spec, for example:
 uv run python \
   examples/comparisons/community-skill-upgrades/generate_scientific_report.py \
   --result .fugue/results/comparisons/PREVIEW_DIGEST/result.json \
-  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v3.yaml \
+  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml \
   --audit-selection /tmp/STUDY.trace-audit-selection.json \
   --audit-review /tmp/STUDY.trace-audit-completed.json \
   --output .fugue/results/comparisons/PREVIEW_DIGEST/scientific-report.json

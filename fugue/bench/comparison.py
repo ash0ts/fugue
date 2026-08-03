@@ -63,6 +63,7 @@ COMPARISON_RESULT_SCHEMA_VERSION = 3
 COMPARISON_READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 COMPARISON_RUNTIME_ROOT = Path(".fugue/runtime/comparisons")
 COMPARISON_RESULT_ROOT = Path(".fugue/results/comparisons")
+APPROVED_COMPARISON_LOCK_NAME = "approved-comparison.lock.json"
 COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
 COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
 COMPARISON_EVALUATOR_RUNTIME_ROOT = Path(".fugue/runtime/evaluator-runtimes")
@@ -593,6 +594,12 @@ class PairedAttemptV2:
     runtime_lock_digest: str | None = None
     infrastructure: dict[str, Any] = field(default_factory=dict)
     judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
+    benchmark_outcome: Literal[
+        "passed", "failed", "unscored", "not_applicable"
+    ] | None = None
+    runtime_outcome: Literal[
+        "completed", "timed_out", "cancelled", "not_started", "not_applicable"
+    ] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(_json_value(asdict(self)), preserve_false=True)
@@ -647,6 +654,12 @@ class PairedAttemptV3:
     execution_fingerprint: str | None = None
     runtime_lock_digest: str | None = None
     infrastructure: dict[str, Any] = field(default_factory=dict)
+    benchmark_outcome: Literal[
+        "passed", "failed", "unscored", "not_applicable"
+    ] | None = None
+    runtime_outcome: Literal[
+        "completed", "timed_out", "cancelled", "not_started", "not_applicable"
+    ] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(_json_value(asdict(self)), preserve_false=True)
@@ -5600,16 +5613,37 @@ def _resolve_approved_comparison_execution_lock(
         for row in rows
         if isinstance((value := row.get("approved_comparison")), Mapping)
     ]
+    references = [
+        str(row.get("approved_comparison_lock_digest") or "") for row in rows
+    ]
     if supplied is None and not embedded:
+        if any(references):
+            raise ValueError(
+                "comparison rows contain approval references but no approved "
+                "execution lock was supplied"
+            )
         return None
     expected = dict(supplied) if supplied is not None else embedded[0]
     _verify_approved_comparison_execution_lock(expected)
-    if len(embedded) != len(rows):
-        raise ValueError(
-            "every comparison row must carry the approved comparison execution lock"
-        )
-    if any(value != expected for value in embedded):
-        raise ValueError("comparison rows disagree on the approved execution lock")
+    expected_digest = str(expected["lock_digest"])
+    for row in rows:
+        embedded_value = row.get("approved_comparison")
+        reference = str(row.get("approved_comparison_lock_digest") or "")
+        if isinstance(embedded_value, Mapping):
+            if dict(embedded_value) != expected:
+                raise ValueError(
+                    "comparison rows disagree on the approved execution lock"
+                )
+            if reference and reference != expected_digest:
+                raise ValueError(
+                    "comparison row approval reference disagrees with its "
+                    "embedded execution lock"
+                )
+        elif reference != expected_digest:
+            raise ValueError(
+                "every comparison row must carry the approved comparison "
+                "execution lock or its exact lock digest"
+            )
     return expected
 
 
@@ -6096,7 +6130,10 @@ def _attempt_coordinate(
 
 
 def write_comparison_result(
-    result: ComparisonResult, *, destination: Path
+    result: ComparisonResult,
+    *,
+    destination: Path,
+    approved_comparison: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
     destination.mkdir(parents=True, exist_ok=True)
     json_path = destination / "result.json"
@@ -6109,6 +6146,10 @@ def write_comparison_result(
                 "result writing"
             )
         is_v3 = isinstance(result, ComparisonResultV3)
+        approved_lock = _result_approved_comparison_lock(
+            destination,
+            supplied=approved_comparison,
+        )
         recomputed = analyze_comparison_rows(
             comparison_id=result.comparison_id,
             preview_digest=result.preview_digest,
@@ -6120,6 +6161,7 @@ def write_comparison_result(
                 if is_v3
                 else None
             ),
+            approved_comparison=approved_lock,
             decision_policy=result.decision_policy,
             attestation=result.decision.attestation,
             result_schema_version=3 if is_v3 else 2,
@@ -6151,6 +6193,7 @@ def write_comparison_result(
             json_path,
             markdown_path,
             destination / "attempts.jsonl",
+            destination / APPROVED_COMPARISON_LOCK_NAME,
         )
         if path.is_file()
     }
@@ -6180,6 +6223,50 @@ def write_comparison_result(
         },
     )
     return json_path, markdown_path
+
+
+def _result_approved_comparison_lock(
+    destination: Path,
+    *,
+    supplied: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Resolve one full lock for content-addressed attempt-row references."""
+
+    path = destination / APPROVED_COMPARISON_LOCK_NAME
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(
+            "approved comparison result lock must be a regular, non-symlink file"
+        )
+    if supplied is not None:
+        value = dict(supplied)
+        _verify_approved_comparison_execution_lock(value)
+        _write_consistent_json(
+            path,
+            value,
+            label="approved comparison result lock",
+        )
+        persisted = _read_result_approved_comparison_lock(path)
+        if persisted != value:
+            raise ValueError(
+                "persisted approved comparison result lock disagrees with the "
+                "supplied execution lock"
+            )
+        return persisted
+    if not path.is_file():
+        return None
+
+    return _read_result_approved_comparison_lock(path)
+
+
+def _read_result_approved_comparison_lock(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("approved comparison result lock is unreadable") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("approved comparison result lock must be a mapping")
+    _verify_approved_comparison_execution_lock(raw)
+    return raw
 
 
 def read_comparison_result(path: Path) -> ComparisonResult:
@@ -6418,6 +6505,80 @@ def _terminal_execution_status(
     if status in {"cancelled", "interrupted", "not_applicable"}:
         return status  # type: ignore[return-value]
     return None
+
+
+_BENCHMARK_OUTCOMES = frozenset(
+    {"passed", "failed", "unscored", "not_applicable"}
+)
+_RUNTIME_OUTCOMES = frozenset(
+    {"completed", "timed_out", "cancelled", "not_started", "not_applicable"}
+)
+
+
+def _explicit_row_outcome(
+    row: Mapping[str, Any],
+    key: str,
+    allowed: frozenset[str],
+) -> str | None:
+    raw = row.get(key)
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str) or raw not in allowed:
+        raise ValueError(f"comparison row has invalid {key}: {raw!r}")
+    return raw
+
+
+def _agent_timeout_outcome(row: Mapping[str, Any]) -> bool:
+    """Recognize exact Agent timeout evidence without conflating infra errors.
+
+    New exports carry both governed outcome fields. Historical rows may lack
+    them, so replay accepts only the exact Harbor exception class or an exact
+    terminal structured Agent-timeout event. Any partially populated or
+    contradictory new outcome pair fails closed as a timeout classification.
+    """
+
+    benchmark_outcome = _explicit_row_outcome(
+        row, "benchmark_outcome", _BENCHMARK_OUTCOMES
+    )
+    runtime_outcome = _explicit_row_outcome(
+        row, "runtime_outcome", _RUNTIME_OUTCOMES
+    )
+    if benchmark_outcome is not None or runtime_outcome is not None:
+        return (
+            benchmark_outcome == "failed"
+            and runtime_outcome == "timed_out"
+        )
+    if row.get("exception_class") == "AgentTimeoutError":
+        return True
+    return any(
+        isinstance(event, Mapping)
+        and event.get("terminal") is True
+        and event.get("origin") == "agent"
+        and event.get("kind") == "agent_timeout"
+        for event in row.get("error_events") or ()
+    )
+
+
+def _row_benchmark_outcome(
+    row: Mapping[str, Any],
+) -> Literal["passed", "failed", "unscored", "not_applicable"] | None:
+    explicit = _explicit_row_outcome(
+        row, "benchmark_outcome", _BENCHMARK_OUTCOMES
+    )
+    if explicit is not None:
+        return explicit  # type: ignore[return-value]
+    return "failed" if _agent_timeout_outcome(row) else None
+
+
+def _row_runtime_outcome(
+    row: Mapping[str, Any],
+) -> Literal[
+    "completed", "timed_out", "cancelled", "not_started", "not_applicable"
+] | None:
+    explicit = _explicit_row_outcome(row, "runtime_outcome", _RUNTIME_OUTCOMES)
+    if explicit is not None:
+        return explicit  # type: ignore[return-value]
+    return "timed_out" if _agent_timeout_outcome(row) else None
 
 
 def _paired_dimension_changes(
@@ -6703,6 +6864,8 @@ def _paired_attempt_view(
         ),
         infrastructure=infrastructure,
         judge_reviews=_judge_reviews(row),
+        benchmark_outcome=_row_benchmark_outcome(row),
+        runtime_outcome=_row_runtime_outcome(row),
     )
 
 
@@ -6763,6 +6926,8 @@ def _paired_attempt_view_v3(
         execution_fingerprint=legacy.execution_fingerprint,
         runtime_lock_digest=legacy.runtime_lock_digest,
         infrastructure=legacy.infrastructure,
+        benchmark_outcome=legacy.benchmark_outcome,
+        runtime_outcome=legacy.runtime_outcome,
     )
 
 
@@ -7765,6 +7930,18 @@ def _dimension_change_v3(raw: Any) -> DimensionChangeV2:
     )
 
 
+def _paired_outcome(
+    raw: Any,
+    *,
+    label: str,
+    allowed: frozenset[str],
+) -> str | None:
+    value = _optional_text(raw, label, 100)
+    if value is not None and value not in allowed:
+        raise ValueError(f"unknown {label}: {value}")
+    return value
+
+
 def _paired_attempt(raw: Any) -> PairedAttemptV2 | None:
     if raw is None:
         return None
@@ -7820,6 +7997,16 @@ def _paired_attempt(raw: Any) -> PairedAttemptV2 | None:
                 value.get("judge_reviews")
             ).items()
         },
+        benchmark_outcome=_paired_outcome(
+            value.get("benchmark_outcome"),
+            label="paired benchmark outcome",
+            allowed=_BENCHMARK_OUTCOMES,
+        ),  # type: ignore[arg-type]
+        runtime_outcome=_paired_outcome(
+            value.get("runtime_outcome"),
+            label="paired runtime outcome",
+            allowed=_RUNTIME_OUTCOMES,
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -7903,6 +8090,16 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             str(value.get("runtime_lock_digest") or "") or None
         ),
         infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+        benchmark_outcome=_paired_outcome(
+            value.get("benchmark_outcome"),
+            label="V3 paired benchmark outcome",
+            allowed=_BENCHMARK_OUTCOMES,
+        ),  # type: ignore[arg-type]
+        runtime_outcome=_paired_outcome(
+            value.get("runtime_outcome"),
+            label="V3 paired runtime outcome",
+            allowed=_RUNTIME_OUTCOMES,
+        ),  # type: ignore[arg-type]
     )
 
 
@@ -12082,6 +12279,7 @@ def _operational_summary(
     output_tokens = 0
     usage_rows = 0
     infrastructure_failures = 0
+    agent_timeouts = 0
     wandb_rows = 0
     wandb_eligible = 0
     evidence_projects: set[str] = set()
@@ -12103,8 +12301,12 @@ def _operational_summary(
             or "unknown"
         )
         evidence[evidence_status] = evidence.get(evidence_status, 0) + 1
-        if status in {"failed", "error", "infrastructure_failed"} or row.get(
-            "exception_class"
+        if _agent_timeout_outcome(row):
+            agent_timeouts += 1
+        elif (
+            status in {"failed", "error", "infrastructure_failed"}
+            or _row_runtime_outcome(row) == "timed_out"
+            or row.get("exception_class")
         ):
             infrastructure_failures += 1
         if "wandb_serverless_eligible" in row:
@@ -12207,6 +12409,8 @@ def _operational_summary(
             "eligible": wandb_eligible,
             "ineligible": wandb_rows - wandb_eligible,
         }
+    if agent_timeouts:
+        result["agent_timeouts"] = agent_timeouts
     return result
 
 
@@ -12675,9 +12879,15 @@ def _execute_comparison(
     projection_context.started = bool(
         publish_research and spec.execution.research_id and research_projection
     )
+    approved_execution_lock = _result_approved_comparison_lock(
+        destination,
+        supplied=request.approved_comparison,
+    )
+    if approved_execution_lock is None:  # pragma: no cover - supplied above
+        raise RuntimeError("approved comparison result lock was not persisted")
 
     approved_inputs = _verified_approved_inputs(
-        request.approved_comparison,
+        approved_execution_lock,
         repo_root=repo_root,
     )
     _require_judge_execution_calibrations(
@@ -12703,7 +12913,7 @@ def _execute_comparison(
                 [evaluation_row],
                 repo_root=repo_root,
                 env=service.env,
-                approved_comparison=request.approved_comparison,
+                approved_comparison=approved_execution_lock,
             )[0]
             scored.pop("final_output", None)
             row.update(scored)
@@ -12792,7 +13002,7 @@ def _execute_comparison(
         rows=rows,
         repo_root=repo_root,
         env=service.env,
-        approved_comparison=request.approved_comparison,
+        approved_comparison=approved_execution_lock,
         source_pre_run_drift=source_pre_run_drift,
         source_checkpoint_drift=source_checkpoint_drift,
         source_post_run_drift=source_post_run_drift,
@@ -12807,7 +13017,7 @@ def _execute_comparison(
         expected_evidence_project=trace_project_slug(
             _comparison_evidence_environment(spec, service.env)
         ),
-        approved_comparison=getattr(request, "approved_comparison", None),
+        approved_comparison=approved_execution_lock,
         decision_policy=spec.decision_policy,
         expected_source_evidence_project=(
             spec.execution.source_evidence_project
@@ -12869,7 +13079,7 @@ def _execute_comparison(
         expected_evidence_project=trace_project_slug(
             _comparison_evidence_environment(spec, service.env)
         ),
-        approved_comparison=getattr(request, "approved_comparison", None),
+        approved_comparison=approved_execution_lock,
         decision_policy=spec.decision_policy,
         expected_source_evidence_project=(
             spec.execution.source_evidence_project
@@ -12884,7 +13094,8 @@ def _execute_comparison(
         supersedes=spec.supersedes,
     )
     json_path, markdown_path = write_comparison_result(
-        result, destination=destination
+        result,
+        destination=destination,
     )
     _publish_comparison_result(
         spec=spec,
@@ -15801,6 +16012,8 @@ def _result_markdown(result: ComparisonResult) -> str:
         "## Operational health\n\n"
         f"- Infrastructure failures: "
         f"{result.operational_summary['infrastructure_failures']}\n"
+        f"- Agent timeouts: "
+        f"{result.operational_summary.get('agent_timeouts', 0)}\n"
         f"- Execution states: "
         f"`{json.dumps(result.operational_summary['execution_states'], sort_keys=True)}`\n"
         f"- Evidence states: "
