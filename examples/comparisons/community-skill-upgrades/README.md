@@ -35,6 +35,8 @@ preview before approving it:
 uv run python \
   examples/comparisons/community-skill-upgrades/freeze_trace_audit.py \
   /tmp/STUDY.preview.json \
+  --fraction 0.25 \
+  --preregistration /path/to/STUDY.preregistration.json \
   --output /tmp/STUDY.trace-audit-selection.json
 ```
 
@@ -214,9 +216,12 @@ calibration is pending.
 
 ## Reporting
 
-Each Study copies `scientific-report-template.json` only after canonical rows
-are terminal and reconciled. Reports must keep deterministic outcomes, blind
-judge labels, Skill-use mechanism evidence, and efficiency separate. They may
+One-attempt canaries retain the historical `scientific-report-template.json`.
+Repeated confirmations use `scientific-report-template-v2.json` only after
+canonical rows are terminal, reconciled, and their frozen trace audit is
+completed by two reviewers. Reports keep deterministic outcomes, blind judge
+labels, Skill-use mechanism evidence, efficiency, evidence links, and
+limitations separate. They may
 not pool scores into a cross-repository ranking or claim repeatability from the
 one-attempt canary. Canonical V2 and V3 results are supported. V2 reports mark
 task validity, source topology, aligned analysis, score explanations, and
@@ -230,14 +235,18 @@ the exact checked-in spec, for example:
 ```bash
 uv run python \
   examples/comparisons/community-skill-upgrades/generate_scientific_report.py \
-  --result .fugue/results/comparisons/32de7e52a52bd4e5cb9f6a1dfdc59a73a6c95880855cbc41af70ff223e0c3913/result.json \
-  --spec examples/comparisons/superpowers-writing-plans-upgrade/comparison-v4.yaml \
-  --output .fugue/results/comparisons/32de7e52a52bd4e5cb9f6a1dfdc59a73a6c95880855cbc41af70ff223e0c3913/scientific-report.json
+  --result .fugue/results/comparisons/PREVIEW_DIGEST/result.json \
+  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v3.yaml \
+  --audit-selection /tmp/STUDY.trace-audit-selection.json \
+  --audit-review /tmp/STUDY.trace-audit-completed.json \
+  --output .fugue/results/comparisons/PREVIEW_DIGEST/scientific-report.json
 ```
 
 Repeat with the Anthropic and Vercel result/spec pair. The generator refuses V1
 results, nonterminal or unreconciled attempts, unresolved Weave chains, or any
 identity mismatch that the source result version can prove. It emits
+the canonical result, Study/spec, preregistration, selection, and signed audit
+digests;
 deterministic dimensions, advisory anchored judge labels and reasons (or an
 explicit unavailable row for a missing optional V2 review), explicit
 observed-versus-reserved cost status, aggregate Skill

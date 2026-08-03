@@ -1,18 +1,16 @@
 {
   "schema_version": 1,
+  "kind": "completed_blinded_trace_audit",
   "campaign_id": "community-skill-upgrade-confirmatory-campaign-v1",
+  "study_id": null,
   "status": "pending_execution",
+  "preview_digest": null,
+  "result_digest": null,
   "selection_digest": null,
-  "selection_frozen_before_trace_review": false,
-  "minimum_fraction": 0.1,
   "selected_attempt_ids": [],
   "required_attempt_ids": [],
   "reviewed_attempts": [],
-  "reviewer_attestation": {
-    "reviewer": null,
-    "reviewed_at": null,
-    "artifact_digest": null
-  },
+  "reviewer_attestations": [],
   "limitations": [
     "The executing Codex agent is not an independent human reviewer.",
     "A conference-qualified human judgment claim remains blocked until the declared blinded human-review protocol is complete."

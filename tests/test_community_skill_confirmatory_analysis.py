@@ -189,3 +189,31 @@ def test_trace_audit_selection_is_blinded_paired_and_deterministic() -> None:
         "development",
         "holdout",
     }
+    assert all(
+        set(item)
+        == {
+            "pair_token",
+            "task_id",
+            "harness",
+            "attempt",
+            "partition",
+            "artifact_a_attempt_id",
+            "artifact_b_attempt_id",
+        }
+        for item in first["selected_pairs"]
+    )
+    reviewer_selection = json.dumps(first, sort_keys=True)
+    assert "baseline" not in reviewer_selection
+    assert "candidate" not in reviewer_selection
+
+    families = {
+        "early-development": ["sp-dev-task-00"],
+        "late-holdout": ["sp-holdout-task-23"],
+    }
+    stratified = AUDIT.freeze(
+        preview,
+        fraction=0.01,
+        behavior_families=families,
+    )
+    selected_tasks = {item["task_id"] for item in stratified["selected_pairs"]}
+    assert selected_tasks >= {"sp-dev-task-00", "sp-holdout-task-23"}

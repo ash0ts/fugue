@@ -48,14 +48,18 @@ def _partition(task_id: str) -> str:
 
 
 def _select_keys(
-    pair_keys: Sequence[tuple[str, str, int]], *, fraction: float, seed: str
+    pair_keys: Sequence[tuple[str, str, int]],
+    *,
+    fraction: float,
+    seed: str,
+    behavior_families: Mapping[str, Sequence[str]] | None = None,
 ) -> list[tuple[str, str, int]]:
     if not 0 < fraction <= 1:
         raise ValueError("audit fraction must be within (0, 1]")
     by_partition: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
     for key in pair_keys:
         by_partition[_partition(key[0])].append(key)
-    total = max(1, math.ceil(len(pair_keys) * fraction))
+    total = max(len(by_partition), math.ceil(len(pair_keys) * fraction))
     targets = {
         partition: math.floor(total * len(keys) / len(pair_keys))
         for partition, keys in by_partition.items()
@@ -83,10 +87,30 @@ def _select_keys(
             ).hexdigest(),
         )
         selected.extend(ranked[: targets[partition]])
-    return sorted(selected)
+    selected_set = set(selected)
+    for family, task_ids in sorted((behavior_families or {}).items()):
+        family_keys = [key for key in pair_keys if key[0] in set(task_ids)]
+        if not family_keys:
+            raise ValueError(f"behavior family has no preview pair: {family}")
+        if any(key in selected_set for key in family_keys):
+            continue
+        selected_set.add(
+            min(
+                family_keys,
+                key=lambda key: hashlib.sha256(
+                    f"{seed}:family:{family}:{key[0]}:{key[1]}:{key[2]}".encode()
+                ).hexdigest(),
+            )
+        )
+    return sorted(selected_set)
 
 
-def freeze(preview: Mapping[str, Any], *, fraction: float) -> dict[str, Any]:
+def freeze(
+    preview: Mapping[str, Any],
+    *,
+    fraction: float,
+    behavior_families: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, Any]:
     preview_digest = preview.get("preview_digest")
     matrix = preview.get("matrix")
     if not isinstance(preview_digest, str) or len(preview_digest) != 64:
@@ -112,18 +136,33 @@ def freeze(preview: Mapping[str, Any], *, fraction: float) -> dict[str, Any]:
         pairs[key][str(variant)] = attempt_id
     if any(set(arms) != {"baseline", "candidate"} for arms in pairs.values()):
         raise ValueError("preview contains an incomplete aligned pair")
-    selected_keys = _select_keys(sorted(pairs), fraction=fraction, seed=preview_digest)
-    selected_pairs = [
-        {
-            "task_id": key[0],
-            "harness": key[1],
-            "attempt": key[2],
-            "partition": _partition(key[0]),
-            "baseline_attempt_id": pairs[key]["baseline"],
-            "candidate_attempt_id": pairs[key]["candidate"],
-        }
-        for key in selected_keys
-    ]
+    selected_keys = _select_keys(
+        sorted(pairs),
+        fraction=fraction,
+        seed=preview_digest,
+        behavior_families=behavior_families,
+    )
+    selected_pairs = []
+    for key in selected_keys:
+        attempt_ids = sorted(
+            pairs[key].values(),
+            key=lambda attempt_id: hashlib.sha256(
+                f"{preview_digest}:blind:{key[0]}:{key[1]}:{key[2]}:{attempt_id}".encode()
+            ).hexdigest(),
+        )
+        selected_pairs.append(
+            {
+                "pair_token": hashlib.sha256(
+                    f"{preview_digest}:pair:{key[0]}:{key[1]}:{key[2]}".encode()
+                ).hexdigest(),
+                "task_id": key[0],
+                "harness": key[1],
+                "attempt": key[2],
+                "partition": _partition(key[0]),
+                "artifact_a_attempt_id": attempt_ids[0],
+                "artifact_b_attempt_id": attempt_ids[1],
+            }
+        )
     document: dict[str, Any] = {
         "schema_version": 1,
         "kind": "blinded_trace_audit_selection",
@@ -136,8 +175,8 @@ def freeze(preview: Mapping[str, Any], *, fraction: float) -> dict[str, Any]:
             attempt_id
             for pair in selected_pairs
             for attempt_id in (
-                pair["baseline_attempt_id"],
-                pair["candidate_attempt_id"],
+                pair["artifact_a_attempt_id"],
+                pair["artifact_b_attempt_id"],
             )
         ),
         "post_result_additions": {
@@ -153,9 +192,32 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("preview", type=Path)
     parser.add_argument("--fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--preregistration",
+        type=Path,
+        help="Optional frozen preregistration containing design.behavior_families.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    document = freeze(_load(args.preview, "preview"), fraction=args.fraction)
+    behavior_families = None
+    if args.preregistration is not None:
+        preregistration = _load(args.preregistration, "preregistration")
+        design = preregistration.get("design")
+        if not isinstance(design, Mapping):
+            raise ValueError("preregistration design is unavailable")
+        raw_families = design.get("behavior_families")
+        if not isinstance(raw_families, Mapping):
+            raise ValueError("preregistration behavior families are unavailable")
+        behavior_families = {
+            str(family): tuple(str(task_id) for task_id in task_ids)
+            for family, task_ids in raw_families.items()
+            if isinstance(task_ids, list)
+        }
+    document = freeze(
+        _load(args.preview, "preview"),
+        fraction=args.fraction,
+        behavior_families=behavior_families,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"selection_digest": document["selection_digest"]}))

@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "status": "pending_execution",
+  "study_id": null,
+  "evidence_project": null,
+  "exact_revisions": {
+    "baseline": null,
+    "candidate": null
+  },
+  "source_result": null,
+  "study_contract": null,
+  "preregistration": null,
+  "trace_audit": null,
+  "task_validity": null,
+  "behavioral_finding": null,
+  "deterministic_results": [],
+  "judge_results": [],
+  "mechanism_results": [],
+  "efficiency": {
+    "latency": null,
+    "tokens": null,
+    "cost": null
+  },
+  "evidence_links": [],
+  "limitations": [
+    "The Agent and blind judge use the same model family; deterministic gates remain authoritative.",
+    "Results are task- and revision-specific and do not rank repositories or Skills universally."
+  ],
+  "conclusion": null
+}
