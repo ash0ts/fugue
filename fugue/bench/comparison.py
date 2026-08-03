@@ -15802,7 +15802,7 @@ def _judge_calibration_value_issue(
 ) -> str | None:
     if not isinstance(value, dict):
         return f"judge {judge.id} calibration must be a mapping"
-    if value.get("schema_version") != 1:
+    if value.get("schema_version") not in {1, 2}:
         return f"judge {judge.id} calibration schema is unsupported"
     if value.get("review_status") != "adjudicated":
         return f"judge {judge.id} calibration is not adjudicated"

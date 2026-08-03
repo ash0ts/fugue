@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
+    _judge_calibration_value_issue,
     _judge_execution_calibration_issue,
     load_comparison,
 )
@@ -165,6 +166,14 @@ def test_v2_offline_conformance_is_recomputed_not_trusted(tmp_path: Path) -> Non
             repo_root=tmp_path,
             approved_inputs=None,
         )
+    )
+
+
+def test_v2_human_calibration_state_is_supported_but_still_pending() -> None:
+    report = _json(REPO_ROOT / CAMPAIGN / "judge-calibration-v2.json")
+
+    assert _judge_calibration_value_issue(_judge(), report) == (
+        "judge community-usefulness calibration is not adjudicated"
     )
 
 
