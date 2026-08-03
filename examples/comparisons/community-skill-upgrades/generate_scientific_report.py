@@ -143,6 +143,7 @@ def _study_contract(
     for manifest_path, collection in (
         (campaign_root / "campaign-manifest.json", "studies"),
         (campaign_root / "conference-campaign-manifest.json", "final_four"),
+        (campaign_root / "canary-execution-policy-v2.json", "studies"),
     ):
         if not manifest_path.is_file():
             continue

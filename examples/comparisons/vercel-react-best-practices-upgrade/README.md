@@ -59,10 +59,12 @@ zero-critical-false-pass gates, the same-model qualitative judge is advisory
 and may be unavailable. It cannot override a deterministic security or
 correctness failure.
 
-Use the normal governed flow after calibration and preparation:
+V2 is the fresh post-integrity-repair Study. V1 remains immutable audit
+history and is not reused or reinterpreted. Use the normal governed flow after
+calibration and preparation:
 
 ```bash
-SPEC=examples/comparisons/vercel-react-best-practices-upgrade/comparison.yaml
+SPEC=examples/comparisons/vercel-react-best-practices-upgrade/comparison-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \

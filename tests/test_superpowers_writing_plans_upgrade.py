@@ -308,10 +308,10 @@ def test_v3_canary_uses_complete_source_and_four_locked_cells() -> None:
     assert all("-full-" in item["resources"][0]["path"] for item in tasks)
 
 
-def test_v4_routes_to_dedicated_project_and_adds_advisory_judge() -> None:
-    spec = load_comparison(EXAMPLE / "comparison-v4.yaml", repo_root=Path.cwd())
+def test_v5_routes_to_dedicated_project_and_adds_advisory_judge() -> None:
+    spec = load_comparison(EXAMPLE / "comparison-v5.yaml", repo_root=Path.cwd())
 
-    assert spec.id == "superpowers-writing-plans-upgrade-canary-v4"
+    assert spec.id == "superpowers-writing-plans-upgrade-canary-v5"
     assert spec.execution.evidence_project == (
         "wandb/fugue-superpowers-writing-plans-upgrade-v1"
     )

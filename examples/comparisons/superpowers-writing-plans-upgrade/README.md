@@ -21,7 +21,8 @@ approval ceiling impossible, and the private scorer required literal
 candidate-authored headings. V2's seven reviewable plans are diagnostic only;
 they do not support an upgrade claim.
 
-V4 uses complete historical repository trees, candidate-neutral plan checks,
+V5 is the fresh post-integrity-repair Study. It uses complete historical
+repository trees, candidate-neutral plan checks,
 and a four-cell canary: `2 tasks × 2 exact Skill revisions × 1 attempt`. It uses
 Claude Code, Anthropic Sonnet 5, and local Docker/Harbor. The result project is
 `wandb/fugue-superpowers-writing-plans-upgrade-v1`. A positive result supports only
@@ -54,7 +55,7 @@ the task images. Trials do not clone, download, or infer later source state.
 Then use the normal governed flow:
 
 ```bash
-SPEC=examples/comparisons/superpowers-writing-plans-upgrade/comparison-v4.yaml
+SPEC=examples/comparisons/superpowers-writing-plans-upgrade/comparison-v5.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" --env-file "$ENV_FILE" --json

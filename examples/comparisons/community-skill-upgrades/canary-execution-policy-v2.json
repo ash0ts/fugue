@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "id": "community-skill-upgrade-canary-execution-policy-v2",
+  "status": "limits_only_not_approval",
+  "currency": "USD",
+  "calibration": {
+    "id": "community-skill-judge-calibration-v1",
+    "status": "completed_advisory_only_pending_human_review",
+    "result_path": "judge-calibration-result-v1.json",
+    "result_digest": "7e0e93d4d6180d3216004e51d36da6486b491de6721d1302289ebcf25627a45b",
+    "sanitizer_compatibility_path": "judge-sanitizer-compatibility-v2.json",
+    "sanitizer_compatibility_receipt_digest": "53d145e3d259e56124ed8eb97259b03b92a25151e53ec54af1e1183a798e71e4",
+    "accounted_allocation_usd": 8,
+    "new_model_calls": 0,
+    "judge_claim_scope": "advisory_same_family_only"
+  },
+  "studies": [
+    {
+      "id": "superpowers-writing-plans-upgrade-canary-v5",
+      "spec": "../superpowers-writing-plans-upgrade/comparison-v5.yaml",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-upgrade-v1",
+      "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "tasks": 2,
+      "attempts": 1,
+      "cells": 4,
+      "maximum_cost_usd": 34,
+      "approval_status": "fresh_exact_preview_required"
+    },
+    {
+      "id": "anthropic-skill-creator-upgrade-canary-v2",
+      "spec": "../anthropic-skill-creator-upgrade/comparison-v2.yaml",
+      "evidence_project": "wandb/fugue-anthropic-skill-creator-upgrade-v1",
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+      "tasks": 2,
+      "attempts": 1,
+      "cells": 4,
+      "maximum_cost_usd": 34,
+      "approval_status": "fresh_exact_preview_required"
+    },
+    {
+      "id": "vercel-react-best-practices-upgrade-canary-v2",
+      "spec": "../vercel-react-best-practices-upgrade/comparison-v2.yaml",
+      "evidence_project": "wandb/fugue-vercel-react-best-practices-upgrade-v1",
+      "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+      "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+      "tasks": 2,
+      "attempts": 1,
+      "cells": 4,
+      "maximum_cost_usd": 34,
+      "approval_status": "fresh_exact_preview_required"
+    }
+  ],
+  "totals": {
+    "new_agent_cells": 12,
+    "new_study_maximum_cost_usd": 102,
+    "calibration_accounted_allocation_usd": 8,
+    "cumulative_campaign_ceiling_usd": 110
+  },
+  "authorization_contract": {
+    "approval_unit": "one_exact_preview_per_study",
+    "checked_in_policy_is_approval": false,
+    "prior_approval_reuse": "forbidden",
+    "checkpoint_cells": 1,
+    "stop_on_integrity_privacy_budget_or_cleanup_failure": true,
+    "confirmatory_studies_authorized": false
+  }
+}

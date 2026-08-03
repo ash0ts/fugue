@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).parents[1]
 CAMPAIGN = REPO_ROOT / "examples/comparisons/community-skill-upgrades"
 SPEC_PATH = (
     REPO_ROOT
-    / "examples/comparisons/superpowers-writing-plans-upgrade/comparison-v4.yaml"
+    / "examples/comparisons/superpowers-writing-plans-upgrade/comparison-v5.yaml"
 )
 
 
@@ -130,21 +130,11 @@ def _attempt(
 
 def _result() -> tuple[ComparisonResultV3, Any, dict[str, Any], dict[str, Any]]:
     spec = load_comparison(SPEC_PATH, repo_root=REPO_ROOT)
-    manifest = json.loads((CAMPAIGN / "campaign-manifest.json").read_text())
-    study = next(item for item in manifest["studies"] if item["id"] == spec.id)
-    study = copy.deepcopy(study)
-    study["_manifest"] = {
-        "id": "community-skill-upgrade-canary-v1",
-        "path": "campaign-manifest.json",
-        "sha256": _sha(CAMPAIGN / "campaign-manifest.json"),
-    }
-    study["_study_contract_digest"] = stable_digest(
-        {key: value for key, value in study.items() if not key.startswith("_")}
+    study = REPORTER._study_contract(
+        campaign_root=CAMPAIGN,
+        spec_path=SPEC_PATH,
+        study_id=spec.id,
     )
-    study["_spec"] = {
-        "path": SPEC_PATH.relative_to(REPO_ROOT).as_posix(),
-        "sha256": _sha(SPEC_PATH),
-    }
     template = json.loads(REPORTER.TEMPLATE.read_text())
     task_ids = ("credential-rotation-plan-v3", "evidence-destination-plan-v3")
     pairs = []
@@ -450,6 +440,7 @@ def _confirmatory_inputs() -> tuple[
             arm["observed"] = 8
             arm["applicable"] = 8
     study["attempts"] = 4
+    study["cells"] = 16
     study["expected_cells"] = 16
     preregistration_path = (
         REPO_ROOT / "examples/comparisons/superpowers-writing-plans-upgrade/"
@@ -602,6 +593,12 @@ def test_report_is_decision_ready_without_private_labels() -> None:
     }
     assert len(report["evidence_links"]) == 20
     assert report["source_result"]["canonical_reader_verified"] is True
+    assert report["study_contract"]["manifest_id"] == (
+        "community-skill-upgrade-canary-execution-policy-v2"
+    )
+    assert report["study_contract"]["manifest_path"] == (
+        "canary-execution-policy-v2.json"
+    )
     assert report["trace_audit"]["status"] == ("not_required_for_one_attempt_canary")
     assert REPORTER.CANARY_LIMITATION[0] in report["limitations"]
     serialized = json.dumps(report, sort_keys=True)

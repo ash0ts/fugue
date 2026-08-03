@@ -44,11 +44,11 @@ def _score():
 
 
 def test_vercel_canary_locks_exact_revisions_matrix_destination_and_budget() -> None:
-    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+    spec = load_comparison(EXAMPLE / "comparison-v2.yaml", repo_root=Path.cwd())
     lock = json.loads(LOCK.read_text(encoding="utf-8"))
 
     assert spec.schema_version == 2
-    assert spec.id == "vercel-react-best-practices-upgrade-canary-v1"
+    assert spec.id == "vercel-react-best-practices-upgrade-canary-v2"
     assert spec.baseline.skills == ("vercel-react-best-practices-before",)
     assert spec.candidate.skills == ("vercel-react-best-practices-after",)
     assert lock["repository"] == "https://github.com/vercel-labs/agent-skills"
@@ -211,7 +211,7 @@ def test_vercel_scorer_ignores_self_reported_claims_and_checks_final_source() ->
 
 
 def test_vercel_judge_is_shared_blinded_and_cannot_replace_deterministic_gate() -> None:
-    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+    spec = load_comparison(EXAMPLE / "comparison-v2.yaml", repo_root=Path.cwd())
     judge = next(item for item in spec.evaluators if item.type == "llm_judge")
     deterministic = next(
         item for item in spec.evaluators if item.type == "deterministic"
@@ -221,7 +221,7 @@ def test_vercel_judge_is_shared_blinded_and_cannot_replace_deterministic_gate() 
     assert judge.required is False
     assert judge.profile == "anthropic/claude-sonnet-5"
     assert judge.calibration == (
-        "examples/comparisons/community-skill-upgrades/judge-calibration.json"
+        "examples/comparisons/community-skill-upgrades/judge-calibration-v2.json"
     )
     assert judge.dimensions == (
         "useful_actionability",

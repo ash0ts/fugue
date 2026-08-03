@@ -22,9 +22,9 @@ from fugue.bench.judge_input import (
 REPO_ROOT = Path(__file__).parents[1]
 CAMPAIGN = Path("examples/comparisons/community-skill-upgrades")
 ACTIVE_SPECS = (
-    Path("examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v5.yaml"),
-    Path("examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v1.yaml"),
-    Path("examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-v1.yaml"),
+    Path("examples/comparisons/superpowers-writing-plans-upgrade/comparison-v5.yaml"),
+    Path("examples/comparisons/anthropic-skill-creator-upgrade/comparison-v2.yaml"),
+    Path("examples/comparisons/vercel-react-best-practices-upgrade/comparison-v2.yaml"),
 )
 
 

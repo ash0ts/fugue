@@ -12,5 +12,5 @@ primary_metric:
   name: behavior_pass
   goal: maximize
 presentation:
-  default_study_id: anthropic-skill-creator-upgrade-canary-v1
+  default_study_id: anthropic-skill-creator-upgrade-canary-v2
   read_only: true

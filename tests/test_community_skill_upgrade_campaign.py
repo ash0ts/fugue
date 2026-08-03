@@ -144,6 +144,88 @@ def test_campaign_assets_are_strict_valid_but_not_execution_eligible() -> None:
     assert calibration["execution_gate"]["campaign_allocation_usd"] == 8
 
 
+def test_repaired_canary_policy_is_bounded_and_not_an_approval() -> None:
+    policy = _json("canary-execution-policy-v2.json")
+
+    assert policy["schema_version"] == 2
+    assert policy["status"] == "limits_only_not_approval"
+    assert policy["calibration"] == {
+        "id": "community-skill-judge-calibration-v1",
+        "status": "completed_advisory_only_pending_human_review",
+        "result_path": "judge-calibration-result-v1.json",
+        "result_digest": (
+            "7e0e93d4d6180d3216004e51d36da6486b491de6721d1302289ebcf25627a45b"
+        ),
+        "sanitizer_compatibility_path": "judge-sanitizer-compatibility-v2.json",
+        "sanitizer_compatibility_receipt_digest": (
+            "53d145e3d259e56124ed8eb97259b03b92a25151e53ec54af1e1183a798e71e4"
+        ),
+        "accounted_allocation_usd": 8,
+        "new_model_calls": 0,
+        "judge_claim_scope": "advisory_same_family_only",
+    }
+    studies = policy["studies"]
+    assert len(studies) == 3
+    assert [study["cells"] for study in studies] == [4, 4, 4]
+    assert [study["maximum_cost_usd"] for study in studies] == [34, 34, 34]
+    assert all(
+        study["approval_status"] == "fresh_exact_preview_required"
+        for study in studies
+    )
+    for study in studies:
+        spec_path = (EXAMPLE / str(study["spec"])).resolve()
+        spec = load_comparison(spec_path, repo_root=REPO_ROOT)
+        assert spec.id == study["id"]
+        assert spec.execution.evidence_project == study["evidence_project"]
+        lock_path = spec_path.parent / "skill-revisions.lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert lock["baseline"]["commit"] == study["baseline_commit"]
+        assert lock["candidate"]["commit"] == study["candidate_commit"]
+        assert spec.execution.attempts == 1
+        assert spec.execution.evidence_checkpoint_cells == 1
+        assert spec.execution.max_cost_usd == study["maximum_cost_usd"]
+        task_path = REPO_ROOT / spec.taskset.tasks
+        assert len(
+            [line for line in task_path.read_text(encoding="utf-8").splitlines() if line]
+        ) == 2
+        judge = next(item for item in spec.evaluators if item.type == "llm_judge")
+        assert judge.required is False
+        assert judge.calibration.endswith("judge-calibration-v2.json")
+    assert policy["totals"] == {
+        "new_agent_cells": 12,
+        "new_study_maximum_cost_usd": 102,
+        "calibration_accounted_allocation_usd": 8,
+        "cumulative_campaign_ceiling_usd": 110,
+    }
+    assert sum(study["cells"] for study in studies) == policy["totals"][
+        "new_agent_cells"
+    ]
+    assert sum(study["maximum_cost_usd"] for study in studies) == policy["totals"][
+        "new_study_maximum_cost_usd"
+    ]
+    assert (
+        policy["totals"]["new_study_maximum_cost_usd"]
+        + policy["totals"]["calibration_accounted_allocation_usd"]
+        == policy["totals"]["cumulative_campaign_ceiling_usd"]
+    )
+    result = _json(str(policy["calibration"]["result_path"]))
+    compatibility = _json(
+        str(policy["calibration"]["sanitizer_compatibility_path"])
+    )
+    assert result["result_digest"] == policy["calibration"]["result_digest"]
+    assert compatibility["receipt_digest"] == policy["calibration"][
+        "sanitizer_compatibility_receipt_digest"
+    ]
+    assert policy["authorization_contract"] == {
+        "approval_unit": "one_exact_preview_per_study",
+        "checked_in_policy_is_approval": False,
+        "prior_approval_reuse": "forbidden",
+        "checkpoint_cells": 1,
+        "stop_on_integrity_privacy_budget_or_cleanup_failure": True,
+        "confirmatory_studies_authorized": False,
+    }
+
+
 def test_campaign_has_balanced_16_case_repository_strata() -> None:
     rows = CONTRACT.read_cases(EXAMPLE / "judge-calibration-cases.jsonl")
     summary = CONTRACT.validate_cases(rows)

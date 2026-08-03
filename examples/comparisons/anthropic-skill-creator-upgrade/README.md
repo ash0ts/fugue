@@ -60,8 +60,11 @@ receive only those prepared, read-only inputs and cannot clone or install.
 
 ## Governed canary
 
+V2 is the fresh post-integrity-repair Study. V1 remains immutable audit
+history and is not reused or reinterpreted.
+
 ```bash
-SPEC=examples/comparisons/anthropic-skill-creator-upgrade/comparison.yaml
+SPEC=examples/comparisons/anthropic-skill-creator-upgrade/comparison-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \

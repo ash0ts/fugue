@@ -12,5 +12,5 @@ primary_metric:
   name: behavior_pass
   goal: maximize
 presentation:
-  default_study_id: superpowers-writing-plans-upgrade-canary-v4
+  default_study_id: superpowers-writing-plans-upgrade-canary-v5
   read_only: true

@@ -46,11 +46,11 @@ def _prepare_module():
 
 
 def test_canary_locks_exact_skill_creator_upgrade_and_four_cells() -> None:
-    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+    spec = load_comparison(EXAMPLE / "comparison-v2.yaml", repo_root=Path.cwd())
     lock = json.loads(LOCK.read_text(encoding="utf-8"))
 
     assert spec.schema_version == 2
-    assert spec.id == "anthropic-skill-creator-upgrade-canary-v1"
+    assert spec.id == "anthropic-skill-creator-upgrade-canary-v2"
     assert spec.baseline.skills == ("anthropic-skill-creator-before-compatibility",)
     assert spec.candidate.skills == ("anthropic-skill-creator-compatibility",)
     assert lock["repository"] == "https://github.com/anthropics/skills"
@@ -110,7 +110,7 @@ def test_canary_locks_exact_skill_creator_upgrade_and_four_cells() -> None:
 
 
 def test_shared_judge_is_advisory_and_blinded_to_treatment() -> None:
-    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+    spec = load_comparison(EXAMPLE / "comparison-v2.yaml", repo_root=Path.cwd())
     judge = next(item for item in spec.evaluators if item.type == "llm_judge")
     rubric = json.loads(
         Path(
@@ -122,7 +122,7 @@ def test_shared_judge_is_advisory_and_blinded_to_treatment() -> None:
     assert judge.required is False
     assert judge.profile == "anthropic/claude-sonnet-5"
     assert judge.calibration == (
-        "examples/comparisons/community-skill-upgrades/judge-calibration.json"
+        "examples/comparisons/community-skill-upgrades/judge-calibration-v2.json"
     )
     assert judge.rubric == rubric["rubric"]
     assert judge.dimensions == (

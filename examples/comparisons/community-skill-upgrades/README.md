@@ -1,6 +1,32 @@
 # Community Skill upgrade campaign
 
-## Confirmatory campaign V1
+## Current executable canaries
+
+The current execution authority is
+`canary-execution-policy-v2.json`: three fresh four-cell Studies, one per
+repository. They use new Study identities because every earlier canary is
+audit history produced before the final artifact, cancellation, scorer, and
+trace-integrity repairs. Each Study has its own exact preview and approval with
+a $34 ceiling. The 12 new Agent cells therefore have a $102 ceiling; the
+already completed judge diagnostic accounts for the remaining $8 of the
+original $110 campaign allocation and must not be rerun.
+
+The same-family Sonnet judge is advisory. Its frozen 48-case synthetic result
+passed the authored-reference thresholds and its V2 sanitizer compatibility
+receipt is valid, but human review remains pending. Deterministic task and
+safety gates are authoritative, and no result may claim a human-qualified
+judge outcome.
+
+The active specs are:
+
+- `../superpowers-writing-plans-upgrade/comparison-v5.yaml`
+- `../anthropic-skill-creator-upgrade/comparison-v2.yaml`
+- `../vercel-react-best-practices-upgrade/comparison-v2.yaml`
+
+Each run stops after its first cell unless project routing, the five-link Weave
+chain, privacy, cost accounting, and Harbor cleanup reconcile.
+
+## Deferred confirmatory campaign V1
 
 The original four-cell canaries are exploratory audit history. They are not
 pooled with the confirmatory campaign and they do not support a general Skill
@@ -8,11 +34,11 @@ upgrade claim. The frozen confirmatory design is in
 `conference-preregistration.json`; the four operator stages are enumerated in
 `conference-campaign-manifest.json`.
 
-The active Superpowers execution is V5. V3 is retained as invalid audit
+The deferred Superpowers confirmatory design is V5. V3 is retained as invalid audit
 history after a bounded Agent timeout was misclassified as infrastructure
 failure. V4 is also invalid audit history: its checkpoint exposed silent
 primary-artifact truncation and an over-broad path classifier before the run
-was stopped. V5 is a complete 192-cell restart with the same behavior inputs,
+was stopped. V5 preregisters a complete 192-cell restart with the same behavior inputs,
 an amended measurement contract, and a fresh project, source lock, preview,
 and approval. V1-V4 rows are excluded from every effect estimate, and the V5
 report must include the preregistered conservative sensitivity for holdout
@@ -26,14 +52,15 @@ independently sampled tasks.
 
 ### Confirmatory cost and approval boundary
 
-The active confirmatory limits are frozen in
+The deferred confirmatory limits are frozen in
 `confirmatory-budget-policy-v1.json`. They are intentionally much larger than
 the original canary budget: each Study reserves 192 × ($8.40 Agent + $0.10
 advisory judge) = **$1,632**. The independent hard caps are $1,700 for
 Superpowers and $1,640 each for Anthropic and Vercel, for 576 cells, $4,896 of
 estimated reserve, and at most $4,980 across three separately approved runs.
 
-The checked-in policy is not approval. Each Study requires a fresh receipt for
+The checked-in policy is not approval, and no confirmatory execution is
+currently authorized. Each Study would require a fresh receipt for
 its exact preview and cap. The historical `campaign-manifest.json` and
 `budget-ledger.json` describe the original four-cell canaries and their $110
 ceiling only; neither those files nor any approval derived from them authorizes
