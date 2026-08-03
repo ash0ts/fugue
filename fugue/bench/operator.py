@@ -2194,10 +2194,11 @@ class OperatorService:
                 )
             evidence_checkpoint_cells = int(
                 request.approved_comparison.get(
-                    "evidence_checkpoint_cells", 0
+                    "evidence_checkpoint_cells",
+                    resolved.evidence_checkpoint_cells,
                 )
                 if request.approved_comparison
-                else 0
+                else resolved.evidence_checkpoint_cells
             )
             if evidence_checkpoint_cells and max_workers != 1:
                 raise RuntimeError(
@@ -2232,7 +2233,9 @@ class OperatorService:
                 )
 
             observability_error = None
-            live_required = bool(request.approved_comparison) and any(
+            live_required = bool(
+                request.approved_comparison or resolved.require_live_evidence
+            ) and any(
                 cell.applicable and cell.execution_kind == "agent"
                 for cell in cells
             )
@@ -2242,12 +2245,12 @@ class OperatorService:
             )
             if live_required and not trace_api_key(run_env):
                 raise RuntimeError(
-                    "approved comparison requires live Weave evidence before "
+                    "this experiment requires live Weave evidence before "
                     "Agent execution, but no trace credential is configured"
                 )
             if live_required and live_disabled:
                 raise RuntimeError(
-                    "approved comparison cannot disable required live Weave evidence"
+                    "this experiment cannot disable required live Weave evidence"
                 )
             if (
                 cells
@@ -2275,11 +2278,11 @@ class OperatorService:
                     observability_error = f"{type(exc).__name__}: {exc}"
                     if live_required:
                         raise RuntimeError(
-                            "approved comparison live-evidence initialization failed"
+                            "required live-evidence initialization failed"
                         ) from exc
             if live_required and live is None:
                 raise RuntimeError(
-                    "approved comparison has no live-evidence coordinator"
+                    "required live-evidence coordinator is unavailable"
                 )
             local = (
                 GeneratedEvaluationCoordinator(
@@ -2346,6 +2349,15 @@ class OperatorService:
                 harbor_conformance.enforced
                 and harbor_conformance.status != "passed"
             )
+            # A governed comparison promises a reconciled live evidence graph,
+            # so publication failure invalidates that run. Ordinary experiments
+            # may opt into best-effort observability; preserve their task result
+            # while recording the publication failure explicitly.
+            publication_blocked = bool(
+                live_required
+                and publication is not None
+                and publication.failures
+            )
             _finalize_run(
                 self.repo_root,
                 run_id,
@@ -2354,7 +2366,7 @@ class OperatorService:
                     "cancelled"
                     if cancelled
                     else "failed"
-                    if failed or conformance_blocked
+                    if failed or conformance_blocked or publication_blocked
                     else "passed"
                 ),
                 error=(
@@ -2365,6 +2377,11 @@ class OperatorService:
                         f"{harbor_conformance.status}"
                     )
                     if conformance_blocked
+                    else (
+                        "Live evidence publication did not reconcile: "
+                        + "; ".join(publication.failures)
+                    )
+                    if publication_blocked and publication is not None
                     else None
                 ),
                 running=running,

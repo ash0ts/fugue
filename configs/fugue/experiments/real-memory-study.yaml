@@ -52,6 +52,8 @@ evidence_destination:
   api_base_url: https://api.wandb.ai
   trace_base_url: https://trace.wandb.ai
   app_base_url: https://wandb.ai
+require_live_evidence: true
+evidence_checkpoint_cells: 1
 default_preset: canary
 tags: [agent-eval, repository-memory, retrieval-to-action, real-study-lane-v1]
 harnesses: [claude-code]

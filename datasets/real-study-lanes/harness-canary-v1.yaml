@@ -12,7 +12,7 @@ dataset:
       - swebench==4.0.3
       - datasets==2.16.1
       - fastcore==1.10.5
-model: wandb/zai-org/GLM-5.2
+model: anthropic/claude-sonnet-5
 k: 1
 n_concurrent: 1
 jobs_dir: .fugue/runtime/jobs/real-harness-study

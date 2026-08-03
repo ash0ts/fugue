@@ -2,10 +2,10 @@ schema_version: 1
 id: real-harness-study-v1
 revision: v1
 title: Real harness behavior canary
-objective: Measure task-specific harness behavior without changing the W&B-routed GLM-5.2 model, task cohort, context, runtime policy, or attempt count and without claiming a universal harness ranking.
+objective: Measure task-specific harness behavior without changing Anthropic Sonnet 5, the task cohort, context, runtime policy, or attempt count and without claiming a universal harness ranking.
 allowed:
   experiments: [real-harness-study]
-  models: [wandb/zai-org/GLM-5.2]
+  models: [anthropic/claude-sonnet-5]
   harnesses: [hermes, openclaw, claude-code, codex]
   workloads: [canary]
   variants: [baseline]

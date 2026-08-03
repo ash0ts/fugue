@@ -386,6 +386,8 @@ class ExperimentSpec:
     source_evidence_destination: EvidenceDestinationV1 | None = None
     evidence_project: str | None = None
     evidence_destination: EvidenceDestinationV1 | None = None
+    require_live_evidence: bool = False
+    evidence_checkpoint_cells: int = 0
     tags: list[str] = field(default_factory=list)
     harnesses: list[str] = field(default_factory=list)
     variants: list[FeatureVariant] = field(default_factory=list)
@@ -420,6 +422,10 @@ class ExperimentSpec:
             value.pop("evidence_project", None)
         if self.evidence_destination is None:
             value.pop("evidence_destination", None)
+        if not self.require_live_evidence:
+            value.pop("require_live_evidence", None)
+        if not self.evidence_checkpoint_cells:
+            value.pop("evidence_checkpoint_cells", None)
         value["variants"] = [
             _paths_to_strings(variant.to_dict()) for variant in self.variants
         ]
@@ -686,6 +692,18 @@ def experiment_from_data(
         raise ValueError(
             "source evidence project and destination must be declared together"
         )
+    require_live_evidence = bool(raw.get("require_live_evidence", False))
+    evidence_checkpoint_cells = (
+        _non_negative_int(
+            raw.get("evidence_checkpoint_cells"),
+            kind="experiment evidence_checkpoint_cells",
+        )
+        or 0
+    )
+    if evidence_checkpoint_cells and not require_live_evidence:
+        raise ValueError(
+            "experiment evidence checkpoints require require_live_evidence=true"
+        )
     return ExperimentSpec(
         id=experiment_id,
         title=str(raw.get("title") or experiment_id),
@@ -699,6 +717,8 @@ def experiment_from_data(
         source_evidence_destination=source_evidence_destination,
         evidence_project=evidence_project,
         evidence_destination=evidence_destination,
+        require_live_evidence=require_live_evidence,
+        evidence_checkpoint_cells=evidence_checkpoint_cells,
         tags=_string_list(raw.get("tags")),
         harnesses=_string_list(raw.get("harnesses")),
         variants=variants,
@@ -1365,6 +1385,13 @@ def _positive_int(value: Any, *, kind: str) -> int | None:
     parsed = _optional_int(value)
     if parsed is not None and parsed < 1:
         raise ValueError(f"{kind} must be positive")
+    return parsed
+
+
+def _non_negative_int(value: Any, *, kind: str) -> int | None:
+    parsed = _optional_int(value)
+    if parsed is not None and parsed < 0:
+        raise ValueError(f"{kind} must be non-negative")
     return parsed
 
 

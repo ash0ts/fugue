@@ -20,6 +20,63 @@ if tracer_source.count(attribute_needle) != 2:
     raise SystemExit("hermes-otel tracer patch target mismatch")
 tracer_source = tracer_source.replace(attribute_needle, attribute_replacement)
 
+trace_import_needle = (
+    "    from opentelemetry.trace import INVALID_SPAN, set_span_in_context\n"
+)
+trace_import_replacement = """    from opentelemetry.trace import (
+        INVALID_SPAN,
+        NonRecordingSpan,
+        SpanContext,
+        TraceFlags,
+        TraceState,
+        set_span_in_context,
+    )
+"""
+if tracer_source.count(trace_import_needle) != 1:
+    raise SystemExit("hermes-otel span-context import patch target mismatch")
+tracer_source = tracer_source.replace(trace_import_needle, trace_import_replacement)
+
+parent_needle = '''            span_ctx = None
+            if effective_parent is not None and hasattr(effective_parent, "get_span_context"):
+                span_ctx = set_span_in_context(effective_parent)
+
+            span = self.tracer.start_span(name, attributes=attrs, context=span_ctx, links=links)
+'''
+parent_replacement = '''            span_ctx = None
+            if effective_parent is not None and hasattr(effective_parent, "get_span_context"):
+                span_ctx = set_span_in_context(effective_parent)
+            else:
+                traceparent = os.environ.get("FUGUE_WEAVE_TRACEPARENT", "").strip()
+                if traceparent:
+                    # Start only a native root under Fugue's remote Evaluation span.
+                    parts = traceparent.split("-")
+                    if (
+                        len(parts) != 4
+                        or parts[0] != "00"
+                        or len(parts[1]) != 32
+                        or len(parts[2]) != 16
+                        or len(parts[3]) != 2
+                    ):
+                        raise ValueError("invalid FUGUE_WEAVE_TRACEPARENT")
+                    trace_id = int(parts[1], 16)
+                    span_id = int(parts[2], 16)
+                    if trace_id == 0 or span_id == 0:
+                        raise ValueError("invalid FUGUE_WEAVE_TRACEPARENT")
+                    parent = SpanContext(
+                        trace_id=trace_id,
+                        span_id=span_id,
+                        is_remote=True,
+                        trace_flags=TraceFlags(int(parts[3], 16) & 1),
+                        trace_state=TraceState(),
+                    )
+                    span_ctx = set_span_in_context(NonRecordingSpan(parent))
+
+            span = self.tracer.start_span(name, attributes=attrs, context=span_ctx, links=links)
+'''
+if tracer_source.count(parent_needle) != 1:
+    raise SystemExit("hermes-otel evaluation parent patch target mismatch")
+tracer_source = tracer_source.replace(parent_needle, parent_replacement)
+
 atexit_needle = "        atexit.register(self._force_flush)\n"
 atexit_replacement = """        atexit.register(self._force_flush)
         if os.environ.get("FUGUE_WEAVE_SINGLE_TURN_KEY", "").strip():

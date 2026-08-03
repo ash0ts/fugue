@@ -9,6 +9,7 @@ import fugue.bench.run_conformance as run_conformance
 from fugue.bench.campaign_evidence import (
     _harbor_conformance_failures,
     apply_campaign_run_conformance,
+    verified_trace_link_set,
 )
 from fugue.bench.campaign_lifecycle import CampaignService
 from fugue.bench.candidates import stable_digest
@@ -16,6 +17,100 @@ from fugue.bench.files import atomic_write_json
 from fugue.bench.library import get_experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _verified_trace_row() -> dict[str, object]:
+    project = "wandb/fugue-test"
+    row: dict[str, object] = {
+        "attempt_id": "a" * 64,
+        "trace_project": project,
+        "trace_receipt": {"app_base_url": "https://wandb.ai"},
+        "otel_trace_id": "b" * 32,
+        "otel_root_span_id": "c" * 16,
+        "weave_dataset_ref": f"weave:///{project}/object/tasks:dataset-v1",
+        "weave_dataset_url": (
+            f"https://wandb.ai/{project}/weave/objects/tasks/versions/dataset-v1"
+        ),
+        "dataset_version_object_verified": True,
+    }
+    for prefix, call_id in (
+        ("weave_evaluation_root", "evaluation"),
+        ("eval_predict_and_score", "predict-and-score"),
+        ("weave_prediction", "prediction"),
+        ("weave_agent_root", "agent-evidence"),
+    ):
+        id_field = (
+            "eval_predict_and_score_call_id"
+            if prefix == "eval_predict_and_score"
+            else f"{prefix}_call_id"
+        )
+        row[id_field] = call_id
+        row[f"{prefix}_ref"] = f"weave:///{project}/call/{call_id}"
+        row[f"{prefix}_url"] = (
+            f"https://wandb.ai/{project}/weave/calls/{call_id}"
+        )
+    row.update(
+        {
+            "evaluation_root_object_verified": True,
+            "eval_predict_and_score_object_verified": True,
+            "weave_prediction_object_verified": True,
+            "agent_graph_verified": True,
+        }
+    )
+    return row
+
+
+def test_trace_link_set_rejects_unknown_agent_evidence_kind() -> None:
+    row = _verified_trace_row()
+    row.update(
+        {
+            "weave_agent_root_evidence_kind": "asserted_agent_root_v0",
+            "weave_agent_root_is_native_call": True,
+        }
+    )
+
+    result = verified_trace_link_set(row)
+
+    assert result["verified"] is False
+    assert "does not recognize the Agent evidence kind" in result["failures"]
+
+
+def test_trace_link_set_requires_exact_receipt_cross_transport_edge() -> None:
+    row = _verified_trace_row()
+    row.update(
+        {
+            "weave_agent_root_evidence_kind": (
+                "native_otel_cross_transport_receipt_v1"
+            ),
+            "weave_agent_root_is_native_call": False,
+            "agent_cross_transport_edge": {
+                "schema_version": 1,
+                "status": "verified",
+                "source_system": "otel",
+                "source_trace_id": "wrong-trace",
+                "source_span_id": "c" * 16,
+                "receipt_system": "weave",
+                "receipt_call_id": "agent-evidence",
+            },
+        }
+    )
+
+    result = verified_trace_link_set(row)
+
+    assert result["verified"] is False
+    assert "does not verify the Agent receipt cross-transport edge" in result[
+        "failures"
+    ]
+
+    row["agent_cross_transport_edge"]["source_trace_id"] = "b" * 32  # type: ignore[index]
+    result = verified_trace_link_set(row)
+    assert result["verified"] is True
+    agent_link = next(
+        link for link in result["links"] if link["slot"] == "agent_root"
+    )
+    assert agent_link["evidence_kind"] == (
+        "native_otel_cross_transport_receipt_v1"
+    )
 
 
 def test_local_harbor_receipt_gates_every_agent_row_not_a_workload_label(

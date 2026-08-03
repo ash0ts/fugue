@@ -5,21 +5,15 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
 from fugue.bench.ai import _intervention_component_locks, get_analysis
 from fugue.bench.analysis_contracts import (
-    AlignedAnalysisV1,
-    AlignedArmV1,
-    AlignedAttemptSetV1,
-    AlignedContrastV1,
-    AlignedDimensionV1,
     EvidenceDriftCheckV1,
     EvidenceTopologyV1,
     LockDescriptorV1,
-    TaskStratifiedSummaryV1,
-    TaskValidityV1,
 )
 from fugue.bench.campaign_lifecycle import get_campaign
 from fugue.bench.candidates import stable_digest
@@ -32,6 +26,17 @@ from fugue.bench.comparison import (
     DimensionChangeV2,
     PairedAttemptV3,
     PairedCaseV3,
+    _aligned_analysis_v3,
+    _behavioral_summary_v3,
+    _comparison_qualification_digest,
+    _deterministic_summary,
+    _evidence_grade,
+    _operational_summary,
+    _runtime_locks_v3,
+    _task_validity_v3,
+    _v3_canonical_attempt_rows,
+    _v3_semantic_integrity,
+    read_comparison_result,
 )
 from fugue.bench.intervention_provenance import (
     build_intervention_component_lock,
@@ -45,10 +50,17 @@ from fugue.bench.loop_failure import (
 from fugue.model_plane import EvidenceDestinationV1
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-COMPARISON_ID = "mcp-main-vs-0-4-natural-maintainer-canary-v3"
+COMPARISON_ID = "mcp-main-vs-0-4-tool-surface-confirmation-v10"
+RESULT_DIGEST = "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
+FAILURE_TASK_ID = "exact-history-target"
 SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
 RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
 LOOP_PROJECT = "wandb/fugue-claude-loop-engineering-v1"
+CHECKED_FAILURE_LOCK = (
+    REPO_ROOT
+    / "examples/loop-engineering/wandb-evidence-loop/fixtures/"
+    "mcp-v10-exact-history-baseline.failure-lock.json"
+)
 
 
 def _destination(project: str) -> EvidenceDestinationV1:
@@ -62,32 +74,41 @@ def _destination(project: str) -> EvidenceDestinationV1:
     )
 
 
+def _evidence_call_id(prefix: str, kind: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"{prefix}:{kind}"))
+
+
 def _links(prefix: str) -> tuple[AttemptEvidenceLinkV1, ...]:
     base = f"https://wandb.ai/{RESULT_PROJECT}/weave"
+    call_base = f"weave:///{RESULT_PROJECT}/call"
+    evaluation_id = _evidence_call_id(prefix, "evaluation")
+    score_id = _evidence_call_id(prefix, "score")
+    prediction_id = _evidence_call_id(prefix, "prediction")
+    agent_id = _evidence_call_id(prefix, "agent")
     return (
         AttemptEvidenceLinkV1(
             kind="evaluation_root",
             status="resolved",
-            ref=f"{prefix}-evaluation",
-            url=f"{base}/calls/{prefix}-evaluation",
+            ref=f"{call_base}/{evaluation_id}",
+            url=f"{base}/calls/{evaluation_id}",
         ),
         AttemptEvidenceLinkV1(
             kind="prediction_and_score",
             status="resolved",
-            ref=f"{prefix}-score",
-            url=f"{base}/calls/{prefix}-score",
+            ref=f"{call_base}/{score_id}",
+            url=f"{base}/calls/{score_id}",
         ),
         AttemptEvidenceLinkV1(
             kind="prediction",
             status="resolved",
-            ref=f"{prefix}-prediction",
-            url=f"{base}/calls/{prefix}-prediction",
+            ref=f"{call_base}/{prediction_id}",
+            url=f"{base}/calls/{prediction_id}",
         ),
         AttemptEvidenceLinkV1(
             kind="agent_root",
             status="resolved",
-            ref=f"{prefix}-agent",
-            url=f"{base}/calls/{prefix}-agent",
+            ref=f"{call_base}/{agent_id}",
+            url=f"{base}/calls/{agent_id}",
         ),
         AttemptEvidenceLinkV1(
             kind="dataset",
@@ -104,6 +125,7 @@ def _attempt(
     arm: str,
     attempt: int,
     passed: bool,
+    scores: dict[str, bool] | None = None,
 ) -> PairedAttemptV3:
     candidate = stable_digest({"arm": arm})
     runtime = stable_digest({"runtime": "local-harbor"})
@@ -116,12 +138,14 @@ def _attempt(
         "runtime": runtime,
     }
     attempt_id = stable_digest({"schema_version": 1, **identity})
+    resolved_scores = scores or {"maintainer.factual_correctness": passed}
+    evidence_prefix = f"{task_id}-{arm}-{attempt}"
     return PairedAttemptV3(
         attempt_id=attempt_id,
         identity=identity,
         prediction_id=f"prediction-{task_id}-{arm}-{attempt}",
         passed=passed,
-        execution_status="passed",
+        execution_status="completed",
         evaluation_status="scored",
         evidence_status="reconciled",
         cost_usd=0.25,
@@ -131,15 +155,17 @@ def _attempt(
         tool_calls=2,
         tools=("query_wandb_tool",),
         queried_projects=(SOURCE_PROJECT,),
-        scores={"maintainer.factual_correctness": passed},
+        scores=resolved_scores,
         score_explanations={
-            "maintainer.factual_correctness": "safe deterministic explanation"
+            dimension: "safe deterministic explanation"
+            for dimension in resolved_scores
         },
         sanitized_answer_excerpt=None,
         actual_query_scope=(SOURCE_PROJECT,),
         reported_project_identity=SOURCE_PROJECT,
-        evidence_links=_links(f"{task_id}-{arm}-{attempt}"),
-        weave_agent_root_call_id=f"{task_id}-{arm}-{attempt}-agent",
+        evidence_links=_links(evidence_prefix),
+        weave_agent_root_call_id=_evidence_call_id(evidence_prefix, "agent"),
+        otel_root_span_id=stable_digest({"otel": evidence_prefix})[:16],
         execution_fingerprint=runtime,
         runtime_lock_digest=runtime,
         infrastructure={"harbor": "passed"},
@@ -202,31 +228,107 @@ def _pair(
     )
 
 
-def _result() -> ComparisonResultV3:
-    pairs = (
-        _pair(
-            task_id="reconcile-evaluations",
-            attempt=1,
-            baseline_passed=False,
-            candidate_passed=True,
+def _exact_history_pair(
+    attempt: int,
+    *,
+    candidate_answer_correct: bool | None = None,
+    candidate_bounded: bool | None = None,
+) -> PairedCaseV3:
+    if candidate_answer_correct is None:
+        candidate_answer_correct = attempt == 1
+    if candidate_bounded is None:
+        candidate_bounded = attempt == 2
+    baseline_scores = {
+        "tool-surface.answer_correct": True,
+        "tool-surface.bounded_evidence": False,
+        "tool-surface.evidence_honesty": False,
+    }
+    candidate_scores = {
+        "tool-surface.answer_correct": candidate_answer_correct,
+        "tool-surface.bounded_evidence": candidate_bounded,
+        "tool-surface.evidence_honesty": False,
+    }
+    return PairedCaseV3(
+        pair_id=stable_digest(
+            {
+                "schema_version": 1,
+                "task_id": FAILURE_TASK_ID,
+                "harness": "claude-code",
+                "attempt": attempt,
+            }
         ),
-        _pair(
-            task_id="reconcile-evaluations",
-            attempt=2,
-            baseline_passed=False,
-            candidate_passed=True,
+        task_id=FAILURE_TASK_ID,
+        harness="claude-code",
+        attempt=attempt,
+        status="unchanged" if candidate_answer_correct else "regressed",
+        dimension_changes=(
+            DimensionChangeV2(
+                id="tool-surface.answer_correct",
+                label="Answer correct",
+                status="unchanged" if candidate_answer_correct else "regressed",
+                baseline=True,
+                candidate=candidate_answer_correct,
+                critical=True,
+                role="outcome",
+            ),
+            DimensionChangeV2(
+                id="tool-surface.bounded_evidence",
+                label="Bounded evidence",
+                status="unchanged" if not candidate_bounded else "improved",
+                baseline=False,
+                candidate=candidate_bounded,
+                critical=True,
+                role="safety_gate",
+            ),
+            DimensionChangeV2(
+                id="tool-surface.evidence_honesty",
+                label="Evidence honesty",
+                status="unchanged",
+                baseline=False,
+                candidate=False,
+                critical=True,
+                role="safety_gate",
+            ),
         ),
-        _pair(
-            task_id="project-health",
-            attempt=1,
-            baseline_passed=True,
-            candidate_passed=True,
+        baseline=_attempt(
+            task_id=FAILURE_TASK_ID,
+            arm="baseline",
+            attempt=attempt,
+            passed=False,
+            scores=baseline_scores,
         ),
-        _pair(
-            task_id="project-health",
-            attempt=2,
-            baseline_passed=True,
-            candidate_passed=True,
+        candidate=_attempt(
+            task_id=FAILURE_TASK_ID,
+            arm="candidate",
+            attempt=attempt,
+            passed=False,
+            scores=candidate_scores,
+        ),
+        task_label=FAILURE_TASK_ID,
+    )
+
+
+def _result(
+    *,
+    pairs: tuple[PairedCaseV3, ...] | None = None,
+    topology: EvidenceTopologyV1 | None = None,
+) -> ComparisonResultV3:
+    resolved_pairs = pairs or (
+        _exact_history_pair(1),
+        _exact_history_pair(2),
+        *(
+            _pair(
+                task_id=task_id,
+                attempt=attempt,
+                baseline_passed=True,
+                candidate_passed=True,
+            )
+            for task_id in (
+                "evaluation-summary-accuracy",
+                "filtered-failure-triage",
+                "run-inventory-projection",
+            )
+            for attempt in (1, 2)
         ),
     )
     source_digest = stable_digest({"source": "locked"})
@@ -235,7 +337,7 @@ def _result() -> ComparisonResultV3:
         expected_digest=source_digest,
         observed_digest=source_digest,
     )
-    topology = EvidenceTopologyV1(
+    resolved_topology = topology or EvidenceTopologyV1(
         source_destination=_destination(SOURCE_PROJECT),
         result_destination=_destination(RESULT_PROJECT),
         source_lock_digest=source_digest,
@@ -243,121 +345,123 @@ def _result() -> ComparisonResultV3:
         post_run_drift=drift,
         execution_identity=stable_digest({"runtime": "local-harbor"}),
     )
-    aligned_attempts = tuple(
-        AlignedAttemptSetV1(
-            alignment_id=pair.pair_id,
-            task_id=pair.task_id,
-            harness=pair.harness,
-            attempt=pair.attempt,
-            attempt_ids_by_arm={
-                "baseline": pair.baseline.attempt_id,  # type: ignore[union-attr]
-                "candidate": pair.candidate.attempt_id,  # type: ignore[union-attr]
-            },
-        )
-        for pair in pairs
+    task_validity = _task_validity_v3(
+        resolved_pairs,
+        topology=resolved_topology,
     )
-    analysis = AlignedAnalysisV1(
+    analysis_rows = tuple(
+        {"variant_id": arm}
+        for pair in resolved_pairs
+        for arm in ("baseline", "candidate")
+    )
+    analysis = _aligned_analysis_v3(
+        resolved_pairs,
+        rows=analysis_rows,
         study_intent="mcp_release_maintenance",
-        reference_arm="baseline",
-        arms=(
-            AlignedArmV1(id="baseline", label="main"),
-            AlignedArmV1(id="candidate", label="staging"),
-        ),
-        contrasts=(
-            AlignedContrastV1(
-                id="staging-vs-main",
-                reference_arm="baseline",
-                treatment_arms=("candidate",),
-                dimensions=(
-                    AlignedDimensionV1(
-                        id="maintainer.factual_correctness",
-                        label="Factual correctness",
-                        role="outcome",
-                        critical=True,
-                    ),
-                ),
-            ),
-        ),
-        aligned_attempts=aligned_attempts,
-        task_summaries=(
-            TaskStratifiedSummaryV1(
-                task_id="reconcile-evaluations",
-                validity="valid",
-                pair_counts={"improved": 2},
-            ),
-            TaskStratifiedSummaryV1(
-                task_id="project-health",
-                validity="non_discriminating",
-                pair_counts={"unchanged": 2},
-                blockers=("task did not discriminate revisions",),
-            ),
-        ),
+        task_validity=task_validity,
     )
-    behavioral = BehavioralSummaryV1(
-        status="improved",
-        recommendation="Investigate the repeated baseline failure.",
-        improved_pairs=2,
-        regressed_pairs=0,
-        mixed_pairs=0,
-        unchanged_pairs=2,
-        incomplete_pairs=0,
-        candidate_critical_failures=0,
-        critical_blockers=(),
-        supported_claim="Candidate fixed the locked reconciliation task.",
-        limitations=("This is a bounded canary.",),
-        next_action="Lock one repeated failure for loop engineering.",
+    behavioral = _behavioral_summary_v3(
+        BehavioralSummaryV1(
+            status="regressed",
+            recommendation="Investigate the exact-history regression.",
+            improved_pairs=0,
+            regressed_pairs=1,
+            mixed_pairs=0,
+            unchanged_pairs=7,
+            incomplete_pairs=0,
+            candidate_critical_failures=2,
+            critical_blockers=("exact-history-target safety failures",),
+            supported_claim=(
+                "The candidate regressed on one locked outcome pair."
+            ),
+            limitations=("This is a bounded canary.",),
+            next_action="Lock one repeated failure for loop engineering.",
+        ),
+        paired_cases=resolved_pairs,
+        task_validity=task_validity,
     )
     decision = DecisionSummaryV1(
-        status="hold",
-        recommendation="Package release remains on hold.",
-        release_target="wandb-mcp-server Python package 0.4",
-        candidate_sha="4" * 40,
+        status="inconclusive",
+        recommendation="This fixture does not evaluate a package release.",
+        release_target=None,
+        candidate_sha=None,
         evidence_grade="A",
         gates=(),
-        critical_blockers=("release gates are incomplete",),
+        critical_blockers=(),
         limitations=("Local behavior is not package qualification.",),
-        next_action="Complete package gates.",
+        next_action="Inspect the repeated failure.",
         human_signoff_required=True,
     )
     cohort_lineage = {
         "schema_version": 1,
-        "source_lock_digest": source_digest,
+        "source_lock_digest": resolved_topology.source_lock_digest,
         "taskset_digest": "1" * 64,
         "private_labels_digest": "2" * 64,
         "arms": {
-            "baseline": {"behavior_digest": "3" * 64},
-            "candidate": {"behavior_digest": "4" * 64},
+            "baseline": {
+                "behavior_digest": "3" * 64,
+                "source_revisions": [],
+            },
+            "candidate": {
+                "behavior_digest": "4" * 64,
+                "source_revisions": [],
+            },
         },
-        "execution": {"runtime_digest": "5" * 64},
+        "execution": {
+            "model": "anthropic/claude-sonnet-5",
+            "harnesses": ["claude-code"],
+            "trace_content": "full",
+            "environment_digest": "5" * 64,
+            "source_evidence_project": SOURCE_PROJECT,
+            "source_evidence_destination": (
+                resolved_topology.source_destination.to_dict()
+            ),
+            "result_evidence_project": RESULT_PROJECT,
+            "result_evidence_destination": (
+                resolved_topology.result_destination.to_dict()
+            ),
+        },
         "scorer_digests": {"maintainer-scorer": "b" * 64},
     }
     cohort_lineage["lineage_digest"] = stable_digest(cohort_lineage)
-    return ComparisonResultV3(
+    pair_counts = {
+        status: sum(pair.status == status for pair in resolved_pairs)
+        for status in ("improved", "regressed", "mixed", "unchanged", "incomplete")
+    }
+    preliminary = ComparisonResultV3(
         schema_version=3,
         comparison_id=COMPARISON_ID,
         preview_digest="a" * 64,
         source="local-harbor-mcp-canary",
         evidence_project=RESULT_PROJECT,
-        rows=8,
-        baseline_passed=2,
-        candidate_passed=4,
-        improved=2,
-        regressed=0,
-        mixed=0,
-        unchanged=2,
-        incomplete=0,
+        rows=len(resolved_pairs) * 2,
+        baseline_passed=sum(
+            pair.baseline is not None and pair.baseline.passed is True
+            for pair in resolved_pairs
+        ),
+        candidate_passed=sum(
+            pair.candidate is not None and pair.candidate.passed is True
+            for pair in resolved_pairs
+        ),
+        improved=pair_counts["improved"],
+        regressed=pair_counts["regressed"],
+        mixed=pair_counts["mixed"],
+        unchanged=pair_counts["unchanged"],
+        incomplete=pair_counts["incomplete"],
         required_evaluations_incomplete=0,
-        deterministic_summary={},
+        deterministic_summary={"baseline": {}, "candidate": {}},
         judge_summary={},
         mechanism_summary={},
-        operational_summary={},
+        operational_summary={
+            "execution_states": {"completed": len(resolved_pairs) * 2}
+        },
         evidence_links=(),
-        paired_cases=pairs,
+        paired_cases=resolved_pairs,
         limitations=("bounded canary",),
         integrity={
             "status": "reconciled",
-            "row_count": 8,
-            "unique_attempts": 8,
+            "row_count": len(resolved_pairs) * 2,
+            "unique_attempts": len(resolved_pairs) * 2,
             "duplicate_attempt_ids": [],
             "unresolved_evidence_attempts": 0,
             "invalid_evidence_attempts": 0,
@@ -366,20 +470,9 @@ def _result() -> ComparisonResultV3:
         behavioral_summary=behavioral,
         decision_policy=None,
         decision=decision,
-        evidence_topology=topology,
+        evidence_topology=resolved_topology,
         aligned_analysis=analysis,
-        task_validity=(
-            TaskValidityV1(
-                task_id="reconcile-evaluations",
-                status="valid",
-                discriminating_dimensions=("maintainer.factual_correctness",),
-            ),
-            TaskValidityV1(
-                task_id="project-health",
-                status="non_discriminating",
-                reasons=("both revisions passed",),
-            ),
-        ),
+        task_validity=task_validity,
         release_note_coverage=(),
         scorer_revisions=(
             LockDescriptorV1(
@@ -396,37 +489,49 @@ def _result() -> ComparisonResultV3:
             ),
         ),
         cohort_lineage=cohort_lineage,
+        evidence_destination=resolved_topology.result_destination.to_dict(),
         candidate_source_revisions=(
             CandidateSourceRevisionV1(
                 kind="mcp",
-                id="wandb-mcp-main",
-                version_identity="git:" + "5" * 40,
-                runtime_digest="sha256:" + "6" * 64,
-                lock_digest="sha256:" + "7" * 64,
-            ),
-            CandidateSourceRevisionV1(
-                kind="mcp",
-                id="wandb-mcp-0-4-staging",
-                version_identity="git:" + "4" * 40,
+                id="wandb-mcp-0-4-current",
+                version_identity="git:5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
                 runtime_digest="sha256:" + "8" * 64,
                 lock_digest="sha256:" + "9" * 64,
             ),
         ),
         qualification_digest="d" * 64,
-        result_digest="e" * 64,
+        result_digest="d" * 64,
+    )
+    canonical_rows = _v3_canonical_attempt_rows(preliminary)
+    integrity = _v3_semantic_integrity(preliminary, canonical_rows)
+    canonical = replace(
+        preliminary,
+        deterministic_summary=_deterministic_summary(canonical_rows),
+        operational_summary=_operational_summary(canonical_rows),
+        integrity=integrity,
+        runtime_locks=_runtime_locks_v3(canonical_rows),
+        decision=replace(
+            decision,
+            evidence_grade=_evidence_grade(integrity, canonical_rows),
+        ),
+    )
+    qualification_digest = _comparison_qualification_digest(canonical.to_dict())
+    return replace(
+        canonical,
+        qualification_digest=qualification_digest,
+        result_digest=qualification_digest,
     )
 
 
 def _build_lock(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    _monkeypatch: pytest.MonkeyPatch,
     result: ComparisonResultV3 | None = None,
     *,
     preview_spec_digest: str = "f" * 64,
     expected_spec_digest: str = "f" * 64,
 ) -> dict[str, object]:
     result_path = tmp_path / "result.json"
-    result_path.write_text('{"schema_version":3}\n', encoding="utf-8")
     preview_path = tmp_path / "prepared-preview.json"
     preview = {
         "schema_version": 3,
@@ -442,35 +547,44 @@ def _build_lock(
     }
     preview["preview_digest"] = stable_digest(preview)
     preview_path.write_text(json.dumps(preview), encoding="utf-8")
-    selected_result = replace(
+    changed_preview = replace(
         result or _result(),
         preview_digest=str(preview["preview_digest"]),
     )
-    monkeypatch.setattr(
-        "fugue.bench.loop_failure.read_comparison_result",
-        lambda _: selected_result,
+    changed_preview_digest = _comparison_qualification_digest(
+        changed_preview.to_dict()
     )
+    selected_result = replace(
+        changed_preview,
+        qualification_digest=changed_preview_digest,
+        result_digest=changed_preview_digest,
+    )
+    result_path.write_text(
+        json.dumps(selected_result.to_dict(), sort_keys=True),
+        encoding="utf-8",
+    )
+    assert read_comparison_result(result_path) == selected_result
     baseline = selected_result.paired_cases[0].baseline
     assert baseline is not None
     return build_comparison_failure_lock(
         result_path=result_path,
         preview_path=preview_path,
-        task_id="reconcile-evaluations",
+        task_id=FAILURE_TASK_ID,
         arm="baseline",
         primary_attempt_id=baseline.attempt_id,
         expected_comparison_id=COMPARISON_ID,
         expected_source_project=SOURCE_PROJECT,
         expected_result_project=RESULT_PROJECT,
         expected_harness="claude-code",
-        expected_tasks=2,
+        expected_tasks=4,
         expected_attempts=2,
         spec_digest=expected_spec_digest,
         locked_at="2026-07-30T10:00:00Z",
-        required_source_ids=("wandb-mcp-main", "wandb-mcp-0-4-staging"),
+        required_source_ids=("wandb-mcp-0-4-current",),
     )
 
 
-def test_v3_failure_lock_binds_repeated_real_failure_without_answers(
+def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -480,7 +594,8 @@ def test_v3_failure_lock_binds_repeated_real_failure_without_answers(
     assert validated["failure"]["repeated_attempt_ids"]
     assert len(validated["failure"]["repeated_attempt_ids"]) == 2
     assert validated["failure"]["failed_critical_dimensions"] == [
-        "maintainer.factual_correctness"
+        "tool-surface.bounded_evidence",
+        "tool-surface.evidence_honesty",
     ]
     assert validated["source"]["source_project"] == SOURCE_PROJECT
     assert validated["source"]["result_project"] == RESULT_PROJECT
@@ -504,6 +619,132 @@ def test_v3_failure_lock_binds_repeated_real_failure_without_answers(
     with pytest.raises(ValueError, match="primary attempt candidate"):
         validate_comparison_failure_lock(tampered)
 
+    sixteen_hex_call = json.loads(json.dumps(validated))
+    for attempt in (
+        sixteen_hex_call["primary_attempt"],
+        sixteen_hex_call["repeated_attempts"][0],
+    ):
+        evaluation = next(
+            link
+            for link in attempt["evidence_links"]
+            if link["kind"] == "evaluation_root"
+        )
+        evaluation["ref"] = (
+            f"weave:///{RESULT_PROJECT}/call/0123456789abcdef"
+        )
+        evaluation["url"] = (
+            f"https://wandb.ai/{RESULT_PROJECT}/weave/calls/0123456789abcdef"
+        )
+    sixteen_hex_call["lock_sha256"] = stable_digest(
+        {**sixteen_hex_call, "lock_sha256": ""}
+    )
+    validate_comparison_failure_lock(sixteen_hex_call)
+
+    diagnostic_substitution = json.loads(json.dumps(validated))
+    for attempt in (
+        diagnostic_substitution["primary_attempt"],
+        diagnostic_substitution["repeated_attempts"][0],
+    ):
+        span_id = attempt["diagnostic_ids"]["otel_root_span_id"]
+        evaluation = next(
+            link
+            for link in attempt["evidence_links"]
+            if link["kind"] == "evaluation_root"
+        )
+        evaluation["ref"] = f"weave:///{RESULT_PROJECT}/call/{span_id}"
+        evaluation["url"] = (
+            f"https://wandb.ai/{RESULT_PROJECT}/weave/calls/{span_id}"
+        )
+    diagnostic_substitution["lock_sha256"] = stable_digest(
+        {**diagnostic_substitution, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="explicit diagnostic ID"):
+        validate_comparison_failure_lock(diagnostic_substitution)
+
+    bare_call_id = json.loads(json.dumps(validated))
+    for attempt in (
+        bare_call_id["primary_attempt"],
+        bare_call_id["repeated_attempts"][0],
+    ):
+        evaluation = next(
+            link
+            for link in attempt["evidence_links"]
+            if link["kind"] == "evaluation_root"
+        )
+        evaluation["ref"] = "not-a-stable-ref"
+    bare_call_id["lock_sha256"] = stable_digest(
+        {**bare_call_id, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="canonical Weave Call ref"):
+        validate_comparison_failure_lock(bare_call_id)
+
+    noncanonical_route = json.loads(json.dumps(validated))
+    evaluation = next(
+        link
+        for link in noncanonical_route["primary_attempt"]["evidence_links"]
+        if link["kind"] == "evaluation_root"
+    )
+    evaluation["url"] += "/unrelated"
+    noncanonical_route["lock_sha256"] = stable_digest(
+        {**noncanonical_route, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="canonical Call route"):
+        validate_comparison_failure_lock(noncanonical_route)
+
+    noncanonical_dataset = json.loads(json.dumps(validated))
+    for attempt in (
+        noncanonical_dataset["primary_attempt"],
+        noncanonical_dataset["repeated_attempts"][0],
+    ):
+        dataset = next(
+            link
+            for link in attempt["evidence_links"]
+            if link["kind"] == "dataset"
+        )
+        dataset["ref"] = "not-a-weave-ref"
+    noncanonical_dataset["lock_sha256"] = stable_digest(
+        {**noncanonical_dataset, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="canonical Weave Dataset ref"):
+        validate_comparison_failure_lock(noncanonical_dataset)
+
+    wrong_dataset_route = json.loads(json.dumps(validated))
+    for attempt in (
+        wrong_dataset_route["primary_attempt"],
+        wrong_dataset_route["repeated_attempts"][0],
+    ):
+        dataset = next(
+            link
+            for link in attempt["evidence_links"]
+            if link["kind"] == "dataset"
+        )
+        dataset["url"] = f"https://wandb.ai/{RESULT_PROJECT}/anything"
+    wrong_dataset_route["lock_sha256"] = stable_digest(
+        {**wrong_dataset_route, "lock_sha256": ""}
+    )
+    with pytest.raises(ValueError, match="canonical Dataset route"):
+        validate_comparison_failure_lock(wrong_dataset_route)
+
+
+def test_checked_v10_failure_lock_is_valid_and_sanitized() -> None:
+    lock = json.loads(CHECKED_FAILURE_LOCK.read_text(encoding="utf-8"))
+    validated = validate_comparison_failure_lock(lock)
+
+    assert validated["lock_sha256"] == (
+        "ca7674943384ec41ef8c4690479cb9e5c9fd33bf9c1e56a191b932b76991f646"
+    )
+    assert validated["source"]["result_digest"] == RESULT_DIGEST
+    assert validated["failure"]["task_id"] == FAILURE_TASK_ID
+    assert len(validated["failure"]["repeated_attempt_ids"]) == 2
+    assert validated["primary_attempt"]["weave_agent_root_call_id"]
+    assert validated["repeated_attempts"][0]["weave_agent_root_call_id"]
+
+    serialized = json.dumps(validated, sort_keys=True).lower()
+    assert "sanitized_answer_excerpt" not in serialized
+    assert "expected_answer" not in serialized
+    assert "private_truth" not in serialized
+    assert "news" + "-research-agent" not in serialized
+
 
 def test_failure_lock_rejects_preview_spec_drift(
     tmp_path: Path,
@@ -522,17 +763,20 @@ def test_failure_lock_rejects_non_valid_or_drifted_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result = _result()
-    invalid_task = replace(
-        result,
-        task_validity=(
-            TaskValidityV1(
-                task_id="reconcile-evaluations",
-                status="inconclusive",
-                reasons=("human review required",),
-            ),
-            result.task_validity[1],
+    non_discriminating_pairs = (
+        _exact_history_pair(
+            1,
+            candidate_answer_correct=True,
+            candidate_bounded=False,
         ),
+        _exact_history_pair(
+            2,
+            candidate_answer_correct=True,
+            candidate_bounded=False,
+        ),
+        *result.paired_cases[2:],
     )
+    invalid_task = _result(pairs=non_discriminating_pairs)
     with pytest.raises(ValueError, match="not valid discriminating"):
         _build_lock(tmp_path, monkeypatch, invalid_task)
 
@@ -542,13 +786,12 @@ def test_failure_lock_rejects_non_valid_or_drifted_source(
         observed_digest="2" * 64,
         reason="source changed",
     )
-    drifted_result = replace(
-        result,
-        evidence_topology=replace(
+    drifted_result = _result(
+        topology=replace(
             result.evidence_topology,
             post_run_drift=drifted,
             topology_digest="",
-        ),
+        )
     )
     with pytest.raises(ValueError, match="source evidence drifted"):
         _build_lock(tmp_path, monkeypatch, drifted_result)
@@ -601,15 +844,41 @@ def test_loop_assets_do_not_claim_old_smoke_or_fake_trace() -> None:
         / "examples/loop-engineering/wandb-evidence-loop/README.md",
         REPO_ROOT
         / "examples/loop-engineering/wandb-evidence-loop/agent-prompt.md",
+        REPO_ROOT
+        / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py",
     )
     text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
+    assert "mcp-main-vs-0-4-natural-maintainer-canary-v3" not in text
     assert "a2bae727" not in text
     assert "571ee85" not in text
     assert "50-call" not in text
     assert "339-second" not in text
     assert "news" + "-research-agent" not in text
     assert COMPARISON_ID in text
+    assert FAILURE_TASK_ID in text
+    assert "OTel trace/span IDs are diagnostics only" in text
+
+
+def test_loop_failure_source_is_exact_authoritative_v10() -> None:
+    path = (
+        REPO_ROOT
+        / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py"
+    )
+    spec = importlib.util.spec_from_file_location("loop_lock_failure", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    spec_digest, required_sources = module._locked_spec(REPO_ROOT)
+
+    assert len(spec_digest) == 64
+    assert module.COMPARISON_ID == COMPARISON_ID
+    assert module.RESULT_DIGEST == RESULT_DIGEST
+    assert module.FAILURE_TASK_ID == FAILURE_TASK_ID
+    assert module.FAILURE_ARM == "baseline"
+    assert module.TASKS == 4
+    assert required_sources == ("wandb-mcp-0-4-current",)
 
 
 def test_loop_selection_resolves_only_locked_components_in_selected_arm(
@@ -759,6 +1028,8 @@ def _verification_row(
         "weave_agent_root_call_id": agent_id,
         "weave_agent_root_ref": f"{call_base}/{agent_id}",
         "weave_agent_root_url": f"{weave_base}/calls/{agent_id}",
+        "weave_agent_root_evidence_kind": "native_weave_call_v1",
+        "weave_agent_root_is_native_call": True,
         "agent_graph_verified": True,
         "weave_dataset_id": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",
         "weave_dataset_ref": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
@@ -24,6 +24,7 @@ FailureArm = Literal["baseline", "candidate"]
 
 _DIGEST = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 _CALL_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_OTEL_SPAN_ID = re.compile(r"^[0-9a-fA-F]{16}$")
 _EVIDENCE_KINDS = {
     "evaluation_root",
     "prediction_and_score",
@@ -506,9 +507,16 @@ def _locked_attempt(
         raise ValueError(f"{arm} evidence is not reconciled")
     if attempt.actual_query_scope != (source_project,):
         raise ValueError(f"{arm} queried outside the locked source project")
+    weave_agent_root_call_id = _call_id(
+        attempt.weave_agent_root_call_id,
+        f"{arm} Agent evidence receipt Call ID",
+    )
+    diagnostic_ids = _attempt_diagnostic_ids(attempt, arm=arm)
     links = _resolved_links(
         attempt,
         result_project=result_project,
+        expected_agent_call_id=weave_agent_root_call_id,
+        diagnostic_ids=diagnostic_ids.values(),
     )
     return {
         "attempt_id": attempt.attempt_id,
@@ -521,6 +529,8 @@ def _locked_attempt(
         "actual_query_scope": list(attempt.actual_query_scope),
         "reported_project_identity": attempt.reported_project_identity,
         "failed_critical_dimensions": critical_failures,
+        "weave_agent_root_call_id": weave_agent_root_call_id,
+        "diagnostic_ids": diagnostic_ids,
         "evidence_links": links,
     }
 
@@ -572,6 +582,8 @@ def _validate_locked_attempt(
             "actual_query_scope",
             "reported_project_identity",
             "failed_critical_dimensions",
+            "weave_agent_root_call_id",
+            "diagnostic_ids",
             "evidence_links",
         },
         f"{arm} locked attempt",
@@ -611,11 +623,20 @@ def _validate_locked_attempt(
             f"{arm} failed dimensions",
             minimum=1,
         ),
-        "evidence_links": _locked_links(
-            value.get("evidence_links"),
-            result_project=result_project,
+        "weave_agent_root_call_id": _call_id(
+            value.get("weave_agent_root_call_id"),
+            f"{arm} Agent evidence receipt Call ID",
+        ),
+        "diagnostic_ids": _diagnostic_ids(
+            value.get("diagnostic_ids"), arm=arm
         ),
     }
+    normalized["evidence_links"] = _locked_links(
+        value.get("evidence_links"),
+        result_project=result_project,
+        expected_agent_call_id=normalized["weave_agent_root_call_id"],
+        diagnostic_ids=normalized["diagnostic_ids"].values(),
+    )
     if normalized["actual_query_scope"] != [source_project]:
         raise ValueError(f"{arm} actual query scope changed")
     if normalized["runtime_identity"] not in {
@@ -630,12 +651,25 @@ def _resolved_links(
     attempt: PairedAttemptV3,
     *,
     result_project: str,
+    expected_agent_call_id: str,
+    diagnostic_ids: Sequence[str],
 ) -> list[dict[str, str]]:
     links = [item.to_dict() for item in attempt.evidence_links]
-    return _locked_links(links, result_project=result_project)
+    return _locked_links(
+        links,
+        result_project=result_project,
+        expected_agent_call_id=expected_agent_call_id,
+        diagnostic_ids=diagnostic_ids,
+    )
 
 
-def _locked_links(raw: Any, *, result_project: str) -> list[dict[str, str]]:
+def _locked_links(
+    raw: Any,
+    *,
+    result_project: str,
+    expected_agent_call_id: str,
+    diagnostic_ids: Sequence[str],
+) -> list[dict[str, str]]:
     if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
         raise ValueError("attempt evidence links must be a list")
     result: list[dict[str, str]] = []
@@ -661,10 +695,41 @@ def _locked_links(raw: Any, *, result_project: str) -> list[dict[str, str]]:
         if f"/{result_project}/" not in url:
             raise ValueError(f"{kind} evidence URL uses a different project")
         if kind in _CALL_EVIDENCE_KINDS:
-            if not _CALL_ID.fullmatch(ref):
-                raise ValueError(f"{kind} does not use a canonical Weave Call ID")
-            if f"/weave/calls/{ref}" not in url:
+            call_id = _call_id_from_ref(
+                ref,
+                result_project=result_project,
+                kind=kind,
+                diagnostic_ids=diagnostic_ids,
+            )
+            parsed = urlparse(url)
+            if (
+                parsed.path
+                != f"/{result_project}/weave/calls/{quote(call_id, safe='')}"
+                or parsed.query
+                or parsed.fragment
+            ):
                 raise ValueError(f"{kind} does not use the canonical Call route")
+            if kind == "agent_root" and call_id != expected_agent_call_id:
+                raise ValueError(
+                    "agent_root link differs from the verified cross-transport "
+                    "Agent evidence receipt Call ID"
+                )
+        else:
+            name, digest = _dataset_identity_from_ref(
+                ref,
+                result_project=result_project,
+            )
+            parsed = urlparse(url)
+            expected_path = (
+                f"/{result_project}/weave/objects/{quote(name, safe='')}/"
+                f"versions/{quote(digest, safe='')}"
+            )
+            if (
+                parsed.path != expected_path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("dataset does not use the canonical Dataset route")
         result.append(
             {
                 "kind": kind,
@@ -677,6 +742,78 @@ def _locked_links(raw: Any, *, result_project: str) -> list[dict[str, str]]:
     if len(result) != 5 or {item["kind"] for item in result} != _EVIDENCE_KINDS:
         raise ValueError("attempt requires exactly five resolved Weave links")
     return sorted(result, key=lambda item: item["kind"])
+
+
+def _call_id_from_ref(
+    ref: str,
+    *,
+    result_project: str,
+    kind: str,
+    diagnostic_ids: Sequence[str],
+) -> str:
+    prefix = f"weave:///{result_project}/call/"
+    if not ref.startswith(prefix):
+        raise ValueError(f"{kind} does not use a canonical Weave Call ref")
+    call_id = ref.removeprefix(prefix)
+    if not _CALL_ID.fullmatch(call_id):
+        raise ValueError(f"{kind} does not use a canonical Weave Call ID")
+    if call_id in set(diagnostic_ids):
+        raise ValueError(f"{kind} uses an explicit diagnostic ID as a Weave Call ID")
+    return call_id
+
+
+def _dataset_identity_from_ref(
+    ref: str,
+    *,
+    result_project: str,
+) -> tuple[str, str]:
+    prefix = f"weave:///{result_project}/object/"
+    if not ref.startswith(prefix):
+        raise ValueError("dataset does not use a canonical Weave Dataset ref")
+    version = ref.removeprefix(prefix)
+    if "/" in version or ":" not in version:
+        raise ValueError("dataset does not use a canonical Weave Dataset ref")
+    name, digest = version.rsplit(":", 1)
+    if not name or not digest:
+        raise ValueError("dataset does not use a canonical Weave Dataset ref")
+    return name, digest
+
+
+def _attempt_diagnostic_ids(
+    attempt: PairedAttemptV3,
+    *,
+    arm: str,
+) -> dict[str, str]:
+    return _diagnostic_ids(
+        (
+            {"otel_root_span_id": attempt.otel_root_span_id}
+            if attempt.otel_root_span_id
+            else {}
+        ),
+        arm=arm,
+    )
+
+
+def _diagnostic_ids(raw: Any, *, arm: str) -> dict[str, str]:
+    value = _mapping(raw, f"{arm} diagnostic IDs")
+    _reject_unknown_keys(
+        value,
+        {"otel_root_span_id"},
+        f"{arm} diagnostic IDs",
+    )
+    if not value:
+        return {}
+    span_id = _text(value.get("otel_root_span_id"), f"{arm} OTel root span ID")
+    if not _OTEL_SPAN_ID.fullmatch(span_id) or int(span_id, 16) == 0:
+        raise ValueError(f"{arm} OTel root span ID is invalid")
+    return {"otel_root_span_id": span_id.lower()}
+
+
+def _call_id(value: Any, name: str) -> str:
+    call_id = _text(value, name)
+    if not _CALL_ID.fullmatch(call_id):
+        raise ValueError(f"{name} must be a canonical Weave Call ID")
+    return call_id
 
 
 def _validate_lock_descriptors(raw: Any) -> dict[str, Any]:

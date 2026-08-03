@@ -677,6 +677,8 @@ class FakeCampaignOperator(OperatorService):
                     "weave_agent_root_call_id": agent_call,
                     "weave_agent_root_ref": call_ref(agent_call),
                     "weave_agent_root_url": call_url(agent_call),
+                    "weave_agent_root_evidence_kind": "native_weave_call_v1",
+                    "weave_agent_root_is_native_call": True,
                     "agent_graph_verified": self.valid_evidence,
                     "weave_dataset_ref": (
                         "weave:///team/fugue-experiments/object/dataset:v1"
