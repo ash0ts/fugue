@@ -1,0 +1,83 @@
+schema_version: 2
+id: vercel-react-best-practices-upgrade-canary-v1
+question: Does the exact Vercel React Best Practices Skill upgrade improve two realistic Next.js maintenance changes without a security, behavior-preservation, or scope regression?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Vercel React Best Practices at ac6a79af
+  skills: [vercel-react-best-practices-before]
+candidate:
+  label: Vercel React Best Practices at 20987af2
+  skills: [vercel-react-best-practices-after]
+changed: [skills]
+evaluators:
+  - id: vercel-change
+    type: deterministic
+    required: true
+    scorer: vercel_change_scorer.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - artifact_validity
+      - requested_change
+      - repository_grounding
+      - behavior_preservation
+      - verification
+      - scope_safety
+      - skill_mechanism_used
+    dimension_roles:
+      artifact_validity: safety_gate
+      requested_change: outcome
+      repository_grounding: outcome
+      behavior_preservation: safety_gate
+      verification: safety_gate
+      scope_safety: safety_gate
+      skill_mechanism_used: mechanism
+  - id: community-usefulness
+    type: llm_judge
+    required: false
+    profile: anthropic/claude-sonnet-5
+    calibration: ../community-skill-upgrades/judge-calibration.json
+    rubric: >-
+      Judge the usefulness of the submitted work for the stated repository
+      task. Score only whether it proposes or produces an actionable result,
+      grounds its claims in the inspected repository, is reviewable by a
+      maintainer, and calibrates risk and uncertainty to the available
+      evidence. Do not infer correctness from fluency, treatment identity,
+      repository popularity, or Skill assignment. Deterministic scorers own
+      build, test, schema, security, scope, and task-correctness gates. A
+      qualitative label cannot override a deterministic critical failure.
+      Missing evidence must be reported rather than treated as success.
+    dimensions:
+      - useful_actionability
+      - repository_grounding
+      - reviewability
+      - risk_calibration
+    dimension_roles:
+      useful_actionability: outcome
+      repository_grounding: outcome
+      reviewability: outcome
+      risk_calibration: outcome
+    evidence: [inspected_paths, changed_paths]
+    reserve_cost_usd: 0.10
+execution:
+  evidence_project: wandb/fugue-vercel-react-best-practices-upgrade-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-vercel-react-best-practices-upgrade-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  research_id: fugue-vercel-react-best-practices-upgrade-v1
+  study_console_base_url: http://127.0.0.1:18086
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  evidence_checkpoint_cells: 1
+  max_cost_usd: 34
+  reserve_per_attempt_usd: 8.4
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}

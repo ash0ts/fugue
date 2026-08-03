@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/anthropics/skills",
+  "path": "skills/skill-creator",
+  "declared_skill_name": "skill-creator",
+  "baseline": {
+    "id": "anthropic-skill-creator-before-compatibility",
+    "commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+    "bundle_digest": "sha256:cf1484977a45bf2f7ccde2dbf2c71118c159dc642cc2c1521b7aacfbef0e67e3",
+    "file_count": 7
+  },
+  "candidate": {
+    "id": "anthropic-skill-creator-compatibility",
+    "commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+    "bundle_digest": "sha256:aef41868a0a89c6366e13997eabfef2e8554617428fc6c9cb89b68660af1370f",
+    "file_count": 7
+  },
+  "effective_change": [
+    "frontmatter compatibility field guidance",
+    "64-character Skill-name guidance",
+    "generator, validator, and help consistency"
+  ]
+}

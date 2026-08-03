@@ -160,6 +160,7 @@ def _attempt(
             dimension: "safe deterministic explanation"
             for dimension in resolved_scores
         },
+        judge_reviews={},
         sanitized_answer_excerpt=None,
         actual_query_scope=(SOURCE_PROJECT,),
         reported_project_identity=SOURCE_PROJECT,

@@ -46,6 +46,7 @@ from fugue.agent_tracing import (
     normalize_trace_content,
     openclaw_agent_id,
     skill_invocation_evidence,
+    skill_runtime_name_map,
     stable_agent_name,
 )
 from fugue.artifacts import artifact_recoveries
@@ -1066,7 +1067,16 @@ done
                 }
             )
             return
-        command = skill_registration_probe_command(directory, assigned)
+        provenance = _json_env("FUGUE_SKILL_PROVENANCE")
+        runtime_name_by_id = skill_runtime_name_map(assigned, provenance)
+        id_by_runtime_name = {
+            runtime_name: skill_id
+            for skill_id, runtime_name in runtime_name_by_id.items()
+        }
+        command = skill_registration_probe_command(
+            directory,
+            list(runtime_name_by_id.values()),
+        )
         result = await self.exec_as_agent(
             environment,
             command=command,
@@ -1077,10 +1087,18 @@ done
             payload = json.loads(lines[-1]) if lines else {}
         except json.JSONDecodeError:
             payload = {}
+        registered_runtime_names = [
+            str(value) for value in payload.get("skills_registered", [])
+        ]
         registration = {
             "status": "registered" if result.return_code == 0 else "failed",
             "skills_assigned": assigned,
-            "skills_registered": payload.get("skills_registered", []),
+            "skills_registered": [
+                id_by_runtime_name[value]
+                for value in registered_runtime_names
+                if value in id_by_runtime_name
+            ],
+            "runtime_skill_names": registered_runtime_names,
             "registration_digest": payload.get("registration_digest"),
             "directory": payload.get("directory", directory),
         }
@@ -2569,6 +2587,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
             instruction,
             skills=_split_tags(os.environ.get("FUGUE_SKILL_IDS")),
             directory=f"{remote_codex_home}/home/.agents/skills",
+            provenance=_json_env("FUGUE_SKILL_PROVENANCE"),
         )
         escaped_instruction = shlex.quote(instruction)
         weave_project = _weave_project_slug()

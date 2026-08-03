@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: fugue-vercel-react-best-practices-upgrade-v1
+  name: Vercel React Best Practices Upgrade
+  description: Exact upstream Skill revisions on locked Next.js maintenance fixtures.
+  objective: Decide whether this exact Skill upgrade merits a larger independent holdout.
+wandb:
+  entity: wandb
+  project: fugue-vercel-react-best-practices-upgrade-v1
+database: .study-console/studies.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: vercel-react-best-practices-upgrade-canary-v1
+  read_only: true

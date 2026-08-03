@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "campaign_id": "community-skill-upgrade-campaign-v1",
+  "currency": "USD",
+  "campaign_ceiling_usd": 110,
+  "status": "unapproved",
+  "allocations": [
+    {
+      "stage_id": "community-skill-judge-calibration-v1",
+      "cap_usd": 8,
+      "approval_status": "not_approved",
+      "approval_digest": null,
+      "observed_usd": 0
+    },
+    {
+      "stage_id": "superpowers-writing-plans-upgrade-canary-v4",
+      "cap_usd": 34,
+      "approval_status": "not_approved",
+      "approval_digest": null,
+      "observed_usd": 0
+    },
+    {
+      "stage_id": "anthropic-skill-creator-upgrade-canary-v1",
+      "cap_usd": 34,
+      "approval_status": "not_approved",
+      "approval_digest": null,
+      "observed_usd": 0
+    },
+    {
+      "stage_id": "vercel-react-best-practices-upgrade-canary-v1",
+      "cap_usd": 34,
+      "approval_status": "not_approved",
+      "approval_digest": null,
+      "observed_usd": 0
+    }
+  ],
+  "total_allocated_usd": 110,
+  "total_approved_usd": 0,
+  "total_observed_usd": 0,
+  "note": "This checked-in ledger is a ceiling configuration, not an approval or spend receipt. Each stage requires its own immutable Fugue preview and operator approval."
+}

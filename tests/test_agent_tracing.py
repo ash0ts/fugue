@@ -17,6 +17,7 @@ from fugue.agent_tracing import (
     openclaw_agent_id,
     openclaw_conversation_id,
     skill_invocation_evidence,
+    skill_runtime_name_map,
     stable_agent_name,
 )
 from fugue.registration import (
@@ -241,6 +242,90 @@ def test_codex_assigned_skills_are_read_before_task_work() -> None:
         )
 
 
+def test_imported_skill_alias_uses_declared_runtime_name_and_stable_evidence_id(
+    tmp_path: Path,
+) -> None:
+    skill_id = "superpowers-writing-plans-before-contracts"
+    provenance = [{"id": skill_id, "declared_name": "writing-plans"}]
+    root = "/tmp/isolated/skills"
+
+    assert skill_runtime_name_map([skill_id], provenance) == {
+        skill_id: "writing-plans"
+    }
+    instruction = codex_skill_instruction(
+        "Plan the change.",
+        skills=[skill_id],
+        directory=root,
+        provenance=provenance,
+    )
+    assert f"cat {root}/writing-plans/SKILL.md" in instruction
+
+    (tmp_path / "codex.txt").write_text(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "read-upstream-skill",
+                    "type": "command_execution",
+                    "command": f"cat {root}/writing-plans/SKILL.md",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n"
+    )
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "codex",
+        {
+            "skills_assigned": [skill_id],
+            "skills_registered": [skill_id],
+            "directory": root,
+            "skill_provenance": provenance,
+        },
+    )
+    assert evidence["status"] == "observed"
+    assert evidence["skills_invoked"] == [skill_id]
+
+
+def test_imported_skill_alias_registration_probes_declared_directory(
+    tmp_path: Path,
+) -> None:
+    skill_id = "superpowers-writing-plans-contracts"
+    root = tmp_path / "skills"
+    (root / "writing-plans").mkdir(parents=True)
+    (root / "writing-plans" / "SKILL.md").write_text(
+        "---\nname: writing-plans\n---\n",
+        encoding="utf-8",
+    )
+    runtime_names = skill_runtime_name_map(
+        [skill_id],
+        [{"id": skill_id, "declared_name": "writing-plans"}],
+    )
+
+    result = subprocess.run(
+        skill_registration_probe_command(
+            root.as_posix(), list(runtime_names.values())
+        ),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    registered_ids = {
+        runtime_name: stable_id
+        for stable_id, runtime_name in runtime_names.items()
+    }
+
+    assert result.returncode == 0
+    assert payload["skills_registered"] == ["writing-plans"]
+    assert [registered_ids[name] for name in payload["skills_registered"]] == [
+        skill_id
+    ]
+
+
 def test_codex_skill_evidence_ignores_failed_or_unrelated_commands(
     tmp_path: Path,
 ) -> None:
@@ -340,6 +425,69 @@ def test_claude_skill_tool_proves_assigned_skill_invocation(
             "item_id": "tool-skill",
             "operation": "invoke_skill",
             "skill_id": "wandb-evidence-analysis-v2",
+        }
+    ]
+
+
+def test_claude_shell_read_uses_declared_name_and_reports_stable_skill_id(
+    tmp_path: Path,
+) -> None:
+    root = "/tmp/claude/skills"
+    skill_id = "superpowers-writing-plans-contracts"
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-read-skill",
+                        "name": "Bash",
+                        "input": {
+                            "command": f"cat {root}/writing-plans/SKILL.md"
+                        },
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-read-skill",
+                        "is_error": False,
+                        "content": "Skill loaded",
+                    }
+                ]
+            },
+        },
+    ]
+    (tmp_path / "claude-code.txt").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "claude-code",
+        {
+            "skills_assigned": [skill_id],
+            "skills_registered": [skill_id],
+            "directory": root,
+            "skill_provenance": [
+                {"id": skill_id, "declared_name": "writing-plans"}
+            ],
+        },
+    )
+
+    assert evidence["status"] == "observed"
+    assert evidence["skills_invoked"] == [skill_id]
+    assert evidence["events"] == [
+        {
+            "item_id": "tool-read-skill",
+            "operation": "read_skill_instructions",
+            "skill_id": skill_id,
         }
     ]
 

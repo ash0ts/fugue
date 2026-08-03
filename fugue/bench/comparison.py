@@ -7,6 +7,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import urllib.parse
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -203,6 +204,101 @@ class ComparisonExecutionPolicyV1:
         return _drop_empty(asdict(self), preserve_false=True)
 
 
+@dataclass
+class _ComparisonRuntimeBudget:
+    """Fail closed between approved comparison cells when spend drifts.
+
+    A model-backed cell is an atomic unit and can itself exceed its reservation.
+    This ledger prevents Fugue from launching another queued cell after accounted
+    spend, missing cost evidence, or the minimum reservation for remaining cells
+    makes the approved ceiling impossible to honor.
+    """
+
+    max_cost_usd: float
+    reserve_per_attempt_usd: float
+    total_cells: int
+    cancellation_event: threading.Event = field(default_factory=threading.Event)
+    accounted_cost_usd: float = 0.0
+    failure_reason: str | None = None
+    _receipts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def observe(self, row: dict[str, Any]) -> None:
+        attempt = str(row.get("attempt_id") or "").strip()
+        with self._lock:
+            if attempt and attempt in self._receipts:
+                row["comparison_runtime_budget"] = dict(self._receipts[attempt])
+                if self.failure_reason:
+                    raise RuntimeError(self.failure_reason)
+                return
+
+            terminal_cells = len(self._receipts) + 1
+            remaining_cells = max(0, self.total_cells - terminal_cells)
+            cost = _row_number(
+                row,
+                "accounted_cost_usd",
+                "cost_usd",
+                "agent_cost_usd",
+                "observed_cost_usd",
+            )
+            reason: str | None = None
+            if not attempt:
+                reason = (
+                    "comparison runtime budget could not bind terminal spend "
+                    "to a stable attempt identity"
+                )
+            elif cost is None and (
+                self.max_cost_usd == 0 and self.reserve_per_attempt_usd == 0
+            ):
+                cost = 0.0
+                self.accounted_cost_usd += cost
+            elif cost is None or cost < 0:
+                reason = (
+                    "comparison runtime cost evidence is unavailable for "
+                    f"attempt {attempt}; remaining cells were cancelled"
+                )
+            else:
+                self.accounted_cost_usd += cost
+
+            reserved_remaining = self.reserve_per_attempt_usd * remaining_cells
+            projected_minimum = self.accounted_cost_usd + reserved_remaining
+            if reason is None and self.accounted_cost_usd > self.max_cost_usd + 1e-9:
+                reason = (
+                    "comparison accounted spend exceeded the approved ceiling "
+                    f"(${self.accounted_cost_usd:.6f} > ${self.max_cost_usd:.6f}); "
+                    "remaining cells were cancelled"
+                )
+            elif reason is None and projected_minimum > self.max_cost_usd + 1e-9:
+                reason = (
+                    "comparison accounted spend plus the locked reservation for "
+                    "remaining cells exceeds the approved ceiling "
+                    f"(${projected_minimum:.6f} > ${self.max_cost_usd:.6f}); "
+                    "remaining cells were cancelled"
+                )
+
+            receipt = {
+                "schema_version": 1,
+                "status": "failed" if reason else "within_budget",
+                "attempt_id": attempt or None,
+                "cell_accounted_cost_usd": cost,
+                "accounted_cost_usd": round(self.accounted_cost_usd, 9),
+                "approved_max_cost_usd": self.max_cost_usd,
+                "reserve_per_remaining_attempt_usd": self.reserve_per_attempt_usd,
+                "terminal_cells": terminal_cells,
+                "remaining_cells": remaining_cells,
+                "reserved_remaining_cost_usd": round(reserved_remaining, 9),
+                "projected_minimum_cost_usd": round(projected_minimum, 9),
+                **({"reason": reason} if reason else {}),
+            }
+            if attempt:
+                self._receipts[attempt] = receipt
+            row["comparison_runtime_budget"] = dict(receipt)
+            if reason:
+                self.failure_reason = self.failure_reason or reason
+                self.cancellation_event.set()
+                raise RuntimeError(self.failure_reason)
+
+
 DecisionStatus = Literal[
     "invalid",
     "blocked",
@@ -374,9 +470,31 @@ class PairedAttemptV2:
     execution_fingerprint: str | None = None
     runtime_lock_digest: str | None = None
     infrastructure: dict[str, Any] = field(default_factory=dict)
+    judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class JudgeReviewV1:
+    """Safe, decision-independent presentation of one blind judge result."""
+
+    label: Literal[
+        "unusable",
+        "weak",
+        "adequate",
+        "strong",
+        "exceptional",
+    ]
+    reason: str
+    missing_evidence: bool
+    observed_cost_usd: float | None = None
+    accounted_reserve_usd: float | None = None
+    cost_status: Literal["observed", "unavailable"] = "unavailable"
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -397,6 +515,7 @@ class PairedAttemptV3:
     queried_projects: tuple[str, ...]
     scores: dict[str, Any]
     score_explanations: dict[str, str]
+    judge_reviews: dict[str, JudgeReviewV1]
     sanitized_answer_excerpt: str | None
     actual_query_scope: tuple[str, ...]
     reported_project_identity: str | None
@@ -915,6 +1034,14 @@ def comparison_from_dict(
     return replace(unsigned, spec_digest=digest)
 
 
+def _comparison_reserved_cost_per_attempt(spec: ComparisonSpecV1) -> float:
+    return spec.execution.reserve_per_attempt_usd + sum(
+        evaluator.reserve_cost_usd
+        for evaluator in spec.evaluators
+        if evaluator.type == "llm_judge"
+    )
+
+
 def check_comparison(
     spec: ComparisonSpecV1, *, repo_root: Path
 ) -> ComparisonReadinessV1:
@@ -1008,26 +1135,32 @@ def check_comparison(
         issue = _judge_calibration_issue(judge, repo_root)
         if issue:
             (blockers if judge.required else warnings).append(issue)
+        execution_issue = _judge_execution_calibration_issue(
+            judge,
+            repo_root=repo_root,
+            approved_inputs=None,
+        )
+        if execution_issue and execution_issue != issue:
+            warnings.append(
+                "Agent execution is gated until " + execution_issue
+            )
     estimated_cells = (
         len(tasks)
         * 2
         * len(spec.execution.harnesses)
         * spec.execution.attempts
     )
-    judge_reserve = sum(
-        item.reserve_cost_usd
-        for item in spec.evaluators
-        if item.type == "llm_judge"
-    )
-    estimated_cost = estimated_cells * (
-        spec.execution.reserve_per_attempt_usd + judge_reserve
-    )
+    estimated_cost = estimated_cells * _comparison_reserved_cost_per_attempt(spec)
     if estimated_cells < 1:
         blockers.append("comparison must resolve at least one attempt")
     if estimated_cost > spec.execution.max_cost_usd + 1e-9:
         blockers.append(
             f"estimated cost ${estimated_cost:.2f} exceeds the "
             f"${spec.execution.max_cost_usd:.2f} comparison limit"
+        )
+    if spec.execution.concurrency != 1:
+        blockers.append(
+            "runtime budget enforcement requires comparison concurrency=1"
         )
     if blockers:
         status = "blocked"
@@ -1879,12 +2012,28 @@ def _comparison_cohort_lineage(
     repo_root: Path,
     source_lock_digest: str,
 ) -> dict[str, Any]:
+    from fugue.bench.sources import resolve_skill
+
     arms: dict[str, Any] = {}
     for arm, candidate in (
         ("baseline", spec.baseline),
         ("candidate", spec.candidate),
     ):
         revisions: list[dict[str, Any]] = []
+        for skill_id in candidate.skills:
+            skill = resolve_skill(skill_id, repo_root)
+            revisions.append(
+                {
+                    "kind": "skill",
+                    "id": skill.id,
+                    "version_identity": (
+                        f"git:{skill.resolved_commit}"
+                        if skill.resolved_commit
+                        else f"digest:{skill.digest}"
+                    ),
+                    "runtime_digest": skill.digest,
+                }
+            )
         for selection in candidate.integrations:
             integration_id = str(selection["id"])
             lock_path = (
@@ -1903,6 +2052,7 @@ def _comparison_cohort_lineage(
             )
             revisions.append(
                 {
+                    "kind": "integration",
                     "id": integration_id,
                     "version_identity": str(
                         lock.get("version_identity") or ""
@@ -1918,7 +2068,7 @@ def _comparison_cohort_lineage(
             "behavior_digest": stable_digest(candidate.behavior()),
             "source_revisions": sorted(
                 revisions,
-                key=lambda item: str(item["id"]),
+                key=lambda item: (str(item.get("kind") or ""), str(item["id"])),
             ),
         }
     unsigned = {
@@ -3489,6 +3639,8 @@ def _approved_comparison_execution_lock(
         public_rows=public_rows,
     )
     integration_change = _integration_change_required(comparison)
+    skill_change = _skill_change_required(comparison)
+    source_change = integration_change or skill_change
     candidate_cells = [
         item
         for item in _sequence(matrix.get("matrix_cells"), "preview matrix cells")
@@ -3497,15 +3649,15 @@ def _approved_comparison_execution_lock(
     ]
     candidate_revisions = _consistent_source_revisions(
         candidate_cells,
-        required=integration_change,
+        required=source_change,
         label="approved candidate",
     )
     candidate_ids = sorted(
         {str(item.get("candidate_id") or "") for item in candidate_cells}
     )
-    if integration_change and len(candidate_ids) != 1:
+    if source_change and len(candidate_ids) != 1:
         raise ValueError(
-            "integration-changing comparison must resolve one candidate identity"
+            "source-changing comparison must resolve one candidate identity"
         )
     unsigned = {
         "schema_version": 1,
@@ -3542,7 +3694,7 @@ def _approved_comparison_execution_lock(
         "evidence_checkpoint_cells": int(
             comparison_execution.get("evidence_checkpoint_cells") or 0
         ),
-        "candidate_source_revisions_required": integration_change,
+        "candidate_source_revisions_required": source_change,
         "candidate_source_revisions": [
             item.to_dict() for item in candidate_revisions
         ],
@@ -3748,6 +3900,21 @@ def analyze_comparison_rows(
         "Task outcomes and authored evaluations must be interpreted separately.",
         "The result applies only to the locked taskset, candidates, and attempts.",
     ]
+    if any(
+        isinstance(judge, Mapping)
+        and judge.get("status") in {"scored", "missing_evidence", "unavailable"}
+        and (
+            judge.get("cost_status") is not None
+            or _row_number(judge, "accounted_reserve_usd") is not None
+        )
+        and judge.get("cost_status") != "observed"
+        for row in normalized
+        for judge in _mapping_or_empty(row.get("comparison_judges")).values()
+    ):
+        limitations.append(
+            "The judge provider did not return observed dollar cost; Fugue "
+            "reports its accounted reservation separately from Agent spend."
+        )
     if incomplete:
         limitations.append("At least one aligned pair is incomplete.")
     required_incomplete = sum(
@@ -5030,7 +5197,7 @@ def _verify_approved_source_contract(
         )
     if revisions_required and not candidate_revisions:
         raise ValueError(
-            "integration-changing comparison has no approved candidate source revision"
+            "source-changing comparison has no approved candidate source revision"
         )
     candidate_ids = sorted(
         {
@@ -5042,7 +5209,7 @@ def _verify_approved_source_contract(
     )
     if revisions_required and len(candidate_ids) != 1:
         raise ValueError(
-            "integration-changing comparison must lock one candidate identity"
+            "source-changing comparison must lock one candidate identity"
         )
     if str(approved.get("candidate_source_identity_digest") or "") != stable_digest(
         {
@@ -5905,6 +6072,7 @@ def _paired_attempt_view(
             or _row_text(row, "runtime_digest")
         ),
         infrastructure=infrastructure,
+        judge_reviews=_judge_reviews(row),
     )
 
 
@@ -5955,6 +6123,7 @@ def _paired_attempt_view_v3(
             )
             for dimension, value in scores.items()
         },
+        judge_reviews=_judge_reviews(row),
         sanitized_answer_excerpt=_sanitized_answer_excerpt(row),
         actual_query_scope=tuple(sorted(_queried_projects(row))),
         reported_project_identity=_reported_project_identity(row),
@@ -5965,6 +6134,82 @@ def _paired_attempt_view_v3(
         runtime_lock_digest=legacy.runtime_lock_digest,
         infrastructure=legacy.infrastructure,
     )
+
+
+def _judge_reviews(row: Mapping[str, Any]) -> dict[str, JudgeReviewV1]:
+    """Project only bounded, redacted judge summaries into public results."""
+
+    reviews: dict[str, JudgeReviewV1] = {}
+    for judge_id, raw in sorted(
+        _mapping_or_empty(row.get("comparison_judges")).items()
+    ):
+        if not isinstance(raw, Mapping) or raw.get("status") not in {
+            "scored",
+            "missing_evidence",
+        }:
+            continue
+        scores = [
+            float(value)
+            for value in _mapping_or_empty(raw.get("scores")).values()
+            if isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ]
+        if not scores:
+            continue
+        reason = str(
+            raw.get("overall_assessment") or raw.get("rationale") or ""
+        ).strip()
+        reason = " ".join(
+            str(
+                redact_value(reason, secrets=secrets_from_env(os.environ))
+            ).split()
+        )[:500]
+        if not reason:
+            continue
+        missing_evidence = raw.get("status") == "missing_evidence" or bool(
+            raw.get("missing_evidence", False)
+        )
+        observed_cost = _row_number(raw, "observed_cost_usd")
+        accounted_reserve = _row_number(raw, "accounted_reserve_usd")
+        cost_status = str(raw.get("cost_status") or "unavailable")
+        if cost_status not in {"observed", "unavailable"}:
+            continue
+        if cost_status == "observed" and observed_cost is None:
+            continue
+        if cost_status == "unavailable" and observed_cost is not None:
+            continue
+        reviews[str(judge_id)] = JudgeReviewV1(
+            label=(
+                "unusable"
+                if missing_evidence
+                else _judge_review_label(sum(scores) / len(scores))
+            ),
+            reason=reason,
+            missing_evidence=missing_evidence,
+            observed_cost_usd=observed_cost,
+            accounted_reserve_usd=accounted_reserve,
+            cost_status=cost_status,  # type: ignore[arg-type]
+        )
+    return reviews
+
+
+def _judge_review_label(score: float) -> Literal[
+    "unusable",
+    "weak",
+    "adequate",
+    "strong",
+    "exceptional",
+]:
+    if score < 0.25:
+        return "unusable"
+    if score < 0.5:
+        return "weak"
+    if score < 0.75:
+        return "adequate"
+    if score < 0.9:
+        return "strong"
+    return "exceptional"
 
 
 def _paired_dimension_changes_v3(
@@ -6855,6 +7100,12 @@ def _paired_attempt(raw: Any) -> PairedAttemptV2 | None:
             str(value.get("runtime_lock_digest") or "") or None
         ),
         infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+        judge_reviews={
+            str(key): _judge_review(item)
+            for key, item in _mapping_or_empty(
+                value.get("judge_reviews")
+            ).items()
+        },
     )
 
 
@@ -6869,6 +7120,7 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
     score_explanations = _mapping(
         value.get("score_explanations"), "V3 score explanations"
     )
+    judge_reviews = _mapping_or_empty(value.get("judge_reviews"))
     return PairedAttemptV3(
         attempt_id=_text(value.get("attempt_id"), "V3 attempt id", 200),
         identity=dict(_mapping(value.get("identity"), "V3 attempt identity")),
@@ -6903,6 +7155,10 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             str(key): _text(item, "V3 score explanation", 2000)
             for key, item in score_explanations.items()
         },
+        judge_reviews={
+            str(key): _judge_review(item)
+            for key, item in judge_reviews.items()
+        },
         sanitized_answer_excerpt=_optional_text(
             value.get("sanitized_answer_excerpt"),
             "sanitized answer excerpt",
@@ -6933,6 +7189,53 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             str(value.get("runtime_lock_digest") or "") or None
         ),
         infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+    )
+
+
+def _judge_review(raw: Any) -> JudgeReviewV1:
+    value = _mapping(raw, "V3 judge review")
+    _reject_unknown(
+        value,
+        {
+            "label",
+            "reason",
+            "missing_evidence",
+            "observed_cost_usd",
+            "accounted_reserve_usd",
+            "cost_status",
+        },
+        "V3 judge review",
+    )
+    label = str(value.get("label") or "")
+    if label not in {
+        "unusable",
+        "weak",
+        "adequate",
+        "strong",
+        "exceptional",
+    }:
+        raise ValueError(f"unknown V3 judge review label: {label}")
+    missing_evidence = value.get("missing_evidence")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError("V3 judge review missing_evidence must be boolean")
+    observed_cost = _number_or_none(value.get("observed_cost_usd"))
+    accounted_reserve = _number_or_none(value.get("accounted_reserve_usd"))
+    cost_status = str(value.get("cost_status") or "unavailable")
+    if cost_status not in {"observed", "unavailable"}:
+        raise ValueError("V3 judge review cost_status is unsupported")
+    if observed_cost is not None and observed_cost < 0:
+        raise ValueError("V3 judge review observed cost must be non-negative")
+    if accounted_reserve is not None and accounted_reserve < 0:
+        raise ValueError("V3 judge review accounted reserve must be non-negative")
+    if (cost_status == "observed") != (observed_cost is not None):
+        raise ValueError("V3 judge review cost evidence is inconsistent")
+    return JudgeReviewV1(
+        label=label,  # type: ignore[arg-type]
+        reason=_text(value.get("reason"), "V3 judge review reason", 500),
+        missing_evidence=missing_evidence,
+        observed_cost_usd=observed_cost,
+        accounted_reserve_usd=accounted_reserve,
+        cost_status=cost_status,  # type: ignore[arg-type]
     )
 
 
@@ -7113,6 +7416,13 @@ def _integration_change_required(comparison: Mapping[str, Any]) -> bool:
     )
 
 
+def _skill_change_required(comparison: Mapping[str, Any]) -> bool:
+    return any(
+        str(value) == "skills" or str(value).startswith("skills.")
+        for value in comparison.get("changed") or ()
+    )
+
+
 def _consistent_source_revisions(
     cells: Sequence[Mapping[str, Any]],
     *,
@@ -7121,11 +7431,28 @@ def _consistent_source_revisions(
 ) -> tuple[CandidateSourceRevisionV1, ...]:
     observed: list[tuple[CandidateSourceRevisionV1, ...]] = []
     for cell in cells:
+        integration_revisions = _source_revisions_from_provenance(
+            cell.get("integration_provenance"),
+            required=required,
+            label=label,
+        )
+        skill_revisions = _skill_source_revisions_from_provenance(
+            cell.get("skill_provenance"),
+            required=required,
+            label=label,
+        )
         observed.append(
-            _source_revisions_from_provenance(
-                cell.get("integration_provenance"),
-                required=required,
-                label=label,
+            tuple(
+                sorted(
+                    (*integration_revisions, *skill_revisions),
+                    key=lambda item: (
+                        item.kind,
+                        item.id,
+                        item.version_identity,
+                        item.runtime_digest,
+                        item.lock_digest or "",
+                    ),
+                )
             )
         )
     if not observed:
@@ -7185,6 +7512,67 @@ def _source_revisions_from_provenance(
     if missing:
         raise ValueError(
             f"{label} integration provenance lacks immutable source revisions: "
+            + ", ".join(sorted(missing))
+        )
+    return tuple(
+        revisions[key]
+        for key in sorted(
+            revisions,
+            key=lambda value: tuple(item or "" for item in value),
+        )
+    )
+
+
+def _skill_source_revisions_from_provenance(
+    raw: Any,
+    *,
+    required: bool,
+    label: str,
+) -> tuple[CandidateSourceRevisionV1, ...]:
+    provenance = raw or ()
+    if isinstance(provenance, Mapping):
+        provenance = (provenance,)
+    if not isinstance(provenance, Sequence) or isinstance(
+        provenance,
+        str | bytes,
+    ):
+        raise ValueError(f"{label} Skill provenance must be an array")
+    revisions: dict[
+        tuple[str, str, str, str, str | None],
+        CandidateSourceRevisionV1,
+    ] = {}
+    missing: list[str] = []
+    for raw_item in provenance:
+        if not isinstance(raw_item, Mapping):
+            raise ValueError(f"{label} Skill provenance must contain objects")
+        source_id = str(raw_item.get("id") or "")
+        commit = str(raw_item.get("resolved_commit") or "")
+        digest = str(raw_item.get("digest") or "")
+        if not source_id or not digest:
+            if required:
+                missing.append(source_id or "unknown")
+            continue
+        revision = _candidate_source_revision(
+            {
+                "kind": "skill",
+                "id": source_id,
+                "version_identity": (
+                    f"git:{commit}" if commit else f"digest:{digest}"
+                ),
+                "runtime_digest": digest,
+            }
+        )
+        key = (
+            revision.kind,
+            revision.id,
+            revision.version_identity,
+            revision.runtime_digest,
+            revision.lock_digest,
+        )
+        revisions[key] = revision
+    if missing:
+        raise ValueError(
+            f"{label} Skill provenance lacks immutable source revisions: "
             + ", ".join(sorted(missing))
         )
     return tuple(
@@ -8428,6 +8816,55 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                     "ComparisonResultV3 score explanations must cover every "
                     "deterministic score"
                 )
+            for judge_id, review in attempt.judge_reviews.items():
+                if review.cost_status == "observed":
+                    if (
+                        review.observed_cost_usd is None
+                        or review.observed_cost_usd < 0
+                    ):
+                        raise ValueError(
+                            "ComparisonResultV3 observed judge cost is invalid"
+                        )
+                elif review.observed_cost_usd is not None:
+                    raise ValueError(
+                        "ComparisonResultV3 unavailable judge cost cannot carry "
+                        "an observed value"
+                    )
+                if (
+                    review.accounted_reserve_usd is not None
+                    and review.accounted_reserve_usd < 0
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 judge reserve must be non-negative"
+                    )
+                prefix = f"comparison.judge.{judge_id}."
+                judge_scores = [
+                    float(value)
+                    for dimension, value in attempt.scores.items()
+                    if dimension.startswith(prefix)
+                    and isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ]
+                if review.missing_evidence:
+                    if judge_scores or review.label != "unusable":
+                        raise ValueError(
+                            "ComparisonResultV3 missing-evidence judge review "
+                            "must be unusable and excluded from numeric summaries"
+                        )
+                    continue
+                if not judge_scores:
+                    raise ValueError(
+                        "ComparisonResultV3 judge review lacks its locked "
+                        "numeric judge dimensions"
+                    )
+                if review.label != _judge_review_label(
+                    sum(judge_scores) / len(judge_scores)
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 judge review label disagrees with "
+                        "its locked numeric dimensions"
+                    )
 
             infrastructure = dict(attempt.infrastructure)
             backend = str(infrastructure.get("backend") or "")
@@ -9491,16 +9928,24 @@ def score_comparison_rows(
                     row,
                     expected=label["expected"],
                     passed=passed,
-                    candidate_skill_ids=spec.candidate.skills,
+                    expected_skill_ids=(
+                        spec.baseline.skills
+                        if str(row.get("variant_id") or "") == "baseline"
+                        else spec.candidate.skills
+                        if str(row.get("variant_id") or "") == "candidate"
+                        else ()
+                    ),
                 )
                 row["comparison_required_evaluation_complete"] = True
         judge_results: dict[str, Any] = {}
         judge_scores: dict[str, float] = {}
+        judge_accounted_reserve = 0.0
         for judge in (
             evaluator
             for evaluator in spec.evaluators
             if evaluator.type == "llm_judge"
         ):
+            judge_reserve_accounted = False
             qualification = _comparison_judge_qualification(
                 judge,
                 repo_root=repo_root,
@@ -9510,6 +9955,20 @@ def score_comparison_rows(
                 judge_results[judge.id] = {
                     "status": "unavailable",
                     "reason": "judge execution was not requested",
+                    "qualification": qualification,
+                }
+                if judge.required:
+                    row["comparison_required_evaluation_complete"] = False
+                continue
+            calibration_issue = _judge_execution_calibration_issue(
+                judge,
+                repo_root=repo_root,
+                approved_inputs=approved_inputs,
+            )
+            if calibration_issue:
+                judge_results[judge.id] = {
+                    "status": "unavailable",
+                    "reason": calibration_issue,
                     "qualification": qualification,
                 }
                 if judge.required:
@@ -9527,6 +9986,8 @@ def score_comparison_rows(
                 failure_stage = "provider_request"
                 request_policy = _comparison_judge_request_policy(judge, env)
                 request = judge_request or _request_comparison_judge
+                judge_accounted_reserve += judge.reserve_cost_usd
+                judge_reserve_accounted = True
                 payload, usage, receipt = request(
                     evaluator=judge,
                     public_task=public_tasks.get(task_id, {}),
@@ -9535,19 +9996,46 @@ def score_comparison_rows(
                 )
                 failure_stage = "rubric_validation"
                 parsed = _validate_comparison_judge_payload(judge, payload)
-                for dimension, value in parsed["scores"].items():
-                    judge_scores[f"{judge.id}.{dimension}"] = value
-                judge_results[judge.id] = {
-                    "status": "scored",
-                    **parsed,
-                    "usage": usage,
-                    "route_receipt": {
-                        **dict(receipt),
-                        "judge_input_privacy": judge_input_privacy,
-                    },
-                    "qualification": qualification,
-                    "cost_usd": None,
+                observed_judge_cost = _row_number(
+                    usage,
+                    "cost_usd",
+                    "observed_cost_usd",
+                )
+                judge_cost_evidence = {
+                    "observed_cost_usd": observed_judge_cost,
+                    "accounted_reserve_usd": judge.reserve_cost_usd,
+                    "cost_status": (
+                        "observed"
+                        if observed_judge_cost is not None
+                        else "unavailable"
+                    ),
                 }
+                route_receipt = {
+                    **dict(receipt),
+                    "judge_input_privacy": judge_input_privacy,
+                }
+                if parsed["missing_evidence"]:
+                    judge_results[judge.id] = {
+                        "status": "missing_evidence",
+                        **parsed,
+                        "usage": usage,
+                        "route_receipt": route_receipt,
+                        "qualification": qualification,
+                        **judge_cost_evidence,
+                    }
+                    if judge.required:
+                        row["comparison_required_evaluation_complete"] = False
+                else:
+                    for dimension, value in parsed["scores"].items():
+                        judge_scores[f"{judge.id}.{dimension}"] = value
+                    judge_results[judge.id] = {
+                        "status": "scored",
+                        **parsed,
+                        "usage": usage,
+                        "route_receipt": route_receipt,
+                        "qualification": qualification,
+                        **judge_cost_evidence,
+                    }
             except Exception as exc:
                 failure = _comparison_judge_failure_metadata(
                     exc,
@@ -9563,6 +10051,15 @@ def score_comparison_rows(
                     ),
                     "failure": failure,
                     "qualification": qualification,
+                    **(
+                        {
+                            "observed_cost_usd": None,
+                            "accounted_reserve_usd": judge.reserve_cost_usd,
+                            "cost_status": "unavailable",
+                        }
+                        if judge_reserve_accounted
+                        else {}
+                    ),
                 }
                 if judge.required:
                     row["comparison_required_evaluation_complete"] = False
@@ -9575,6 +10072,17 @@ def score_comparison_rows(
             )
         if judge_scores:
             row["comparison_judge_scores"] = judge_scores
+        if judge_accounted_reserve:
+            row["comparison_judge_accounted_cost_usd"] = judge_accounted_reserve
+            base_cost = _row_number(
+                row,
+                "accounted_cost_usd",
+                "cost_usd",
+                "agent_cost_usd",
+                "observed_cost_usd",
+            )
+            if base_cost is not None:
+                row["accounted_cost_usd"] = base_cost + judge_accounted_reserve
         scored.append(row)
     return scored
 
@@ -9619,7 +10127,8 @@ def _request_comparison_judge(
         "the baseline or candidate. Use only the supplied public task, final "
         "response, permitted evidence, and rubric. Return one JSON object with: "
         "scores (one 0..1 number per dimension), overall_assessment (brief text), "
-        "uncertainty (0..1), and rationale (at most 500 characters). Do not return "
+        "uncertainty (0..1), missing_evidence (boolean), and rationale (at most "
+        "500 characters). Do not return "
         "hidden reasoning or a chain of thought.\n\n"
         + json.dumps(payload, sort_keys=True, default=str)[:48_000]
     )
@@ -9864,6 +10373,7 @@ def _validate_comparison_judge_payload(
     assessment = str(payload.get("overall_assessment") or "").strip()
     rationale = str(payload.get("rationale") or "").strip()
     uncertainty = payload.get("uncertainty")
+    missing_evidence = payload.get("missing_evidence")
     if not assessment or len(assessment) > 500:
         raise ValueError("judge overall_assessment must be 1..500 characters")
     if not rationale or len(rationale) > 500:
@@ -9874,11 +10384,14 @@ def _validate_comparison_judge_payload(
         or not 0 <= float(uncertainty) <= 1
     ):
         raise ValueError("judge uncertainty must be between zero and one")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError("judge missing_evidence must be boolean")
     return {
         "scores": scores,
         "overall_assessment": assessment,
         "uncertainty": float(uncertainty),
         "rationale": rationale,
+        "missing_evidence": missing_evidence,
     }
 
 
@@ -9887,10 +10400,9 @@ def _comparison_mechanism(
     *,
     expected: Any,
     passed: bool,
-    candidate_skill_ids: tuple[str, ...],
+    expected_skill_ids: tuple[str, ...],
 ) -> dict[str, str]:
-    variant = str(row.get("variant_id") or "")
-    skill_applicable = variant == "candidate" and bool(candidate_skill_ids)
+    skill_applicable = bool(expected_skill_ids)
     assigned = {
         str(value)
         for value in (
@@ -9910,7 +10422,7 @@ def _comparison_mechanism(
         if isinstance(invocation, Mapping)
         else set()
     )
-    expected_skills = set(candidate_skill_ids)
+    expected_skills = set(expected_skill_ids)
     source = (
         str(expected.get("source") or expected.get("source_document") or "")
         if isinstance(expected, Mapping)
@@ -10374,6 +10886,8 @@ def _operational_summary(
     evidence: dict[str, int] = {}
     observed_cost = 0.0
     cost_rows = 0
+    accounted_cost = 0.0
+    accounted_cost_rows = 0
     latency_ms = 0.0
     latency_rows = 0
     input_tokens = 0
@@ -10422,10 +10936,20 @@ def _operational_summary(
                 )
                 usage = mcp_tool_usage.setdefault(variant, {})
                 usage[public_name] = usage.get(public_name, 0) + count
-        cost = row.get("accounted_cost_usd", row.get("cost_usd"))
+        cost = _row_number(
+            row,
+            "cost_usd",
+            "observed_cost_usd",
+            "total_cost_usd",
+            "agent_cost_usd",
+        )
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
             cost_rows += 1
+        row_accounted_cost = _row_number(row, "accounted_cost_usd")
+        if row_accounted_cost is not None:
+            accounted_cost += row_accounted_cost
+            accounted_cost_rows += 1
         latency = row.get("latency_ms")
         if isinstance(latency, int | float) and not isinstance(latency, bool):
             latency_ms += float(latency)
@@ -10442,6 +10966,10 @@ def _operational_summary(
         "infrastructure_failures": infrastructure_failures,
         "observed_cost_usd": round(observed_cost, 6) if cost_rows else None,
         "cost_rows": cost_rows,
+        "accounted_cost_usd": (
+            round(accounted_cost, 6) if accounted_cost_rows else None
+        ),
+        "accounted_cost_rows": accounted_cost_rows,
         "latency_ms": round(latency_ms, 3) if latency_rows else None,
         "latency_rows": latency_rows,
         "input_tokens": input_tokens if usage_rows else None,
@@ -10766,67 +11294,87 @@ def execute_comparison(
         request.approved_comparison,
         repo_root=repo_root,
     )
+    _require_judge_execution_calibrations(
+        spec,
+        repo_root=repo_root,
+        approved_inputs=approved_inputs,
+    )
     from fugue.bench.execution import new_run_id
 
     run_id = new_run_id()
     evaluated_cells = 0
     source_checkpoint_drift: EvidenceDriftCheckV1 | None = None
+    runtime_budget = _ComparisonRuntimeBudget(
+        max_cost_usd=spec.execution.max_cost_usd,
+        reserve_per_attempt_usd=_comparison_reserved_cost_per_attempt(spec),
+        total_cells=int(current.readiness["estimated_cells"]),
+    )
 
     def evaluate_attempt(row: dict[str, Any]) -> None:
         nonlocal evaluated_cells, source_checkpoint_drift
-        evaluation_row = dict(row)
-        evaluation_row["final_output"] = _comparison_trial_output(row)
-        scored = score_comparison_rows(
-            spec,
-            [evaluation_row],
-            repo_root=repo_root,
-            env=service.env,
-            approved_comparison=request.approved_comparison,
-        )[0]
-        scored.pop("final_output", None)
-        row.update(scored)
-        _require_checkpoint_judges(
-            spec,
-            row,
-            checkpoint_index=evaluated_cells,
-        )
-        if source_pre_run_drift is not None:
-            row["source_pre_run_drift"] = (
-                source_pre_run_drift.to_dict()
-            )
-        evaluated_cells += 1
-        if (
-            source_pre_run_drift is not None
-            and source_checkpoint_drift is None
-            and evaluated_cells
-            >= max(1, spec.execution.evidence_checkpoint_cells)
-        ):
-            source_checkpoint_drift = _verify_v3_source_drift(
+        try:
+            evaluation_row = dict(row)
+            evaluation_row["final_output"] = _comparison_trial_output(row)
+            scored = score_comparison_rows(
                 spec,
-                readiness=current.readiness,
+                [evaluation_row],
                 repo_root=repo_root,
                 env=service.env,
+                approved_comparison=request.approved_comparison,
+            )[0]
+            scored.pop("final_output", None)
+            row.update(scored)
+            _require_checkpoint_judges(
+                spec,
+                row,
+                checkpoint_index=evaluated_cells,
             )
-            if (
-                source_checkpoint_drift is None
-                or source_checkpoint_drift.status != "matched"
-            ):
-                raise RuntimeError(
-                    "immutable source evidence changed at the first-cell "
-                    "checkpoint; remaining cells were cancelled"
+            if source_pre_run_drift is not None:
+                row["source_pre_run_drift"] = (
+                    source_pre_run_drift.to_dict()
                 )
-        if source_checkpoint_drift is not None:
-            row["source_checkpoint_drift"] = (
-                source_checkpoint_drift.to_dict()
-            )
+            evaluated_cells += 1
+            if (
+                source_pre_run_drift is not None
+                and source_checkpoint_drift is None
+                and evaluated_cells
+                >= max(1, spec.execution.evidence_checkpoint_cells)
+            ):
+                source_checkpoint_drift = _verify_v3_source_drift(
+                    spec,
+                    readiness=current.readiness,
+                    repo_root=repo_root,
+                    env=service.env,
+                )
+                if (
+                    source_checkpoint_drift is None
+                    or source_checkpoint_drift.status != "matched"
+                ):
+                    raise RuntimeError(
+                        "immutable source evidence changed at the first-cell "
+                        "checkpoint; remaining cells were cancelled"
+                    )
+            if source_checkpoint_drift is not None:
+                row["source_checkpoint_drift"] = (
+                    source_checkpoint_drift.to_dict()
+                )
+            runtime_budget.observe(row)
+        except Exception:
+            # Host evaluator exceptions are normalized into evidence rows by the
+            # live publisher. The shared event is what stops queued cells.
+            runtime_budget.cancellation_event.set()
+            raise
 
     run_summary = service.execute_run(
         request,
         run_id=run_id,
         experiment=experiment,
+        cancellation_event=runtime_budget.cancellation_event,
         host_evaluator=evaluate_attempt,
         host_scorer_names=_comparison_scorer_names(spec),
     )
+    if runtime_budget.failure_reason:
+        raise RuntimeError(runtime_budget.failure_reason)
     if run_summary is not None and run_summary.status != "passed":
         raise RuntimeError(
             "comparison execution did not pass its required cell/evidence "
@@ -10875,7 +11423,11 @@ def execute_comparison(
             spec.execution.source_evidence_project
         ),
         result_schema_version=3 if spec.schema_version >= 3 else 2,
-        study_intent="mcp_release_qualification",
+        study_intent=(
+            "mcp_release_qualification"
+            if spec.decision_policy is not None
+            else "candidate_comparison"
+        ),
         release_note_coverage=release_note_coverage,
         supersedes=spec.supersedes,
     )
@@ -10933,7 +11485,11 @@ def execute_comparison(
             spec.execution.source_evidence_project
         ),
         result_schema_version=3 if spec.schema_version >= 3 else 2,
-        study_intent="mcp_release_qualification",
+        study_intent=(
+            "mcp_release_qualification"
+            if spec.decision_policy is not None
+            else "candidate_comparison"
+        ),
         release_note_coverage=release_note_coverage,
         supersedes=spec.supersedes,
     )
@@ -12291,6 +12847,48 @@ def _judge_calibration_issue(
     return _judge_calibration_value_issue(judge, value)
 
 
+def _judge_calibration_artifact(
+    judge: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+    approved_inputs: Mapping[str, Any] | None,
+) -> tuple[Any, str | None]:
+    if not judge.calibration:
+        return None, None
+    report_sha256: str | None = None
+    try:
+        if approved_inputs is None:
+            path = _safe_input_path(
+                Path(judge.calibration),
+                repo_root,
+                "judge calibration",
+            )
+            report_sha256 = _sha256_path(path)
+        else:
+            artifacts = _mapping(
+                _mapping(
+                    approved_inputs["evaluator_artifacts"],
+                    "approved evaluator artifacts",
+                ).get(judge.id),
+                f"approved evaluator {judge.id} artifacts",
+            )
+            report_sha256 = str(artifacts.get("calibration_sha256") or "") or None
+            path = _frozen_evaluator_artifact_path(
+                repo_root,
+                str(report_sha256 or ""),
+                kind="calibration",
+            )
+        return json.loads(path.read_text(encoding="utf-8")), report_sha256
+    except (
+        FileNotFoundError,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None, report_sha256
+
+
 def _judge_calibration_value_issue(
     judge: ComparisonEvaluatorV1,
     value: Any,
@@ -12348,6 +12946,430 @@ def _judge_calibration_value_issue(
     return None
 
 
+def _judge_execution_calibration_issue(
+    judge: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+    approved_inputs: Mapping[str, Any] | None,
+) -> str | None:
+    """Require a locked calibration result before any paid judge or Agent cell.
+
+    A human-adjudicated calibration remains the qualification standard. An
+    explicitly declared synthetic gate may enable an advisory same-family judge,
+    but it never upgrades that judge to a human-qualified outcome claim.
+    """
+
+    value, _ = _judge_calibration_artifact(
+        judge,
+        repo_root=repo_root,
+        approved_inputs=approved_inputs,
+    )
+    human_issue = _judge_calibration_value_issue(judge, value)
+    if human_issue is None:
+        return None
+    if not isinstance(value, Mapping):
+        return human_issue
+    gate = value.get("execution_gate")
+    if not isinstance(gate, Mapping):
+        return human_issue
+    expected_fields = {
+        "kind",
+        "required_before_agent_trials",
+        "result_path",
+        "preview_digest",
+        "model",
+        "cases_artifact_path",
+        "cases_artifact_sha256",
+        "cases_digest",
+        "rubric_digest",
+        "examples",
+        "calibration_examples",
+        "holdout_examples",
+        "maximum_cost_usd",
+        "minimum_true_positive_rate",
+        "minimum_true_negative_rate",
+        "maximum_critical_false_passes",
+    }
+    if set(gate) != expected_fields:
+        return f"judge {judge.id} synthetic execution gate fields do not match"
+    if gate.get("kind") != "synthetic_blinded_advisory_v1":
+        return f"judge {judge.id} synthetic execution gate kind is unsupported"
+    if gate.get("required_before_agent_trials") is not True:
+        return f"judge {judge.id} synthetic execution gate is not mandatory"
+    if gate.get("model") != judge.profile:
+        return f"judge {judge.id} synthetic execution gate profile does not match"
+    if gate.get("rubric_digest") != _judge_contract_digest(judge):
+        return f"judge {judge.id} synthetic execution gate rubric does not match"
+    if gate.get("cases_digest") != value.get("cases_digest"):
+        return f"judge {judge.id} synthetic execution gate cases do not match"
+    preview_digest = str(gate.get("preview_digest") or "")
+    if not _is_sha256(preview_digest):
+        return f"judge {judge.id} synthetic execution preview digest is invalid"
+    if (
+        int(gate.get("examples") or 0) != 48
+        or int(gate.get("calibration_examples") or 0) != 36
+        or int(gate.get("holdout_examples") or 0) != 12
+    ):
+        return f"judge {judge.id} synthetic execution gate has the wrong cohort"
+    minimum_tpr = float(gate.get("minimum_true_positive_rate") or 0)
+    minimum_tnr = float(gate.get("minimum_true_negative_rate") or 0)
+    if minimum_tpr < 0.85 or minimum_tnr < 0.85:
+        return f"judge {judge.id} synthetic execution thresholds are too weak"
+    if gate.get("maximum_critical_false_passes") != 0:
+        return f"judge {judge.id} synthetic critical-failure threshold is unsafe"
+    if float(gate.get("maximum_cost_usd") or 0) != 8:
+        return f"judge {judge.id} synthetic execution budget is invalid"
+    raw_result_path = str(gate.get("result_path") or "")
+    result_path = Path(raw_result_path)
+    if (
+        result_path.is_absolute()
+        or ".." in result_path.parts
+        or result_path.parts[:3] != (".fugue", "runtime", "community-skill-upgrades")
+    ):
+        return f"judge {judge.id} synthetic result path is outside governed runtime"
+    try:
+        path = _safe_input_path(
+            result_path,
+            repo_root,
+            "judge synthetic calibration result",
+        )
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return f"judge {judge.id} synthetic calibration result is unavailable"
+    return _synthetic_calibration_result_issue(
+        judge,
+        result=result,
+        gate=gate,
+        repo_root=repo_root,
+    )
+
+
+def _is_sha256(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", value))
+
+
+def _frozen_synthetic_calibration_cases(
+    gate: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> list[dict[str, Any]]:
+    raw_path = str(gate.get("cases_artifact_path") or "")
+    relative = Path(raw_path)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.parts[:3]
+        != ("examples", "comparisons", "community-skill-upgrades")
+    ):
+        raise ValueError("synthetic calibration cases path is outside the campaign")
+    expected_sha256 = str(gate.get("cases_artifact_sha256") or "")
+    if not _is_sha256(expected_sha256):
+        raise ValueError("synthetic calibration cases artifact digest is invalid")
+    path = _safe_input_path(relative, repo_root, "synthetic calibration cases")
+    if _sha256_path(path) != expected_sha256:
+        raise ValueError("synthetic calibration cases artifact drifted")
+    rows = _read_jsonl(path, "synthetic calibration cases")
+    if stable_digest(rows) != gate.get("cases_digest"):
+        raise ValueError("synthetic calibration cases content drifted")
+    if len(rows) != int(gate["examples"]):
+        raise ValueError("synthetic calibration cases have the wrong cohort")
+    ids: set[str] = set()
+    split_counts = Counter()
+    for row in rows:
+        case_id = str(row.get("id") or "")
+        split = str(row.get("split") or "")
+        reference = row.get("authored_reference")
+        if (
+            not case_id
+            or case_id in ids
+            or split not in {"calibration", "holdout"}
+            or not isinstance(reference, Mapping)
+            or reference.get("label") not in {"pass", "fail"}
+            or not isinstance(reference.get("critical_false_pass"), bool)
+        ):
+            raise ValueError("synthetic calibration case contract is invalid")
+        ids.add(case_id)
+        split_counts[split] += 1
+    if split_counts != {
+        "calibration": int(gate["calibration_examples"]),
+        "holdout": int(gate["holdout_examples"]),
+    }:
+        raise ValueError("synthetic calibration split disagrees")
+    return rows
+
+
+def _synthetic_classification_rates(
+    actual: Sequence[str],
+    predicted: Sequence[str],
+) -> dict[str, float]:
+    positives = actual.count("pass")
+    negatives = actual.count("fail")
+    if positives == 0 or negatives == 0:
+        raise ValueError("synthetic calibration split is not balanced")
+    true_positives = sum(
+        left == right == "pass"
+        for left, right in zip(actual, predicted, strict=True)
+    )
+    true_negatives = sum(
+        left == right == "fail"
+        for left, right in zip(actual, predicted, strict=True)
+    )
+    return {
+        "true_positive_rate": true_positives / positives,
+        "true_negative_rate": true_negatives / negatives,
+    }
+
+
+def _recompute_synthetic_calibration_metrics(
+    judge: ComparisonEvaluatorV1,
+    *,
+    cases: Sequence[Mapping[str, Any]],
+    results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if len(results) != len(cases):
+        raise ValueError("synthetic calibration rows are incomplete")
+    actual: list[str] = []
+    predicted: list[str] = []
+    splits: list[str] = []
+    critical_false_passes = 0
+    for case, result in zip(cases, results, strict=True):
+        if not isinstance(result, Mapping):
+            raise ValueError("synthetic calibration result row is invalid")
+        if (
+            result.get("case_id") != case.get("id")
+            or result.get("repository_id") != case.get("repository_id")
+            or result.get("split") != case.get("split")
+        ):
+            raise ValueError("synthetic calibration case identities disagree")
+        scores = result.get("dimension_scores")
+        if not isinstance(scores, Mapping) or set(scores) != set(judge.dimensions):
+            raise ValueError("synthetic calibration judge dimensions disagree")
+        normalized_scores: list[float] = []
+        for dimension in judge.dimensions:
+            value = scores[dimension]
+            if (
+                not isinstance(value, int | float)
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or not 0 <= float(value) <= 1
+            ):
+                raise ValueError("synthetic calibration judge score is invalid")
+            normalized_scores.append(float(value))
+        label = str(result.get("overall_label") or "")
+        if label != _judge_review_label(
+            sum(normalized_scores) / len(normalized_scores)
+        ):
+            raise ValueError("synthetic calibration anchored label disagrees")
+        missing_evidence = result.get("missing_evidence")
+        if not isinstance(missing_evidence, bool):
+            raise ValueError("synthetic calibration missing-evidence flag is invalid")
+        predicted_label = (
+            "pass"
+            if label in {"strong", "exceptional"} and not missing_evidence
+            else "fail"
+        )
+        reference = _mapping(case.get("authored_reference"), "authored reference")
+        actual_label = str(reference["label"])
+        actual.append(actual_label)
+        predicted.append(predicted_label)
+        splits.append(str(case["split"]))
+        if (
+            reference["critical_false_pass"] is True
+            and actual_label == "fail"
+            and predicted_label == "pass"
+        ):
+            critical_false_passes += 1
+    rates = _synthetic_classification_rates(actual, predicted)
+    split_rates = {
+        split: _synthetic_classification_rates(
+            [
+                label
+                for label, item_split in zip(actual, splits, strict=True)
+                if item_split == split
+            ],
+            [
+                label
+                for label, item_split in zip(predicted, splits, strict=True)
+                if item_split == split
+            ],
+        )
+        for split in ("calibration", "holdout")
+    }
+    passed = bool(
+        rates["true_positive_rate"] >= 0.85
+        and rates["true_negative_rate"] >= 0.85
+        and all(
+            item["true_positive_rate"] >= 0.85
+            and item["true_negative_rate"] >= 0.85
+            for item in split_rates.values()
+        )
+        and critical_false_passes == 0
+    )
+    return {
+        "examples": len(results),
+        "true_positive_rate": round(rates["true_positive_rate"], 6),
+        "true_negative_rate": round(rates["true_negative_rate"], 6),
+        "calibration_true_positive_rate": round(
+            split_rates["calibration"]["true_positive_rate"], 6
+        ),
+        "calibration_true_negative_rate": round(
+            split_rates["calibration"]["true_negative_rate"], 6
+        ),
+        "holdout_true_positive_rate": round(
+            split_rates["holdout"]["true_positive_rate"], 6
+        ),
+        "holdout_true_negative_rate": round(
+            split_rates["holdout"]["true_negative_rate"], 6
+        ),
+        "critical_false_passes": critical_false_passes,
+        "balanced_accuracy": round(
+            (rates["true_positive_rate"] + rates["true_negative_rate"]) / 2,
+            6,
+        ),
+        "synthetic_thresholds_passed": passed,
+    }
+
+
+def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt audit
+    judge: ComparisonEvaluatorV1,
+    *,
+    result: Any,
+    gate: Mapping[str, Any],
+    repo_root: Path,
+) -> str | None:
+    if not isinstance(result, Mapping):
+        return f"judge {judge.id} synthetic calibration result must be a mapping"
+    supplied_digest = str(result.get("result_digest") or "")
+    unsigned = dict(result)
+    unsigned.pop("result_digest", None)
+    if not _is_sha256(supplied_digest) or supplied_digest != stable_digest(unsigned):
+        return f"judge {judge.id} synthetic calibration result digest disagrees"
+    if result.get("kind") != "synthetic_gold_diagnostic":
+        return f"judge {judge.id} synthetic calibration result kind is unsupported"
+    if result.get("status") != "completed":
+        return f"judge {judge.id} synthetic calibration did not complete"
+    if result.get("model") != gate.get("model"):
+        return f"judge {judge.id} synthetic calibration model drifted"
+    for field_name in (
+        "cases_artifact_path",
+        "cases_artifact_sha256",
+        "cases_digest",
+        "rubric_digest",
+        "preview_digest",
+    ):
+        if result.get(field_name) != gate.get(field_name):
+            return f"judge {judge.id} synthetic calibration {field_name} drifted"
+    approval_digest = str(result.get("approval_digest") or "")
+    if not _is_sha256(approval_digest):
+        return f"judge {judge.id} synthetic calibration approval is unavailable"
+    try:
+        ApprovalLedger(StudyStore(repo_root).path).verify_claim(
+            approval_digest=approval_digest,
+            subject_kind="experiment",
+            preview_digest=str(gate["preview_digest"]),
+            subject_id=f"calibration-{str(gate['preview_digest'])[:20]}",
+            required_cells=int(gate["examples"]),
+            required_cost_usd=float(gate["maximum_cost_usd"]),
+        )
+    except Exception:
+        return f"judge {judge.id} synthetic calibration approval provenance is invalid"
+    if (
+        int(result.get("requested_cases") or 0) != int(gate["examples"])
+        or int(result.get("completed_cases") or 0) != int(gate["examples"])
+    ):
+        return f"judge {judge.id} synthetic calibration row count disagrees"
+    results = result.get("results")
+    if not isinstance(results, list) or len(results) != int(gate["examples"]):
+        return f"judge {judge.id} synthetic calibration rows are incomplete"
+    try:
+        cases = _frozen_synthetic_calibration_cases(gate, repo_root=repo_root)
+        recomputed_metrics = _recompute_synthetic_calibration_metrics(
+            judge,
+            cases=cases,
+            results=results,
+        )
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return f"judge {judge.id} synthetic calibration rows do not match frozen cases"
+    metrics = result.get("synthetic_metrics")
+    if not isinstance(metrics, Mapping):
+        return f"judge {judge.id} synthetic calibration metrics are unavailable"
+    if dict(metrics) != recomputed_metrics:
+        return f"judge {judge.id} synthetic calibration metrics disagree"
+    minimum_tpr = float(gate["minimum_true_positive_rate"])
+    minimum_tnr = float(gate["minimum_true_negative_rate"])
+    for key, minimum in (
+        ("true_positive_rate", minimum_tpr),
+        ("calibration_true_positive_rate", minimum_tpr),
+        ("holdout_true_positive_rate", minimum_tpr),
+        ("true_negative_rate", minimum_tnr),
+        ("calibration_true_negative_rate", minimum_tnr),
+        ("holdout_true_negative_rate", minimum_tnr),
+    ):
+        if float(metrics.get(key) or 0) < minimum:
+            return f"judge {judge.id} synthetic calibration is below {key} threshold"
+    if int(metrics.get("critical_false_passes") or 0) > int(
+        gate["maximum_critical_false_passes"]
+    ):
+        return f"judge {judge.id} synthetic calibration has critical false passes"
+    if metrics.get("synthetic_thresholds_passed") is not True:
+        return f"judge {judge.id} synthetic calibration did not pass"
+    if (
+        float(result.get("budget_ceiling_usd") or 0)
+        != float(gate["maximum_cost_usd"])
+        or result.get("observed_cost_usd") is not None
+        or float(result.get("accounted_cost_usd") or 0)
+        != float(gate["maximum_cost_usd"])
+    ):
+        return f"judge {judge.id} synthetic calibration cost contract disagrees"
+    receipt = result.get("receipt")
+    if not isinstance(receipt, Mapping):
+        return f"judge {judge.id} synthetic calibration receipt is unavailable"
+    receipt_unsigned = dict(receipt)
+    receipt_digest = str(receipt_unsigned.pop("receipt_digest", "") or "")
+    if not _is_sha256(receipt_digest) or receipt_digest != stable_digest(receipt_unsigned):
+        return f"judge {judge.id} synthetic calibration receipt digest disagrees"
+    if (
+        receipt.get("preview_digest") != gate.get("preview_digest")
+        or receipt.get("approval_digest") != approval_digest
+        or receipt.get("secret_value_scan") != "passed"
+        or receipt.get("cases_artifact_path")
+        != gate.get("cases_artifact_path")
+        or receipt.get("cases_artifact_sha256")
+        != gate.get("cases_artifact_sha256")
+        or receipt.get("cases_digest") != gate.get("cases_digest")
+        or receipt.get("rubric_digest") != gate.get("rubric_digest")
+        or int(receipt.get("request_count") or 0) != int(gate["examples"])
+        or int(receipt.get("maximum_requests") or 0) != int(gate["examples"])
+    ):
+        return f"judge {judge.id} synthetic calibration receipt is not qualified"
+    return None
+
+
+def _require_judge_execution_calibrations(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+    approved_inputs: Mapping[str, Any] | None,
+) -> None:
+    issues = [
+        issue
+        for judge in spec.evaluators
+        if judge.type == "llm_judge"
+        for issue in (
+            _judge_execution_calibration_issue(
+                judge,
+                repo_root=repo_root,
+                approved_inputs=approved_inputs,
+            ),
+        )
+        if issue
+    ]
+    if issues:
+        raise RuntimeError(
+            "judge calibration must pass before Agent trials: " + "; ".join(issues)
+        )
+
+
 def _comparison_judge_qualification(
     judge: ComparisonEvaluatorV1,
     *,
@@ -12355,40 +13377,11 @@ def _comparison_judge_qualification(
     approved_inputs: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     contract_digest = _judge_contract_digest(judge)
-    report_sha256: str | None = None
-    value: Any = None
-    if judge.calibration:
-        try:
-            if approved_inputs is None:
-                path = _safe_input_path(
-                    Path(judge.calibration),
-                    repo_root,
-                    "judge calibration",
-                )
-                report_sha256 = _sha256_path(path)
-            else:
-                artifacts = _mapping(
-                    _mapping(
-                        approved_inputs["evaluator_artifacts"],
-                        "approved evaluator artifacts",
-                    ).get(judge.id),
-                    f"approved evaluator {judge.id} artifacts",
-                )
-                report_sha256 = str(artifacts.get("calibration_sha256") or "") or None
-                path = _frozen_evaluator_artifact_path(
-                    repo_root,
-                    str(report_sha256 or ""),
-                    kind="calibration",
-                )
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (
-            FileNotFoundError,
-            KeyError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ):
-            value = None
+    value, report_sha256 = _judge_calibration_artifact(
+        judge,
+        repo_root=repo_root,
+        approved_inputs=approved_inputs,
+    )
     issue = _judge_calibration_value_issue(judge, value)
     review_status = (
         str(value.get("review_status") or "") if isinstance(value, Mapping) else ""
@@ -12402,6 +13395,11 @@ def _comparison_judge_qualification(
     cases_digest = (
         str(value.get("cases_digest") or "") if isinstance(value, Mapping) else ""
     )
+    execution_issue = _judge_execution_calibration_issue(
+        judge,
+        repo_root=repo_root,
+        approved_inputs=approved_inputs,
+    )
     return {
         "judge_id": judge.id,
         "profile": str(judge.profile or ""),
@@ -12412,6 +13410,13 @@ def _comparison_judge_qualification(
             "report_sha256": report_sha256,
             "cases_digest": cases_digest or None,
             "passed": passed,
+        },
+        "execution_calibration": {
+            "status": "passed" if execution_issue is None else "blocked",
+            **({"reason": execution_issue} if execution_issue else {}),
+            "claim_scope": (
+                "human_qualified" if passed else "advisory_same_family"
+            ),
         },
     }
 
@@ -12476,11 +13481,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         )
         for stage, values in result.mechanism_summary.items()
     )
-    judge = (
-        "No blind judge was used.\n"
-        if result.judge_summary.get("status") == "not_used"
-        else "Blind-judge dimensions are available in `result.json`.\n"
-    )
+    judge = _judge_result_markdown(result)
     pair_rows = (
         (
             item.task_id,
@@ -12603,7 +13604,9 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"- Evidence states: "
         f"`{json.dumps(result.operational_summary['evidence_states'], sort_keys=True)}`\n"
         f"- Observed cost: "
-        f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n\n"
+        f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n"
+        f"- Accounted cost (including judge reserves): "
+        f"{result.operational_summary.get('accounted_cost_usd') if result.operational_summary.get('accounted_cost_usd') is not None else 'unavailable'}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
         + "\n### MCP tool use\n\n"
@@ -12616,6 +13619,69 @@ def _result_markdown(result: ComparisonResult) -> str:
         "## Limitations\n\n"
         + "".join(f"- {item}\n" for item in result.limitations)
     )
+
+
+def _judge_result_markdown(result: ComparisonResult) -> str:
+    """Render bounded judge evidence without turning it into a release gate."""
+
+    if result.judge_summary.get("status") == "not_used":
+        return "No blind judge was used.\n"
+    reviews: list[tuple[str, str, JudgeReviewV1]] = []
+    if isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        for pair in result.paired_cases:
+            for arm, attempt in (
+                ("baseline", pair.baseline),
+                ("candidate", pair.candidate),
+            ):
+                if attempt is None:
+                    continue
+                for review in attempt.judge_reviews.values():
+                    reviews.append((pair.task_id, arm, review))
+    if not reviews:
+        return (
+            "Blind-judge dimensions are available in `result.json`; no safe "
+            "anchored review was publishable.\n\n"
+            "Judge evidence is advisory. Deterministic correctness and safety "
+            "gates remain authoritative.\n"
+        )
+    rows = "".join(
+        "| "
+        + " | ".join(
+            (
+                _markdown_cell(task_id),
+                arm,
+                review.label,
+                "missing" if review.missing_evidence else "complete",
+                _judge_cost_label(review),
+                _markdown_cell(review.reason),
+            )
+        )
+        + " |\n"
+        for task_id, arm, review in reviews
+    )
+    return (
+        "Judge evidence is advisory because the Agent and judge use the same "
+        "model family. Deterministic correctness and safety gates remain "
+        "authoritative.\n\n"
+        "| Task | Arm | Usefulness | Evidence | Judge cost | Reason |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        + rows
+    )
+
+
+def _judge_cost_label(review: JudgeReviewV1) -> str:
+    reserve = (
+        f"${review.accounted_reserve_usd:.2f} reserved"
+        if review.accounted_reserve_usd is not None
+        else "reserve unavailable"
+    )
+    if review.cost_status == "observed" and review.observed_cost_usd is not None:
+        return f"${review.observed_cost_usd:.4f} observed; {reserve}"
+    return f"observed unavailable; {reserve}"
+
+
+def _markdown_cell(value: str) -> str:
+    return " ".join(value.replace("|", "\\|").split())
 
 
 def _pass_label(value: Any) -> str:

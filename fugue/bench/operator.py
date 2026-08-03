@@ -210,6 +210,7 @@ class PreviewCellSummary:
     attempt_id: str = ""
     candidate_id: str = ""
     execution_fingerprint: str = ""
+    skill_provenance: tuple[dict[str, Any], ...] = ()
     integration_provenance: tuple[dict[str, Any], ...] = ()
 
 
@@ -1511,6 +1512,7 @@ class OperatorService:
                     execution_fingerprint=(
                         job.resolved_candidate.execution_fingerprint
                     ),
+                    skill_provenance=job.skill_provenance,
                     integration_provenance=job.integration_provenance,
                 )
                 for job in jobs

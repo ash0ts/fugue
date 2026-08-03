@@ -174,6 +174,71 @@ class ApprovalLedger:
             )
         return execution_approval_from_dict(json.loads(row[0]))
 
+    def verify_claim(
+        self,
+        *,
+        approval_digest: str,
+        subject_kind: str,
+        preview_digest: str,
+        subject_id: str,
+        required_cells: int = 0,
+        required_cost_usd: float = 0.0,
+    ) -> ExecutionApprovalV1:
+        """Verify immutable approval provenance after an operation has run.
+
+        Unlike :meth:`claim`, this audit does not mutate the ledger or reject a
+        receipt merely because its execution window has since expired.
+        """
+
+        subject_id = validate_id(subject_id, kind="approved subject id")
+        with connect_database(self.path) as conn:
+            row = conn.execute(
+                "SELECT receipt_json, consumed_by FROM execution_approvals "
+                "WHERE approval_digest=?",
+                (approval_digest,),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "approval_not_found",
+                "execution approval was not found",
+                category="policy",
+            )
+        approval = execution_approval_from_dict(json.loads(row[0]))
+        if approval.subject_kind != subject_kind:
+            raise ResearchError(
+                "approval_subject_mismatch",
+                "execution approval belongs to another operation kind",
+                category="policy",
+            )
+        if approval.preview_digest != preview_digest:
+            raise ResearchError(
+                "approval_preview_mismatch",
+                "execution approval does not match the accepted preview",
+                category="policy",
+            )
+        if str(row[1] or "") != subject_id:
+            raise ResearchError(
+                "approval_claim_mismatch",
+                "execution approval was not claimed by the expected operation",
+                category="policy",
+            )
+        if (
+            approval.maximum_cells is not None
+            and required_cells > approval.maximum_cells
+        ):
+            raise ResearchError(
+                "approval_cell_limit",
+                "accepted preview exceeds the approved cell limit",
+                category="policy",
+            )
+        if required_cost_usd > approval.maximum_cost_usd + 1e-9:
+            raise ResearchError(
+                "approval_cost_limit",
+                "accepted preview exceeds the approved cost limit",
+                category="policy",
+            )
+        return approval
+
     def claim(
         self,
         *,

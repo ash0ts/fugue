@@ -1,0 +1,8 @@
+{
+  "name": "fugue-server-action-auth-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "baseline": {
+    "bundle_digest": "sha256:042dce52998aa6288b4b5eac3fae325113559a666d959a10dd164a981b8ab797",
+    "bundle_digest_status": "reviewed_and_materialized",
+    "commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "id": "vercel-react-best-practices-before",
+    "source_identity_digest": "sha256:ef7c1fa426d3d61902ff1cfdfb095d6ae0523624a950f6ee9ee9828941d82159"
+  },
+  "candidate": {
+    "bundle_digest": "sha256:c9a31361925582718024d9ed69078e4dc3a41293f18642436a05a396d91134de",
+    "bundle_digest_status": "reviewed_and_materialized",
+    "commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+    "id": "vercel-react-best-practices-after",
+    "source_identity_digest": "sha256:9f4a345fbbd8f80316e27bd3faf6eff365fb08062ad59f26e0f3aa7dd448a8bc"
+  },
+  "manifest_digest": "6e961310702e0276db806c125197bed4a44662a277e8903c3881c3479025f132",
+  "path": "skills/react-best-practices",
+  "repository": "https://github.com/vercel-labs/agent-skills",
+  "schema_version": 1
+}

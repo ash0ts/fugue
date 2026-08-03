@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-upgrade-campaign-v1",
+  "title": "Public Skill upgrade canaries",
+  "execution_order": [
+    "superpowers-writing-plans-upgrade-canary-v4",
+    "anthropic-skill-creator-upgrade-canary-v1",
+    "vercel-react-best-practices-upgrade-canary-v1"
+  ],
+  "calibration": {
+    "id": "community-skill-judge-calibration-v1",
+    "rubric": "judge-rubric.json",
+    "cases": "judge-calibration-cases.jsonl",
+    "cases_sha256": "239eaafc06ebccb6bef86adaa940cb54bafec8b3a8b4677c64e75f7dd1191776",
+    "report": "judge-calibration.json",
+    "expected_examples": 48,
+    "calibration_examples": 36,
+    "holdout_examples": 12,
+    "budget_usd": 8,
+    "status": "pending_human_review"
+  },
+  "studies": [
+    {
+      "id": "superpowers-writing-plans-upgrade-canary-v4",
+      "spec": "../superpowers-writing-plans-upgrade/comparison-v4.yaml",
+      "repository": "https://github.com/obra/superpowers",
+      "skill_path": "skills/writing-plans",
+      "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-upgrade-v1",
+      "task_count": 2,
+      "variant_count": 2,
+      "attempts": 1,
+      "expected_cells": 4,
+      "budget_usd": 34,
+      "status": "blocked_on_calibration"
+    },
+    {
+      "id": "anthropic-skill-creator-upgrade-canary-v1",
+      "spec": "../anthropic-skill-creator-upgrade/comparison.yaml",
+      "repository": "https://github.com/anthropics/skills",
+      "skill_path": "skills/skill-creator",
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+      "evidence_project": "wandb/fugue-anthropic-skill-creator-upgrade-v1",
+      "task_count": 2,
+      "variant_count": 2,
+      "attempts": 1,
+      "expected_cells": 4,
+      "budget_usd": 34,
+      "status": "blocked_on_calibration"
+    },
+    {
+      "id": "vercel-react-best-practices-upgrade-canary-v1",
+      "spec": "../vercel-react-best-practices-upgrade/comparison.yaml",
+      "repository": "https://github.com/vercel-labs/agent-skills",
+      "skill_path": "skills/react-best-practices",
+      "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+      "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+      "evidence_project": "wandb/fugue-vercel-react-best-practices-upgrade-v1",
+      "task_count": 2,
+      "variant_count": 2,
+      "attempts": 1,
+      "expected_cells": 4,
+      "budget_usd": 34,
+      "status": "blocked_on_calibration"
+    }
+  ],
+  "execution": {
+    "backend": "docker",
+    "harness": "claude-code",
+    "model": "anthropic/claude-sonnet-5",
+    "concurrency": 1,
+    "checkpoint_cells": 1,
+    "preparation_required": true,
+    "approval_required": true,
+    "cumulative_budget_usd": 110,
+    "stop_on_checkpoint_failure": true
+  },
+  "budget_ledger": "budget-ledger.json",
+  "scientific_report_template": "scientific-report-template.json"
+}

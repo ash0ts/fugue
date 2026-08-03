@@ -17,12 +17,17 @@ from fugue.bench.comparison import (
     ComparisonSpecV1,
     DecisionAttestationV1,
     _apply_decision_attestation,
+    _candidate_source_revisions,
     _canonical_decision_gate_policies,
     _comparison_qualification_digest,
+    _comparison_reserved_cost_per_attempt,
     _comparison_result_digest,
     _comparison_trial_output,
+    _ComparisonRuntimeBudget,
     _evaluate_decision,
     _evaluator_digest,
+    _judge_review_label,
+    _paired_attempt_view,
     _paired_attempt_view_v3,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
@@ -43,7 +48,7 @@ from fugue.bench.comparison import (
 )
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
 from fugue.bench.evaluations import JudgeResponseError
-from fugue.bench.operator import OperatorService
+from fugue.bench.operator import OperatorService, PreviewCellSummary
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.experiment_views import (
@@ -201,6 +206,23 @@ def test_evidence_checkpoint_requires_serial_execution() -> None:
         comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
 
 
+def test_runtime_budget_blocks_parallel_paid_launches() -> None:
+    root = Path.cwd()
+    raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
+    raw["execution"]["evidence_checkpoint_cells"] = 0
+    raw["execution"]["concurrency"] = 2
+    raw["execution"]["reserve_per_attempt_usd"] = 1
+    raw["execution"]["max_cost_usd"] = 16
+    spec = comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
+
+    readiness = check_comparison(spec, repo_root=root)
+
+    assert readiness.status == "blocked"
+    assert "runtime budget enforcement requires comparison concurrency=1" in (
+        readiness.blockers
+    )
+
+
 def test_comparison_rejects_unknown_fields_and_undeclared_changes() -> None:
     root = Path.cwd()
     raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
@@ -294,6 +316,8 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
         "infrastructure_failures": 0,
         "observed_cost_usd": None,
         "cost_rows": 0,
+        "accounted_cost_usd": None,
+        "accounted_cost_rows": 0,
         "latency_ms": None,
         "latency_rows": 0,
         "input_tokens": None,
@@ -915,6 +939,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     }
     result_base = "https://wandb.ai/wandb/result-project/weave"
     rows: list[dict[str, object]] = []
+    preview_by_attempt = {
+        str(cell["attempt_id"]): cell
+        for cell in preview.matrix["matrix_cells"]
+    }
     for cell in approved["expected_cells"]:
         variant = str(cell["variant_id"])
         passed = variant == "candidate"
@@ -946,6 +974,9 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["trace_project"] = result_project
         row["trace_receipt"] = approved["evidence_destination"]
         row["approved_comparison"] = approved
+        row["skill_provenance"] = list(
+            preview_by_attempt[str(cell["attempt_id"])]["skill_provenance"]
+        )
         row["integration_provenance"] = []
         row["comparison_dimension_roles"] = {
             "release.factual_correctness": "outcome",
@@ -1995,7 +2026,16 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     assert approved["approved_inputs_digest"] == stable_digest(
         approved["approved_inputs"]
     )
-    assert approved["candidate_source_revisions_required"] is False
+    assert approved["candidate_source_revisions_required"] is True
+    assert len(approved["candidate_source_revisions"]) == 1
+    assert approved["candidate_source_revisions"][0]["kind"] == "skill"
+    assert approved["candidate_source_revisions"][0][
+        "version_identity"
+    ].startswith("digest:sha256:")
+    preview_by_attempt = {
+        str(cell["attempt_id"]): cell
+        for cell in preview.matrix["matrix_cells"]
+    }
     rows = [
         {
             **{
@@ -2013,6 +2053,9 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
                     "skip_reason",
                 )
             },
+            "skill_provenance": list(
+                preview_by_attempt[str(cell["attempt_id"])]["skill_provenance"]
+            ),
             "integration_provenance": [],
             "run_id": "approved-run",
             "trace_project": approved["evidence_project"],
@@ -2155,6 +2198,7 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
 
     source_required = json.loads(json.dumps(approved))
     source_required["candidate_source_revisions_required"] = True
+    source_required["candidate_source_revisions"] = []
     candidate_ids = sorted(
         {
             cell["candidate_id"]
@@ -2432,6 +2476,13 @@ def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -
 def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    spec = replace(
+        spec,
+        baseline=replace(
+            spec.baseline,
+            skills=("verify-current-source-before",),
+        ),
+    )
     rows = [
         {
             "answer": {"amount": 125, "source": "expense-policy-v4.md"},
@@ -2456,6 +2507,13 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
             "task_id": "expense-limit",
             "trial_index": 1,
             "variant_id": "baseline",
+            "skills_assigned": ["verify-current-source-before"],
+            "skills_registered": ["verify-current-source-before"],
+            "skill_registration_status": "registered",
+            "skill_invocation_evidence": {
+                "status": "observed",
+                "skills_invoked": ["verify-current-source-before"],
+            },
         },
     ]
     scored = score_comparison_rows(spec, rows, repo_root=root)
@@ -2471,9 +2529,89 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
         "applicable": 1,
         "unavailable": 0,
     }
+    assert result.mechanism_summary["skill_assigned"]["baseline"] == {
+        "observed": 1,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert result.mechanism_summary["skill_invoked"]["baseline"] == {
+        "observed": 1,
+        "applicable": 1,
+        "unavailable": 0,
+    }
     assert result.mechanism_summary["relevant_source_used"]["candidate"][
         "observed"
     ] == 1
+
+
+def test_candidate_source_revisions_include_exact_git_skill() -> None:
+    revisions = _candidate_source_revisions(
+        [
+            {
+                "variant_id": "candidate",
+                "integration_provenance": [],
+                "skill_provenance": [
+                    {
+                        "id": "writing-plans-candidate",
+                        "digest": "sha256:" + "a" * 64,
+                        "resolved_commit": "b" * 40,
+                    }
+                ],
+            },
+            {
+                "variant_id": "candidate",
+                "integration_provenance": [],
+                "skill_provenance": [
+                    {
+                        "id": "writing-plans-candidate",
+                        "digest": "sha256:" + "a" * 64,
+                        "resolved_commit": "b" * 40,
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert [item.to_dict() for item in revisions] == [
+        {
+            "kind": "skill",
+            "id": "writing-plans-candidate",
+            "version_identity": "git:" + "b" * 40,
+            "runtime_digest": "sha256:" + "a" * 64,
+        }
+    ]
+
+
+def test_candidate_source_revisions_include_project_owned_skill_digest() -> None:
+    digest = "sha256:" + "c" * 64
+    revisions = _candidate_source_revisions(
+        [
+            {
+                "variant_id": "candidate",
+                "integration_provenance": [],
+                "skill_provenance": [
+                    {
+                        "id": "project-writing-plans",
+                        "digest": digest,
+                        "license_status": "project-owned",
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert [item.to_dict() for item in revisions] == [
+        {
+            "kind": "skill",
+            "id": "project-writing-plans",
+            "version_identity": f"digest:{digest}",
+            "runtime_digest": digest,
+        }
+    ]
+
+
+def test_preview_cells_carry_skill_provenance_into_approval_lineage() -> None:
+    assert "skill_provenance" in PreviewCellSummary.__dataclass_fields__
 
 
 def test_zero_row_comparison_cannot_succeed() -> None:
@@ -2648,7 +2786,7 @@ def test_deterministic_evaluator_rejects_judge_timeout() -> None:
         comparison_from_dict(raw, repo_root=root, source=path.parent)
 
 
-def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
+def test_v3_attempt_exports_safe_anchored_blind_judge_review() -> None:
     row = {
         "attempt_id": "a" * 64,
         "attempt_identity": {
@@ -2669,11 +2807,25 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         "comparison_judge_scores": {
             "maintainer-actionability.maintenance_actionability": 0.8,
         },
+        "comparison_judges": {
+            "maintainer-actionability": {
+                "status": "scored",
+                "scores": {"maintenance_actionability": 0.8},
+                "overall_assessment": "Concrete and bounded maintainer advice.",
+                "rationale": "Private reasoning is not projected.",
+                "missing_evidence": False,
+            }
+        },
         "mcp_tool_calls": [],
     }
 
+    legacy_attempt = _paired_attempt_view(row)
     attempt = _paired_attempt_view_v3(row)
 
+    assert legacy_attempt is not None
+    assert legacy_attempt.judge_reviews[
+        "maintainer-actionability"
+    ].label == "strong"
     assert attempt is not None
     assert attempt.scores == {
         "natural-maintainer.answer_correct": True,
@@ -2685,6 +2837,70 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         ]
         == "Blind judge score; no rationale or private truth is published."
     )
+    assert attempt.judge_reviews["maintainer-actionability"].to_dict() == {
+        "label": "strong",
+        "reason": "Concrete and bounded maintainer advice.",
+        "missing_evidence": False,
+        "cost_status": "unavailable",
+    }
+
+
+def test_missing_evidence_judge_is_unusable_and_not_numerically_aggregated() -> None:
+    row = {
+        "attempt_id": "a" * 64,
+        "attempt_identity": {
+            "task_id": "maintainer-project-health",
+            "arm": "candidate",
+            "harness": "claude-code",
+            "attempt": 1,
+            "candidate": "b" * 64,
+            "runtime": "c" * 64,
+        },
+        "prediction_id": "prediction-1",
+        "pass": True,
+        "status": "completed",
+        "comparison_evaluation_status": "scored",
+        "comparison_deterministic_scores": {
+            "maintainer.answer_correct": True,
+        },
+        "comparison_judges": {
+            "maintainer-actionability": {
+                "status": "missing_evidence",
+                "scores": {"maintenance_actionability": 1.0},
+                "overall_assessment": "Required repository evidence is missing.",
+                "rationale": "No grounded judgment is possible.",
+                "missing_evidence": True,
+            }
+        },
+        "mcp_tool_calls": [],
+    }
+
+    attempt = _paired_attempt_view_v3(row)
+
+    assert attempt is not None
+    assert attempt.scores == {"maintainer.answer_correct": True}
+    assert attempt.judge_reviews["maintainer-actionability"].to_dict() == {
+        "label": "unusable",
+        "reason": "Required repository evidence is missing.",
+        "missing_evidence": True,
+        "cost_status": "unavailable",
+    }
+
+
+@pytest.mark.parametrize(
+    ("score", "label"),
+    [
+        (0.0, "unusable"),
+        (0.25, "weak"),
+        (0.5, "adequate"),
+        (0.75, "strong"),
+        (0.9, "exceptional"),
+    ],
+)
+def test_blind_judge_labels_have_stable_public_anchors(
+    score: float, label: str
+) -> None:
+    assert _judge_review_label(score) == label
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
@@ -2887,8 +3103,17 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
     assert "--network" not in str(observed["source"])
 
 
+@pytest.fixture
+def allow_unit_judge_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.comparison._judge_execution_calibration_issue",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     monkeypatch: pytest.MonkeyPatch,
+    allow_unit_judge_execution: None,
 ) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
@@ -2925,6 +3150,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                 "overall_assessment": "Grounded and appropriately bounded.",
                 "uncertainty": 0.1,
                 "rationale": "The response cites the inspected current source.",
+                "missing_evidence": False,
             },
             {"input_tokens": 100, "output_tokens": 40},
         )
@@ -2954,6 +3180,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                 "mcp_tool_names": ["summarize_evaluation_tool"],
                 "inspected_paths": ["expense-policy-v4.md"],
                 "comparison_deterministic_scores": {"private": True},
+                "cost_usd": 1.0,
             }
         ],
         repo_root=root,
@@ -2973,6 +3200,12 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     assert rows[0]["comparison_required_evaluation_complete"] is True
     assert captured["requests"] == 1
     assert captured["timeout_sec"] == 300
+    assert rows[0]["comparison_judge_accounted_cost_usd"] == 0.1
+    assert rows[0]["accounted_cost_usd"] == 1.1
+    judge_cost = rows[0]["comparison_judges"]["maintainer-review"]
+    assert judge_cost["observed_cost_usd"] is None
+    assert judge_cost["accounted_reserve_usd"] == 0.1
+    assert judge_cost["cost_status"] == "unavailable"
     privacy = rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
         "judge_input_privacy"
     ]
@@ -2992,6 +3225,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
 
 def test_blind_judge_rejects_secret_before_provider_call(
     monkeypatch: pytest.MonkeyPatch,
+    allow_unit_judge_execution: None,
 ) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
@@ -3041,6 +3275,7 @@ def test_blind_judge_rejects_secret_before_provider_call(
 
 def test_blind_judge_read_timeout_is_not_retried(
     monkeypatch: pytest.MonkeyPatch,
+    allow_unit_judge_execution: None,
 ) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
@@ -3102,10 +3337,16 @@ def test_blind_judge_read_timeout_is_not_retried(
             "automatic_retries": 0,
         },
     }
+    failed_judge = rows[0]["comparison_judges"]["maintainer-review"]
+    assert failed_judge["observed_cost_usd"] is None
+    assert failed_judge["accounted_reserve_usd"] == 0.1
+    assert failed_judge["cost_status"] == "unavailable"
+    assert rows[0]["comparison_judge_accounted_cost_usd"] == 0.1
 
 
 def test_blind_judge_records_safe_no_json_failure_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    allow_unit_judge_execution: None,
 ) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
@@ -3172,7 +3413,9 @@ def test_blind_judge_records_safe_no_json_failure_metadata(
     assert "expense-policy-v4.md" not in json.dumps(failure)
 
 
-def test_blind_judge_distinguishes_strict_rubric_validation_failure() -> None:
+def test_blind_judge_distinguishes_strict_rubric_validation_failure(
+    allow_unit_judge_execution: None,
+) -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
     judge = ComparisonEvaluatorV1(
@@ -3383,3 +3626,95 @@ def test_execute_comparison_never_prepares_after_preview(
             fetch_weave=False,
             publish_research=False,
         )
+
+
+def test_runtime_budget_cancels_before_remaining_cells_when_projection_drifts() -> None:
+    budget = _ComparisonRuntimeBudget(
+        max_cost_usd=5,
+        reserve_per_attempt_usd=1,
+        total_cells=3,
+    )
+    first = {"attempt_id": "a" * 64, "cost_usd": 4.5}
+
+    with pytest.raises(RuntimeError, match="remaining cells exceeds"):
+        budget.observe(first)
+
+    assert budget.cancellation_event.is_set()
+    assert budget.accounted_cost_usd == 4.5
+    assert first["comparison_runtime_budget"] == {
+        "schema_version": 1,
+        "status": "failed",
+        "attempt_id": "a" * 64,
+        "cell_accounted_cost_usd": 4.5,
+        "accounted_cost_usd": 4.5,
+        "approved_max_cost_usd": 5,
+        "reserve_per_remaining_attempt_usd": 1,
+        "terminal_cells": 1,
+        "remaining_cells": 2,
+        "reserved_remaining_cost_usd": 2,
+        "projected_minimum_cost_usd": 6.5,
+        "reason": budget.failure_reason,
+    }
+
+
+def test_reserved_cost_per_attempt_includes_advisory_judge() -> None:
+    spec = load_comparison(
+        Path(
+            "examples/comparisons/anthropic-skill-creator-upgrade/comparison.yaml"
+        ),
+        repo_root=Path.cwd(),
+    )
+
+    assert _comparison_reserved_cost_per_attempt(spec) == 8.5
+
+
+@pytest.mark.parametrize("max_cost_usd", [0, 10])
+def test_zero_reserve_comparison_must_run_serially(max_cost_usd: float) -> None:
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+    paid = replace(
+        spec,
+        execution=replace(
+            spec.execution,
+            max_cost_usd=max_cost_usd,
+            reserve_per_attempt_usd=0,
+            concurrency=2,
+        ),
+    )
+
+    readiness = check_comparison(paid, repo_root=Path.cwd())
+
+    assert readiness.status == "blocked"
+    assert "runtime budget enforcement requires comparison concurrency=1" in (
+        readiness.blockers
+    )
+
+
+def test_runtime_budget_fails_closed_when_started_attempt_has_no_cost() -> None:
+    budget = _ComparisonRuntimeBudget(
+        max_cost_usd=10,
+        reserve_per_attempt_usd=1,
+        total_cells=2,
+    )
+    row = {"attempt_id": "b" * 64, "exception_class": "AgentTimeoutError"}
+
+    with pytest.raises(RuntimeError, match="cost evidence is unavailable"):
+        budget.observe(row)
+
+    assert budget.cancellation_event.is_set()
+    assert row["comparison_runtime_budget"]["cell_accounted_cost_usd"] is None
+    assert row["comparison_runtime_budget"]["remaining_cells"] == 1
+
+
+def test_runtime_budget_accepts_explicitly_no_cost_comparison_rows() -> None:
+    budget = _ComparisonRuntimeBudget(
+        max_cost_usd=0,
+        reserve_per_attempt_usd=0,
+        total_cells=1,
+    )
+    row = {"attempt_id": "c" * 64}
+
+    budget.observe(row)
+
+    assert not budget.cancellation_event.is_set()
+    assert row["comparison_runtime_budget"]["status"] == "within_budget"
+    assert row["comparison_runtime_budget"]["cell_accounted_cost_usd"] == 0

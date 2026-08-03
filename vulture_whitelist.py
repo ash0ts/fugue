@@ -55,7 +55,6 @@ official_popularity_exception
 workspace_digest
 patch_sha256
 context_version
-skill_provenance
 integration_provenance
 aggregation
 evidence_inputs

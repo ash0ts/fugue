@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "community-usefulness",
+  "profile": "anthropic/claude-sonnet-5",
+  "role": "advisory",
+  "rubric": "Judge the usefulness of the submitted work for the stated repository task. Score only whether it proposes or produces an actionable result, grounds its claims in the inspected repository, is reviewable by a maintainer, and calibrates risk and uncertainty to the available evidence. Do not infer correctness from fluency, treatment identity, repository popularity, or Skill assignment. Deterministic scorers own build, test, schema, security, scope, and task-correctness gates. A qualitative label cannot override a deterministic critical failure. Missing evidence must be reported rather than treated as success.",
+  "dimensions": [
+    "useful_actionability",
+    "repository_grounding",
+    "reviewability",
+    "risk_calibration"
+  ],
+  "evidence": [
+    "inspected_paths",
+    "changed_paths"
+  ],
+  "labels": [
+    {
+      "id": "unusable",
+      "transport_value": 0.0,
+      "score_band": "0.00 <= mean < 0.25",
+      "description": "No safe, actionable result, or a critical claim conflicts with the supplied evidence."
+    },
+    {
+      "id": "weak",
+      "transport_value": 0.25,
+      "score_band": "0.25 <= mean < 0.50",
+      "description": "Some relevant content, but it is materially generic, ungrounded, unsafe, or not reviewable."
+    },
+    {
+      "id": "adequate",
+      "transport_value": 0.5,
+      "score_band": "0.50 <= mean < 0.75",
+      "description": "Plausible and bounded, but missing important repository evidence, review detail, or risk handling."
+    },
+    {
+      "id": "strong",
+      "transport_value": 0.75,
+      "score_band": "0.75 <= mean < 0.90",
+      "description": "Actionable, repository-grounded, reviewable, and appropriately calibrated, with only minor omissions."
+    },
+    {
+      "id": "exceptional",
+      "transport_value": 1.0,
+      "score_band": "0.90 <= mean <= 1.00",
+      "description": "Strong on every dimension and unusually clear about evidence, tradeoffs, verification, and limits."
+    }
+  ],
+  "passing_labels": [
+    "strong",
+    "exceptional"
+  ],
+  "blinded_fields": [
+    "variant_id",
+    "variant_label",
+    "candidate_id",
+    "skill_revision",
+    "source_commit"
+  ],
+  "critical_policy": "The judge remains unavailable when required evidence is missing and may never turn a deterministic critical failure into a task pass."
+}

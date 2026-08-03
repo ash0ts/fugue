@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: fugue-superpowers-writing-plans-upgrade-v1
+  name: Fugue Superpowers Writing Plans Upgrade
+  description: Exact upstream Skill revision comparisons on locked maintenance tasks.
+  objective: Decide whether a reviewed Skill upgrade should advance to a larger holdout.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-upgrade-v1
+database: .study-console/superpowers-writing-plans.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-upgrade-canary-v4
+  read_only: true

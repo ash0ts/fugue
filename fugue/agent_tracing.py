@@ -66,16 +66,18 @@ def codex_skill_instruction(
     *,
     skills: list[str],
     directory: str,
+    provenance: Any = (),
 ) -> str:
     """Make assigned skill use explicit enough to prove from Codex events."""
     if not skills:
         return instruction
     commands: list[str] = []
     root = PurePosixPath(directory)
+    runtime_names = skill_runtime_name_map(skills, provenance)
     for skill_id in skills:
         if not skill_id or PurePosixPath(skill_id).name != skill_id:
             raise ValueError(f"invalid skill id for Codex delivery: {skill_id!r}")
-        path = root / skill_id / "SKILL.md"
+        path = root / runtime_names[skill_id] / "SKILL.md"
         commands.append(f"cat {shlex.quote(path.as_posix())}")
     return (
         "Assigned reviewed skills are behavior-affecting inputs. Before any task "
@@ -86,12 +88,46 @@ def codex_skill_instruction(
     )
 
 
+def skill_runtime_name_map(
+    assigned: list[str],
+    provenance: Any,
+) -> dict[str, str]:
+    """Map stable Fugue Skill ids to the names registered by the harness.
+
+    Imported Skills may be given an operator-facing alias while retaining the
+    upstream ``name`` from their SKILL.md frontmatter. Runtime discovery uses
+    that declared name; Fugue evidence continues to use the stable lock id.
+    """
+    mapping = {skill_id: skill_id for skill_id in assigned}
+    if isinstance(provenance, list):
+        for item in provenance:
+            if not isinstance(item, dict):
+                continue
+            skill_id = str(item.get("id") or "")
+            declared_name = str(item.get("declared_name") or "")
+            if skill_id not in mapping or not declared_name:
+                continue
+            if (
+                PurePosixPath(declared_name).name != declared_name
+                or declared_name in {".", ".."}
+            ):
+                raise ValueError(
+                    f"invalid declared runtime name for Skill {skill_id!r}"
+                )
+            mapping[skill_id] = declared_name
+    runtime_names = list(mapping.values())
+    if len(runtime_names) != len(set(runtime_names)):
+        raise ValueError("assigned Skills must have unique declared runtime names")
+    return mapping
+
+
 def skill_invocation_evidence(
     logs_dir: Path,
     harness: str,
     registration: dict[str, Any],
 ) -> dict[str, Any]:
     assigned = [str(item) for item in registration.get("skills_assigned") or []]
+    provenance = registration.get("skill_provenance") or []
     if not assigned:
         return {"status": "not_applicable", "skills_invoked": []}
     if harness not in {"codex", "claude-code"}:
@@ -131,7 +167,7 @@ def skill_invocation_evidence(
                 payloads,
                 assigned=assigned,
                 directory=directory,
-                provenance=registration.get("skill_provenance") or [],
+                provenance=provenance,
             )
         )
     else:
@@ -148,6 +184,7 @@ def skill_invocation_evidence(
                 str(item.get("command") or ""),
                 assigned=assigned,
                 directory=directory,
+                provenance=provenance,
             )
             if skill_id:
                 events.append(
@@ -211,6 +248,7 @@ def _claude_skill_events(
                         str(tool_input.get("command") or ""),
                         assigned=assigned,
                         directory=directory,
+                        provenance=provenance,
                     )
                     if skill_id:
                         pending[tool_id] = ("read_skill_instructions", skill_id)
@@ -234,6 +272,7 @@ def _skill_read_from_command(
     *,
     assigned: list[str],
     directory: str,
+    provenance: Any = (),
 ) -> str | None:
     try:
         outer = shlex.split(command)
@@ -250,7 +289,8 @@ def _skill_read_from_command(
             return None
     if not argv or Path(argv[0]).name not in {"cat", "head", "sed", "tail"}:
         return None
-    for skill_id in assigned:
-        if f"{directory}/{skill_id}/SKILL.md" in argv:
+    runtime_names = skill_runtime_name_map(assigned, provenance)
+    for skill_id, runtime_name in runtime_names.items():
+        if f"{directory}/{runtime_name}/SKILL.md" in argv:
             return skill_id
     return None

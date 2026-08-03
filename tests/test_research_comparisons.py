@@ -579,6 +579,10 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
     materialized = materialize_comparison(preview, repo_root=repo_root)
     preview_operator = comparison_module.OperatorService(repo_root)
     approved = materialized[1].approved_comparison
+    preview_by_attempt = {
+        str(cell["attempt_id"]): cell
+        for cell in preview.matrix["matrix_cells"]
+    }
     rows = []
     for cell in approved["expected_cells"]:
         variant = str(cell["variant_id"])
@@ -598,6 +602,11 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
                 "applicable": cell["applicable"],
                 "skip_reason": cell["skip_reason"],
                 "run_id": "projection-failure-run",
+                "skill_provenance": list(
+                    preview_by_attempt[str(cell["attempt_id"])][
+                        "skill_provenance"
+                    ]
+                ),
                 "integration_provenance_digest": cell[
                     "integration_provenance_digest"
                 ],

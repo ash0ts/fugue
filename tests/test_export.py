@@ -20,7 +20,9 @@ from fugue.bench.export import (
     PublishedEvaluation,
     _fetch_agents_spans,
     _fetch_calls_spans,
+    _merge_planned_cell_identities,
     _summarize_spans,
+    _synthesize_missing_trial_rows,
     compile_export,
     export_rows,
     publish_to_weave,
@@ -5957,3 +5959,179 @@ def test_weave_enrichment_marks_expected_agent_identity(
     )
     missing = export_rows([jobs], fetch_weave=True, env={"WANDB_API_KEY": "x"})
     assert missing[0]["weave_agent_name_match"] is None
+
+
+def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
+    identity = {
+        "task_id": "routing-plan",
+        "arm": "candidate",
+        "harness": "claude-code",
+        "attempt": 2,
+        "candidate": "c" * 64,
+        "runtime": "e" * 64,
+    }
+    shared = {
+        "run_id": "run-1",
+        "candidate_id": "c" * 64,
+        "comparison_example_id": "x" * 64,
+        "trial_index": 2,
+        "execution_fingerprint": "e" * 64,
+        "workload_id": "harbor",
+        "harness": "claude-code",
+        "context_system_id": "none",
+        "variant_id": "candidate",
+        "model_provider": "anthropic",
+        "model": "anthropic/claude-sonnet-5",
+    }
+    trial = {
+        "record_type": "trial",
+        **shared,
+        "task_name": "fugue/routing-plan",
+    }
+    cell = {
+        "record_type": "cell",
+        **shared,
+        "cell_id": "cell-1",
+        "task_id": "routing-plan",
+        "attempt_id": "a" * 64,
+        "attempt_identity": identity,
+        "run_name": "skill-upgrade",
+        "status": "interrupted",
+        "runtime_outcome": "cancelled",
+    }
+
+    _merge_planned_cell_identities([trial, cell])
+
+    assert trial["cell_id"] == "cell-1"
+    assert trial["task_id"] == "routing-plan"
+    assert trial["task_name"] == "routing-plan"
+    assert trial["attempt_id"] == "a" * 64
+    assert trial["attempt_identity"] == identity
+    assert trial["status"] == "interrupted"
+    assert trial["runtime_outcome"] == "cancelled"
+    assert trial["planned_cell_identity_status"] == "reconciled"
+
+
+def test_export_synthesizes_interrupted_trial_preserving_planned_identity(
+    tmp_path: Path,
+) -> None:
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    run_key = (
+        "run-1:harbor:cell:routing-plan:claude-code:none:candidate:t001"
+    )
+    shared = {
+        "cell_id": "cell-1",
+        "run_key": run_key,
+        "run_id": "run-1",
+        "candidate_id": "c" * 64,
+        "comparison_example_id": "x" * 64,
+        "trial_index": 1,
+        "execution_fingerprint": "e" * 64,
+        "workload_id": "harbor",
+        "harness": "claude-code",
+        "context_system_id": "none",
+        "variant_id": "candidate",
+        "model_provider": "anthropic",
+        "model": "anthropic/claude-sonnet-5",
+        "task_id": "routing-plan",
+        "attempt_id": "a" * 64,
+        "attempt_identity": {
+            "task_id": "routing-plan",
+            "arm": "candidate",
+            "harness": "claude-code",
+            "attempt": 1,
+            "candidate": "c" * 64,
+            "runtime": "e" * 64,
+        },
+    }
+    (jobs / "cells.jsonl").write_text(
+        json.dumps({**shared, "status": "interrupted"}) + "\n",
+        encoding="utf-8",
+    )
+    (jobs / "evaluation-results.jsonl").write_text(
+        json.dumps(
+            {
+                **shared,
+                "task_id": "",
+                "attempt_id": "",
+                "attempt_identity": None,
+                "candidate_id": "",
+                "execution_fingerprint": None,
+                "status": "interrupted",
+                "runtime_outcome": "cancelled",
+                "comparison_evaluation_status": "unavailable",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rows = export_rows([jobs], repo_root=tmp_path)
+    trials = [row for row in rows if row.get("record_type") == "trial"]
+
+    assert len(trials) == 1
+    assert trials[0]["task_id"] == "routing-plan"
+    assert trials[0]["attempt_id"] == "a" * 64
+    assert trials[0]["attempt_identity"] == shared["attempt_identity"]
+    assert trials[0]["candidate_id"] == "c" * 64
+    assert trials[0]["execution_fingerprint"] == "e" * 64
+    assert trials[0]["status"] == "interrupted"
+    assert trials[0]["runtime_outcome"] == "cancelled"
+    assert trials[0]["planned_cell_identity_status"] == (
+        "synthesized_from_live_terminal"
+    )
+
+
+def test_synthesized_interrupted_trial_rejects_live_identity_disagreement() -> None:
+    planned = {
+        "record_type": "cell",
+        "cell_id": "cell-1",
+        "run_key": "run-1:harbor:cell:routing-plan:claude-code:none:candidate:t001",
+        "task_id": "routing-plan",
+        "attempt_id": "a" * 64,
+        "candidate_id": "c" * 64,
+        "execution_fingerprint": "e" * 64,
+        "trial_index": 1,
+        "harness": "claude-code",
+        "context_system_id": "none",
+        "variant_id": "candidate",
+    }
+    live = {
+        **planned,
+        "record_type": "live_evaluation",
+        "candidate_id": "d" * 64,
+        "status": "interrupted",
+    }
+
+    with pytest.raises(ValueError, match="candidate_id"):
+        _synthesize_missing_trial_rows([planned], [live])
+
+
+def test_interrupted_trial_rejects_conflicting_planned_identity() -> None:
+    shared = {
+        "run_id": "run-1",
+        "candidate_id": "c" * 64,
+        "comparison_example_id": "x" * 64,
+        "trial_index": 1,
+        "execution_fingerprint": "e" * 64,
+        "workload_id": "harbor",
+        "harness": "claude-code",
+        "context_system_id": "none",
+        "variant_id": "candidate",
+        "model_provider": "anthropic",
+        "model": "anthropic/claude-sonnet-5",
+    }
+    trial = {"record_type": "trial", **shared, "task_id": "wrong-task"}
+    cell = {
+        "record_type": "cell",
+        **shared,
+        "cell_id": "cell-1",
+        "task_id": "right-task",
+        "attempt_id": "a" * 64,
+        "attempt_identity": {},
+        "run_name": "skill-upgrade",
+    }
+
+    with pytest.raises(ValueError, match="task_id"):
+        _merge_planned_cell_identities([trial, cell])

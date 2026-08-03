@@ -1,0 +1,58 @@
+schema_version: 2
+id: superpowers-writing-plans-fugue-canary-v3
+question: On two complete, historical Fugue trees, does the exact Superpowers writing-plans upgrade produce more correct, grounded, dependency-aware, and reviewable implementation plans without a safety regression?
+taskset:
+  tasks: tasks-v3.jsonl
+  private_labels: private-labels-v3.jsonl
+baseline:
+  label: Superpowers writing-plans before contract additions at de4672b1
+  skills: [superpowers-writing-plans-before-contracts]
+candidate:
+  label: Superpowers writing-plans with task and interface contracts at 8e1262a3
+  skills: [superpowers-writing-plans-contracts]
+changed: [skills]
+evaluators:
+  - id: plan-quality
+    type: deterministic
+    required: true
+    scorer: plan_quality_scorer.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - artifact_validity
+      - requirement_coverage
+      - repository_grounding
+      - dependency_contracts
+      - reviewable_decomposition
+      - verification_quality
+      - scope_and_secret_safety
+      - scenario_coverage
+    dimension_roles:
+      artifact_validity: safety_gate
+      requirement_coverage: outcome
+      repository_grounding: outcome
+      dependency_contracts: mechanism
+      reviewable_decomposition: outcome
+      verification_quality: safety_gate
+      scope_and_secret_safety: safety_gate
+      scenario_coverage: outcome
+execution:
+  evidence_project: wandb/fugue-skill-upgrade-qualification-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-skill-upgrade-qualification-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  research_id: fugue-skill-upgrade-qualification-v1
+  study_console_base_url: http://127.0.0.1:18081
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  evidence_checkpoint_cells: 1
+  max_cost_usd: 20
+  reserve_per_attempt_usd: 5
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}

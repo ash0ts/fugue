@@ -1,0 +1,58 @@
+schema_version: 2
+id: superpowers-writing-plans-fugue-canary-v2
+question: Does the exact Superpowers writing-plans upgrade improve constraint fidelity, interface clarity, and reviewable task decomposition on two real Fugue maintenance briefs?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Superpowers writing-plans before contract additions at de4672b1
+  skills: [superpowers-writing-plans-before-contracts]
+candidate:
+  label: Superpowers writing-plans with task and interface contracts at 8e1262a3
+  skills: [superpowers-writing-plans-contracts]
+changed: [skills]
+evaluators:
+  - id: plan-contract
+    type: deterministic
+    required: true
+    scorer: skill_upgrade_scorer.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - plan_structure
+      - constraint_fidelity
+      - repository_grounding
+      - interface_contracts
+      - reviewable_decomposition
+      - verification_quality
+      - scope_and_secret_safety
+      - historical_diff_coverage
+    dimension_roles:
+      plan_structure: safety_gate
+      constraint_fidelity: outcome
+      repository_grounding: outcome
+      interface_contracts: outcome
+      reviewable_decomposition: outcome
+      verification_quality: safety_gate
+      scope_and_secret_safety: safety_gate
+      historical_diff_coverage: outcome
+execution:
+  evidence_project: wandb/fugue-skill-upgrade-qualification-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-skill-upgrade-qualification-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  research_id: fugue-skill-upgrade-qualification-v1
+  study_console_base_url: http://127.0.0.1:18081
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 1
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 0.75
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}

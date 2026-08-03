@@ -2491,6 +2491,8 @@ def export_rows(
         *[row for job in jobs for row in _cell_result_rows(job)],
     ]
     live_rows = [row for job in jobs for row in _live_evaluation_rows(job)]
+    _synthesize_missing_trial_rows(rows, live_rows)
+    _merge_planned_cell_identities(rows)
     live_by_run_key = {
         str(row["run_key"]): row for row in live_rows if row.get("run_key")
     }
@@ -2541,6 +2543,162 @@ def export_rows(
             _merge_error_events(row)
     _apply_runtime_equivalence(rows)
     return rows
+
+
+_PLANNED_CELL_IDENTITY_FIELDS = (
+    "cell_id",
+    "task_id",
+    "attempt_id",
+    "attempt_identity",
+    "run_id",
+    "run_name",
+    "trial_index",
+    "comparison_example_id",
+    "candidate_id",
+    "execution_fingerprint",
+    "workload_id",
+    "harness",
+    "context_system_id",
+    "variant_id",
+    "model_provider",
+    "model",
+)
+
+
+def _synthesize_missing_trial_rows(
+    rows: list[dict[str, Any]],
+    live_rows: list[dict[str, Any]],
+) -> None:
+    """Keep a terminal approved cell when Harbor never wrote ``result.json``."""
+
+    existing_run_keys = {
+        str(row.get("run_key") or "")
+        for row in rows
+        if row.get("record_type") == "trial" and row.get("run_key")
+    }
+    cells_by_id = {
+        str(row["cell_id"]): row
+        for row in rows
+        if row.get("record_type") == "cell" and row.get("cell_id")
+    }
+    cells_by_key = {
+        key: row
+        for row in rows
+        if row.get("record_type") == "cell"
+        and (key := _planned_cell_join_key(row)) is not None
+    }
+    synthesized_keys: set[str] = set()
+    for live in live_rows:
+        run_key = str(live.get("run_key") or "")
+        if not run_key or run_key in existing_run_keys:
+            continue
+        planned = cells_by_id.get(str(live.get("cell_id") or ""))
+        if planned is None:
+            key = _planned_cell_join_key(live)
+            planned = cells_by_key.get(key) if key is not None else None
+        if planned is None:
+            continue
+        terminal = str(live.get("status") or live.get("execution_status") or "")
+        if terminal not in {
+            "passed",
+            "failed",
+            "error",
+            "interrupted",
+            "cancelled",
+            "timed_out",
+            "infrastructure_failed",
+        }:
+            continue
+        if run_key in synthesized_keys:
+            raise ValueError("duplicate live terminal row for one planned attempt")
+        for field_name in _PLANNED_CELL_IDENTITY_FIELDS:
+            expected = planned.get(field_name)
+            observed = live.get(field_name)
+            if observed not in (None, "") and expected not in (None, ""):
+                if observed != expected:
+                    raise ValueError(
+                        "live terminal identity disagrees with its immutable "
+                        f"planned cell: {field_name}"
+                    )
+        trial = dict(planned)
+        for field_name, observed in live.items():
+            if (
+                field_name in _PLANNED_CELL_IDENTITY_FIELDS
+                and observed in (None, "")
+                and planned.get(field_name) not in (None, "")
+            ):
+                continue
+            trial[field_name] = observed
+        trial["record_type"] = "trial"
+        trial["task_name"] = str(trial.get("task_id") or "") or None
+        trial["planned_cell_identity_status"] = "synthesized_from_live_terminal"
+        rows.append(trial)
+        synthesized_keys.add(run_key)
+
+
+def _merge_planned_cell_identities(rows: list[dict[str, Any]]) -> None:
+    """Restore immutable plan identity when an interrupted trial lacks live rows."""
+
+    cells: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+    for row in rows:
+        if row.get("record_type") != "cell":
+            continue
+        key = _planned_cell_join_key(row)
+        if key is None:
+            continue
+        existing = cells.get(key)
+        if existing is not None and any(
+            existing.get(field) != row.get(field)
+            for field in _PLANNED_CELL_IDENTITY_FIELDS
+        ):
+            raise ValueError("conflicting planned cell identities in run export")
+        cells[key] = row
+
+    for row in rows:
+        if row.get("record_type") != "trial":
+            continue
+        key = _planned_cell_join_key(row)
+        planned = cells.get(key) if key is not None else None
+        if planned is None:
+            continue
+        for field_name in _PLANNED_CELL_IDENTITY_FIELDS:
+            expected = planned.get(field_name)
+            observed = row.get(field_name)
+            if observed not in (None, "") and observed != expected:
+                raise ValueError(
+                    "trial identity disagrees with its immutable planned cell: "
+                    f"{field_name}"
+                )
+            if observed in (None, "") and expected not in (None, ""):
+                row[field_name] = expected
+        task_id = str(row.get("task_id") or "")
+        task_name = str(row.get("task_name") or "")
+        if task_name and task_id and task_name != task_id:
+            if task_name.rsplit("/", 1)[-1] != task_id:
+                raise ValueError(
+                    "trial task_name disagrees with its immutable planned task_id"
+                )
+            row["task_name"] = task_id
+        elif not task_name and task_id:
+            row["task_name"] = task_id
+        for outcome_field in ("status", "runtime_outcome", "error"):
+            if row.get(outcome_field) in (None, "") and planned.get(
+                outcome_field
+            ) not in (None, ""):
+                row[outcome_field] = planned[outcome_field]
+        row.setdefault("planned_cell_identity_status", "reconciled")
+
+
+def _planned_cell_join_key(
+    row: Mapping[str, Any],
+) -> tuple[str, str, str, int] | None:
+    run_id = str(row.get("run_id") or "")
+    candidate_id = str(row.get("candidate_id") or "")
+    comparison_id = str(row.get("comparison_example_id") or "")
+    trial_index = _positive_int(row.get("trial_index"))
+    if not all((run_id, candidate_id, comparison_id, trial_index)):
+        return None
+    return run_id, candidate_id, comparison_id, trial_index
 
 
 def _apply_evaluation_asset_locks(
@@ -2806,7 +2964,23 @@ def _merge_live_evaluation_row(row: dict[str, Any], live: dict[str, Any]) -> Non
         for key, value in row.items()
         if key in _LOCAL_RESULT_FIELDS or key.startswith("context_")
     }
-    row.update(live)
+    for field_name in _PLANNED_CELL_IDENTITY_FIELDS:
+        expected = row.get(field_name)
+        observed = live.get(field_name)
+        if observed not in (None, "") and expected not in (None, ""):
+            if observed != expected:
+                raise ValueError(
+                    "live terminal identity disagrees with its immutable "
+                    f"planned cell: {field_name}"
+                )
+    for field_name, observed in live.items():
+        if (
+            field_name in _PLANNED_CELL_IDENTITY_FIELDS
+            and observed in (None, "")
+            and row.get(field_name) not in (None, "")
+        ):
+            continue
+        row[field_name] = observed
     row.update(local)
 
 

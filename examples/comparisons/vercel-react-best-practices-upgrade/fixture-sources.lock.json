@@ -1,0 +1,17 @@
+{
+  "fixtures": [
+    {"path": "rsc-serialization/README.md", "sha256": "709a412ba517e9bf713388358cfe7391270005ca1fe01cac2fe7a69801e43835", "size": 291},
+    {"path": "rsc-serialization/app/projects/page.jsx", "sha256": "3aad67c56bfd62f1761b42f745d93a313b651a0ccbc1905eea308d73e13012a5", "size": 342},
+    {"path": "rsc-serialization/app/projects/projects-client.jsx", "sha256": "fbc687f6b07522f8a6423fba866430082f60a80e0361720ad55f6510affa3aaf", "size": 362},
+    {"path": "rsc-serialization/lib/projects.mjs", "sha256": "72fcf7c44f7837599a69d3ed854b604b8600608a269a609f53c254687d7b422c", "size": 161},
+    {"path": "rsc-serialization/package.json", "sha256": "8739a719c8c84c0d4012a215568831e9488aa80aabfbe1faf87a7a8bc5f88c92", "size": 133},
+    {"path": "rsc-serialization/tests/serialization.test.mjs", "sha256": "02de0f2fe6a045e46f23b4cb7dbb0fdc4b4cabda82c700600fec353fca035e65", "size": 1239},
+    {"path": "server-action-auth/README.md", "sha256": "a527169d8e137f7165f0672762c9c5dbf52807bb84685429569eda35d764469c", "size": 292},
+    {"path": "server-action-auth/app/actions.mjs", "sha256": "c1d81a1c2dea4366c033526bbe41d7f0813edca2a396af155ba28d7b362d0fa9", "size": 503},
+    {"path": "server-action-auth/lib/deps.mjs", "sha256": "63b8e56390b1cf856ad9753e814a005911017439e57969066644229c361c4d50", "size": 853},
+    {"path": "server-action-auth/package.json", "sha256": "c6f55e1306e301429d573fb3953a6a51abb37c34a62265d08545f4cdca6f8950", "size": 134},
+    {"path": "server-action-auth/tests/actions.test.mjs", "sha256": "af3cca1311d17db7b354a564f17100dabf6e8f02b5443c9ba249bc09ac3c05dd", "size": 1175}
+  ],
+  "manifest_digest": "3d55d835615c6929cffd5d9c49b9936bca23c4c31f0223c93eb9905ec09b2fd3",
+  "schema_version": 1
+}

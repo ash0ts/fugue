@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: fugue-anthropic-skill-creator-upgrade-v1
+  name: Anthropic Skill Creator Upgrade
+  description: Exact compatibility-aware Skill Creator revision comparison.
+  objective: Decide whether the reviewed Skill Creator upgrade should advance to a larger holdout.
+wandb:
+  entity: wandb
+  project: fugue-anthropic-skill-creator-upgrade-v1
+database: .study-console/anthropic-skill-creator-upgrade.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: anthropic-skill-creator-upgrade-canary-v1
+  read_only: true

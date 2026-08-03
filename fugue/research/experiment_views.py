@@ -2253,6 +2253,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "execution_fingerprint",
         "runtime_lock_digest",
         "infrastructure",
+        "judge_reviews",
     }
     _reject_unknown(value, allowed, "paired_attempt")
     links = tuple(
@@ -2339,6 +2340,12 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         )
         if field_value:
             result[field_name] = field_value
+    judge_reviews = {
+        str(key): _canonical_judge_review(item, judge_id=str(key))
+        for key, item in _mapping_or_empty(value.get("judge_reviews")).items()
+    }
+    if judge_reviews:
+        result["judge_reviews"] = judge_reviews
     return result
 
 
@@ -2348,6 +2355,7 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     value = _mapping(raw, "V3 paired_attempt")
     extras = {
         "score_explanations",
+        "judge_reviews",
         "sanitized_answer_excerpt",
         "actual_query_scope",
         "reported_project_identity",
@@ -2400,6 +2408,12 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     if actual_query_scope != tuple(base["queried_projects"]):
         raise ValueError("V3 actual query scope must equal normalized queried projects")
     base["score_explanations"] = explanations
+    judge_reviews = {
+        str(key): _canonical_judge_review(item, judge_id=str(key))
+        for key, item in _mapping_or_empty(value.get("judge_reviews")).items()
+    }
+    if judge_reviews:
+        base["judge_reviews"] = judge_reviews
     base["actual_query_scope"] = actual_query_scope
     excerpt = _optional_text(
         value.get("sanitized_answer_excerpt"),
@@ -2416,6 +2430,66 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     if reported:
         base["reported_project_identity"] = reported
     return base
+
+
+def _canonical_judge_review(raw: Any, *, judge_id: str) -> dict[str, Any]:
+    value = _mapping(raw, f"judge review {judge_id}")
+    _reject_unknown(
+        value,
+        {
+            "label",
+            "reason",
+            "missing_evidence",
+            "observed_cost_usd",
+            "accounted_reserve_usd",
+            "cost_status",
+        },
+        f"judge review {judge_id}",
+    )
+    label = str(value.get("label") or "")
+    if label not in {
+        "unusable",
+        "weak",
+        "adequate",
+        "strong",
+        "exceptional",
+    }:
+        raise ValueError(f"unknown judge review label: {label}")
+    missing_evidence = value.get("missing_evidence")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError("V3 judge review missing_evidence must be boolean")
+    result: dict[str, Any] = {
+        "label": label,
+        "reason": _text(value.get("reason"), "V3 judge review reason", 500),
+        "missing_evidence": missing_evidence,
+    }
+    has_cost_metadata = any(
+        field_name in value
+        for field_name in (
+            "observed_cost_usd",
+            "accounted_reserve_usd",
+            "cost_status",
+        )
+    )
+    if not has_cost_metadata:
+        return result
+    cost_status = str(value.get("cost_status") or "")
+    if cost_status not in {"observed", "unavailable"}:
+        raise ValueError("V3 judge review cost_status is unsupported")
+    observed_cost = _optional_float(value.get("observed_cost_usd"))
+    accounted_reserve = _optional_float(value.get("accounted_reserve_usd"))
+    if observed_cost is not None and observed_cost < 0:
+        raise ValueError("V3 judge review observed cost must be non-negative")
+    if accounted_reserve is not None and accounted_reserve < 0:
+        raise ValueError("V3 judge review accounted reserve must be non-negative")
+    if (cost_status == "observed") != (observed_cost is not None):
+        raise ValueError("V3 judge review cost evidence is inconsistent")
+    result["cost_status"] = cost_status
+    if observed_cost is not None:
+        result["observed_cost_usd"] = observed_cost
+    if accounted_reserve is not None:
+        result["accounted_reserve_usd"] = accounted_reserve
+    return result
 
 
 def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:
