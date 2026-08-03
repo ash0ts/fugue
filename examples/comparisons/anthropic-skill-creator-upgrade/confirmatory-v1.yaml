@@ -101,7 +101,8 @@ execution:
   harnesses: [claude-code]
   attempts: 4
   concurrency: 1
-  evidence_checkpoint_cells: 1
+  evidence_checkpoint_cells: 2
+  scheduling_seed: community-skill-upgrade-confirmatory-campaign-v1
   max_cost_usd: 1640
   reserve_per_attempt_usd: 8.4
   approval_required: true

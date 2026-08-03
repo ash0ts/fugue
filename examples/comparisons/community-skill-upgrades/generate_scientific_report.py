@@ -957,6 +957,11 @@ def _deterministic_rows(result: SupportedResult) -> list[dict[str, Any]]:
                         else "unavailable_in_v2"
                     ),
                     "tools": list(pair.baseline.tools),
+                    "host_verifier_receipts": dict(
+                        getattr(pair.baseline, "infrastructure", {}).get(
+                            "host_verifier_receipts", {}
+                        )
+                    ),
                 },
                 "candidate": {
                     "attempt_id": pair.candidate.attempt_id,
@@ -975,6 +980,11 @@ def _deterministic_rows(result: SupportedResult) -> list[dict[str, Any]]:
                         else "unavailable_in_v2"
                     ),
                     "tools": list(pair.candidate.tools),
+                    "host_verifier_receipts": dict(
+                        getattr(pair.candidate, "infrastructure", {}).get(
+                            "host_verifier_receipts", {}
+                        )
+                    ),
                 },
             }
         )

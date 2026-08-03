@@ -342,22 +342,43 @@ def schedule_cells(
 ) -> list[PlannedCell]:
     if not scheduling_seed:
         return cells
-    return sorted(
-        cells,
-        key=lambda cell: hashlib.sha256(
-            ":".join(
-                (
-                    scheduling_seed,
-                    cell.workload_id,
-                    cell.task_id,
-                    cell.harness,
-                    cell.context_system_id,
-                    cell.variant_id,
-                    str(cell.trial_index),
-                )
-            ).encode()
-        ).hexdigest(),
-    )
+
+    # Repeated comparison arms must not be confounded with wall-clock order.
+    # Keep each task/attempt block adjacent, deterministically randomize the
+    # blocks, and rotate which arm runs first. For a two-arm comparison with an
+    # even number of blocks this guarantees equal baseline-first and
+    # candidate-first blocks while remaining independent of the run id and the
+    # input list order.
+    blocks: dict[tuple[str, str, str, str, int], list[PlannedCell]] = {}
+    for cell in cells:
+        key = (
+            cell.workload_id,
+            cell.task_id,
+            cell.harness,
+            cell.context_system_id,
+            cell.trial_index,
+        )
+        blocks.setdefault(key, []).append(cell)
+
+    def block_digest(key: tuple[str, str, str, str, int]) -> str:
+        return hashlib.sha256(
+            ":".join((scheduling_seed, *map(str, key))).encode()
+        ).hexdigest()
+
+    scheduled: list[PlannedCell] = []
+    for block_index, key in enumerate(sorted(blocks, key=block_digest)):
+        block = sorted(
+            blocks[key],
+            key=lambda cell: (
+                cell.variant_id,
+                cell.candidate_id,
+                cell.execution_fingerprint,
+                cell.id,
+            ),
+        )
+        rotation = block_index % len(block)
+        scheduled.extend(block[rotation:] + block[:rotation])
+    return scheduled
 
 
 def execute_cells(

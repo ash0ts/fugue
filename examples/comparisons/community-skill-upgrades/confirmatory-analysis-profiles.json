@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "status": "frozen_before_execution",
+  "campaign_id": "community-skill-upgrade-confirmatory-campaign-v1",
+  "profiles": [
+    {
+      "id": "superpowers-writing-plans",
+      "study_ids": [],
+      "pending_study_id": "superpowers-writing-plans-confirmatory-v3",
+      "enablement_status": "blocked_pending_exact_v3_amendment_manifest_and_spec",
+      "historical_rejected_study_ids": [
+        "superpowers-writing-plans-confirmatory-v1",
+        "superpowers-writing-plans-confirmatory-v2"
+      ],
+      "preregistration": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+      "preregistration_sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7",
+      "amendments": {},
+      "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "partition": {
+        "kind": "preregistration_lists",
+        "development_path": ["design", "development_task_ids"],
+        "holdout_path": ["design", "holdout_task_ids"]
+      },
+      "primary_families": [
+        {
+          "id": "global_constraint_fidelity",
+          "aggregation": "dimension",
+          "dimension": "plan-quality-confirmatory.global_constraint_fidelity"
+        },
+        {
+          "id": "interface_graph_consistency",
+          "aggregation": "dimension",
+          "dimension": "plan-quality-confirmatory.interface_graph_consistency"
+        },
+        {
+          "id": "right_sized_decomposition",
+          "aggregation": "dimension",
+          "dimension": "plan-quality-confirmatory.right_sized_decomposition"
+        },
+        {
+          "id": "repository_grounding",
+          "aggregation": "dimension",
+          "dimension": "plan-quality-confirmatory.repository_grounding"
+        }
+      ],
+      "primary_composite": {
+        "aggregation": "mean_dimensions",
+        "dimensions": [
+          "plan-quality-confirmatory.global_constraint_fidelity",
+          "plan-quality-confirmatory.interface_graph_consistency",
+          "plan-quality-confirmatory.right_sized_decomposition",
+          "plan-quality-confirmatory.repository_grounding"
+        ]
+      },
+      "safety_dimensions": [
+        "plan-quality-confirmatory.artifact_validity",
+        "plan-quality-confirmatory.verification_matrix",
+        "plan-quality-confirmatory.scope_secret_safety"
+      ],
+      "candidate_all_attempt_dimensions": [],
+      "decision": {
+        "minimum_meaningful_improvement": 0.15,
+        "equivalence_margin": 0.1,
+        "alpha": 0.05,
+        "significant_family_requirement": "all",
+        "composite_threshold_required": true
+      },
+      "bootstrap": {
+        "samples": 20000,
+        "seed": 20260803
+      },
+      "trace_audit": {
+        "minimum_fraction": 0.25,
+        "behavior_families_path": ["design", "behavior_families"]
+      },
+      "sensitivity_analysis": {
+        "model": "mixed-effects logistic model with task random intercept",
+        "status": "not_implemented",
+        "claim_effect": "No mixed-effects sensitivity claim is made; it must be implemented or formally amended before execution."
+      }
+    },
+    {
+      "id": "anthropic-skill-creator",
+      "study_ids": ["anthropic-skill-creator-confirmatory-v1"],
+      "preregistration": "../anthropic-skill-creator-upgrade/confirmatory-preregistration.json",
+      "preregistration_sha256": "46fb86c8e9d5d4d1500d37a6e2b12eac54a3d7563549e0f77b877f70dd3efc42",
+      "locked_input_paths": {
+        "host_only_task_family_lock_sha256": "../anthropic-skill-creator-upgrade/confirmatory-task-family-lock.json",
+        "private_labels_sha256": "../anthropic-skill-creator-upgrade/confirmatory-private-labels.jsonl",
+        "public_tasks_sha256": "../anthropic-skill-creator-upgrade/confirmatory-tasks.jsonl",
+        "qualification_fixture_generator_sha256": "../anthropic-skill-creator-upgrade/qualification_fixtures.py",
+        "scorer_sha256": "../anthropic-skill-creator-upgrade/confirmatory_scorer.py"
+      },
+      "amendments": {},
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+      "partition": {
+        "kind": "preregistration_lists",
+        "development_path": ["development_task_ids"],
+        "holdout_path": ["holdout_task_ids"]
+      },
+      "primary_families": [
+        {
+          "id": "frontmatter_semantics",
+          "aggregation": "dimension",
+          "dimension": "skill-creator-confirmatory.frontmatter_semantics"
+        },
+        {
+          "id": "compatibility_selection",
+          "aggregation": "dimension",
+          "dimension": "skill-creator-confirmatory.compatibility_selection"
+        },
+        {
+          "id": "name_help_consistency",
+          "aggregation": "dimension",
+          "dimension": "skill-creator-confirmatory.name_help_consistency"
+        }
+      ],
+      "primary_composite": {
+        "aggregation": "mean_dimensions",
+        "dimensions": [
+          "skill-creator-confirmatory.frontmatter_semantics",
+          "skill-creator-confirmatory.compatibility_selection",
+          "skill-creator-confirmatory.name_help_consistency"
+        ]
+      },
+      "secondary_outcome_dimensions": [
+        "skill-creator-confirmatory.instruction_quality"
+      ],
+      "safety_dimensions": [
+        "skill-creator-confirmatory.artifact_validity",
+        "skill-creator-confirmatory.behavior_preservation",
+        "skill-creator-confirmatory.packaging",
+        "skill-creator-confirmatory.dependency_secret_safety"
+      ],
+      "candidate_all_attempt_dimensions": [],
+      "decision": {
+        "minimum_meaningful_improvement": 0.15,
+        "equivalence_margin": 0.1,
+        "alpha": 0.05,
+        "significant_family_requirement": "any",
+        "composite_threshold_required": true
+      },
+      "bootstrap": {
+        "samples": 10000,
+        "seed": 20260803
+      },
+      "trace_audit": {
+        "minimum_fraction": 0.1,
+        "behavior_families_path": null
+      },
+      "sensitivity_analysis": {
+        "model": "mixed-effects logistic model with task random intercept",
+        "status": "not_implemented",
+        "claim_effect": "No mixed-effects sensitivity claim is made; it must be implemented or formally amended before execution."
+      }
+    },
+    {
+      "id": "vercel-react-best-practices",
+      "study_ids": ["vercel-react-best-practices-confirmatory-v1"],
+      "preregistration": "../vercel-react-best-practices-upgrade/confirmatory-preregistration.json",
+      "preregistration_sha256": "2893b25932acb5c3d5c742cbce8efe7b89802181fdb2315b5c912c884df30254",
+      "amendments": {},
+      "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+      "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+      "partition": {
+        "kind": "task_field",
+        "field": "partition",
+        "development_values": ["discovery"],
+        "holdout_values": ["holdout"]
+      },
+      "primary_families": [
+        {
+          "id": "server_action_security",
+          "aggregation": "all_dimensions",
+          "task_tag": "server-action-security",
+          "dimensions": [
+            "vercel-confirmatory.artifact_validity",
+            "vercel-confirmatory.requested_change",
+            "vercel-confirmatory.repository_grounding",
+            "vercel-confirmatory.behavior_preservation",
+            "vercel-confirmatory.verification",
+            "vercel-confirmatory.scope_safety"
+          ]
+        },
+        {
+          "id": "rsc_serialization",
+          "aggregation": "all_dimensions",
+          "task_tag": "rsc-serialization",
+          "dimensions": [
+            "vercel-confirmatory.artifact_validity",
+            "vercel-confirmatory.requested_change",
+            "vercel-confirmatory.repository_grounding",
+            "vercel-confirmatory.behavior_preservation",
+            "vercel-confirmatory.verification",
+            "vercel-confirmatory.scope_safety"
+          ]
+        }
+      ],
+      "primary_composite": {
+        "aggregation": "all_dimensions",
+        "dimensions": [
+          "vercel-confirmatory.artifact_validity",
+          "vercel-confirmatory.requested_change",
+          "vercel-confirmatory.repository_grounding",
+          "vercel-confirmatory.behavior_preservation",
+          "vercel-confirmatory.verification",
+          "vercel-confirmatory.scope_safety"
+        ]
+      },
+      "safety_dimensions": [
+        "vercel-confirmatory.artifact_validity",
+        "vercel-confirmatory.behavior_preservation",
+        "vercel-confirmatory.verification",
+        "vercel-confirmatory.scope_safety"
+      ],
+      "candidate_all_attempt_dimensions": [
+        "vercel-confirmatory.artifact_validity",
+        "vercel-confirmatory.requested_change",
+        "vercel-confirmatory.repository_grounding",
+        "vercel-confirmatory.behavior_preservation",
+        "vercel-confirmatory.verification",
+        "vercel-confirmatory.scope_safety"
+      ],
+      "decision": {
+        "minimum_meaningful_improvement": 0.15,
+        "equivalence_margin": 0.1,
+        "alpha": 0.05,
+        "significant_family_requirement": "any",
+        "composite_threshold_required": false
+      },
+      "bootstrap": {
+        "samples": 10000,
+        "seed": 20260803
+      },
+      "trace_audit": {
+        "minimum_fraction": 0.1,
+        "behavior_families_path": null
+      },
+      "sensitivity_analysis": {
+        "model": "mixed-effects logistic model with task random intercept",
+        "status": "not_implemented",
+        "claim_effect": "No mixed-effects sensitivity claim is made; it must be implemented or formally amended before execution."
+      }
+    }
+  ]
+}

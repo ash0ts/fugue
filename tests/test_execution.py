@@ -133,6 +133,45 @@ def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:
     assert schedule_cells(first, None) is first
 
 
+def test_seeded_scheduling_blocks_attempts_and_counterbalances_arms() -> None:
+    cells: list[PlannedCell] = []
+    for task_index in range(4):
+        for attempt in (1, 2):
+            task_id = f"task-{task_index}"
+            for variant in ("baseline", "candidate"):
+                name = f"{task_index}-{attempt}-{variant}"
+                cells.append(
+                    replace(
+                        _cell("run-a", name),
+                        id=f"cell-{name}",
+                        task_id=task_id,
+                        trial_index=attempt,
+                        variant_id=variant,
+                        candidate_id=f"candidate-{variant}",
+                        execution_fingerprint=f"execution-{variant}",
+                    )
+                )
+
+    scheduled = schedule_cells(cells, "confirmatory-v1")
+    reversed_input = schedule_cells(list(reversed(cells)), "confirmatory-v1")
+    identities = [
+        (cell.task_id, cell.trial_index, cell.variant_id) for cell in scheduled
+    ]
+    assert identities == [
+        (cell.task_id, cell.trial_index, cell.variant_id)
+        for cell in reversed_input
+    ]
+
+    blocks = [scheduled[index : index + 2] for index in range(0, len(cells), 2)]
+    assert all(
+        len({(cell.task_id, cell.trial_index) for cell in block}) == 1
+        and {cell.variant_id for cell in block} == {"baseline", "candidate"}
+        for block in blocks
+    )
+    first_arms = [block[0].variant_id for block in blocks]
+    assert first_arms == ["baseline", "candidate"] * 4
+
+
 def test_real_cell_fails_when_harbor_reports_trial_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
