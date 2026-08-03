@@ -5972,12 +5972,18 @@ def _pair_status_v2(
     candidate_critical_failure = any(
         item.critical and item.candidate is False for item in changes
     )
-    if improved and (regressed or candidate_critical_failure):
+    if improved and regressed:
         return "mixed"
-    if improved:
-        return "improved"
     if regressed:
         return "regressed"
+    # A critical dimension that failed in both arms is a blocker, not a
+    # directional regression. Keep the observed dimension-level improvement,
+    # but do not call the pair improved until every candidate critical
+    # dimension passes. The behavioral summary names the exact blocker.
+    if improved and candidate_critical_failure:
+        return "unchanged"
+    if improved:
+        return "improved"
     return "unchanged"
 
 
@@ -5999,7 +6005,7 @@ def _pair_status_v3(
     if regressed:
         return "regressed"
     if improved and candidate_critical_failure:
-        return "incomplete"
+        return "unchanged"
     if improved:
         return "improved"
     return "unchanged"
@@ -6052,8 +6058,8 @@ def _paired_attempt_view(
 ) -> PairedAttemptV2 | None:
     if row is None:
         return None
-    usage = _mapping_or_empty(row.get("usage"))
     tool_names, tool_call_count = _observed_tool_activity(row)
+    input_tokens, output_tokens = _row_token_usage(row)
     infrastructure = _drop_empty(
         {
             "backend": (
@@ -6147,12 +6153,8 @@ def _paired_attempt_view(
         evidence_status=_attempt_evidence_status(row),
         cost_usd=_observed_attempt_cost(row)[0],
         latency_sec=_row_latency_sec(row),
-        input_tokens=_number_or_none(
-            usage.get("input_tokens") or row.get("input_tokens")
-        ),
-        output_tokens=_number_or_none(
-            usage.get("output_tokens") or row.get("output_tokens")
-        ),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         tool_calls=tool_call_count,
         tools=tuple(tool_names),
         queried_projects=tuple(sorted(_queried_projects(row))),
@@ -6844,6 +6846,30 @@ def _observed_tool_activity(row: Mapping[str, Any]) -> tuple[list[str], int]:
     # an attempt has no normalized MCP calls.
     if normalized_mcp_count:
         return sorted(set(local_names)), normalized_mcp_count
+    # A Harbor trajectory is attempt-local evidence of general Agent tool
+    # activity. Keep it distinct from normalized MCP receipts above: it can
+    # recover missing or cumulative native trace summaries, but it must never
+    # be presented as proof that an MCP mechanism was used.
+    if row.get("agent_trajectory_tool_activity_status") == "available":
+        trajectory_count = row.get("agent_trajectory_tool_call_count")
+        trajectory_names = row.get("agent_trajectory_tool_names") or {}
+        if (
+            isinstance(trajectory_count, int)
+            and not isinstance(trajectory_count, bool)
+            and trajectory_count >= 0
+            and isinstance(trajectory_names, Mapping)
+        ):
+            return (
+                sorted(
+                    str(name)
+                    for name, count in trajectory_names.items()
+                    if str(name)
+                    and isinstance(count, int)
+                    and not isinstance(count, bool)
+                    and count > 0
+                ),
+                trajectory_count,
+            )
     if traced_names:
         return sorted(set(traced_names)), traced_count
     return sorted(set(local_names)), local_count
@@ -6898,6 +6924,31 @@ def _row_latency_sec(row: Mapping[str, Any]) -> float | None:
         return direct
     milliseconds = _row_number(row, "latency_ms")
     return round(milliseconds / 1000, 6) if milliseconds is not None else None
+
+
+def _row_token_usage(
+    row: Mapping[str, Any],
+) -> tuple[float | None, float | None]:
+    usage = _mapping_or_empty(row.get("usage"))
+    sources: list[tuple[Any, Any]] = [
+        (usage.get("input_tokens"), usage.get("output_tokens")),
+        (row.get("input_tokens"), row.get("output_tokens")),
+    ]
+    if row.get("local_usage_status") == "available":
+        sources.append((row.get("n_input_tokens"), row.get("n_output_tokens")))
+    if row.get("weave_usage_status") == "available":
+        sources.append((row.get("weave_input_tokens"), row.get("weave_output_tokens")))
+    for raw_input, raw_output in sources:
+        input_tokens = _number_or_none(raw_input)
+        output_tokens = _number_or_none(raw_output)
+        if (
+            input_tokens is not None
+            and output_tokens is not None
+            and input_tokens >= 0
+            and output_tokens >= 0
+        ):
+            return input_tokens, output_tokens
+    return None, None
 
 
 def _number_or_none(value: Any) -> float | None:
@@ -11215,6 +11266,7 @@ def _operational_summary(
     wandb_eligible = 0
     evidence_projects: set[str] = set()
     mcp_tool_usage: dict[str, dict[str, int]] = {}
+    agent_trajectory_tool_activity: dict[str, dict[str, Any]] = {}
     for row in rows:
         trace_project = str(row.get("trace_project") or "")
         if _weave_project_url(trace_project):
@@ -11239,6 +11291,34 @@ def _operational_summary(
             wandb_rows += 1
             wandb_eligible += row.get("wandb_serverless_eligible") is True
         variant = str(row.get("variant_id") or "unknown")
+        if row.get("agent_trajectory_tool_activity_status") == "available":
+            trajectory_count = row.get("agent_trajectory_tool_call_count")
+            trajectory_names = row.get("agent_trajectory_tool_names") or {}
+            if (
+                isinstance(trajectory_count, int)
+                and not isinstance(trajectory_count, bool)
+                and trajectory_count >= 0
+                and isinstance(trajectory_names, Mapping)
+            ):
+                activity = agent_trajectory_tool_activity.setdefault(
+                    variant,
+                    {"calls": 0, "rows": 0, "tools": {}},
+                )
+                activity["calls"] += trajectory_count
+                activity["rows"] += 1
+                activity_tools = activity["tools"]
+                for raw_name, raw_count in trajectory_names.items():
+                    if (
+                        not isinstance(raw_count, int)
+                        or isinstance(raw_count, bool)
+                        or raw_count <= 0
+                    ):
+                        continue
+                    name = str(raw_name)
+                    if name:
+                        activity_tools[name] = (
+                            activity_tools.get(name, 0) + raw_count
+                        )
         tool_counts = row.get("weave_tool_names") or {}
         if isinstance(tool_counts, Mapping):
             for raw_name, raw_count in tool_counts.items():
@@ -11261,15 +11341,14 @@ def _operational_summary(
         if row_accounted_cost is not None:
             accounted_cost += row_accounted_cost
             accounted_cost_rows += 1
-        latency = row.get("latency_ms")
-        if isinstance(latency, int | float) and not isinstance(latency, bool):
-            latency_ms += float(latency)
+        latency = _row_latency_sec(row)
+        if latency is not None:
+            latency_ms += latency * 1000
             latency_rows += 1
-        row_input = row.get("input_tokens")
-        row_output = row.get("output_tokens")
-        if isinstance(row_input, int) and isinstance(row_output, int):
-            input_tokens += row_input
-            output_tokens += row_output
+        row_input, row_output = _row_token_usage(row)
+        if row_input is not None and row_output is not None:
+            input_tokens += int(row_input)
+            output_tokens += int(row_output)
             usage_rows += 1
     result = {
         "execution_states": dict(sorted(execution.items())),
@@ -11290,6 +11369,16 @@ def _operational_summary(
         "mcp_tool_usage": {
             variant: dict(sorted(tool_counts.items()))
             for variant, tool_counts in sorted(mcp_tool_usage.items())
+        },
+        "agent_trajectory_tool_activity": {
+            variant: {
+                "calls": activity["calls"],
+                "rows": activity["rows"],
+                "tools": dict(sorted(activity["tools"].items())),
+            }
+            for variant, activity in sorted(
+                agent_trajectory_tool_activity.items()
+            )
         },
     }
     if wandb_rows:

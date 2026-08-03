@@ -1539,7 +1539,11 @@ class LiveEvaluationCoordinator:
                     f"{candidate_id}: evaluation scope changed during execution"
                 )
                 continue
-            url = getattr(session.logger, "ui_url", None)
+            url = _published_evaluation_url(
+                session.logger,
+                project=self.project,
+                app_base_url=str(self._evidence_destination["app_base_url"]),
+            )
             evaluation_ref = _logger_ref(session.logger, "_pseudo_evaluation")
             dataset_ref = _object_ref(
                 self._datasets[session.candidate["evaluation_scope_id"]]
@@ -3352,6 +3356,9 @@ def publish_to_weave(
     if republish and not str(republish_reason or "").strip():
         raise ValueError("republish_reason is required for explicit republishing")
     project = project or _weave_project_from_env(env)
+    publication_destination = trace_destination_identity(
+        trace_project_environment(project, env)
+    )
     weave = initialize_weave(project, env)
     logger_cls = getattr(weave, "EvaluationLogger", None)
     if logger_cls is None:
@@ -3482,7 +3489,11 @@ def publish_to_weave(
                     f"{candidate['candidate_id']}: {type(exc).__name__}: {exc}"
                 )
                 continue
-            url = getattr(logger, "ui_url", None)
+            url = _published_evaluation_url(
+                logger,
+                project=project,
+                app_base_url=str(publication_destination["app_base_url"]),
+            )
             evaluation_ref = _logger_ref(logger, "_pseudo_evaluation")
             dataset_ref = _object_ref(datasets[scope_id])
             model_ref = _logger_ref(logger, "model")
@@ -4424,6 +4435,51 @@ def _weave_call_url(
         f"{app_base_url.rstrip('/')}/{urllib.parse.quote(entity, safe='')}/"
         f"{urllib.parse.quote(project_id, safe='')}/weave/calls/"
         f"{urllib.parse.quote(call_id, safe='')}"
+    )
+
+
+def _published_evaluation_url(
+    logger: Any,
+    *,
+    project: str,
+    app_base_url: str,
+) -> str | None:
+    """Return only the canonical URL for the authoritative Evaluation Call.
+
+    ``EvaluationLogger.ui_url`` is an SDK navigation convenience and older SDK
+    versions may still return the legacy ``/r/call/...`` route.  Persisted
+    evidence must instead be derived from the immutable Evaluation Call ref,
+    checked against the locked result project, and rendered with the locked
+    application origin.
+    """
+
+    call = getattr(logger, "_evaluate_call", None)
+    ref = _ref_uri(call)
+    if not ref:
+        return None
+    parsed = urllib.parse.urlsplit(ref)
+    parts = [urllib.parse.unquote(part) for part in parsed.path.strip("/").split("/")]
+    if (
+        parsed.scheme != "weave"
+        or parsed.netloc
+        or len(parts) != 4
+        or parts[2] != "call"
+    ):
+        return None
+    ref_project = "/".join(parts[:2])
+    call_id = parts[3]
+    if ref_project != project or not call_id:
+        return None
+    observed_id = str(getattr(call, "id", "") or "")
+    observed_project = str(getattr(call, "project_id", "") or "")
+    if (observed_id and observed_id != call_id) or (
+        observed_project and observed_project != project
+    ):
+        return None
+    return _weave_call_url(
+        project,
+        call_id,
+        app_base_url=app_base_url,
     )
 
 
@@ -6265,6 +6321,15 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "inspected_paths_status": trajectory_activity["inspected_paths_status"],
         "changed_paths": changed_paths,
         "changed_paths_status": changed_paths_status,
+        "agent_trajectory_tool_activity_status": trajectory_activity[
+            "agent_trajectory_tool_activity_status"
+        ],
+        "agent_trajectory_tool_call_count": trajectory_activity[
+            "agent_trajectory_tool_call_count"
+        ],
+        "agent_trajectory_tool_names": trajectory_activity[
+            "agent_trajectory_tool_names"
+        ],
         "local_error_events": [
             *trajectory_activity["error_events"],
             *([terminal_error] if terminal_error else []),
@@ -7500,6 +7565,9 @@ def _trajectory_activity(
             "changed_paths": [],
             "changed_paths_status": "unavailable",
             "error_events": [],
+            "agent_trajectory_tool_activity_status": "unavailable",
+            "agent_trajectory_tool_call_count": None,
+            "agent_trajectory_tool_names": {},
         }
     if not isinstance(trajectory, dict) or not isinstance(
         trajectory.get("steps", []), list
@@ -7510,10 +7578,15 @@ def _trajectory_activity(
             "changed_paths": [],
             "changed_paths_status": "unavailable",
             "error_events": [],
+            "agent_trajectory_tool_activity_status": "unavailable",
+            "agent_trajectory_tool_call_count": None,
+            "agent_trajectory_tool_names": {},
         }
     inspected: list[str] = []
     changed: list[str] = []
     errors: list[dict[str, Any]] = []
+    tool_names: dict[str, int] = {}
+    tool_call_count = 0
     steps = trajectory.get("steps", []) if isinstance(trajectory, dict) else []
     for step in steps:
         if not isinstance(step, dict):
@@ -7529,6 +7602,8 @@ def _trajectory_activity(
             tool_name = str(
                 call.get("function_name") or call.get("tool_name") or "unknown"
             )
+            tool_call_count += 1
+            tool_names[tool_name] = tool_names.get(tool_name, 0) + 1
             arguments = call.get("arguments") or {}
             call_id = str(call.get("tool_call_id") or call.get("id") or "")
             result = results.get(call_id)
@@ -7571,6 +7646,9 @@ def _trajectory_activity(
         "changed_paths": list(dict.fromkeys(changed)),
         "changed_paths_status": "available",
         "error_events": errors,
+        "agent_trajectory_tool_activity_status": "available",
+        "agent_trajectory_tool_call_count": tool_call_count,
+        "agent_trajectory_tool_names": dict(sorted(tool_names.items())),
     }
 
 

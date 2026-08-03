@@ -328,6 +328,7 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
         "usage_rows": 0,
         "evidence_projects": [],
         "mcp_tool_usage": {},
+        "agent_trajectory_tool_activity": {},
     }
 
 
@@ -1366,6 +1367,55 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert non_discriminating.behavioral_summary.status == "unchanged"
     assert non_discriminating.behavioral_summary.improved_pairs == 0
 
+    blocked_improvement_rows = json.loads(json.dumps(rows))
+    blocked_candidate = next(
+        row
+        for row in blocked_improvement_rows
+        if row["variant_id"] == "candidate"
+    )
+    blocked_candidate["pass"] = False
+    blocked_candidate["comparison_deterministic_scores"][
+        "release.locked_project_scope"
+    ] = False
+    blocked_task_id = str(blocked_candidate["task_id"])
+    blocked_harness = str(blocked_candidate["harness"])
+    blocked_attempt = int(blocked_candidate["trial_index"])
+    blocked_improvement = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=blocked_improvement_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+    )
+    blocked_pair = next(
+        pair
+        for pair in blocked_improvement.paired_cases
+        if pair.task_id == blocked_task_id
+        and pair.harness == blocked_harness
+        and pair.attempt == blocked_attempt
+    )
+    assert {
+        change.id: change.status for change in blocked_pair.dimension_changes
+    } == {
+        "release.factual_correctness": "improved",
+        "release.locked_project_scope": "unchanged",
+    }
+    assert blocked_pair.status == "unchanged"
+    assert blocked_improvement.behavioral_summary.status == "unchanged"
+    assert blocked_improvement.behavioral_summary.critical_blockers == (
+        f"{blocked_pair.task_id}: release.locked_project_scope failed for the "
+        "candidate",
+    )
+    assert blocked_improvement.behavioral_summary.supported_claim == (
+        "No release-qualifying improvement was established across 2 aligned "
+        "pair(s)."
+    )
+
 
 def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
     tmp_path: Path,
@@ -1531,6 +1581,51 @@ def test_identical_critical_failures_are_unchanged_not_mixed() -> None:
     assert result.behavioral_summary.supported_claim is None
 
 
+def test_improvement_with_shared_critical_failure_is_unchanged_and_blocked() -> None:
+    baseline = _decision_row(variant="baseline", passed=False)
+    candidate = _decision_row(variant="candidate", passed=False)
+    baseline["comparison_deterministic_scores"] = {
+        "release.missing_evidence_status": False,
+        "release.terminal_success_or_stop_semantics": False,
+    }
+    candidate["comparison_deterministic_scores"] = {
+        "release.missing_evidence_status": True,
+        "release.terminal_success_or_stop_semantics": False,
+    }
+    criticality = {
+        "release.missing_evidence_status": True,
+        "release.terminal_success_or_stop_semantics": True,
+    }
+    baseline["comparison_deterministic_criticality"] = criticality
+    candidate["comparison_deterministic_criticality"] = criticality
+
+    result = analyze_comparison_rows(
+        comparison_id="improved-but-blocked",
+        preview_digest="b" * 64,
+        rows=[baseline, candidate],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    pair = result.paired_cases[0]
+    assert {change.id: change.status for change in pair.dimension_changes} == {
+        "release.missing_evidence_status": "improved",
+        "release.terminal_success_or_stop_semantics": "unchanged",
+    }
+    # A shared failure is not a regression, so it cannot make the pair mixed.
+    # It still prevents a release-qualifying "improved" verdict.
+    assert pair.status == "unchanged"
+    assert result.mixed == 0
+    assert result.regressed == 0
+    assert result.behavioral_summary.status == "unchanged"
+    assert result.behavioral_summary.candidate_critical_failures == 1
+    assert result.behavioral_summary.critical_blockers == (
+        "release-task: release.terminal_success_or_stop_semantics failed for "
+        "the candidate",
+    )
+    assert result.behavioral_summary.supported_claim is None
+
+
 def test_pure_regression_is_not_relabelled_mixed_by_candidate_failure() -> None:
     result = analyze_comparison_rows(
         comparison_id="pure-regression",
@@ -1571,6 +1666,75 @@ def test_paired_attempt_prefers_attempt_scoped_mcp_calls() -> None:
     assert attempt is not None
     assert attempt.tool_calls == 2
     assert attempt.tools == ("get_run_history_tool", "query_wandb_tool")
+
+
+def test_comparison_recovers_usage_and_agent_activity_from_export_fields() -> None:
+    baseline = _decision_row(variant="baseline", passed=False)
+    candidate = _decision_row(variant="candidate")
+    for row, latency, input_tokens, output_tokens, call_count, names in (
+        (baseline, 12.5, 100, 20, 12, {"Bash": 8, "Read": 4}),
+        (candidate, 14.25, 150, 30, 14, {"Bash": 9, "Read": 5}),
+    ):
+        row.pop("latency_sec")
+        row["wall_time_sec"] = latency
+        row["local_usage_status"] = "available"
+        row["n_input_tokens"] = input_tokens
+        row["n_output_tokens"] = output_tokens
+        row["mcp_tool_names"] = []
+        row["mcp_tool_calls"] = []
+        row["agent_trajectory_tool_activity_status"] = "available"
+        row["agent_trajectory_tool_call_count"] = call_count
+        row["agent_trajectory_tool_names"] = names
+    # Native summaries may be cumulative or missing. The local trajectory is
+    # the attempt-scoped fallback for general Agent activity only.
+    baseline["weave_tool_names"] = {"Bash": 24, "Read": 12}
+    candidate["weave_tool_names"] = {}
+
+    result = analyze_comparison_rows(
+        comparison_id="agent-trajectory-telemetry",
+        preview_digest="b" * 64,
+        rows=[baseline, candidate],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    baseline_attempt = result.paired_cases[0].baseline
+    candidate_attempt = result.paired_cases[0].candidate
+    assert baseline_attempt is not None
+    assert candidate_attempt is not None
+    assert baseline_attempt.latency_sec == 12.5
+    assert candidate_attempt.latency_sec == 14.25
+    assert (baseline_attempt.input_tokens, baseline_attempt.output_tokens) == (
+        100.0,
+        20.0,
+    )
+    assert (candidate_attempt.input_tokens, candidate_attempt.output_tokens) == (
+        150.0,
+        30.0,
+    )
+    assert baseline_attempt.tool_calls == 12
+    assert baseline_attempt.tools == ("Bash", "Read")
+    assert candidate_attempt.tool_calls == 14
+    assert candidate_attempt.tools == ("Bash", "Read")
+    assert result.operational_summary["latency_ms"] == 26750.0
+    assert result.operational_summary["latency_rows"] == 2
+    assert result.operational_summary["input_tokens"] == 250
+    assert result.operational_summary["output_tokens"] == 50
+    assert result.operational_summary["usage_rows"] == 2
+    # Agent trajectory fallback never fabricates MCP mechanism evidence.
+    assert result.operational_summary["mcp_tool_usage"] == {}
+    assert result.operational_summary["agent_trajectory_tool_activity"] == {
+        "baseline": {
+            "calls": 12,
+            "rows": 1,
+            "tools": {"Bash": 8, "Read": 4},
+        },
+        "candidate": {
+            "calls": 14,
+            "rows": 1,
+            "tools": {"Bash": 9, "Read": 5},
+        },
+    }
 
 
 def test_unverified_agent_relationship_invalidates_behavioral_evidence() -> None:

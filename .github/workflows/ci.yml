@@ -70,6 +70,7 @@ jobs:
           tests/test_context.py tests/test_context_contracts.py tests/test_context_study.py
           tests/test_evaluation_assets.py tests/test_export.py tests/test_job_config.py tests/test_mcp_gateway.py
           tests/test_mcp_proxy.py tests/test_operator.py tests/test_run_conformance.py
+          tests/test_path_evidence_integrity.py
           tests/test_runtime_manager.py tests/test_weave_support.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
           tests/test_task_interaction.py
@@ -94,8 +95,14 @@ jobs:
           tests/test_research_agent_interface.py tests/test_research_records.py
           tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
           tests/test_experiment_views.py tests/test_comparison.py
+          tests/test_anthropic_skill_creator_failure_replication.py
+          tests/test_anthropic_skill_creator_upgrade.py
+          tests/test_community_skill_scientific_report.py
+          tests/test_community_skill_upgrade_campaign.py
           tests/test_component_imports.py tests/test_research_comparisons.py
+          tests/test_superpowers_writing_plans_upgrade.py
           tests/test_tasksets.py
+          tests/test_vercel_react_best_practices_upgrade.py
           tests/test_mcp_read_only_evidence.py
           tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
 

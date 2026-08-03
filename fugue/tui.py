@@ -61,6 +61,7 @@ HARNESS_LABELS = (
 )
 HARNESS_NAMES = dict((value, label) for label, value in HARNESS_LABELS)
 CUSTOM_SIZE = "__custom__"
+_UNSAVED_ASSETS_BLOCKER = "Save all proposed assets before running"
 TERMINAL_RUN_STATES = {"passed", "failed", "cancelled", "interrupted"}
 ACTIVE_RUN_STATES = {"starting", "running"}
 
@@ -1471,6 +1472,24 @@ class FugueApp(App[None]):
     def _queue_preview(self) -> None:
         if not self.is_mounted:
             return
+        # Invalidate an in-flight worker as soon as the plan changes, not when
+        # the replacement debounce eventually fires. Thread workers may finish
+        # after Textual has cancelled them, so exclusive worker groups alone do
+        # not establish ownership of the current plan.
+        self._preview_generation += 1
+        self._review_blockers = tuple(
+            blocker
+            for blocker in self._review_blockers
+            if blocker != _UNSAVED_ASSETS_BLOCKER
+        )
+        if self.plan.assets:
+            self._review_blockers = (
+                *self._review_blockers,
+                _UNSAVED_ASSETS_BLOCKER,
+            )
+        run_buttons = list(self.query("#run-live"))
+        if run_buttons:
+            run_buttons[0].disabled = True
         if self._preview_timer is not None:
             self._preview_timer.stop()
         self._preview_timer = self.set_timer(0.3, self._begin_preview)
@@ -1488,7 +1507,6 @@ class FugueApp(App[None]):
                 "Select at least one harness and one variant."
             )
             return
-        self._preview_generation += 1
         generation = self._preview_generation
         preview_status.update("Updating exact matrix...")
         self._preview_worker(
@@ -1519,9 +1537,12 @@ class FugueApp(App[None]):
         self.call_from_thread(self._apply_preview, generation, preview, status)
 
     def _preview_failed(self, generation: int, message: str) -> None:
-        if generation != self._preview_generation:
+        if generation != self._preview_generation or not self.is_mounted:
             return
-        self.query_one("#preview-status", Static).update(f"Preview failed: {message}")
+        preview_status = next(iter(self.query("#preview-status")), None)
+        if not isinstance(preview_status, Static):
+            return
+        preview_status.update(f"Preview failed: {message}")
         self.query_one("#run-live", Button).disabled = True
 
     def _apply_preview(
@@ -1530,7 +1551,10 @@ class FugueApp(App[None]):
         preview: PreviewSummary,
         status: OperatorStatus,
     ) -> None:
-        if generation != self._preview_generation:
+        if generation != self._preview_generation or not self.is_mounted:
+            return
+        preview_status = next(iter(self.query("#preview-status")), None)
+        if not isinstance(preview_status, Static):
             return
         self.plan = replace(self.plan, preview=preview)
         self._review_blockers = self._blockers(preview, status)
@@ -1682,7 +1706,7 @@ class FugueApp(App[None]):
         if preview.applicable_cells == 0:
             blockers.append("No matrix cells are applicable")
         if self.plan.assets:
-            blockers.append("Save all proposed assets before running")
+            blockers.append(_UNSAVED_ASSETS_BLOCKER)
         return tuple(blockers)
 
     def _show_preview_sequencer(self, preview: PreviewSummary) -> None:

@@ -1,5 +1,5 @@
 schema_version: 2
-id: anthropic-skill-creator-instruction-failure-replication-v1
+id: anthropic-skill-creator-instruction-semantic-replication-v2
 question: Does the exact current Anthropic Skill Creator revision improve a generated Skill's traceability and terminal evidence semantics relative to the exact earlier revision?
 taskset:
   tasks: failure-replication-tasks.jsonl
@@ -15,7 +15,7 @@ evaluators:
   - id: evidence-instruction-contract
     type: deterministic
     required: true
-    scorer: failure_replication_scorer_v1_archived.py
+    scorer: failure_replication_scorer.py
     runtime: python312-sandbox-v1
     dimensions:
       - artifact_validity
@@ -73,15 +73,15 @@ evaluators:
     evidence: [inspected_paths, changed_paths]
     reserve_cost_usd: 0.10
 execution:
-  evidence_project: wandb/fugue-anthropic-skill-creator-failure-replication-v1
+  evidence_project: wandb/fugue-anthropic-skill-creator-semantic-replication-v2
   evidence_destination:
     entity: wandb
-    project: fugue-anthropic-skill-creator-failure-replication-v1
+    project: fugue-anthropic-skill-creator-semantic-replication-v2
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
-  research_id: fugue-anthropic-skill-creator-failure-replication-v1
-  study_console_base_url: http://127.0.0.1:18087
+  research_id: anthropic-skill-creator-instruction-semantic-replication-v2
+  study_console_base_url: http://127.0.0.1:18088
   model: anthropic/claude-sonnet-5
   harnesses: [claude-code]
   attempts: 2

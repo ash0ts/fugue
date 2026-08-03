@@ -209,6 +209,77 @@ def test_debounced_preview_is_harmless_after_its_widget_unmounts(
     asyncio.run(exercise())
 
 
+def test_queued_preview_immediately_invalidates_stale_worker_and_blocks_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause(1)
+            stale_generation = app._preview_generation
+            stale_preview = app.plan.preview
+            assert stale_preview is not None
+            stale_status = service.status(
+                app.plan.request,
+                experiment=app.plan.experiment,
+            )
+            app.plan = replace(
+                app.plan,
+                assets=(SimpleNamespace(id="proposed-evaluation"),),
+                preview=None,
+            )
+
+            app._queue_preview()
+
+            assert app._preview_generation > stale_generation
+            assert "Save all proposed assets before running" in app._review_blockers
+            assert app.query_one("#run-live", Button).disabled
+            app._apply_preview(stale_generation, stale_preview, stale_status)
+            app._preview_failed(stale_generation, "stale failure")
+            assert app.plan.preview is None
+            assert "Save all proposed assets before running" in app._review_blockers
+
+    asyncio.run(exercise())
+
+
+def test_preview_callbacks_are_harmless_after_status_widget_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause(1)
+            current_preview = app.plan.preview
+            assert current_preview is not None
+            replacement_preview = replace(
+                current_preview,
+                estimated_trials=current_preview.estimated_trials + 1,
+            )
+            status = service.status(
+                app.plan.request,
+                experiment=app.plan.experiment,
+            )
+            generation = app._preview_generation
+            app._review_blockers = ("current plan blocker",)
+            run_disabled = app.query_one("#run-live", Button).disabled
+            await app.query_one("#preview-status").remove()
+
+            app._apply_preview(generation, replacement_preview, status)
+            app._preview_failed(generation, "late failure")
+
+            assert app.plan.preview is current_preview
+            assert app._review_blockers == ("current plan blocker",)
+            assert app.query_one("#run-live", Button).disabled is run_disabled
+
+    asyncio.run(exercise())
+
+
 def test_tui_applies_recommended_agent_preset_locally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,7 +619,8 @@ def test_memory_smoke_shows_unavailable_cells_without_counting_trials(
             app.plan = replace(app.plan, request=request, preview=None)
             app._render_plan()
             app._begin_preview()
-            await pilot.pause(1)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
 
             assert app.plan.preview is not None
             assert app.plan.preview.cells == 8

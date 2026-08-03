@@ -190,6 +190,9 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["cost_usd"] == 0.01
     assert row["changed_paths_status"] == "unavailable"
     assert row["inspected_paths_status"] == "unavailable"
+    assert row["agent_trajectory_tool_activity_status"] == "unavailable"
+    assert row["agent_trajectory_tool_call_count"] is None
+    assert row["agent_trajectory_tool_names"] == {}
 
     out = tmp_path / "pilot.jsonl"
     write_jsonl(rows, out)
@@ -255,6 +258,9 @@ def test_export_uses_successful_task_workspace_trajectory_as_change_receipt(
     assert row["inspected_paths"] == ["app/actions.mjs"]
     assert row["changed_paths_status"] == "available"
     assert row["changed_paths"] == ["app/actions.mjs"]
+    assert row["agent_trajectory_tool_activity_status"] == "available"
+    assert row["agent_trajectory_tool_call_count"] == 2
+    assert row["agent_trajectory_tool_names"] == {"Edit": 1, "Read": 1}
 
 
 def test_export_marks_unattributed_harbor_zero_usage_unavailable(
@@ -321,7 +327,16 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.examples = []
             self.summary = None
             self.failed = None
-            self.ui_url = "https://wandb.test/evaluations/eval-1"
+            self.ui_url = (
+                f"https://wandb.test/{project}/r/call/evaluation-root-1"
+            )
+            self._evaluate_call = SimpleNamespace(
+                id="evaluation-root-1",
+                project_id=project,
+                ref=SimpleNamespace(
+                    uri=f"weave:///{project}/call/evaluation-root-1"
+                ),
+            )
             loggers.append(self)
 
         def log_example(self, inputs, output, scores) -> None:
@@ -369,6 +384,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     env = {
         "WANDB_API_KEY": "test-only",
         "WANDB_BASE_URL": "https://api.wandb.ai",
+        "WANDB_APP_BASE_URL": "https://wandb.example",
     }
     first = publish_to_weave(rows, project, ledger_root=tmp_path, env=env)
     second = publish_to_weave(rows, project, ledger_root=tmp_path)
@@ -383,7 +399,18 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     assert (first.published, first.skipped, first.failures) == (1, 0, ())
     assert (second.published, second.skipped) == (0, 1)
     assert (third.published, third.skipped) == (1, 0)
-    assert first.evaluations[0].url == "https://wandb.test/evaluations/eval-1"
+    assert first.evaluations[0].url == (
+        f"https://wandb.example/{project}/weave/calls/evaluation-root-1"
+    )
+    first_marker = next(
+        path
+        for path in (tmp_path / "v1").glob("**/*.r1.json")
+        if path.parent.name != "predictions"
+    )
+    assert json.loads(first_marker.read_text())["url"] == (
+        f"https://wandb.example/{project}/weave/calls/evaluation-root-1"
+    )
+    assert "/r/call/" not in first.evaluations[0].url
     assert len(loggers) == 2
     for logger in loggers:
         assert logger.name.startswith("memory-ab | coding |")
@@ -815,10 +842,16 @@ def test_export_recovers_direct_evaluation_after_marker_only_crash(
     tmp_path: Path, monkeypatch
 ) -> None:
     class FakeLogger:
-        ui_url = "https://wandb.test/evaluations/recovered"
+        ui_url = "https://wandb.test/entity/project/r/call/evaluation-recovered"
 
         def __init__(self, **kwargs) -> None:
-            pass
+            self._evaluate_call = SimpleNamespace(
+                id="evaluation-recovered",
+                project_id="entity/project",
+                ref=SimpleNamespace(
+                    uri="weave:///entity/project/call/evaluation-recovered"
+                ),
+            )
 
         def log_example(self, inputs, output, scores) -> None:
             pass
@@ -892,7 +925,10 @@ def test_export_recovers_direct_evaluation_after_marker_only_crash(
 
     assert (recovered.published, recovered.skipped) == (0, 1)
     assert len(recovered.evaluations) == 1
-    assert recovered.evaluations[0].url == FakeLogger.ui_url
+    assert recovered.evaluations[0].url == (
+        "https://wandb.ai/entity/project/weave/calls/evaluation-recovered"
+    )
+    assert "/r/call/" not in recovered.evaluations[0].url
     assert recovered.evaluations[0].direct_predictions == 1
     run_evaluations = OperatorService(tmp_path).run_summary("run-a").evaluations
     assert run_evaluations == recovered.evaluations
@@ -1257,7 +1293,9 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 
         def log_summary(self) -> None:
             self.summarized = True
-            self.ui_url = "https://wandb.test/evaluations/live"
+            self.ui_url = (
+                "https://wandb.test/entity/project/r/call/evaluation-root-1"
+            )
 
         def fail(self, exception) -> None:
             raise AssertionError(exception)
@@ -1427,6 +1465,19 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert publication.evaluations[0].agent_predictions == 1
     assert publication.evaluations[0].linked_agent_predictions == 1
     assert publication.evaluations[0].direct_predictions == 0
+    assert publication.evaluations[0].url == (
+        "https://wandb.ai/entity/project/weave/calls/evaluation-root-1"
+    )
+    assert "/r/call/" not in publication.evaluations[0].url
+    live_marker = next(
+        (
+            tmp_path
+            / ".fugue/runtime/publications/v1/entity-project"
+        ).glob("*.r1.json")
+    )
+    assert json.loads(live_marker.read_text())["url"] == (
+        "https://wandb.ai/entity/project/weave/calls/evaluation-root-1"
+    )
     assert predictions[0].finished is True
     assert predictions[0].output["observed_conversation_id"] == "native-conversation"
     assert predictions[0].output["trace_link_status"] == "linked"
@@ -4259,6 +4310,30 @@ def test_dataset_navigation_uses_the_locked_application_origin() -> None:
     )
 
 
+def test_published_evaluation_url_never_uses_sdk_legacy_fallback() -> None:
+    legacy = "https://wandb.test/entity/project/r/call/evaluation-call"
+
+    assert export._published_evaluation_url(
+        SimpleNamespace(ui_url=legacy),
+        project="entity/project",
+        app_base_url="https://wandb.ai",
+    ) is None
+    assert export._published_evaluation_url(
+        SimpleNamespace(
+            ui_url=legacy,
+            _evaluate_call=SimpleNamespace(
+                id="evaluation-call",
+                project_id="entity/other-project",
+                ref=SimpleNamespace(
+                    uri="weave:///entity/other-project/call/evaluation-call"
+                ),
+            ),
+        ),
+        project="entity/project",
+        app_base_url="https://wandb.ai",
+    ) is None
+
+
 def test_native_agent_call_requires_authoritative_evaluation_ancestry() -> None:
     row = {
         "attempt_id": "a" * 64,
@@ -5694,6 +5769,12 @@ def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
     assert activity["inspected_paths_status"] == "available"
     assert activity["changed_paths"] == []
     assert activity["error_events"][0]["kind"] == "invalid_tool_arguments"
+    assert activity["agent_trajectory_tool_activity_status"] == "available"
+    assert activity["agent_trajectory_tool_call_count"] == 2
+    assert activity["agent_trajectory_tool_names"] == {
+        "read_file": 1,
+        "write_file": 1,
+    }
 
 
 def test_runtime_equivalence_is_computed_within_comparison_cohort() -> None:

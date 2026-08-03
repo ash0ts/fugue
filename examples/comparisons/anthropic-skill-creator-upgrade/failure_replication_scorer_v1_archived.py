@@ -73,48 +73,17 @@ def _frontmatter(value):
     return metadata, text[end + 5 :]
 
 
-def _semantic_windows(value):
-    """Return bounded Markdown blocks and their immediate context.
-
-    Behavioral rules are commonly expressed as a heading followed by a
-    definition, or as a compact Markdown table.  Treating each sentence in
-    isolation makes those ordinary forms false negatives.  Conversely,
-    searching the entire document lets an unrelated keyword inventory look
-    like a rule.  Blank-line-delimited blocks plus adjacent pairs provide the
-    needed context without pooling unrelated sections.
-    """
-
-    blocks = tuple(
-        " ".join(block.lower().split())
-        for block in re.split(r"\n\s*\n", _text(value))
-        if block.strip()
-    )
+def _clauses(value):
     return tuple(
-        " ".join(blocks[index : index + width])
-        for index in range(len(blocks))
-        for width in (1, 2)
-        if index + width <= len(blocks)
+        " ".join(part.lower().split())
+        for line in _text(value).splitlines()
+        for part in re.split(r"(?<=[.;:!?])\s+", line.lstrip("-0123456789. "))
+        if part.strip()
     )
 
 
 def _has_any(value, terms):
     return any(term in value for term in terms)
-
-
-def _has_rule_signal(value):
-    return any(
-        re.search(pattern, value)
-        for pattern in (
-            r"\b(?:must|shall|cannot|can't|may not|do not|don't|never)\b"
-            r"(?!\s*[,;])",
-            r"\bonly (?:if|when)\b",
-            r"\b(?:mandatory|required)\s+\w+",
-            r"\b(?:requires?|needs? to|means?|resolves? to|classif(?:y|ies)|"
-            r"marks?|reports?|treats?)\b(?!\s*[,;])",
-            r"\b(?:acceptance|evidence) condition(?:s)?\b",
-            r"\bwithout\s+(?:a |an |the )?\w+",
-        )
-    )
 
 
 def _artifact_validity(result, files, expected, task):
@@ -157,30 +126,18 @@ def _artifact_validity(result, files, expected, task):
 
 
 def _source_traceability(body):
+    quantifiers = ("each", "every", "all")
     claims = (
         "fact",
         "finding",
         "observation",
         "claim",
-        "assertion",
-        "statement",
         "recommendation",
         "conclusion",
         "result",
         "decision",
-        "report row",
     )
-    sources = (
-        "file",
-        "path",
-        "manifest",
-        "artifact",
-        "evidence",
-        "record",
-        "log",
-        "on-disk",
-        "local source",
-    )
+    sources = ("file", "path", "manifest", "artifact", "evidence", "record")
     relations = (
         "cite",
         "reference",
@@ -192,122 +149,53 @@ def _source_traceability(body):
         "record",
         "support",
         "tie",
-        "pin",
-        "backed by",
-        "substantiat",
     )
     return any(
-        _has_any(window, claims)
-        and _has_any(window, sources)
-        and _has_any(window, relations)
-        and _has_rule_signal(window)
-        for window in _semantic_windows(body)
+        _has_any(clause, quantifiers)
+        and _has_any(clause, claims)
+        and _has_any(clause, sources)
+        and _has_any(clause, relations)
+        for clause in _clauses(body)
     )
 
 
 def _terminal_success_or_stop_semantics(body):
-    windows = _semantic_windows(body)
+    clauses = _clauses(body)
     success = any(
-        _has_any(window, ("verified", "pass", "success", "succeed", "qualify"))
-        and _has_any(
-            window,
-            (
-                "every required",
-                "all required",
-                "all mandatory",
-                "mandatory checks agree",
-                "evidence file exists",
-                "evidence files exist",
-                "evidence that exists",
-                "readable",
-                "matches the claim",
-                "satisfy the requirement",
-                "supports the claim",
-                "affirmatively demonstrates",
-            ),
-        )
-        and _has_rule_signal(window)
-        for window in windows
+        _has_any(clause, ("verified", "pass", "success", "succeed", "qualify"))
+        and _has_any(clause, ("only", "when", "if", "once"))
+        and _has_any(clause, ("every", "all", "required"))
+        for clause in clauses
     )
     failure = any(
-        _has_any(window, ("failed", "fail", "block", "stop", "halt", "reject"))
+        _has_any(clause, ("failed", "fail", "block", "stop", "halt", "reject"))
         and _has_any(
-            window,
-            (
-                "contradict",
-                "disagree",
-                "mismatch",
-                "error",
-                "invalid",
-                "unsupported",
-                "non-zero",
-                "nonzero",
-                "required check",
-                "check failed",
-            ),
+            clause,
+            ("disagree", "mismatch", "error", "invalid", "unsupported", "required"),
         )
-        and _has_rule_signal(window)
-        for window in windows
+        for clause in clauses
     )
     inconclusive = any(
-        _has_any(
-            window,
-            (
-                "inconclusive",
-                "unverified",
-                "unknown",
-                "cannot determine",
-                "not determined",
-            ),
-        )
-        and _has_any(
-            window,
-            (
-                "missing",
-                "absent",
-                "unreadable",
-                "cannot be read",
-                "cannot be opened",
-                "unavailable",
-                "empty",
-                "corrupt",
-                "unparseable",
-                "ambiguous",
-            ),
-        )
-        and _has_rule_signal(window)
-        for window in windows
+        _has_any(clause, ("inconclusive", "unverified", "unknown", "cannot determine"))
+        and _has_any(clause, ("missing", "absent", "unreadable", "cannot be read", "unavailable"))
+        for clause in clauses
     )
     return success and failure and inconclusive
 
 
-def _negates_status(window, targets):
-    target = "(?:" + "|".join(targets) + ")"
-    return bool(
-        re.search(
-            r"(?:\b(?:must\s+)?never\b|\b(?:cannot|can't|must not|may not|"
-            r"do not|don't)\b|\b(?:is|are|remains?|stays?)\s+not\b|"
-            r"(?:^|[—:])\s*not\b)(?!\s*[,;])[^.!?]{0,180}\b" + target + r"\b",
-            window,
-        )
-    )
-
-
 def _missing_evidence_status(body):
-    windows = _semantic_windows(body)
+    clauses = _clauses(body)
     missing = ("missing", "absent", "unreadable", "cannot be read", "unavailable")
     status = ("inconclusive", "unverified", "unknown", "cannot determine")
     has_status = any(
-        _has_any(window, missing)
-        and _has_any(window, status)
-        and _has_rule_signal(window)
-        for window in windows
+        _has_any(clause, missing) and _has_any(clause, status)
+        for clause in clauses
     )
     no_coercion = any(
-        _has_any(window, missing + status)
-        and _negates_status(window, ("pass", "success", "verified"))
-        and _negates_status(window, ("zero", "0"))
-        for window in windows
+        _has_any(clause, missing + status)
+        and _has_any(clause, ("never", "must not", "cannot", "do not", "is not"))
+        and _has_any(clause, ("pass", "success", "verified", "zero", "0"))
+        for clause in clauses
     )
     return has_status and no_coercion
 
@@ -391,7 +279,9 @@ def score(task, output, evidence):
     if result is None or not expected:
         return dict(_DIMENSIONS)
     files = _mapping(result.get("files"))
-    _metadata, body = _frontmatter(files.get(_text(expected.get("skill_path"))))
+    _metadata, body = _frontmatter(
+        files.get(_text(expected.get("skill_path")))
+    )
     return {
         "artifact_validity": _artifact_validity(
             result,

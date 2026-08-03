@@ -82,23 +82,53 @@ The result destination is
 Study Console with `study-console.yaml` on port `18085`; do not reuse another
 campaign's database or project profile.
 
-## Instruction-failure replication
+## Historical instruction-failure replication (V1)
 
-`failure-replication.yaml` is a separate four-cell Study: one public task,
-the same two exact Skill revisions, and two attempts per arm. Its public
-semantic dimensions are source traceability, terminal success-or-stop
-semantics, and honest missing-evidence status. The deterministic scorer accepts
-semantic paraphrases rather than hidden literal phrases; the blinded Sonnet
-review remains advisory.
+`failure-replication.yaml` identifies the completed four-cell V1 Study: one
+public task, the same two exact Skill revisions, and two attempts per arm. Its
+result (`0e40aaaeaf1105f1efc48800f1047151c280975623ec22d4ac3f8fbfd0d1f991`)
+is diagnostic-only. Its deterministic scorer split ordinary Markdown headings,
+definitions, and table rows into separate lexical clauses, incorrectly marking
+two semantically valid artifacts as failures. A read-only audit of all four
+frozen artifacts found the required traceability, PASS / FAIL-STOP /
+INCONCLUSIVE semantics, and missing-evidence handling in every response.
+Separate blinded same-family Sonnet judge calls produced derived `strong`
+labels for all four responses. Those calls are advisory and uncalibrated; they
+are not independent model-family validation and cannot override deterministic
+gates.
 
-Run the standard governed flow only after the exact Skill bundles and local
-Harbor runtime above are prepared:
+The historical result and approval are retained as immutable audit evidence;
+neither may be reused or reinterpreted with the repaired scorer. The checked-in
+V1 inspection spec resolves the byte-for-byte archived scorer at
+`failure_replication_scorer_v1_archived.py` (SHA-256
+`ab0b2c5bee685d4523618dfdd1defe72b6c314c729ede1eabe1d71d5046b9366`).
+It is not a boundary for a new preview or run. Use
+`study-console-failure-replication.yaml` on port `18087` only to inspect that
+diagnostic Study in
+`wandb/fugue-anthropic-skill-creator-failure-replication-v1`.
+
+## Independent semantic replication (V2)
+
+`semantic-replication-v2.yaml` is a fresh four-cell Study with a new comparison,
+research, result-project, and approval identity. It preserves the V1 task,
+private labels, exact candidates, Sonnet 5 route, Claude Code harness, two
+attempts per arm, Harbor runtime, and `$34` ceiling. Its repaired deterministic
+scorer evaluates source traceability, terminal success-or-stop semantics, and
+honest missing-evidence handling by meaning rather than hidden literal phrases;
+the blinded Sonnet review remains advisory.
+
+No V1 preparation, preview, approval, or result was valid for V2. V2 was
+prepared, approved, and completed under its own immutable identity. The
+commands below document the governed flow that produced it; do not reuse its
+preview, approval, or Study identity for new trials. A further replication must
+use a new comparison identity and fresh approval after the exact Skill bundles
+and local Harbor runtime above are prepared:
 
 ```bash
-SPEC=examples/comparisons/anthropic-skill-creator-upgrade/failure-replication.yaml
+SPEC=examples/comparisons/anthropic-skill-creator-upgrade/semantic-replication-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
-PREVIEW=/tmp/anthropic-skill-creator-failure-preview.json
-APPROVAL=/tmp/anthropic-skill-creator-failure-approval.json
+PREVIEW=/tmp/anthropic-skill-creator-semantic-v2-preview.json
+APPROVAL=/tmp/anthropic-skill-creator-semantic-v2-approval.json
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
   --env-file "$ENV_FILE" --json
@@ -117,8 +147,17 @@ env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --run \
   --env-file "$ENV_FILE"
 ```
 
-Use `study-console-failure-replication.yaml` for its dedicated read-only Study
-Console on port `18087`. The profile reads only
-`wandb/fugue-anthropic-skill-creator-failure-replication-v1`, defaults to
-`anthropic-skill-creator-instruction-failure-replication-v1`, and keeps state
-in `.study-console/anthropic-skill-creator-failure-replication.sqlite3`.
+Use `study-console-semantic-replication-v2.yaml` for its dedicated read-only
+Study Console on port `18088`. The profile reads only
+`wandb/fugue-anthropic-skill-creator-semantic-replication-v2`, defaults to
+`anthropic-skill-creator-instruction-semantic-replication-v2`, and keeps state
+in `.study-console/anthropic-skill-creator-semantic-replication-v2.sqlite3`.
+
+The repaired scorer accepts those public semantic forms while continuing to
+reject keyword lists, undefined status labels, and missing-evidence coercion.
+Its completed V2 result digest is
+`1b32ae2f1970dca377770029641cd3b2458aa24351d705e3715d92932bf6d94c`.
+The four rows formed two aligned pairs and found no behavioral difference on
+this one locked task. That narrow `unchanged` result does not retroactively
+repair V1, qualify a general Skill Creator upgrade claim, or provide a valid
+loop-engineering failure card.

@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: anthropic-skill-creator-instruction-semantic-replication-v2
+  name: Anthropic Skill Creator Semantic Replication V2
+  description: Independent two-attempt replication of public evidence-instruction semantics across two exact Skill Creator revisions.
+  objective: Determine whether the earlier instruction-quality finding reproduces under the repaired semantic scorer without reusing the invalid V1 result identity.
+wandb:
+  entity: wandb
+  project: fugue-anthropic-skill-creator-semantic-replication-v2
+database: .study-console/anthropic-skill-creator-semantic-replication-v2.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: anthropic-skill-creator-instruction-semantic-replication-v2
+  read_only: true
