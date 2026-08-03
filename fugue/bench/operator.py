@@ -2336,7 +2336,9 @@ class OperatorService:
             )
             cancelled = bool(cancelled_cells) and not internal_abort
             publication = (
-                live.finalize(cancelled=True)
+                live.abort("Run stopped by an internal safety gate.")
+                if live is not None and internal_abort
+                else live.finalize(cancelled=True)
                 if live is not None and cancelled
                 else live.finalize()
                 if live is not None

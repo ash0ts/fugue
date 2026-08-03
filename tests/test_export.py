@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -2567,6 +2568,147 @@ def _stub_live_agent_bridge(
         active.row["weave_agent_bridge_closed_verified"] = True
 
     coordinator._finish_agent_bridge = finish_bridge
+
+
+def _partial_live_evaluation_scope(
+    tmp_path: Path,
+) -> tuple[
+    LiveEvaluationCoordinator,
+    list[Any],
+]:
+    loggers: list[Any] = []
+
+    class FakeDataset:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class FakeLogger:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+            self.summary_count = 0
+            self.failures: list[str] = []
+            loggers.append(self)
+
+        def log_summary(self) -> None:
+            self.summary_count += 1
+
+        def fail(self, exception: Exception) -> None:
+            self.failures.append(str(exception))
+
+    def cell(
+        *,
+        cell_id: str,
+        task_id: str,
+        variant_id: str,
+        candidate_id: str,
+    ) -> PlannedCell:
+        return PlannedCell(
+            id=cell_id,
+            run_id="run-internal-abort",
+            run_name="internal abort",
+            workload_id="skill-upgrade",
+            task_id=task_id,
+            harness="claude-code",
+            context_system_id="none",
+            variant_id=variant_id,
+            model_provider="anthropic",
+            model="anthropic/claude-sonnet-5",
+            trial_index=1,
+            comparison_example_id=f"example-{task_id}",
+            candidate_id=candidate_id,
+            execution_fingerprint=f"execution-{variant_id}",
+            config_path=Path(f"{cell_id}.json"),
+            result_path=Path("jobs") / cell_id / "result.json",
+            command=("harbor", "run"),
+            env={
+                "WANDB_API_KEY": "test-only",
+                "FUGUE_EXPERIMENT_ID": "scope-test",
+            },
+            n_attempts=1,
+        )
+
+    cells = [
+        cell(
+            cell_id="cell-baseline-a",
+            task_id="task-a",
+            variant_id="baseline",
+            candidate_id="candidate-baseline",
+        ),
+        cell(
+            cell_id="cell-baseline-b",
+            task_id="task-b",
+            variant_id="baseline",
+            candidate_id="candidate-baseline",
+        ),
+        cell(
+            cell_id="cell-candidate-a",
+            task_id="task-a",
+            variant_id="candidate",
+            candidate_id="candidate-treatment",
+        ),
+        cell(
+            cell_id="cell-candidate-b",
+            task_id="task-b",
+            variant_id="candidate",
+            candidate_id="candidate-treatment",
+        ),
+    ]
+    coordinator = LiveEvaluationCoordinator(
+        cells,
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cells[0].env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+    baseline = coordinator._sessions_by_cell[cells[0].id]
+    baseline.rows.append(dict(baseline.candidate["rows"][0]))
+    coordinator._terminal_cells.add(cells[0].id)
+    return coordinator, loggers
+
+
+def test_live_internal_abort_fails_incomplete_scopes_without_publication(
+    tmp_path: Path,
+) -> None:
+    coordinator, loggers = _partial_live_evaluation_scope(tmp_path)
+
+    publication = coordinator.abort("Run stopped by an internal safety gate.")
+
+    assert publication == PublicationResult(published=0, skipped=0)
+    assert all(logger.summary_count == 0 for logger in loggers)
+    assert all(
+        logger.failures == ["Run stopped by an internal safety gate."]
+        for logger in loggers
+    )
+    events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text().splitlines()
+    ]
+    assert sum(event["status"] == "aborted" for event in events) == 3
+    assert all(
+        event.get("error") == "Run stopped by an internal safety gate."
+        for event in events
+        if event["status"] == "aborted"
+    )
+    assert not (tmp_path / ".fugue/runtime/publications").exists()
+
+
+def test_live_normal_finalize_preserves_strict_partial_scope_failures(
+    tmp_path: Path,
+) -> None:
+    coordinator, loggers = _partial_live_evaluation_scope(tmp_path)
+
+    publication = coordinator.finalize()
+
+    assert set(publication.failures) == {
+        "candidate-baseline: evaluation scope changed during execution",
+        "candidate-treatment: live evaluation produced an invalid scope",
+    }
+    assert all(logger.summary_count == 1 for logger in loggers)
+    assert all(logger.failures == [] for logger in loggers)
+    assert publication.evaluations == ()
 
 
 def test_live_cancellation_closes_open_prediction_once_without_trace_polling(

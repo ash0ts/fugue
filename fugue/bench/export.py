@@ -1479,28 +1479,50 @@ class LiveEvaluationCoordinator:
             ),
         )
 
+    def abort(self, reason: str) -> PublicationResult:
+        """Fail incomplete Evaluations without publishing a partial scope."""
+
+        normalized = str(reason).strip()
+        if not normalized:
+            raise ValueError("live Evaluation abort reason must not be empty")
+        return self._finalize_incomplete(
+            reason=normalized,
+            pending_status="aborted",
+        )
+
+    def _finalize_incomplete(
+        self,
+        *,
+        reason: str,
+        pending_status: str,
+    ) -> PublicationResult:
+        self.cancel_open_predictions(reason)
+        error = RuntimeError(reason)
+        for session in self._unique_sessions:
+            try:
+                with session.lock:
+                    session.logger.fail(error)
+            except Exception:
+                pass
+            for row in session.candidate["rows"]:
+                cell_id = str(row.get("cell_id") or "")
+                if not cell_id or cell_id in self._terminal_cells:
+                    continue
+                self._terminal_cells.add(cell_id)
+                self._append_event(
+                    pending_status,
+                    cell_id=cell_id,
+                    candidate_id=row.get("candidate_id"),
+                    error=reason,
+                )
+        return PublicationResult(published=0, skipped=0)
+
     def finalize(self, *, cancelled: bool = False) -> PublicationResult:
         if cancelled:
-            self.cancel_open_predictions("Run cancelled by the operator.")
-            error = RuntimeError("Run cancelled by the operator.")
-            for session in self._unique_sessions:
-                try:
-                    with session.lock:
-                        session.logger.fail(error)
-                except Exception:
-                    pass
-                for row in session.candidate["rows"]:
-                    cell_id = str(row.get("cell_id") or "")
-                    if not cell_id or cell_id in self._terminal_cells:
-                        continue
-                    self._terminal_cells.add(cell_id)
-                    self._append_event(
-                        "cancelled",
-                        cell_id=cell_id,
-                        candidate_id=row.get("candidate_id"),
-                        error=str(error),
-                    )
-            return PublicationResult(published=0, skipped=0)
+            return self._finalize_incomplete(
+                reason="Run cancelled by the operator.",
+                pending_status="cancelled",
+            )
         evaluations: list[PublishedEvaluation] = []
         failures: list[str] = []
         ledger = (

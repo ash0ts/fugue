@@ -1044,6 +1044,10 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
             events.append(("finalize", cancelled))
             return PublicationResult(published=0, skipped=0)
 
+        def abort(self, reason: str) -> PublicationResult:
+            events.append(("abort", reason))
+            return PublicationResult(published=0, skipped=0)
+
     monkeypatch.setattr(
         "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
     )
@@ -1102,6 +1106,10 @@ def test_execute_run_internal_abort_after_terminal_cell_is_not_operator_cancel(
             events.append(("finalize", cancelled))
             return PublicationResult(published=0, skipped=0)
 
+        def abort(self, reason: str) -> PublicationResult:
+            events.append(("abort", reason))
+            return PublicationResult(published=0, skipped=0)
+
     monkeypatch.setattr(
         "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
     )
@@ -1117,13 +1125,15 @@ def test_execute_run_internal_abort_after_terminal_cell_is_not_operator_cancel(
     assert result.status == "failed"
     assert result.cancelled == 0
     assert ("finish", "passed") in events
-    assert ("finalize", False) in events
+    assert ("abort", "Run stopped by an internal safety gate.") in events
+    assert not any(name == "finalize" for name, _ in events)
     manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
     assert manifest is not None
     assert manifest["status"] == "failed"
     assert manifest["error"] == "Run stopped by an internal safety gate."
     assert manifest["cancelled_cells"] == 0
     assert manifest["observability_status"] == "failed"
+    assert manifest["evaluation_failures"] == []
 
 
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
