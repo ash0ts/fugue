@@ -24,7 +24,6 @@ evaluators:
       - behavior_preservation
       - verification
       - scope_safety
-      - skill_mechanism_used
     dimension_roles:
       artifact_validity: safety_gate
       requested_change: outcome
@@ -32,7 +31,6 @@ evaluators:
       behavior_preservation: safety_gate
       verification: safety_gate
       scope_safety: safety_gate
-      skill_mechanism_used: mechanism
   - id: community-usefulness
     type: llm_judge
     required: false

@@ -19,7 +19,6 @@ DIMENSIONS = {
     "behavior_preservation",
     "verification",
     "scope_safety",
-    "skill_mechanism_used",
 }
 
 
@@ -54,12 +53,8 @@ def test_vercel_canary_locks_exact_revisions_matrix_destination_and_budget() -> 
     assert spec.candidate.skills == ("vercel-react-best-practices-after",)
     assert lock["repository"] == "https://github.com/vercel-labs/agent-skills"
     assert lock["path"] == "skills/react-best-practices"
-    assert lock["baseline"]["commit"] == (
-        "ac6a79af08f6d32c34ee03c829824990f3de0a6d"
-    )
-    assert lock["candidate"]["commit"] == (
-        "20987af2f1bc17857b55e7758af8bed91c364ff5"
-    )
+    assert lock["baseline"]["commit"] == ("ac6a79af08f6d32c34ee03c829824990f3de0a6d")
+    assert lock["candidate"]["commit"] == ("20987af2f1bc17857b55e7758af8bed91c364ff5")
     assert spec.execution.evidence_project == (
         "wandb/fugue-vercel-react-best-practices-upgrade-v1"
     )
@@ -80,6 +75,14 @@ def test_vercel_canary_locks_exact_revisions_matrix_destination_and_budget() -> 
     assert len(tasks) == 2
     assert len(tasks) * 2 * spec.execution.attempts == 4
     assert all("expected" not in task for task in tasks)
+    for task in tasks:
+        question = task["input"]["question"]
+        assert "`schema_version` is integer `1`" in question
+        assert "whose value is the full final UTF-8 file content" in question or (
+            "whose values are the full final UTF-8 file contents" in question
+        )
+        assert "complete string `stdout`" in question
+        assert "do not return self-reported correctness booleans" in question
 
 
 def test_vercel_skill_source_lock_is_exact_and_materialized() -> None:
@@ -137,44 +140,74 @@ def test_vercel_private_fixtures_keep_base_fail_gold_pass() -> None:
         base = score(
             {"id": task_id},
             label["base_output"],
-            {"expected": label["expected"], **label["base_evidence"]},
+            {"expected": label["expected"]},
         )
         gold = score(
             {"id": task_id},
             label["gold_output"],
-            {"expected": label["expected"], **label["gold_evidence"]},
+            {"expected": label["expected"]},
         )
 
         assert set(base) == DIMENSIONS
         assert set(gold) == DIMENSIONS
         assert all(gold.values()), (task_id, gold)
         assert not all(base.values()), (task_id, base)
-        assert base["skill_mechanism_used"] is False
 
 
-def test_vercel_scorer_separates_correctness_scope_and_skill_mechanism() -> None:
+def test_vercel_scorer_derives_correctness_scope_and_verification() -> None:
     score = _score()
     label = _labels()["server-action-authorization"]
-    evidence = {"expected": label["expected"], **label["gold_evidence"]}
+    evidence = {"expected": label["expected"]}
 
     wrong = json.loads(json.dumps(label["gold_output"]))
-    wrong["facts"]["authorization_inside_action"] = False
+    wrong["files"]["app/actions.mjs"] = wrong["files"]["app/actions.mjs"].replace(
+        "const membership = await db.membership.findFirst",
+        "const membership = await Promise.resolve",
+    )
     wrong_scores = score({"id": label["id"]}, wrong, evidence)
     assert wrong_scores["requested_change"] is False
-    assert wrong_scores["skill_mechanism_used"] is True
 
-    unsafe_evidence = {
-        **evidence,
-        "changed_paths": [
-            *evidence["changed_paths"],
-            "/tmp/task-repository/repo/package.json",
-        ],
-    }
-    unsafe_scores = score(
-        {"id": label["id"]}, label["gold_output"], unsafe_evidence
-    )
+    unsafe = json.loads(json.dumps(label["gold_output"]))
+    unsafe["files"]["package.json"] = '{"dependencies":{"extra":"latest"}}'
+    unsafe_scores = score({"id": label["id"]}, unsafe, evidence)
     assert unsafe_scores["requested_change"] is True
     assert unsafe_scores["scope_safety"] is False
+
+    unverifiable = json.loads(json.dumps(label["gold_output"]))
+    unverifiable["verification"][0]["stdout"] = "all tests passed"
+    unverifiable_scores = score({"id": label["id"]}, unverifiable, evidence)
+    assert unverifiable_scores["requested_change"] is True
+    assert unverifiable_scores["verification"] is False
+
+    wrong_type = json.loads(json.dumps(label["gold_output"]))
+    wrong_type["verification"][0]["exit_code"] = False
+    wrong_type_scores = score({"id": label["id"]}, wrong_type, evidence)
+    assert wrong_type_scores["artifact_validity"] is False
+
+    absolute_inspection = json.loads(json.dumps(label["gold_output"]))
+    absolute_inspection["inspected_paths"] = [
+        "/tmp/task-repository/repo/app/actions.mjs"
+    ]
+    absolute_scores = score({"id": label["id"]}, absolute_inspection, evidence)
+    assert absolute_scores["artifact_validity"] is False
+    assert absolute_scores["repository_grounding"] is False
+
+
+def test_vercel_scorer_ignores_self_reported_claims_and_checks_final_source() -> None:
+    score = _score()
+    label = _labels()["rsc-serialization-boundary"]
+    output = json.loads(json.dumps(label["base_output"]))
+    output["summary"] = "Everything was fixed and all requested behavior is correct."
+
+    scores = score(
+        {"id": label["id"]},
+        output,
+        {"expected": label["expected"]},
+    )
+
+    assert scores["artifact_validity"] is True
+    assert scores["requested_change"] is False
+    assert scores["verification"] is False
 
 
 def test_vercel_judge_is_shared_blinded_and_cannot_replace_deterministic_gate() -> None:
@@ -202,14 +235,13 @@ def test_vercel_judge_is_shared_blinded_and_cannot_replace_deterministic_gate() 
     assert set(deterministic.dimension_roles.values()) == {
         "outcome",
         "safety_gate",
-        "mechanism",
     }
 
 
 def test_vercel_fixtures_encode_real_failing_boundaries_without_private_truth() -> None:
-    action = (
-        EXAMPLE / "fixtures/server-action-auth/app/actions.mjs"
-    ).read_text(encoding="utf-8")
+    action = (EXAMPLE / "fixtures/server-action-auth/app/actions.mjs").read_text(
+        encoding="utf-8"
+    )
     action_tests = (
         EXAMPLE / "fixtures/server-action-auth/tests/actions.test.mjs"
     ).read_text(encoding="utf-8")
@@ -224,6 +256,4 @@ def test_vercel_fixtures_encode_real_failing_boundaries_without_private_truth() 
     assert "signed-in non-member" in action_tests
     assert "projectNames={projectNames}" in page
     assert "server passes one canonical project collection" in serialization_tests
-    assert "base_output" not in (EXAMPLE / "tasks.jsonl").read_text(
-        encoding="utf-8"
-    )
+    assert "base_output" not in (EXAMPLE / "tasks.jsonl").read_text(encoding="utf-8")

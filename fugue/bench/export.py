@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -6061,18 +6061,36 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         }
         - assigned_integration_ids
     )
-    changed_paths_status = str(meta.get("changed_paths_status") or "unavailable")
-    if changed_paths_status not in {"available", "unavailable"}:
-        changed_paths_status = "unavailable"
+    git_changed_paths_status = str(
+        meta.get("changed_paths_status") or "unavailable"
+    )
+    if git_changed_paths_status not in {"available", "unavailable"}:
+        git_changed_paths_status = "unavailable"
+    container_repo_root = meta.get("container_repo_root")
+    trajectory_activity = _trajectory_activity(
+        trial_dir,
+        container_repo_root=(
+            str(container_repo_root) if container_repo_root else None
+        ),
+    )
+    changed_paths_status = (
+        "available"
+        if git_changed_paths_status == "available"
+        or trajectory_activity["changed_paths_status"] == "available"
+        else "unavailable"
+    )
     evidence = _evidence_summary(
         trial_dir,
         changed_paths=(
             meta.get("changed_paths") or []
-            if changed_paths_status == "available"
+            if git_changed_paths_status == "available"
             else []
         ),
+        trajectory_activity=trajectory_activity,
+        container_repo_root=(
+            str(container_repo_root) if container_repo_root else None
+        ),
     )
-    trajectory_activity = _trajectory_activity(trial_dir)
     inspected_paths = trajectory_activity["inspected_paths"]
     changed_paths = list(
         dict.fromkeys(
@@ -7417,6 +7435,8 @@ def _evidence_summary(
     trial_dir: Path,
     *,
     changed_paths: list[str],
+    trajectory_activity: Mapping[str, Any] | None = None,
+    container_repo_root: str | None = None,
 ) -> dict[str, Any]:
     authored: list[str] = []
     for path in trial_dir.rglob("fugue-evidence.json"):
@@ -7435,10 +7455,15 @@ def _evidence_summary(
             item = value.get("path") if isinstance(value, dict) else value
             if item:
                 authored.append(str(item)[:1_000])
-    activity = _trajectory_activity(trial_dir)
+    activity = trajectory_activity or _trajectory_activity(
+        trial_dir, container_repo_root=container_repo_root
+    )
     changed = [
         value
-        for value in (_normalize_repo_path(item) for item in changed_paths)
+        for value in (
+            _normalize_repo_path(item, container_repo_root=container_repo_root)
+            for item in changed_paths
+        )
         if value
     ]
     observed = list(dict.fromkeys([*activity["inspected_paths"], *changed, *authored]))
@@ -7453,12 +7478,18 @@ _PATH_ARGUMENTS = {"path", "file_path", "filepath", "filename"}
 _READ_TOOLS = {"read", "read_file", "grep", "search", "search_files", "glob"}
 _WRITE_TOOLS = {"write", "write_file", "edit", "patch", "apply_patch"}
 _COMMAND_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])(?:/testbed/|/workspace/repo/|\./)?"
+    r"(?<![A-Za-z0-9_./-])(?:/tmp/task-repository/repo/|"
+    r"/tmp/task-source/workspace/|/tmp/task-source/|/testbed/|"
+    r"/workspace/repo/|\./)?"
     r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
 )
 
 
-def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
+def _trajectory_activity(
+    trial_dir: Path,
+    *,
+    container_repo_root: str | None = None,
+) -> dict[str, Any]:
     path = trial_dir / "agent" / "trajectory.json"
     try:
         trajectory = json.loads(path.read_text())
@@ -7467,6 +7498,7 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
             "inspected_paths": [],
             "inspected_paths_status": "unavailable",
             "changed_paths": [],
+            "changed_paths_status": "unavailable",
             "error_events": [],
         }
     if not isinstance(trajectory, dict) or not isinstance(
@@ -7476,6 +7508,7 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
             "inspected_paths": [],
             "inspected_paths_status": "unavailable",
             "changed_paths": [],
+            "changed_paths_status": "unavailable",
             "error_events": [],
         }
     inspected: list[str] = []
@@ -7515,7 +7548,9 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
             # successful result for the call.
             if result is None:
                 continue
-            paths = _paths_from_tool_arguments(arguments)
+            paths = _paths_from_tool_arguments(
+                arguments, container_repo_root=container_repo_root
+            )
             normalized_name = tool_name.lower()
             if normalized_name in _WRITE_TOOLS:
                 changed.extend(paths)
@@ -7524,11 +7559,17 @@ def _trajectory_activity(trial_dir: Path) -> dict[str, Any]:
             if isinstance(arguments, dict):
                 command = arguments.get("command")
                 if isinstance(command, str):
-                    inspected.extend(_paths_from_command(command))
+                    inspected.extend(
+                        _paths_from_command(
+                            command,
+                            container_repo_root=container_repo_root,
+                        )
+                    )
     return {
         "inspected_paths": list(dict.fromkeys(inspected)),
         "inspected_paths_status": "available",
         "changed_paths": list(dict.fromkeys(changed)),
+        "changed_paths_status": "available",
         "error_events": errors,
     }
 
@@ -7561,25 +7602,37 @@ def _terminal_exception_event(exception: dict[str, Any]) -> dict[str, Any] | Non
     )
 
 
-def _paths_from_tool_arguments(arguments: Any) -> list[str]:
+def _paths_from_tool_arguments(
+    arguments: Any,
+    *,
+    container_repo_root: str | None = None,
+) -> list[str]:
     if not isinstance(arguments, dict):
         return []
     paths: list[str] = []
     for key, value in arguments.items():
         if key.lower() not in _PATH_ARGUMENTS or not isinstance(value, str):
             continue
-        normalized = _normalize_repo_path(value)
+        normalized = _normalize_repo_path(
+            value, container_repo_root=container_repo_root
+        )
         if normalized:
             paths.append(normalized)
     return paths
 
 
-def _paths_from_command(command: str) -> list[str]:
+def _paths_from_command(
+    command: str,
+    *,
+    container_repo_root: str | None = None,
+) -> list[str]:
     return list(
         dict.fromkeys(
             value
             for value in (
-                _normalize_repo_path(match.group(0))
+                _normalize_repo_path(
+                    match.group(0), container_repo_root=container_repo_root
+                )
                 for match in _COMMAND_PATH_RE.finditer(command)
             )
             if value
@@ -7587,16 +7640,54 @@ def _paths_from_command(command: str) -> list[str]:
     )
 
 
-def _normalize_repo_path(value: str) -> str | None:
-    path = value.strip().strip("'\"")
-    for prefix in ("/testbed/", "/workspace/repo/"):
-        if path.startswith(prefix):
-            path = path[len(prefix) :]
-            break
-    path = path.removeprefix("./")
-    if not path or path.startswith(("/", "../", "/logs/", ".fugue-context/")):
+_AUDITED_REPO_ROOTS = (
+    "/tmp/task-repository/repo",
+    "/tmp/task-source/workspace",
+    "/tmp/task-source",
+    "/workspace/repo",
+    "/testbed",
+)
+_CONFIGURED_REPO_ROOTS = (*_AUDITED_REPO_ROOTS, "/workspace", "/app")
+
+
+def _normalize_repo_path(
+    value: str,
+    *,
+    container_repo_root: str | None = None,
+) -> str | None:
+    raw = value.strip().strip("'\"")
+    raw_path = PurePosixPath(raw)
+    if not raw or ".." in raw_path.parts:
         return None
-    return path[:1_000]
+    roots = list(_AUDITED_REPO_ROOTS)
+    if container_repo_root:
+        configured = PurePosixPath(container_repo_root.strip())
+        if (
+            configured.is_absolute()
+            and ".." not in configured.parts
+            and configured.as_posix() in _CONFIGURED_REPO_ROOTS
+        ):
+            roots.insert(0, configured.as_posix())
+    path = raw
+    if raw_path.is_absolute():
+        for root in dict.fromkeys(roots):
+            prefix = f"{root.rstrip('/')}/"
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+                break
+        else:
+            return None
+    else:
+        path = path.removeprefix("./")
+    normalized = PurePosixPath(path)
+    if (
+        not path
+        or normalized.is_absolute()
+        or ".." in normalized.parts
+        or normalized.parts[:1] == (".fugue-context",)
+    ):
+        return None
+    return normalized.as_posix()[:1_000]
 
 
 def _local_tool_result_failed(result: dict[str, Any]) -> bool:

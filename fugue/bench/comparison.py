@@ -339,13 +339,10 @@ class _ComparisonRuntimeBudget:
 
             terminal_cells = len(self._receipts) + 1
             remaining_cells = max(0, self.total_cells - terminal_cells)
-            cost = _row_number(
-                row,
-                "accounted_cost_usd",
-                "cost_usd",
-                "agent_cost_usd",
-                "observed_cost_usd",
-            )
+            cost = _row_number(row, "accounted_cost_usd")
+            cost_source = "accounted_cost_usd" if cost is not None else None
+            if cost is None:
+                cost, cost_source = _observed_attempt_cost(row)
             reason: str | None = None
             if not attempt:
                 reason = (
@@ -386,6 +383,7 @@ class _ComparisonRuntimeBudget:
                 "status": "failed" if reason else "within_budget",
                 "attempt_id": attempt or None,
                 "cell_accounted_cost_usd": cost,
+                "cell_accounted_cost_source": cost_source,
                 "accounted_cost_usd": round(self.accounted_cost_usd, 9),
                 "approved_max_cost_usd": self.max_cost_usd,
                 "reserve_per_remaining_attempt_usd": self.reserve_per_attempt_usd,
@@ -6147,9 +6145,7 @@ def _paired_attempt_view(
             row.get("comparison_evaluation_status") or "unknown"
         ),
         evidence_status=_attempt_evidence_status(row),
-        cost_usd=_row_number(
-            row, "cost_usd", "observed_cost_usd", "total_cost_usd"
-        ),
+        cost_usd=_observed_attempt_cost(row)[0],
         latency_sec=_row_latency_sec(row),
         input_tokens=_number_or_none(
             usage.get("input_tokens") or row.get("input_tokens")
@@ -6859,6 +6855,41 @@ def _row_number(row: Mapping[str, Any], *keys: str) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def _observed_attempt_cost(
+    row: Mapping[str, Any],
+) -> tuple[float | None, str | None]:
+    """Return one normalized observed cost without inventing missing usage.
+
+    The in-cell adapter is the primary source. A timed-out Agent may not emit
+    that terminal field even though the reconciled Weave usage collector did.
+    Only an explicitly available Weave usage/cost receipt is accepted as the
+    fallback; an unqualified numeric trace attribute remains unavailable.
+    """
+
+    for field_name in (
+        "cost_usd",
+        "observed_cost_usd",
+        "total_cost_usd",
+        "agent_cost_usd",
+    ):
+        value = _number_or_none(row.get(field_name))
+        if value is not None:
+            return value, field_name
+    if (
+        row.get("weave_usage_status") == "available"
+        and row.get("weave_cost_status") == "available"
+    ):
+        value = _number_or_none(row.get("weave_total_cost_usd"))
+        if value is not None:
+            return value, "weave_total_cost_usd"
+    return None, None
+
+
+def _accounted_attempt_cost(row: Mapping[str, Any]) -> float | None:
+    accounted = _row_number(row, "accounted_cost_usd")
+    return accounted if accounted is not None else _observed_attempt_cost(row)[0]
 
 
 def _row_latency_sec(row: Mapping[str, Any]) -> float | None:
@@ -8200,6 +8231,25 @@ def _critical_dimension_failures(
     return failures
 
 
+def _critical_dimension_blockers(
+    rows: Sequence[Mapping[str, Any]], variant: str
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    for row in rows:
+        if str(row.get("variant_id") or "") != variant:
+            continue
+        task_id = str(row.get("task_id") or row.get("task_name") or "unknown-task")
+        critical = row.get("comparison_deterministic_criticality") or {}
+        scores = _mapping_or_empty(row.get("comparison_deterministic_scores"))
+        if not isinstance(critical, Mapping):
+            continue
+        for raw_name, required in critical.items():
+            name = str(raw_name)
+            if required is True and not _dimension_passed(scores.get(name)):
+                blockers.append(f"{task_id}: {name} failed for the {variant}")
+    return tuple(dict.fromkeys(blockers))
+
+
 def _critical_regressions(rows: Sequence[Mapping[str, Any]]) -> int:
     pairs: dict[tuple[str, str, int], dict[str, Mapping[str, Any]]] = {}
     for row in rows:
@@ -8249,6 +8299,7 @@ def _behavioral_summary(
     cross_project_attempts: int,
 ) -> BehavioralSummaryV1:
     candidate_critical_failures = _critical_dimension_failures(rows, "candidate")
+    candidate_critical_blockers = _critical_dimension_blockers(rows, "candidate")
     local_conformance_failed = bool(
         integrity.get("harbor_conformance_failed_attempts")
     )
@@ -8337,24 +8388,17 @@ def _behavioral_summary(
             limitations=common_limitations,
             next_action="Resolve the missing attempts or evidence links and rerun.",
         )
-    if mixed or (improved and regressed) or candidate_critical_failures:
-        blockers = (
-            (
-                f"{candidate_critical_failures} candidate critical dimension(s) failed",
-            )
-            if candidate_critical_failures
-            else ()
-        )
+    if mixed or (improved and regressed):
         return BehavioralSummaryV1(
             status="mixed",
-            recommendation="MIXED — the candidate has both useful and blocking behavior.",
+            recommendation="MIXED — outcome improvements and regressions coexist.",
             improved_pairs=improved,
             regressed_pairs=regressed,
             mixed_pairs=mixed,
             unchanged_pairs=unchanged,
             incomplete_pairs=incomplete,
             candidate_critical_failures=candidate_critical_failures,
-            critical_blockers=blockers,
+            critical_blockers=candidate_critical_blockers,
             supported_claim=None,
             limitations=common_limitations,
             next_action="Inspect the discordant dimensions before selecting the candidate.",
@@ -8377,7 +8421,7 @@ def _behavioral_summary(
             limitations=common_limitations,
             next_action="Do not promote this candidate; inspect the regressed attempts.",
         )
-    if improved:
+    if improved and not candidate_critical_failures:
         return BehavioralSummaryV1(
             status="improved",
             recommendation="IMPROVED — the candidate is better on the locked comparison.",
@@ -8396,21 +8440,33 @@ def _behavioral_summary(
             limitations=common_limitations,
             next_action="Use a separately approved confirmation cohort before promotion.",
         )
+    blocked = bool(candidate_critical_blockers)
     return BehavioralSummaryV1(
         status="unchanged",
-        recommendation="UNCHANGED — no behavioral difference was detected.",
+        recommendation=(
+            "UNCHANGED — no release-qualifying behavioral improvement was "
+            "established."
+            if blocked
+            else "UNCHANGED — no behavioral difference was detected."
+        ),
         improved_pairs=improved,
         regressed_pairs=regressed,
         mixed_pairs=mixed,
         unchanged_pairs=unchanged,
         incomplete_pairs=incomplete,
         candidate_critical_failures=candidate_critical_failures,
-        critical_blockers=(),
+        critical_blockers=candidate_critical_blockers,
         supported_claim=(
-            f"No behavioral difference was detected across {unchanged} aligned pair(s)."
+            None
+            if blocked
+            else f"No behavioral difference was detected across {unchanged} aligned pair(s)."
         ),
         limitations=common_limitations,
-        next_action="Use harder pre-frozen tasks if the decision still matters.",
+        next_action=(
+            "Repair the named candidate blockers before promotion."
+            if blocked
+            else "Use harder pre-frozen tasks if the decision still matters."
+        ),
     )
 
 
@@ -8419,7 +8475,7 @@ def _efficiency_regressions(
 ) -> dict[str, float | None]:
     result: dict[str, float | None] = {}
     for label, extractor in (
-        ("cost", lambda row: _row_number(row, "cost_usd", "observed_cost_usd")),
+        ("cost", lambda row: _observed_attempt_cost(row)[0]),
         ("latency", _row_latency_sec),
         ("tool_calls", lambda row: float(_observed_tool_activity(row)[1])),
     ):
@@ -10186,13 +10242,7 @@ def score_comparison_rows(
             row["comparison_judge_scores"] = judge_scores
         if judge_accounted_reserve:
             row["comparison_judge_accounted_cost_usd"] = judge_accounted_reserve
-            base_cost = _row_number(
-                row,
-                "accounted_cost_usd",
-                "cost_usd",
-                "agent_cost_usd",
-                "observed_cost_usd",
-            )
+            base_cost = _accounted_attempt_cost(row)
             if base_cost is not None:
                 row["accounted_cost_usd"] = base_cost + judge_accounted_reserve
         scored.append(row)
@@ -11203,13 +11253,7 @@ def _operational_summary(
                 )
                 usage = mcp_tool_usage.setdefault(variant, {})
                 usage[public_name] = usage.get(public_name, 0) + count
-        cost = _row_number(
-            row,
-            "cost_usd",
-            "observed_cost_usd",
-            "total_cost_usd",
-            "agent_cost_usd",
-        )
+        cost = _observed_attempt_cost(row)[0]
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
             cost_rows += 1
@@ -11472,6 +11516,43 @@ def _publish_comparison_result(
         raise publication_error
 
 
+def _comparison_run_exportability_issue(run_summary: Any) -> str | None:
+    """Reject orchestration failures while retaining terminal task failures.
+
+    A failed Agent task is comparative evidence and must reach canonical
+    scoring. Cancellation, interruption, pending work, or failed evidence
+    publication are run-level failures and cannot be analyzed as a completed
+    comparison.
+    """
+
+    if run_summary is None:
+        return None
+    if run_summary.cancelled:
+        return f"status={run_summary.status}, cancelled_cells={run_summary.cancelled}"
+    if run_summary.interrupted:
+        return (
+            f"status={run_summary.status}, "
+            f"interrupted_cells={run_summary.interrupted}"
+        )
+    if run_summary.pending:
+        return f"status={run_summary.status}, pending_cells={run_summary.pending}"
+    if run_summary.evaluation_failures:
+        return (
+            f"status={run_summary.status}, "
+            f"evaluation_failures={len(run_summary.evaluation_failures)}"
+        )
+    if run_summary.status == "passed":
+        return None
+    if run_summary.observability_status not in {None, "passed"}:
+        return (
+            f"status={run_summary.status}, "
+            f"observability_status={run_summary.observability_status}"
+        )
+    if run_summary.status == "failed" and run_summary.failed:
+        return None
+    return f"status={run_summary.status}, no terminal task failure to analyze"
+
+
 def execute_comparison(
     preview: ComparisonPreviewV1,
     *,
@@ -11637,15 +11718,17 @@ def execute_comparison(
         run_id=run_id,
         experiment=experiment,
         cancellation_event=runtime_budget.cancellation_event,
+        cancellation_origin="internal",
         host_evaluator=evaluate_attempt,
         host_scorer_names=_comparison_scorer_names(spec),
     )
     if runtime_budget.failure_reason:
         raise RuntimeError(runtime_budget.failure_reason)
-    if run_summary is not None and run_summary.status != "passed":
+    run_issue = _comparison_run_exportability_issue(run_summary)
+    if run_issue is not None:
         raise RuntimeError(
             "comparison execution did not pass its required cell/evidence "
-            f"gates (run={run_id}, status={run_summary.status})"
+            f"gates (run={run_id}, {run_issue})"
         )
     source_post_run_drift = _verify_v3_source_drift(
         spec,

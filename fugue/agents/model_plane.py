@@ -90,6 +90,34 @@ _SECRET_ENV_NAME = re.compile(
 )
 _CONTAINER_SECRET_ROOT = PurePosixPath("/tmp/fugue-agent-secrets")
 _CONTAINER_TRIAL_POLICY_ROOT = PurePosixPath("/tmp/fugue-trial-policy")
+_CONTAINER_REPO_ROOTS = (
+    PurePosixPath("/tmp/task-repository/repo"),
+    PurePosixPath("/tmp/task-source/workspace"),
+    PurePosixPath("/tmp/task-source"),
+    PurePosixPath("/workspace/repo"),
+    PurePosixPath("/testbed"),
+    PurePosixPath("/workspace"),
+    PurePosixPath("/app"),
+)
+
+
+def _validated_container_repo_root(value: str) -> str:
+    """Return one explicitly allowed in-container repository root.
+
+    The value can come from operator configuration or from an in-container
+    discovery probe.  Keep it constrained to Fugue's known task roots so a
+    malformed value cannot turn post-trial evidence collection into an
+    arbitrary filesystem probe.
+    """
+
+    raw = value.strip()
+    path = PurePosixPath(raw)
+    if not raw or not path.is_absolute() or ".." in path.parts:
+        raise ValueError("invalid configured container repository root")
+    normalized = PurePosixPath(path.as_posix())
+    if normalized not in _CONTAINER_REPO_ROOTS:
+        raise ValueError("unsupported configured container repository root")
+    return normalized.as_posix()
 
 
 def _safe_exec_failure(result: Any) -> str:
@@ -840,6 +868,7 @@ done
         changed_paths: list[str] = []
         changed_paths_status = "unavailable"
         changed_paths_error: str | None = None
+        container_repo_root: str | None = None
         # Harbor runs the prepared verifier after the Agent exits. Restore the
         # immutable image's tool modes only after no Agent shell remains.
         await self._restore_verifier_runtime(environment)
@@ -855,6 +884,7 @@ done
             ]
         try:
             repo_root = await self._container_repo_root(environment)
+            container_repo_root = repo_root
             result = await self.exec_as_agent(
                 environment,
                 command=(
@@ -883,6 +913,7 @@ done
                 changed_paths=changed_paths,
                 changed_paths_status=changed_paths_status,
                 changed_paths_error=changed_paths_error,
+                container_repo_root=container_repo_root,
                 artifact_normalization=artifact_normalization,
             )
         finally:
@@ -936,6 +967,7 @@ done
         changed_paths: list[str] | None = None,
         changed_paths_status: str = "unavailable",
         changed_paths_error: str | None = None,
+        container_repo_root: str | None = None,
         artifact_normalization: list[dict[str, str]] | None = None,
     ) -> None:
         try:
@@ -953,6 +985,8 @@ done
             meta["changed_paths_error"] = changed_paths_error
         else:
             meta.pop("changed_paths_error", None)
+        if container_repo_root:
+            meta["container_repo_root"] = container_repo_root
         meta["artifact_normalization"] = artifact_normalization or []
         fingerprints = getattr(self, "_runtime_fingerprints", {})
         meta["runtime_fingerprints"] = fingerprints
@@ -1267,11 +1301,20 @@ done
     async def _container_repo_root(self, environment: BaseEnvironment) -> str:
         configured = os.environ.get("FUGUE_CONTAINER_REPO_ROOT", "").strip()
         if configured:
-            return configured
+            return _validated_container_repo_root(configured)
         result = await self.exec_as_agent(
-            environment, command='printf %s "$PWD"', timeout_sec=10
+            environment,
+            command=(
+                "for root in /tmp/task-repository/repo "
+                "/tmp/task-source/workspace /tmp/task-source; do "
+                'if [ -d "$root" ]; then printf %s "$root"; exit 0; fi; '
+                'done; printf %s "$PWD"'
+            ),
+            timeout_sec=10,
         )
-        return (result.stdout or "").strip() or "/app"
+        return _validated_container_repo_root(
+            (result.stdout or "").strip() or "/app"
+        )
 
     async def _inject_context_artifact(
         self, environment: BaseEnvironment

@@ -6,6 +6,7 @@ jobs/
 artifacts/
 reports/
 .fugue/
+.study-console/
 /wandb/
 
 # The export tests intentionally version a minimal synthetic Harbor job.

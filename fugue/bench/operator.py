@@ -2014,6 +2014,7 @@ class OperatorService:
         experiment: ExperimentSpec | None = None,
         cell_runner: Any = None,
         cancellation_event: threading.Event | None = None,
+        cancellation_origin: Literal["operator", "internal"] = "operator",
         host_evaluator: Callable[[dict[str, Any]], None] | None = None,
         host_scorer_names: tuple[str, ...] = (),
     ) -> RunSummary:
@@ -2315,10 +2316,25 @@ class OperatorService:
                     else None
                 ),
                 cancellation_event=cancel_event,
+                cancellation_message=(
+                    "Run stopped by an internal safety gate."
+                    if cancellation_origin == "internal"
+                    else "Run cancelled by the operator."
+                ),
             )
-            cancelled = cancel_event.is_set() or any(
-                item.status == "cancelled" for item in outcomes
+            failed = sum(item.status == "failed" for item in outcomes)
+            skipped = sum(item.status == "not_applicable" for item in outcomes)
+            cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
+            passed = sum(item.status == "passed" for item in outcomes)
+            operator_cancel_requested = bool(
+                (read_run_manifest(run_dir) or {}).get("cancellation_requested_at")
             )
+            internal_abort = bool(
+                cancel_event.is_set()
+                and cancellation_origin == "internal"
+                and not operator_cancel_requested
+            )
+            cancelled = bool(cancelled_cells) and not internal_abort
             publication = (
                 live.finalize(cancelled=True)
                 if live is not None and cancelled
@@ -2334,10 +2350,6 @@ class OperatorService:
             failures = list(publication.failures if publication else ())
             if observability_error:
                 failures.insert(0, observability_error)
-            failed = sum(item.status == "failed" for item in outcomes)
-            skipped = sum(item.status == "not_applicable" for item in outcomes)
-            cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
-            passed = sum(item.status == "passed" for item in outcomes)
             harbor_conformance = write_harbor_run_conformance_receipt(
                 repo_root=self.repo_root,
                 run_id=run_id,
@@ -2368,12 +2380,17 @@ class OperatorService:
                     "cancelled"
                     if cancelled
                     else "failed"
-                    if failed or conformance_blocked or publication_blocked
+                    if internal_abort
+                    or failed
+                    or conformance_blocked
+                    or publication_blocked
                     else "passed"
                 ),
                 error=(
                     "Run cancelled by the operator."
                     if cancelled
+                    else "Run stopped by an internal safety gate."
+                    if internal_abort
                     else (
                         "Local Harbor conformance receipt did not pass: "
                         f"{harbor_conformance.status}"
@@ -2384,7 +2401,14 @@ class OperatorService:
                         + "; ".join(publication.failures)
                     )
                     if publication_blocked and publication is not None
-                    else None
+                    else next(
+                        (
+                            item.error
+                            for item in outcomes
+                            if item.status == "failed" and item.error
+                        ),
+                        None,
+                    )
                 ),
                 running=running,
                 values={
@@ -2393,7 +2417,7 @@ class OperatorService:
                     "cancelled_cells": cancelled_cells,
                     "not_applicable_cells": skipped,
                     "observability_status": "failed"
-                    if failures
+                    if failures or internal_abort
                     else "cancelled"
                     if cancelled
                     else "passed",

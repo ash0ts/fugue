@@ -14,6 +14,12 @@ tasks exercise those surfaces directly: one creates a 44-character,
 platform-bounded Skill; the other adds compatibility metadata without changing
 an existing Skill's instructions or package.
 
+Each public task declares the exact JSON value types, task identity, path base,
+file set, and validation-command shape expected by the deterministic scorer.
+The scorer checks requested semantics without requiring undocumented section
+titles or repeating the Skill name in a memo, and distinguishes an instruction
+that forbids an install command from one that tells the user to run it.
+
 The deterministic scorer owns correctness and safety. The shared blinded
 Sonnet judge reports community usefulness using anchored labels, but remains
 advisory because it shares a model family with the Agent and its synthetic/gold

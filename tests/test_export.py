@@ -196,6 +196,67 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert "bridge-check__abc123" in out.read_text()
 
 
+def test_export_uses_successful_task_workspace_trajectory_as_change_receipt(
+    tmp_path: Path,
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    trial = next(jobs.rglob("result.json")).parent
+    meta_path = trial / "agent" / "fugue-meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta.update(
+        {
+            "changed_paths_status": "unavailable",
+            "changed_paths": [],
+            "changed_paths_error": "NonZeroAgentExitCodeError",
+            "container_repo_root": "/tmp/task-repository/repo",
+        }
+    )
+    meta_path.write_text(json.dumps(meta))
+    (trial / "agent" / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "tool_calls": [
+                            {
+                                "tool_call_id": "read",
+                                "function_name": "Read",
+                                "arguments": {
+                                    "file_path": (
+                                        "/tmp/task-repository/repo/app/actions.mjs"
+                                    )
+                                },
+                            },
+                            {
+                                "tool_call_id": "edit",
+                                "function_name": "Edit",
+                                "arguments": {
+                                    "file_path": (
+                                        "/tmp/task-repository/repo/app/actions.mjs"
+                                    )
+                                },
+                            },
+                        ],
+                        "observation": {
+                            "results": [
+                                {"source_call_id": "read", "content": "source"},
+                                {"source_call_id": "edit", "content": "updated"},
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    [row] = export_rows([jobs])
+
+    assert row["inspected_paths_status"] == "available"
+    assert row["inspected_paths"] == ["app/actions.mjs"]
+    assert row["changed_paths_status"] == "available"
+    assert row["changed_paths"] == ["app/actions.mjs"]
+
+
 def test_export_marks_unattributed_harbor_zero_usage_unavailable(
     tmp_path: Path,
 ) -> None:

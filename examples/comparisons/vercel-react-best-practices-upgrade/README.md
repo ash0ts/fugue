@@ -16,8 +16,14 @@ The tasks are small but executable Next.js-style maintenance cases. One
 requires authentication and authorization inside a Server Action before a
 mutation. The other removes redundant React Server Component serialization
 while preserving accessible output. The checked-in fixtures intentionally fail
-their focused Node tests before repair. Private expected facts and scorer
-fixtures never enter Agent inputs.
+their focused Node tests before repair. Each public task declares an exact JSON
+answer schema containing the complete final changed files and the complete
+`node --test` receipt. The deterministic scorer derives behavior from those
+file contents and test names; it does not trust self-reported correctness
+booleans. Private expected source properties never enter Agent inputs.
+
+Skill registration and invocation remain Fugue mechanism evidence. They are
+not reimplemented as a filename heuristic inside the task-correctness scorer.
 
 The checked-in Skill lock binds repository, path, and exact commits. Bundle
 digests remain `null` until Fugue performs its explicit reviewed import; the

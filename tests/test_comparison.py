@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -23,6 +24,7 @@ from fugue.bench.comparison import (
     _comparison_qualification_digest,
     _comparison_reserved_cost_per_attempt,
     _comparison_result_digest,
+    _comparison_run_exportability_issue,
     _comparison_trial_output,
     _ComparisonRuntimeBudget,
     _evaluate_decision,
@@ -1520,8 +1522,31 @@ def test_identical_critical_failures_are_unchanged_not_mixed() -> None:
     assert result.mixed == 0
     # A failed candidate critical dimension still blocks the aggregate verdict;
     # it does not fabricate a difference between identical paired outcomes.
-    assert result.behavioral_summary.status == "mixed"
+    assert result.behavioral_summary.status == "unchanged"
     assert result.behavioral_summary.candidate_critical_failures == 2
+    assert result.behavioral_summary.critical_blockers == (
+        "release-task: release.factual_correctness failed for the candidate",
+        "release-task: release.locked_project_scope failed for the candidate",
+    )
+    assert result.behavioral_summary.supported_claim is None
+
+
+def test_pure_regression_is_not_relabelled_mixed_by_candidate_failure() -> None:
+    result = analyze_comparison_rows(
+        comparison_id="pure-regression",
+        preview_digest="b" * 64,
+        rows=[
+            _decision_row(variant="baseline", passed=True),
+            _decision_row(variant="candidate", passed=False),
+        ],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    assert result.paired_cases[0].status == "regressed"
+    assert result.behavioral_summary.status == "regressed"
+    assert result.regressed == 1
+    assert result.mixed == 0
 
 
 def test_paired_attempt_prefers_attempt_scoped_mcp_calls() -> None:
@@ -3227,7 +3252,9 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                 "inspected_paths": ["expense-policy-v4.md"],
                 "inspected_paths_status": "available",
                 "comparison_deterministic_scores": {"private": True},
-                "cost_usd": 1.0,
+                "weave_usage_status": "available",
+                "weave_cost_status": "available",
+                "weave_total_cost_usd": 1.0,
             }
         ],
         repo_root=root,
@@ -3758,6 +3785,7 @@ def test_runtime_budget_cancels_before_remaining_cells_when_projection_drifts() 
         "status": "failed",
         "attempt_id": "a" * 64,
         "cell_accounted_cost_usd": 4.5,
+        "cell_accounted_cost_source": "cost_usd",
         "accounted_cost_usd": 4.5,
         "approved_max_cost_usd": 5,
         "reserve_per_remaining_attempt_usd": 1,
@@ -3812,7 +3840,35 @@ def test_runtime_budget_fails_closed_when_started_attempt_has_no_cost() -> None:
 
     assert budget.cancellation_event.is_set()
     assert row["comparison_runtime_budget"]["cell_accounted_cost_usd"] is None
+    assert row["comparison_runtime_budget"]["cell_accounted_cost_source"] is None
     assert row["comparison_runtime_budget"]["remaining_cells"] == 1
+
+
+def test_runtime_budget_uses_verified_weave_cost_for_timed_out_attempt() -> None:
+    budget = _ComparisonRuntimeBudget(
+        max_cost_usd=10,
+        reserve_per_attempt_usd=1,
+        total_cells=1,
+    )
+    row = {
+        "attempt_id": "d" * 64,
+        "exception_class": "AgentTimeoutError",
+        "weave_usage_status": "available",
+        "weave_cost_status": "available",
+        "weave_total_cost_usd": 4.337110345377283,
+    }
+
+    budget.observe(row)
+
+    assert not budget.cancellation_event.is_set()
+    assert budget.accounted_cost_usd == pytest.approx(4.337110345377283)
+    assert row["comparison_runtime_budget"]["cell_accounted_cost_usd"] == pytest.approx(
+        4.337110345377283
+    )
+    assert (
+        row["comparison_runtime_budget"]["cell_accounted_cost_source"]
+        == "weave_total_cost_usd"
+    )
 
 
 def test_runtime_budget_accepts_explicitly_no_cost_comparison_rows() -> None:
@@ -3828,3 +3884,36 @@ def test_runtime_budget_accepts_explicitly_no_cost_comparison_rows() -> None:
     assert not budget.cancellation_event.is_set()
     assert row["comparison_runtime_budget"]["status"] == "within_budget"
     assert row["comparison_runtime_budget"]["cell_accounted_cost_usd"] == 0
+    assert row["comparison_runtime_budget"]["cell_accounted_cost_source"] is None
+
+
+def test_terminal_task_failure_is_exportable_but_cancellation_is_not() -> None:
+    terminal_failure = SimpleNamespace(
+        status="failed",
+        failed=1,
+        cancelled=0,
+        interrupted=0,
+        pending=0,
+        observability_status="passed",
+        evaluation_failures=(),
+    )
+    cancelled = SimpleNamespace(
+        **{
+            **terminal_failure.__dict__,
+            "cancelled": 1,
+        }
+    )
+    interrupted = SimpleNamespace(
+        **{
+            **terminal_failure.__dict__,
+            "interrupted": 1,
+        }
+    )
+
+    assert _comparison_run_exportability_issue(terminal_failure) is None
+    assert "cancelled_cells=1" in str(
+        _comparison_run_exportability_issue(cancelled)
+    )
+    assert "interrupted_cells=1" in str(
+        _comparison_run_exportability_issue(interrupted)
+    )

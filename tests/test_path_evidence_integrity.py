@@ -5,7 +5,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from fugue.agents.model_plane import _TrialMetaMixin
+import pytest
+
+from fugue.agents.model_plane import (
+    _TrialMetaMixin,
+    _validated_container_repo_root,
+)
 from fugue.bench import export
 
 
@@ -68,6 +73,7 @@ def test_post_run_git_diff_records_available_empty_or_nonempty_receipt(
     meta = json.loads((trial.logs_dir / "fugue-meta.json").read_text())
     assert meta["changed_paths_status"] == "available"
     assert meta["changed_paths"] == ["src/app.py", "tests/test_app.py"]
+    assert meta["container_repo_root"] == "/workspace/repo"
     assert "changed_paths_error" not in meta
 
 
@@ -162,8 +168,116 @@ def test_trajectory_counts_only_correlated_successful_path_activity(
     activity = export._trajectory_activity(trial)
 
     assert activity["inspected_paths_status"] == "available"
+    assert activity["changed_paths_status"] == "available"
     assert activity["inspected_paths"] == ["src/read.py"]
     assert activity["changed_paths"] == ["src/written.py"]
     assert len(activity["error_events"]) == 1
     assert activity["error_events"][0]["tool_name"] == "read_file"
     assert activity["error_events"][0]["source"] == "local_trajectory"
+
+
+def test_extracted_task_roots_produce_repo_relative_audited_paths(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {
+                        "tool_calls": [
+                            {
+                                "tool_call_id": "read-repo",
+                                "function_name": "Read",
+                                "arguments": {
+                                    "file_path": (
+                                        "/tmp/task-repository/repo/app/actions.mjs"
+                                    )
+                                },
+                            },
+                            {
+                                "tool_call_id": "edit-repo",
+                                "function_name": "Edit",
+                                "arguments": {
+                                    "file_path": (
+                                        "/tmp/task-repository/repo/app/actions.mjs"
+                                    )
+                                },
+                            },
+                            {
+                                "tool_call_id": "read-source",
+                                "function_name": "Read",
+                                "arguments": {
+                                    "file_path": (
+                                        "/tmp/task-source/workspace/skills/demo/SKILL.md"
+                                    )
+                                },
+                            },
+                        ],
+                        "observation": {
+                            "results": [
+                                {"source_call_id": "read-repo", "content": "source"},
+                                {"source_call_id": "edit-repo", "content": "edited"},
+                                {
+                                    "source_call_id": "read-source",
+                                    "content": "skill",
+                                },
+                            ]
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    activity = export._trajectory_activity(trial)
+
+    assert activity["inspected_paths"] == [
+        "app/actions.mjs",
+        "skills/demo/SKILL.md",
+    ]
+    assert activity["changed_paths"] == ["app/actions.mjs"]
+    assert activity["inspected_paths_status"] == "available"
+    assert activity["changed_paths_status"] == "available"
+
+
+def test_task_path_normalization_rejects_escape_and_untrusted_absolute_paths() -> (
+    None
+):
+    assert (
+        export._normalize_repo_path(
+            "/tmp/task-repository/repo/app/actions.mjs"
+        )
+        == "app/actions.mjs"
+    )
+    assert (
+        export._normalize_repo_path(
+            "/tmp/task-source/workspace/skills/demo/SKILL.md"
+        )
+        == "skills/demo/SKILL.md"
+    )
+    for unsafe in (
+        "/tmp/task-repository/repo/../private-labels.json",
+        "/tmp/task-source/workspace/../../etc/passwd",
+        "/tmp/task-repository/repository/secrets.txt",
+        "src/../../private-labels.json",
+        "/etc/passwd",
+    ):
+        assert export._normalize_repo_path(unsafe) is None
+
+
+def test_configured_container_repo_root_is_allowlisted() -> None:
+    assert (
+        _validated_container_repo_root(" /tmp/task-repository/repo ")
+        == "/tmp/task-repository/repo"
+    )
+    assert _validated_container_repo_root("/app") == "/app"
+    for unsafe in (
+        "../repo",
+        "/tmp/task-repository/repo/../private",
+        "/etc",
+        "/tmp/task-repository/repository",
+    ):
+        with pytest.raises(ValueError, match="container repository root"):
+            _validated_container_repo_root(unsafe)

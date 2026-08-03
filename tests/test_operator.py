@@ -1074,6 +1074,58 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
     assert manifest["failed_cells"] == 0
 
 
+def test_execute_run_internal_abort_after_terminal_cell_is_not_operator_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    run_id = "operator-internal-abort"
+    cancellation = threading.Event()
+    events: list[tuple[str, object]] = []
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell) -> None:
+            events.append(("begin", cell.id))
+
+        def finish_cell(self, cell, outcome) -> None:
+            events.append(("finish", outcome.status))
+            cancellation.set()
+
+        def finalize(self, *, cancelled: bool = False) -> PublicationResult:
+            events.append(("finalize", cancelled))
+            return PublicationResult(published=0, skipped=0)
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id=run_id,
+        cell_runner=lambda command, **kwargs: subprocess.CompletedProcess(command, 0),
+        cancellation_event=cancellation,
+        cancellation_origin="internal",
+    )
+
+    assert result.status == "failed"
+    assert result.cancelled == 0
+    assert ("finish", "passed") in events
+    assert ("finalize", False) in events
+    manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
+    assert manifest is not None
+    assert manifest["status"] == "failed"
+    assert manifest["error"] == "Run stopped by an internal safety gate."
+    assert manifest["cancelled_cells"] == 0
+    assert manifest["observability_status"] == "failed"
+
+
 def test_execute_run_planning_failure_records_starting_failure_without_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

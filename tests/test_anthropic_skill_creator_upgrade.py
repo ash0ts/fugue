@@ -51,12 +51,8 @@ def test_canary_locks_exact_skill_creator_upgrade_and_four_cells() -> None:
 
     assert spec.schema_version == 2
     assert spec.id == "anthropic-skill-creator-upgrade-canary-v1"
-    assert spec.baseline.skills == (
-        "anthropic-skill-creator-before-compatibility",
-    )
-    assert spec.candidate.skills == (
-        "anthropic-skill-creator-compatibility",
-    )
+    assert spec.baseline.skills == ("anthropic-skill-creator-before-compatibility",)
+    assert spec.candidate.skills == ("anthropic-skill-creator-compatibility",)
     assert lock["repository"] == "https://github.com/anthropics/skills"
     assert lock["path"] == "skills/skill-creator"
     assert lock["declared_skill_name"] == "skill-creator"
@@ -85,11 +81,14 @@ def test_canary_locks_exact_skill_creator_upgrade_and_four_cells() -> None:
     assert spec.execution.attempts == 1
     assert spec.execution.max_cost_usd == 34
     assert spec.execution.reserve_per_attempt_usd == 8.4
-    assert sum(
-        evaluator.reserve_cost_usd
-        for evaluator in spec.evaluators
-        if evaluator.type == "llm_judge"
-    ) == 0.1
+    assert (
+        sum(
+            evaluator.reserve_cost_usd
+            for evaluator in spec.evaluators
+            if evaluator.type == "llm_judge"
+        )
+        == 0.1
+    )
 
     tasks = [
         json.loads(line)
@@ -97,9 +96,17 @@ def test_canary_locks_exact_skill_creator_upgrade_and_four_cells() -> None:
         if line.strip()
     ]
     assert len(tasks) == 2
-    assert {
-        item["resources"][0]["path"].rsplit("/", 1)[-1] for item in tasks
-    } == {"create-skill-workspace.tar", "update-skill-workspace.tar"}
+    assert {item["resources"][0]["path"].rsplit("/", 1)[-1] for item in tasks} == {
+        "create-skill-workspace.tar",
+        "update-skill-workspace.tar",
+    }
+    for task in tasks:
+        question = task["input"]["question"]
+        assert "`schema_version` is integer `1`" in question
+        assert "maps paths relative to the `skills/` directory" in question
+        assert (
+            "`validation` has exactly string `command` and boolean `passed`" in question
+        )
 
 
 def test_shared_judge_is_advisory_and_blinded_to_treatment() -> None:
@@ -208,9 +215,71 @@ def test_long_name_limit_and_unsafe_dependency_fail_closed() -> None:
         unsafe,
         {"expected": label["expected"]},
     )
+    documented_prohibition = label["gold_output"].replace(
+        "Offline operation only; all release evidence must already be local.",
+        "Offline operation only; pip install is forbidden, avoid git clone, and keep all release evidence local. Password: never serialize or persist it.",
+    )
+    documented_scores = score(
+        {"id": label["id"]},
+        documented_prohibition,
+        {"expected": label["expected"]},
+    )
 
     assert long_scores["name_rules"] is False
     assert unsafe_scores["dependency_secret_safety"] is False
+    assert documented_scores["dependency_secret_safety"] is True
+
+    leaked_secret = label["gold_output"].replace(
+        "Offline operation only; all release evidence must already be local.",
+        "Offline operation only. API key: sk-live-value",
+    )
+    leaked_scores = score(
+        {"id": label["id"]},
+        leaked_secret,
+        {"expected": label["expected"]},
+    )
+    assert leaked_scores["dependency_secret_safety"] is False
+
+
+def test_public_semantics_do_not_require_hidden_headings_or_memo_name() -> None:
+    score = _score()
+    label = _labels()["create-compatible-long-name-skill"]
+    output = (
+        label["gold_output"]
+        .replace("## Workflow", "## Bounded process")
+        .replace("## Validation", "## Verification checks")
+        .replace("## Failure handling", "## Incomplete evidence")
+        .replace(
+            "Created cross-platform-release-evidence-verification as a two-file, offline Skill with explicit platform requirements and bounded evidence handling.",
+            "Completed the requested two-file package and its offline validation without adding executable code.",
+        )
+    )
+
+    scores = score(
+        {"id": label["id"]},
+        output,
+        {"expected": label["expected"]},
+    )
+
+    assert scores["name_rules"] is True
+    assert scores["instruction_quality"] is True
+
+
+def test_wrong_task_identity_remains_a_real_schema_failure() -> None:
+    score = _score()
+    label = _labels()["create-compatible-long-name-skill"]
+    output = label["gold_output"].replace(
+        '"task_id":"create-compatible-long-name-skill"',
+        '"task_id":"cross-platform-release-evidence-verification-skill"',
+    )
+
+    scores = score(
+        {"id": label["id"]},
+        output,
+        {"expected": label["expected"]},
+    )
+
+    assert scores["schema_validity"] is False
 
 
 def test_task_fixture_archives_are_deterministic(tmp_path: Path) -> None:
