@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -23,7 +24,9 @@ from fugue.bench.execution import (
     update_run_manifest,
     write_run_manifest,
 )
-from fugue.bench.files import latest_jsonl_records
+from fugue.bench.files import atomic_write_json, latest_jsonl_records
+
+CANCELLATION_CLEANUP_RECEIPT = "cancellation-cleanup.json"
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,65 @@ class ManagedRun:
     run_dir: Path
     log_path: Path
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CancellationCleanupResult:
+    status: str
+    projects: tuple[str, ...]
+    planned_jobs: int
+    started_jobs: int
+    never_started_jobs: int
+    removed_containers: tuple[str, ...] = ()
+    removed_networks: tuple[str, ...] = ()
+    remaining_containers: tuple[str, ...] = ()
+    remaining_networks: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    @property
+    def zero_orphans_verified(self) -> bool:
+        return (
+            self.status == "passed"
+            and not self.remaining_containers
+            and not self.remaining_networks
+        )
+
+    def to_dict(self, *, run_id: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "status": self.status,
+            "generated_at": _now(),
+            "scope": {
+                "kind": "exact_run_compose_projects",
+                "compose_projects": list(self.projects),
+                "selector": "com.docker.compose.project=<exact project>",
+                "resource_types": ["container", "network"],
+                "excluded": ["other Compose projects", "non-Docker resources"],
+            },
+            "planned_jobs": self.planned_jobs,
+            "started_jobs": self.started_jobs,
+            "never_started_jobs": self.never_started_jobs,
+            "mutations_performed": bool(
+                self.removed_containers or self.removed_networks
+            ),
+            "removed_containers": list(self.removed_containers),
+            "removed_networks": list(self.removed_networks),
+            "remaining_containers": list(self.remaining_containers),
+            "remaining_networks": list(self.remaining_networks),
+            "zero_orphans_verified": self.zero_orphans_verified,
+            "errors": list(self.errors),
+            "receipt_sha256": "",
+        }
+
+
+@dataclass(frozen=True)
+class _ComposeProjectScope:
+    projects: tuple[str, ...]
+    planned_jobs: int
+    started_jobs: int
+    never_started_jobs: int
+    errors: tuple[str, ...] = ()
 
 
 class RunSupervisor:
@@ -121,6 +183,9 @@ class RunSupervisor:
     def cancel(self, run_id: str) -> ManagedRun:
         run = self.get(run_id)
         if run.status not in {"starting", "running"}:
+            if run.status in {"cancelled", "interrupted"}:
+                self.record_cancellation_cleanup(run_id)
+                return self.get(run_id, recover=False)
             return run
         message = "Run cancelled by the operator."
         requested_at = _now()
@@ -132,32 +197,52 @@ class RunSupervisor:
                 "cancellation_reason": message,
             },
         )
+        signal_errors = _signal_recorded_cell_groups(run.run_dir, signal.SIGTERM)
         if run.pid is not None:
             try:
                 os.kill(run.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            except OSError as exc:
+                signal_errors.append(
+                    f"controller process {run.pid}: SIGTERM failed: {exc}"
+                )
 
         deadline = time.monotonic() + self.cancel_grace_sec
         while time.monotonic() < deadline:
             current = read_run_manifest(run.run_dir) or {}
             if current.get("status") not in {"starting", "running"}:
-                return self._finish_cancellation_cleanup(run_id, run.run_dir)
+                self.record_cancellation_cleanup(
+                    run_id,
+                    signal_errors=signal_errors,
+                )
+                return self.get(run_id, recover=False)
             if run.pid is None or not _pid_alive(run.pid):
                 break
             time.sleep(0.05)
 
         current = read_run_manifest(run.run_dir) or {}
         if current.get("status") not in {"starting", "running"}:
-            return self._finish_cancellation_cleanup(run_id, run.run_dir)
+            self.record_cancellation_cleanup(
+                run_id,
+                signal_errors=signal_errors,
+            )
+            return self.get(run_id, recover=False)
         if run.pid is not None and _pid_alive(run.pid):
-            _signal_recorded_cell_groups(run.run_dir, signal.SIGKILL)
+            signal_errors.extend(
+                _signal_recorded_cell_groups(run.run_dir, signal.SIGKILL)
+            )
             process_group = run.metadata.get("process_group") or run.pid
             if isinstance(process_group, int):
                 try:
                     os.killpg(process_group, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except OSError as exc:
+                    signal_errors.append(
+                        f"controller process group {process_group}: "
+                        f"SIGKILL failed: {exc}"
+                    )
             for _ in range(20):
                 if not _pid_alive(run.pid):
                     break
@@ -191,21 +276,104 @@ class RunSupervisor:
             run_id,
             forced_cancellation,
         )
-        return self._finish_cancellation_cleanup(run_id, run.run_dir)
-
-    def _finish_cancellation_cleanup(self, run_id: str, run_dir: Path) -> ManagedRun:
-        projects, errors = _cleanup_run_compose_projects(self.repo_root, run_dir)
-        if projects:
-            update_run_manifest(
-                self.repo_root,
-                run_id,
-                lambda _: {
-                    "cancellation_cleanup_status": "failed" if errors else "passed",
-                    "cancellation_cleanup_projects": projects,
-                    "cancellation_cleanup_errors": errors,
-                },
-            )
+        self.record_cancellation_cleanup(
+            run_id,
+            signal_errors=signal_errors,
+        )
         return self.get(run_id, recover=False)
+
+    def record_cancellation_cleanup(
+        self,
+        run_id: str,
+        *,
+        signal_errors: list[str] | tuple[str, ...] = (),
+    ) -> CancellationCleanupResult:
+        """Remove and verify only exact run-scoped Harbor resources."""
+
+        run_dir = self._run_dir(run_id)
+        receipt_path = run_dir / CANCELLATION_CLEANUP_RECEIPT
+        with FileLock(f"{receipt_path}.lock"):
+            result = _cleanup_run_compose_projects(self.repo_root, run_dir)
+            payload = result.to_dict(run_id=run_id)
+            prior_errors: list[str] = []
+            prior_signal_errors: list[str] = []
+            prior_removed_containers: list[str] = []
+            prior_removed_networks: list[str] = []
+            if receipt_path.is_file():
+                try:
+                    previous = json.loads(receipt_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    previous = {}
+                if isinstance(previous, dict):
+                    prior_errors = [
+                        str(value) for value in previous.get("errors") or ()
+                    ]
+                    prior_signal_errors = [
+                        str(value)
+                        for value in previous.get("signal_errors") or ()
+                    ]
+                    prior_removed_containers = [
+                        str(value)
+                        for value in previous.get("removed_containers") or ()
+                    ]
+                    prior_removed_networks = [
+                        str(value)
+                        for value in previous.get("removed_networks") or ()
+                    ]
+                    payload["previous_receipt_sha256"] = str(
+                        previous.get("receipt_sha256") or ""
+                    )
+            payload["removed_containers"] = sorted(
+                {
+                    *prior_removed_containers,
+                    *result.removed_containers,
+                }
+            )
+            payload["removed_networks"] = sorted(
+                {
+                    *prior_removed_networks,
+                    *result.removed_networks,
+                }
+            )
+            payload["mutations_performed"] = bool(
+                payload["removed_containers"] or payload["removed_networks"]
+            )
+            payload["prior_errors"] = sorted(set(prior_errors))
+            payload["signal_errors"] = sorted(
+                {*prior_signal_errors, *signal_errors}
+            )
+            payload["graceful_termination_status"] = (
+                "failed" if payload["signal_errors"] else "passed"
+            )
+            payload["receipt_sha256"] = _receipt_digest(payload)
+            atomic_write_json(receipt_path, payload)
+        update_run_manifest(
+            self.repo_root,
+            run_id,
+            lambda _: {
+                "cancellation_cleanup_status": str(payload["status"]),
+                "cancellation_cleanup_projects": list(result.projects),
+                "cancellation_cleanup_errors": [
+                    str(value) for value in payload["errors"]
+                ],
+                "cancellation_graceful_termination_status": str(
+                    payload["graceful_termination_status"]
+                ),
+                "cancellation_signal_errors": [
+                    str(value) for value in payload["signal_errors"]
+                ],
+                "cancellation_cleanup_receipt": {
+                    "schema_version": 1,
+                    "path": receipt_path.relative_to(self.repo_root).as_posix(),
+                    "sha256": str(payload["receipt_sha256"]),
+                    "status": str(payload["status"]),
+                    "zero_orphans_verified": bool(
+                        payload["zero_orphans_verified"]
+                    ),
+                },
+            },
+        )
+        return result
 
     def read_log(
         self,
@@ -365,7 +533,10 @@ def _redact_command(command: list[str]) -> list[str]:
     return redacted
 
 
-def _signal_recorded_cell_groups(run_dir: Path, signum: signal.Signals) -> None:
+def _signal_recorded_cell_groups(
+    run_dir: Path, signum: signal.Signals
+) -> list[str]:
+    errors: list[str] = []
     for record in latest_cell_records(run_dir / "cells.jsonl"):
         process_group = record.get("harbor_process_group")
         if not isinstance(process_group, int) or process_group <= 0:
@@ -376,35 +547,59 @@ def _signal_recorded_cell_groups(run_dir: Path, signum: signal.Signals) -> None:
             os.killpg(process_group, signum)
         except ProcessLookupError:
             continue
+        except OSError as exc:
+            errors.append(
+                f"Harbor process group {process_group}: {signum.name} failed: {exc}"
+            )
+    return errors
 
 
 def _cleanup_run_compose_projects(
     repo_root: Path, run_dir: Path
-) -> tuple[list[str], list[str]]:
-    projects = _compose_projects_from_snapshot(repo_root, run_dir)
+) -> CancellationCleanupResult:
+    scope = _compose_projects_from_snapshot(repo_root, run_dir)
+    projects = list(scope.projects)
+    if scope.errors:
+        return CancellationCleanupResult(
+            status="unavailable",
+            projects=scope.projects,
+            planned_jobs=scope.planned_jobs,
+            started_jobs=scope.started_jobs,
+            never_started_jobs=scope.never_started_jobs,
+            errors=scope.errors,
+        )
     if not projects:
-        return [], []
+        return CancellationCleanupResult(
+            status="passed",
+            projects=(),
+            planned_jobs=scope.planned_jobs,
+            started_jobs=scope.started_jobs,
+            never_started_jobs=scope.never_started_jobs,
+        )
     docker = shutil.which("docker")
     if docker is None:
-        return projects, ["docker is unavailable; Harbor containers were not removed"]
-    errors: list[str] = []
-    for project in projects:
-        listed = subprocess.run(
-            [
-                docker,
-                "ps",
-                "-aq",
-                "--filter",
-                f"label=com.docker.compose.project={project}",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
+        return CancellationCleanupResult(
+            status="unavailable",
+            projects=scope.projects,
+            planned_jobs=scope.planned_jobs,
+            started_jobs=scope.started_jobs,
+            never_started_jobs=scope.never_started_jobs,
+            errors=("docker is unavailable; Harbor resources were not removed",),
         )
-        if listed.returncode != 0:
-            errors.append(f"{project}: docker ps failed: {listed.stderr.strip()}")
+    errors: list[str] = []
+    removed_containers: list[str] = []
+    removed_networks: list[str] = []
+    remaining_containers: list[str] = []
+    remaining_networks: list[str] = []
+    for project in projects:
+        container_ids, list_error = _docker_resource_ids(
+            docker,
+            resource="container",
+            project=project,
+        )
+        if list_error is not None:
+            errors.append(list_error)
             continue
-        container_ids = [item for item in listed.stdout.splitlines() if item]
         if container_ids:
             removed = subprocess.run(
                 [docker, "rm", "-f", *container_ids],
@@ -414,49 +609,116 @@ def _cleanup_run_compose_projects(
             )
             if removed.returncode != 0:
                 errors.append(f"{project}: docker rm failed: {removed.stderr.strip()}")
-                continue
-        networks = subprocess.run(
-            [
-                docker,
-                "network",
-                "ls",
-                "-q",
-                "--filter",
-                f"label=com.docker.compose.project={project}",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
+            else:
+                removed_containers.extend(container_ids)
+        network_ids, network_error = _docker_resource_ids(
+            docker,
+            resource="network",
+            project=project,
         )
-        if networks.returncode != 0:
-            errors.append(
-                f"{project}: docker network ls failed: {networks.stderr.strip()}"
+        if network_error is not None:
+            errors.append(network_error)
+            continue
+        if network_ids:
+            removed = subprocess.run(
+                [docker, "network", "rm", *network_ids],
+                text=True,
+                capture_output=True,
+                check=False,
             )
-            continue
-        network_ids = [item for item in networks.stdout.splitlines() if item]
-        if not network_ids:
-            continue
-        removed_networks = subprocess.run(
-            [docker, "network", "rm", *network_ids],
-            text=True,
-            capture_output=True,
-            check=False,
+            if removed.returncode != 0:
+                errors.append(
+                    f"{project}: docker network rm failed: "
+                    f"{removed.stderr.strip()}"
+                )
+            else:
+                removed_networks.extend(network_ids)
+
+        verified_containers, container_verify_error = _docker_resource_ids(
+            docker,
+            resource="container",
+            project=project,
         )
-        if removed_networks.returncode != 0:
-            errors.append(
-                f"{project}: docker network rm failed: "
-                f"{removed_networks.stderr.strip()}"
-            )
-    return projects, errors
+        if container_verify_error is not None:
+            errors.append(container_verify_error)
+        else:
+            remaining_containers.extend(verified_containers)
+        verified_networks, network_verify_error = _docker_resource_ids(
+            docker,
+            resource="network",
+            project=project,
+        )
+        if network_verify_error is not None:
+            errors.append(network_verify_error)
+        else:
+            remaining_networks.extend(verified_networks)
+    status = (
+        "failed"
+        if remaining_containers or remaining_networks
+        else "unavailable"
+        if errors
+        else "passed"
+    )
+    return CancellationCleanupResult(
+        status=status,
+        projects=scope.projects,
+        planned_jobs=scope.planned_jobs,
+        started_jobs=scope.started_jobs,
+        never_started_jobs=scope.never_started_jobs,
+        removed_containers=tuple(sorted(set(removed_containers))),
+        removed_networks=tuple(sorted(set(removed_networks))),
+        remaining_containers=tuple(sorted(set(remaining_containers))),
+        remaining_networks=tuple(sorted(set(remaining_networks))),
+        errors=tuple(errors),
+    )
 
 
-def _compose_projects_from_snapshot(repo_root: Path, run_dir: Path) -> list[str]:
+def _docker_resource_ids(
+    docker: str,
+    *,
+    resource: str,
+    project: str,
+) -> tuple[list[str], str | None]:
+    command = (
+        [docker, "ps", "-aq"]
+        if resource == "container"
+        else [docker, "network", "ls", "-q"]
+    )
+    command.extend(
+        ["--filter", f"label=com.docker.compose.project={project}"]
+    )
+    listed = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        label = "docker ps" if resource == "container" else "docker network ls"
+        return [], f"{project}: {label} failed: {listed.stderr.strip()}"
+    return sorted({item for item in listed.stdout.splitlines() if item}), None
+
+
+def _compose_projects_from_snapshot(
+    repo_root: Path, run_dir: Path
+) -> _ComposeProjectScope:
     try:
         snapshot = json.loads((run_dir / "input-lock.json").read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return []
-    jobs_root = (repo_root / "jobs").resolve()
+        return _ComposeProjectScope(
+            projects=(),
+            planned_jobs=0,
+            started_jobs=0,
+            never_started_jobs=0,
+            errors=("immutable run snapshot is unavailable",),
+        )
+    allowed_roots = (
+        (repo_root / "jobs").resolve(),
+        (repo_root / ".fugue" / "runtime" / "jobs").resolve(),
+    )
     projects: set[str] = set()
+    errors: list[str] = []
+    planned_paths: set[Path] = set()
     for planned in snapshot.get("planned_matrix") or ():
         raw_result = planned.get("result_path") if isinstance(planned, dict) else None
         if not isinstance(raw_result, str) or not raw_result:
@@ -465,19 +727,103 @@ def _compose_projects_from_snapshot(repo_root: Path, run_dir: Path) -> list[str]
         job_dir = (
             result if result.is_absolute() else repo_root / result
         ).parent.resolve()
-        if not job_dir.is_relative_to(jobs_root):
+        if not any(job_dir.is_relative_to(root) for root in allowed_roots):
             continue
+        planned_paths.add(job_dir)
+    started_jobs = 0
+    never_started_jobs = 0
+    recorded_started = _recorded_started_job_directories(repo_root, run_dir)
+    for job_dir in sorted(planned_paths):
+        was_started = job_dir in recorded_started
         try:
             children = tuple(job_dir.iterdir())
-        except OSError:
+        except FileNotFoundError:
+            if was_started:
+                started_jobs += 1
+                errors.append(
+                    f"started Harbor result directory is unavailable: {job_dir}"
+                )
+            else:
+                never_started_jobs += 1
             continue
+        except OSError as exc:
+            errors.append(f"cannot inspect Harbor result directory {job_dir}: {exc}")
+            continue
+        job_projects: set[str] = set()
         for child in children:
             if not child.is_dir() or "__" not in child.name:
                 continue
             project = f"{child.name.lower()}__env"
             if re.fullmatch(r"[a-z0-9][a-z0-9_.-]*(?:__[a-z0-9_.-]+)+", project):
-                projects.add(project)
-    return sorted(projects)
+                job_projects.add(project)
+        if job_projects:
+            started_jobs += 1
+            projects.update(job_projects)
+        elif was_started:
+            started_jobs += 1
+            errors.append(
+                f"started job has no exact Harbor Compose project: {job_dir}"
+            )
+        else:
+            never_started_jobs += 1
+    return _ComposeProjectScope(
+        projects=tuple(sorted(projects)),
+        planned_jobs=len(planned_paths),
+        started_jobs=started_jobs,
+        never_started_jobs=never_started_jobs,
+        errors=tuple(errors),
+    )
+
+
+def _recorded_started_job_directories(
+    repo_root: Path, run_dir: Path
+) -> set[Path]:
+    path = run_dir / "cells.jsonl"
+    if not path.is_file():
+        return set()
+    directories: set[Path] = set()
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                process_group = record.get("harbor_process_group")
+                raw_result = record.get("result_path")
+                if (
+                    not isinstance(process_group, int)
+                    or process_group <= 0
+                    or not isinstance(raw_result, str)
+                    or not raw_result
+                ):
+                    continue
+                result = Path(raw_result)
+                directories.add(
+                    (
+                        result
+                        if result.is_absolute()
+                        else repo_root / result
+                    ).parent.resolve()
+                )
+    except OSError:
+        return set()
+    return directories
+
+
+def _receipt_digest(payload: dict[str, Any]) -> str:
+    unsigned = dict(payload)
+    unsigned["receipt_sha256"] = ""
+    return hashlib.sha256(
+        json.dumps(
+            unsigned,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    ).hexdigest()
 
 
 def _record_forced_evaluation_cancellation(run_dir: Path, message: str) -> list[str]:

@@ -435,6 +435,47 @@ def test_harbor_receipt_records_exact_identity_and_zero_orphans(
     ) == value
 
 
+def test_harbor_receipt_does_not_treat_never_started_jobs_as_cleanup_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-partial-cancel"
+    started = _local_job(tmp_path, run_id)
+    never_started = SimpleNamespace(**vars(started))
+    never_started.job_name = "never-started"
+    never_started.result_path = (
+        tmp_path
+        / ".fugue/runtime/jobs/demo"
+        / run_id
+        / "never-started/result.json"
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id=run_id,
+        jobs=[started, never_started],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        host_scorer_names=("comparison.deterministic.answer",),
+        pre_execution_inventory=_inventory(),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "passed"
+    cleanup = value["docker_cleanup"]
+    assert cleanup["status"] == "passed"
+    assert cleanup["errors"] == []
+    assert cleanup["scope"]["planned_job_count"] == 2
+    assert cleanup["scope"]["started_job_count"] == 1
+    assert cleanup["scope"]["never_started_job_count"] == 1
+    assert all("never-started" not in " ".join(command) for command in calls)
+
+
 def test_local_privacy_scan_streams_artifact_larger_than_sixteen_mib(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

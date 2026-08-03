@@ -2353,6 +2353,8 @@ class OperatorService:
                 )
             )
             cancelled = bool(cancelled_cells) and not internal_abort
+            if cancelled_cells and conformance_enforced:
+                self.supervisor.record_cancellation_cleanup(run_id)
             fatal_outcome = next(
                 (item for item in outcomes if item.status == "failed"),
                 None,

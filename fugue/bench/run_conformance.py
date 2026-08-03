@@ -1461,7 +1461,7 @@ def _docker_cleanup_audit(
     jobs: Sequence[RenderedJob],
     pre_execution_inventory: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    projects, derivation_errors = _compose_projects_for_jobs(
+    projects, derivation_errors, job_states = _compose_projects_for_jobs(
         repo_root=repo_root,
         run_id=run_id,
         jobs=jobs,
@@ -1477,6 +1477,7 @@ def _docker_cleanup_audit(
             "compose_projects": projects,
             "resource_types": ["container", "network"],
             "selector": "com.docker.compose.project=<exact project>",
+            **job_states,
             "excluded": [
                 "other Compose projects",
                 "non-Docker resources",
@@ -1503,17 +1504,23 @@ def _docker_cleanup_audit(
                 inventory.get("status") or "missing"
             ),
         }
-    if derivation_errors or not projects:
+    if derivation_errors:
         return {
             **base,
             "status": "unavailable",
-            "reason": (
-                "exact run Compose projects could not be established"
-                if not projects
-                else "some exact run Compose projects could not be established"
-            ),
+            "reason": "some exact run Compose projects could not be established",
             "errors": derivation_errors,
             "pre_execution_inventory_status": "passed",
+        }
+    if not projects:
+        return {
+            **base,
+            "status": "passed",
+            "reason": "no local Harbor job started",
+            "errors": [],
+            "pre_execution_inventory_status": "passed",
+            "new_remaining_container_count": 0,
+            "unattributed_new_containers": [],
         }
 
     pre_container_ids = {
@@ -1658,15 +1665,19 @@ def _compose_projects_for_jobs(
     repo_root: Path,
     run_id: str,
     jobs: Sequence[RenderedJob],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], dict[str, int]]:
     allowed_roots = (
         (repo_root / "jobs").resolve(),
         (repo_root / ".fugue" / "runtime" / "jobs").resolve(),
     )
     projects: set[str] = set()
     errors: list[str] = []
+    started_jobs = 0
+    never_started_jobs = 0
+    recorded_started = _recorded_started_job_directories(repo_root, run_id)
     for job in jobs:
         job_dir = Path(job.result_path).parent.resolve()
+        was_started = job_dir in recorded_started
         if (
             run_id not in job_dir.parts
             or not any(job_dir.is_relative_to(root) for root in allowed_roots)
@@ -1675,8 +1686,19 @@ def _compose_projects_for_jobs(
             continue
         try:
             children = tuple(job_dir.iterdir())
-        except OSError:
-            errors.append(f"{job.job_name}: Harbor result directory is unavailable")
+        except FileNotFoundError:
+            if was_started:
+                started_jobs += 1
+                errors.append(
+                    f"{job.job_name}: started Harbor result directory is unavailable"
+                )
+            else:
+                never_started_jobs += 1
+            continue
+        except OSError as exc:
+            errors.append(
+                f"{job.job_name}: Harbor result directory cannot be inspected: {exc}"
+            )
             continue
         job_projects = {
             f"{child.name.lower()}__env"
@@ -1692,12 +1714,61 @@ def _compose_projects_for_jobs(
             )
         }
         if not valid:
-            errors.append(
-                f"{job.job_name}: no exact Harbor Compose project was recorded"
-            )
+            if was_started:
+                started_jobs += 1
+                errors.append(
+                    f"{job.job_name}: started job has no exact Harbor Compose project"
+                )
+            else:
+                never_started_jobs += 1
             continue
+        started_jobs += 1
         projects.update(valid)
-    return sorted(projects), errors
+    return (
+        sorted(projects),
+        errors,
+        {
+            "planned_job_count": len(jobs),
+            "started_job_count": started_jobs,
+            "never_started_job_count": never_started_jobs,
+        },
+    )
+
+
+def _recorded_started_job_directories(repo_root: Path, run_id: str) -> set[Path]:
+    path = repo_root / ".fugue" / "runtime" / run_id / "cells.jsonl"
+    if not path.is_file():
+        return set()
+    directories: set[Path] = set()
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping):
+                    continue
+                process_group = record.get("harbor_process_group")
+                raw_result = record.get("result_path")
+                if (
+                    not isinstance(process_group, int)
+                    or process_group <= 0
+                    or not isinstance(raw_result, str)
+                    or not raw_result
+                ):
+                    continue
+                result = Path(raw_result)
+                directories.add(
+                    (
+                        result
+                        if result.is_absolute()
+                        else repo_root / result
+                    ).parent.resolve()
+                )
+    except OSError:
+        return set()
+    return directories
 
 
 def _docker_ids(

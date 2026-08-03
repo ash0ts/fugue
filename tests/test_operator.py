@@ -1078,6 +1078,99 @@ def test_execute_run_cancellation_closes_started_cell_and_cancels_run(
     assert manifest["failed_cells"] == 0
 
 
+def test_default_harbor_cancellation_cleans_before_conformance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    order: list[str] = []
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell) -> None:
+            del cell
+
+        def finish_cell(self, cell, outcome) -> None:
+            del cell, outcome
+
+        def finalize(self, *, cancelled: bool = False) -> PublicationResult:
+            assert cancelled is True
+            return PublicationResult(published=0, skipped=0)
+
+        def abort(self, reason: str) -> PublicationResult:
+            raise AssertionError(reason)
+
+    def cancelled_cells(cells, **kwargs):
+        return [
+            CellOutcome(
+                cell.id,
+                "cancelled",
+                error="Run cancelled by the operator.",
+                runtime_outcome="cancelled",
+            )
+            for cell in cells
+        ]
+
+    class FakeConformance:
+        status = "passed"
+        enforced = True
+
+        def manifest_reference(self, repo_root: Path) -> dict[str, object]:
+            del repo_root
+            return {
+                "schema_version": 1,
+                "path": ".fugue/runtime/test/harbor-conformance.json",
+                "sha256": "a" * 64,
+                "status": "passed",
+                "enforced": True,
+            }
+
+    def cleanup(run_id: str):
+        order.append(f"cleanup:{run_id}")
+        return SimpleNamespace(status="passed")
+
+    def conformance(**kwargs):
+        order.append(f"conformance:{kwargs['run_id']}")
+        return FakeConformance()
+
+    monkeypatch.setattr(operator_module, "LiveEvaluationCoordinator", FakeLiveEvaluation)
+    monkeypatch.setattr(operator_module, "execute_cells", cancelled_cells)
+    monkeypatch.setattr(operator_module, "_DEFAULT_EXECUTE_CELLS", cancelled_cells)
+    monkeypatch.setattr(
+        operator_module,
+        "capture_local_docker_inventory",
+        lambda jobs: {
+            "schema_version": 1,
+            "status": "passed",
+            "backend": "local_harbor_docker",
+            "container_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        operator_module,
+        "write_harbor_run_conformance_receipt",
+        conformance,
+    )
+    monkeypatch.setattr(service.supervisor, "record_cancellation_cleanup", cleanup)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id="operator-default-cancellation",
+    )
+
+    assert result.status == "cancelled"
+    assert order == [
+        "cleanup:operator-default-cancellation",
+        "conformance:operator-default-cancellation",
+    ]
+
+
 def test_execute_run_internal_abort_after_terminal_cell_is_not_operator_cancel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
