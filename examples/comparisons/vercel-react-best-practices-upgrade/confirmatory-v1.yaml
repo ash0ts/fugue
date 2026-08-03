@@ -17,6 +17,11 @@ evaluators:
     required: true
     scorer: vercel_confirmatory_scorer.py
     runtime: python312-sandbox-v1
+    verifier:
+      type: node_test
+      source: host_node_verifier.cjs
+      runtime: node22-verifier-v1
+      dimension: verification
     dimensions:
       - artifact_validity
       - requested_change
@@ -95,7 +100,13 @@ execution:
   harnesses: [claude-code]
   attempts: 4
   concurrency: 1
-  evidence_checkpoint_cells: 1
+  evidence_checkpoint_cells: 2
+  scheduling_seed: community-skill-upgrade-confirmatory-campaign-v1
+  qualification_inputs:
+    confirmatory_analysis_profile_sha256: ../community-skill-upgrades/confirmatory-analysis-profiles.json
+    campaign_preregistration_sha256: ../community-skill-upgrades/conference-preregistration.json
+    campaign_manifest_sha256: ../community-skill-upgrades/conference-campaign-manifest.json
+    repository_preregistration_sha256: confirmatory-preregistration.json
   max_cost_usd: 1640
   reserve_per_attempt_usd: 8.4
   approval_required: true

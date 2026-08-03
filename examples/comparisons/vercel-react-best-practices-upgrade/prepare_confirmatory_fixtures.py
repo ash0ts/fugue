@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -23,13 +24,12 @@ SOURCE_LOCK = EXAMPLE_ROOT / "confirmatory-fixtures.lock.json"
 TASKS_PATH = EXAMPLE_ROOT / "confirmatory-tasks.jsonl"
 PRIVATE_PATH = EXAMPLE_ROOT / "confirmatory-private-labels.jsonl"
 SCORER_PATH = EXAMPLE_ROOT / "vercel_confirmatory_scorer.py"
+HOST_VERIFIER_PATH = EXAMPLE_ROOT / "host_node_verifier.cjs"
 OUTPUT_ROOT = (
     REPO_ROOT
     / ".fugue/comparison-resources/vercel-react-best-practices-confirmatory-v1"
 )
-NODE_IMAGE = (
-    "node@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf"
-)
+NODE_IMAGE = "node:22-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf"
 
 
 def _stable_digest(value: object) -> str:
@@ -43,7 +43,9 @@ def _sha256(path: Path) -> str:
 
 
 def _load_catalog() -> tuple[dict[str, Any], ...]:
-    spec = importlib.util.spec_from_file_location("vercel_confirmatory_catalog", CATALOG_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "vercel_confirmatory_catalog", CATALOG_PATH
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load fixture catalog")
     module = importlib.util.module_from_spec(spec)
@@ -53,7 +55,9 @@ def _load_catalog() -> tuple[dict[str, Any], ...]:
     if len(fixtures) != 24 or len({item["id"] for item in fixtures}) != 24:
         raise RuntimeError("confirmatory catalog must contain 24 unique fixtures")
     if sum(item["split"] == "discovery" for item in fixtures) != 8:
-        raise RuntimeError("confirmatory catalog must contain eight development fixtures")
+        raise RuntimeError(
+            "confirmatory catalog must contain eight development fixtures"
+        )
     if sum(item["split"] == "holdout" for item in fixtures) != 16:
         raise RuntimeError("confirmatory catalog must contain sixteen holdouts")
     return fixtures
@@ -65,6 +69,68 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _expected_contract(fixture: dict[str, Any]) -> dict[str, Any]:
+    archive = _archive_contract(fixture)
+    return {
+        "task_id": str(fixture["id"]),
+        "required_file_paths": list(fixture["target_files"]),
+        "allowed_file_paths": list(fixture["target_files"]),
+        "required_inspected_paths": list(fixture["required_inspected_paths"]),
+        "public_test_name": str(fixture["public_test_name"]),
+        **archive,
+        "verifier": dict(fixture["verifier"]),
+    }
+
+
+def refresh_frozen_sources() -> dict[str, Any]:
+    """Regenerate host-only labels and their self-authenticating source lock."""
+
+    fixtures = _load_catalog()
+    labels = _load_jsonl(PRIVATE_PATH)
+    labels_by_id = {str(item["id"]): item for item in labels}
+    refreshed = []
+    for fixture in fixtures:
+        task_id = str(fixture["id"])
+        label = dict(labels_by_id[task_id])
+        label["expected"] = _expected_contract(fixture)
+        label["base_output"] = _frozen_label_output(fixture, gold=False)
+        label["gold_output"] = _frozen_label_output(fixture, gold=True)
+        refreshed.append(label)
+    PRIVATE_PATH.write_text(
+        "".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n"
+            for item in refreshed
+        ),
+        encoding="utf-8",
+    )
+    source_names = (
+        "conference_fixture_catalog.py",
+        "confirmatory-tasks.jsonl",
+        "confirmatory-private-labels.jsonl",
+        "vercel_confirmatory_scorer.py",
+        "host_node_verifier.cjs",
+        "confirmatory-preregistration.json",
+        "prepare_confirmatory_fixtures.py",
+    )
+    lock = {
+        "schema_version": 1,
+        "sources": [
+            {
+                "path": name,
+                "sha256": _sha256(EXAMPLE_ROOT / name),
+                "size": (EXAMPLE_ROOT / name).stat().st_size,
+            }
+            for name in source_names
+        ],
+    }
+    lock["manifest_digest"] = _stable_digest(lock)
+    SOURCE_LOCK.write_text(
+        json.dumps(lock, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return lock
 
 
 def _load_and_verify_source_lock() -> dict[str, Any]:
@@ -93,103 +159,7 @@ def _load_and_verify_source_lock() -> dict[str, Any]:
     return {**value, "manifest_digest": supplied}
 
 
-def _hidden_test_source(fixture: dict[str, Any]) -> str:
-    target_paths = list(fixture["target_files"])
-    contract = json.dumps(fixture["verifier"], sort_keys=True)
-    paths = json.dumps(target_paths)
-    task_id = str(fixture["id"])
-    return f"""import test from 'node:test';
-import assert from 'node:assert/strict';
-import {{ readFileSync }} from 'node:fs';
-
-const contract = {contract};
-const paths = {paths};
-const sources = Object.fromEntries(paths.map((path) => [path, readFileSync(new URL(`../${{path}}`, import.meta.url), 'utf8')]));
-const text = (path) => sources[path] || '';
-const containsAll = (source, values) => (values || []).every((value) => source.includes(value));
-const containsNone = (source, values) => (values || []).every((value) => !source.includes(value));
-
-test('host-only verifier for {task_id}', () => {{
-  if (contract.kind === 'server_action') {{
-    const source = text(contract.source_path);
-    assert.ok(source.includes(`export async function ${{contract.export_name}}`));
-    if (contract.mode === 'read_only_control') {{
-      assert.ok(source.includes(contract.read_call));
-      assert.ok(containsNone(source, contract.forbidden_calls));
-      assert.ok(containsAll(source, contract.validation_terms));
-      return;
-    }}
-    const auth = source.indexOf(contract.auth_call);
-    const authorization = source.indexOf(contract.authorization_call);
-    const mutation = source.indexOf(contract.mutation_call);
-    assert.ok(auth >= 0 && auth < authorization && authorization < mutation);
-    assert.ok(source.indexOf('throw', auth) < authorization);
-    assert.ok(source.indexOf('throw', authorization) < mutation);
-    assert.ok(containsAll(source, contract.authorization_terms));
-    assert.ok(containsAll(source, contract.validation_terms));
-    if (contract.validation_before_auth) {{
-      assert.ok(contract.validation_terms.every((term) => source.indexOf(term) < auth));
-    }}
-    return;
-  }}
-  if (contract.kind === 'rsc_props') {{
-    const server = text(contract.server_path);
-    const client = text(contract.client_path);
-    const compact = server.split(/\\s+/).join('');
-    if (contract.mode === 'canonical_only') {{
-      assert.ok(compact.includes(`return{{${{contract.canonical_prop}}}};`));
-      assert.ok(containsNone(server, contract.derived_props));
-      assert.ok(containsAll(client, contract.client_terms));
-    }} else {{
-      assert.ok(compact.includes(`return{{${{contract.canonical_prop}}}};`));
-      assert.ok(containsAll(server, contract.server_terms));
-      assert.ok(containsAll(client, contract.client_terms));
-    }}
-    return;
-  }}
-  const source = text(contract.source_path);
-  if (contract.kind === 'dom_batch') {{
-    const writes = contract.write_terms.map((term) => source.indexOf(term));
-    const reads = contract.read_terms.map((term) => source.indexOf(term));
-    assert.ok(Math.max(...writes) < Math.min(...reads));
-    assert.ok(containsNone(source, contract.forbidden_read_terms));
-    return;
-  }}
-  if (contract.kind === 'dom_write_control') {{
-    assert.ok(containsAll(source, contract.write_terms));
-    assert.ok(containsNone(source, contract.forbidden_read_terms));
-    return;
-  }}
-  if (contract.kind === 'array_extreme') {{
-    assert.ok(source.includes('values.length === 0') && source.includes('return null'));
-    assert.ok(source.includes('for (') || source.includes('.reduce('));
-    assert.ok(!source.includes('.sort('));
-    assert.ok(!source.includes(contract.mode === 'max' ? 'Math.max(...' : 'Math.min(...'));
-    return;
-  }}
-  if (contract.kind === 'array_sum_control') {{
-    assert.ok(source.split(/\\s+/).join('').includes('.reduce((total,value)=>total+value,0)'));
-    return;
-  }}
-  if (contract.kind === 'hook_timing') {{
-    assert.ok(source.includes(`hooks.${{contract.effect}}(`));
-    assert.ok(source.includes('ref.current = value'));
-    if (contract.forbid_layout) assert.ok(!source.includes('useLayoutEffect'));
-    return;
-  }}
-  if (contract.kind === 'event_signature') {{
-    assert.ok(source.includes(`@param {{${{contract.event_type}}}}`));
-    assert.ok(source.includes(`event.${{contract.property}}`));
-    return;
-  }}
-  assert.fail(`unknown hidden verifier: ${{contract.kind}}`);
-}});
-"""
-
-
-def _public_files(
-    fixture: dict[str, Any], *, gold: bool, include_hidden: bool = False
-) -> dict[str, bytes]:
+def _public_files(fixture: dict[str, Any], *, gold: bool) -> dict[str, bytes]:
     task_id = str(fixture["id"])
     files: dict[str, bytes] = {
         "package.json": (
@@ -216,11 +186,49 @@ def _public_files(
     side = "gold" if gold else "base"
     for path, sources in fixture["target_files"].items():
         files[str(path)] = str(sources[side]).encode()
-    if include_hidden:
-        files["tests/host-only-verifier.test.mjs"] = _hidden_test_source(
-            fixture
-        ).encode()
     return files
+
+
+def _archive_bytes(fixture: dict[str, Any]) -> bytes:
+    files = _public_files(fixture, gold=False)
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for relative in sorted(files):
+            data = files[relative]
+            info = tarfile.TarInfo(f"repo/{relative}")
+            info.size = len(data)
+            info.mode = 0o644
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = "root"
+            info.gname = "root"
+            archive.addfile(info, io.BytesIO(data))
+    return stream.getvalue()
+
+
+def _archive_contract(fixture: dict[str, Any]) -> dict[str, Any]:
+    files = _public_files(fixture, gold=False)
+    archive = _archive_bytes(fixture)
+    manifest = [
+        {
+            "path": relative,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for relative, data in sorted(files.items())
+    ]
+    public_test = files["tests/task.test.mjs"]
+    return {
+        "base_archive_format": "ustar",
+        "base_archive_sha256": hashlib.sha256(archive).hexdigest(),
+        "base_archive_size": len(archive),
+        "base_archive_file_count": len(files),
+        "base_archive_files": manifest,
+        "base_archive_manifest_digest": _stable_digest(manifest),
+        "public_test_path": "tests/task.test.mjs",
+        "public_test_sha256": hashlib.sha256(public_test).hexdigest(),
+    }
 
 
 def _write_tree(root: Path, files: dict[str, bytes]) -> None:
@@ -231,69 +239,62 @@ def _write_tree(root: Path, files: dict[str, bytes]) -> None:
 
 
 def _node_runtime_receipt() -> dict[str, str]:
-    node = shutil.which("node")
-    if node is not None:
-        version = subprocess.run(
-            [node, "--version"], capture_output=True, text=True, timeout=5, check=True
-        ).stdout.strip()
-        return {
-            "mode": "host_binary",
-            "identity": f"sha256:{_sha256(Path(node).resolve())}",
-            "version": version,
-        }
-    if shutil.which("docker") is not None:
-        return {"mode": "docker", "identity": NODE_IMAGE, "version": "node-22"}
-    raise RuntimeError("Node.js or Docker is required for fixture preflight")
+    if shutil.which("docker") is None:
+        raise RuntimeError(
+            "Docker with the digest-pinned Node 22 image is required for fixture preflight"
+        )
+    return {
+        "mode": "docker",
+        "identity": NODE_IMAGE,
+        "version": "22",
+        "platform": "linux/arm64",
+    }
 
 
 def _run_public_tests(root: Path) -> subprocess.CompletedProcess[str]:
-    runtime = _node_runtime_receipt()
-    if runtime["mode"] == "host_binary":
-        node = shutil.which("node")
-        assert node is not None
-        command = [node, "--test"]
-        cwd = root
-    else:
-        docker = shutil.which("docker")
-        assert docker is not None
-        command = [
-            docker,
-            "run",
-            "--rm",
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            "64",
-            "--cpus",
-            "1",
-            "--memory",
-            "256m",
-            "--mount",
-            f"type=bind,src={root.resolve()},dst=/workspace,readonly",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=16m",
-            "--workdir",
-            "/workspace",
-            NODE_IMAGE,
-            "node",
-            "--test",
-        ]
-        cwd = None
+    _node_runtime_receipt()
+    docker = shutil.which("docker")
+    assert docker is not None
+    command = [
+        docker,
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--platform",
+        "linux/arm64",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "64",
+        "--cpus",
+        "1",
+        "--memory",
+        "256m",
+        "--mount",
+        f"type=bind,src={root.resolve()},dst=/workspace,readonly",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=16m",
+        "--workdir",
+        "/workspace",
+        NODE_IMAGE,
+        "node",
+        "--test",
+        "tests/task.test.mjs",
+    ]
     return subprocess.run(
         command,
-        cwd=cwd,
+        cwd=None,
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
-        env={"PATH": str(Path(shutil.which("docker") or command[0]).parent)},
+        env={"PATH": str(Path(docker).parent)},
     )
 
 
@@ -305,18 +306,16 @@ def _validate_node_test_receipt(
 ) -> None:
     detail = completed.stdout + completed.stderr
     public_name = str(fixture["public_test_name"])
-    hidden_name = f"host-only verifier for {fixture['id']}"
     common = bool(
         "TAP version 13" in detail
         and public_name in detail
-        and hidden_name in detail
-        and re.search(r"# tests\s+2\b", detail)
+        and re.search(r"# tests\s+1\b", detail)
     )
     if should_pass:
         valid = bool(
             common
             and completed.returncode == 0
-            and re.search(r"# pass\s+2\b", detail)
+            and re.search(r"# pass\s+1\b", detail)
             and re.search(r"# fail\s+0\b", detail)
         )
         expectation = "passing"
@@ -324,7 +323,8 @@ def _validate_node_test_receipt(
         valid = bool(
             common
             and completed.returncode == 1
-            and re.search(r"# fail\s+[1-9]\d*\b", detail)
+            and re.search(r"# pass\s+0\b", detail)
+            and re.search(r"# fail\s+1\b", detail)
         )
         expectation = "failing"
     if not valid:
@@ -332,6 +332,70 @@ def _validate_node_test_receipt(
             f"{expectation} Node test receipt was not produced for "
             f"{fixture['id']} (exit {completed.returncode})\n{detail[-4000:]}"
         )
+
+
+def _tree_digest(files: dict[str, bytes | str]) -> str:
+    records = [
+        [
+            relative,
+            len(data if isinstance(data, bytes) else data.encode()),
+            hashlib.sha256(
+                data if isinstance(data, bytes) else data.encode()
+            ).hexdigest(),
+        ]
+        for relative, data in sorted(files.items())
+    ]
+    return _stable_digest(records)
+
+
+def _host_verifier_receipt(
+    fixture: dict[str, Any],
+    expected: dict[str, Any],
+    output: dict[str, Any],
+    completed: subprocess.CompletedProcess[str],
+    *,
+    attempt_id: str,
+) -> dict[str, Any]:
+    passed = completed.returncode == 0
+    detail = completed.stdout + completed.stderr
+    submitted = dict(output["files"])
+    final_tree = _public_files(fixture, gold=False)
+    final_tree.update({path: body.encode() for path, body in submitted.items()})
+    runtime = _node_runtime_receipt()
+    runtime_profile = {
+        "id": "node22-verifier-v1",
+        "image": NODE_IMAGE,
+        "platform": runtime["platform"],
+    }
+    receipt = {
+        "schema_version": 2,
+        "kind": "post_trial_verifier_receipt",
+        "evaluator_id": "vercel-confirmatory",
+        "task_id": str(fixture["id"]),
+        "attempt_id": attempt_id,
+        "status": "passed" if passed else "failed",
+        "failure_kind": None if passed else "public_test_failed",
+        "runtime": f"node-{runtime['version']}",
+        "command": ["node", "--test", "tests/task.test.mjs"],
+        "exit_code": completed.returncode,
+        "test_count": 1,
+        "pass_count": 1 if passed else 0,
+        "fail_count": 0 if passed else 1,
+        "output_sha256": hashlib.sha256(detail.encode()).hexdigest(),
+        "base_archive_sha256": expected["base_archive_sha256"],
+        "public_test_sha256": expected["public_test_sha256"],
+        "submitted_artifact_sha256": _stable_digest(output),
+        "final_tree_sha256": _tree_digest(final_tree),
+        "verifier_source_sha256": _sha256(HOST_VERIFIER_PATH),
+        "runtime_profile_id": runtime_profile["id"],
+        "runtime_profile_digest": _stable_digest(runtime_profile),
+        "runtime_image": NODE_IMAGE,
+        "runtime_platform": runtime["platform"],
+        "runtime_image_id": runtime["identity"],
+        "runtime_lock_digest": _stable_digest(runtime),
+    }
+    receipt["receipt_digest"] = _stable_digest(receipt)
+    return receipt
 
 
 def _output(
@@ -365,27 +429,67 @@ def _output(
     }
 
 
+def _frozen_label_output(fixture: dict[str, Any], *, gold: bool) -> dict[str, Any]:
+    passed = gold
+    status = "ok" if passed else "not ok"
+    completed = subprocess.CompletedProcess(
+        args=["node", "--test", "tests/task.test.mjs"],
+        returncode=0 if passed else 1,
+        stdout=(
+            "TAP version 13\n"
+            f"# Subtest: {fixture['public_test_name']}\n"
+            f"{status} 1 - {fixture['public_test_name']}\n"
+            "1..1\n"
+            "# tests 1\n"
+            f"# pass {1 if passed else 0}\n"
+            f"# fail {0 if passed else 1}\n"
+        ),
+        stderr="",
+    )
+    return _output(fixture, gold=gold, completed=completed)
+
+
 def _preflight(fixture: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
     scorer = runpy.run_path(SCORER_PATH.as_posix())["score"]
     with tempfile.TemporaryDirectory(prefix=f"fugue-vercel-{fixture['id']}-") as value:
         root = Path(value)
         base_root = root / "base"
         gold_root = root / "gold"
-        _write_tree(base_root, _public_files(fixture, gold=False, include_hidden=True))
-        _write_tree(gold_root, _public_files(fixture, gold=True, include_hidden=True))
+        _write_tree(base_root, _public_files(fixture, gold=False))
+        _write_tree(gold_root, _public_files(fixture, gold=True))
         base_run = _run_public_tests(base_root)
         gold_run = _run_public_tests(gold_root)
         _validate_node_test_receipt(fixture, base_run, should_pass=False)
         _validate_node_test_receipt(fixture, gold_run, should_pass=True)
+        base_output = _output(fixture, gold=False, completed=base_run)
+        gold_output = _output(fixture, gold=True, completed=gold_run)
         base_scores = scorer(
             {"id": fixture["id"]},
-            _output(fixture, gold=False, completed=base_run),
-            {"expected": expected},
+            base_output,
+            {
+                "expected": expected,
+                "host_verifier_receipt": _host_verifier_receipt(
+                    fixture,
+                    expected,
+                    base_output,
+                    base_run,
+                    attempt_id=f"preflight:{fixture['id']}:base",
+                ),
+            },
         )
         gold_scores = scorer(
             {"id": fixture["id"]},
-            _output(fixture, gold=True, completed=gold_run),
-            {"expected": expected},
+            gold_output,
+            {
+                "expected": expected,
+                "host_verifier_receipt": _host_verifier_receipt(
+                    fixture,
+                    expected,
+                    gold_output,
+                    gold_run,
+                    attempt_id=f"preflight:{fixture['id']}:gold",
+                ),
+            },
         )
     if all(base_scores.values()):
         raise RuntimeError(f"base scorer unexpectedly passed: {fixture['id']}")
@@ -399,32 +503,28 @@ def _preflight(fixture: dict[str, Any], expected: dict[str, Any]) -> dict[str, A
         "base_scores": base_scores,
         "gold_scores": gold_scores,
         "base_tree_digest": _stable_digest(
-            {key: hashlib.sha256(data).hexdigest() for key, data in _public_files(fixture, gold=False).items()}
+            {
+                key: hashlib.sha256(data).hexdigest()
+                for key, data in _public_files(fixture, gold=False).items()
+            }
         ),
         "gold_tree_digest": _stable_digest(
-            {key: hashlib.sha256(data).hexdigest() for key, data in _public_files(fixture, gold=True).items()}
+            {
+                key: hashlib.sha256(data).hexdigest()
+                for key, data in _public_files(fixture, gold=True).items()
+            }
         ),
-        "hidden_verifier_sha256": hashlib.sha256(
-            _hidden_test_source(fixture).encode()
-        ).hexdigest(),
+        "base_archive_sha256": expected["base_archive_sha256"],
+        "archive_manifest_digest": expected["base_archive_manifest_digest"],
+        "public_test_sha256": expected["public_test_sha256"],
     }
 
 
 def _build_archive(fixture: dict[str, Any], destination: Path) -> dict[str, Any]:
     files = _public_files(fixture, gold=False)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(destination, "w", format=tarfile.USTAR_FORMAT) as archive:
-        for relative in sorted(files):
-            data = files[relative]
-            info = tarfile.TarInfo(f"repo/{relative}")
-            info.size = len(data)
-            info.mode = 0o644
-            info.mtime = 0
-            info.uid = 0
-            info.gid = 0
-            info.uname = "root"
-            info.gname = "root"
-            archive.addfile(info, io.BytesIO(data))
+    contract = _archive_contract(fixture)
+    destination.write_bytes(_archive_bytes(fixture))
     try:
         archive_path = destination.relative_to(REPO_ROOT).as_posix()
     except ValueError:
@@ -434,6 +534,8 @@ def _build_archive(fixture: dict[str, Any], destination: Path) -> dict[str, Any]
         "archive": archive_path,
         "sha256": _sha256(destination),
         "file_count": len(files),
+        "archive_manifest_digest": contract["base_archive_manifest_digest"],
+        "public_test_sha256": contract["public_test_sha256"],
     }
 
 
@@ -447,8 +549,12 @@ def prepare(output_root: Path = OUTPUT_ROOT) -> dict[str, Any]:
     if [str(item["id"]) for item in tasks] != fixture_ids:
         raise RuntimeError("public task order differs from the frozen fixture catalog")
     if [str(item["id"]) for item in labels] != fixture_ids:
-        raise RuntimeError("private-label order differs from the frozen fixture catalog")
-    receipts = [_preflight(fixture, expected_by_id[str(fixture["id"])]) for fixture in fixtures]
+        raise RuntimeError(
+            "private-label order differs from the frozen fixture catalog"
+        )
+    receipts = [
+        _preflight(fixture, expected_by_id[str(fixture["id"])]) for fixture in fixtures
+    ]
     archives = [
         _build_archive(fixture, output_root / f"{fixture['id']}.tar")
         for fixture in fixtures
@@ -478,7 +584,11 @@ def prepare(output_root: Path = OUTPUT_ROOT) -> dict[str, Any]:
 
 
 def main() -> None:
-    print(json.dumps(prepare(), sort_keys=True))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--refresh-frozen-sources", action="store_true")
+    args = parser.parse_args()
+    result = refresh_frozen_sources() if args.refresh_frozen_sources else prepare()
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":

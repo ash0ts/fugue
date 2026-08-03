@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "2514fd02ec990a2c5a70e9e5876a9a7b5380a9ae2c25a25451ce6c23d3a512cd",
+  "manifest_digest": "525ea7a8e113df67eb7b44b2c3d2f03e6358f92fdd86dd5e30f58b5c0c377c8a",
   "schema_version": 1,
   "sources": [
     {
@@ -14,13 +14,18 @@
     },
     {
       "path": "confirmatory-private-labels.jsonl",
-      "sha256": "1548cc7dfbdbd9e9d67c20a40b7cb2b8940c25c8974f949b3c71b23b8ac2534f",
-      "size": 64607
+      "sha256": "00a2eb673cc3cce9bfbd11a117e480a139d6f95e2cdaa131177fd55d7517433a",
+      "size": 79709
     },
     {
       "path": "vercel_confirmatory_scorer.py",
-      "sha256": "44687ed021cb3aae78a13c6d4526b44ca0e1f2dcdec717da2751b5ecfe333637",
-      "size": 11488
+      "sha256": "f354dbfc8c4e028d7479c3130d581a08da0ebd073fbd89ed60fdea852edea65a",
+      "size": 13122
+    },
+    {
+      "path": "host_node_verifier.cjs",
+      "sha256": "11bafd016d98d53292aa6c219e7dbf5ee382875c9df315d2d1f858c5b1983b9e",
+      "size": 16638
     },
     {
       "path": "confirmatory-preregistration.json",
@@ -29,8 +34,8 @@
     },
     {
       "path": "prepare_confirmatory_fixtures.py",
-      "sha256": "5c91e5996dfacb6beb0409644db65ca599afa60a2bb7e41bcded323984592159",
-      "size": 18074
+      "sha256": "4468c3749c7a91d6594201c1f1f018bed15499f32ecaa99e565aee8358d3d315",
+      "size": 20729
     }
   ]
 }

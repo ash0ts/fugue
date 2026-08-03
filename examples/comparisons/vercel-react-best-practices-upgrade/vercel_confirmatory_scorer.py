@@ -69,7 +69,10 @@ def _artifact_validity(task, result):
         and result.get("task_id") == task.get("id")
         and result.get("status") == "completed"
         and files
-        and all(_safe_path(path) and isinstance(body, str) and body for path, body in files.items())
+        and all(
+            _safe_path(path) and isinstance(body, str) and body
+            for path, body in files.items()
+        )
         and isinstance(inspected, list)
         and inspected
         and all(_safe_path(path) for path in inspected)
@@ -107,8 +110,12 @@ def _server_action(files, verifier):
         read_call = _text(verifier.get("read_call"))
         requested = bool(
             read_call in source
-            and all(term not in source for term in _strings(verifier.get("forbidden_calls")))
-            and all(term in source for term in _strings(verifier.get("validation_terms")))
+            and all(
+                term not in source for term in _strings(verifier.get("forbidden_calls"))
+            )
+            and all(
+                term in source for term in _strings(verifier.get("validation_terms"))
+            )
         )
         return requested, bool(read_call in source and "return" in source)
     if mode != "authorize_mutation":
@@ -117,18 +124,26 @@ def _server_action(files, verifier):
     authorization = source.find(_text(verifier.get("authorization_call")))
     mutation = source.find(_text(verifier.get("mutation_call")))
     validation_terms = _strings(verifier.get("validation_terms"))
-    auth_guard = source.find("throw", auth + 1, authorization if authorization >= 0 else len(source))
-    authorization_guard = source.find("throw", authorization + 1, mutation if mutation >= 0 else len(source))
+    auth_guard = source.find(
+        "throw", auth + 1, authorization if authorization >= 0 else len(source)
+    )
+    authorization_guard = source.find(
+        "throw", authorization + 1, mutation if mutation >= 0 else len(source)
+    )
     requested = bool(
         0 <= auth < authorization < mutation
         and auth_guard >= 0
         and authorization_guard >= 0
-        and all(term in source for term in _strings(verifier.get("authorization_terms")))
+        and all(
+            term in source for term in _strings(verifier.get("authorization_terms"))
+        )
         and all(term in source for term in validation_terms)
         and source.count(_text(verifier.get("mutation_call"))) == 1
     )
     if verifier.get("validation_before_auth") and validation_terms:
-        requested = requested and max(source.find(term) for term in validation_terms) < auth
+        requested = (
+            requested and max(source.find(term) for term in validation_terms) < auth
+        )
     preserved = bool(
         "'use server'" in source
         and "return" in source
@@ -141,7 +156,12 @@ def _rsc(files, verifier):
     server = _text(files.get(verifier.get("server_path")))
     client = _text(files.get(verifier.get("client_path")))
     mode = verifier.get("mode")
-    if not server or not client or "export function" not in server or "export function" not in client:
+    if (
+        not server
+        or not client
+        or "export function" not in server
+        or "export function" not in client
+    ):
         return False, False
     if mode == "canonical_only":
         canonical = _text(verifier.get("canonical_prop"))
@@ -159,7 +179,10 @@ def _rsc(files, verifier):
             _return_keys(server) == [canonical]
             and all(term in server for term in _strings(verifier.get("server_terms")))
             and all(term in client for term in _strings(verifier.get("client_terms")))
-            and all(term not in _return_keys(server) for term in _strings(verifier.get("forbidden_props")))
+            and all(
+                term not in _return_keys(server)
+                for term in _strings(verifier.get("forbidden_props"))
+            )
         )
         return requested, bool(canonical in client and "return" in client)
     return False, False
@@ -172,7 +195,10 @@ def _dom(files, verifier):
     reads = _strings(verifier.get("read_terms"))
     forbidden = _strings(verifier.get("forbidden_read_terms"))
     if kind == "dom_write_control":
-        requested = bool(all(term in source for term in writes) and all(term not in source for term in forbidden))
+        requested = bool(
+            all(term in source for term in writes)
+            and all(term not in source for term in forbidden)
+        )
         return requested, bool("export function" in source)
     write_positions = [source.find(term) for term in writes]
     read_positions = [source.find(term) for term in reads]
@@ -253,19 +279,49 @@ def _semantic(files, expected):
     return False, False
 
 
-def _verification(result, expected, semantic_pass):
-    receipts = _array(result.get("verification"))
-    receipt = _mapping(receipts[0]) if len(receipts) == 1 else {}
-    stdout = _text(receipt.get("stdout"))
-    name = _text(expected.get("public_test_name"))
+def _verification(evidence, semantic_pass, task_id):
+    receipt = _mapping(evidence.get("host_verifier_receipt"))
+    sha256_fields = (
+        "output_sha256",
+        "base_archive_sha256",
+        "public_test_sha256",
+        "submitted_artifact_sha256",
+        "final_tree_sha256",
+        "receipt_digest",
+    )
     return bool(
         semantic_pass
-        and receipt.get("command") == "node --test"
+        and receipt.get("schema_version") == 2
+        and receipt.get("kind") == "post_trial_verifier_receipt"
+        and receipt.get("evaluator_id") == "vercel-confirmatory"
+        and receipt.get("task_id") == task_id
+        and isinstance(receipt.get("attempt_id"), str)
+        and bool(receipt["attempt_id"])
+        and isinstance(receipt.get("verifier_source_sha256"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", receipt["verifier_source_sha256"]))
+        and receipt.get("runtime_profile_id") == "node22-verifier-v1"
+        and isinstance(receipt.get("runtime_image"), str)
+        and "@sha256:" in receipt["runtime_image"]
+        and receipt.get("runtime_platform") == "linux/arm64"
+        and isinstance(receipt.get("runtime_image_id"), str)
+        and bool(receipt["runtime_image_id"])
+        and receipt.get("status") == "passed"
+        and receipt.get("failure_kind") is None
+        and receipt.get("command") == ["node", "--test", "tests/task.test.mjs"]
         and receipt.get("exit_code") == 0
-        and name
-        and name in stdout
-        and re.search(r"(?:#\s*)?fail(?:ed)?\D+0\b|\b0\s+fail", stdout, re.I)
-        and re.search(r"(?:#\s*)?pass(?:ed)?\D+[1-9]\d*\b|\b[1-9]\d*\s+pass", stdout, re.I)
+        and receipt.get("test_count") == 1
+        and receipt.get("pass_count") == 1
+        and receipt.get("fail_count") == 0
+        and all(
+            bool(re.fullmatch(r"[0-9a-f]{64}", _text(receipt.get(field))))
+            for field in sha256_fields
+        )
+        and bool(
+            re.fullmatch(r"[0-9a-f]{64}", _text(receipt.get("runtime_profile_digest")))
+        )
+        and bool(
+            re.fullmatch(r"[0-9a-f]{64}", _text(receipt.get("runtime_lock_digest")))
+        )
     )
 
 
@@ -291,13 +347,18 @@ def score(task, output, evidence):
         allowed_files
         and set(files) == set(required_files)
         and set(files) <= allowed_files
-        and all(_safe_path(path) and path not in {"package.json", "package-lock.json"} for path in files)
+        and all(
+            _safe_path(path) and path not in {"package.json", "package-lock.json"}
+            for path in files
+        )
     )
     return {
         "artifact_validity": _artifact_validity(task, result),
         "requested_change": requested,
         "repository_grounding": grounding,
         "behavior_preservation": preserved,
-        "verification": _verification(result, expected, requested and preserved),
+        "verification": _verification(
+            evidence, requested and preserved, task.get("id")
+        ),
         "scope_safety": scope,
     }
