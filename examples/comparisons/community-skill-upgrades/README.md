@@ -8,19 +8,37 @@ upgrade claim. The frozen confirmatory design is in
 `conference-preregistration.json`; the four operator stages are enumerated in
 `conference-campaign-manifest.json`.
 
-The active Superpowers execution is V4. V3 is retained as invalid audit
-history: seven terminal rows were exposed before a bounded Agent timeout was
-misclassified as infrastructure failure and cancelled the remaining 185 cells.
-V4 is a complete 192-cell restart with unchanged behavior inputs and a fresh
-project, source lock, preview, and approval. V3 rows are excluded from every
-effect estimate, and the V4 report must include the preregistered conservative
-sensitivity that removes the one holdout task exposed in V3.
+The active Superpowers execution is V5. V3 is retained as invalid audit
+history after a bounded Agent timeout was misclassified as infrastructure
+failure. V4 is also invalid audit history: its checkpoint exposed silent
+primary-artifact truncation and an over-broad path classifier before the run
+was stopped. V5 is a complete 192-cell restart with the same behavior inputs,
+an amended measurement contract, and a fresh project, source lock, preview,
+and approval. V1-V4 rows are excluded from every effect estimate, and the V5
+report must include the preregistered conservative sensitivity for holdout
+tasks exposed by earlier attempts.
 
 Each repository Study contains 24 tasks (8 scorer-development tasks and 16
 untouched holdouts), two exact Skill revisions, and four attempts per task and
 arm: 192 cells per Study and 576 Agent cells in total. The inference unit is a
 task. Repeated attempts estimate within-task variability and are not counted as
 independently sampled tasks.
+
+### Confirmatory cost and approval boundary
+
+The active confirmatory limits are frozen in
+`confirmatory-budget-policy-v1.json`. They are intentionally much larger than
+the original canary budget: each Study reserves 192 × ($8.40 Agent + $0.10
+advisory judge) = **$1,632**. The independent hard caps are $1,700 for
+Superpowers and $1,640 each for Anthropic and Vercel, for 576 cells, $4,896 of
+estimated reserve, and at most $4,980 across three separately approved runs.
+
+The checked-in policy is not approval. Each Study requires a fresh receipt for
+its exact preview and cap. The historical `campaign-manifest.json` and
+`budget-ledger.json` describe the original four-cell canaries and their $110
+ceiling only; neither those files nor any approval derived from them authorizes
+one of these 192-cell confirmatory Studies. The completed judge diagnostic is
+an advisory prerequisite and contributes no new cells or spend to this policy.
 
 The governed comparison contract is intentionally two-arm. V1 estimates the
 exact candidate-minus-baseline revision effect. It does not estimate absolute
@@ -82,9 +100,9 @@ discordant or critical pair. A report is incomplete until the five Weave
 relationships, task/runtime locks, host verifier, privacy receipt, and Harbor
 cleanup are checked for every audited attempt.
 
-This directory binds three independent, task-specific Skill upgrade canaries
-under one offline-validated campaign ceiling. It does not create an alternate
-runner: each lane remains an ordinary Fugue comparison with its own preview,
+This directory binds three independent, task-specific Skill upgrade Studies.
+It does not create an alternate runner or a campaign-wide spend approval: each
+lane remains an ordinary Fugue comparison with its own preview, finite cap,
 approval, execution identity, evidence project, and result.
 
 The checked-in calibration is intentionally **pending human review**. Judge
@@ -124,13 +142,17 @@ uv run python \
   examples/comparisons/community-skill-upgrades/validate_campaign.py
 ```
 
-The command validates strict schemas, exact revisions and Study destinations,
-the 36/12 balanced calibration split, the non-approved $110 ceiling, and the
-claim-free scientific report template. It also hashes the exact calibration
-case bytes and rejects drift before emitting judge input or making a provider
-request. It exits successfully when the fixture set is internally valid while
-reporting `pending_human_review`; the three previews remain approvable, but
-execution stays gated on the synthetic result.
+The command validates the historical canary fixtures: strict schemas, exact
+revisions and Study destinations, the 36/12 balanced calibration split, the
+non-approved $110 canary ceiling, and the claim-free scientific report
+template. It does not authorize or price the confirmatory cohort. The focused
+confirmatory contract test independently reconciles
+`confirmatory-budget-policy-v1.json` with all three active specs. Validation
+also hashes the exact calibration case bytes and rejects drift before emitting
+judge input or making a provider request. It exits successfully when the
+fixture set is internally valid while reporting `pending_human_review`; the
+three previews remain approvable, but execution requires their new exact
+approval receipts.
 
 To produce a judge-only input file that omits authored references and reviews:
 
@@ -154,7 +176,8 @@ That report passes only when overall, calibration-split, and holdout-split
 balanced accuracy are each >= 0.85, with zero critical false passes. TPR and
 TNR remain visible as diagnostic metrics rather than independent gates. Each
 lane then needs a new immutable preview and its own
-operator approval. The budget ledger is a ceiling configuration, not approval.
+operator approval. The historical budget ledger is a canary ceiling
+configuration, not approval and not a confirmatory spending authority.
 For this acceptable-versus-defective calibration, `adequate` is the minimum
 acceptable qualitative label: its limitations stay visible, and deterministic
 task and safety gates remain authoritative. `weak` and `unusable` are defective;
@@ -249,7 +272,7 @@ the exact checked-in spec, for example:
 uv run python \
   examples/comparisons/community-skill-upgrades/generate_scientific_report.py \
   --result .fugue/results/comparisons/PREVIEW_DIGEST/result.json \
-  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml \
+  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v5.yaml \
   --audit-selection /tmp/STUDY.trace-audit-selection.json \
   --audit-review /tmp/STUDY.trace-audit-completed.json \
   --output .fugue/results/comparisons/PREVIEW_DIGEST/scientific-report.json

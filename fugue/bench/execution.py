@@ -75,6 +75,7 @@ class PlannedCell:
     execution_limits_digest: str = ""
     context_delivery: str = "portable"
     expected_evidence_paths: tuple[str, ...] = ()
+    expected_artifact_paths: tuple[str, ...] = ()
     evaluation_asset_lock_sha256: str = ""
     run_snapshot_sha256: str = ""
     source_commit: str = ""
@@ -138,6 +139,7 @@ class PlannedCell:
             "skip_reason": self.skip_reason,
             "config_sha256": self.config_sha256,
             "runtime_assets": [list(item) for item in self.runtime_assets],
+            "expected_artifact_paths": list(self.expected_artifact_paths),
             "run_snapshot_sha256": self.run_snapshot_sha256 or None,
             "source_commit": self.source_commit or None,
             "source_tree": self.source_tree or None,
@@ -191,6 +193,7 @@ class _ExecutionAbortController:
         self.message = message
         self.store = store
         self._lock = threading.Lock()
+        self.origin = "internal"
 
     def stop_request(
         self,
@@ -198,26 +201,33 @@ class _ExecutionAbortController:
         cancellation_message: str,
     ) -> tuple[str, str] | None:
         if self.event is not None and self.event.is_set():
-            return self.message, "internal"
+            return self.message, self.origin
         if cancellation_event is not None and cancellation_event.is_set():
             return cancellation_message, "operator"
         return None
 
-    def request(self, cell: PlannedCell, outcome: CellOutcome) -> None:
-        if self.event is None or outcome.status != "failed":
+    def request(
+        self,
+        cell: PlannedCell,
+        outcome: CellOutcome,
+        *,
+        origin: str = "internal",
+    ) -> None:
+        if self.event is None or outcome.status not in {"failed", "cancelled"}:
             return
         with self._lock:
             if self.event.is_set():
                 return
+            self.origin = origin
             self.event.set()
             assert self.store is not None
             self.store.append_event(
                 "run_abort_requested",
                 cell=cell,
-                status="failed",
+                status=outcome.status,
                 message=outcome.error or self.message,
                 runtime_outcome=outcome.runtime_outcome,
-                cancellation_origin="internal",
+                cancellation_origin=origin,
             )
 
 
@@ -318,6 +328,7 @@ def plan_cells(
                 execution_limits_digest=job.execution_limits_digest,
                 context_delivery=job.context_delivery,
                 expected_evidence_paths=job.expected_evidence_paths,
+                expected_artifact_paths=job.expected_artifact_paths,
                 evaluation_case=job.evaluation_case,
                 evaluation_rubrics=job.evaluation_rubrics,
                 scorer_hashes=job.scorer_hashes,
@@ -589,7 +600,7 @@ def execute_cells(
                 returncode = int(result.returncode)
             harbor_result = (
                 _harbor_job_result(cell, repo_root)
-                if runner is None and returncode == 0 and cell.execution_kind == "agent"
+                if runner is None and cell.execution_kind == "agent"
                 else _HarborJobResult(None, "unscored")
             )
             trial_error = harbor_result.error
@@ -603,6 +614,10 @@ def execute_cells(
                 status: CellStatus = "cancelled"
                 trial_error = requested_stop[0]
                 terminal_origin = requested_stop[1]
+            elif harbor_result.runtime_outcome == "cancelled":
+                status = "cancelled"
+                trial_error = trial_error or "Harbor trial was cancelled"
+                terminal_origin = "external"
             else:
                 status = (
                     "passed" if returncode == 0 and trial_error is None else "failed"
@@ -635,7 +650,12 @@ def execute_cells(
                 error=f"{type(exc).__name__}: {exc}",
                 runtime_outcome="not_started",
             )
-        abort.request(cell, outcome)
+        if terminal_origin != "operator":
+            abort.request(
+                cell,
+                outcome,
+                origin=terminal_origin or "internal",
+            )
         ended = datetime.now(UTC)
         outcome = _finish_cell_evidence(
             cell,
@@ -867,6 +887,17 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
     if errored:
+        if _all_harbor_errors_are_cancellations(
+            stats,
+            expected_trials=cell.n_attempts,
+            reported_total=result.get("n_total_trials"),
+        ):
+            return _HarborJobResult(
+                f"{errored} Harbor trial(s) were cancelled",
+                "unscored",
+                None,
+                runtime_outcome="cancelled",
+            )
         if _all_harbor_errors_are_agent_timeouts(
             stats,
             expected_trials=cell.n_attempts,
@@ -885,7 +916,8 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
         return _HarborJobResult(
-            f"{cancelled} Harbor trial(s) were cancelled", "unscored"
+            f"{cancelled} Harbor trial(s) reported an unreconciled cancellation",
+            "unscored",
         )
     rewards: list[float] = []
     for evaluation in (stats.get("evals") or {}).values():
@@ -1018,6 +1050,92 @@ def _all_harbor_errors_are_agent_timeouts(
         evaluation_trial_count == expected_trials
         and evaluation_error_count == expected_trials
         and len(timed_out_trials) == expected_trials
+    )
+
+
+def _all_harbor_errors_are_cancellations(
+    stats: Mapping[str, Any],
+    *,
+    expected_trials: int,
+    reported_total: Any,
+) -> bool:
+    """Recognize a complete Harbor cancellation without treating it as success."""
+
+    if (
+        not isinstance(reported_total, int)
+        or isinstance(reported_total, bool)
+        or reported_total != expected_trials
+        or expected_trials < 1
+    ):
+        return False
+    counter_names = (
+        "n_errored_trials",
+        "n_completed_trials",
+        "n_retries",
+        "n_cancelled_trials",
+        "n_running_trials",
+        "n_pending_trials",
+    )
+    counters: dict[str, int] = {}
+    for name in counter_names:
+        value = stats.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+        counters[name] = value
+    if (
+        counters["n_errored_trials"] != expected_trials
+        or counters["n_completed_trials"] != expected_trials
+        or counters["n_cancelled_trials"] != expected_trials
+        or counters["n_retries"] != 0
+        or counters["n_running_trials"] != 0
+        or counters["n_pending_trials"] != 0
+    ):
+        return False
+    evaluations = stats.get("evals")
+    if not isinstance(evaluations, Mapping) or not evaluations:
+        return False
+    cancelled_trials: set[str] = set()
+    evaluation_errors = 0
+    evaluation_trials = 0
+    for raw_evaluation in evaluations.values():
+        if not isinstance(raw_evaluation, Mapping):
+            return False
+        raw_error_count = raw_evaluation.get("n_errors")
+        if (
+            isinstance(raw_error_count, bool)
+            or not isinstance(raw_error_count, int)
+            or raw_error_count < 0
+        ):
+            return False
+        evaluation_errors += raw_error_count
+        raw_trial_count = raw_evaluation.get("n_trials")
+        if (
+            isinstance(raw_trial_count, bool)
+            or not isinstance(raw_trial_count, int)
+            or raw_trial_count < 0
+        ):
+            return False
+        evaluation_trials += raw_trial_count
+        raw_exceptions = raw_evaluation.get("exception_stats") or {}
+        if not isinstance(raw_exceptions, Mapping) or set(raw_exceptions) != {
+            "CancelledError"
+        }:
+            return False
+        raw_trial_ids = raw_exceptions["CancelledError"]
+        if not isinstance(raw_trial_ids, list):
+            return False
+        for raw_trial_id in raw_trial_ids:
+            if (
+                not isinstance(raw_trial_id, str)
+                or not raw_trial_id
+                or raw_trial_id in cancelled_trials
+            ):
+                return False
+            cancelled_trials.add(raw_trial_id)
+    return (
+        evaluation_errors == expected_trials
+        and evaluation_trials + evaluation_errors == expected_trials
+        and len(cancelled_trials) == expected_trials
     )
 
 

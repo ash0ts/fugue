@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,8 @@ import yaml
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.comparison import (
     APPROVED_COMPARISON_LOCK_NAME,
+    COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION,
+    COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES,
     COMPARISON_RESULT_ROOT,
     COMPARISON_RUNTIME_ROOT,
     ComparisonEvaluatorV1,
@@ -24,11 +27,12 @@ from fugue.bench.comparison import (
     _candidate_source_revisions,
     _canonical_decision_gate_policies,
     _comparison_judge_response_schema,
+    _comparison_primary_output_projection,
     _comparison_qualification_digest,
     _comparison_reserved_cost_per_attempt,
     _comparison_result_digest,
     _comparison_run_exportability_issue,
-    _comparison_trial_output,
+    _comparison_trial_output_with_receipt,
     _ComparisonRuntimeBudget,
     _evaluate_decision,
     _evaluator_digest,
@@ -38,6 +42,7 @@ from fugue.bench.comparison import (
     _paired_attempt_view_v3,
     _prepare_comparison_judge_input,
     _prepare_evaluator_runtimes,
+    _reported_project_identity,
     _request_comparison_judge,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
@@ -81,6 +86,76 @@ from fugue.research.store import StudyStore
 EXAMPLE = Path("examples/comparisons/source-use-replay")
 LIVE_SKILL_EXAMPLE = Path("examples/comparisons/source-use-skill")
 MCP_MAINTENANCE_EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
+
+
+def _primary_output_receipt(
+    value: object,
+    *,
+    source: str = "row_output",
+) -> dict[str, object]:
+    encoded = (
+        value.encode()
+        if isinstance(value, str)
+        else json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    )
+    return {
+        "schema_version": 1,
+        "status": "complete",
+        "source": source,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "truncated": False,
+    }
+
+
+def _fake_scorer_receipts(
+    *,
+    source: str,
+    evidence: Mapping[str, object],
+    reference: Mapping[str, object],
+    profile: object,
+) -> dict[str, object]:
+    serialized_input = json.dumps(
+        {"evidence": evidence, "reference": reference},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    input_unsigned = {
+        "schema_version": 1,
+        "status": "bound",
+        "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+        "input_bytes": len(serialized_input),
+        "input_sha256": hashlib.sha256(serialized_input).hexdigest(),
+        "evidence_digest": stable_digest(evidence),
+        "reference_digest": stable_digest(reference),
+        "reference_output_digest": stable_digest(reference.get("output")),
+        "runtime_profile_id": profile.id,
+        "runtime_profile_digest": profile.profile_digest,
+        "runtime_image": profile.image,
+        "runtime_platform": profile.platform,
+    }
+    runtime_unsigned = {
+        "schema_version": 1,
+        "status": "verified_absent",
+        "container_name_sha256": "7" * 64,
+    }
+    return {
+        "fugue_input_receipt": {
+            **input_unsigned,
+            "receipt_digest": stable_digest(input_unsigned),
+        },
+        "fugue_runtime_receipt": {
+            **runtime_unsigned,
+            "receipt_digest": stable_digest(runtime_unsigned),
+        },
+    }
 
 
 def test_evaluator_runtime_preparation_locks_exact_profile_image_and_platform(
@@ -438,6 +513,9 @@ def test_comparison_compiles_declared_counterbalanced_schedule() -> None:
     assert experiment.default_preset == "counterbalanced"
     assert len(experiment.presets) == 1
     assert experiment.presets[0].scheduling_seed == "comparison-confirmatory-v1"
+    assert experiment.artifacts == [
+        {"source": "/logs/artifacts/fugue-answer.md"}
+    ]
 
 
 def test_runtime_budget_blocks_parallel_paid_launches() -> None:
@@ -2476,6 +2554,52 @@ def test_answer_excerpt_requires_privacy_evidence_and_redacts_json_secrets(
     assert _sanitized_answer_excerpt(row) is None
 
 
+def test_answer_excerpt_and_reported_project_use_scored_primary_artifact() -> None:
+    row = _decision_row(variant="candidate")
+    primary = {
+        "project": "wandb/scored-primary-project",
+        "recommendation": "advance",
+    }
+    receipt = _primary_output_receipt(primary, source="fugue_answer_artifact")
+    row["comparison_primary_output_projection"] = (
+        _comparison_primary_output_projection(
+            value=primary,
+            receipt=receipt,
+            env={},
+            row=row,
+        )
+    )
+    row["agent_response"] = json.dumps(
+        {
+            "project": "wandb/different-conversation-project",
+            "recommendation": "hold",
+        }
+    )
+
+    excerpt = _sanitized_answer_excerpt(row)
+
+    assert excerpt is not None
+    assert "scored-primary-project" in excerpt
+    assert "different-conversation-project" not in excerpt
+    assert _reported_project_identity(row) == "wandb/scored-primary-project"
+
+
+def test_primary_artifact_projection_never_persists_excerpt_after_privacy_failure() -> None:
+    row = _decision_row(variant="candidate")
+    row["private_label_leak"] = True
+    private_value = {"expected": "host-only-answer", "recommendation": "advance"}
+    projection = _comparison_primary_output_projection(
+        value=private_value,
+        receipt=_primary_output_receipt(private_value),
+        env={},
+        row=row,
+    )
+    assert projection["status"] == "unavailable"
+    assert "sanitized_excerpt" not in projection
+    assert "reported_project_identity" not in projection
+    assert "host-only-answer" not in json.dumps(projection)
+
+
 def test_answer_excerpt_respects_serialized_utf8_byte_limit() -> None:
     row = _decision_row(variant="candidate")
     row["agent_response"] = "é" * 1_000
@@ -2914,17 +3038,288 @@ def test_comparison_scoring_prefers_locked_answer_artifact(
     answer.write_text('{"answer": 42}', encoding="utf-8")
 
     assert (
-        _comparison_trial_output(
+        _comparison_trial_output_with_receipt(
             {
                 "trial_dir": trial_dir.as_posix(),
                 "agent_response": "The answer was written to the artifact.",
             }
-        )
+        )[0]
         == '{"answer": 42}'
     )
-    assert _comparison_trial_output({"agent_response": "terminal answer"}) == (
-        "terminal answer"
+    assert _comparison_trial_output_with_receipt(
+        {"agent_response": "terminal answer"}
+    )[0] == "terminal answer"
+
+
+def test_approved_scoring_rebinds_primary_output_from_the_host_artifact(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    spec = load_comparison(comparison_path, repo_root=tmp_path)
+    preview = preview_comparison(spec, repo_root=tmp_path)
+    _experiment, request = materialize_comparison(
+        preview,
+        repo_root=tmp_path,
+        approval_digest="a" * 64,
     )
+    approved = request.approved_comparison
+    trial_dir = (
+        tmp_path
+        / ".fugue"
+        / "runtime"
+        / "jobs"
+        / spec.id
+        / "approved-run"
+        / "job"
+        / "trial"
+    )
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    host_output = '{"answer":"host-authenticated"}'
+    answer.write_text(host_output, encoding="utf-8")
+    expected_paths = ["/logs/artifacts/fugue-answer.md"]
+    base_row = {
+        "task_id": "unlabeled-task",
+        "variant_id": "baseline",
+        "harness": "codex",
+        "run_id": "approved-run",
+        "trial_dir": trial_dir.as_posix(),
+        "expected_artifact_paths": expected_paths,
+        "final_output": '{"answer":"caller-controlled"}',
+    }
+
+    [scored] = score_comparison_rows(
+        spec,
+        [base_row],
+        repo_root=tmp_path,
+        approved_comparison=approved,
+    )
+
+    assert scored["final_output"] == host_output
+    assert scored["comparison_primary_output"]["sha256"] == hashlib.sha256(
+        host_output.encode()
+    ).hexdigest()
+
+    forged_output = '{"answer":"forged-receipt"}'
+    forged_encoded = forged_output.encode()
+    forged_receipt = {
+        "schema_version": 1,
+        "status": "complete",
+        "source": "fugue_answer_artifact",
+        "source_path": "/logs/artifacts/fugue-answer.md",
+        "path": "artifacts/logs/artifacts/fugue-answer.md",
+        "contract_version": COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION,
+        "locked_artifact_paths_digest": stable_digest(expected_paths),
+        "bytes": len(forged_encoded),
+        "sha256": hashlib.sha256(forged_encoded).hexdigest(),
+        "truncated": False,
+    }
+    with pytest.raises(ValueError, match="extracted primary artifact receipt"):
+        score_comparison_rows(
+            spec,
+            [
+                {
+                    **base_row,
+                    "final_output": forged_output,
+                    "comparison_primary_output": forged_receipt,
+                }
+            ],
+            repo_root=tmp_path,
+            approved_comparison=approved,
+        )
+
+
+def test_comparison_primary_artifact_is_complete_past_legacy_truncation(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    expected = "complete-plan\n" + ("verified section\n" * 2_000)
+    assert len(expected) > 16_000
+    answer.write_text(expected, encoding="utf-8")
+
+    value, receipt = _comparison_trial_output_with_receipt(
+        {
+            "trial_dir": trial_dir.as_posix(),
+            "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+        }
+    )
+
+    assert value == expected
+    assert receipt["bytes"] == len(expected.encode())
+    assert receipt["sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+
+
+def test_canonical_primary_receipt_rejects_wrong_source_identity(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("complete", encoding="utf-8")
+    value, receipt = _comparison_trial_output_with_receipt(
+        {
+            "trial_dir": trial_dir.as_posix(),
+            "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+        }
+    )
+    receipt["source"] = "row_output"
+    row = _decision_row(variant="candidate")
+    row["expected_artifact_paths"] = ["/logs/artifacts/fugue-answer.md"]
+
+    with pytest.raises(ValueError, match="canonical primary artifact identity"):
+        _comparison_primary_output_projection(
+            value=value,
+            receipt=receipt,
+            env={},
+            row=row,
+        )
+
+
+@pytest.mark.parametrize("expected_paths", [[], "fugue-answer.md", ["other.md"]])
+def test_comparison_primary_artifact_identity_fails_closed_when_bound_malformed(
+    tmp_path: Path,
+    expected_paths: object,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("complete", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="expected artifact identity"):
+        _comparison_trial_output_with_receipt(
+            {
+                "trial_dir": trial_dir.as_posix(),
+                "expected_artifact_paths": expected_paths,
+            }
+        )
+
+
+def test_comparison_bound_primary_artifact_cannot_fall_back_to_terminal_output(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    with pytest.raises(ValueError, match="primary answer artifact"):
+        _comparison_trial_output_with_receipt(
+            {
+                "trial_dir": trial_dir.as_posix(),
+                "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+                "agent_response": "must not be used",
+            }
+        )
+
+
+def test_comparison_primary_artifact_allows_other_locked_outputs(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("complete", encoding="utf-8")
+
+    value, receipt = _comparison_trial_output_with_receipt(
+        {
+            "trial_dir": trial_dir.as_posix(),
+            "expected_artifact_paths": [
+                "/logs/artifacts/supporting.json",
+                "/logs/artifacts/fugue-answer.md",
+            ],
+        }
+    )
+
+    assert value == "complete"
+    assert receipt["source_path"] == "/logs/artifacts/fugue-answer.md"
+
+
+def test_comparison_primary_artifact_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("must not be read", encoding="utf-8")
+    answer.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _comparison_trial_output_with_receipt(
+            {
+                "trial_dir": trial_dir.as_posix(),
+                "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+            }
+        )
+
+
+def test_comparison_primary_artifact_rejects_symlinked_trial_root(
+    tmp_path: Path,
+) -> None:
+    real_trial = tmp_path / "real-trial"
+    answer = real_trial / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("must not be read through a linked root", encoding="utf-8")
+    linked_trial = tmp_path / "linked-trial"
+    linked_trial.symlink_to(real_trial, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _comparison_trial_output_with_receipt(
+            {
+                "trial_dir": linked_trial.as_posix(),
+                "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+            }
+        )
+
+
+def test_comparison_primary_artifact_rejects_symlinked_trial_ancestor(
+    tmp_path: Path,
+) -> None:
+    trusted_root = tmp_path / "trusted-jobs"
+    trusted_root.mkdir()
+    outside_parent = tmp_path / "outside-parent"
+    real_trial = outside_parent / "trial"
+    answer = real_trial / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("must not be read through a linked ancestor", encoding="utf-8")
+    linked_parent = trusted_root / "linked-parent"
+    linked_parent.symlink_to(outside_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _comparison_trial_output_with_receipt(
+            {
+                "trial_dir": (linked_parent / "trial").as_posix(),
+                "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+            },
+            trusted_root=trusted_root,
+        )
+
+
+def test_comparison_primary_artifact_fails_closed_when_oversized(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    answer = trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_bytes(b"x" * (COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES + 1))
+
+    with pytest.raises(ValueError, match="exceeds the locked byte limit"):
+        _comparison_trial_output_with_receipt({"trial_dir": trial_dir.as_posix()})
+
+
+@pytest.mark.parametrize("trial_dir", [None, "does-not-exist"])
+def test_comparison_primary_artifact_binding_requires_host_trial_directory(
+    trial_dir: str | None,
+) -> None:
+    row: dict[str, object] = {
+        "expected_artifact_paths": ["/logs/artifacts/fugue-answer.md"],
+        "agent_response": "must not become the scored fallback",
+    }
+    if trial_dir is not None:
+        row["trial_dir"] = trial_dir
+
+    with pytest.raises(ValueError, match="trial directory is missing"):
+        _comparison_trial_output_with_receipt(row)
 
 
 def test_source_use_demo_uses_packaged_assets_outside_checkout(
@@ -3301,6 +3696,29 @@ def test_llm_judge_timeout_is_strict_defaulted_and_bound_to_spec() -> None:
     assert configured.spec_digest != defaulted.spec_digest
 
 
+def test_llm_judge_digest_binds_input_sanitizer_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("inspected_paths",),
+    )
+    original = _evaluator_digest(judge, root)
+
+    monkeypatch.setattr(
+        "fugue.bench.comparison.COMPARISON_JUDGE_INPUT_SANITIZER_VERSION",
+        999,
+    )
+
+    assert _evaluator_digest(judge, root) != original
+
+
 @pytest.mark.parametrize("timeout_sec", [0, 901, 1.5, True, None])
 def test_llm_judge_timeout_rejects_invalid_values(timeout_sec: object) -> None:
     root = Path.cwd()
@@ -3514,8 +3932,9 @@ def test_anthropic_blind_judge_sends_the_bound_response_schema(
     )
     captured: dict[str, object] = {}
 
-    def post_judge(*_args: object, **kwargs: object):
+    def post_judge(*args: object, **kwargs: object):
         captured.update(kwargs)
+        captured["prompt"] = args[4]
         return (
             {
                 "scores": {"maintenance_actionability": 0.75},
@@ -3531,7 +3950,13 @@ def test_anthropic_blind_judge_sends_the_bound_response_schema(
     _, _, receipt = _request_comparison_judge(
         evaluator=judge,
         public_task={"input": "Review this change."},
-        row={"answer": "A grounded response."},
+        row={
+            "answer": "A grounded response.",
+            "comparison_primary_output": _primary_output_receipt(
+                "A grounded response.",
+                source="fugue_answer_artifact",
+            ),
+        },
         env={"ANTHROPIC_API_KEY": "test-secret"},
     )
 
@@ -3552,9 +3977,85 @@ def test_anthropic_blind_judge_sends_the_bound_response_schema(
     assert receipt["requested_text_max_characters"] == 500
     assert receipt["response_max_characters"] == JUDGE_JSON_MAX_RESPONSE_CHARACTERS
     assert receipt["maximum_prompt_characters"] == 48_000
+    assert receipt["primary_response"] == {
+        "schema_version": 1,
+        "status": "complete",
+        "source": "fugue_answer_artifact",
+        "primary_artifact_receipt_digest": stable_digest(
+            _primary_output_receipt(
+                "A grounded response.",
+                source="fugue_answer_artifact",
+            )
+        ),
+        "source_characters": 20,
+        "source_bytes": 20,
+        "source_sha256": hashlib.sha256(b"A grounded response.").hexdigest(),
+        "provider_characters": 20,
+        "provider_bytes": 20,
+        "provider_sha256": hashlib.sha256(b"A grounded response.").hexdigest(),
+        "privacy_transformed": False,
+        "truncated": False,
+    }
+    assert "complete primary artifact" in str(captured["prompt"])
+    assert "fixture placeholders remain intact" in str(captured["prompt"])
+    assert "declared privacy redaction" in str(captured["prompt"])
     assert receipt["request_policy"]["structured_assistant_options"] == {
         "thinking": {"type": "disabled"}
     }
+
+
+def test_live_blind_judge_receives_complete_primary_artifact_past_legacy_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("inspected_paths",),
+    )
+    artifact = "# Complete plan\n" + ("Verified section.\n" * 1_500)
+    artifact += 'secret = Path(values["wandb_api_key_file"]).read_text()\n'
+    artifact += "WANDB_API_KEY=example-placeholder\n"
+    assert len(artifact.encode()) > 16_000
+    captured: dict[str, str] = {}
+
+    def post_judge(*args: object, **_kwargs: object):
+        captured["prompt"] = str(args[4])
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.75},
+                "overall_assessment": "Useful and grounded.",
+                "uncertainty": 0.2,
+                "missing_evidence": False,
+                "rationale": "The complete plan is reviewable.",
+            },
+            {"input_tokens": 100, "output_tokens": 20},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", post_judge)
+    _, _, receipt = _request_comparison_judge(
+        evaluator=judge,
+        public_task={"input": "Review this plan."},
+        row={
+            "answer": artifact,
+            "comparison_primary_output": _primary_output_receipt(
+                artifact,
+                source="fugue_answer_artifact",
+            ),
+        },
+        env={"ANTHROPIC_API_KEY": "configured-secret-value"},
+    )
+
+    provider_payload = json.loads(captured["prompt"].split("\n\n", 1)[1])
+    assert provider_payload["response"] == artifact
+    assert len(captured["prompt"]) < 48_000
+    assert receipt["primary_response"]["source_bytes"] == len(artifact.encode())
+    assert receipt["primary_response"]["provider_bytes"] == len(artifact.encode())
+    assert receipt["primary_response"]["privacy_transformed"] is False
+    assert receipt["primary_response"]["truncated"] is False
 
 
 def test_live_blind_judge_fails_closed_instead_of_truncating_payload() -> None:
@@ -3572,7 +4073,12 @@ def test_live_blind_judge_fails_closed_instead_of_truncating_payload() -> None:
         _request_comparison_judge(
             evaluator=judge,
             public_task={"input": "Review this change."},
-            row={"answer": "x" * 60_000},
+            row={
+                "answer": "x" * 60_000,
+                "comparison_primary_output": _primary_output_receipt(
+                    "x" * 60_000
+                ),
+            },
             env={"ANTHROPIC_API_KEY": "test-secret"},
         )
 
@@ -3672,6 +4178,111 @@ def test_checkpoint_stops_when_required_judge_does_not_score() -> None:
     ]
 
 
+def test_cancelled_comparison_row_never_invokes_scorer_or_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    calls: list[str] = []
+
+    def forbidden_scorer(*_args: object, **_kwargs: object) -> object:
+        calls.append("scorer")
+        raise AssertionError("cancelled row must not be scored")
+
+    def forbidden_judge(*_args: object, **_kwargs: object) -> object:
+        calls.append("judge")
+        raise AssertionError("cancelled row must not be judged")
+
+    monkeypatch.setattr(
+        "fugue.bench.comparison._run_custom_scorer",
+        forbidden_scorer,
+    )
+    [row] = score_comparison_rows(
+        spec,
+        [
+            {
+                "task_id": "expense-limit",
+                "variant_id": "baseline",
+                "harness": "claude-code",
+                "trial_index": 1,
+                "status": "cancelled",
+                "runtime_outcome": "cancelled",
+            }
+        ],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "configured-secret"},
+        judge_request=forbidden_judge,
+    )
+
+    assert calls == []
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_required_evaluation_complete"] is False
+
+
+def test_cancelled_comparison_row_clears_stale_outcome_claims() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    stale = {
+        "task_id": "expense-limit",
+        "variant_id": "baseline",
+        "harness": "claude-code",
+        "trial_index": 1,
+        "status": "cancelled",
+        "runtime_outcome": "cancelled",
+        "pass": True,
+        "benchmark_pass": True,
+        "benchmark_outcome": "passed",
+        "reward": 1.0,
+        "host_evaluator_status": "scored",
+        "evaluation_overall": 1.0,
+        "evaluation_judge_status": "scored",
+        "evaluation_correctness": 1.0,
+        "judge_correctness": 1.0,
+        "evaluation_rubrics": [{"id": "quality"}],
+        "judge_overall": 0.9,
+        "adapter_outcome": {
+            "deterministic_verification": {"state": "passed"},
+        },
+        "comparison_deterministic_scores": {"facts.answer": 1.0},
+        "comparison_dimension_roles": {"facts.answer": "outcome"},
+        "comparison_deterministic_criticality": {"facts.answer": True},
+        "comparison_mechanism": {"assigned": True, "used": True},
+        "comparison_judge_scores": {"judge.useful": 1.0},
+        "comparison_judge_accounted_cost_usd": 0.5,
+        "comparison_judges": {"judge": {"status": "scored"}},
+        "comparison_host_verifier_receipts": [{"status": "passed"}],
+    }
+
+    [row] = score_comparison_rows(spec, [stale], repo_root=root)
+
+    assert row["pass"] is None
+    assert row["benchmark_pass"] is None
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["reward"] is None
+    assert row["host_evaluator_status"] == "not_run"
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_judge_status"] == "unavailable"
+    assert all(
+        field not in row
+        for field in (
+            "comparison_deterministic_scores",
+            "comparison_dimension_roles",
+            "comparison_deterministic_criticality",
+            "comparison_mechanism",
+            "comparison_judge_scores",
+            "comparison_judge_accounted_cost_usd",
+            "comparison_host_verifier_receipts",
+            "evaluation_overall",
+            "evaluation_judge_status",
+            "evaluation_correctness",
+            "judge_correctness",
+            "evaluation_rubrics",
+            "judge_overall",
+            "adapter_outcome",
+        )
+    )
+
+
 def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> None:
     policies = _canonical_decision_gate_policies(
         (),
@@ -3713,6 +4324,12 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
             "score": 1.0 if passed else 0.0,
             "reason": "custom deterministic scorer",
             "details": {"fact_correct": passed},
+            **_fake_scorer_receipts(
+                source=source,
+                evidence=evidence,
+                reference=reference,
+                profile=profile,
+            ),
         }
 
     monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
@@ -3749,6 +4366,20 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
     assert rows[0]["comparison_deterministic_scores"] == {
         "fact-and-source.fact_correct": True
     }
+    scorer_receipt = rows[0]["comparison_deterministic_scorer_receipts"][
+        "fact-and-source"
+    ]
+    assert scorer_receipt["status"] == "bound"
+    assert scorer_receipt["primary_artifact_sha256"] == rows[0][
+        "comparison_primary_output"
+    ]["sha256"]
+    assert scorer_receipt["receipt_digest"] == stable_digest(
+        {
+            key: value
+            for key, value in scorer_receipt.items()
+            if key != "receipt_digest"
+        }
+    )
     assert observed["reference"] == {
         "task": {
             "id": "expense-limit",
@@ -3772,6 +4403,65 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
         "trial_index": 1,
     }
     assert "--network" not in str(observed["source"])
+
+
+def test_deterministic_scorer_rejects_primary_artifact_receipt_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    scorer_path = root / ".fugue" / "test-primary-binding-scorer.py"
+    scorer_path.parent.mkdir(parents=True, exist_ok=True)
+    scorer_path.write_text(
+        "def score(task, output, evidence):\n"
+        "    return {'fact_correct': True}\n"
+    )
+
+    def fake_runner(*, source, evidence, reference, profile, limits):
+        return {
+            "score": 1.0,
+            "reason": "custom deterministic scorer",
+            "details": {"fact_correct": True},
+            **_fake_scorer_receipts(
+                source=source,
+                evidence=evidence,
+                reference=reference,
+                profile=profile,
+            ),
+        }
+
+    monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    evaluator = replace(
+        spec.evaluators[0],
+        checks=(),
+        scorer=scorer_path.relative_to(root).as_posix(),
+        runtime="python312-sandbox-v1",
+        dimensions=("fact_correct",),
+    )
+    custom = replace(spec, evaluators=(evaluator,))
+    answer = {"amount": 125, "source": "expense-policy-v4.md"}
+    wrong_receipt = _primary_output_receipt({"different": "artifact"})
+    try:
+        with pytest.raises(
+            ValueError,
+            match="canonical result projection disagrees",
+        ):
+            score_comparison_rows(
+                custom,
+                [
+                    {
+                        "task_id": "expense-limit",
+                        "variant_id": "candidate",
+                        "harness": "codex",
+                        "trial_index": 1,
+                        "answer": answer,
+                        "comparison_primary_output": wrong_receipt,
+                    }
+                ],
+                repo_root=root,
+            )
+    finally:
+        scorer_path.unlink(missing_ok=True)
 
 
 def test_custom_host_verifier_is_frozen_and_overrides_its_bound_dimension(
@@ -3804,6 +4494,12 @@ def test_custom_host_verifier_is_frozen_and_overrides_its_bound_dimension(
             "score": 1.0 if passed else 0.0,
             "reason": "custom deterministic scorer",
             "details": {"fact_correct": passed},
+            **_fake_scorer_receipts(
+                source=source,
+                evidence=evidence,
+                reference=reference,
+                profile=profile,
+            ),
         }
 
     monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
@@ -4055,7 +4751,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
     }
 
 
-def test_blind_judge_sanitizes_safe_credential_placeholders_before_provider(
+def test_blind_judge_preserves_safe_credential_placeholders_before_provider(
     monkeypatch: pytest.MonkeyPatch,
     allow_unit_judge_execution: None,
 ) -> None:
@@ -4100,9 +4796,15 @@ def test_blind_judge_sanitizes_safe_credential_placeholders_before_provider(
         [
             {
                 "answer": {
-                    "plan": (
-                        "Use API_KEY=example-placeholder in the local fixture, "
-                        "then verify the credential is not committed."
+                    "plan": "\n".join(
+                        (
+                            "Use API_KEY=example-placeholder in the local fixture.",
+                            'env_file.write_text("WANDB_API_KEY=from-env-file\\n")',
+                            'first.write_text("WANDB_API_KEY=first-key\\n")',
+                            'second.write_text("WANDB_API_KEY=second-key\\n")',
+                            'secret = Path(values["wandb_api_key_file"]).read_text()',
+                            "Then verify the credential is not committed.",
+                        )
                     )
                 },
                 "task_id": "expense-limit",
@@ -4121,8 +4823,12 @@ def test_blind_judge_sanitizes_safe_credential_placeholders_before_provider(
     prompt = str(captured["prompt"])
     provider_payload = json.loads(prompt.split("\n\n", 1)[1])
     serialized_payload = json.dumps(provider_payload, sort_keys=True)
-    assert "example-placeholder" not in serialized_payload
-    assert "API_KEY=[redacted]" in serialized_payload
+    assert "API_KEY=example-placeholder" in serialized_payload
+    assert "WANDB_API_KEY=from-env-file" in serialized_payload
+    assert "WANDB_API_KEY=first-key" in serialized_payload
+    assert "WANDB_API_KEY=second-key" in serialized_payload
+    assert "secret = Path" in serialized_payload
+    assert "[redacted]" not in serialized_payload
     assert "configured-secret-value" not in serialized_payload
     assert "private_expected_values" not in serialized_payload
     assert "variant_id" not in serialized_payload
@@ -4130,15 +4836,101 @@ def test_blind_judge_sanitizes_safe_credential_placeholders_before_provider(
     assert result["status"] == "scored"
     route = result["route_receipt"]
     privacy = route["judge_input_privacy"]
-    assert privacy["contract"] == "fugue-judge-input-sanitization-v1"
-    assert privacy["transformed"] is True
-    assert privacy["transformed_value_count"] == 1
-    assert privacy["source_payload_sha256"] != privacy["provider_payload_sha256"]
+    assert privacy["contract"] == "fugue-judge-input-sanitization-v3"
+    assert privacy["transform"] == "high-confidence-credential-redaction-v3"
+    assert privacy["transformed"] is False
+    assert privacy["transformed_value_count"] == 0
+    assert privacy["source_payload_sha256"] == privacy["provider_payload_sha256"]
+    assert privacy["primary_response"]["privacy_transformed"] is False
+    assert (
+        privacy["primary_response"]["source_sha256"]
+        == privacy["primary_response"]["provider_sha256"]
+    )
     assert privacy["provider_payload_sha256"] == stable_digest(provider_payload)
     assert route["provider_payload_sha256"] == privacy["provider_payload_sha256"]
     assert route["input_transform_receipt_digest"] == privacy["receipt_digest"]
     assert privacy["receipt_digest"] == stable_digest(
         {key: value for key, value in privacy.items() if key != "receipt_digest"}
+    )
+
+
+def test_blind_judge_redacts_unknown_credentials_without_corrupting_code() -> None:
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="anthropic/claude-sonnet-5",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("inspected_paths",),
+    )
+    answer = {
+        "plan": "\n".join(
+            (
+                'token = "unreviewed-live-credential-1234"',
+                "Authorization: Bearer unreviewed-bearer-1234",
+                "API_KEY=unreviewed-api-key-1234",
+                "API_KEY=prod-example-ACTUALSECRET123",
+                "API_KEY=abcd$rest",
+                "API_KEY=<prod-real-secret-1234>",
+                "Authorization: Bearer <prod-bearer-secret-1234>",
+                "password: correct horse battery staple",
+                "secret: alpha bravo charlie delta",
+                "token: echo foxtrot golf hotel",
+                "api_key: india juliet kilo lima",
+                "token = sample-live-credential-9999",
+                'token = os.getenv("TOKEN", "fallback-secret-9876")',
+                'secret = config["secret"] # comment-secret-9876',
+                'secret = Path(values["wandb_api_key_file"]).read_text()',
+                'api_key = Path("/run/secrets/wandb")',
+                'token = os.getenv("TOKEN")',
+                'secret = config["secret"]',
+            )
+        ),
+        "api_key": "unreviewed-structured-key-1234",
+    }
+    prepared, receipt = _prepare_comparison_judge_input(
+        evaluator=judge,
+        public_task={"input": "Review the repair plan.", "tags": ["maintenance"]},
+        row={
+            "answer": answer,
+            "comparison_primary_output": _primary_output_receipt(answer),
+            "inspected_paths": ["README.md"],
+            "inspected_paths_status": "available",
+        },
+        env={"ANTHROPIC_API_KEY": "configured-secret-value"},
+    )
+
+    serialized = json.dumps(prepared, sort_keys=True)
+    assert "unreviewed-live-credential-1234" not in serialized
+    assert "unreviewed-bearer-1234" not in serialized
+    assert "unreviewed-api-key-1234" not in serialized
+    assert "unreviewed-structured-key-1234" not in serialized
+    assert "prod-example-ACTUALSECRET123" not in serialized
+    assert "abcd$rest" not in serialized
+    assert "prod-real-secret-1234" not in serialized
+    assert "prod-bearer-secret-1234" not in serialized
+    assert "correct horse battery staple" not in serialized
+    assert "alpha bravo charlie delta" not in serialized
+    assert "echo foxtrot golf hotel" not in serialized
+    assert "india juliet kilo lima" not in serialized
+    assert "sample-live-credential-9999" not in serialized
+    assert "fallback-secret-9876" not in serialized
+    assert "comment-secret-9876" not in serialized
+    assert 'token = \\"[redacted]\\"' in serialized
+    assert "Authorization: Bearer [redacted]" in serialized
+    assert "API_KEY=[redacted]" in serialized
+    assert "secret = Path" in serialized
+    assert 'api_key = Path(\\"/run/secrets/wandb\\")' in serialized
+    assert 'token = os.getenv(\\"TOKEN\\")' in serialized
+    assert 'secret = config[\\"secret\\"]' in serialized
+    assert receipt["contract"] == "fugue-judge-input-sanitization-v3"
+    assert receipt["transformed"] is True
+    assert receipt["transformed_value_count"] == 2
+    assert receipt["primary_response"]["privacy_transformed"] is True
+    assert (
+        receipt["primary_response"]["source_sha256"]
+        != receipt["primary_response"]["provider_sha256"]
     )
 
 
@@ -4155,8 +4947,10 @@ def test_blind_judge_rejects_untracked_prepared_payload_transformation(
         evidence=("inspected_paths",),
     )
     public_task = {"input": "Review the repair plan.", "tags": ["maintenance"]}
+    answer = {"plan": "Set API_KEY=example-placeholder in the test fixture."}
     row = {
-        "answer": {"plan": "Set API_KEY=example-placeholder in the test fixture."},
+        "answer": answer,
+        "comparison_primary_output": _primary_output_receipt(answer),
         "inspected_paths": ["README.md"],
         "inspected_paths_status": "available",
     }

@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-upgrade-confirmatory-budget-policy-v1",
+  "status": "limits_only_not_approval",
+  "currency": "USD",
+  "authorization_contract": {
+    "approval_unit": "one_exact_preview_per_study",
+    "campaign_wide_approval_is_sufficient": false,
+    "checked_in_policy_is_approval": false,
+    "approval_receipts_are_checked_in": false,
+    "required_preview_bindings": [
+      "source",
+      "taskset",
+      "private_labels",
+      "candidate",
+      "runtime",
+      "scorer",
+      "judge_calibration",
+      "evidence_destination",
+      "cell_count",
+      "maximum_cost_usd"
+    ],
+    "prior_approval_reuse": "forbidden_after_any_bound_input_changes"
+  },
+  "historical_canary_policy": {
+    "manifest": "campaign-manifest.json",
+    "budget_ledger": "budget-ledger.json",
+    "campaign_id": "community-skill-upgrade-campaign-v1",
+    "ceiling_usd": 110,
+    "scope": "historical_four_cell_canaries_and_original_judge_calibration",
+    "status": "audit_history_only",
+    "authorizes_confirmatory_execution": false,
+    "reason": "The active confirmatory studies have different specs, tasksets, cell counts, execution identities, and preview digests."
+  },
+  "prerequisite_diagnostic": {
+    "id": "community-skill-judge-calibration-v1",
+    "status": "completed_advisory_only_pending_human_review",
+    "new_cells": 0,
+    "new_reserve_usd": 0,
+    "new_cap_usd": 0,
+    "authorizes_agent_studies": false
+  },
+  "studies": [
+    {
+      "id": "superpowers-writing-plans-confirmatory-v5",
+      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v5.yaml",
+      "tasks": 24,
+      "arms": 2,
+      "attempts_per_task_per_arm": 4,
+      "cells": 192,
+      "agent_reserve_per_cell_usd": 8.4,
+      "judge_reserve_per_cell_usd": 0.1,
+      "total_reserve_per_cell_usd": 8.5,
+      "estimated_reserve_usd": 1632,
+      "maximum_cost_usd": 1700,
+      "approval_status": "fresh_exact_preview_required"
+    },
+    {
+      "id": "anthropic-skill-creator-confirmatory-v1",
+      "spec": "../anthropic-skill-creator-upgrade/confirmatory-v1.yaml",
+      "tasks": 24,
+      "arms": 2,
+      "attempts_per_task_per_arm": 4,
+      "cells": 192,
+      "agent_reserve_per_cell_usd": 8.4,
+      "judge_reserve_per_cell_usd": 0.1,
+      "total_reserve_per_cell_usd": 8.5,
+      "estimated_reserve_usd": 1632,
+      "maximum_cost_usd": 1640,
+      "approval_status": "fresh_exact_preview_required"
+    },
+    {
+      "id": "vercel-react-best-practices-confirmatory-v1",
+      "spec": "../vercel-react-best-practices-upgrade/confirmatory-v1.yaml",
+      "tasks": 24,
+      "arms": 2,
+      "attempts_per_task_per_arm": 4,
+      "cells": 192,
+      "agent_reserve_per_cell_usd": 8.4,
+      "judge_reserve_per_cell_usd": 0.1,
+      "total_reserve_per_cell_usd": 8.5,
+      "estimated_reserve_usd": 1632,
+      "maximum_cost_usd": 1640,
+      "approval_status": "fresh_exact_preview_required"
+    }
+  ],
+  "totals": {
+    "cells": 576,
+    "estimated_reserve_usd": 4896,
+    "sum_of_independent_maximum_cost_usd": 4980,
+    "single_campaign_spend_authorization_exists": false
+  }
+}

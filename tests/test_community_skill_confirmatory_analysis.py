@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from collections.abc import Callable
@@ -107,7 +108,7 @@ def _superpowers_base_inputs() -> dict[str, Any]:
     )
     spec = ANALYSIS.load_comparison(
         REPO_ROOT
-        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v4.yaml",
+        / "examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v5.yaml",
         repo_root=REPO_ROOT,
     )
     tasks = ANALYSIS._public_tasks(REPO_ROOT / spec.taskset.tasks)
@@ -176,6 +177,8 @@ def _rows(
                         "attempt_id": ANALYSIS.stable_digest(identity),
                         **identity,
                         "status": "passed",
+                        "runtime_outcome": "completed",
+                        "benchmark_outcome": "passed",
                         "comparison_deterministic_scores": scores,
                         "comparison_dimension_roles": {
                             dimension: (
@@ -230,6 +233,98 @@ def test_confirmatory_contract_is_frozen_before_execution() -> None:
     assert all(item["cells"] == 192 for item in studies)
 
 
+def test_confirmatory_budget_policy_reconciles_active_specs_and_denies_legacy_authority() -> None:
+    manifest = json.loads(
+        (CAMPAIGN / "conference-campaign-manifest.json").read_text(encoding="utf-8")
+    )
+    binding = manifest["budget_policy"]
+    policy_path = CAMPAIGN / binding["path"]
+    policy_bytes = policy_path.read_bytes()
+    assert hashlib.sha256(policy_bytes).hexdigest() == binding["sha256"]
+
+    policy = json.loads(policy_bytes)
+    assert policy["status"] == binding["status"] == "limits_only_not_approval"
+    assert policy["authorization_contract"] == {
+        "approval_unit": "one_exact_preview_per_study",
+        "campaign_wide_approval_is_sufficient": False,
+        "checked_in_policy_is_approval": False,
+        "approval_receipts_are_checked_in": False,
+        "required_preview_bindings": [
+            "source",
+            "taskset",
+            "private_labels",
+            "candidate",
+            "runtime",
+            "scorer",
+            "judge_calibration",
+            "evidence_destination",
+            "cell_count",
+            "maximum_cost_usd",
+        ],
+        "prior_approval_reuse": "forbidden_after_any_bound_input_changes",
+    }
+    legacy = policy["historical_canary_policy"]
+    assert legacy["ceiling_usd"] == 110
+    assert legacy["status"] == "audit_history_only"
+    assert legacy["authorizes_confirmatory_execution"] is False
+    assert policy["prerequisite_diagnostic"] == {
+        "id": "community-skill-judge-calibration-v1",
+        "status": "completed_advisory_only_pending_human_review",
+        "new_cells": 0,
+        "new_reserve_usd": 0,
+        "new_cap_usd": 0,
+        "authorizes_agent_studies": False,
+    }
+
+    expected = {
+        "superpowers-writing-plans-confirmatory-v5": (192, 1632, 1700),
+        "anthropic-skill-creator-confirmatory-v1": (192, 1632, 1640),
+        "vercel-react-best-practices-confirmatory-v1": (192, 1632, 1640),
+    }
+    for study in policy["studies"]:
+        spec = ANALYSIS.load_comparison(
+            (CAMPAIGN / study["spec"]).resolve(), repo_root=REPO_ROOT
+        )
+        tasks = ANALYSIS._public_tasks(REPO_ROOT / spec.taskset.tasks)
+        judge_reserve = sum(
+            evaluator.reserve_cost_usd
+            for evaluator in spec.evaluators
+            if evaluator.type == "llm_judge"
+        )
+        cells = len(tasks) * 2 * spec.execution.attempts
+        reserve_per_cell = spec.execution.reserve_per_attempt_usd + judge_reserve
+        assert study["id"] == spec.id
+        assert study["tasks"] == len(tasks) == 24
+        assert study["arms"] == 2
+        assert study["attempts_per_task_per_arm"] == spec.execution.attempts == 4
+        assert study["cells"] == cells
+        assert study["agent_reserve_per_cell_usd"] == 8.4
+        assert study["judge_reserve_per_cell_usd"] == pytest.approx(judge_reserve)
+        assert study["total_reserve_per_cell_usd"] == pytest.approx(
+            reserve_per_cell
+        )
+        assert study["estimated_reserve_usd"] == pytest.approx(
+            cells * reserve_per_cell
+        )
+        assert study["maximum_cost_usd"] == spec.execution.max_cost_usd
+        assert spec.execution.qualification_inputs[
+            "confirmatory_budget_policy_sha256"
+        ] == str(policy_path.relative_to(REPO_ROOT))
+        assert (
+            study["cells"],
+            study["estimated_reserve_usd"],
+            study["maximum_cost_usd"],
+        ) == expected[study["id"]]
+        assert study["approval_status"] == "fresh_exact_preview_required"
+
+    assert policy["totals"] == {
+        "cells": 576,
+        "estimated_reserve_usd": 4896,
+        "sum_of_independent_maximum_cost_usd": 4980,
+        "single_campaign_spend_authorization_exists": False,
+    }
+
+
 def test_source_lock_always_binds_campaign_analysis_and_selection_code() -> None:
     assert SOURCE_LOCK.CAMPAIGN_SUPPORT_FILES == {
         "analyze_confirmatory.py": "confirmatory_analysis_implementation",
@@ -242,7 +337,7 @@ def test_source_lock_always_binds_campaign_analysis_and_selection_code() -> None
 @pytest.mark.parametrize(
     ("study_id", "samples", "families", "requirement"),
     [
-        ("superpowers-writing-plans-confirmatory-v4", 20_000, 4, "all"),
+        ("superpowers-writing-plans-confirmatory-v5", 20_000, 4, "all"),
         ("anthropic-skill-creator-confirmatory-v1", 10_000, 3, "any"),
         ("vercel-react-best-practices-confirmatory-v1", 10_000, 2, "any"),
     ],
@@ -288,43 +383,45 @@ def test_preregistered_locked_input_drift_fails_closed() -> None:
         )
 
 
-def test_superpowers_v1_v2_v3_are_rejected_and_v4_is_exactly_bound() -> None:
+def test_superpowers_v1_through_v4_are_rejected_and_v5_is_exactly_bound() -> None:
     for study_id in (
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
         "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4",
     ):
         with pytest.raises(ValueError, match="identify exactly one"):
             ANALYSIS._profile_for_study(PROFILES, study_id)
     profile, profile_sha = ANALYSIS._profile_for_study(
         PROFILES,
-        "superpowers-writing-plans-confirmatory-v4",
+        "superpowers-writing-plans-confirmatory-v5",
     )
     assert len(profile_sha) == 64
-    assert profile["study_ids"] == ["superpowers-writing-plans-confirmatory-v4"]
-    assert profile["amendments"]["superpowers-writing-plans-confirmatory-v4"] == {
+    assert profile["study_ids"] == ["superpowers-writing-plans-confirmatory-v5"]
+    assert profile["amendments"]["superpowers-writing-plans-confirmatory-v5"] == {
         "path": (
             "../superpowers-writing-plans-upgrade/"
-            "preregistration-confirmatory-v4-amendment.json"
+            "preregistration-confirmatory-v5-amendment.json"
         ),
-        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+        "sha256": "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37",
         "amendment_digest": (
-            "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+            "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
         ),
     }
     inputs = _superpowers_base_inputs()
     assert inputs["preregistration_binding"]["amendment"]["sha256"] == (
-        "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424"
+        "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37"
     )
     assert inputs["preregistration_binding"]["amendment"][
         "amendment_digest"
     ] == (
-        "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+        "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
     )
     assert inputs["profile"]["historical_rejected_study_ids"] == [
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
         "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4",
     ]
     assert inputs["profile"]["sensitivity_analysis"]["restart_exposure"] == {
         "status": "required_descriptive",
@@ -338,16 +435,16 @@ def test_superpowers_v1_v2_v3_are_rejected_and_v4_is_exactly_bound() -> None:
     }
 
 
-def test_superpowers_v4_manifest_binds_amendment_bytes_and_canonical_digest() -> None:
-    inputs = _study_inputs("superpowers-writing-plans-confirmatory-v4")
+def test_superpowers_v5_manifest_binds_amendment_bytes_and_canonical_digest() -> None:
+    inputs = _study_inputs("superpowers-writing-plans-confirmatory-v5")
     expected = {
         "path": (
             "../superpowers-writing-plans-upgrade/"
-            "preregistration-confirmatory-v4-amendment.json"
+            "preregistration-confirmatory-v5-amendment.json"
         ),
-        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
+        "sha256": "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37",
         "amendment_digest": (
-            "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+            "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
         ),
     }
     assert inputs["study"]["amendment"] == expected
@@ -367,7 +464,7 @@ def test_superpowers_v4_manifest_binds_amendment_bytes_and_canonical_digest() ->
         )
 
 
-def test_superpowers_v4_amendment_canonical_drift_fails_closed(
+def test_superpowers_v5_amendment_canonical_drift_fails_closed(
     tmp_path: Path,
 ) -> None:
     document = json.loads(PROFILES.read_text(encoding="utf-8"))
@@ -379,7 +476,7 @@ def test_superpowers_v4_amendment_canonical_drift_fails_closed(
     amendment_path = (
         REPO_ROOT
         / "examples/comparisons/superpowers-writing-plans-upgrade/"
-        "preregistration-confirmatory-v4-amendment.json"
+        "preregistration-confirmatory-v5-amendment.json"
     )
     amendment = json.loads(amendment_path.read_text(encoding="utf-8"))
     amendment["claim_boundary"] += " Undisclosed drift."
@@ -388,7 +485,7 @@ def test_superpowers_v4_amendment_canonical_drift_fails_closed(
         json.dumps(amendment, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    binding = profile["amendments"]["superpowers-writing-plans-confirmatory-v4"]
+    binding = profile["amendments"]["superpowers-writing-plans-confirmatory-v5"]
     binding["path"] = drifted_path.as_posix()
     binding["sha256"] = ANALYSIS._sha256(drifted_path)
 
@@ -399,7 +496,7 @@ def test_superpowers_v4_amendment_canonical_drift_fails_closed(
         ANALYSIS._load_profile_preregistration(
             profile,
             profile_path=PROFILES,
-            study_id="superpowers-writing-plans-confirmatory-v4",
+            study_id="superpowers-writing-plans-confirmatory-v5",
         )
 
 
@@ -661,6 +758,25 @@ def test_matrix_requires_every_unique_preregistered_coordinate() -> None:
         )
 
 
+def test_matrix_rejects_scored_agent_timeout_as_missing_attempt() -> None:
+    inputs = _study_inputs("anthropic-skill-creator-confirmatory-v1")
+    rows = _rows(inputs)
+    rows[0] = {
+        **rows[0],
+        "status": "passed",
+        "runtime_outcome": "timed_out",
+        "benchmark_outcome": "failed",
+    }
+
+    with pytest.raises(ValueError, match="runtime outcome is not completed"):
+        ANALYSIS._validate_matrix(
+            rows=rows,
+            tasks=[str(item["id"]) for item in inputs["tasks"]],
+            attempts=4,
+            harnesses=("claude-code",),
+        )
+
+
 def test_attempt_rows_must_share_one_digest_verified_approval_lock() -> None:
     unsigned = {
         "kind": "approved_comparison_execution",
@@ -880,6 +996,11 @@ def test_bindings_require_exact_topology_scorers_and_task_validity(
         "_comparison_cohort_lineage",
         lambda *_args, **_kwargs: lineage,
     )
+    monkeypatch.setattr(
+        ANALYSIS,
+        "_validate_attempt_scorer_receipts",
+        lambda **_kwargs: "7" * 64,
+    )
     bindings = ANALYSIS._validate_bindings(
         result=result,
         rows=[{"attempt_id": attempt_id}],
@@ -893,6 +1014,7 @@ def test_bindings_require_exact_topology_scorers_and_task_validity(
     assert bindings["scorer_revisions"] == [
         {"id": "scorer", "digest": scorer_digest}
     ]
+    assert bindings["attempt_scorer_receipts_digest"] == "7" * 64
 
     result.task_validity = (
         SimpleNamespace(
@@ -913,6 +1035,115 @@ def test_bindings_require_exact_topology_scorers_and_task_validity(
                 "candidate_commit": "candidate",
             },
             repo_root=REPO_ROOT,
+        )
+
+
+def test_attempt_scorer_receipt_rejects_score_only_mutation() -> None:
+    scorer_path = (
+        REPO_ROOT
+        / "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "plan_quality_scorer_v3.py"
+    )
+    evaluator = SimpleNamespace(
+        id="plan-quality-confirmatory",
+        type="deterministic",
+        scorer=scorer_path.relative_to(REPO_ROOT).as_posix(),
+        runtime="python312-sandbox-v1",
+        dimensions=("artifact_validity",),
+    )
+    profile = ANALYSIS.load_task_profiles(REPO_ROOT).scorer_runtime(
+        evaluator.runtime
+    )
+    output = "# Exact plan\n\nUse the locked repository evidence."
+    encoded = output.encode()
+    expected_paths = ["/logs/artifacts/fugue-answer.md"]
+    primary = {
+        "schema_version": 1,
+        "status": "complete",
+        "source": "fugue_answer_artifact",
+        "source_path": "/logs/artifacts/fugue-answer.md",
+        "path": "artifacts/logs/artifacts/fugue-answer.md",
+        "contract_version": 1,
+        "locked_artifact_paths_digest": ANALYSIS.stable_digest(expected_paths),
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "truncated": False,
+    }
+    revision = "a" * 64
+    input_unsigned = {
+        "schema_version": 1,
+        "status": "bound",
+        "source_sha256": "b" * 64,
+        "input_bytes": 100,
+        "input_sha256": "c" * 64,
+        "evidence_digest": "d" * 64,
+        "reference_digest": "e" * 64,
+        "reference_output_digest": ANALYSIS.stable_digest(output),
+        "runtime_profile_id": profile.id,
+        "runtime_profile_digest": profile.profile_digest,
+        "runtime_image": profile.image,
+        "runtime_platform": profile.platform,
+    }
+    input_receipt = {
+        **input_unsigned,
+        "receipt_digest": ANALYSIS.stable_digest(input_unsigned),
+    }
+    cleanup_unsigned = {
+        "schema_version": 1,
+        "status": "verified_absent",
+        "container_name_sha256": "f" * 64,
+    }
+    cleanup = {
+        **cleanup_unsigned,
+        "receipt_digest": ANALYSIS.stable_digest(cleanup_unsigned),
+    }
+    scores = {"artifact_validity": True}
+    scorer_unsigned = {
+        "schema_version": 1,
+        "status": "bound",
+        "evaluator_id": evaluator.id,
+        "evaluator_revision_digest": revision,
+        "approved_scorer_source_sha256": ANALYSIS._sha256(scorer_path),
+        "primary_artifact_receipt_digest": ANALYSIS.stable_digest(primary),
+        "primary_artifact_sha256": primary["sha256"],
+        "primary_artifact_bytes": primary["bytes"],
+        "normalized_output_digest": ANALYSIS.stable_digest(output),
+        "normalized_scores_digest": ANALYSIS.stable_digest(scores),
+        "scorer_input_receipt": input_receipt,
+        "runtime_cleanup_receipt": cleanup,
+    }
+    scorer_receipt = {
+        **scorer_unsigned,
+        "receipt_digest": ANALYSIS.stable_digest(scorer_unsigned),
+    }
+    row = {
+        "attempt_id": "1" * 64,
+        "expected_artifact_paths": expected_paths,
+        "final_output": output,
+        "comparison_primary_output": primary,
+        "comparison_deterministic_scores": {
+            f"{evaluator.id}.artifact_validity": True
+        },
+        "comparison_deterministic_scorer_receipts": {
+            evaluator.id: scorer_receipt
+        },
+    }
+    result = SimpleNamespace(
+        scorer_revisions=(SimpleNamespace(id=evaluator.id, digest=revision),)
+    )
+    spec = SimpleNamespace(evaluators=(evaluator,))
+
+    assert len(
+        ANALYSIS._validate_attempt_scorer_receipts(
+            rows=[row], result=result, spec=spec, repo_root=REPO_ROOT
+        )
+    ) == 64
+    row["comparison_deterministic_scores"][
+        f"{evaluator.id}.artifact_validity"
+    ] = False
+    with pytest.raises(ValueError, match="approved artifact"):
+        ANALYSIS._validate_attempt_scorer_receipts(
+            rows=[row], result=result, spec=spec, repo_root=REPO_ROOT
         )
 
 

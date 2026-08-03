@@ -161,6 +161,78 @@ class _TracePollingCancelled(Exception):
 _WEAVE_CALL_SOURCE = "weave_calls"
 _WEAVE_AGENT_SPAN_SOURCE = "weave_agents"
 
+_INELIGIBLE_EVALUATION_CLAIM_FIELDS = (
+    "mrr",
+    "ndcg_at_10",
+    "recall_at_1",
+    "recall_at_5",
+    "recall_at_10",
+    "recall_at_20",
+    "evidence_recall",
+    "citation_correctness",
+    "fact_recall",
+    "judge_correctness",
+    "judge_completeness",
+    "judge_groundedness",
+    "judge_overall",
+    "evaluation_assertions",
+    "evaluation_task_completion",
+    "evaluation_correctness",
+    "evaluation_groundedness",
+    "evaluation_tool_use",
+    "evaluation_artifact_quality",
+    "evaluation_na_dimensions",
+    "evaluation_judge_model",
+    "evaluation_judge_reasons",
+    "evaluation_judge_input_tokens",
+    "evaluation_judge_output_tokens",
+    "evaluation_judge_latency_ms",
+    "evaluation_error",
+    "evaluation_rubrics",
+    "judge_error",
+    "comparison_deterministic_scores",
+    "comparison_deterministic_scorer_receipts",
+    "comparison_dimension_roles",
+    "comparison_deterministic_criticality",
+    "comparison_mechanism",
+    "comparison_judge_scores",
+    "comparison_judge_accounted_cost_usd",
+    "comparison_judge_status",
+    "comparison_judges",
+    "comparison_host_verifier_receipts",
+    "comparison_primary_output_projection",
+    "evaluation_overall",
+    "evaluation_judge_status",
+)
+
+
+def _clear_ineligible_evaluation_claims(
+    row: dict[str, Any],
+    *,
+    status: str,
+) -> None:
+    """Remove scores that cannot survive cancellation or non-execution."""
+
+    row["pass"] = None
+    row["benchmark_pass"] = None
+    row["reward"] = None
+    row["benchmark_outcome"] = (
+        "not_applicable" if status == "not_applicable" else "unscored"
+    )
+    for field_name in _INELIGIBLE_EVALUATION_CLAIM_FIELDS:
+        row.pop(field_name, None)
+    row.update(
+        {
+            "host_evaluator_status": "not_run",
+            "comparison_evaluation_status": "unavailable",
+            "comparison_evaluation_reason": (
+                f"attempt ended as {status} before host evaluation"
+            ),
+            "comparison_required_evaluation_complete": False,
+        }
+    )
+    _set_adapter_outcome(row)
+
 
 def _eager_call_op(weave_module: Any, name: str) -> Any:
     """Create a public Weave op whose Call start is sent immediately."""
@@ -1453,7 +1525,6 @@ class LiveEvaluationCoordinator:
         row.update(
             {
                 "status": "cancelled",
-                "pass": None,
                 "benchmark_outcome": "unscored",
                 "runtime_outcome": "cancelled",
                 "trace_link_status": "cancelled",
@@ -1464,6 +1535,7 @@ class LiveEvaluationCoordinator:
                 "weave_usage_source": "unavailable",
             }
         )
+        _clear_ineligible_evaluation_claims(row, status="cancelled")
         active.prediction.output = _evaluation_output(row)
         with active.session.lock:
             active.prediction.__exit__(None, None, None)
@@ -1823,6 +1895,19 @@ class GeneratedEvaluationCoordinator:
             _planned_evaluation_row(cell),
         )
         row["evaluation_publication_mode"] = "local"
+        if outcome.status in {"cancelled", "interrupted", "not_applicable"}:
+            _clear_ineligible_evaluation_claims(row, status=outcome.status)
+            with self._lock:
+                with self.path.open("a") as handle:
+                    handle.write(
+                        json.dumps(
+                            redact_value(row),
+                            sort_keys=True,
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            return
         if cell.evaluation_case is not None:
             apply_generated_evaluation(
                 row,
@@ -1938,6 +2023,7 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "evaluation_scorers": list(cell.scorer_refs),
         "evaluation_rubrics": list(cell.evaluation_rubrics),
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
+        "expected_artifact_paths": list(cell.expected_artifact_paths),
         **(
             {
                 "approved_comparison_lock_digest": str(
@@ -2038,6 +2124,7 @@ def _completed_evaluation_row(
         "source_dirty_digest",
         "approved_comparison",
         "approved_comparison_lock_digest",
+        "expected_artifact_paths",
     ):
         if key in planned:
             row[key] = planned[key]
@@ -2717,16 +2804,33 @@ def _merge_planned_cell_identities(rows: list[dict[str, Any]]) -> None:
             row["task_name"] = task_id
         elif not task_name and task_id:
             row["task_name"] = task_id
+        planned_status = str(planned.get("status") or "")
+        terminal = planned_status in {
+            "passed",
+            "failed",
+            "not_applicable",
+            "cancelled",
+            "interrupted",
+        }
         for outcome_field in (
             "status",
             "benchmark_outcome",
             "runtime_outcome",
+            "reward",
             "error",
         ):
-            if row.get(outcome_field) in (None, "") and planned.get(
+            if terminal and outcome_field in planned:
+                row[outcome_field] = planned[outcome_field]
+            elif row.get(outcome_field) in (None, "") and planned.get(
                 outcome_field
             ) not in (None, ""):
                 row[outcome_field] = planned[outcome_field]
+        if terminal and (
+            planned_status in {"cancelled", "interrupted", "not_applicable"}
+            or str(row.get("runtime_outcome") or "")
+            in {"cancelled", "not_started", "not_applicable"}
+        ):
+            _clear_ineligible_evaluation_claims(row, status=planned_status)
         row.setdefault("planned_cell_identity_status", "reconciled")
 
 
@@ -5976,7 +6080,7 @@ def _set_adapter_outcome(
     terminal = [event for event in values if event.get("terminal")]
     recoverable = [event for event in values if event.get("recoverable")]
     status = str(row.get("status") or "")
-    if status in {"cancelled", "not_applicable"}:
+    if status in {"cancelled", "interrupted", "not_applicable"}:
         execution_state = status
     elif terminal:
         execution_state = "failed"
@@ -6261,7 +6365,11 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "context_support": meta.get("context_support"),
         "context_config_hash": meta.get("context_config_hash"),
         "context_cache_keys": meta.get("context_cache_keys", {}),
-        "expected_artifact_paths": meta.get("expected_artifact_paths", []),
+        **(
+            {"expected_artifact_paths": meta["expected_artifact_paths"]}
+            if "expected_artifact_paths" in meta
+            else {}
+        ),
         "artifact_normalization": meta.get("artifact_normalization", []),
         "prompt_hashes": meta.get("prompt_hashes", {}),
         "skill_ids": meta.get("skill_ids", []),

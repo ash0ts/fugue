@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
@@ -228,6 +229,9 @@ def _output(fixture: dict, side: str, exit_code: int) -> dict:
 
 def test_confirmatory_spec_freezes_v3_identity_projects_and_192_cells() -> None:
     spec = load_comparison(SPEC, repo_root=Path.cwd())
+    console = yaml.safe_load(
+        (EXAMPLE / "confirmatory-study-console.yaml").read_text(encoding="utf-8")
+    )
     tasks = _jsonl(TASKS)
     deterministic = next(
         item for item in spec.evaluators if item.type == "deterministic"
@@ -238,6 +242,10 @@ def test_confirmatory_spec_freezes_v3_identity_projects_and_192_cells() -> None:
     assert spec.baseline.skills == ("vercel-react-best-practices-before",)
     assert spec.candidate.skills == ("vercel-react-best-practices-after",)
     assert spec.execution.research_id == "vercel-react-best-practices-confirmatory-v1"
+    assert console["research"]["id"] == spec.execution.research_id
+    assert (
+        f"wandb/{console['wandb']['project']}" == spec.execution.evidence_project
+    )
     assert spec.execution.source_evidence_project == (
         "wandb/fugue-vercel-react-best-practices-source-v1"
     )
@@ -258,6 +266,7 @@ def test_confirmatory_spec_freezes_v3_identity_projects_and_192_cells() -> None:
     assert spec.execution.qualification_inputs == {
         "campaign_manifest_sha256": "examples/comparisons/community-skill-upgrades/conference-campaign-manifest.json",
         "campaign_preregistration_sha256": "examples/comparisons/community-skill-upgrades/conference-preregistration.json",
+        "confirmatory_budget_policy_sha256": "examples/comparisons/community-skill-upgrades/confirmatory-budget-policy-v1.json",
         "confirmatory_analysis_profile_sha256": "examples/comparisons/community-skill-upgrades/confirmatory-analysis-profiles.json",
         "repository_preregistration_sha256": "examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-preregistration.json",
     }
@@ -367,20 +376,56 @@ def test_canonical_readiness_proves_all_base_fail_gold_pass_fixtures(
             "details": _host_receipt(passed, task["id"]),
         }
 
-    def fake_scorer(evaluator, *, task, output, evidence, expected, **kwargs):
+    def fake_inline_runner(*, source, evidence, reference, profile, **kwargs):
         details = score(
-            task,
-            output,
-            {**evidence, "expected": expected},
+            reference["task"],
+            reference["output"],
+            {**evidence, "expected": reference["expected"]},
         )
+        serialized_input = json.dumps(
+            {"evidence": evidence, "reference": reference},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        input_unsigned = {
+            "schema_version": 1,
+            "status": "bound",
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "input_bytes": len(serialized_input),
+            "input_sha256": hashlib.sha256(serialized_input).hexdigest(),
+            "evidence_digest": stable_digest(evidence),
+            "reference_digest": stable_digest(reference),
+            "reference_output_digest": stable_digest(reference["output"]),
+            "runtime_profile_id": profile.id,
+            "runtime_profile_digest": profile.profile_digest,
+            "runtime_image": profile.image,
+            "runtime_platform": profile.platform,
+        }
+        runtime_unsigned = {
+            "schema_version": 1,
+            "status": "verified_absent",
+            "container_name_sha256": "7" * 64,
+        }
         return {
             "score": 1.0 if all(details.values()) else 0.0,
             "reason": "offline qualification fixture",
             "details": details,
+            "fugue_input_receipt": {
+                **input_unsigned,
+                "receipt_digest": stable_digest(input_unsigned),
+            },
+            "fugue_runtime_receipt": {
+                **runtime_unsigned,
+                "receipt_digest": stable_digest(runtime_unsigned),
+            },
         }
 
     monkeypatch.setattr("fugue.bench.comparison._run_custom_verifier", fake_verifier)
-    monkeypatch.setattr("fugue.bench.comparison._run_custom_scorer", fake_scorer)
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer",
+        fake_inline_runner,
+    )
     readiness = check_comparison(
         load_comparison(SPEC, repo_root=Path.cwd()), repo_root=Path.cwd()
     )

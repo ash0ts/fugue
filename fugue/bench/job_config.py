@@ -126,6 +126,7 @@ class RenderedJob:
     outer_wall_time_sec: int | None = None
     execution_limits_digest: str = ""
     expected_evidence_paths: tuple[str, ...] = ()
+    expected_artifact_paths: tuple[str, ...] = ()
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -640,6 +641,14 @@ def _build_jobs(
                             else ""
                         ),
                         expected_evidence_paths=tuple(tasks[0].expected_paths),
+                        expected_artifact_paths=tuple(
+                            str(value)
+                            for value in (
+                                config.get("fugue", {}).get(
+                                    "expected_artifact_paths", []
+                                )
+                            )
+                        ),
                         evaluation_case=evaluation_cases.get(tasks[0].id),
                         evaluation_rubrics=evaluation_rubrics,
                         scorer_hashes=dict(scorer_hashes),

@@ -615,6 +615,18 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     assert cleanup["receipt_digest"] == stable_digest(
         {key: value for key, value in cleanup.items() if key != "receipt_digest"}
     )
+    input_receipt = payload["fugue_input_receipt"]
+    assert input_receipt["status"] == "bound"
+    assert input_receipt["reference_output_digest"] == stable_digest(None)
+    assert input_receipt["runtime_profile_id"] == profile.id
+    assert input_receipt["runtime_profile_digest"] == profile.profile_digest
+    assert input_receipt["receipt_digest"] == stable_digest(
+        {
+            key: value
+            for key, value in input_receipt.items()
+            if key != "receipt_digest"
+        }
+    )
 
 
 def test_inline_scorer_timeout_removes_exact_container_and_proves_cleanup(

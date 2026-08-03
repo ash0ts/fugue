@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import runpy
 from contextlib import contextmanager
@@ -2009,10 +2010,43 @@ def test_v3_natural_maintainer_specs_are_exact_source_isolated_studies(
             reference["output"],
             {**evidence, "expected": reference["expected"]},
         )
+        serialized_input = json.dumps(
+            {"evidence": evidence, "reference": reference},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        input_unsigned = {
+            "schema_version": 1,
+            "status": "bound",
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "input_bytes": len(serialized_input),
+            "input_sha256": hashlib.sha256(serialized_input).hexdigest(),
+            "evidence_digest": stable_digest(evidence),
+            "reference_digest": stable_digest(reference),
+            "reference_output_digest": stable_digest(reference["output"]),
+            "runtime_profile_id": profile.id,
+            "runtime_profile_digest": profile.profile_digest,
+            "runtime_image": profile.image,
+            "runtime_platform": profile.platform,
+        }
+        runtime_unsigned = {
+            "schema_version": 1,
+            "status": "verified_absent",
+            "container_name_sha256": "7" * 64,
+        }
         return {
             "score": 1.0 if all(details.values()) else 0.0,
             "reason": "offline qualification fixture",
             "details": details,
+            "fugue_input_receipt": {
+                **input_unsigned,
+                "receipt_digest": stable_digest(input_unsigned),
+            },
+            "fugue_runtime_receipt": {
+                **runtime_unsigned,
+                "receipt_digest": stable_digest(runtime_unsigned),
+            },
         }
 
     monkeypatch.setattr(

@@ -301,6 +301,87 @@ def test_agent_timeout_is_terminal_task_evidence_and_allows_next_cell(
     assert records[timed_out.id]["error"] is None
 
 
+def test_external_harbor_cancellation_is_not_reported_as_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-external-cancellation"
+    cancelled = _cell(run_id, "cancelled")
+    queued = _cell(run_id, "queued")
+    result_path = tmp_path / cancelled.result_path
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "n_total_trials": 1,
+                "stats": {
+                    "n_completed_trials": 1,
+                    "n_errored_trials": 1,
+                    "n_retries": 0,
+                    "n_cancelled_trials": 1,
+                    "n_running_trials": 0,
+                    "n_pending_trials": 0,
+                    "evals": {
+                        "agent__model__dataset": {
+                            "n_trials": 0,
+                            "n_errors": 1,
+                            "exception_stats": {
+                                "CancelledError": ["trial-cancelled"]
+                            },
+                        }
+                    },
+                },
+            }
+        )
+    )
+    started: list[str] = []
+
+    def run_cell(cell, *args, **kwargs):
+        started.append(cell.id)
+        return 130
+
+    monkeypatch.setattr("fugue.bench.execution._run_cell_process", run_cell)
+    internal_abort = threading.Event()
+
+    outcomes = execute_cells(
+        [cancelled, queued],
+        repo_root=tmp_path,
+        max_workers=1,
+        internal_abort_event=internal_abort,
+    )
+
+    assert started == [cancelled.id]
+    assert internal_abort.is_set() is True
+    assert {
+        outcome.cell_id: (
+            outcome.status,
+            outcome.benchmark_outcome,
+            outcome.runtime_outcome,
+        )
+        for outcome in outcomes
+    } == {
+        cancelled.id: ("cancelled", "unscored", "cancelled"),
+        queued.id: ("cancelled", "unscored", "not_started"),
+    }
+    records = {
+        row["cell_id"]: row
+        for row in latest_cell_records(
+            tmp_path / ".fugue/runtime/run-external-cancellation/cells.jsonl"
+        )
+    }
+    assert records[cancelled.id]["runtime_outcome"] == "cancelled"
+    assert records[cancelled.id]["cancellation_origin"] == "external"
+    assert records[queued.id]["runtime_outcome"] == "not_started"
+    assert records[queued.id]["cancellation_origin"] == "external"
+    events = [
+        json.loads(line)
+        for line in (
+            tmp_path / ".fugue/runtime/run-external-cancellation/events.jsonl"
+        ).read_text().splitlines()
+    ]
+    [abort] = [event for event in events if event["event"] == "run_abort_requested"]
+    assert abort["cancellation_origin"] == "external"
+
+
 @pytest.mark.parametrize(
     ("stats_update", "reported_total"),
     (
@@ -311,6 +392,20 @@ def test_agent_timeout_is_terminal_task_evidence_and_allows_next_cell(
         ({"n_completed_trials": "1"}, 1),
         ({"n_errored_trials": True}, 1),
         ({"n_cancelled_trials": False}, 1),
+        (
+            {
+                "evals": {
+                    "agent__model__dataset": {
+                        "n_trials": 1,
+                        "n_errors": 1,
+                        "exception_stats": {
+                            "CancelledError": ["trial-cancelled"]
+                        },
+                    }
+                }
+            },
+            1,
+        ),
         ({"n_total_trials": 2}, 1),
         ({"n_total_trials": "1"}, 1),
         (

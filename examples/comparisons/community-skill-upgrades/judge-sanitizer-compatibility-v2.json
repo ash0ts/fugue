@@ -1,0 +1,610 @@
+{
+  "cases": [
+    {
+      "case_id": "superpowers-credential-plan-pass-01",
+      "current_prompt_sha256": "97accfeec6182e6547c9ef90a8f1740c9a9dd1766d69e19763af972e90145e62",
+      "historical_prompt_sha256": "97accfeec6182e6547c9ef90a8f1740c9a9dd1766d69e19763af972e90145e62",
+      "provider_payload_sha256": "cfec57ee1a2e339dbc81aa09ea89022decb3e0daf11a00032b900ddb95453acb",
+      "source_payload_sha256": "cfec57ee1a2e339dbc81aa09ea89022decb3e0daf11a00032b900ddb95453acb",
+      "transform_receipt_digest": "bbe1d38aa22cd0f77fbe02a8a767af89786e3bcab1a1e50ef4ba39a70c4371bd",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-credential-plan-pass-02",
+      "current_prompt_sha256": "6a87b144e200bdda95c2398dc515c372d1850b40dbc45716d15363cb4c43a8ca",
+      "historical_prompt_sha256": "6a87b144e200bdda95c2398dc515c372d1850b40dbc45716d15363cb4c43a8ca",
+      "provider_payload_sha256": "ff837d6cfa635f9d9ce982b573d475157c718da1b9964b2e5c7c4c462ac11c5e",
+      "source_payload_sha256": "ff837d6cfa635f9d9ce982b573d475157c718da1b9964b2e5c7c4c462ac11c5e",
+      "transform_receipt_digest": "9067195ac3dd5f7fc3c45013408c71975d847bf7388cf05458b71fa1e379a103",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-credential-plan-fail-01",
+      "current_prompt_sha256": "b33e5b89535a13e07e695bf88bb21e495c205f35255152e6219ada6b09744739",
+      "historical_prompt_sha256": "b33e5b89535a13e07e695bf88bb21e495c205f35255152e6219ada6b09744739",
+      "provider_payload_sha256": "9abfd6f20e43ba54d65740264fd82b94e9d04d0cdec5742aa077b8617f63f186",
+      "source_payload_sha256": "9abfd6f20e43ba54d65740264fd82b94e9d04d0cdec5742aa077b8617f63f186",
+      "transform_receipt_digest": "9c8029058c0da17fefa89297b299349cc0a7108975a3f90f91ae3bb84157919a",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-credential-plan-fail-02",
+      "current_prompt_sha256": "a13b8d5234a62267f466215295630818657dd1eabdb7de784a5c53b070e94beb",
+      "historical_prompt_sha256": "a13b8d5234a62267f466215295630818657dd1eabdb7de784a5c53b070e94beb",
+      "provider_payload_sha256": "f05fb96bb900de6db58c138797e63e025a6415b159b3780b52c01cd704086f4b",
+      "source_payload_sha256": "f05fb96bb900de6db58c138797e63e025a6415b159b3780b52c01cd704086f4b",
+      "transform_receipt_digest": "390f025c6be4e950e20bef7879696fc2f0a513f6d8c8477d36c67df595425d81",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-evidence-destination-pass-01",
+      "current_prompt_sha256": "e3efb025bf803f8dda832c9c9fed297b281030ed158ef9493cbe074636f51722",
+      "historical_prompt_sha256": "e3efb025bf803f8dda832c9c9fed297b281030ed158ef9493cbe074636f51722",
+      "provider_payload_sha256": "358103ae0bffabc3fd0750cee60e0a54650dec2920d1e4bff7f9c670e8708abf",
+      "source_payload_sha256": "358103ae0bffabc3fd0750cee60e0a54650dec2920d1e4bff7f9c670e8708abf",
+      "transform_receipt_digest": "52991c88e076f1453b3b3662da6d9f92fb49ab13a3de657119d5ed1dd21dfc46",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-evidence-destination-pass-02",
+      "current_prompt_sha256": "37b3661b815a29331affbcf637d03868cbb9ef90586f46642a0b4f597f2781ff",
+      "historical_prompt_sha256": "37b3661b815a29331affbcf637d03868cbb9ef90586f46642a0b4f597f2781ff",
+      "provider_payload_sha256": "3b115a44ab35c10455f36798b6e31a4f4404ed43ca61aede742cee16fb0d92e7",
+      "source_payload_sha256": "3b115a44ab35c10455f36798b6e31a4f4404ed43ca61aede742cee16fb0d92e7",
+      "transform_receipt_digest": "fc99c0f3b9538a01b9d976e5f6cfa70b3da31563d64f08248c30f2dc5189042e",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-evidence-destination-fail-01",
+      "current_prompt_sha256": "e62fd0eeee36a4fea833da685870c180c33dc66a641c1b77b30c366395afac23",
+      "historical_prompt_sha256": "e62fd0eeee36a4fea833da685870c180c33dc66a641c1b77b30c366395afac23",
+      "provider_payload_sha256": "4900815de64c7eb5d2b9ba1b45376de5c33796af3b8fb8d2cd4e71c2f569d285",
+      "source_payload_sha256": "4900815de64c7eb5d2b9ba1b45376de5c33796af3b8fb8d2cd4e71c2f569d285",
+      "transform_receipt_digest": "a7fefa18397298f74176310ffc9c6a7a035bd8c213c9678426c0b58bf897b9cd",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-evidence-destination-fail-02",
+      "current_prompt_sha256": "3ddc1985cd8bfaf6d40f466ad32bd810c7982a7233ef20f5876dc9ee79df3039",
+      "historical_prompt_sha256": "3ddc1985cd8bfaf6d40f466ad32bd810c7982a7233ef20f5876dc9ee79df3039",
+      "provider_payload_sha256": "4242f702c5d97b3a7ba8c735b8fd058c4392f949dc2cb8caa2c7f11adcfc46a9",
+      "source_payload_sha256": "4242f702c5d97b3a7ba8c735b8fd058c4392f949dc2cb8caa2c7f11adcfc46a9",
+      "transform_receipt_digest": "c0475234f64e9296790fd2c443fb754da5a7203b2b5d34ddb877bce239adf360",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-pass-01",
+      "current_prompt_sha256": "4a2833d96ed2358dbf783936476823c56ee3f093f5e9f16b2861d953b7af7517",
+      "historical_prompt_sha256": "4a2833d96ed2358dbf783936476823c56ee3f093f5e9f16b2861d953b7af7517",
+      "provider_payload_sha256": "d6460d0b5751b203ed4e250ce02b2fcb2c3c62b477ef5dd4524d6447ea7f86c0",
+      "source_payload_sha256": "d6460d0b5751b203ed4e250ce02b2fcb2c3c62b477ef5dd4524d6447ea7f86c0",
+      "transform_receipt_digest": "f35f76aec3857a9ed3ac4a0efbdd2a7ee232e80173e21fe55ffa235f95c02252",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-pass-02",
+      "current_prompt_sha256": "107b6ee835c8a6a2325ead3a053d95b339afb451d2196960b432773479bff5e2",
+      "historical_prompt_sha256": "107b6ee835c8a6a2325ead3a053d95b339afb451d2196960b432773479bff5e2",
+      "provider_payload_sha256": "15d1a680ae9a48910322517307ccde8f2e4e01b09b3656f8e2d9ec825181b6cb",
+      "source_payload_sha256": "15d1a680ae9a48910322517307ccde8f2e4e01b09b3656f8e2d9ec825181b6cb",
+      "transform_receipt_digest": "001fd79d325b4300da36cdfb6bdc0a7b7b5c3617bbeefe90f77c36a3f290badb",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-fail-01",
+      "current_prompt_sha256": "b3a2e1ad928312f683d72f3b8237842ec724696cbfe5ec55d66e7d3893a4cd3e",
+      "historical_prompt_sha256": "b3a2e1ad928312f683d72f3b8237842ec724696cbfe5ec55d66e7d3893a4cd3e",
+      "provider_payload_sha256": "f8461e06360f9760e183ce1d1907dd7de77a8d5f591a938f25a896667176a82b",
+      "source_payload_sha256": "f8461e06360f9760e183ce1d1907dd7de77a8d5f591a938f25a896667176a82b",
+      "transform_receipt_digest": "f4d72d1ae02d49ad969692c6eeda7144b8a337b9faea2eec8689a697c63583b7",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-fail-02",
+      "current_prompt_sha256": "417e7c2fc53de9def40e2798973ea6436a5d0de572e6a7e92f941fceefe4e1cb",
+      "historical_prompt_sha256": "417e7c2fc53de9def40e2798973ea6436a5d0de572e6a7e92f941fceefe4e1cb",
+      "provider_payload_sha256": "b543f91934fd842009bfa62492f68c0ec95ae404434bb9fa4171339427f1c92d",
+      "source_payload_sha256": "b543f91934fd842009bfa62492f68c0ec95ae404434bb9fa4171339427f1c92d",
+      "transform_receipt_digest": "ccb16ca7d21765743ad006ca98c9d761cd5beed25c4b1e3e85dd605a7ff98c09",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-pass-01",
+      "current_prompt_sha256": "a44a42fe4591f0e382edfcb8ea6452a78709c3257d744fd9359bd8169a264904",
+      "historical_prompt_sha256": "a44a42fe4591f0e382edfcb8ea6452a78709c3257d744fd9359bd8169a264904",
+      "provider_payload_sha256": "cc02b268619b2b0e3f44d5117d10159365d9902f77cf4b58c4e2eb2e32a0db6d",
+      "source_payload_sha256": "cc02b268619b2b0e3f44d5117d10159365d9902f77cf4b58c4e2eb2e32a0db6d",
+      "transform_receipt_digest": "ed550e2c54a7fe4c5d40898cb16e46406a829845dc5fc218e3c5cdb8f54ad973",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-pass-02",
+      "current_prompt_sha256": "88383ee02f8419235c7e169984e8a58910d355d9159fa7ad8c1a583ff6f69cac",
+      "historical_prompt_sha256": "88383ee02f8419235c7e169984e8a58910d355d9159fa7ad8c1a583ff6f69cac",
+      "provider_payload_sha256": "4caca7e9d45f9a1fc52b787c262e541e2ddde82aa69d8e045b579296eef9ac03",
+      "source_payload_sha256": "4caca7e9d45f9a1fc52b787c262e541e2ddde82aa69d8e045b579296eef9ac03",
+      "transform_receipt_digest": "bf6167367f11cd3c31b778769fa03a99204115f39bc3195c506ac27c045c9d49",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-fail-01",
+      "current_prompt_sha256": "5ed673feeff3679dd28555381689a4c75846bab8ab9f07a2c15d829acb06425e",
+      "historical_prompt_sha256": "5ed673feeff3679dd28555381689a4c75846bab8ab9f07a2c15d829acb06425e",
+      "provider_payload_sha256": "3d13a8c8991fc15d8af8cb29ae47df3ee9e60cc8a2eb6295752bcc01f3d32fa5",
+      "source_payload_sha256": "3d13a8c8991fc15d8af8cb29ae47df3ee9e60cc8a2eb6295752bcc01f3d32fa5",
+      "transform_receipt_digest": "912275a3e7cf5796698c9578d2aa3b7993d6bdc2593fe43690d2243203604503",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-fail-02",
+      "current_prompt_sha256": "957272992a6bca0cec5ccfdcd325beacf12851687330080d7841762b093f2e1b",
+      "historical_prompt_sha256": "957272992a6bca0cec5ccfdcd325beacf12851687330080d7841762b093f2e1b",
+      "provider_payload_sha256": "d9846ed476c137d2d615ffa36e5577e085cc13cfaf115231072f1f7cbcb078e0",
+      "source_payload_sha256": "d9846ed476c137d2d615ffa36e5577e085cc13cfaf115231072f1f7cbcb078e0",
+      "transform_receipt_digest": "bea6c29925e89ff4daf68675840748dc007e95e2a84fac3985666130906e9b01",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-compatibility-pass-01",
+      "current_prompt_sha256": "1463b11635c4b84f275613e3dc231f6922db10d80b253616c16cbcf3ca90c932",
+      "historical_prompt_sha256": "1463b11635c4b84f275613e3dc231f6922db10d80b253616c16cbcf3ca90c932",
+      "provider_payload_sha256": "8a1c808959bbcf025e4df2f80e07922feea701cf2922f13315155494f5906c3e",
+      "source_payload_sha256": "8a1c808959bbcf025e4df2f80e07922feea701cf2922f13315155494f5906c3e",
+      "transform_receipt_digest": "8ce9eef24aa8c5e3d1f5c65168e17ce85d954a86c6eff05bd1890fff3ea4c281",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-compatibility-pass-02",
+      "current_prompt_sha256": "92ba842b643a150943ca5e4ff42e8a7fddee07ad8c2b9fc4cafe2edb8cbe4768",
+      "historical_prompt_sha256": "92ba842b643a150943ca5e4ff42e8a7fddee07ad8c2b9fc4cafe2edb8cbe4768",
+      "provider_payload_sha256": "32b711ff7e193afa10024b0d6bfd9bc2f6f0b6c29667c2506930b254c2e90fc3",
+      "source_payload_sha256": "32b711ff7e193afa10024b0d6bfd9bc2f6f0b6c29667c2506930b254c2e90fc3",
+      "transform_receipt_digest": "59e0b9ea3420ce97913c4d09dd64e6b93cae5d66cfb74bf4b0536cf0f07d08e6",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-compatibility-fail-01",
+      "current_prompt_sha256": "bdd7b2e9a4512b255664b2d998850ab8d7d2a4a580641c377572406f9b5323cf",
+      "historical_prompt_sha256": "bdd7b2e9a4512b255664b2d998850ab8d7d2a4a580641c377572406f9b5323cf",
+      "provider_payload_sha256": "a6b2e9b23b7792afb0ccfa1ae3d53b3a944447f19d9cce51ff6887d2499ce532",
+      "source_payload_sha256": "a6b2e9b23b7792afb0ccfa1ae3d53b3a944447f19d9cce51ff6887d2499ce532",
+      "transform_receipt_digest": "d1efd2cbc1502ba7c0a527c6b1bfcb2510e5337ab946fd62ed2457c9eb683d82",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-compatibility-fail-02",
+      "current_prompt_sha256": "cbbf594c714472b98270473eb189f3626dbde8d95ec7d50e7713a0bc86a8054b",
+      "historical_prompt_sha256": "cbbf594c714472b98270473eb189f3626dbde8d95ec7d50e7713a0bc86a8054b",
+      "provider_payload_sha256": "ee6b06e2d504514a97e98eaa53017b4832f8f27e3a1bfe8aea07b5149413ec07",
+      "source_payload_sha256": "ee6b06e2d504514a97e98eaa53017b4832f8f27e3a1bfe8aea07b5149413ec07",
+      "transform_receipt_digest": "944ab754c791db0e83292518b05e4e6bccb2502b56ae316fa73a2eb36068d0d3",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-name-rule-pass-01",
+      "current_prompt_sha256": "bcc939a5d7c4399f64e91ca97a1db74c552b08d69a69971b1f6ca41c391fde4d",
+      "historical_prompt_sha256": "bcc939a5d7c4399f64e91ca97a1db74c552b08d69a69971b1f6ca41c391fde4d",
+      "provider_payload_sha256": "9a369f9ff4b35cacdb5239d960b1a79f1d531faf4e951ab9a5a7db278eb40715",
+      "source_payload_sha256": "9a369f9ff4b35cacdb5239d960b1a79f1d531faf4e951ab9a5a7db278eb40715",
+      "transform_receipt_digest": "1d213671e95d15733e4e4ca86b8cbddcd8197d17e0dd4d218603545da632a80d",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-name-rule-pass-02",
+      "current_prompt_sha256": "c90900a1cd6a543b7c4a8841b4254c88fe81ca48def74cd5c287cbd371d041fc",
+      "historical_prompt_sha256": "c90900a1cd6a543b7c4a8841b4254c88fe81ca48def74cd5c287cbd371d041fc",
+      "provider_payload_sha256": "07766ccc7114ec6a2d58c1cb7207267b7c135b7c858aad1caab7a7511aff4cc2",
+      "source_payload_sha256": "07766ccc7114ec6a2d58c1cb7207267b7c135b7c858aad1caab7a7511aff4cc2",
+      "transform_receipt_digest": "cae2de71668a71bfe3d51fa9b2182fefd2a1e36170f642feddd7b76b6ee39c5a",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-name-rule-fail-01",
+      "current_prompt_sha256": "8e8fd1f2f11fa9075314fbeb5aa9c3b5da9fc9af5149a8cc620c3413cbc811a1",
+      "historical_prompt_sha256": "8e8fd1f2f11fa9075314fbeb5aa9c3b5da9fc9af5149a8cc620c3413cbc811a1",
+      "provider_payload_sha256": "061ec0b6d5eb7a96a47c77c3b245740521c17e57718a963e78aed02cb985ffa2",
+      "source_payload_sha256": "061ec0b6d5eb7a96a47c77c3b245740521c17e57718a963e78aed02cb985ffa2",
+      "transform_receipt_digest": "2e2996dfe40cf81d100047e8f074ce9e88a598fe9fefcb04bb6b33549fa30a0c",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-name-rule-fail-02",
+      "current_prompt_sha256": "5c07a78c52e94eefe3b064ce1322b36830a99a93374f995e06c59f9d006a22fc",
+      "historical_prompt_sha256": "5c07a78c52e94eefe3b064ce1322b36830a99a93374f995e06c59f9d006a22fc",
+      "provider_payload_sha256": "08322049efe4254ddb8eb12fe196ef238b1f5679ea6103894a8ee39c4150ec8b",
+      "source_payload_sha256": "08322049efe4254ddb8eb12fe196ef238b1f5679ea6103894a8ee39c4150ec8b",
+      "transform_receipt_digest": "3e2454dd5ccc3fb2ee0156ea9b953f9f628cf1f199c83fa38df5d0dd2ea137cc",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-packaging-pass-01",
+      "current_prompt_sha256": "f229c14b9aaeb64d571bd48269c65315873649b21ae8630031646d1f5894aaf3",
+      "historical_prompt_sha256": "f229c14b9aaeb64d571bd48269c65315873649b21ae8630031646d1f5894aaf3",
+      "provider_payload_sha256": "f05e7bd04af3af27cb3a4aa7df5fe5e73fb5b8ed01e97c1a18e685987823e335",
+      "source_payload_sha256": "f05e7bd04af3af27cb3a4aa7df5fe5e73fb5b8ed01e97c1a18e685987823e335",
+      "transform_receipt_digest": "33cac076cc291db214436b2b05eaa8c9ded857b8614997604b7761df1a99d6d8",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-packaging-pass-02",
+      "current_prompt_sha256": "17270b1d9ff63e14747c940581ca6444c75877dd5e017db09208a0f49cd82c58",
+      "historical_prompt_sha256": "17270b1d9ff63e14747c940581ca6444c75877dd5e017db09208a0f49cd82c58",
+      "provider_payload_sha256": "61991b73a48871dbe13896bb8b6e5640d1e10c7972c50c3d946de6560a0c6ea3",
+      "source_payload_sha256": "61991b73a48871dbe13896bb8b6e5640d1e10c7972c50c3d946de6560a0c6ea3",
+      "transform_receipt_digest": "34ecc36a45c8ed9cb5b16a7294ed5bcd66f4bad7213f1e15e67833f368ef4f86",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-packaging-fail-01",
+      "current_prompt_sha256": "526cce3b7b9d9b01f33da6aeee2b422c49b01461afedc55fac211cbf703464ef",
+      "historical_prompt_sha256": "526cce3b7b9d9b01f33da6aeee2b422c49b01461afedc55fac211cbf703464ef",
+      "provider_payload_sha256": "364c034e8e76daf5f982f75f3360d57d7567f1446ddb75a2631ea27a3fa7ae82",
+      "source_payload_sha256": "364c034e8e76daf5f982f75f3360d57d7567f1446ddb75a2631ea27a3fa7ae82",
+      "transform_receipt_digest": "6ad3ffa91c46e08b56911cf7baf49d37fa0952e0586ee48489557988e9a94675",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-packaging-fail-02",
+      "current_prompt_sha256": "e342983575b66990d1caab7c80949a1c58a09568df98ebea775701b9f404ff9c",
+      "historical_prompt_sha256": "e342983575b66990d1caab7c80949a1c58a09568df98ebea775701b9f404ff9c",
+      "provider_payload_sha256": "1bfdd4a53167c03318f4662b37de701713f30e7d7fbcda934cd6a48249287f24",
+      "source_payload_sha256": "1bfdd4a53167c03318f4662b37de701713f30e7d7fbcda934cd6a48249287f24",
+      "transform_receipt_digest": "c0da7fdf63fe8bc34ef80536fd68a9d1a729545749a59eecac8a477a0553049d",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-review-risk-pass-01",
+      "current_prompt_sha256": "d319f13f7cb38a288260c30023177c9bed264fd47af7d9188036c4f1bfec279d",
+      "historical_prompt_sha256": "d319f13f7cb38a288260c30023177c9bed264fd47af7d9188036c4f1bfec279d",
+      "provider_payload_sha256": "fe6bb8db1e164cfac846deef36fa97474aa490d3e749eee9ae6cd2d40337aeee",
+      "source_payload_sha256": "fe6bb8db1e164cfac846deef36fa97474aa490d3e749eee9ae6cd2d40337aeee",
+      "transform_receipt_digest": "428902e7efad7ae6cbeffe5a422426dc77890dd469a3b600311cdd325725901d",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-review-risk-pass-02",
+      "current_prompt_sha256": "b6840bf7f98df06aa03b5f82951346f142659276a3a8cac4ee84a62b132d96db",
+      "historical_prompt_sha256": "b6840bf7f98df06aa03b5f82951346f142659276a3a8cac4ee84a62b132d96db",
+      "provider_payload_sha256": "f96cd4ff11a275010059ca71e22cfbd07f0a2895ce8c753bce04e4c3884d273f",
+      "source_payload_sha256": "f96cd4ff11a275010059ca71e22cfbd07f0a2895ce8c753bce04e4c3884d273f",
+      "transform_receipt_digest": "faab3e1174e00d84d7b728c63780dfe5a92e93ace09674647875092fd0f57c5e",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-review-risk-fail-01",
+      "current_prompt_sha256": "c8204b3329cd6d154dc20e4a2722dc7d7de355d2362db0a6a9af32b2b1e61b5d",
+      "historical_prompt_sha256": "c8204b3329cd6d154dc20e4a2722dc7d7de355d2362db0a6a9af32b2b1e61b5d",
+      "provider_payload_sha256": "551963f5c2df6ab08791f1a586829ffa40b23cc40739d610c06bdac2e53bf6d9",
+      "source_payload_sha256": "551963f5c2df6ab08791f1a586829ffa40b23cc40739d610c06bdac2e53bf6d9",
+      "transform_receipt_digest": "2326cad6f085dfb63b2988e9a2a6d3d9b29341f38f9167ae69500091b37955bd",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "anthropic-review-risk-fail-02",
+      "current_prompt_sha256": "11a3a62084e6400f6df610e23376f1beebcfa3a5ce63a5799be2fa824ef0f780",
+      "historical_prompt_sha256": "11a3a62084e6400f6df610e23376f1beebcfa3a5ce63a5799be2fa824ef0f780",
+      "provider_payload_sha256": "707e5f199eec1666e6fc15b1a9dd760bff0bf23e59a46b2b4f810bbea679fe42",
+      "source_payload_sha256": "707e5f199eec1666e6fc15b1a9dd760bff0bf23e59a46b2b4f810bbea679fe42",
+      "transform_receipt_digest": "37ce964a58220ea99d91d8e904725a57e5ba7b7e304ae312f0a3ba3a2280d716",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-server-action-pass-01",
+      "current_prompt_sha256": "cda0acb376a7a0fa9a60234918985756cf4bb0a70e0a44793232976cabe06baf",
+      "historical_prompt_sha256": "cda0acb376a7a0fa9a60234918985756cf4bb0a70e0a44793232976cabe06baf",
+      "provider_payload_sha256": "c10a5efed2781af7fb8264513512cb5a8ea3458a72799dee54da600e40e1e274",
+      "source_payload_sha256": "c10a5efed2781af7fb8264513512cb5a8ea3458a72799dee54da600e40e1e274",
+      "transform_receipt_digest": "40369b3bbc43c1eef7db9cc4371789b2535682065b97e6dc4a864a4861cb78d1",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-server-action-pass-02",
+      "current_prompt_sha256": "8a3487d23fbfb0fd013a19c008ecf0dc2ffc65033d6fcb3cf8397d4642660c8f",
+      "historical_prompt_sha256": "8a3487d23fbfb0fd013a19c008ecf0dc2ffc65033d6fcb3cf8397d4642660c8f",
+      "provider_payload_sha256": "9ee2c004cbb50446001e5d0b82b18d11651429502db95ed7df9566c0fcd4bfe7",
+      "source_payload_sha256": "9ee2c004cbb50446001e5d0b82b18d11651429502db95ed7df9566c0fcd4bfe7",
+      "transform_receipt_digest": "ebc02ff58f8f2f8b804466afc03dd746e2c28b8c8aeadc43c0e242fa88d74248",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-server-action-fail-01",
+      "current_prompt_sha256": "1cdc8b7d475c2aef7bbe6312b3870e1385e6767339ff00fa4887a7bcbf8bc0d8",
+      "historical_prompt_sha256": "1cdc8b7d475c2aef7bbe6312b3870e1385e6767339ff00fa4887a7bcbf8bc0d8",
+      "provider_payload_sha256": "224583c09a1665f948b283d38cab859a6873bc4298020e2e65de9983644188fa",
+      "source_payload_sha256": "224583c09a1665f948b283d38cab859a6873bc4298020e2e65de9983644188fa",
+      "transform_receipt_digest": "abae1afdcbacf0ace62f7731d06ce7599914b6eb8e9b46f0036315754eeda74b",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-server-action-fail-02",
+      "current_prompt_sha256": "b055db6513fbf43571d0983b5bca37b5a1bf0cdbc6ed26dfc2be6ae46c5375f2",
+      "historical_prompt_sha256": "b055db6513fbf43571d0983b5bca37b5a1bf0cdbc6ed26dfc2be6ae46c5375f2",
+      "provider_payload_sha256": "ffa92e12bf7b219fb03170a4b1a9837b2b4fef506492b6f00fa708ca097e80b8",
+      "source_payload_sha256": "ffa92e12bf7b219fb03170a4b1a9837b2b4fef506492b6f00fa708ca097e80b8",
+      "transform_receipt_digest": "42cf2d4e95004d7c15662131250cc085f43c7a082b149ccd67c6b5bea5883596",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rsc-serialization-pass-01",
+      "current_prompt_sha256": "79fca6e3f00eea2415e472bf1d57230a8fd6184aa26ff3cfb705e7ed6c8fef99",
+      "historical_prompt_sha256": "79fca6e3f00eea2415e472bf1d57230a8fd6184aa26ff3cfb705e7ed6c8fef99",
+      "provider_payload_sha256": "0de09921fcb26c34be2d601c2d3c1bbf7f049690404fab0dea79207876998e5d",
+      "source_payload_sha256": "0de09921fcb26c34be2d601c2d3c1bbf7f049690404fab0dea79207876998e5d",
+      "transform_receipt_digest": "619fe24ed19370fe35c167c3f856797303011de3ee433491492bd7adb0dc476b",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rsc-serialization-pass-02",
+      "current_prompt_sha256": "63aaa5cdb33cd68860f7d8982b8be0110cf47cb2eb093342a5555e8c24ac87ff",
+      "historical_prompt_sha256": "63aaa5cdb33cd68860f7d8982b8be0110cf47cb2eb093342a5555e8c24ac87ff",
+      "provider_payload_sha256": "9488dc33b1a93be9d17793f76029143879f2fb020684fd24a2aef903f7cfb6b8",
+      "source_payload_sha256": "9488dc33b1a93be9d17793f76029143879f2fb020684fd24a2aef903f7cfb6b8",
+      "transform_receipt_digest": "1c5f2af010c7bee38011891e0977d05291747928202a946f0ea8425aaba7021d",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rsc-serialization-fail-01",
+      "current_prompt_sha256": "79521535d930f5396b03ac08c42e8934570cab68befeb0da697d951f1ef522d7",
+      "historical_prompt_sha256": "79521535d930f5396b03ac08c42e8934570cab68befeb0da697d951f1ef522d7",
+      "provider_payload_sha256": "562d1209f880f6a403e75e948f7da7c5e911b10c515d614091b2f07409e5516b",
+      "source_payload_sha256": "562d1209f880f6a403e75e948f7da7c5e911b10c515d614091b2f07409e5516b",
+      "transform_receipt_digest": "6a240bcee0a8151d97461af3ac0b4a9997056f4b7a47eec172304ffce56c8d58",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rsc-serialization-fail-02",
+      "current_prompt_sha256": "602ae5f212eb192b6cd07738cafcff91d19113f5e9469f8a3856b9ae6e17d843",
+      "historical_prompt_sha256": "602ae5f212eb192b6cd07738cafcff91d19113f5e9469f8a3856b9ae6e17d843",
+      "provider_payload_sha256": "a2bb6f8be9ffa402874329d1a5646fa615cbc2c6b096b71e34f0446db25614ec",
+      "source_payload_sha256": "a2bb6f8be9ffa402874329d1a5646fa615cbc2c6b096b71e34f0446db25614ec",
+      "transform_receipt_digest": "4996097cf9bb9ff43a844a26bd1858061b8ab4fb897d3dace2f4d06f447d204b",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rule-grounding-pass-01",
+      "current_prompt_sha256": "d4c0085da54301443bec87c3037b0535a30455abc4ffd825eb388d8b3202f9f6",
+      "historical_prompt_sha256": "d4c0085da54301443bec87c3037b0535a30455abc4ffd825eb388d8b3202f9f6",
+      "provider_payload_sha256": "140fcaccee12e0232f0853fb28796f126537e8831ea7d7192e983522a5f99e63",
+      "source_payload_sha256": "140fcaccee12e0232f0853fb28796f126537e8831ea7d7192e983522a5f99e63",
+      "transform_receipt_digest": "73c7e45c401e81b4a2c34f6328f74caccda6bec8da63abb282023b9769bd54ba",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rule-grounding-pass-02",
+      "current_prompt_sha256": "d505ac1f928a40cc7d87dca6613d1cdb21e8e5e655d3d404955956663a112cdf",
+      "historical_prompt_sha256": "d505ac1f928a40cc7d87dca6613d1cdb21e8e5e655d3d404955956663a112cdf",
+      "provider_payload_sha256": "8108699d24a2ff90fe9191c796a7e58b0a0647f617a3f1a9e4eaf0930c9fca90",
+      "source_payload_sha256": "8108699d24a2ff90fe9191c796a7e58b0a0647f617a3f1a9e4eaf0930c9fca90",
+      "transform_receipt_digest": "3cf502e263f6a697503b7d5c7be023771d317e8c27e29a14455a139b68b68e68",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rule-grounding-fail-01",
+      "current_prompt_sha256": "91a86bb569642f45f61816ba886d523de00c142f755d701c68c3ffef0208949a",
+      "historical_prompt_sha256": "91a86bb569642f45f61816ba886d523de00c142f755d701c68c3ffef0208949a",
+      "provider_payload_sha256": "caed405102728a86c709d6678d7d10bc31359dc729ba5cd16caaf2d4003f1e37",
+      "source_payload_sha256": "caed405102728a86c709d6678d7d10bc31359dc729ba5cd16caaf2d4003f1e37",
+      "transform_receipt_digest": "d437147403db3ef6cd755ffc639f70275fdf9718e3b4e72668c18addb416a054",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rule-grounding-fail-02",
+      "current_prompt_sha256": "a9301ffb080688f86a7ae89e453fe117a4e958c466a47422c42da5d6eddcc522",
+      "historical_prompt_sha256": "a9301ffb080688f86a7ae89e453fe117a4e958c466a47422c42da5d6eddcc522",
+      "provider_payload_sha256": "b9fec62e09eea6c4173788d317f2805a90e612757cf88c394804f5370f616c81",
+      "source_payload_sha256": "b9fec62e09eea6c4173788d317f2805a90e612757cf88c394804f5370f616c81",
+      "transform_receipt_digest": "934570077c3a86981cdf6370af196cc83ed45a0b32275d54ce0798945b666b19",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rollout-risk-pass-01",
+      "current_prompt_sha256": "fab88c84368d35c6f00e5f3ddbe5a7da7e31563dfd9de7cf54d865aae1966ea0",
+      "historical_prompt_sha256": "fab88c84368d35c6f00e5f3ddbe5a7da7e31563dfd9de7cf54d865aae1966ea0",
+      "provider_payload_sha256": "0c0661c03bafe2d1de21a1bed2b108a5164cdf8ba731cf8efdb82f554bf5d0e7",
+      "source_payload_sha256": "0c0661c03bafe2d1de21a1bed2b108a5164cdf8ba731cf8efdb82f554bf5d0e7",
+      "transform_receipt_digest": "8ad61f3cc6c7bb8650f1d5c11cc1b98b447189d499f954a267961911aecbca69",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rollout-risk-pass-02",
+      "current_prompt_sha256": "e4ae1b3e3dcf22b3fafe024ed4c21450e9d2c23ac1ba11e8a58f25fe96e8558f",
+      "historical_prompt_sha256": "e4ae1b3e3dcf22b3fafe024ed4c21450e9d2c23ac1ba11e8a58f25fe96e8558f",
+      "provider_payload_sha256": "f50c91adbd4b93dbb60406424d79f2144b252d8ec14748410409be14c16c0673",
+      "source_payload_sha256": "f50c91adbd4b93dbb60406424d79f2144b252d8ec14748410409be14c16c0673",
+      "transform_receipt_digest": "097d0581f5a85efd65fdbe153a09fbe605c3828ef6c3a11a964857e169d6de89",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rollout-risk-fail-01",
+      "current_prompt_sha256": "2f2fbd906e0568ba672241a1406345091fe15f4c7fd35dd918f5a04e51cf5618",
+      "historical_prompt_sha256": "2f2fbd906e0568ba672241a1406345091fe15f4c7fd35dd918f5a04e51cf5618",
+      "provider_payload_sha256": "a02fe8fb7a4ca284d3b680c4e47335babf840b3503f7f67b753d62688a152128",
+      "source_payload_sha256": "a02fe8fb7a4ca284d3b680c4e47335babf840b3503f7f67b753d62688a152128",
+      "transform_receipt_digest": "741109158f6370404a5210f73109a330880524b29d51e5dc96344bcbd7e8329f",
+      "transformed": false,
+      "transformed_value_count": 0
+    },
+    {
+      "case_id": "vercel-rollout-risk-fail-02",
+      "current_prompt_sha256": "db12d93f6fad8c8bbfd015808c1447722d82e0da8c44f9d14b631476e9bb4e8c",
+      "historical_prompt_sha256": "db12d93f6fad8c8bbfd015808c1447722d82e0da8c44f9d14b631476e9bb4e8c",
+      "provider_payload_sha256": "4fa44a9165b725d173ce09c5a9d2a840dabde13a0751de8b7685cdbd7384980a",
+      "source_payload_sha256": "4fa44a9165b725d173ce09c5a9d2a840dabde13a0751de8b7685cdbd7384980a",
+      "transform_receipt_digest": "f2eef2f0c0a36cddf0744362c1b7468e9d19ecd6d80c733305838a4b03d12c2a",
+      "transformed": false,
+      "transformed_value_count": 0
+    }
+  ],
+  "claim_scope": "no_new_model_payload_compatibility",
+  "kind": "comparison_judge_sanitizer_compatibility",
+  "limitations": [
+    "No model request was rerun; V2 reuses the immutable V1 responses.",
+    "The historical runner did not persist request bodies, so exact prompts are deterministically reconstructed from its locked code, cases, and rubric.",
+    "Offline redaction cases validate the sanitizer implementation, not the model's response to transformed inputs.",
+    "The judge remains advisory until a two-reviewer human calibration is adjudicated."
+  ],
+  "offline_conformance": {
+    "cases": [
+      {
+        "actual_output_sha256": "c866a4136a868b13022fc84c4f12ad0e9ddb4c0c4b378ad8cafc7ab79ab1d985",
+        "case_id": "authorization-bearer-redaction",
+        "expected_output_sha256": "c866a4136a868b13022fc84c4f12ad0e9ddb4c0c4b378ad8cafc7ab79ab1d985",
+        "family": "credential_redaction",
+        "input_sha256": "5065084382fb5d4f890cabb3b13d77d20af579e1501b621e5bb9d2278f2a8d1f",
+        "passed": true,
+        "transformed": true
+      },
+      {
+        "actual_output_sha256": "938e253ce68bdb8204695893238d50de7a5f2f4324bd27b93596483566642009",
+        "case_id": "nested-sensitive-key-redaction",
+        "expected_output_sha256": "938e253ce68bdb8204695893238d50de7a5f2f4324bd27b93596483566642009",
+        "family": "credential_redaction",
+        "input_sha256": "f497f55eee4de350e330e78f745ffb4fd539fa0146ad4c534c3432abb8403c6b",
+        "passed": true,
+        "transformed": true
+      },
+      {
+        "actual_output_sha256": "962ca13f39dcf10d0f3c9591db97737858e26f45bf8ba3c16e13ab7433bf4c5c",
+        "case_id": "password-assignment-redaction",
+        "expected_output_sha256": "962ca13f39dcf10d0f3c9591db97737858e26f45bf8ba3c16e13ab7433bf4c5c",
+        "family": "credential_redaction",
+        "input_sha256": "dde1f66a618699a5141a3d37895b4efcf995696317118497eb265bf3ac6f3e26",
+        "passed": true,
+        "transformed": true
+      },
+      {
+        "actual_output_sha256": "5b14d8dac1e7bf539a41cf5a08db9f581cecae9885dcd808e2d04d7181be1cba",
+        "case_id": "token-pattern-redaction",
+        "expected_output_sha256": "5b14d8dac1e7bf539a41cf5a08db9f581cecae9885dcd808e2d04d7181be1cba",
+        "family": "credential_redaction",
+        "input_sha256": "51d6a454d286e8c09b80f104c04eeaf66f41322bb5bb186cb02810da7975f598",
+        "passed": true,
+        "transformed": true
+      },
+      {
+        "actual_output_sha256": "ef6bfb4d9372eaea344671c61947751584bce79ad8d27a0ce6ae976beb6ac958",
+        "case_id": "environment-placeholder-preservation",
+        "expected_output_sha256": "ef6bfb4d9372eaea344671c61947751584bce79ad8d27a0ce6ae976beb6ac958",
+        "family": "safe_placeholder_preservation",
+        "input_sha256": "ef6bfb4d9372eaea344671c61947751584bce79ad8d27a0ce6ae976beb6ac958",
+        "passed": true,
+        "transformed": false
+      },
+      {
+        "actual_output_sha256": "36606f83ae578a42b41500dd695adedcbee6d0f417c83b0a4264292dca7dbafc",
+        "case_id": "path-read-expression-preservation",
+        "expected_output_sha256": "36606f83ae578a42b41500dd695adedcbee6d0f417c83b0a4264292dca7dbafc",
+        "family": "safe_placeholder_preservation",
+        "input_sha256": "36606f83ae578a42b41500dd695adedcbee6d0f417c83b0a4264292dca7dbafc",
+        "passed": true,
+        "transformed": false
+      },
+      {
+        "actual_output_sha256": "9e2202c88eeebbc37280e1a0b55aa0af80ff60622ed14eb9e4a6626879e078d9",
+        "case_id": "config-expression-preservation",
+        "expected_output_sha256": "9e2202c88eeebbc37280e1a0b55aa0af80ff60622ed14eb9e4a6626879e078d9",
+        "family": "safe_placeholder_preservation",
+        "input_sha256": "9e2202c88eeebbc37280e1a0b55aa0af80ff60622ed14eb9e4a6626879e078d9",
+        "passed": true,
+        "transformed": false
+      },
+      {
+        "actual_output_sha256": "4a6cb074bd9873988e0a831219f7482ad46e79fde16bc45166d7c61e1b417829",
+        "case_id": "from-env-placeholder-preservation",
+        "expected_output_sha256": "4a6cb074bd9873988e0a831219f7482ad46e79fde16bc45166d7c61e1b417829",
+        "family": "safe_placeholder_preservation",
+        "input_sha256": "4a6cb074bd9873988e0a831219f7482ad46e79fde16bc45166d7c61e1b417829",
+        "passed": true,
+        "transformed": false
+      }
+    ],
+    "status": "passed",
+    "summary": {
+      "cases": 8,
+      "credential_redaction_cases": 4,
+      "passed": 8,
+      "safe_preservation_cases": 4
+    }
+  },
+  "receipt_digest": "53d145e3d259e56124ed8eb97259b03b92a25151e53ec54af1e1183a798e71e4",
+  "sanitizer": {
+    "builder_artifact_path": "examples/comparisons/community-skill-upgrades/build_judge_sanitizer_compatibility_v2.py",
+    "builder_artifact_sha256": "e888d6894534f94c26c68d68cf1eb6f2a43e052e8d86e76824b23c03a992304e",
+    "contract": "fugue-judge-input-sanitization-v3",
+    "implementation_path": "fugue/bench/judge_input.py",
+    "implementation_sha256": "fc5ef58eeb2f8224b91c63784cc8758abcc64b96b474ad87675e35aadd870bee",
+    "transform": "high-confidence-credential-redaction-v3",
+    "version": 3
+  },
+  "schema_version": 2,
+  "source_calibration": {
+    "approval_digest": "81c511c9843cf3beb7522361620152ca5b6b206d9be7c52131c69763479b7bcd",
+    "archived_result_path": "examples/comparisons/community-skill-upgrades/judge-calibration-result-v1.json",
+    "archived_result_sha256": "d2b3cc88803df4980c30b60f91b24ee535ee39aae118da7093f922b9cadeea31",
+    "cases_artifact_path": "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl",
+    "cases_artifact_sha256": "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e",
+    "cases_digest": "f4634b7dee0898e2bfc8104961ad2f1bdd70be5feda1081214457257b9215a15",
+    "historical_runtime_result_path": ".fugue/runtime/community-skill-upgrades/judge-calibration.result.json",
+    "model": "anthropic/claude-sonnet-5",
+    "preview_digest": "329f8c57223007620b7428aed0df3471b95fc8281d9693216cde8e8ed0437e57",
+    "report_path": "examples/comparisons/community-skill-upgrades/judge-calibration.json",
+    "report_sha256": "8c8e5d794ef6722891efd9a739b7cf677830029cd9c3cc3e902b1b46165d1150",
+    "result_digest": "7e0e93d4d6180d3216004e51d36da6486b491de6721d1302289ebcf25627a45b",
+    "rubric_digest": "6706b2a5dbbc0850b0f1b904920d14ae9df54a212b34f745540efc4d3f3ef74b",
+    "runner_artifact_path": "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py",
+    "runner_artifact_sha256": "8a4e42921bcd5ee62f004a47d8d70ae73e349f1119d17e37b711331cc3857afe"
+  },
+  "status": "passed",
+  "summary": {
+    "byte_equivalent_payloads": 48,
+    "byte_equivalent_prompts": 48,
+    "cases": 48,
+    "transformed_payloads": 0
+  }
+}

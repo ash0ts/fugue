@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: superpowers-writing-plans-confirmatory-v5
+  name: Superpowers Writing Plans Confirmatory Study V5
+  description: Full restart with complete primary-artifact binding and the V3 path-classification scorer after the invalid V4 checkpoint.
+  objective: Estimate task-level paired behavior changes without pooling invalid V1-V4 rows or treating repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-superpowers-writing-plans-confirmatory-v5
+database: .study-console/superpowers-writing-plans-confirmatory-v5.sqlite3
+primary_metric:
+  name: holdout_task_level_paired_pass_delta
+  goal: maximize
+presentation:
+  default_study_id: superpowers-writing-plans-confirmatory-v5
+  read_only: true

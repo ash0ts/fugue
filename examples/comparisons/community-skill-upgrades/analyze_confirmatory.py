@@ -25,10 +25,13 @@ from fugue.bench.comparison import (
     APPROVED_COMPARISON_LOCK_NAME,
     ComparisonResultV3,
     _comparison_cohort_lineage,
+    _extract_structured_result,
+    _verified_comparison_primary_output_receipt,
     analyze_comparison_rows,
     load_comparison,
     read_comparison_result,
 )
+from fugue.bench.task_authoring import load_task_profiles
 
 TERMINAL_STATUSES = {
     "agent_completed",
@@ -258,13 +261,29 @@ def _load_profile_preregistration(
         ):
             raise ValueError("repository preregistration amendment digest drifted")
         replacement = amendment_value.get("replacement_execution")
+        changes = amendment_value.get("changes")
+        if not isinstance(changes, Mapping):
+            raise ValueError("preregistration amendment changes are malformed")
+        measurement_restart = amendment_value.get("amendment_kind") == (
+            "scorer_and_primary_artifact_integrity_full_restart"
+        )
+        evaluator_change_allowed = bool(
+            measurement_restart
+            and changes.get("deterministic_scorer") is True
+            and changes.get("primary_artifact_contract") is True
+            and changes.get("judge_requiredness") is False
+            and isinstance(amendment_value.get("measurement_revision"), Mapping)
+        )
         if (
             not isinstance(replacement, Mapping)
             or replacement.get("comparison_id") != study_id
-            or amendment_value.get("changes", {}).get("hypotheses") is not False
-            or amendment_value.get("changes", {}).get("taskset") is not False
-            or amendment_value.get("changes", {}).get("treatments") is not False
-            or amendment_value.get("changes", {}).get("evaluators") is not False
+            or changes.get("hypotheses") is not False
+            or changes.get("taskset") is not False
+            or changes.get("treatments") is not False
+            or (
+                changes.get("evaluators") is not False
+                and not evaluator_change_allowed
+            )
         ):
             raise ValueError("preregistration amendment changes behavioral inputs")
         binding["amendment"] = {
@@ -527,6 +546,187 @@ def _canonical_attempt_ids(result: ComparisonResultV3) -> set[str]:
     }
 
 
+def _validate_attempt_scorer_receipts(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    result: ComparisonResultV3,
+    spec: Any,
+    repo_root: Path,
+) -> str:
+    """Prove every inferential score came from the locked full artifact."""
+
+    evaluators = tuple(
+        evaluator
+        for evaluator in spec.evaluators
+        if evaluator.type == "deterministic" and evaluator.scorer
+    )
+    if not evaluators:
+        raise ValueError("confirmatory analysis requires a custom deterministic scorer")
+    revision_digests = {item.id: item.digest for item in result.scorer_revisions}
+    profiles = load_task_profiles(repo_root)
+    accepted_receipts: list[dict[str, Any]] = []
+    expected_input_fields = {
+        "schema_version",
+        "status",
+        "source_sha256",
+        "input_bytes",
+        "input_sha256",
+        "evidence_digest",
+        "reference_digest",
+        "reference_output_digest",
+        "runtime_profile_id",
+        "runtime_profile_digest",
+        "runtime_image",
+        "runtime_platform",
+        "receipt_digest",
+    }
+    expected_scorer_fields = {
+        "schema_version",
+        "status",
+        "evaluator_id",
+        "evaluator_revision_digest",
+        "approved_scorer_source_sha256",
+        "primary_artifact_receipt_digest",
+        "primary_artifact_sha256",
+        "primary_artifact_bytes",
+        "normalized_output_digest",
+        "normalized_scores_digest",
+        "scorer_input_receipt",
+        "runtime_cleanup_receipt",
+        "receipt_digest",
+    }
+    for row in rows:
+        attempt_id = str(row.get("attempt_id") or "")
+        expected_paths = row.get("expected_artifact_paths")
+        if not isinstance(expected_paths, list) or not expected_paths:
+            raise ValueError(
+                f"attempt {attempt_id} lacks its locked primary artifact paths"
+            )
+        output = (
+            row.get("final_output")
+            if row.get("final_output") is not None
+            else row.get("answer")
+        )
+        primary = _verified_comparison_primary_output_receipt(
+            row.get("comparison_primary_output"),
+            value=output,
+            label=f"attempt {attempt_id}",
+            expected_artifact_paths=tuple(str(item) for item in expected_paths),
+        )
+        row_receipts = row.get("comparison_deterministic_scorer_receipts")
+        if not isinstance(row_receipts, Mapping) or set(row_receipts) != {
+            evaluator.id for evaluator in evaluators
+        }:
+            raise ValueError(
+                f"attempt {attempt_id} deterministic scorer receipts are incomplete"
+            )
+        normalized_output_digest = stable_digest(_extract_structured_result(output))
+        for evaluator in evaluators:
+            receipt = row_receipts.get(evaluator.id)
+            if not isinstance(receipt, Mapping) or set(receipt) != expected_scorer_fields:
+                raise ValueError(
+                    f"attempt {attempt_id} scorer receipt fields drifted for "
+                    f"{evaluator.id}"
+                )
+            unsigned_receipt = {
+                key: value for key, value in receipt.items() if key != "receipt_digest"
+            }
+            scorer_path = (repo_root / str(evaluator.scorer)).resolve()
+            profile = profiles.scorer_runtime(str(evaluator.runtime))
+            row_scores = row.get("comparison_deterministic_scores")
+            if not isinstance(row_scores, Mapping):
+                raise ValueError(
+                    f"attempt {attempt_id} deterministic scores are unavailable"
+                )
+            prefix = f"{evaluator.id}."
+            evaluator_scores = {
+                str(name)[len(prefix) :]: value
+                for name, value in row_scores.items()
+                if str(name).startswith(prefix)
+            }
+            if (
+                receipt.get("schema_version") != 1
+                or receipt.get("status") != "bound"
+                or receipt.get("receipt_digest") != stable_digest(unsigned_receipt)
+                or receipt.get("evaluator_id") != evaluator.id
+                or receipt.get("evaluator_revision_digest")
+                != revision_digests.get(evaluator.id)
+                or not scorer_path.is_file()
+                or receipt.get("approved_scorer_source_sha256") != _sha256(scorer_path)
+                or receipt.get("primary_artifact_receipt_digest")
+                != stable_digest(primary)
+                or receipt.get("primary_artifact_sha256") != primary.get("sha256")
+                or receipt.get("primary_artifact_bytes") != primary.get("bytes")
+                or receipt.get("normalized_output_digest")
+                != normalized_output_digest
+                or set(evaluator_scores) != set(evaluator.dimensions)
+                or receipt.get("normalized_scores_digest")
+                != stable_digest(evaluator_scores)
+            ):
+                raise ValueError(
+                    f"attempt {attempt_id} scorer receipt is not bound to the "
+                    f"approved artifact for {evaluator.id}"
+                )
+            input_receipt = receipt.get("scorer_input_receipt")
+            if (
+                not isinstance(input_receipt, Mapping)
+                or set(input_receipt) != expected_input_fields
+            ):
+                raise ValueError(
+                    f"attempt {attempt_id} scorer input receipt fields drifted"
+                )
+            unsigned_input = {
+                key: value
+                for key, value in input_receipt.items()
+                if key != "receipt_digest"
+            }
+            if (
+                input_receipt.get("schema_version") != 1
+                or input_receipt.get("status") != "bound"
+                or input_receipt.get("receipt_digest") != stable_digest(unsigned_input)
+                or not _is_digest(input_receipt.get("source_sha256"))
+                or not _is_digest(input_receipt.get("input_sha256"))
+                or not _is_digest(input_receipt.get("evidence_digest"))
+                or not _is_digest(input_receipt.get("reference_digest"))
+                or input_receipt.get("reference_output_digest")
+                != normalized_output_digest
+                or input_receipt.get("runtime_profile_id") != profile.id
+                or input_receipt.get("runtime_profile_digest")
+                != profile.profile_digest
+                or input_receipt.get("runtime_image") != profile.image
+                or input_receipt.get("runtime_platform") != profile.platform
+            ):
+                raise ValueError(
+                    f"attempt {attempt_id} scorer input/runtime receipt is invalid"
+                )
+            cleanup = receipt.get("runtime_cleanup_receipt")
+            if not isinstance(cleanup, Mapping):
+                raise ValueError(
+                    f"attempt {attempt_id} scorer cleanup receipt is unavailable"
+                )
+            unsigned_cleanup = {
+                key: value for key, value in cleanup.items() if key != "receipt_digest"
+            }
+            if (
+                set(cleanup)
+                != {
+                    "schema_version",
+                    "status",
+                    "container_name_sha256",
+                    "receipt_digest",
+                }
+                or cleanup.get("schema_version") != 1
+                or cleanup.get("status") != "verified_absent"
+                or not _is_digest(cleanup.get("container_name_sha256"))
+                or cleanup.get("receipt_digest") != stable_digest(unsigned_cleanup)
+            ):
+                raise ValueError(
+                    f"attempt {attempt_id} scorer cleanup receipt is invalid"
+                )
+            accepted_receipts.append(dict(receipt))
+    return stable_digest(accepted_receipts)
+
+
 def _validate_bindings(  # noqa: C901 - one bounded cross-artifact gate.
     *,
     result: ComparisonResultV3,
@@ -621,6 +821,12 @@ def _validate_bindings(  # noqa: C901 - one bounded cross-artifact gate.
         item.id: item.digest for item in result.scorer_revisions
     }:
         raise ValueError("canonical scorer revision bindings disagree")
+    scorer_receipts_digest = _validate_attempt_scorer_receipts(
+        rows=rows,
+        result=result,
+        spec=spec,
+        repo_root=repo_root,
+    )
     validity = {item.task_id: item for item in result.task_validity}
     if len(validity) != len(result.task_validity):
         raise ValueError("canonical task validity contains duplicate task ids")
@@ -651,6 +857,7 @@ def _validate_bindings(  # noqa: C901 - one bounded cross-artifact gate.
             item.to_dict() for item in result.candidate_source_revisions
         ],
         "scorer_revisions": [item.to_dict() for item in result.scorer_revisions],
+        "attempt_scorer_receipts_digest": scorer_receipts_digest,
         "runtime_locks": [item.to_dict() for item in result.runtime_locks],
         "task_validity_digest": stable_digest(
             [item.to_dict() for item in result.task_validity]
@@ -678,6 +885,12 @@ def _validate_matrix(
         status = str(row.get("status") or row.get("execution_status") or "")
         if status not in TERMINAL_STATUSES:
             raise ValueError(f"attempt {row.get('attempt_id')} is not terminal")
+        runtime_outcome = str(row.get("runtime_outcome") or "")
+        if runtime_outcome != "completed":
+            raise ValueError(
+                f"attempt {row.get('attempt_id')} runtime outcome is not completed: "
+                f"{runtime_outcome or 'missing'}"
+            )
         coordinate = (
             str(row.get("task_id") or ""),
             str(row.get("variant_id") or ""),

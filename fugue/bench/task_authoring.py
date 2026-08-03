@@ -1518,11 +1518,15 @@ def run_inline_scorer(
         root = Path(value)
         scorer_path = root / "scorer.py"
         input_path = root / "input.json"
-        scorer_path.write_text(source, encoding="utf-8")
-        input_path.write_text(
-            json.dumps({"evidence": evidence, "reference": reference}, sort_keys=True),
-            encoding="utf-8",
+        input_payload = {"evidence": evidence, "reference": reference}
+        serialized_input = json.dumps(
+            input_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        scorer_path.write_text(source, encoding="utf-8")
+        input_path.write_text(serialized_input, encoding="utf-8")
         scorer_path.chmod(0o400)
         input_path.chmod(0o400)
         container_name = f"fugue-inline-scorer-{uuid.uuid4().hex}"
@@ -1585,7 +1589,28 @@ def run_inline_scorer(
         _scorer_payload(payload)
         if cleanup_receipt is None:  # pragma: no cover - defensive invariant
             raise RuntimeError("inline scorer cleanup receipt is unavailable")
-        return {**payload, "fugue_runtime_receipt": cleanup_receipt}
+        unsigned_input_receipt = {
+            "schema_version": 1,
+            "status": "bound",
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "input_bytes": len(serialized_input.encode()),
+            "input_sha256": hashlib.sha256(serialized_input.encode()).hexdigest(),
+            "evidence_digest": stable_digest(evidence),
+            "reference_digest": stable_digest(reference),
+            "reference_output_digest": stable_digest(reference.get("output")),
+            "runtime_profile_id": profile.id,
+            "runtime_profile_digest": profile.profile_digest,
+            "runtime_image": profile.image,
+            "runtime_platform": profile.platform,
+        }
+        return {
+            **payload,
+            "fugue_runtime_receipt": cleanup_receipt,
+            "fugue_input_receipt": {
+                **unsigned_input_receipt,
+                "receipt_digest": stable_digest(unsigned_input_receipt),
+            },
+        }
 
 
 def _cleanup_inline_scorer_container(

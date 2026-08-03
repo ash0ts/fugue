@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "amendment_id": "superpowers-writing-plans-confirmatory-v5-measurement-integrity-restart",
+  "status": "frozen_before_v5_preview",
+  "amendment_kind": "scorer_and_primary_artifact_integrity_full_restart",
+  "prior_preregistration": {
+    "id": "superpowers-writing-plans-confirmatory-v1",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+    "sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7"
+  },
+  "prior_amendment": {
+    "id": "superpowers-writing-plans-confirmatory-v4-agent-timeout-restart",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json",
+    "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424"
+  },
+  "superseded_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v4",
+    "run_id": "20260803T202659-d4afb1438c",
+    "preview_digest": "2fa48bfe92aa6009d68686b17330b773a3916ab8800f538941bfc6f15f32742b",
+    "approval_digest": "1302cf5d8818178e294192873321ca14f3320c4271362be187f558288a28270e",
+    "trace_audit_selection_digest": "31f1a88a60417fcd90dafca914d895d3ec6f84db705ba932a6d666015985563b",
+    "status": "invalid",
+    "reason_code": "primary_artifact_and_scorer_input_integrity_failure",
+    "behavioral_result_eligible": false,
+    "planned_cells": 192,
+    "completed_runtime_cells": 1,
+    "externally_cancelled_cells": 1,
+    "not_started_cells": 190,
+    "canonical_result_published": false
+  },
+  "v4_failure_diagnosis": {
+    "candidate_neutral": true,
+    "observed_full_artifact_sha256": "2122dd42b89acabe0d1d9865e36177c8104236d508a56adafbbbfed33750c25c",
+    "observed_full_artifact_bytes": 26556,
+    "scored_prefix_sha256": "069d66a5263d733dd1a5a5010c6737f2b328b704c859bb78a5d046ce7947ca57",
+    "scored_prefix_characters": 16000,
+    "defects": [
+      "the deterministic scorer and blind judge received a silent 16000-character prefix instead of the complete primary artifact",
+      "the scorer did not persist a digest binding the primary artifact to its exact scoring input",
+      "explanatory source citations, explicit no-change statements, and CI references were classified as proposed modification paths",
+      "privacy placeholders inserted into judge input were interpreted as artifact corruption",
+      "an externally cancelled candidate with no primary artifact was still deterministically scored and judged"
+    ],
+    "claim_effect": "The completed V4 row and interrupted candidate row are diagnostic evidence only. They cannot support a baseline-versus-candidate estimate, and no V4 row may be pooled into V5."
+  },
+  "measurement_revision": {
+    "prior_scorer": "plan_quality_scorer_v2.py",
+    "prior_scorer_sha256": "5af965f77ad96e90f36a49db57ce41f60bcbb8729cfb32fdeb49642e2a727fe1",
+    "replacement_scorer": "plan_quality_scorer_v3.py",
+    "replacement_scorer_sha256": "b67862e8c63bfa97ba6ea56fc3d3bdcb72e463a87e5bc433be0ead5258164b4a",
+    "prior_judge_calibration": "../community-skill-upgrades/judge-calibration.json",
+    "prior_judge_calibration_sha256": "8c8e5d794ef6722891efd9a739b7cf677830029cd9c3cc3e902b1b46165d1150",
+    "replacement_judge_calibration": "../community-skill-upgrades/judge-calibration-v2.json",
+    "replacement_judge_calibration_sha256": "1317369101156e149413f73b741d0da97f2dfa61279a2c49bc1dbf2737e38ba6",
+    "sanitizer_compatibility_artifact": "../community-skill-upgrades/judge-sanitizer-compatibility-v2.json",
+    "sanitizer_compatibility_artifact_sha256": "aa5f6ea6202c15fc41ce0b0eab45043e4f1dde0bf4235c11537befbc7cad7422",
+    "sanitizer_compatibility_receipt_digest": "53d145e3d259e56124ed8eb97259b03b92a25151e53ec54af1e1183a798e71e4",
+    "sanitizer_implementation_sha256": "fc5ef58eeb2f8224b91c63784cc8758abcc64b96b474ad87675e35aadd870bee",
+    "repairs": [
+      "require an explicit positive file-change directive before classifying a path as modified",
+      "ignore path-local negated changes and no-other-files-change statements",
+      "ignore explanatory implementation citations and CI or verification references",
+      "retain fail-closed rejection of an explicit out-of-scope modification",
+      "bind the complete primary artifact and normalized score map into each deterministic scorer receipt",
+      "bind the current judge-input sanitizer implementation through the V2 compatibility receipt"
+    ],
+    "judge_policy": "The same blinded Sonnet 5 judge remains advisory because human double-review is pending and remains secondary to deterministic safety gates. V2 makes no new model call: it proves all 48 historical provider payloads and prompts are byte-equivalent under the current sanitizer, separately passes four redaction and four safe-preservation cases, and binds the exact implementation. Judge rows from V1 and V2 are descriptive and must not be pooled as one measurement revision."
+  },
+  "execution_integrity_requirements": [
+    "persist one exact primary artifact path, byte count, and sha256",
+    "bind the complete deterministic scorer input to the primary artifact without truncation",
+    "reject missing or multiple primary artifacts",
+    "skip scoring and judging for externally cancelled or otherwise incomplete attempts",
+    "retain five-link Weave reconciliation, privacy checks, cost evidence, and run-scoped cleanup before releasing the remaining cohort"
+  ],
+  "restart_decision": {
+    "basis": "measurement_and_execution_integrity_defect",
+    "outcome_dependent": false,
+    "made_before_any_valid_v4_pair_or_hypothesis_test": true,
+    "restart_scope": "all_192_cells_from_scratch",
+    "resume_or_selective_rerun": false,
+    "v4_rows_in_v5_analysis": false,
+    "interim_efficacy_stopping": false
+  },
+  "replacement_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v5",
+    "research_id": "superpowers-writing-plans-confirmatory-v5",
+    "result_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v5",
+    "source_lock_path": ".fugue/qualification/community-skill-confirmatory/superpowers-v5/source.lock.json",
+    "source_lock_policy": "Generate a fresh lock from the V5 spec and prepared immutable source; never hand-edit or reuse the V4 result-project lock.",
+    "evidence_checkpoint_cells": 2,
+    "full_terminal_cohort_required": true
+  },
+  "frozen_behavioral_inputs": {
+    "public_tasks_sha256": "9612919179b86b62b381712f5e6f79bd686beed3e3b0fb431a66248976a2382f",
+    "private_labels_sha256": "5c2110565b8622dd4d5d89047c462906675b138e022af4e8c8edff8e5f890fa0",
+    "skill_revision_lock_sha256": "47f56e275f85d80193f5f7c5647a92c4689aeb12f493ecd06de61c37036bf583",
+    "agent_visible_source_archive_sha256": "c1bd998358d7eff1269f3d2da951d12331df1dc1df635a176bb3d129305311b0",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "source_project": "wandb/fugue-superpowers-writing-plans-source-v1",
+    "model_route": "anthropic/claude-sonnet-5",
+    "harness": "claude-code",
+    "tasks": 24,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": false,
+    "holdout_membership": false,
+    "private_expected_values": false,
+    "treatments": false,
+    "model_or_harness": false,
+    "task_or_agent_limits": false,
+    "budget_ceiling": false,
+    "scheduling_seed": false,
+    "primary_analysis": false,
+    "deterministic_scorer": true,
+    "judge_requiredness": false,
+    "judge_input_measurement": true,
+    "judge_calibration_binding": true,
+    "primary_artifact_contract": true,
+    "execution_identity": true,
+    "result_destination": true,
+    "source_lock_location": true
+  },
+  "claim_boundary": "Only a complete V5 cohort scored with the V3 scorer and complete-artifact contract may support the frozen behavioral question. V1-V4 remain immutable audit history and contribute no behavioral rows.",
+  "amendment_digest": "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
+}

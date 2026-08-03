@@ -2792,6 +2792,39 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
     _stub_live_agent_bridge(monkeypatch, coordinator)
 
     coordinator.begin_cell(cells[0])
+    original_completed_row = export._completed_evaluation_row
+
+    def completed_with_stale_claims(
+        cell: PlannedCell,
+        outcome: CellOutcome,
+        planned: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = original_completed_row(cell, outcome, planned)
+        row.update(
+            {
+                "pass": True,
+                "benchmark_pass": True,
+                "reward": 1.0,
+                "comparison_deterministic_scores": {"facts.answer": 1.0},
+                "comparison_deterministic_scorer_receipts": {
+                    "facts": {"status": "bound"}
+                },
+                "comparison_judge_scores": {"judge.useful": 1.0},
+                "comparison_judge_accounted_cost_usd": 0.5,
+                "comparison_judge_status": "scored",
+                "comparison_judges": {"judge": {"status": "scored"}},
+                "comparison_host_verifier_receipts": {
+                    "facts": {"status": "passed"}
+                },
+                "comparison_primary_output_projection": {"status": "available"},
+                "evaluation_overall": 1.0,
+                "evaluation_judge_status": "scored",
+                "judge_overall": 1.0,
+            }
+        )
+        return row
+
+    monkeypatch.setattr(export, "_completed_evaluation_row", completed_with_stale_claims)
     coordinator.finish_cell(
         cells[0],
         CellOutcome(cells[0].id, "cancelled", error="operator cancellation"),
@@ -2805,6 +2838,24 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
     assert predictions[0].output["runtime_outcome"] == "cancelled"
     assert predictions[0].output["trace_link_status"] == "cancelled"
     assert predictions[0].output["trace_link_reason"] == "operator cancellation"
+    [terminal_row] = [
+        json.loads(line)
+        for line in (
+            tmp_path / ".fugue/runtime/run-cancel/evaluation-results.jsonl"
+        )
+        .read_text()
+        .splitlines()
+    ]
+    assert terminal_row["pass"] is None
+    assert terminal_row["benchmark_pass"] is None
+    assert terminal_row["reward"] is None
+    assert terminal_row["host_evaluator_status"] == "not_run"
+    assert terminal_row["comparison_evaluation_status"] == "unavailable"
+    assert terminal_row["adapter_outcome"]["deterministic_verification"]["state"] == (
+        "unscored"
+    )
+    for field_name in export._INELIGIBLE_EVALUATION_CLAIM_FIELDS:
+        assert field_name not in terminal_row
     assert all(logger.failed is not None for logger in loggers)
     statuses = [
         json.loads(line)["status"]
@@ -3935,6 +3986,14 @@ def test_trial_row_separates_runtime_completion_from_task_outcome(
 
     assert row["agent_runtime_completed"] is True
     assert row["pass"] is False
+    assert "expected_artifact_paths" not in row
+
+    (trial_dir / "agent").mkdir()
+    (trial_dir / "agent" / "fugue-meta.json").write_text(
+        json.dumps({"expected_artifact_paths": []}),
+        encoding="utf-8",
+    )
+    assert export._row_from_trial(result_path)["expected_artifact_paths"] == []
 
     failed = json.loads(result_path.read_text(encoding="utf-8"))
     failed["exception_info"] = {"exception_type": "AgentRuntimeError"}
@@ -5175,6 +5234,90 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
     assert "secret-value" not in json.dumps(result)
 
 
+def test_local_cancelled_cell_skips_generated_and_host_evaluators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="capabilities",
+        task_id="case-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "missing" / "result.json",
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+        evaluation_case={"id": "case-a"},
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        export,
+        "apply_generated_evaluation",
+        lambda *_args, **_kwargs: calls.append("generated"),
+    )
+    monkeypatch.setattr(
+        export,
+        "_completed_evaluation_row",
+        lambda _cell, _outcome, planned: {
+            **planned,
+            "status": "cancelled",
+            "pass": True,
+            "benchmark_pass": True,
+            "reward": 1.0,
+            "comparison_deterministic_scores": {"facts.answer": 1.0},
+            "comparison_judge_scores": {"judge.useful": 1.0},
+            "comparison_judge_accounted_cost_usd": 0.5,
+            "comparison_judge_status": "scored",
+            "comparison_host_verifier_receipts": [{"status": "passed"}],
+        },
+    )
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={},
+        host_evaluator=lambda _row: calls.append("host"),
+    )
+
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "cancelled",
+            returncode=130,
+            runtime_outcome="cancelled",
+        ),
+    )
+
+    row = json.loads(
+        (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
+    )
+    assert calls == []
+    assert row["status"] == "cancelled"
+    assert row["host_evaluator_status"] == "not_run"
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["pass"] is None
+    assert row["benchmark_pass"] is None
+    assert row["reward"] is None
+    assert row["adapter_outcome"]["execution"]["state"] == "cancelled"
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == "unscored"
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    assert "comparison_judge_accounted_cost_usd" not in row
+    assert "comparison_judge_status" not in row
+    assert "comparison_host_verifier_receipts" not in row
+
+
 def test_completed_evaluation_recovers_setup_failure_and_fingerprint(
     tmp_path: Path,
 ) -> None:
@@ -6272,7 +6415,10 @@ def test_weave_enrichment_marks_expected_agent_identity(
     assert missing[0]["weave_agent_name_match"] is None
 
 
-def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
+@pytest.mark.parametrize("terminal_status", ["cancelled", "interrupted"])
+def test_ineligible_trial_uses_exact_planned_cell_identity_and_outcome(
+    terminal_status: str,
+) -> None:
     identity = {
         "task_id": "routing-plan",
         "arm": "candidate",
@@ -6298,6 +6444,18 @@ def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
         "record_type": "trial",
         **shared,
         "task_name": "fugue/routing-plan",
+        "status": "passed",
+        "benchmark_outcome": "passed",
+        "runtime_outcome": "completed",
+        "reward": 1.0,
+        "pass": True,
+        "benchmark_pass": True,
+        "host_evaluator_status": "scored",
+        "comparison_evaluation_status": "scored",
+        "comparison_deterministic_scores": {"plan.complete": 1.0},
+        "evaluation_correctness": 1.0,
+        "judge_correctness": 1.0,
+        "evaluation_rubrics": [{"id": "plan-quality"}],
     }
     cell = {
         "record_type": "cell",
@@ -6307,7 +6465,7 @@ def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
         "attempt_id": "a" * 64,
         "attempt_identity": identity,
         "run_name": "skill-upgrade",
-        "status": "interrupted",
+        "status": terminal_status,
         "benchmark_outcome": "unscored",
         "runtime_outcome": "cancelled",
         "approved_comparison_lock_digest": "f" * 64,
@@ -6320,11 +6478,46 @@ def test_interrupted_trial_recovers_exact_planned_cell_identity() -> None:
     assert trial["task_name"] == "routing-plan"
     assert trial["attempt_id"] == "a" * 64
     assert trial["attempt_identity"] == identity
-    assert trial["status"] == "interrupted"
+    assert trial["status"] == terminal_status
     assert trial["benchmark_outcome"] == "unscored"
     assert trial["runtime_outcome"] == "cancelled"
+    assert trial["reward"] is None
+    assert trial["pass"] is None
+    assert trial["benchmark_pass"] is None
+    assert trial["host_evaluator_status"] == "not_run"
+    assert trial["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in trial
+    assert "evaluation_correctness" not in trial
+    assert "judge_correctness" not in trial
+    assert "evaluation_rubrics" not in trial
+    assert export._evaluation_scores(trial) == {}
+    assert trial["adapter_outcome"]["rubric_evaluation"]["state"] == "not_requested"
     assert trial["approved_comparison_lock_digest"] == "f" * 64
     assert trial["planned_cell_identity_status"] == "reconciled"
+
+
+def test_cancelled_evaluation_claim_clearing_removes_all_publishable_scores() -> None:
+    row = {
+        "record_type": "trial",
+        "status": "cancelled",
+        "benchmark_outcome": "passed",
+        "runtime_outcome": "cancelled",
+        "pass": True,
+        "benchmark_pass": True,
+        "reward": 1.0,
+        "evaluation_correctness": 0.9,
+        "evaluation_task_completion": 1.0,
+        "judge_correctness": 0.8,
+        "evaluation_judge_status": "scored",
+        "evaluation_rubrics": [{"id": "quality"}],
+    }
+
+    export._clear_ineligible_evaluation_claims(row, status="cancelled")
+
+    assert export._evaluation_scores(row) == {}
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == "unscored"
+    assert row["adapter_outcome"]["rubric_evaluation"]["state"] == "not_requested"
 
 
 def test_export_synthesizes_interrupted_trial_preserving_planned_identity(

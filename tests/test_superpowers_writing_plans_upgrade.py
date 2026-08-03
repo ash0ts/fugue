@@ -32,9 +32,11 @@ CONFIRMATORY = EXAMPLE / "confirmatory-v1.yaml"
 CONFIRMATORY_V2 = EXAMPLE / "confirmatory-v2.yaml"
 CONFIRMATORY_V3 = EXAMPLE / "confirmatory-v3.yaml"
 CONFIRMATORY_V4 = EXAMPLE / "confirmatory-v4.yaml"
+CONFIRMATORY_V5 = EXAMPLE / "confirmatory-v5.yaml"
 CONFIRMATORY_TASKS = EXAMPLE / "tasks-conference-v1.jsonl"
 CONFIRMATORY_PRIVATE = EXAMPLE / "private-labels-conference-v1.jsonl"
 CONFIRMATORY_SCORER = EXAMPLE / "plan_quality_scorer_v2.py"
+CONFIRMATORY_SCORER_V3 = EXAMPLE / "plan_quality_scorer_v3.py"
 CONFIRMATORY_PREREGISTRATION = EXAMPLE / "preregistration-confirmatory-v1.json"
 CONFIRMATORY_V2_AMENDMENT = (
     EXAMPLE / "preregistration-confirmatory-v2-amendment.json"
@@ -46,6 +48,8 @@ CONFIRMATORY_V3_AMENDMENT = (
 CONFIRMATORY_V3_CONSOLE = EXAMPLE / "study-console-confirmatory-v3.yaml"
 CONFIRMATORY_V4_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v4-amendment.json"
 CONFIRMATORY_V4_CONSOLE = EXAMPLE / "study-console-confirmatory-v4.yaml"
+CONFIRMATORY_V5_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v5-amendment.json"
+CONFIRMATORY_V5_CONSOLE = EXAMPLE / "study-console-confirmatory-v5.yaml"
 CONFIRMATORY_PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"
 CONFIRMATORY_DIMENSIONS = {
     "artifact_validity",
@@ -100,6 +104,14 @@ def _v3_labels() -> dict[str, dict]:
 
 def _confirmatory_score():
     return runpy.run_path(CONFIRMATORY_SCORER.as_posix())["score"]
+
+
+def _confirmatory_v3_score():
+    return runpy.run_path(CONFIRMATORY_SCORER_V3.as_posix())["score"]
+
+
+def _confirmatory_v3_scorer_module() -> dict:
+    return runpy.run_path(CONFIRMATORY_SCORER_V3.as_posix())
 
 
 def _confirmatory_labels() -> dict[str, dict]:
@@ -708,6 +720,85 @@ def test_confirmatory_v4_freezes_full_restart_without_behavioral_drift() -> None
     }
 
 
+def test_confirmatory_v5_versions_measurement_repairs_without_rewriting_v4() -> None:
+    v4_raw = yaml.safe_load(CONFIRMATORY_V4.read_text(encoding="utf-8"))
+    v5_raw = yaml.safe_load(CONFIRMATORY_V5.read_text(encoding="utf-8"))
+    v5 = load_comparison(CONFIRMATORY_V5, repo_root=Path.cwd())
+    amendment = json.loads(CONFIRMATORY_V5_AMENDMENT.read_text(encoding="utf-8"))
+    unsigned = dict(amendment)
+    amendment_digest = unsigned.pop("amendment_digest")
+    console = yaml.safe_load(CONFIRMATORY_V5_CONSOLE.read_text(encoding="utf-8"))
+
+    for field in ("question", "taskset", "baseline", "candidate", "changed"):
+        assert v5_raw[field] == v4_raw[field]
+    assert v4_raw["evaluators"][0]["scorer"] == "plan_quality_scorer_v2.py"
+    assert v4_raw["evaluators"][1]["required"] is False
+    assert v5_raw["evaluators"][0] == {
+        **v4_raw["evaluators"][0],
+        "scorer": "plan_quality_scorer_v3.py",
+    }
+    assert v5_raw["evaluators"][1] == {
+        **v4_raw["evaluators"][1],
+        "calibration": "../community-skill-upgrades/judge-calibration-v2.json",
+    }
+
+    assert v5.id == "superpowers-writing-plans-confirmatory-v5"
+    assert v5.execution.research_id == v5.id
+    assert v5.execution.evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v5"
+    )
+    assert v5.execution.source_lock == (
+        ".fugue/qualification/community-skill-confirmatory/"
+        "superpowers-v5/source.lock.json"
+    )
+    assert v5.execution.study_console_base_url == "http://127.0.0.1:18103"
+    assert v5.execution.attempts == 4
+    assert v5.execution.evidence_checkpoint_cells == 2
+    assert v5.execution.qualification_inputs["repository_amendment_sha256"] == (
+        "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "preregistration-confirmatory-v5-amendment.json"
+    )
+
+    assert amendment_digest == stable_digest(unsigned)
+    assert amendment["prior_amendment"]["sha256"] == _sha256(
+        CONFIRMATORY_V4_AMENDMENT
+    )
+    assert amendment["superseded_execution"]["behavioral_result_eligible"] is False
+    assert amendment["measurement_revision"]["prior_scorer_sha256"] == _sha256(
+        CONFIRMATORY_SCORER
+    )
+    assert amendment["measurement_revision"][
+        "replacement_scorer_sha256"
+    ] == _sha256(CONFIRMATORY_SCORER_V3)
+    campaign = EXAMPLE.parent / "community-skill-upgrades"
+    assert amendment["measurement_revision"][
+        "replacement_judge_calibration_sha256"
+    ] == _sha256(campaign / "judge-calibration-v2.json")
+    assert amendment["measurement_revision"][
+        "sanitizer_compatibility_artifact_sha256"
+    ] == _sha256(campaign / "judge-sanitizer-compatibility-v2.json")
+    assert amendment["measurement_revision"][
+        "sanitizer_implementation_sha256"
+    ] == _sha256(Path("fugue/bench/judge_input.py"))
+    assert amendment["replacement_execution"]["comparison_id"] == v5.id
+    assert amendment["changes"]["deterministic_scorer"] is True
+    assert amendment["changes"]["judge_requiredness"] is False
+    assert amendment["changes"]["judge_input_measurement"] is True
+    assert amendment["changes"]["judge_calibration_binding"] is True
+    assert amendment["changes"]["taskset"] is False
+    assert amendment["changes"]["private_expected_values"] is False
+
+    assert console["research"]["id"] == v5.id
+    assert console["wandb"] == {
+        "entity": "wandb",
+        "project": "fugue-superpowers-writing-plans-confirmatory-v5",
+    }
+    assert console["presentation"] == {
+        "default_study_id": v5.id,
+        "read_only": True,
+    }
+
+
 def test_confirmatory_prompts_are_natural_and_keep_oracles_private() -> None:
     tasks = [
         json.loads(line)
@@ -746,6 +837,19 @@ def test_confirmatory_private_oracles_generate_passing_reference_plans() -> None
         assert label["gold_output"] == _render_oracle_plan(label["expected"])
 
 
+def test_confirmatory_v3_scorer_preserves_reference_oracle_contracts() -> None:
+    score = _confirmatory_v3_score()
+    for task_id, label in _confirmatory_labels().items():
+        scores = score(
+            {"id": task_id},
+            label["gold_output"],
+            {"expected": label["expected"]},
+        )
+
+        assert set(scores) == CONFIRMATORY_DIMENSIONS
+        assert all(scores.values()), (task_id, scores)
+
+
 def test_confirmatory_scorer_rejects_self_report_hallucination_and_microtasks() -> None:
     score = _confirmatory_score()
     label = _confirmatory_labels()["sp-dev-evidence-destination"]
@@ -772,6 +876,110 @@ def test_confirmatory_scorer_rejects_self_report_hallucination_and_microtasks() 
     assert hallucinated_scores["repository_grounding"] is False
     assert hallucinated_scores["right_sized_decomposition"] is False
     assert hallucinated_scores["scope_secret_safety"] is False
+
+
+def test_confirmatory_path_classifier_ignores_non_change_references() -> None:
+    modification_paths = _confirmatory_v3_scorer_module()["_modification_paths"]
+    plan = """# Focused plan
+
+Architecture follows the existing durable-write idiom in `fugue/reference.py:atomic_write`.
+Source inspection found the current reader at `fugue/reader.py:20-30`.
+No other files need to change: `docs/guide.md` remains accurate.
+
+## Task 1: Implement the focused change
+
+Modify `fugue/target.py` and update `tests/test_target.py`.
+Modify the existing `fugue/second_target.py`.
+Update the following file: `tests/test_second_target.py`.
+In `fugue/path_first_target.py`, update the parser and preserve its callers.
+Run the CI checks already defined in `.github/workflows/ci.yml`.
+"""
+
+    assert modification_paths(plan) == [
+        "fugue/target.py",
+        "tests/test_target.py",
+        "fugue/second_target.py",
+        "tests/test_second_target.py",
+        "fugue/path_first_target.py",
+    ]
+
+
+def test_confirmatory_path_classifier_is_path_local_and_fail_closed() -> None:
+    scorer = _confirmatory_v3_scorer_module()
+    modification_paths = scorer["_modification_paths"]
+    scope_secret_safety = scorer["_scope_secret_safety"]
+    plan = """# Focused plan
+
+## Task 1: Implement the focused change
+
+Modify `fugue/target.py` following the pattern in `fugue/reference.py`;
+do not change `docs/guide.md`.
+Run tests and verify the result.
+"""
+    expected = {
+        "allowed_paths": ["fugue/target.py"],
+        "prohibited_paths": [],
+        "prohibited_actions": [],
+    }
+
+    assert modification_paths(plan) == ["fugue/target.py"]
+    assert scope_secret_safety(plan, expected) is True
+
+    out_of_scope = plan + "\nUpdate `docs/guide.md` with the new behavior.\n"
+    assert modification_paths(out_of_scope) == [
+        "fugue/target.py",
+        "docs/guide.md",
+    ]
+    assert scope_secret_safety(out_of_scope, expected) is False
+
+
+def test_confirmatory_path_classifier_excludes_same_clause_reference() -> None:
+    modification_paths = _confirmatory_v3_scorer_module()["_modification_paths"]
+    plan = (
+        "Update `fugue/target.py` by following the existing implementation in "
+        "`fugue/reference.py`."
+    )
+
+    assert modification_paths(plan) == ["fugue/target.py"]
+
+    shorter = "Update `fugue/target.py` following `fugue/reference.py`."
+    assert modification_paths(shorter) == ["fugue/target.py"]
+
+    using_reference = (
+        "Update `fugue/target.py` using the implementation in "
+        "`fugue/reference.py`."
+    )
+    assert modification_paths(using_reference) == ["fugue/target.py"]
+
+    consistent_reference = (
+        "Update `fugue/target.py` consistent with `fugue/reference.py`."
+    )
+    assert modification_paths(consistent_reference) == ["fugue/target.py"]
+
+    two_targets = "Update `fugue/target.py` and `fugue/second_target.py`."
+    assert modification_paths(two_targets) == [
+        "fugue/target.py",
+        "fugue/second_target.py",
+    ]
+
+
+def test_confirmatory_path_classifier_accepts_writing_plans_file_directives() -> None:
+    modification_paths = _confirmatory_v3_scorer_module()["_modification_paths"]
+    plan = """# Focused plan
+
+## Task 1: Implement and verify
+
+**Files:**
+- Modify: `fugue/target.py`
+- Test: `tests/test_target.py`
+
+Follow the existing implementation in `fugue/reference.py`.
+"""
+
+    assert modification_paths(plan) == [
+        "fugue/target.py",
+        "tests/test_target.py",
+    ]
 
 
 def test_confirmatory_non_applicable_interface_penalizes_invented_api() -> None:

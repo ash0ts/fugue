@@ -3,9 +3,14 @@
   "id": "community-skill-upgrade-confirmatory-campaign-v1",
   "title": "Confirmatory public Skill revision studies",
   "preregistration": "conference-preregistration.json",
+  "budget_policy": {
+    "path": "confirmatory-budget-policy-v1.json",
+    "sha256": "d70ad327024d0fab42368c0a101715327e359fd7e08c8529bf98093c57f87b31",
+    "status": "limits_only_not_approval"
+  },
   "execution_order": [
     "community-skill-judge-calibration-v1",
-    "superpowers-writing-plans-confirmatory-v4",
+    "superpowers-writing-plans-confirmatory-v5",
     "anthropic-skill-creator-confirmatory-v1",
     "vercel-react-best-practices-confirmatory-v1"
   ],
@@ -21,10 +26,10 @@
       "claim_role": "advisory_only_pending_human_review"
     },
     {
-      "id": "superpowers-writing-plans-confirmatory-v4",
+      "id": "superpowers-writing-plans-confirmatory-v5",
       "kind": "governed_comparison",
-      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v4.yaml",
-      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v4",
+      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v5.yaml",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v5",
       "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
       "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
       "tasks": 24,
@@ -32,14 +37,15 @@
       "cells": 192,
       "status": "pending_preview",
       "amendment": {
-        "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json",
-        "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
-        "amendment_digest": "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+        "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v5-amendment.json",
+        "sha256": "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37",
+        "amendment_digest": "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
       },
       "supersedes": [
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
-        "superpowers-writing-plans-confirmatory-v3"
+        "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4"
       ]
     },
     {
@@ -102,6 +108,16 @@
       "reason_code": "agent_timeout_misclassified_as_infrastructure_abort",
       "terminal_evidence_rows": 7,
       "internally_cancelled_cells": 185,
+      "canonical_result_published": false
+    },
+    {
+      "id": "superpowers-writing-plans-confirmatory-v4",
+      "run_id": "20260803T202659-d4afb1438c",
+      "preview_digest": "2fa48bfe92aa6009d68686b17330b773a3916ab8800f538941bfc6f15f32742b",
+      "status": "invalid",
+      "behavioral_result_eligible": false,
+      "reason_code": "primary_artifact_and_scorer_input_integrity_failure",
+      "terminal_evidence_rows": 2,
       "canonical_result_published": false
     }
   ]

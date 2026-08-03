@@ -702,6 +702,10 @@ tasks:
             output,
             "/logs/artifacts/fugue-answer.md",
         ]
+        assert job.expected_artifact_paths == (
+            output,
+            "/logs/artifacts/fugue-answer.md",
+        )
         assert json.loads(job.env["FUGUE_EXPECTED_ARTIFACT_PATHS"]) == [
             output,
             "/logs/artifacts/fugue-answer.md",

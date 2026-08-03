@@ -298,6 +298,7 @@ def build_run_snapshot(
             "config_sha256": cell.config_sha256,
             "result_path": cell.result_path.as_posix(),
             "runtime_assets": [list(item) for item in cell.runtime_assets],
+            "expected_artifact_paths": list(cell.expected_artifact_paths),
             "generated_runtime_asset_ids": list(
                 generated_runtime_assets_by_config.get(
                     cell.config_path.resolve().as_posix(),

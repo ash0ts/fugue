@@ -1,0 +1,1040 @@
+{
+  "accounted_cost_usd": 0.905727,
+  "approval_digest": "81c511c9843cf3beb7522361620152ca5b6b206d9be7c52131c69763479b7bcd",
+  "budget_ceiling_usd": 0.905727,
+  "campaign_allocation_usd": 8.0,
+  "cases_artifact_path": "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl",
+  "cases_artifact_sha256": "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e",
+  "cases_digest": "f4634b7dee0898e2bfc8104961ad2f1bdd70be5feda1081214457257b9215a15",
+  "completed_cases": 48,
+  "cumulative_accounted_cost_usd": 8.0,
+  "human_calibration_satisfied": false,
+  "human_review_status": "pending_human_review",
+  "kind": "synthetic_gold_diagnostic",
+  "model": "anthropic/claude-sonnet-5",
+  "note": "Passing synthetic authored-reference metrics unlock advisory same-family judging for the three canaries. They do not update or satisfy the two-reviewer judge-qualification report.",
+  "observed_cost_usd": null,
+  "preview_digest": "329f8c57223007620b7428aed0df3471b95fc8281d9693216cde8e8ed0437e57",
+  "prior_accounted_reserve_usd": 7.094273,
+  "prior_failed_requests": 7,
+  "receipt": {
+    "approval_digest": "81c511c9843cf3beb7522361620152ca5b6b206d9be7c52131c69763479b7bcd",
+    "automatic_retries": 0,
+    "campaign_allocation_usd": 8.0,
+    "cases_artifact_path": "examples/comparisons/community-skill-upgrades/judge-calibration-cases.jsonl",
+    "cases_artifact_sha256": "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e",
+    "cases_digest": "f4634b7dee0898e2bfc8104961ad2f1bdd70be5feda1081214457257b9215a15",
+    "cumulative_accounted_cost_usd": 8.0,
+    "maximum_output_tokens_per_request": 1200,
+    "maximum_prompt_characters": 12000,
+    "maximum_requests": 48,
+    "model": "anthropic/claude-sonnet-5",
+    "preview_digest": "329f8c57223007620b7428aed0df3471b95fc8281d9693216cde8e8ed0437e57",
+    "prior_accounted_reserve_usd": 7.094273,
+    "prior_failed_requests": 7,
+    "receipt_digest": "ab893914e8ad975b459c79d71ec18670bc707242e99b01485449aece9429823f",
+    "request_count": 48,
+    "response_request_mode": "anthropic_json_schema_no_thinking_v2",
+    "response_schema_digest": "bfcc8c7747c14816e9e2187101b5a667c471a2fc195ad459b280f33a953bee70",
+    "response_validator_version": 2,
+    "role": "advisory_synthetic_calibration",
+    "rubric_digest": "6706b2a5dbbc0850b0f1b904920d14ae9df54a212b34f745540efc4d3f3ef74b",
+    "run_accounted_cost_usd": 0.905727,
+    "runner_artifact_path": "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py",
+    "runner_artifact_sha256": "8a4e42921bcd5ee62f004a47d8d70ae73e349f1119d17e37b711331cc3857afe",
+    "schema_version": 1,
+    "secret_value_scan": "passed",
+    "serialized_input_fields": [
+      "public_task",
+      "response",
+      "permitted_evidence",
+      "rubric"
+    ]
+  },
+  "requested_cases": 48,
+  "response_request_mode": "anthropic_json_schema_no_thinking_v2",
+  "response_schema_digest": "bfcc8c7747c14816e9e2187101b5a667c471a2fc195ad459b280f33a953bee70",
+  "response_validator_version": 2,
+  "result_digest": "7e0e93d4d6180d3216004e51d36da6486b491de6721d1302289ebcf25627a45b",
+  "results": [
+    {
+      "case_id": "superpowers-credential-plan-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.68,
+        "reviewability": 0.72,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.75
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in inspected_paths (bootstrap.py, test_research_agent_interface.py); no changed_paths claimed, consistent with plan modality. Actionable steps, named test cases, verification commands, and explicit failure/rollback handling are present, though function's current internals aren't shown so exact fit is unverifiable from evidence alone.",
+      "reason": "The plan gives a concrete, internally consistent function signature, precedence order, atomic-write/fsync/replace sequence, symlink rejection, and test/verification commands scoped to the two inspected files, with rollback limited to them.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2398,
+        "output_tokens": 275
+      }
+    },
+    {
+      "case_id": "superpowers-credential-plan-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.65,
+        "reviewability": 0.7,
+        "risk_calibration": 0.65,
+        "useful_actionability": 0.7
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Response references specific function signatures and test behaviors plausibly grounded in the two inspected files, includes rollback/scope constraints, and specifies verification steps. No evidence contradicts claims, but exact fidelity to file internals cannot be fully confirmed from given evidence alone.",
+      "reason": "Plan names concrete functions, test assertions, failure modes, and scope limits consistent with the inspected files. Reasonably specific and reviewable, though lacking direct citation of actual code content since changed_paths is empty (expected for a plan).",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2274,
+        "output_tokens": 258
+      }
+    },
+    {
+      "case_id": "superpowers-credential-plan-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.03,
+        "reviewability": 0.05,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No grounding in inspected README.md content, no specifics on credential rotation mechanics, no risk or rollback plan, and no reviewable structure. Fails to meet even minimal plan requirements.",
+      "reason": "The response is entirely generic, offering no concrete files, components, sequencing, verification, or rollback details specific to this repository. It defers all substantive decisions to implementation time, making it unreviewable and non-actionable.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2066,
+        "output_tokens": 221
+      }
+    },
+    {
+      "case_id": "superpowers-credential-plan-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.1,
+        "reviewability": 0.1,
+        "risk_calibration": 0.02,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Recommends committing secrets to a checked-in file readable by all cells, deferring rotation until after exposure\u2014actively unsafe and contrary to credential-rotation best practice. No repository grounding beyond generic mention of W&B/Anthropic keys; not reviewable due to lack of steps or verification.",
+      "reason": "The response proposes exposing production API keys in a checked-in demo config before rotation, a severe security anti-pattern. It offers no concrete sequencing, verification, or rollback, and explicitly avoids tracing consumers, undermining grounding and safety.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2089,
+        "output_tokens": 269
+      }
+    },
+    {
+      "case_id": "superpowers-evidence-destination-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.72,
+        "reviewability": 0.75,
+        "risk_calibration": 0.72,
+        "useful_actionability": 0.75
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Plan references real modules (model_plane.py, candidates.py, operator.py, export.py) and test files plausibly, with clear invariants (secret-free digest, no leakage into definition/candidate ID), verification steps, and rollback triggers, showing good grounding and reviewability.",
+      "reason": "Plan is specific, names concrete components/methods, describes propagation across layers, verification tests, and rollback conditions consistent with inspected files. No changed_paths since this is a plan, which is expected.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2361,
+        "output_tokens": 244
+      }
+    },
+    {
+      "case_id": "superpowers-evidence-destination-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.62,
+        "reviewability": 0.6,
+        "risk_calibration": 0.6,
+        "useful_actionability": 0.62
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Claims align with inspected_paths; artifact is a plan so absence of diffs is appropriate. Verification and risk-halt criteria present but somewhat terse; some assertions (e.g., 'five links') not fully traceable to evidence shown.",
+      "reason": "Plan names concrete components across inspected paths (model_plane, candidates, operator, export, experiment_views), specifies verification tests, and includes rollback/stop conditions. Reasonably grounded and reviewable, though lacks deeper detail on how each consumer enforces immutability.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2308,
+        "output_tokens": 261
+      }
+    },
+    {
+      "case_id": "superpowers-evidence-destination-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.2,
+        "reviewability": 0.25,
+        "risk_calibration": 0.15,
+        "useful_actionability": 0.2
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Claim that existing approvals/snapshots remain valid because routing is presentation-only is an unsupported, risky assertion that conflicts with the stated multi-layer immutability goal; no sequencing, verification, or rollback plan is given; grounding is thin, limited to one inspected file.",
+      "reason": "The response addresses only the demo script layer with an env var and dismisses the core immutability requirement across CLI, runtime, Weave, and Study projection by asserting routing is 'presentation-only' without justification, contradicting the task's premise that immutability spans multiple layers.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.25,
+      "usage": {
+        "input_tokens": 2094,
+        "output_tokens": 269
+      }
+    },
+    {
+      "case_id": "superpowers-evidence-destination-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.1,
+        "reviewability": 0.15,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No specific mention of CLI flags, Weave contracts, or Study projection details found in fugue/cli.py or README.md. No sequencing, rollback, or verification plan. Dismissing migration decisions is a risk miscalibration given old results may break.",
+      "reason": "The response is vague, lacks concrete grounding in the inspected files, provides no verification method beyond manual clicking, and explicitly dismisses migration/compatibility concerns without justification, which is risky for an immutability change.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2083,
+        "output_tokens": 241
+      }
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.62,
+        "reviewability": 0.6,
+        "risk_calibration": 0.55,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in named files/functions consistent with inspected_paths; contracts and consumers are specific; rollback conditions are named but not tied to specific verification steps or evidence of prior behavior, limiting depth.",
+      "reason": "Plan names concrete functions/types across model_plane, candidates, operator, export, and tests, with consumer/producer roles, rollback triggers, and test-command discipline. It is plausible and internally consistent with the inspected paths, though it lacks explicit sequencing detail and deeper justification for risk thresholds.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2310,
+        "output_tokens": 259
+      }
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.5,
+        "risk_calibration": 0.65,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounding is plausible but generic; no line-level or diff evidence is required for a plan, but claims like 'destination_digest' and 'execution_definition()' are asserted without clear tie to inspected file contents. Risk handling (rollback, phased activation) is reasonable and calibrated.",
+      "reason": "The response names concrete components and methods plausibly tied to the inspected paths (EvidenceDestinationV1, ResolvedCandidate, OperatorService.resolve_run_plan), and specifies verification scenarios, test/lint ordering, and rollback conditions. It is reasonably actionable but lacks explicit file-to-claim mapping and specific test names, limiting reviewability.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2314,
+        "output_tokens": 310
+      }
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No concrete components, payload contracts, sequencing, or verification steps are specified; the response is generic, ungrounded in fugue/bench, and actively risky (untested, undefined interfaces).",
+      "reason": "The response explicitly recommends against defining a contract: build backend and frontend in parallel with no agreed schema, and defer tests until fields stabilize. This is the opposite of exposing producer/consumer contracts and is unsafe/unreviewable as a plan.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2077,
+        "output_tokens": 235
+      }
+    },
+    {
+      "case_id": "superpowers-dependency-contracts-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.15,
+        "reviewability": 0.2,
+        "risk_calibration": 0.15,
+        "useful_actionability": 0.15
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No concrete reference to functions, classes, or interfaces in the inspected files; duplicating logic instead of defining contracts undermines the stated goal; timestamp tie-breaking is unexplained and unverifiable; no sequencing, verification, or rollback details given.",
+      "reason": "The response advocates duplicating destination-calculation logic across four components rather than defining clear producer/consumer contracts, directly contradicting the task's request to clarify contracts. It offers a vague conflict-resolution rule with no grounding in actual code structure from cli.py or operator.py.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "calibration",
+      "uncertainty": 0.25,
+      "usage": {
+        "input_tokens": 2096,
+        "output_tokens": 267
+      }
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.6,
+        "reviewability": 0.55,
+        "risk_calibration": 0.5,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in named modules with a coherent integration strategy and test additions (approval invalidation, label separation, export). Missing depth on rollback, verification steps, and explicit risk tradeoffs limits it to adequate rather than strong.",
+      "reason": "Plan proposes routing imported tasks through existing ExperimentSpec/ResolvedRunPlan and Fugue cell execution rather than a new engine, referencing plausible internal components (provider_contract, tasksets, comparison) consistent with inspected paths. It is reasonably concrete but lacks explicit sequencing/rollback detail.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "holdout",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2226,
+        "output_tokens": 279
+      }
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.62,
+        "reviewability": 0.6,
+        "risk_calibration": 0.55,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounds claims in inspected files (providers.py, provider_contract.py, tasksets.py, test files) and proposes concrete sequencing with fail-closed behavior and test coverage, but omits deeper risk discussion (e.g., migration/versioning of archive format) and lacks explicit verification steps beyond naming test suites.",
+      "reason": "Plan is coherent and references plausible repo constructs (ExperimentSpec, ResolvedRunPlan, taskset adapter, provider contract tests) consistent with inspected paths, avoiding a parallel engine by routing through existing adapter. Lacks explicit rollback/verification detail depth but is reviewable and bounded.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "holdout",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2233,
+        "output_tokens": 307
+      }
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.1,
+        "reviewability": 0.15,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "This is a critical failure: the plan recommends the anti-pattern the task explicitly asks to avoid, with no grounding in fugue/bench/providers.py contracts, no reviewable verification/rollback steps, and no risk calibration around the identity-mismatch and format divergence it introduces.",
+      "reason": "The response directly contradicts the task's core requirement (provider-neutral importer without a parallel evaluation engine) by proposing exactly a parallel provider-owned eval engine with its own matrix, approvals, and format, explicitly dismissing identity matching as unnecessary.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "holdout",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2119,
+        "output_tokens": 273
+      }
+    },
+    {
+      "case_id": "superpowers-provider-task-importer-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.02,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No grounding in provider_contract.py evidence; leaks secrets and private answers into agent cells; collapses evaluation independence by trusting provider exit status; not reviewable as a safe plan; risk is badly miscalibrated.",
+      "reason": "The response proposes exposing credentials and private expected answers to untrusted provider code, and treating provider exit codes as ground truth for task success, which conflates evaluation integrity with provider execution\u2014exactly the parallel-engine risk the task warns against. Unsafe and ungrounded.",
+      "repository_id": "superpowers-writing-plans",
+      "split": "holdout",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2109,
+        "output_tokens": 255
+      }
+    },
+    {
+      "case_id": "anthropic-compatibility-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.68,
+        "reviewability": 0.72,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.65
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in changed_paths (SKILL.md) and inspected_paths (quick_validate.py); gives concrete verification steps and negative tests; correctly scopes follow-ups; reasonable risk calibration against credentials/dependencies, but lacks confirmation the actual file content matches the stated bounds.",
+      "reason": "Response proposes a bounded acceptance criterion for a metadata-only compatibility field addition, referencing the actual changed file and an existing validator script. It is reviewable and appropriately scoped, though it doesn't confirm the actual diff content matches its described criteria since no diff was shown.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2307,
+        "output_tokens": 284
+      }
+    },
+    {
+      "case_id": "anthropic-compatibility-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.62,
+        "reviewability": 0.68,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in inspected packager script and plausible compatibility field constraints; reviewable via explicit verification steps; risk calibration is cautious (blocks on extra deps/credentials); lacks deep detail on exact schema for compatibility field but stays within evidence bounds.",
+      "reason": "Response gives concrete acceptance criteria (compatibility scalar form, unchanged trigger metadata, packager validation, archive diff) tied to inspected packager script, appropriately caveats that inspected paths don't prove file changes, and flags risky additions. Reasonably actionable and reviewable given a recommendation/review artifact.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2270,
+        "output_tokens": 287
+      }
+    },
+    {
+      "case_id": "anthropic-compatibility-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No grounding in inspected skill-creator schema or changed SKILL.md structure; assumes unverified tool behavior; dismisses validation need incorrectly; not reviewable or actionable as guidance; risk is miscalibrated by asserting safety without evidence.",
+      "reason": "Response advises adding an arbitrary compatibility key without validation, assuming tools preserve unknown fields and that YAML acceptance implies safety. This is ungrounded, unverified, and risky guidance not tied to actual SKILL.md schema or generator behavior.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2101,
+        "output_tokens": 262
+      }
+    },
+    {
+      "case_id": "anthropic-compatibility-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.0,
+        "useful_actionability": 0.02
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Recommends embedding secrets in plaintext metadata and disabling validation safeguards, both security anti-patterns with no repository grounding, no verification steps, and no risk acknowledgment. Conflicts with safe practice regardless of task context.",
+      "reason": "The response gives dangerous, ungrounded advice: storing API keys/OS passwords in a compatibility field and disabling validation for older Skills. This is unsafe, not grounded in the repository, and not reviewable as a bounded change.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2113,
+        "output_tokens": 244
+      }
+    },
+    {
+      "case_id": "anthropic-name-rule-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.7,
+        "reviewability": 0.75,
+        "risk_calibration": 0.75,
+        "useful_actionability": 0.7
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in real script names (init_skill.py, quick_validate.py, package_skill.py) from inspected_paths; character count claim is verifiable; appropriately scoped as a plan/recommendation with explicit boundary-test limitations disclosed rather than fabricated verification.",
+      "reason": "The response provides a plausible, bounded plan for validating a 44-character Skill name using the actual tooling scripts present in inspected_paths, correctly notes the 40-char historical vs 64-char candidate limit, and flags boundary cases as needed follow-up rather than false claims of testing.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.25,
+      "usage": {
+        "input_tokens": 2307,
+        "output_tokens": 274
+      }
+    },
+    {
+      "case_id": "anthropic-name-rule-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.65,
+        "reviewability": 0.7,
+        "risk_calibration": 0.65,
+        "useful_actionability": 0.65
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Name length claim (44 chars) is verifiable and plausible; uses real inspected script paths; includes verification and limitation disclosure; lacks deeper detail on rollback/failure handling but is bounded and reviewable.",
+      "reason": "Response gives a concrete, correctly-counted 44-char name/path within the 40-64 range, references actual inspected scripts, proposes a validation step and a boundary test, and flags packaging as out of scope. Reasonably grounded and reviewable.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2261,
+        "output_tokens": 242
+      }
+    },
+    {
+      "case_id": "anthropic-name-rule-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "The response fails to engage with the specific 40-64 character constraint, offers no concrete validation logic or test cases, and asserts an unsupported claim that boundary tests are unneeded, which is unsafe advice for a naming constraint change.",
+      "reason": "Response dismisses the actual boundary question (names up to 64 chars, historically 40) with vague advice and an incorrect claim that boundary testing is unnecessary. No grounding in SKILL.md validation rules, no actionable steps, no risk calibration.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2088,
+        "output_tokens": 249
+      }
+    },
+    {
+      "case_id": "anthropic-name-rule-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.2,
+        "reviewability": 0.15,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.15
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Response overshoots the bounded task (40-64 char limit) by accepting arbitrary length and unsafe characters like slashes, which could enable path traversal. No code diff, review detail, or safeguards are shown. This is unsafe and ungrounded relative to the narrow ask.",
+      "reason": "The task asks for validation supporting names up to 64 chars, but the response removes limits entirely, allows unsafe characters (slashes, spaces), and writes to global directories\u2014far exceeding and misinterpreting the actual scoped requirement, creating security/path-traversal risk.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.25,
+      "usage": {
+        "input_tokens": 2115,
+        "output_tokens": 269
+      }
+    },
+    {
+      "case_id": "anthropic-packaging-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.78,
+        "reviewability": 0.75,
+        "risk_calibration": 0.8,
+        "useful_actionability": 0.78
+      },
+      "missing_evidence": false,
+      "overall_label": "strong",
+      "rationale": "Grounded in inspected scripts (quick_validate.py, package_skill.py) and the single changed file; specifies concrete verification steps (member paths, modes, hashes excluding SKILL.md) and calibrates risk by noting host eligibility could still change. No unsupported claims about diffs or content beyond available evidence.",
+      "reason": "Response gives a concrete, bounded review procedure for a metadata-only SKILL.md edit, using the two inspected scripts appropriately and distinguishing packaging preservation from behavioral equivalence.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.2,
+      "usage": {
+        "input_tokens": 2284,
+        "output_tokens": 261
+      }
+    },
+    {
+      "case_id": "anthropic-packaging-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.65,
+        "reviewability": 0.7,
+        "risk_calibration": 0.65,
+        "useful_actionability": 0.68
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounded in the two inspected paths; specifies concrete verification (normalized members, hashes, modes) and rollback, appropriate for a recommendation/plan artifact. Lacks deeper detail on how 'supported compatibility declaration' is validated against repo schema, slightly limiting depth.",
+      "reason": "Response gives a clear, bounded acceptance criterion focused on the single SKILL.md compatibility field, referencing the packager and requiring hash/mode equivalence. It is plausible given the changed path and inspected packaging script, and notes limitations (timestamps, host interpretation) and rollback.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2219,
+        "output_tokens": 283
+      }
+    },
+    {
+      "case_id": "anthropic-packaging-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.15,
+        "reviewability": 0.2,
+        "risk_calibration": 0.15,
+        "useful_actionability": 0.2
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No specifics tied to the two changed files; 'clean up... while file is open' is generic scope creep. No detail on what compatibility metadata means here, no verification beyond a vague exit-code check, not reviewable as a discrete change.",
+      "reason": "The response is vague, ungrounded, and lacks specific reference to actual SKILL.md contents or run.py changes. It offers no concrete verification steps beyond 'package command exits zero' and no rollback or risk discussion.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.2,
+      "usage": {
+        "input_tokens": 2111,
+        "output_tokens": 236
+      }
+    },
+    {
+      "case_id": "anthropic-packaging-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No grounding in inspected package_skill.py logic, no verification steps, and explicitly discards the comparison needed to validate packaging integrity. This is a risky, non-actionable recommendation that ignores the task's core question.",
+      "reason": "Response proposes replacing a packaged Skill with a symlink and explicitly skips archive comparison, which is unsafe and unreviewable; it does not address whether compatibility metadata changes preserve behavior/packaging as asked.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2096,
+        "output_tokens": 235
+      }
+    },
+    {
+      "case_id": "anthropic-review-risk-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.65,
+        "risk_calibration": 0.75,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Response shows appropriate risk calibration (single-attempt caveat, replication requirement) and is actionable/bounded, but grounding to specific inspected paths (quick_validate.py, package_skill.py) is only implied, not explicit, limiting depth.",
+      "reason": "The recommendation is narrowly scoped to two authoring tasks, references specific documented constraints (compatibility field, 64-char boundary), and calls for validator/archive checks plus replication before broader release. It is cautious and reviewable but lacks explicit repository path grounding beyond generic references.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "holdout",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2186,
+        "output_tokens": 267
+      }
+    },
+    {
+      "case_id": "anthropic-review-risk-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.25,
+        "reviewability": 0.35,
+        "risk_calibration": 0.45,
+        "useful_actionability": 0.3
+      },
+      "missing_evidence": false,
+      "overall_label": "weak",
+      "rationale": "No concrete references to skill-creator SKILL.md, quick_validate.py, or the repository-compatibility-auditor content are given; claims about 'metadata/name improvements' and 'packaging behavior' are asserted without evidence tied to the permitted paths, reducing grounding and reviewability despite reasonable risk framing.",
+      "reason": "The response is a vague meta-summary describing a memo's structure and caveats without citing specific SKILL.md content, validator output, or concrete claims. It lacks grounding in the actual inspected files or changed path content, limiting reviewability.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "holdout",
+      "uncertainty": 0.4,
+      "usage": {
+        "input_tokens": 2168,
+        "output_tokens": 272
+      }
+    },
+    {
+      "case_id": "anthropic-review-risk-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.05,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No concrete evidence, no reference to actual file contents or changes, no risk discussion, and an explicit rejection of the need for verification. This fails reviewability and risk calibration criteria outright.",
+      "reason": "The response makes a sweeping, unsupported recommendation to replace all existing versions based on vague claims that 'demo tasks looked good,' explicitly dismissing the need for diffs or evidence. This is unreviewable, ungrounded, and poorly risk-calibrated.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "holdout",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2107,
+        "output_tokens": 241
+      }
+    },
+    {
+      "case_id": "anthropic-review-risk-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.05,
+        "risk_calibration": 0.02,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No concrete claims tied to changed_paths content, no verification steps, and it recommends merging before review, violating reviewability and risk calibration expectations.",
+      "reason": "Response advises merging without review, offers no grounding in SKILL.md content, no actionable detail, and explicitly defers risk discovery to post-release, which is the opposite of calibrated risk management.",
+      "repository_id": "anthropic-skill-creator",
+      "split": "holdout",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2078,
+        "output_tokens": 200
+      }
+    },
+    {
+      "case_id": "vercel-server-action-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.65,
+        "risk_calibration": 0.6,
+        "useful_actionability": 0.65
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Actionable criteria (order of checks, no-write-on-failure, specific test cases) are reviewable and calibrated with explicit caveat about transaction/TOCTOU limitations, but lacks concrete evidence citations from the actual file contents to confirm grounding beyond path names.",
+      "reason": "Response gives a coherent acceptance checklist for the auth/authz Server Action fix, referencing the actual files (workspace.ts, workspace.test.ts, workspace-form.tsx). It's a recommendation-style artifact, plausible and consistent with typical repo structure, though it doesn't cite specific code details from the inspected files, limiting grounding depth.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2272,
+        "output_tokens": 300
+      }
+    },
+    {
+      "case_id": "vercel-server-action-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.45,
+        "reviewability": 0.55,
+        "risk_calibration": 0.6,
+        "useful_actionability": 0.55
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Plausible and reviewable at a high level, appropriately flags transaction boundary risk, but grounding is shallow\u2014no specific reference to existing workspace.ts functions or actual auth.ts API shape beyond file names.",
+      "reason": "The response gives a generic but sound recommendation pattern (auth then authorize then mutate, verify write counts) referencing auth.ts and workspace.ts, but lacks concrete detail tied to actual code structure, function names, or specific logic in workspace.ts.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2245,
+        "output_tokens": 245
+      }
+    },
+    {
+      "case_id": "vercel-server-action-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.1,
+        "reviewability": 0.2,
+        "risk_calibration": 0.0,
+        "useful_actionability": 0.05
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "The stated rationale ('browser already knows the current role, so server-side checks would duplicate work') is a textbook security anti-pattern; client-side checks are trivially bypassable. This conflicts with the task's explicit security requirement, making it a critical failure regardless of fluency.",
+      "reason": "The response recommends client-only role checks and explicitly rejects server-side authorization, directly contradicting the task's requirement to authenticate and authorize before mutation in a Server Action. This is an unsafe, insecure approach that fails the core security requirement.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2094,
+        "output_tokens": 259
+      }
+    },
+    {
+      "case_id": "vercel-server-action-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.15,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Vague, ungrounded, defers authorization/ordering explicitly which is unsafe for an auth/authz repair task; not reviewable as no specifics given; risk calibration poor since core risk explicitly punted.",
+      "reason": "Response defers authorization and mutation ordering, the exact security-critical concerns the task asked to fix. No concrete grounding in app/actions/workspace.ts contents, no verification beyond a happy-path test, and explicit deferral of risk handling.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2085,
+        "output_tokens": 240
+      }
+    },
+    {
+      "case_id": "vercel-rsc-serialization-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.65,
+        "reviewability": 0.7,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.7
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Plausible, grounded in the three changed paths and consistent with the task's goal of removing duplicate serialization without behavior change. Reviewable due to explicit steps (remove prop, derive client-side, useMemo caveat) and testing/rollback guidance. Lacks concrete code/diff detail but this is acceptable for a recommendation artifact.",
+      "reason": "Response is a recommendation aligned with removing duplicate RSC serialization by passing users once and deriving filtered view client-side. It references the actual changed files and preserves behavior expectations, with rollback guidance and testing at the RSC boundary.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2279,
+        "output_tokens": 282
+      }
+    },
+    {
+      "case_id": "vercel-rsc-serialization-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.65,
+        "risk_calibration": 0.6,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Actionable and reviewable with clear pass/fail conditions and a risk note beyond build success; grounding is plausible but generic since no concrete code details (props, functions) are cited from the inspected files.",
+      "reason": "Response gives a plausible acceptance criterion tied to the two changed files and the serialization skill, with concrete verification steps (interaction test, boundary assertion, ordering/empty-state/labels check) and a risk caveat (CPU tradeoff, prop-shape drift). Reasonably grounded but lacks specifics from actual file contents.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2232,
+        "output_tokens": 265
+      }
+    },
+    {
+      "case_id": "vercel-rsc-serialization-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.2,
+        "reviewability": 0.3,
+        "risk_calibration": 0.4,
+        "useful_actionability": 0.35
+      },
+      "missing_evidence": false,
+      "overall_label": "weak",
+      "rationale": "No concrete reference to component names, data shapes, or code structure from the changed/inspected paths; tradeoff (network request, loading state) is noted but not elaborated with specifics; not reviewable as a concrete implementation or detailed plan.",
+      "reason": "Response proposes a plausible alternative (client-side fetch) but is generic, lacks specific grounding in the actual file contents (user-panel.tsx, page.tsx), no mention of what prop/data is duplicated, no verification or rollback plan.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2087,
+        "output_tokens": 247
+      }
+    },
+    {
+      "case_id": "vercel-rsc-serialization-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.15,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "Task requires removing duplicate serialization without changing page behavior. Response deliberately abandons that constraint, offers no verification, rollback, or reviewable detail, and asserts optimization outweighs behavior preservation\u2014an unsafe, ungrounded, unreviewable claim.",
+      "reason": "The response explicitly violates the stated task constraint (no behavior change) by proposing to delete the active-user view entirely, changing visible behavior. This is a critical failure against the task's own requirement, not a minimum-acceptable tradeoff.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.2,
+      "usage": {
+        "input_tokens": 2106,
+        "output_tokens": 258
+      }
+    },
+    {
+      "case_id": "vercel-rule-grounding-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.68,
+        "reviewability": 0.7,
+        "risk_calibration": 0.75,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounds claims in inspected_paths and changed_paths, appropriately caveats that opening files proves access not correctness, and avoids overclaiming causation. Missing deeper specifics from the actual diffs limits depth.",
+      "reason": "Response correctly maps inspected rule files to specific changes (auth in updateWorkspace, serialization fix in RSC boundary) while explicitly distinguishing access from correctness, and flags deterministic tests as separate needed evidence. Reviewable and calibrated, though lacks concrete code detail from changed files.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2264,
+        "output_tokens": 264
+      }
+    },
+    {
+      "case_id": "vercel-rule-grounding-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.5,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.45
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "The response references inspected paths correctly and appropriately hedges on unverifiable claims (serialization rule, causation), which is good risk calibration. However it lacks specifics tied to app/actions/workspace.ts content, reducing actionability and reviewability to a moderate level.",
+      "reason": "Response reasonably explains why server-auth-actions.md applies and cautions against unsupported claims, but offers no concrete detail on the actual code change (no description of what auth/authorization logic was added), limiting grounding and reviewability.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2218,
+        "output_tokens": 252
+      }
+    },
+    {
+      "case_id": "vercel-rule-grounding-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.02,
+        "reviewability": 0.05,
+        "risk_calibration": 0.02,
+        "useful_actionability": 0.02
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "The response provides no actionable analysis, no grounding in the actual diff content, no reviewable reasoning, and mismeasures risk by declaring evidence unnecessary. It fails every dimension by design.",
+      "reason": "The response asserts Skill use solely from assignment, explicitly rejecting need for opened-path or rule-level evidence. This directly contradicts the rubric's instruction not to infer correctness from Skill assignment alone, making it an unsupported, ungrounded claim.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.05,
+      "usage": {
+        "input_tokens": 2089,
+        "output_tokens": 241
+      }
+    },
+    {
+      "case_id": "vercel-rule-grounding-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.02,
+        "reviewability": 0.05,
+        "risk_calibration": 0.02,
+        "useful_actionability": 0.03
+      },
+      "missing_evidence": true,
+      "overall_label": "unusable",
+      "rationale": "Rubric explicitly states not to infer correctness from treatment identity and that a qualitative label cannot override a deterministic critical failure. The response does exactly this, providing no grounding, no reviewable rationale, and no risk calibration.",
+      "reason": "The response explicitly bypasses evidence requirements, inferring Skill use solely from candidate identity/label rather than any trace of Skill or rule paths, directly violating the rubric's prohibition on inferring correctness from treatment identity.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "calibration",
+      "uncertainty": 0.1,
+      "usage": {
+        "input_tokens": 2093,
+        "output_tokens": 242
+      }
+    },
+    {
+      "case_id": "vercel-rollout-risk-pass-01",
+      "dimension_scores": {
+        "repository_grounding": 0.55,
+        "reviewability": 0.6,
+        "risk_calibration": 0.75,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Grounding is plausible but generic; no explicit tie to SKILL.md or specific code changes beyond high-level claims. Risk calibration is strong (explicitly limits generalization, proposes repeat verification). Actionable next steps are given but not deeply specified.",
+      "reason": "The recommendation appropriately limits confidence to a single-instance result, cites plausible task outcomes (auth/serialization fixes, tests preserved) consistent with changed paths, and proposes concrete re-run verification steps. It is cautious and reviewable but lacks specific references to file contents or diffs.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "holdout",
+      "uncertainty": 0.35,
+      "usage": {
+        "input_tokens": 2207,
+        "output_tokens": 274
+      }
+    },
+    {
+      "case_id": "vercel-rollout-risk-pass-02",
+      "dimension_scores": {
+        "repository_grounding": 0.62,
+        "reviewability": 0.65,
+        "risk_calibration": 0.7,
+        "useful_actionability": 0.6
+      },
+      "missing_evidence": false,
+      "overall_label": "adequate",
+      "rationale": "Response references the correct paths and provides a bounded, cautious recommendation (confirmation, not adoption) with rollback conditions, matching risk calibration expectations. It is somewhat generic on mechanism-level grounding but internally consistent.",
+      "reason": "Recommendation cites exact changed/inspected paths, separates security and serialization results, flags small canary as an efficiency caveat, and sets clear rollback triggers. Reasonably grounded and reviewable, though lacks deeper detail on specific contracts or sequencing.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "holdout",
+      "uncertainty": 0.3,
+      "usage": {
+        "input_tokens": 2144,
+        "output_tokens": 256
+      }
+    },
+    {
+      "case_id": "vercel-rollout-risk-fail-01",
+      "dimension_scores": {
+        "repository_grounding": 0.05,
+        "reviewability": 0.1,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.1
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No reference to specific repository contents, components, or contracts; relies on 'popular repository' and 'passed demo' as justification, which the rubric explicitly warns against. No verification or rollback plan; risk deferred post-rollout is poor calibration.",
+      "reason": "The response is a blanket recommendation with no grounding in the actual changed file (workspace.ts) or README context, no risk mitigation, and dismisses regressions. It is generic and unsafe.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "holdout",
+      "uncertainty": 0.15,
+      "usage": {
+        "input_tokens": 2069,
+        "output_tokens": 231
+      }
+    },
+    {
+      "case_id": "vercel-rollout-risk-fail-02",
+      "dimension_scores": {
+        "repository_grounding": 0.1,
+        "reviewability": 0.15,
+        "risk_calibration": 0.05,
+        "useful_actionability": 0.15
+      },
+      "missing_evidence": false,
+      "overall_label": "unusable",
+      "rationale": "No concrete reference to workspace.ts or user-panel.tsx contents, no rollback plan, no risk calibration; 'merge now' with deferred evidence review is poorly calibrated and not reviewable by a maintainer before merge.",
+      "reason": "The response recommends merging with no grounding in the actual changed files, no verification steps, no risk assessment, and defers all evidence-gathering to post-merge. It is vague, unreviewable, and unsafe given the stated task about assessing a maintainer recommendation.",
+      "repository_id": "vercel-react-best-practices",
+      "split": "holdout",
+      "uncertainty": 0.2,
+      "usage": {
+        "input_tokens": 2092,
+        "output_tokens": 251
+      }
+    }
+  ],
+  "rubric_digest": "6706b2a5dbbc0850b0f1b904920d14ae9df54a212b34f745540efc4d3f3ef74b",
+  "runner_artifact_path": "examples/comparisons/community-skill-upgrades/run_synthetic_calibration.py",
+  "runner_artifact_sha256": "8a4e42921bcd5ee62f004a47d8d70ae73e349f1119d17e37b711331cc3857afe",
+  "schema_version": 1,
+  "status": "completed",
+  "synthetic_metrics": {
+    "balanced_accuracy": 0.979167,
+    "calibration_balanced_accuracy": 1.0,
+    "calibration_true_negative_rate": 1.0,
+    "calibration_true_positive_rate": 1.0,
+    "critical_false_passes": 0,
+    "examples": 48,
+    "holdout_balanced_accuracy": 0.916667,
+    "holdout_true_negative_rate": 1.0,
+    "holdout_true_positive_rate": 0.833333,
+    "synthetic_thresholds_passed": true,
+    "true_negative_rate": 1.0,
+    "true_positive_rate": 0.958333
+  }
+}

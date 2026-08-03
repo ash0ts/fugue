@@ -6,20 +6,21 @@
     {
       "id": "superpowers-writing-plans",
       "study_ids": [
-        "superpowers-writing-plans-confirmatory-v4"
+        "superpowers-writing-plans-confirmatory-v5"
       ],
       "historical_rejected_study_ids": [
         "superpowers-writing-plans-confirmatory-v1",
         "superpowers-writing-plans-confirmatory-v2",
-        "superpowers-writing-plans-confirmatory-v3"
+        "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4"
       ],
       "preregistration": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
       "preregistration_sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7",
       "amendments": {
-        "superpowers-writing-plans-confirmatory-v4": {
-          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v4-amendment.json",
-          "sha256": "5bf2100c905b8daadaf53ce0b69591783bcb3db63e8804993313e4ddae9dd424",
-          "amendment_digest": "4a31029ff242b753cb01ff11d9f8c3c43fb91671ffe627ad38256ef22d1361c3"
+        "superpowers-writing-plans-confirmatory-v5": {
+          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v5-amendment.json",
+          "sha256": "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37",
+          "amendment_digest": "5b35d3d4ac692f6b7be4be160f1c0d799a34ecb68f33fa24f747de2305394bcd"
         }
       },
       "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",

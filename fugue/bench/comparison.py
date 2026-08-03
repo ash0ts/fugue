@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import ast
 import base64
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -41,6 +43,14 @@ from fugue.bench.analysis_contracts import (
 )
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.files import atomic_write_json, inspect_docker_image
+from fugue.bench.judge_input import (
+    COMPARISON_JUDGE_INPUT_SANITIZER_CONTRACT,
+    COMPARISON_JUDGE_INPUT_SANITIZER_IMPLEMENTATION_SHA256,
+    COMPARISON_JUDGE_INPUT_SANITIZER_TRANSFORM,
+    COMPARISON_JUDGE_INPUT_SANITIZER_VERSION,
+    comparison_judge_input_sanitizer_conformance_cases,
+    sanitize_comparison_judge_value,
+)
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
 from fugue.bench.operator import (
     ExperimentRequest,
@@ -73,6 +83,9 @@ COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION = 2
 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS = 500
 COMPARISON_JUDGE_RESPONSE_MAX_CHARACTERS = 16_000
 COMPARISON_JUDGE_MAX_PROMPT_CHARACTERS = 48_000
+COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION = 1
+COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH = "/logs/artifacts/fugue-answer.md"
+COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES = 1_048_576
 COMPARISON_JUDGE_PASSING_LABELS = ("adequate", "strong", "exceptional")
 COMPARISON_JUDGE_PASSING_SCORE = 0.5
 COMPARISON_JUDGE_METRIC_POLICY = "balanced_accuracy_by_split_v1"
@@ -3254,7 +3267,10 @@ def _qualification_results(
             warnings.append(f"{task_id}: missing base_output qualification fixture")
         else:
             try:
-                base_passed, _, _ = _score_deterministic_output(
+                _, base_primary_receipt = _comparison_trial_output_with_receipt(
+                    {"answer": label["base_output"]}
+                )
+                base_passed, _, _, _ = _score_deterministic_output(
                     task=task,
                     output=label["base_output"],
                     expected=label.get("expected"),
@@ -3264,6 +3280,7 @@ def _qualification_results(
                     ),
                     evaluators=evaluators,
                     repo_root=repo_root,
+                    primary_output_receipt=base_primary_receipt,
                 )
             except Exception as exc:
                 blockers.append(
@@ -3277,7 +3294,10 @@ def _qualification_results(
             warnings.append(f"{task_id}: missing gold_output qualification fixture")
         else:
             try:
-                gold_passed, _, _ = _score_deterministic_output(
+                _, gold_primary_receipt = _comparison_trial_output_with_receipt(
+                    {"answer": label["gold_output"]}
+                )
+                gold_passed, _, _, _ = _score_deterministic_output(
                     task=task,
                     output=label["gold_output"],
                     expected=label.get("expected"),
@@ -3287,6 +3307,7 @@ def _qualification_results(
                     ),
                     evaluators=evaluators,
                     repo_root=repo_root,
+                    primary_output_receipt=gold_primary_receipt,
                 )
             except Exception as exc:
                 blockers.append(
@@ -3462,6 +3483,9 @@ def compile_comparison(
             "n_concurrent": spec.execution.concurrency,
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
+            "artifacts": [
+                {"source": COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH},
+            ],
             "presets": [
                 {
                     "id": "counterbalanced",
@@ -7114,11 +7138,16 @@ def _safe_score_explanation(
 def _sanitized_answer_excerpt(row: Mapping[str, Any]) -> str | None:
     if not _privacy_scans_complete(row):
         return None
-    raw = row.get("agent_response")
-    if raw is None:
-        raw = row.get("final_output")
+    projection = row.get("comparison_primary_output_projection")
+    if isinstance(projection, Mapping):
+        excerpt = projection.get("sanitized_excerpt")
+        if projection.get("status") == "available" and isinstance(excerpt, str):
+            return excerpt or None
+    raw = row.get("final_output")
     if raw is None:
         raw = row.get("answer")
+    if raw is None:
+        raw = row.get("agent_response")
     if raw is None:
         return None
     structured = _extract_structured_result(raw)
@@ -7138,9 +7167,16 @@ def _sanitized_answer_excerpt(row: Mapping[str, Any]) -> str | None:
 
 
 def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
-    raw = row.get("agent_response")
+    projection = row.get("comparison_primary_output_projection")
+    if isinstance(projection, Mapping):
+        value = projection.get("reported_project_identity")
+        if projection.get("status") == "available" and isinstance(value, str):
+            return value.strip() or None
+    raw = row.get("final_output")
     if raw is None:
-        raw = row.get("final_output")
+        raw = row.get("answer")
+    if raw is None:
+        raw = row.get("agent_response")
     if isinstance(raw, str):
         raw = _extract_structured_result(raw)
     if not isinstance(raw, Mapping):
@@ -7149,6 +7185,80 @@ def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
     if value is None:
         value = raw.get("project")
     return str(value).strip() or None if value is not None else None
+
+
+def _comparison_primary_output_projection(
+    *,
+    value: Any,
+    receipt: Mapping[str, Any],
+    env: Mapping[str, str],
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    verified = _verified_comparison_primary_output_receipt(
+        receipt,
+        value=value,
+        label="canonical result projection",
+        expected_artifact_paths=(
+            tuple(str(item) for item in row.get("expected_artifact_paths") or ())
+            if row.get("expected_artifact_paths") is not None
+            else None
+        ),
+    )
+    base = {
+        "schema_version": 1,
+        "source": verified.get("source"),
+        "source_sha256": verified["sha256"],
+        "source_bytes": verified["bytes"],
+        "primary_artifact_receipt_digest": stable_digest(verified),
+        "conversation_output_field": "agent_response",
+    }
+    if (
+        not _privacy_scans_complete(row)
+        or row.get("credential_leak") is True
+        or row.get("private_label_leak") is True
+    ):
+        unsigned_unavailable = {
+            **base,
+            "status": "unavailable",
+            "reason": "privacy evidence is incomplete or failed",
+        }
+        return {
+            **unsigned_unavailable,
+            "projection_digest": stable_digest(unsigned_unavailable),
+        }
+    secrets = secrets_from_env(env)
+    structured = _extract_structured_result(value)
+    sanitized = (
+        redact_value(structured, secrets=secrets)
+        if isinstance(structured, Mapping | list | tuple)
+        else redact_text(str(value), secrets=secrets)
+    )
+    text = (
+        json.dumps(
+            sanitized,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if isinstance(sanitized, Mapping | list | tuple)
+        else str(sanitized)
+    )
+    text = " ".join(text.strip().split())
+    excerpt = text.encode()[:1000].decode("utf-8", errors="ignore").rstrip()
+    reported_project: str | None = None
+    if isinstance(sanitized, Mapping):
+        raw_project = sanitized.get("source_project")
+        if raw_project is None:
+            raw_project = sanitized.get("project")
+        if raw_project is not None:
+            reported_project = str(raw_project).strip() or None
+    unsigned = {
+        **base,
+        "status": "available",
+        "sanitized_excerpt": excerpt,
+        "sanitized_excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        "reported_project_identity": reported_project,
+    }
+    return {**unsigned, "projection_digest": stable_digest(unsigned)}
 
 
 def _attempt_evidence_links(
@@ -10876,7 +10986,84 @@ def _verify_bound_host_verifier_receipt(
         raise ValueError("host verifier runtime cleanup receipt is invalid")
 
 
-def score_comparison_rows(
+def _comparison_ineligible_terminal_reason(row: Mapping[str, Any]) -> str | None:
+    terminal_status = str(row.get("status") or "")
+    runtime_outcome = str(row.get("runtime_outcome") or "")
+    if terminal_status in {"cancelled", "failed", "interrupted", "not_applicable"}:
+        return terminal_status
+    if runtime_outcome in {"cancelled", "not_started", "timed_out"}:
+        return runtime_outcome
+    return None
+
+
+def _clear_comparison_outcome_claims(
+    row: dict[str, Any],
+    *,
+    terminal_reason: str,
+) -> None:
+    """Remove claims that cannot survive a cancelled or unstarted attempt."""
+
+    row["pass"] = None
+    row["benchmark_pass"] = None
+    row["reward"] = None
+    row["benchmark_outcome"] = (
+        "not_applicable"
+        if terminal_reason == "not_applicable"
+        else "failed"
+        if terminal_reason == "timed_out"
+        and row.get("benchmark_outcome") == "failed"
+        else "unscored"
+    )
+    row["host_evaluator_status"] = "not_run"
+    for field_name in (
+        "mrr",
+        "ndcg_at_10",
+        "recall_at_1",
+        "recall_at_5",
+        "recall_at_10",
+        "recall_at_20",
+        "evidence_recall",
+        "citation_correctness",
+        "fact_recall",
+        "judge_correctness",
+        "judge_completeness",
+        "judge_groundedness",
+        "judge_overall",
+        "evaluation_assertions",
+        "evaluation_task_completion",
+        "evaluation_correctness",
+        "evaluation_groundedness",
+        "evaluation_tool_use",
+        "evaluation_artifact_quality",
+        "evaluation_na_dimensions",
+        "evaluation_judge_model",
+        "evaluation_judge_reasons",
+        "evaluation_judge_input_tokens",
+        "evaluation_judge_output_tokens",
+        "evaluation_judge_latency_ms",
+        "evaluation_error",
+        "evaluation_rubrics",
+        "evaluation_overall",
+        "evaluation_judge_status",
+        "judge_error",
+        "adapter_outcome",
+        "comparison_deterministic_scores",
+        "comparison_dimension_roles",
+        "comparison_deterministic_criticality",
+        "comparison_deterministic_scorer_receipts",
+        "comparison_primary_output_projection",
+        "comparison_mechanism",
+        "comparison_judge_scores",
+        "comparison_judge_accounted_cost_usd",
+        "comparison_host_verifier_receipts",
+        "comparison_judge_checkpoint_status",
+        "comparison_judge_checkpoint_unavailable",
+        "comparison_judge_checkpoint_required_unavailable",
+    ):
+        row.pop(field_name, None)
+
+
+def score_comparison_rows(  # noqa: C901 - strict deterministic/judge audit pipeline.
     spec: ComparisonSpecV1,
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -10931,11 +11118,90 @@ def score_comparison_rows(
     scored: list[dict[str, Any]] = []
     for source in rows:
         row = _bind_attempt_identity(source)
+        ineligible_terminal = _comparison_ineligible_terminal_reason(row)
+        if ineligible_terminal:
+            reason = (
+                f"attempt ended as {ineligible_terminal} before "
+                "comparison evaluation"
+            )
+            _clear_comparison_outcome_claims(
+                row,
+                terminal_reason=ineligible_terminal,
+            )
+            row.update(
+                {
+                    "comparison_evaluation_status": "unavailable",
+                    "comparison_evaluation_reason": reason,
+                    "comparison_required_evaluation_complete": False,
+                    "comparison_judge_status": "unavailable",
+                    "comparison_judges": {
+                        judge.id: {"status": "unavailable", "reason": reason}
+                        for judge in spec.evaluators
+                        if judge.type == "llm_judge"
+                    },
+                }
+            )
+            scored.append(row)
+            continue
+        if approved_inputs is not None:
+            approved_run_id = validate_id(
+                str(row.get("run_id") or ""),
+                kind="approved comparison row run id",
+            )
+            host_output, host_receipt = _comparison_trial_output_with_receipt(
+                row,
+                trusted_root=repo_root,
+                allowed_trial_root=(
+                    repo_root
+                    / ".fugue"
+                    / "runtime"
+                    / "jobs"
+                    / spec.id
+                    / approved_run_id
+                ),
+                trial_path_base=repo_root,
+                require_canonical_artifact=True,
+            )
+            supplied_receipt = row.get("comparison_primary_output")
+            if supplied_receipt is not None:
+                verified_supplied = _verified_comparison_primary_output_receipt(
+                    supplied_receipt,
+                    value=host_output,
+                    label="approved comparison row",
+                    expected_artifact_paths=tuple(
+                        str(item)
+                        for item in row.get("expected_artifact_paths") or ()
+                    ),
+                )
+                if verified_supplied != host_receipt:
+                    raise ValueError(
+                        "approved comparison primary artifact receipt disagrees "
+                        "with fresh host extraction"
+                    )
+            row["comparison_primary_output"] = host_receipt
+            row["final_output"] = host_output
+        elif not isinstance(row.get("comparison_primary_output"), Mapping):
+            fallback_output, fallback_receipt = (
+                _comparison_trial_output_with_receipt(row)
+            )
+            row["comparison_primary_output"] = fallback_receipt
+            row.setdefault("final_output", fallback_output)
         task_id = str(row.get("task_id") or row.get("task_name") or "")
         output = (
             row.get("final_output")
             if row.get("final_output") is not None
             else row.get("answer")
+        )
+        row["comparison_primary_output_projection"] = (
+            _comparison_primary_output_projection(
+                value=output,
+                receipt=_mapping(
+                    row.get("comparison_primary_output"),
+                    "comparison primary output receipt",
+                ),
+                env=env or os.environ,
+                row=row,
+            )
         )
         label = labels.get(task_id)
         row.setdefault("benchmark_pass", row.get("pass"))
@@ -10946,13 +11212,30 @@ def score_comparison_rows(
             row["comparison_required_evaluation_complete"] = False
         else:
             try:
-                passed, dimensions, verifier_receipts = _score_deterministic_output(
+                (
+                    passed,
+                    dimensions,
+                    verifier_receipts,
+                    scorer_receipts,
+                ) = _score_deterministic_output(
                     task=public_tasks.get(task_id, {}),
                     output=output,
                     expected=label["expected"],
                     evidence=_custom_scorer_evidence(row),
                     evaluators=deterministic,
                     repo_root=repo_root,
+                    primary_output_receipt=_mapping(
+                        row.get("comparison_primary_output"),
+                        "comparison primary output receipt",
+                    ),
+                    expected_artifact_paths=(
+                        tuple(
+                            str(item)
+                            for item in row.get("expected_artifact_paths") or ()
+                        )
+                        if row.get("expected_artifact_paths") is not None
+                        else None
+                    ),
                     scorer_source_digests=scorer_source_digests,
                     verifier_source_digests=verifier_source_digests,
                 )
@@ -10969,6 +11252,7 @@ def score_comparison_rows(
                 row["comparison_evaluation_status"] = "scored"
                 row["comparison_deterministic_scores"] = dimensions
                 _bind_host_verifier_receipts(row, verifier_receipts)
+                row["comparison_deterministic_scorer_receipts"] = scorer_receipts
                 row["comparison_dimension_roles"] = {
                     f"{evaluator.id}.{dimension}": role
                     for evaluator in deterministic
@@ -11278,7 +11562,12 @@ def _request_comparison_judge(
         "means the list is not evidence. An available empty changed_paths list is "
         "expected for a plan or recommendation and is not, by itself, missing "
         "evidence. Do not require implementation proof that the public task did "
-        "not request. Do not return "
+        "not request. Fugue supplies the complete primary artifact or fails the "
+        "attempt instead of silently truncating it. High-confidence credential "
+        "values may appear as [redacted] after the deterministic privacy "
+        "transform, while explicit fixture placeholders remain intact. Do not "
+        "treat a declared privacy redaction as an artifact defect. If a redaction "
+        "prevents a rubric judgment, set missing_evidence instead. Do not return "
         "hidden reasoning or a chain of thought.\n\n"
     )
     prompt = prompt_prefix + json.dumps(payload, sort_keys=True, default=str)
@@ -11330,6 +11619,12 @@ def _request_comparison_judge(
             "public_rubric_contract_digest": stable_digest(payload["rubric"]),
             "provider_payload_sha256": payload_sha256,
             "input_transform_receipt_digest": transform_receipt_digest,
+            "primary_response": dict(
+                _mapping(
+                    expected_transform_receipt.get("primary_response"),
+                    "judge input primary response receipt",
+                )
+            ),
             "requested_text_max_characters": (
                 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
             ),
@@ -11622,10 +11917,10 @@ def _prepare_comparison_judge_input(
         secrets=configured_secrets,
     ):
         raise ValueError("judge input contains an exact configured credential")
-    sanitized = redact_value(payload, secrets=())
+    sanitized = sanitize_comparison_judge_value(payload)
     if not isinstance(sanitized, dict):
         raise ValueError("judge input sanitization produced an invalid payload")
-    if redact_value(sanitized, secrets=()) != sanitized:
+    if sanitize_comparison_judge_value(sanitized) != sanitized:
         raise ValueError("judge input sanitization is not idempotent")
     if _comparison_judge_contains_exact_secret(
         sanitized,
@@ -11638,11 +11933,19 @@ def _prepare_comparison_judge_input(
     )
     source_payload_sha256 = stable_digest(payload)
     provider_payload_sha256 = stable_digest(sanitized)
+    primary_response = _comparison_primary_response_receipt(
+        row=row,
+        source_payload=payload,
+        provider_payload=sanitized,
+    )
     unsigned_receipt = {
         "schema_version": 1,
         "status": "passed",
-        "contract": "fugue-judge-input-sanitization-v1",
-        "transform": "generic-credential-placeholder-redaction-v1",
+        "contract": COMPARISON_JUDGE_INPUT_SANITIZER_CONTRACT,
+        "transform": COMPARISON_JUDGE_INPUT_SANITIZER_TRANSFORM,
+        "implementation_sha256": (
+            COMPARISON_JUDGE_INPUT_SANITIZER_IMPLEMENTATION_SHA256
+        ),
         "source_payload_sha256": source_payload_sha256,
         "provider_payload_sha256": provider_payload_sha256,
         # Retain the established field as the exact provider-visible digest.
@@ -11651,6 +11954,7 @@ def _prepare_comparison_judge_input(
         "transformed_value_count": transformed_value_count,
         "exact_configured_secret_scan": "passed",
         "preexisting_leak_scan": "passed",
+        "primary_response": primary_response,
     }
     return sanitized, {
         **unsigned_receipt,
@@ -11696,23 +12000,406 @@ def _comparison_output(row: Mapping[str, Any]) -> Any:
     return None
 
 
-def _comparison_trial_output(row: Mapping[str, Any]) -> Any:
+def _comparison_primary_response_receipt(
+    *,
+    row: Mapping[str, Any],
+    source_payload: Mapping[str, Any],
+    provider_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = source_payload.get("response")
+    provider = provider_payload.get("response")
+    source_text = source if isinstance(source, str) else json.dumps(
+        source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    provider_text = provider if isinstance(provider, str) else json.dumps(
+        provider,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    primary_mapping = _verified_comparison_primary_output_receipt(
+        row.get("comparison_primary_output"),
+        value=source,
+        label="judge input",
+        expected_artifact_paths=(
+            tuple(str(item) for item in row.get("expected_artifact_paths") or ())
+            if row.get("expected_artifact_paths") is not None
+            else None
+        ),
+    )
+    primary_receipt_digest = stable_digest(primary_mapping)
+    return {
+        "schema_version": 1,
+        "status": "complete",
+        "source": str(primary_mapping.get("source") or "row_output"),
+        "primary_artifact_receipt_digest": primary_receipt_digest,
+        "source_characters": len(source_text),
+        "source_bytes": len(source_text.encode()),
+        "source_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+        "provider_characters": len(provider_text),
+        "provider_bytes": len(provider_text.encode()),
+        "provider_sha256": hashlib.sha256(provider_text.encode()).hexdigest(),
+        "privacy_transformed": source_text != provider_text,
+        "truncated": False,
+    }
+
+
+def _comparison_primary_value_bytes(value: Any) -> bytes:
+    return (
+        value.encode()
+        if isinstance(value, str)
+        else json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    )
+
+
+def _verified_comparison_primary_output_receipt(
+    receipt: Any,
+    *,
+    value: Any,
+    label: str,
+    expected_artifact_paths: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(receipt, Mapping):
+        raise ValueError(f"{label} is missing its primary artifact receipt")
+    primary = dict(receipt)
+    if (
+        primary.get("status") != "complete"
+        or primary.get("truncated") is not False
+        or not isinstance(primary.get("bytes"), int)
+        or isinstance(primary.get("bytes"), bool)
+        or not _is_sha256(str(primary.get("sha256") or ""))
+    ):
+        raise ValueError(f"{label} primary artifact receipt is incomplete")
+    if expected_artifact_paths is not None:
+        expected_fields = {
+            "schema_version",
+            "status",
+            "source",
+            "source_path",
+            "path",
+            "contract_version",
+            "locked_artifact_paths_digest",
+            "bytes",
+            "sha256",
+            "truncated",
+        }
+        if set(primary) != expected_fields:
+            raise ValueError(f"{label} canonical primary receipt fields drifted")
+        normalized_expected = [str(item) for item in expected_artifact_paths]
+        if (
+            primary.get("schema_version") != 1
+            or primary.get("source") != "fugue_answer_artifact"
+            or primary.get("source_path") != COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH
+            or primary.get("path")
+            != "artifacts/logs/artifacts/fugue-answer.md"
+            or primary.get("contract_version")
+            != COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION
+            or primary.get("locked_artifact_paths_digest")
+            != stable_digest(normalized_expected)
+        ):
+            raise ValueError(f"{label} canonical primary artifact identity drifted")
+    encoded = _comparison_primary_value_bytes(value)
+    if (
+        primary["bytes"] != len(encoded)
+        or primary["sha256"] != hashlib.sha256(encoded).hexdigest()
+    ):
+        raise ValueError(
+            f"{label} disagrees with the extracted primary artifact receipt"
+        )
+    return primary
+
+
+def _comparison_absolute_path(path: Path, *, base: Path | None = None) -> Path:
+    value = path if path.is_absolute() else (base or Path.cwd()) / path
+    return Path(os.path.abspath(os.fspath(value)))
+
+
+def _open_comparison_directory(
+    path: Path,
+    *,
+    trusted_root: Path,
+    missing_ok: bool = False,
+    missing_message: str = "comparison primary trial directory is missing",
+) -> int | None:
+    """Open a directory below a trusted root without following any component."""
+
+    path = _comparison_absolute_path(path)
+    trusted_root = _comparison_absolute_path(trusted_root)
+    try:
+        relative = path.relative_to(trusted_root)
+    except ValueError as exc:
+        raise ValueError(
+            "comparison primary trial path escaped its trusted root"
+        ) from exc
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory_descriptor: int | None = None
+    try:
+        root_metadata = os.lstat(trusted_root)
+        if stat.S_ISLNK(root_metadata.st_mode):
+            raise ValueError("comparison primary artifact path contains a symlink")
+        directory_descriptor = os.open(
+            trusted_root,
+            directory_flags | no_follow,
+        )
+        if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
+            raise ValueError("comparison primary trusted root is not a directory")
+        for part in relative.parts:
+            child_metadata = os.stat(
+                part,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if stat.S_ISLNK(child_metadata.st_mode):
+                raise ValueError(
+                    "comparison primary artifact path contains a symlink"
+                )
+            if not stat.S_ISDIR(child_metadata.st_mode):
+                raise ValueError(
+                    "comparison primary artifact parent is not a directory"
+                )
+            child_descriptor = os.open(
+                part,
+                directory_flags | no_follow,
+                dir_fd=directory_descriptor,
+            )
+            if not stat.S_ISDIR(os.fstat(child_descriptor).st_mode):
+                os.close(child_descriptor)
+                raise ValueError(
+                    "comparison primary artifact parent is not a directory"
+                )
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+    except FileNotFoundError as exc:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        if missing_ok:
+            return None
+        raise ValueError(missing_message) from exc
+    except OSError as exc:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        if exc.errno == errno.ELOOP:
+            raise ValueError(
+                "comparison primary artifact path contains a symlink"
+            ) from exc
+        raise ValueError(
+            "comparison primary trial directory could not be opened safely"
+        ) from exc
+    except Exception:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        raise
+    return directory_descriptor
+
+
+def _read_comparison_artifact_file(
+    path: Path,
+    *,
+    trial_dir: Path,
+    trusted_root: Path,
+) -> bytes:
+    """Read a bounded regular artifact without following any path component."""
+
+    path = _comparison_absolute_path(path)
+    trial_dir = _comparison_absolute_path(trial_dir)
+    trusted_root = _comparison_absolute_path(trusted_root)
+    try:
+        trial_dir.relative_to(trusted_root)
+    except ValueError as exc:
+        raise ValueError(
+            "comparison primary trial path escaped its trusted root"
+        ) from exc
+    try:
+        relative = path.relative_to(trial_dir)
+        if not relative.parts or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("comparison primary artifact path escaped its trial") from exc
+    directory_descriptor = _open_comparison_directory(
+        path.parent,
+        trusted_root=trusted_root,
+        missing_message="comparison primary answer artifact is missing",
+    )
+    if directory_descriptor is None:  # pragma: no cover - missing_ok is false above
+        raise ValueError("comparison primary answer artifact is missing")
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        metadata = os.stat(
+            path.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError("comparison primary artifact path contains a symlink")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("comparison primary artifact is not a regular file")
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | no_follow,
+            dir_fd=directory_descriptor,
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("comparison primary artifact is not a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            encoded = handle.read(COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES + 1)
+    except FileNotFoundError as exc:
+        raise ValueError("comparison primary answer artifact is missing") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(
+                "comparison primary artifact path contains a symlink"
+            ) from exc
+        raise ValueError(
+            "comparison primary answer artifact could not be read safely"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_descriptor)
+    if len(encoded) > COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES:
+        raise ValueError(
+            "comparison primary answer artifact exceeds the locked byte limit"
+        )
+    return encoded
+
+
+def _comparison_trial_output_with_receipt(
+    row: Mapping[str, Any],
+    *,
+    trusted_root: Path | None = None,
+    allowed_trial_root: Path | None = None,
+    trial_path_base: Path | None = None,
+    require_canonical_artifact: bool = False,
+) -> tuple[Any, dict[str, Any]]:
+    expected_paths = row.get("expected_artifact_paths")
+    canonical_artifact_bound = expected_paths is not None
+    if require_canonical_artifact and not canonical_artifact_bound:
+        raise ValueError(
+            "approved comparison row is missing its canonical artifact identity"
+        )
+    normalized_expected: list[str] = []
+    if canonical_artifact_bound:
+        if not isinstance(expected_paths, Sequence) or isinstance(
+            expected_paths, str | bytes
+        ):
+            raise ValueError("comparison expected artifact identity is malformed")
+        normalized_expected = [str(value) for value in expected_paths]
+        if (
+            normalized_expected.count(COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH)
+            != 1
+        ):
+            raise ValueError(
+                "comparison expected artifact identity does not bind exactly "
+                "one canonical fugue answer path"
+            )
     raw_trial_dir = row.get("trial_dir")
     if isinstance(raw_trial_dir, str) and raw_trial_dir:
-        trial_dir = Path(raw_trial_dir)
-        if trial_dir.is_dir():
-            answers = sorted(trial_dir.rglob("fugue-answer.md"))
+        raw_trial_path = Path(raw_trial_dir)
+        if any(part == ".." for part in raw_trial_path.parts):
+            raise ValueError("comparison primary trial path is malformed")
+        trial_dir = _comparison_absolute_path(
+            raw_trial_path,
+            base=trial_path_base,
+        )
+        traversal_root = _comparison_absolute_path(
+            trusted_root or Path(trial_dir.anchor)
+        )
+        permitted_trial_root = _comparison_absolute_path(
+            allowed_trial_root or traversal_root,
+            base=trial_path_base,
+        )
+        try:
+            permitted_trial_root.relative_to(traversal_root)
+            trial_dir.relative_to(permitted_trial_root)
+        except ValueError as exc:
+            raise ValueError(
+                "comparison primary trial path escaped its trusted run root"
+            ) from exc
+        trial_descriptor = _open_comparison_directory(
+            trial_dir,
+            trusted_root=traversal_root,
+            missing_ok=not canonical_artifact_bound,
+        )
+        if trial_descriptor is not None:
+            os.close(trial_descriptor)
+            if canonical_artifact_bound:
+                answers = [
+                    trial_dir / "artifacts" / "logs" / "artifacts" / "fugue-answer.md"
+                ]
+            else:
+                # Backward-compatible historical rows did not carry the expected
+                # artifact identity. New compiled comparisons always use the exact
+                # canonical mirror above.
+                answers = sorted(trial_dir.rglob("fugue-answer.md"))
             if answers:
-                try:
-                    value = answers[0].read_text(
-                        encoding="utf-8", errors="replace"
-                    ).strip()
-                except OSError:
-                    pass
-                else:
-                    if value:
-                        return value[:16_000]
-    return _comparison_output(row)
+                if len(answers) != 1:
+                    raise ValueError(
+                        "comparison trial contains multiple primary answer artifacts"
+                    )
+                encoded = _read_comparison_artifact_file(
+                    answers[0],
+                    trial_dir=trial_dir,
+                    trusted_root=traversal_root,
+                )
+                value = encoded.decode("utf-8")
+                if value.strip():
+                    relative = answers[0].relative_to(trial_dir).as_posix()
+                    return value, {
+                        "schema_version": 1,
+                        "status": "complete",
+                        "source": "fugue_answer_artifact",
+                        "source_path": COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH,
+                        "path": relative,
+                        "contract_version": (
+                            COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION
+                        ),
+                        "locked_artifact_paths_digest": (
+                            stable_digest(normalized_expected)
+                            if canonical_artifact_bound
+                            else None
+                        ),
+                        "bytes": len(encoded),
+                        "sha256": hashlib.sha256(encoded).hexdigest(),
+                        "truncated": False,
+                    }
+                if canonical_artifact_bound:
+                    raise ValueError(
+                        "comparison canonical primary answer artifact is empty"
+                    )
+            if canonical_artifact_bound:
+                raise ValueError(
+                    "comparison canonical primary answer artifact is unavailable"
+                )
+    elif canonical_artifact_bound:
+        raise ValueError("comparison canonical primary trial directory is missing")
+    value = _comparison_output(row)
+    encoded = _comparison_primary_value_bytes(value)
+    if len(encoded) > COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES:
+        raise ValueError("comparison row output exceeds the locked byte limit")
+    return value, {
+        "schema_version": 1,
+        "status": "complete",
+        "source": "row_output",
+        "contract_version": COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "truncated": False,
+    }
 
 
 def _validate_comparison_judge_payload(
@@ -12907,7 +13594,9 @@ def _execute_comparison(
         nonlocal evaluated_cells, source_checkpoint_drift
         try:
             evaluation_row = dict(row)
-            evaluation_row["final_output"] = _comparison_trial_output(row)
+            final_output, primary_output = _comparison_trial_output_with_receipt(row)
+            evaluation_row["final_output"] = final_output
+            evaluation_row["comparison_primary_output"] = primary_output
             scored = score_comparison_rows(
                 spec,
                 [evaluation_row],
@@ -14207,6 +14896,15 @@ def _evaluator_digest(
     from fugue.bench.task_authoring import load_task_profiles
 
     value = evaluator.to_dict()
+    value["primary_artifact_contract"] = {
+        "version": COMPARISON_PRIMARY_ARTIFACT_CONTRACT_VERSION,
+        "source_path": COMPARISON_PRIMARY_ARTIFACT_SOURCE_PATH,
+        "maximum_bytes": COMPARISON_PRIMARY_ARTIFACT_MAX_BYTES,
+        "encoding": "utf-8-strict",
+        "regular_file_required": True,
+        "symlinks_allowed": False,
+        "truncation_allowed": False,
+    }
     profiles = (
         load_task_profiles(repo_root)
         if evaluator.scorer or evaluator.verifier
@@ -14250,6 +14948,14 @@ def _evaluator_digest(
                 )
             ),
             "validator_version": COMPARISON_JUDGE_RESPONSE_VALIDATOR_VERSION,
+            "input_sanitizer": {
+                "version": COMPARISON_JUDGE_INPUT_SANITIZER_VERSION,
+                "contract": COMPARISON_JUDGE_INPUT_SANITIZER_CONTRACT,
+                "transform": COMPARISON_JUDGE_INPUT_SANITIZER_TRANSFORM,
+                "implementation_sha256": (
+                    COMPARISON_JUDGE_INPUT_SANITIZER_IMPLEMENTATION_SHA256
+                ),
+            },
             "requested_text_max_characters": (
                 COMPARISON_JUDGE_TEXT_REQUESTED_MAX_CHARACTERS
             ),
@@ -14267,15 +14973,25 @@ def _score_deterministic_output(
     evidence: Mapping[str, Any],
     evaluators: Sequence[ComparisonEvaluatorV1],
     repo_root: Path,
+    primary_output_receipt: Mapping[str, Any],
+    expected_artifact_paths: Sequence[str] | None = None,
     scorer_source_digests: Mapping[str, str] | None = None,
     verifier_source_digests: Mapping[str, str] | None = None,
 ) -> tuple[
     bool,
     dict[str, bool | float],
     dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
 ]:
     scores: dict[str, bool | float] = {}
     verifier_receipts: dict[str, dict[str, Any]] = {}
+    scorer_receipts: dict[str, dict[str, Any]] = {}
+    verified_primary_output_receipt = _verified_comparison_primary_output_receipt(
+        primary_output_receipt,
+        value=output,
+        label="deterministic scorer input",
+        expected_artifact_paths=expected_artifact_paths,
+    )
     evaluator_passes: list[bool] = []
     for evaluator in evaluators:
         evaluator_evidence = dict(evidence)
@@ -14359,6 +15075,84 @@ def _score_deterministic_output(
                         f"scorer dimension {dimension!r} must be bool or 0..1"
                     )
                 scores[f"{evaluator.id}.{dimension}"] = normalized
+            input_receipt = _mapping(
+                payload.get("fugue_input_receipt"),
+                "deterministic scorer input receipt",
+            )
+            input_receipt_digest = str(input_receipt.get("receipt_digest") or "")
+            if (
+                input_receipt.get("status") != "bound"
+                or not _is_sha256(input_receipt_digest)
+                or input_receipt_digest
+                != stable_digest(
+                    {
+                        key: value
+                        for key, value in input_receipt.items()
+                        if key != "receipt_digest"
+                    }
+                )
+                or input_receipt.get("reference_output_digest")
+                != stable_digest(_extract_structured_result(output))
+            ):
+                raise ValueError("deterministic scorer input receipt is invalid")
+            runtime_receipt = _mapping(
+                payload.get("fugue_runtime_receipt"),
+                "deterministic scorer runtime receipt",
+            )
+            runtime_receipt_digest = str(
+                runtime_receipt.get("receipt_digest") or ""
+            )
+            if (
+                runtime_receipt.get("status") != "verified_absent"
+                or not _is_sha256(runtime_receipt_digest)
+                or runtime_receipt_digest
+                != stable_digest(
+                    {
+                        key: value
+                        for key, value in runtime_receipt.items()
+                        if key != "receipt_digest"
+                    }
+                )
+            ):
+                raise ValueError("deterministic scorer runtime receipt is invalid")
+            unsigned_scorer_receipt = {
+                "schema_version": 1,
+                "status": "bound",
+                "evaluator_id": evaluator.id,
+                "evaluator_revision_digest": _evaluator_digest(
+                    evaluator, repo_root
+                ),
+                "approved_scorer_source_sha256": (
+                    str(scorer_source_digests.get(evaluator.id) or "")
+                    if scorer_source_digests is not None
+                    else _sha256_path(
+                        _safe_input_path(
+                            Path(str(evaluator.scorer)),
+                            repo_root,
+                            "deterministic scorer",
+                        )
+                    )
+                ),
+                "primary_artifact_receipt_digest": stable_digest(
+                    verified_primary_output_receipt
+                ),
+                "primary_artifact_sha256": verified_primary_output_receipt.get(
+                    "sha256"
+                ),
+                "primary_artifact_bytes": verified_primary_output_receipt.get(
+                    "bytes"
+                ),
+                "normalized_output_digest": stable_digest(
+                    _extract_structured_result(output)
+                ),
+                "normalized_scores_digest": stable_digest(normalized_details),
+                "scorer_input_receipt": dict(input_receipt),
+                "runtime_cleanup_receipt": dict(runtime_receipt),
+            }
+            scorer_receipts[evaluator.id] = {
+                **unsigned_scorer_receipt,
+                "receipt_digest": stable_digest(unsigned_scorer_receipt),
+            }
             evaluator_passes.append(
                 float(payload["score"]) == 1.0
                 and (verifier_passed is None or verifier_passed)
@@ -14384,6 +15178,7 @@ def _score_deterministic_output(
         bool(evaluator_passes) and all(evaluator_passes),
         scores,
         verifier_receipts,
+        scorer_receipts,
     )
 
 
@@ -14481,17 +15276,49 @@ if __name__ == "__main__":
         scorer_cpus=1.0,
         scorer_output_bytes=64_000,
     )
-    return run_inline_scorer(
+    scorer_evidence = dict(evidence)
+    scorer_reference = {
+        "task": dict(task),
+        "output": output,
+        "expected": expected,
+    }
+    payload = run_inline_scorer(
         source=wrapper,
-        evidence=dict(evidence),
-        reference={
-            "task": dict(task),
-            "output": output,
-            "expected": expected,
-        },
+        evidence=scorer_evidence,
+        reference=scorer_reference,
         profile=profile,
         limits=limits,
     )
+    input_receipt = _mapping(
+        payload.get("fugue_input_receipt"),
+        "deterministic scorer input receipt",
+    )
+    serialized_input = json.dumps(
+        {"evidence": scorer_evidence, "reference": scorer_reference},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    expected_input_fields = {
+        "schema_version": 1,
+        "status": "bound",
+        "source_sha256": hashlib.sha256(wrapper.encode()).hexdigest(),
+        "input_bytes": len(serialized_input),
+        "input_sha256": hashlib.sha256(serialized_input).hexdigest(),
+        "evidence_digest": stable_digest(scorer_evidence),
+        "reference_digest": stable_digest(scorer_reference),
+        "reference_output_digest": stable_digest(output),
+        "runtime_profile_id": profile.id,
+        "runtime_profile_digest": profile.profile_digest,
+        "runtime_image": profile.image,
+        "runtime_platform": profile.platform,
+    }
+    if input_receipt != {
+        **expected_input_fields,
+        "receipt_digest": stable_digest(expected_input_fields),
+    }:
+        raise ValueError("deterministic scorer input receipt disagrees with invocation")
+    return payload
 
 
 def _run_custom_verifier(
@@ -15109,14 +15936,32 @@ def _judge_execution_calibration_issue(  # noqa: C901 - strict artifact audit.
         "prior_runs_ledger_digest",
         "prior_runs",
     }
+    compatibility_v2_fields = {
+        "compatibility_artifact_path",
+        "compatibility_artifact_sha256",
+        "compatibility_receipt_digest",
+        "sanitizer_version",
+        "sanitizer_contract",
+        "sanitizer_transform",
+        "sanitizer_implementation_sha256",
+    }
+    gate_kind = str(gate.get("kind") or "")
+    if gate_kind == "synthetic_blinded_advisory_v1":
+        if value.get("schema_version") != 1:
+            return f"judge {judge.id} synthetic V1 calibration schema is unsupported"
+        required_gate_fields = expected_fields
+    elif gate_kind == "synthetic_blinded_advisory_v2":
+        if value.get("schema_version") != 2:
+            return f"judge {judge.id} synthetic V2 calibration schema is unsupported"
+        required_gate_fields = expected_fields | compatibility_v2_fields
+    else:
+        return f"judge {judge.id} synthetic execution gate kind is unsupported"
     allowed_field_sets = {
-        frozenset(expected_fields),
-        frozenset(expected_fields | ledger_fields),
+        frozenset(required_gate_fields),
+        frozenset(required_gate_fields | ledger_fields),
     }
     if frozenset(gate) not in allowed_field_sets:
         return f"judge {judge.id} synthetic execution gate fields do not match"
-    if gate.get("kind") != "synthetic_blinded_advisory_v1":
-        return f"judge {judge.id} synthetic execution gate kind is unsupported"
     if gate.get("required_before_agent_trials") is not True:
         return f"judge {judge.id} synthetic execution gate is not mandatory"
     if gate.get("model") != judge.profile:
@@ -15164,10 +16009,16 @@ def _judge_execution_calibration_issue(  # noqa: C901 - strict artifact audit.
         return f"judge {judge.id} synthetic critical policy drifted"
     raw_result_path = str(gate.get("result_path") or "")
     result_path = Path(raw_result_path)
-    if (
-        result_path.is_absolute()
-        or ".." in result_path.parts
-        or result_path.parts[:3] != (".fugue", "runtime", "community-skill-upgrades")
+    v1_runtime_result = (
+        result_path.parts[:3] == (".fugue", "runtime", "community-skill-upgrades")
+    )
+    v2_archived_result = raw_result_path == (
+        "examples/comparisons/community-skill-upgrades/"
+        "judge-calibration-result-v1.json"
+    )
+    if result_path.is_absolute() or ".." in result_path.parts or not (
+        (gate_kind == "synthetic_blinded_advisory_v1" and v1_runtime_result)
+        or (gate_kind == "synthetic_blinded_advisory_v2" and v2_archived_result)
     ):
         return f"judge {judge.id} synthetic result path is outside governed runtime"
     try:
@@ -15179,12 +16030,25 @@ def _judge_execution_calibration_issue(  # noqa: C901 - strict artifact audit.
         result = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError, json.JSONDecodeError):
         return f"judge {judge.id} synthetic calibration result is unavailable"
-    return _synthetic_calibration_result_issue(
+    result_issue = _synthetic_calibration_result_issue(
         judge,
         result=result,
         gate=gate,
         repo_root=repo_root,
+        verify_approval_provenance=(
+            gate_kind == "synthetic_blinded_advisory_v1"
+        ),
     )
+    if result_issue:
+        return result_issue
+    if gate_kind == "synthetic_blinded_advisory_v2":
+        return _synthetic_calibration_sanitizer_compatibility_issue(
+            judge,
+            gate=gate,
+            result=result,
+            repo_root=repo_root,
+        )
+    return None
 
 
 def _is_sha256(value: str) -> bool:
@@ -15617,6 +16481,7 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
     result: Any,
     gate: Mapping[str, Any],
     repo_root: Path,
+    verify_approval_provenance: bool = True,
 ) -> str | None:
     if not isinstance(result, Mapping):
         return f"judge {judge.id} synthetic calibration result must be a mapping"
@@ -15651,17 +16516,21 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
     approval_digest = str(result.get("approval_digest") or "")
     if not _is_sha256(approval_digest):
         return f"judge {judge.id} synthetic calibration approval is unavailable"
-    try:
-        ApprovalLedger(StudyStore(repo_root).path).verify_claim(
-            approval_digest=approval_digest,
-            subject_kind="experiment",
-            preview_digest=str(gate["preview_digest"]),
-            subject_id=f"calibration-{str(gate['preview_digest'])[:20]}",
-            required_cells=int(gate["examples"]),
-            required_cost_usd=float(gate["maximum_cost_usd"]),
-        )
-    except Exception:
-        return f"judge {judge.id} synthetic calibration approval provenance is invalid"
+    if verify_approval_provenance:
+        try:
+            ApprovalLedger(StudyStore(repo_root).path).verify_claim(
+                approval_digest=approval_digest,
+                subject_kind="experiment",
+                preview_digest=str(gate["preview_digest"]),
+                subject_id=f"calibration-{str(gate['preview_digest'])[:20]}",
+                required_cells=int(gate["examples"]),
+                required_cost_usd=float(gate["maximum_cost_usd"]),
+            )
+        except Exception:
+            return (
+                f"judge {judge.id} synthetic calibration approval provenance "
+                "is invalid"
+            )
     if (
         int(result.get("requested_cases") or 0) != int(gate["examples"])
         or int(result.get("completed_cases") or 0) != int(gate["examples"])
@@ -15755,6 +16624,355 @@ def _synthetic_calibration_result_issue(  # noqa: C901 - one bounded receipt aud
         or int(receipt.get("maximum_requests") or 0) != int(gate["examples"])
     ):
         return f"judge {judge.id} synthetic calibration receipt is not qualified"
+    return None
+
+
+def _synthetic_calibration_sanitizer_compatibility_issue(  # noqa: C901
+    judge: ComparisonEvaluatorV1,
+    *,
+    gate: Mapping[str, Any],
+    result: Mapping[str, Any],
+    repo_root: Path,
+) -> str | None:
+    """Verify the model-free V2 bridge from the immutable V1 judge result.
+
+    V2 does not claim a new model run. It proves that every reconstructed V1
+    provider payload is byte-equivalent under the current sanitizer, and it
+    separately checks redaction and safe-placeholder conformance. The archived
+    result is fully recomputed above; only its local approval-ledger claim is
+    non-portable and is therefore retained as an immutable digest rather than
+    reasserted in a clean clone.
+    """
+
+    sanitizer_gate = {
+        "version": gate.get("sanitizer_version"),
+        "contract": gate.get("sanitizer_contract"),
+        "transform": gate.get("sanitizer_transform"),
+        "implementation_sha256": gate.get(
+            "sanitizer_implementation_sha256"
+        ),
+    }
+    expected_sanitizer = {
+        "version": COMPARISON_JUDGE_INPUT_SANITIZER_VERSION,
+        "contract": COMPARISON_JUDGE_INPUT_SANITIZER_CONTRACT,
+        "transform": COMPARISON_JUDGE_INPUT_SANITIZER_TRANSFORM,
+        "implementation_sha256": (
+            COMPARISON_JUDGE_INPUT_SANITIZER_IMPLEMENTATION_SHA256
+        ),
+    }
+    if sanitizer_gate != expected_sanitizer:
+        return f"judge {judge.id} synthetic V2 sanitizer binding drifted"
+
+    raw_path = str(gate.get("compatibility_artifact_path") or "")
+    if raw_path != (
+        "examples/comparisons/community-skill-upgrades/"
+        "judge-sanitizer-compatibility-v2.json"
+    ):
+        return f"judge {judge.id} synthetic V2 compatibility path is invalid"
+    try:
+        path = _safe_input_path(
+            Path(raw_path),
+            repo_root,
+            "judge sanitizer compatibility receipt",
+        )
+        if _sha256_path(path) != gate.get("compatibility_artifact_sha256"):
+            return f"judge {judge.id} synthetic V2 compatibility bytes drifted"
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return f"judge {judge.id} synthetic V2 compatibility is unavailable"
+    if not isinstance(value, Mapping):
+        return f"judge {judge.id} synthetic V2 compatibility must be a mapping"
+    expected_top_fields = {
+        "schema_version",
+        "kind",
+        "status",
+        "claim_scope",
+        "source_calibration",
+        "sanitizer",
+        "cases",
+        "summary",
+        "offline_conformance",
+        "limitations",
+        "receipt_digest",
+    }
+    if set(value) != expected_top_fields:
+        return f"judge {judge.id} synthetic V2 compatibility fields do not match"
+    unsigned = dict(value)
+    receipt_digest = str(unsigned.pop("receipt_digest", "") or "")
+    if (
+        not _is_sha256(receipt_digest)
+        or receipt_digest != stable_digest(unsigned)
+        or receipt_digest != gate.get("compatibility_receipt_digest")
+    ):
+        return f"judge {judge.id} synthetic V2 compatibility digest disagrees"
+    if (
+        value.get("schema_version") != 2
+        or value.get("kind") != "comparison_judge_sanitizer_compatibility"
+        or value.get("status") != "passed"
+        or value.get("claim_scope")
+        != "no_new_model_payload_compatibility"
+    ):
+        return f"judge {judge.id} synthetic V2 compatibility did not pass"
+
+    source = value.get("source_calibration")
+    source_fields = {
+        "report_path",
+        "report_sha256",
+        "historical_runtime_result_path",
+        "archived_result_path",
+        "archived_result_sha256",
+        "result_digest",
+        "preview_digest",
+        "approval_digest",
+        "model",
+        "cases_artifact_path",
+        "cases_artifact_sha256",
+        "cases_digest",
+        "rubric_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+    }
+    if not isinstance(source, Mapping) or set(source) != source_fields:
+        return f"judge {judge.id} synthetic V2 source binding is invalid"
+    if (
+        source.get("report_path")
+        != "examples/comparisons/community-skill-upgrades/judge-calibration.json"
+        or source.get("historical_runtime_result_path")
+        != ".fugue/runtime/community-skill-upgrades/judge-calibration.result.json"
+        or source.get("archived_result_path") != gate.get("result_path")
+        or source.get("archived_result_sha256")
+        != _sha256_path(
+            _safe_input_path(
+                Path(str(gate["result_path"])),
+                repo_root,
+                "archived synthetic calibration result",
+            )
+        )
+        or source.get("result_digest") != result.get("result_digest")
+        or source.get("preview_digest") != result.get("preview_digest")
+        or source.get("approval_digest") != result.get("approval_digest")
+        or source.get("model") != judge.profile
+    ):
+        return f"judge {judge.id} synthetic V2 archived result binding drifted"
+    try:
+        v1_report_path = _safe_input_path(
+            Path(str(source["report_path"])),
+            repo_root,
+            "V1 judge calibration report",
+        )
+        if _sha256_path(v1_report_path) != source.get("report_sha256"):
+            return f"judge {judge.id} synthetic V2 V1 report bytes drifted"
+        v1_report = json.loads(v1_report_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return f"judge {judge.id} synthetic V2 V1 report is unavailable"
+    if not isinstance(v1_report, Mapping):
+        return f"judge {judge.id} synthetic V2 V1 report is invalid"
+    v1_gate = v1_report.get("execution_gate")
+    if (
+        v1_report.get("schema_version") != 1
+        or not isinstance(v1_gate, Mapping)
+        or v1_gate.get("kind") != "synthetic_blinded_advisory_v1"
+    ):
+        return f"judge {judge.id} synthetic V2 V1 report identity drifted"
+    for field_name in (
+        "cases_artifact_path",
+        "cases_artifact_sha256",
+        "cases_digest",
+        "rubric_digest",
+        "runner_artifact_path",
+        "runner_artifact_sha256",
+    ):
+        if (
+            source.get(field_name) != gate.get(field_name)
+            or source.get(field_name) != v1_gate.get(field_name)
+        ):
+            return (
+                f"judge {judge.id} synthetic V2 {field_name} source binding "
+                "drifted"
+            )
+
+    sanitizer = value.get("sanitizer")
+    sanitizer_fields = {
+        "version",
+        "contract",
+        "transform",
+        "implementation_path",
+        "implementation_sha256",
+        "builder_artifact_path",
+        "builder_artifact_sha256",
+    }
+    if not isinstance(sanitizer, Mapping) or set(sanitizer) != sanitizer_fields:
+        return f"judge {judge.id} synthetic V2 sanitizer receipt is invalid"
+    if (
+        {key: sanitizer.get(key) for key in expected_sanitizer}
+        != expected_sanitizer
+        or sanitizer.get("implementation_path") != "fugue/bench/judge_input.py"
+        or sanitizer.get("builder_artifact_path")
+        != (
+            "examples/comparisons/community-skill-upgrades/"
+            "build_judge_sanitizer_compatibility_v2.py"
+        )
+    ):
+        return f"judge {judge.id} synthetic V2 sanitizer receipt drifted"
+    try:
+        implementation_path = _safe_input_path(
+            Path(str(sanitizer["implementation_path"])),
+            repo_root,
+            "judge input sanitizer implementation",
+        )
+        builder_path = _safe_input_path(
+            Path(str(sanitizer["builder_artifact_path"])),
+            repo_root,
+            "judge sanitizer compatibility builder",
+        )
+        if (
+            _sha256_path(implementation_path)
+            != sanitizer.get("implementation_sha256")
+            or _sha256_path(builder_path)
+            != sanitizer.get("builder_artifact_sha256")
+        ):
+            return f"judge {judge.id} synthetic V2 implementation bytes drifted"
+    except (FileNotFoundError, ValueError):
+        return f"judge {judge.id} synthetic V2 implementation is unavailable"
+
+    rows = value.get("cases")
+    summary = value.get("summary")
+    if (
+        not isinstance(rows, list)
+        or len(rows) != 48
+        or summary
+        != {
+            "cases": 48,
+            "byte_equivalent_payloads": 48,
+            "byte_equivalent_prompts": 48,
+            "transformed_payloads": 0,
+        }
+    ):
+        return f"judge {judge.id} synthetic V2 compatibility cohort disagrees"
+    case_fields = {
+        "case_id",
+        "source_payload_sha256",
+        "provider_payload_sha256",
+        "historical_prompt_sha256",
+        "current_prompt_sha256",
+        "transformed",
+        "transformed_value_count",
+        "transform_receipt_digest",
+    }
+    try:
+        cases = _frozen_synthetic_calibration_cases(gate, repo_root=repo_root)
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return f"judge {judge.id} synthetic V2 frozen cases are unavailable"
+    for case, row in zip(cases, rows, strict=True):
+        if not isinstance(row, Mapping) or set(row) != case_fields:
+            return f"judge {judge.id} synthetic V2 case receipt is invalid"
+        permitted_evidence = dict(
+            _mapping(case.get("permitted_evidence"), "permitted evidence")
+        )
+        for field_name in ("inspected_paths", "changed_paths"):
+            if field_name in permitted_evidence:
+                permitted_evidence[f"{field_name}_status"] = "available"
+        try:
+            source_payload = comparison_judge_request_payload(
+                public_task=_mapping(case.get("public_task"), "public task"),
+                response=case.get("response"),
+                permitted_evidence=permitted_evidence,
+                rubric=str(judge.rubric or ""),
+                dimensions=judge.dimensions,
+            )
+            provider_payload = sanitize_comparison_judge_value(source_payload)
+            transformed_count = _comparison_judge_transformed_value_count(
+                source_payload,
+                provider_payload,
+            )
+        except (TypeError, ValueError):
+            return f"judge {judge.id} synthetic V2 payload reconstruction failed"
+        transform_receipt = {
+            "schema_version": 1,
+            "case_id": str(case["id"]),
+            "sanitizer_version": COMPARISON_JUDGE_INPUT_SANITIZER_VERSION,
+            "sanitizer_contract": COMPARISON_JUDGE_INPUT_SANITIZER_CONTRACT,
+            "sanitizer_transform": COMPARISON_JUDGE_INPUT_SANITIZER_TRANSFORM,
+            "sanitizer_implementation_sha256": (
+                COMPARISON_JUDGE_INPUT_SANITIZER_IMPLEMENTATION_SHA256
+            ),
+            "source_payload_sha256": stable_digest(source_payload),
+            "provider_payload_sha256": stable_digest(provider_payload),
+            "transformed": transformed_count > 0,
+            "transformed_value_count": transformed_count,
+        }
+        if (
+            row.get("case_id") != case.get("id")
+            or row.get("source_payload_sha256")
+            != transform_receipt["source_payload_sha256"]
+            or row.get("provider_payload_sha256")
+            != transform_receipt["provider_payload_sha256"]
+            or row.get("transform_receipt_digest")
+            != stable_digest(transform_receipt)
+            or row.get("transformed") is not False
+            or row.get("transformed_value_count") != 0
+            or row.get("historical_prompt_sha256")
+            != row.get("current_prompt_sha256")
+            or not _is_sha256(str(row.get("historical_prompt_sha256") or ""))
+        ):
+            return f"judge {judge.id} synthetic V2 case compatibility drifted"
+
+    offline = value.get("offline_conformance")
+    offline_fields = {"status", "cases", "summary"}
+    if not isinstance(offline, Mapping) or set(offline) != offline_fields:
+        return f"judge {judge.id} synthetic V2 offline conformance is invalid"
+    offline_rows = offline.get("cases")
+    offline_case_fields = {
+        "case_id",
+        "family",
+        "input_sha256",
+        "expected_output_sha256",
+        "actual_output_sha256",
+        "transformed",
+        "passed",
+    }
+    fixtures = comparison_judge_input_sanitizer_conformance_cases()
+    if not isinstance(offline_rows, list) or len(offline_rows) != len(fixtures):
+        return f"judge {judge.id} synthetic V2 offline cohort disagrees"
+    expected_family_counts = Counter(str(case["family"]) for case in fixtures)
+    expected_summary = {
+        "cases": len(fixtures),
+        "credential_redaction_cases": expected_family_counts[
+            "credential_redaction"
+        ],
+        "safe_preservation_cases": expected_family_counts[
+            "safe_placeholder_preservation"
+        ],
+        "passed": len(fixtures),
+    }
+    if offline.get("status") != "passed" or offline.get("summary") != expected_summary:
+        return f"judge {judge.id} synthetic V2 offline conformance did not pass"
+    for fixture, row in zip(fixtures, offline_rows, strict=True):
+        if not isinstance(row, Mapping) or set(row) != offline_case_fields:
+            return f"judge {judge.id} synthetic V2 offline case is invalid"
+        actual = sanitize_comparison_judge_value(fixture["input"])
+        expected = fixture["expected_output"]
+        transformed = actual != fixture["input"]
+        if (
+            row.get("case_id") != fixture["id"]
+            or row.get("family") != fixture["family"]
+            or row.get("input_sha256") != stable_digest(fixture["input"])
+            or row.get("expected_output_sha256") != stable_digest(expected)
+            or row.get("actual_output_sha256") != stable_digest(actual)
+            or row.get("transformed") is not transformed
+            or row.get("passed") is not True
+            or actual != expected
+            or sanitize_comparison_judge_value(actual) != actual
+        ):
+            return f"judge {judge.id} synthetic V2 offline case drifted"
+
+    limitations = value.get("limitations")
+    if (
+        not isinstance(limitations, list)
+        or len(limitations) < 4
+        or not all(isinstance(item, str) and item.strip() for item in limitations)
+    ):
+        return f"judge {judge.id} synthetic V2 limitations are incomplete"
     return None
 
 
