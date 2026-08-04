@@ -375,6 +375,7 @@ def _confirmatory_inputs() -> tuple[
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     result, spec, study, template = _result()
     object.__setattr__(spec.execution, "attempts", 4)
@@ -442,6 +443,13 @@ def _confirmatory_inputs() -> tuple[
     study["attempts"] = 4
     study["cells"] = 16
     study["expected_cells"] = 16
+    study["study_class"] = "measurement_development_descriptive"
+    study["conference_claim_eligible"] = False
+    study["_manifest"] = {
+        "id": "community-skill-upgrade-measurement-development-v2",
+        "path": "conference-campaign-manifest-v2.json",
+        "sha256": "a" * 64,
+    }
     preregistration_path = (
         REPO_ROOT / "examples/comparisons/superpowers-writing-plans-upgrade/"
         "preregistration-confirmatory-v1.json"
@@ -559,7 +567,97 @@ def _confirmatory_inputs() -> tuple[
         }
         for reviewer in ("reviewer-a", "reviewer-b")
     ]
-    return result, spec, study, template, selection, review
+    analysis: dict[str, Any] = {
+        "schema_version": 3,
+        "kind": "community_skill_confirmatory_analysis",
+        "campaign_id": study["_manifest"]["id"],
+        "study_id": result.comparison_id,
+        "status": "complete",
+        "study_class": "measurement_development_descriptive",
+        "conference_claim_eligible": False,
+        "scope": "Exact authored locked benchmark only.",
+        "claim_eligibility": {
+            "conference_claim_eligible": False,
+            "population_claim_eligible": False,
+            "reason": "The authored benchmark has too few independent tasks.",
+        },
+        "reserved_powered_studies": [
+            {
+                "repository": repository,
+                "development_study_id": f"{repository}-conference-development-v1",
+                "holdout_study_id": f"{repository}-conference-holdout-v1",
+                "status": "reserved_pending_sealed_sampling_frame_and_spec_bindings",
+            }
+            for repository in (
+                "superpowers-writing-plans",
+                "anthropic-skill-creator",
+                "vercel-react-best-practices",
+            )
+        ],
+        "exact_revisions": {
+            "baseline": study["baseline_commit"],
+            "candidate": study["candidate_commit"],
+        },
+        "evidence_project": result.evidence_project,
+        "counts": {
+            "development_tasks": 1,
+            "holdout_tasks": 1,
+            "attempts_per_task_per_arm": 4,
+            "arms": 2,
+            "rows": 16,
+        },
+        "prospective_power_design": {
+            "status": "verified_underpowered_current_design",
+            "artifact": {"id": "power-v1", "sha256": "b" * 64},
+            "scenario": {"net_effect": 0.15},
+            "verified_power_points": [],
+            "current_design": {
+                "conference_claim_eligible": False,
+                "reason": "Only one independent holdout task is present in this fixture.",
+            },
+            "recommended_design": {"campaign_cells": 6528},
+            "analysis_contract": {},
+            "limitations": ["Prospective assumptions are illustrative."],
+            "claim_effect": "No population claim is supported.",
+        },
+        "deterministic": {
+            "primary_partition": "holdout",
+            "inference_unit": "task",
+            "attempt_role": "within_task_replication",
+            "holdout": {
+                "primary_families": [
+                    {
+                        "id": "repository_grounding",
+                        "task_level_mean_difference": 1.0,
+                        "task_cluster_bootstrap_95_ci": [1.0, 1.0],
+                        "exact_two_sided_sign_p": 1.0,
+                        "holm_adjusted_p": 1.0,
+                    }
+                ],
+                "primary_composite": {
+                    "task_level_mean_difference": 1.0,
+                    "task_cluster_bootstrap_95_ci": [1.0, 1.0],
+                    "exact_two_sided_sign_p": 1.0,
+                    "holm_adjusted_p": 1.0,
+                },
+                "primary_test_attainability": [],
+                "safety_conjunction_gates": [],
+            },
+            "finding": {"status": "improved", "critical_blockers": []},
+            "sensitivity_analysis": {"status": "not_implemented"},
+        },
+        "limitations": [
+            "The descriptive benchmark is underpowered for a population claim."
+        ],
+        "integrity": {
+            "result_digest": result.result_digest,
+            "qualification_digest": result.qualification_digest,
+            "result_file_sha256": "6" * 64,
+            "canonical_result_recomputed": True,
+        },
+    }
+    analysis["analysis_digest"] = stable_digest(analysis)
+    return result, spec, study, template, selection, review, analysis
 
 
 def test_report_is_decision_ready_without_private_labels() -> None:
@@ -593,6 +691,22 @@ def test_report_is_decision_ready_without_private_labels() -> None:
     }
     assert len(report["evidence_links"]) == 20
     assert report["source_result"]["canonical_reader_verified"] is True
+    assert report["report_provenance"] == {
+        "generator": {
+            "path": (
+                "examples/comparisons/community-skill-upgrades/"
+                "generate_scientific_report.py"
+            ),
+            "sha256": _sha(CAMPAIGN / "generate_scientific_report.py"),
+        },
+        "template": {
+            "path": (
+                "examples/comparisons/community-skill-upgrades/"
+                "scientific-report-template-v3.json"
+            ),
+            "sha256": _sha(CAMPAIGN / "scientific-report-template-v3.json"),
+        },
+    }
     assert report["study_contract"]["manifest_id"] == (
         "community-skill-upgrade-canary-execution-policy-v2"
     )
@@ -609,13 +723,17 @@ def test_report_is_decision_ready_without_private_labels() -> None:
 
 
 def test_four_attempt_v3_report_binds_preregistration_and_completed_audit() -> None:
-    result, spec, study, template, selection, review = _confirmatory_inputs()
+    result, spec, study, template, selection, review, analysis = (
+        _confirmatory_inputs()
+    )
 
     report = _generate_report(
         result=result,
         spec=spec,
         study=study,
         template=template,
+        confirmatory_analysis=analysis,
+        confirmatory_analysis_sha256="9" * 64,
         audit_selection=selection,
         audit_review=review,
         audit_selection_sha256="7" * 64,
@@ -625,6 +743,15 @@ def test_four_attempt_v3_report_binds_preregistration_and_completed_audit() -> N
     assert report["study_contract"]["attempts_per_task_arm"] == 4
     assert report["study_contract"]["planned_cells"] == 16
     assert report["preregistration"]["status"] == "bound"
+    assert report["confirmatory_analysis"]["status"] == (
+        "bound_underpowered_current_design"
+    )
+    assert report["confirmatory_analysis"]["primary_families"][0][
+        "task_level_mean_difference"
+    ] == 1.0
+    assert report["behavioral_finding"]["conference_qualification_status"] == (
+        "not_qualified_underpowered_design"
+    )
     assert report["trace_audit"]["status"] == "completed"
     assert report["trace_audit"]["required_attempts"] == 16
     assert REPORTER.CANARY_LIMITATION[0] not in report["limitations"]
@@ -636,10 +763,48 @@ def test_four_attempt_v3_report_binds_preregistration_and_completed_audit() -> N
 
 
 def test_confirmatory_report_rejects_stale_or_unsigned_audit() -> None:
-    result, spec, study, template, selection, review = _confirmatory_inputs()
+    result, spec, study, template, selection, review, analysis = (
+        _confirmatory_inputs()
+    )
     review["result_digest"] = "9" * 64
 
     with pytest.raises(ValueError, match="different immutable inputs"):
+        _generate_report(
+            result=result,
+            spec=spec,
+            study=study,
+            template=template,
+            confirmatory_analysis=analysis,
+            confirmatory_analysis_sha256="9" * 64,
+            audit_selection=selection,
+            audit_review=review,
+            audit_selection_sha256="7" * 64,
+            audit_review_sha256="8" * 64,
+        )
+
+
+def test_confirmatory_report_requires_completed_audit() -> None:
+    result, spec, study, template, _selection, _review, analysis = (
+        _confirmatory_inputs()
+    )
+
+    with pytest.raises(ValueError, match="completed frozen trace audit"):
+        _generate_report(
+            result=result,
+            spec=spec,
+            study=study,
+            template=template,
+            confirmatory_analysis=analysis,
+            confirmatory_analysis_sha256="9" * 64,
+        )
+
+
+def test_confirmatory_report_requires_bound_analyzer_output() -> None:
+    result, spec, study, template, selection, review, _analysis = (
+        _confirmatory_inputs()
+    )
+
+    with pytest.raises(ValueError, match="bound analyzer output"):
         _generate_report(
             result=result,
             spec=spec,
@@ -649,18 +814,6 @@ def test_confirmatory_report_rejects_stale_or_unsigned_audit() -> None:
             audit_review=review,
             audit_selection_sha256="7" * 64,
             audit_review_sha256="8" * 64,
-        )
-
-
-def test_confirmatory_report_requires_completed_audit() -> None:
-    result, spec, study, template, _selection, _review = _confirmatory_inputs()
-
-    with pytest.raises(ValueError, match="completed frozen trace audit"):
-        _generate_report(
-            result=result,
-            spec=spec,
-            study=study,
-            template=template,
         )
 
 
@@ -678,7 +831,9 @@ def test_v2_report_is_conservative_about_unavailable_v3_contracts() -> None:
         "source_result_schema_version": 2,
         "task_validity_basis": "not_assessed_in_v2",
         "evidence_topology_basis": "unavailable_in_v2",
+        "analysis_basis": "canonical_one_attempt_behavioral_summary",
         "status": "incomplete",
+        "conference_qualification_status": "not_applicable_canary",
         "recommendation": "INCOMPLETE — required behavioral evidence is unavailable.",
         "supported_claim": None,
         "critical_blockers": ["one required evaluation is incomplete"],
@@ -774,4 +929,14 @@ def test_template_and_report_schema_are_strict() -> None:
     )
     report["private_labels"] = {"secret": True}
     with pytest.raises(ValueError, match="fields disagree"):
+        REPORTER.validate_report(report)
+
+    report = _generate_report(
+        result=result,
+        spec=spec,
+        study=study,
+        template=template,
+    )
+    report["report_provenance"]["generator"]["sha256"] = "not-a-digest"
+    with pytest.raises(ValueError, match="generator binding is not exact"):
         REPORTER.validate_report(report)

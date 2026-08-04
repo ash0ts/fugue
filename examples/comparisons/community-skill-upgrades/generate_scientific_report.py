@@ -6,6 +6,9 @@ score-explanation, and sanitized-excerpt contracts.  Reports generated from
 V2 therefore mark those claims unavailable instead of reconstructing them
 from display data.  V3 keeps the stronger contract and additionally supports
 preregistered, repeated confirmatory studies with a frozen blinded trace audit.
+Schema V3 additionally requires the independently recomputed confirmatory
+analysis; a repeated Study can no longer inherit the generic per-attempt
+behavioral summary or silently use the one-attempt preregistration path.
 """
 
 from __future__ import annotations
@@ -32,9 +35,9 @@ SupportedResult = ComparisonResultV2 | ComparisonResultV3
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[2]
-TEMPLATE = ROOT / "scientific-report-template-v2.json"
+TEMPLATE = ROOT / "scientific-report-template-v3.json"
 MANIFEST = ROOT / "campaign-manifest.json"
-CONFIRMATORY_MANIFEST = ROOT / "conference-campaign-manifest.json"
+CONFIRMATORY_MANIFEST = ROOT / "conference-campaign-manifest-v2.json"
 TERMINAL_STATES = {
     "completed",
     "failed",
@@ -66,8 +69,10 @@ REPORT_FIELDS = {
     "evidence_project",
     "exact_revisions",
     "source_result",
+    "report_provenance",
     "study_contract",
     "preregistration",
+    "confirmatory_analysis",
     "trace_audit",
     "task_validity",
     "behavioral_finding",
@@ -143,6 +148,7 @@ def _study_contract(
     for manifest_path, collection in (
         (campaign_root / "campaign-manifest.json", "studies"),
         (campaign_root / "conference-campaign-manifest.json", "final_four"),
+        (campaign_root / "conference-campaign-manifest-v2.json", "final_four"),
         (campaign_root / "canary-execution-policy-v2.json", "studies"),
     ):
         if not manifest_path.is_file():
@@ -470,6 +476,14 @@ def _study_binding(
     if not isinstance(spec_binding, Mapping) or set(spec_binding) != {"path", "sha256"}:
         raise ValueError("Study is missing its exact spec binding")
     spec_sha256 = _required_digest(spec_binding.get("sha256"), "Study spec digest")
+    if spec.execution.attempts > 1 and (
+        study.get("study_class") != "measurement_development_descriptive"
+        or study.get("conference_claim_eligible") is not False
+        or manifest.get("id") != "community-skill-upgrade-measurement-development-v2"
+    ):
+        raise ValueError(
+            "repeated report requires the descriptive V2 Study contract"
+        )
     return {
         "manifest_id": str(manifest.get("id") or ""),
         "manifest_path": str(manifest.get("path") or ""),
@@ -479,6 +493,8 @@ def _study_binding(
         "spec_sha256": spec_sha256,
         "attempts_per_task_arm": spec.execution.attempts,
         "planned_cells": int(study.get("cells", study.get("expected_cells")) or 0),
+        "study_class": study.get("study_class"),
+        "conference_claim_eligible": study.get("conference_claim_eligible"),
     }
 
 
@@ -513,9 +529,14 @@ def _preregistration_binding(
     *,
     study: Mapping[str, Any],
     campaign_root: Path,
+    required: bool,
 ) -> dict[str, Any]:
     declarations = study.get("preregistration")
     if declarations is None:
+        if required:
+            raise ValueError(
+                "repeated confirmatory Study requires exact preregistration bindings"
+            )
         return {
             "status": "not_required_for_one_attempt_canary",
             "artifacts": [],
@@ -564,6 +585,153 @@ def _preregistration_binding(
         "status": "bound",
         "artifacts": artifacts,
         "binding_digest": stable_digest(artifacts),
+    }
+
+
+def _confirmatory_analysis_binding(  # noqa: C901 - strict cross-artifact gate.
+    *,
+    result: SupportedResult,
+    spec: ComparisonSpecV1,
+    study: Mapping[str, Any],
+    analysis: Mapping[str, Any] | None,
+    analysis_file_sha256: str | None,
+    source_result_sha256: str,
+) -> dict[str, Any]:
+    if spec.execution.attempts == 1:
+        if analysis is not None or analysis_file_sha256 is not None:
+            raise ValueError(
+                "one-attempt canary cannot claim a confirmatory analysis"
+            )
+        return {
+            "status": "not_applicable_one_attempt_canary",
+            "analysis_digest": None,
+            "file_sha256": None,
+            "prospective_power_design": None,
+            "primary_families": [],
+            "primary_composite": None,
+            "safety_conjunction_gates": [],
+            "finding": None,
+            "limitations": [CANARY_LIMITATION[0]],
+        }
+    if not isinstance(result, ComparisonResultV3):
+        raise ValueError("repeated confirmatory analysis requires ComparisonResultV3")
+    if analysis is None or analysis_file_sha256 is None:
+        raise ValueError(
+            "repeated confirmatory report requires a bound analyzer output"
+        )
+    if not _SHA256.fullmatch(str(analysis_file_sha256)):
+        raise ValueError("confirmatory analysis file digest is invalid")
+    supplied_digest = str(analysis.get("analysis_digest") or "")
+    unsigned = dict(analysis)
+    unsigned.pop("analysis_digest", None)
+    if (
+        analysis.get("schema_version") != 3
+        or analysis.get("kind") != "community_skill_confirmatory_analysis"
+        or analysis.get("status") != "complete"
+        or analysis.get("study_id") != result.comparison_id
+        or analysis.get("evidence_project") != result.evidence_project
+        or supplied_digest != stable_digest(unsigned)
+    ):
+        raise ValueError("confirmatory analysis identity or digest disagrees")
+    manifest = study.get("_manifest")
+    eligibility = analysis.get("claim_eligibility")
+    powered = analysis.get("reserved_powered_studies")
+    if (
+        not isinstance(manifest, Mapping)
+        or analysis.get("campaign_id") != manifest.get("id")
+        or analysis.get("study_class") != "measurement_development_descriptive"
+        or analysis.get("conference_claim_eligible") is not False
+        or not isinstance(eligibility, Mapping)
+        or eligibility.get("conference_claim_eligible") is not False
+        or eligibility.get("population_claim_eligible") is not False
+        or not isinstance(powered, list)
+        or len(powered) != 3
+    ):
+        raise ValueError("confirmatory analysis overclaims the descriptive design")
+    revisions = analysis.get("exact_revisions")
+    if not isinstance(revisions, Mapping) or revisions != {
+        "baseline": study.get("baseline_commit"),
+        "candidate": study.get("candidate_commit"),
+    }:
+        raise ValueError("confirmatory analysis revisions disagree")
+    counts = analysis.get("counts")
+    if (
+        not isinstance(counts, Mapping)
+        or counts.get("rows") != result.rows
+        or counts.get("attempts_per_task_per_arm") != spec.execution.attempts
+        or counts.get("arms") != 2
+    ):
+        raise ValueError("confirmatory analysis matrix disagrees")
+    integrity = analysis.get("integrity")
+    if (
+        not isinstance(integrity, Mapping)
+        or integrity.get("result_digest") != result.result_digest
+        or integrity.get("qualification_digest") != result.qualification_digest
+        or integrity.get("result_file_sha256") != source_result_sha256
+        or integrity.get("canonical_result_recomputed") is not True
+    ):
+        raise ValueError("confirmatory analysis does not bind the source result")
+    prospective = analysis.get("prospective_power_design")
+    if (
+        not isinstance(prospective, Mapping)
+        or prospective.get("status")
+        != "verified_underpowered_current_design"
+        or not isinstance(prospective.get("artifact"), Mapping)
+        or prospective["current_design"].get("conference_claim_eligible") is not False
+    ):
+        raise ValueError("confirmatory analysis has no verified prospective design")
+    deterministic = analysis.get("deterministic")
+    if not isinstance(deterministic, Mapping):
+        raise ValueError("confirmatory deterministic analysis is unavailable")
+    holdout = deterministic.get("holdout")
+    finding = deterministic.get("finding")
+    if not isinstance(holdout, Mapping) or not isinstance(finding, Mapping):
+        raise ValueError("confirmatory holdout analysis is unavailable")
+    families = holdout.get("primary_families")
+    composite = holdout.get("primary_composite")
+    safety = holdout.get("safety_conjunction_gates")
+    if (
+        not isinstance(families, list)
+        or not families
+        or not isinstance(composite, Mapping)
+        or not isinstance(safety, list)
+    ):
+        raise ValueError("confirmatory effect estimates are incomplete")
+    required_family_fields = {
+        "task_level_mean_difference",
+        "task_cluster_bootstrap_95_ci",
+        "exact_two_sided_sign_p",
+        "holm_adjusted_p",
+    }
+    if any(not required_family_fields <= set(item) for item in families):
+        raise ValueError("confirmatory family statistics are incomplete")
+    limitations = analysis.get("limitations")
+    if not isinstance(limitations, list) or not limitations:
+        raise ValueError("confirmatory analysis limitations are unavailable")
+    return {
+        "status": "bound_underpowered_current_design",
+        "analysis_digest": supplied_digest,
+        "file_sha256": analysis_file_sha256,
+        "source_result_file_sha256": source_result_sha256,
+        "study_class": analysis["study_class"],
+        "conference_claim_eligible": False,
+        "claim_eligibility": dict(eligibility),
+        "reserved_powered_studies": [dict(item) for item in powered],
+        "prospective_power_design": prospective,
+        "primary_partition": deterministic.get("primary_partition"),
+        "inference_unit": deterministic.get("inference_unit"),
+        "attempt_role": deterministic.get("attempt_role"),
+        "primary_families": [dict(item) for item in families],
+        "primary_composite": dict(composite),
+        "primary_test_attainability": list(
+            holdout.get("primary_test_attainability") or []
+        ),
+        "safety_conjunction_gates": [dict(item) for item in safety],
+        "finding": dict(finding),
+        "sensitivity_analysis": dict(
+            deterministic.get("sensitivity_analysis") or {}
+        ),
+        "limitations": list(limitations),
     }
 
 
@@ -1241,14 +1409,16 @@ def _task_validity(result: SupportedResult) -> list[dict[str, Any]]:
 def _validate_template(value: Mapping[str, Any]) -> None:
     if set(value) != REPORT_FIELDS:
         raise ValueError("scientific report template fields drifted")
-    if value["schema_version"] != 2 or value["status"] != "pending_execution":
-        raise ValueError("scientific report template must remain pending")
+    if value["schema_version"] != 3 or value["status"] != "pending_execution":
+        raise ValueError("scientific report V3 template must remain pending")
     for field in (
         "study_id",
         "evidence_project",
         "source_result",
+        "report_provenance",
         "study_contract",
         "preregistration",
+        "confirmatory_analysis",
         "trace_audit",
         "task_validity",
         "behavioral_finding",
@@ -1292,8 +1462,8 @@ def validate_report(  # noqa: C901 - one strict report-schema boundary.
         raise ValueError(
             f"scientific report fields disagree: unknown={unknown}, missing={missing}"
         )
-    if value["schema_version"] != 2 or value["status"] != "completed":
-        raise ValueError("scientific report must be a completed schema-v2 artifact")
+    if value["schema_version"] != 3 or value["status"] != "completed":
+        raise ValueError("scientific report must be a completed schema-v3 artifact")
     if not str(value["study_id"] or "") or not str(value["evidence_project"] or ""):
         raise ValueError("scientific report identity is incomplete")
     revisions = value["exact_revisions"]
@@ -1319,6 +1489,21 @@ def validate_report(  # noqa: C901 - one strict report-schema boundary.
         )
     ):
         raise ValueError("scientific report source result is not canonically bound")
+    provenance = value["report_provenance"]
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "generator",
+        "template",
+    }:
+        raise ValueError("scientific report generator provenance is malformed")
+    for role in ("generator", "template"):
+        binding = provenance[role]
+        if (
+            not isinstance(binding, Mapping)
+            or set(binding) != {"path", "sha256"}
+            or not str(binding.get("path") or "")
+            or not _SHA256.fullmatch(str(binding.get("sha256") or ""))
+        ):
+            raise ValueError(f"scientific report {role} binding is not exact")
     study_contract = value["study_contract"]
     if not isinstance(study_contract, Mapping) or any(
         not _SHA256.fullmatch(str(study_contract.get(field) or ""))
@@ -1337,6 +1522,33 @@ def validate_report(  # noqa: C901 - one strict report-schema boundary.
         "not_required_for_one_attempt_canary",
     }:
         raise ValueError("scientific report preregistration binding is malformed")
+    analysis = value["confirmatory_analysis"]
+    if not isinstance(analysis, Mapping) or analysis.get("status") not in {
+        "bound_underpowered_current_design",
+        "not_applicable_one_attempt_canary",
+    }:
+        raise ValueError("scientific report confirmatory analysis is malformed")
+    if analysis.get("status") == "bound_underpowered_current_design":
+        if (
+            not _SHA256.fullmatch(str(analysis.get("analysis_digest") or ""))
+            or not _SHA256.fullmatch(str(analysis.get("file_sha256") or ""))
+            or analysis.get("study_class")
+            != "measurement_development_descriptive"
+            or analysis.get("conference_claim_eligible") is not False
+            or not isinstance(analysis.get("claim_eligibility"), Mapping)
+            or analysis["claim_eligibility"].get("population_claim_eligible")
+            is not False
+            or not isinstance(analysis.get("primary_families"), list)
+            or not analysis["primary_families"]
+            or not isinstance(analysis.get("primary_composite"), Mapping)
+            or not isinstance(analysis.get("prospective_power_design"), Mapping)
+            or not analysis.get("limitations")
+        ):
+            raise ValueError(
+                "scientific report confirmatory statistics are incomplete"
+            )
+    elif analysis.get("primary_families") != []:
+        raise ValueError("one-attempt report cannot carry confirmatory statistics")
     trace_audit = value["trace_audit"]
     if not isinstance(trace_audit, Mapping) or trace_audit.get("status") not in {
         "completed",
@@ -1408,10 +1620,14 @@ def generate_report(
     campaign_root: Path = ROOT,
     source_result_sha256: str,
     canonical_result_verified: bool,
+    confirmatory_analysis: Mapping[str, Any] | None = None,
+    confirmatory_analysis_sha256: str | None = None,
     audit_selection: Mapping[str, Any] | None = None,
     audit_review: Mapping[str, Any] | None = None,
     audit_selection_sha256: str | None = None,
     audit_review_sha256: str | None = None,
+    report_generator_path: Path | None = None,
+    report_template_path: Path | None = None,
 ) -> dict[str, Any]:
     if not isinstance(result, ComparisonResultV2 | ComparisonResultV3):
         raise ValueError("scientific reports require ComparisonResultV2 or V3")
@@ -1430,10 +1646,39 @@ def generate_report(
         source_result_sha256=source_result_sha256,
         canonical_result_verified=canonical_result_verified,
     )
+    resolved_generator = _within(
+        report_generator_path or Path(__file__),
+        repo_root,
+        "scientific report generator",
+    )
+    resolved_template = _within(
+        report_template_path or TEMPLATE,
+        repo_root,
+        "scientific report template",
+    )
+    report_provenance = {
+        "generator": {
+            "path": resolved_generator.relative_to(repo_root.resolve()).as_posix(),
+            "sha256": _sha256(resolved_generator),
+        },
+        "template": {
+            "path": resolved_template.relative_to(repo_root.resolve()).as_posix(),
+            "sha256": _sha256(resolved_template),
+        },
+    }
     study_contract = _study_binding(study, spec=spec)
     preregistration = _preregistration_binding(
         study=study,
         campaign_root=campaign_root,
+        required=spec.execution.attempts > 1,
+    )
+    statistical_analysis = _confirmatory_analysis_binding(
+        result=result,
+        spec=spec,
+        study=study,
+        analysis=confirmatory_analysis,
+        analysis_file_sha256=confirmatory_analysis_sha256,
+        source_result_sha256=source_result_sha256,
     )
     if spec.execution.attempts == 1:
         if any(
@@ -1473,19 +1718,57 @@ def generate_report(
         )
     judges = [item for item in spec.evaluators if item.type == "llm_judge"]
     behavior = result.behavioral_summary
-    supported = behavior.supported_claim or "No positive behavioral claim is supported."
-    report = {
-        "schema_version": 2,
-        "status": "completed",
-        "study_id": result.comparison_id,
-        "evidence_project": result.evidence_project,
-        "exact_revisions": revisions,
-        "source_result": source_result,
-        "study_contract": study_contract,
-        "preregistration": preregistration,
-        "trace_audit": trace_audit,
-        "task_validity": _task_validity(result),
-        "behavioral_finding": {
+    if statistical_analysis["status"] == "bound_underpowered_current_design":
+        statistical_finding = statistical_analysis["finding"]
+        statistical_status = str(statistical_finding.get("status") or "inconclusive")
+        if statistical_status not in BEHAVIORAL_STATUSES:
+            raise ValueError("confirmatory finding has an unsupported status")
+        recommendation_by_status = {
+            "improved": "Treat this as a positive locked-benchmark signal only.",
+            "regressed": "Stop this exact upgrade and investigate the named regressions.",
+            "mixed": "Investigate the discordant dimensions before another comparison.",
+            "unchanged": "Do not claim a meaningful difference on this locked benchmark.",
+            "inconclusive": "Do not choose an upgrade from this underpowered comparison.",
+            "invalid": "Repair result integrity before drawing a behavioral conclusion.",
+            "incomplete": "Complete the frozen matrix before drawing a conclusion.",
+        }
+        power = statistical_analysis["prospective_power_design"]
+        current_design = power["current_design"]
+        supported = (
+            "The preregistered locked-benchmark analysis classified the exact "
+            f"candidate-minus-baseline contrast as {statistical_status}. The "
+            "current design is not eligible for a population or conference claim."
+        )
+        finding = {
+            "source_result_schema_version": result.schema_version,
+            "task_validity_basis": "canonical_task_validity_v1",
+            "evidence_topology_basis": "canonical_evidence_topology_v1",
+            "analysis_basis": "bound_preregistered_confirmatory_analysis_v3",
+            "status": statistical_status,
+            "conference_qualification_status": "not_qualified_underpowered_design",
+            "recommendation": recommendation_by_status[statistical_status],
+            "supported_claim": supported,
+            "critical_blockers": [
+                str(current_design.get("reason") or "current design is underpowered"),
+                *list(statistical_finding.get("critical_blockers") or []),
+            ],
+            "next_action": (
+                "Freeze an independent sampling frame and separately approve the "
+                f"recommended {power['recommended_design']['campaign_cells']}-cell "
+                "campaign before making a conference-qualified claim."
+            ),
+            "release_decision": result.decision.to_dict(),
+        }
+        conclusion = (
+            f"LOCKED-BENCHMARK {statistical_status.upper()}; CONFERENCE CLAIM "
+            f"NOT QUALIFIED. {supported} Next action: {finding['next_action']}"
+        )
+    else:
+        supported = (
+            behavior.supported_claim
+            or "No positive behavioral claim is supported."
+        )
+        finding = {
             "source_result_schema_version": result.schema_version,
             "task_validity_basis": (
                 "canonical_task_validity_v1"
@@ -1497,23 +1780,48 @@ def generate_report(
                 if isinstance(result, ComparisonResultV3)
                 else "unavailable_in_v2"
             ),
+            "analysis_basis": "canonical_one_attempt_behavioral_summary",
             "status": behavior.status,
+            "conference_qualification_status": "not_applicable_canary",
             "recommendation": behavior.recommendation,
             "supported_claim": behavior.supported_claim,
             "critical_blockers": list(behavior.critical_blockers),
             "next_action": behavior.next_action,
             "release_decision": result.decision.to_dict(),
-        },
+        }
+        conclusion = (
+            f"{behavior.status.upper()}: {behavior.recommendation} "
+            f"{supported} Next action: {behavior.next_action}"
+        )
+    limitations = list(
+        dict.fromkeys(
+            (
+                *_limitations(template, result, spec),
+                *statistical_analysis["limitations"],
+            )
+        )
+    )
+    report = {
+        "schema_version": 3,
+        "status": "completed",
+        "study_id": result.comparison_id,
+        "evidence_project": result.evidence_project,
+        "exact_revisions": revisions,
+        "source_result": source_result,
+        "report_provenance": report_provenance,
+        "study_contract": study_contract,
+        "preregistration": preregistration,
+        "confirmatory_analysis": statistical_analysis,
+        "trace_audit": trace_audit,
+        "task_validity": _task_validity(result),
+        "behavioral_finding": finding,
         "deterministic_results": _deterministic_rows(result),
         "judge_results": _judge_rows(result, judges[0].id),
         "mechanism_results": _skill_evidence(result, spec),
         "efficiency": _efficiency(result),
         "evidence_links": _evidence_links(result),
-        "limitations": _limitations(template, result, spec),
-        "conclusion": (
-            f"{behavior.status.upper()}: {behavior.recommendation} "
-            f"{supported} Next action: {behavior.next_action}"
-        ),
+        "limitations": limitations,
+        "conclusion": conclusion,
     }
     validate_report(report)
     return report
@@ -1526,6 +1834,7 @@ def build_report(
     repo_root: Path = REPO_ROOT,
     campaign_root: Path = ROOT,
     template_path: Path = TEMPLATE,
+    confirmatory_analysis_path: Path | None = None,
     audit_selection_path: Path | None = None,
     audit_review_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -1541,6 +1850,20 @@ def build_report(
         study_id=result.comparison_id,
     )
     template = _load_object(template_path, "scientific report template")
+    resolved_analysis = (
+        _within(
+            confirmatory_analysis_path,
+            repo_root,
+            "confirmatory analysis",
+        )
+        if confirmatory_analysis_path is not None
+        else None
+    )
+    confirmatory_analysis = (
+        _load_object(resolved_analysis, "confirmatory analysis")
+        if resolved_analysis is not None
+        else None
+    )
     audit_selection = (
         _load_object(
             _within(audit_selection_path, repo_root, "trace-audit selection"),
@@ -1566,6 +1889,10 @@ def build_report(
         campaign_root=campaign_root,
         source_result_sha256=_sha256(resolved_result),
         canonical_result_verified=True,
+        confirmatory_analysis=confirmatory_analysis,
+        confirmatory_analysis_sha256=(
+            _sha256(resolved_analysis) if resolved_analysis is not None else None
+        ),
         audit_selection=audit_selection,
         audit_review=audit_review,
         audit_selection_sha256=(
@@ -1578,6 +1905,8 @@ def build_report(
             if audit_review_path is not None
             else None
         ),
+        report_generator_path=Path(__file__).resolve(),
+        report_template_path=template_path.resolve(),
     )
 
 
@@ -1596,6 +1925,7 @@ def main() -> int:
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--spec", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--confirmatory-analysis", type=Path)
     parser.add_argument("--audit-selection", type=Path)
     parser.add_argument("--audit-review", type=Path)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
@@ -1608,8 +1938,9 @@ def main() -> int:
         campaign_root=repo_root / "examples/comparisons/community-skill-upgrades",
         template_path=(
             repo_root / "examples/comparisons/community-skill-upgrades/"
-            "scientific-report-template-v2.json"
+            "scientific-report-template-v3.json"
         ),
+        confirmatory_analysis_path=args.confirmatory_analysis,
         audit_selection_path=args.audit_selection,
         audit_review_path=args.audit_review,
     )

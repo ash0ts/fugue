@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-upgrade-prospective-power-design-v1",
+  "status": "frozen_before_next_valid_preview",
+  "role": "design_diagnostic_not_execution_approval",
+  "estimand": "task-level paired candidate-minus-baseline difference under the exact locked model, harness, runtime, and repository-specific task population",
+  "inference_unit": "independent task provenance cluster",
+  "illustrative_scenario": {
+    "purpose": "Prospective conservative sizing scenario; these probabilities are design assumptions, not estimates from the invalid historical executions.",
+    "candidate_win_probability": 0.25,
+    "baseline_win_probability": 0.1,
+    "tie_probability": 0.65,
+    "net_effect": 0.15,
+    "test": "two-sided exact sign test over nonzero task-level paired differences",
+    "multiplicity": "Holm across the declared primary family",
+    "power_target": 0.8,
+    "confidence": 0.95
+  },
+  "verified_power_points": [
+    {
+      "independent_tasks": 16,
+      "alpha": 0.05,
+      "power": 0.0609283407,
+      "interpretation": "current holdout, unadjusted"
+    },
+    {
+      "independent_tasks": 16,
+      "alpha": 0.0125,
+      "power": 0.0097582679,
+      "interpretation": "current holdout, four-primary-family rank-one threshold"
+    },
+    {
+      "independent_tasks": 168,
+      "alpha": 0.0166666667,
+      "power": 0.8006328452,
+      "interpretation": "approximate 80 percent threshold after three repository-level primary hypotheses"
+    },
+    {
+      "independent_tasks": 192,
+      "alpha": 0.0166666667,
+      "power": 0.8599430526,
+      "interpretation": "recommended target-behavior cohort after three repository-level primary hypotheses"
+    },
+    {
+      "independent_tasks": 214,
+      "alpha": 0.0166666667,
+      "power": 0.9013897148,
+      "interpretation": "approximate 90 percent threshold after three repository-level primary hypotheses"
+    }
+  ],
+  "current_design": {
+    "development_tasks_per_repository": 8,
+    "holdout_tasks_per_repository": 16,
+    "attempts_per_task_per_arm": 4,
+    "arms": 2,
+    "cells_per_repository": 192,
+    "campaign_cells": 576,
+    "conference_claim_eligible": false,
+    "reason": "There are only sixteen independent holdout task units per repository, no population sampling frame, and at least one Vercel primary family has four task units and a minimum Holm-adjusted exact-sign p-value of 0.25."
+  },
+  "recommended_design": {
+    "development_tasks_per_repository": 32,
+    "development_attempts_per_task_per_arm": 2,
+    "target_holdout_tasks_per_repository": 192,
+    "safety_control_tasks_per_repository": 64,
+    "holdout_attempts_per_task_per_arm": 4,
+    "arms": 2,
+    "development_cells_per_repository": 128,
+    "holdout_cells_per_repository": 2048,
+    "total_cells_per_repository": 2176,
+    "repositories": 3,
+    "campaign_cells": 6528,
+    "task_independence_requirement": "Each primary unit must have an independent issue, commit, package, or other provenance-cluster identity. Reused generators or source changes must be analyzed at their shared cluster and inflate the sample size by the prospective design effect.",
+    "approval_policy": "Every repository development Study and sealed holdout Study requires its own exact finite preview and approval; this design artifact authorizes no execution or spend."
+  },
+  "analysis_contract": {
+    "primary": "One preregistered composite endpoint per repository with Holm correction across the three repository-level hypotheses.",
+    "secondary": "Dimension-level effects are Holm-corrected within repository and reported only after the repository primary endpoint.",
+    "equivalence": "Two one-sided tests against the frozen [-0.10, 0.10] margin.",
+    "safety": "Zero-tolerance critical failures are operational gates; population noninferiority is a separate one-sided estimate.",
+    "sensitivity": "A mixed-effects model must represent task/provenance clusters and repeated attempts; it cannot treat attempts or templated variants as independent tasks.",
+    "stopping": "No interim efficacy stopping or outcome-dependent retries. Administrative stopping is limited to integrity, privacy, routing, cleanup, or immutable-budget failure."
+  },
+  "limitations": [
+    "The power values are prospective scenario calculations, not estimates from valid pilot outcomes.",
+    "Actual power depends on baseline completion, discordance, task heterogeneity, attempt correlation, and provenance clustering; a simulation over the frozen sampling frame is required before a larger holdout is approved.",
+    "Adding near-duplicate synthetic tasks cannot satisfy the independent-task requirement.",
+    "The current 576-cell design may produce descriptive locked-benchmark evidence but cannot support a conference-qualified population claim."
+  ]
+}

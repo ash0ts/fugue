@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "amendment_id": "anthropic-skill-creator-confirmatory-v2-measurement-qualification",
+  "status": "frozen_before_v2_preview",
+  "amendment_kind": "scorer_mutation_product_contract_and_claim_scope_restart",
+  "prior_study": {
+    "comparison_id": "anthropic-skill-creator-confirmatory-v1",
+    "comparison_spec_sha256": "63deb6e7c6f3f86236b631f5ff07767b41b66891bf52dd654b5ca389428feb5a",
+    "known_preview_digests": [
+      "0aa20a32a8aca8a4c8ab1a6788048c8f983b4640fd44cd74cbdce2532742108e",
+      "43aa6e06b432f6cbea8d0217ddd0cc057840884602f998706e9053ddece4f3f5",
+      "688f32ab684483a2e6ee5294f1637f5f7d138975dafbe14e5c1d2da42deafd98"
+    ],
+    "approval_digest": null,
+    "run_id": null,
+    "status": "superseded_before_valid_execution",
+    "behavioral_result_eligible": false,
+    "canonical_result_published": false
+  },
+  "diagnosis": {
+    "made_before_v2_preview_or_execution": true,
+    "outcome_dependent": false,
+    "v1_agent_outputs_observed": false,
+    "defects": [
+      "the V1 base qualification artifact changed only schema_version and therefore did not validate substantive scorer dimensions",
+      "raw upstream acceptance of empty and one-character compatibility values was not explicitly separated from task-level usefulness",
+      "the authored sixteen-task holdout has no community population sampling frame and is not adequately powered for a conference-qualified claim"
+    ],
+    "claim_effect": "V1 preview artifacts are preparation audit history only. They contribute no Agent rows, outcomes, priors, or selective coordinates to V2."
+  },
+  "measurement_revision": {
+    "deterministic_scorer": "confirmatory_scorer.py",
+    "deterministic_scorer_sha256": "c98fe2a020e8d96542a5611966a430d2828257f837bc565573e534b997005977",
+    "scorer_changed": false,
+    "mutation_validator": "validate_confirmatory_scorer_v2.py",
+    "mutation_validator_sha256": "3f0fe1722f1dbe5b7f0e0fe745413d8b0294cdff91149b75a3e615b66f9e3ae0",
+    "mutation_validation_receipt": "confirmatory-scorer-validation-v2.json",
+    "mutation_validation_receipt_sha256": "dfd712d34799eeb3fb70bdaad1cf726284e9f32c3ae0477732741f192157fc01",
+    "mutation_validation_receipt_digest": "d39b490814548cc2e569076d14026027b58d1a1b79c139e82ee8d43dc9c5553c",
+    "mutation_validation_policy": "Every canonical gold artifact must pass every dimension; every dimension must have at least eight host-only targeted negative mutations and zero targeted false accepts.",
+    "private_mutations_serialized": false,
+    "compatibility_product_contract": "compatibility-product-contract-v2.json",
+    "compatibility_product_contract_sha256": "467c542441b99d44cb8e4df69862275bb0bd478ef36a3c4492f152ce86d02dc6",
+    "product_policy": "Upstream parser acceptance is infrastructure behavior. A required task passes only when the field is nonempty, at most 500 characters, and covers every host-locked requirement group; mechanism evidence cannot override task correctness."
+  },
+  "claim_scope": {
+    "study_class": "measurement_development_descriptive",
+    "conference_claim_eligible": false,
+    "population_claim_eligible": false,
+    "allowed_claim": "A task- and revision-specific descriptive finding for the exact authored benchmark, Claude Code harness, Sonnet 5 route, and locked Harbor runtime.",
+    "forbidden_claims": [
+      "population improvement",
+      "community-wide Skill superiority",
+      "conference-qualified efficacy",
+      "universal Skill or repository ranking"
+    ]
+  },
+  "replacement_execution": {
+    "comparison_id": "anthropic-skill-creator-confirmatory-v2",
+    "comparison_spec_sha256": "25c53648f6ba640fc7257e661b9bdacae480a5113c11b511a195f868ac2b4f1e",
+    "research_id": "anthropic-skill-creator-confirmatory-v2",
+    "result_project": "wandb/fugue-anthropic-skill-creator-confirmatory-v2",
+    "source_lock_path": ".fugue/qualification/community-skill-confirmatory/anthropic-v2/source.lock.json",
+    "source_preparer": "prepare_confirmatory_v2.py",
+    "source_preparer_sha256": "a18c3f5ca1a89e45de0db59ffb6d4b9f8cd2f6efff50179711fdc8ad7a16f905",
+    "planned_cells": 192,
+    "evidence_checkpoint_cells": 2,
+    "full_terminal_cohort_required": true
+  },
+  "frozen_behavioral_inputs": {
+    "public_tasks_sha256": "0cd90f0214108bb0c49aa7b25c279eb980057a9ec1142ab46349ac8b272ec641",
+    "private_labels_sha256": "2297fe640c51aafa5d7fbd57b90baaab457f56c8f4482b178abc0c0998cfeede",
+    "repository_preregistration_sha256": "46fb86c8e9d5d4d1500d37a6e2b12eac54a3d7563549e0f77b877f70dd3efc42",
+    "qualification_fixture_generator_sha256": "953a041ea71175020bfd8465c68a17147f4a382b4601b8041fbeeed85d1056e2",
+    "host_only_task_family_lock_sha256": "0b804d2bc62d8f0435f97ff4ce932d2505315603d8fd85bfcbf10d8d0bfe51d2",
+    "skill_revision_lock_sha256": "dbfa00da719f66570dc2341b34815033a12bc18b89eeb4c297cc251f1040bb46",
+    "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+    "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+    "source_project": "wandb/fugue-anthropic-skill-creator-source-v1",
+    "model_route": "anthropic/claude-sonnet-5",
+    "harness": "claude-code",
+    "tasks": 24,
+    "development_tasks": 8,
+    "holdout_tasks": 16,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": false,
+    "holdout_membership": false,
+    "private_expected_values": false,
+    "treatments": false,
+    "model_or_harness": false,
+    "task_or_agent_limits": false,
+    "budget_ceiling": false,
+    "scheduling_seed": true,
+    "deterministic_scorer": false,
+    "scorer_qualification": true,
+    "compatibility_product_contract": true,
+    "claim_scope": true,
+    "execution_identity": true,
+    "result_destination": true,
+    "source_lock_location": true
+  },
+  "claim_boundary": "Only a complete V2 cohort with the bound product contract and passed mutation-validation receipt may support a descriptive finding for these locked tasks and exact revisions. V1 remains immutable preparation history and V2 is not population- or conference-claim eligible.",
+  "amendment_digest": "7959e83a85820b7bb22b764a9caa307779af4e551096d7ea454b0168f5c0f5e7"
+}

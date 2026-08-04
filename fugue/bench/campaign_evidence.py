@@ -791,6 +791,11 @@ _SAFE_PREDICTION_FIELDS = (
     "weave_agent_root_url",
     "weave_agent_root_evidence_kind",
     "weave_agent_root_is_native_call",
+    "weave_agent_evidence_receipt_call_id",
+    "weave_agent_evidence_receipt_ref",
+    "weave_agent_evidence_receipt_url",
+    "native_trajectory_status",
+    "conversation_correlation_status",
     "agent_cross_transport_edge",
     "weave_agent_bridge_cross_transport_edge",
     "weave_agent_receipt_supersession",
@@ -895,6 +900,37 @@ def safe_prediction_row(
         link_set = verified_trace_link_set(row)
         result["evidence_links"] = link_set["links"]
         result["evidence_link_failures"] = link_set["failures"]
+        receipt_link = next(
+            (
+                item
+                for item in link_set["links"]
+                if item.get("slot") == "agent_evidence_receipt"
+            ),
+            None,
+        )
+        if receipt_link is not None:
+            # Historical runtime rows used ``weave_agent_root_*`` for both a
+            # native Agent Call and the Weave receipt that correlates an OTel
+            # trajectory.  Public projections must not repeat that ambiguity.
+            for field_name in (
+                "weave_agent_root_call_id",
+                "weave_agent_root_ref",
+                "weave_agent_root_url",
+            ):
+                result.pop(field_name, None)
+            result.update(
+                {
+                    "weave_agent_evidence_receipt_call_id": receipt_link["call_id"],
+                    "weave_agent_evidence_receipt_ref": receipt_link["ref"],
+                    "weave_agent_evidence_receipt_url": receipt_link["uri"],
+                    "native_trajectory_status": receipt_link[
+                        "native_trajectory_status"
+                    ],
+                    "conversation_correlation_status": receipt_link[
+                        "conversation_correlation_status"
+                    ],
+                }
+            )
     return _json_value(redact_value(result, secrets=secrets))
 
 
@@ -969,14 +1005,6 @@ _TRACE_LINK_SLOTS = (
         "weave_evaluation_root_url",
         "evaluation_root_object_verified",
     ),
-    (
-        "agent_root",
-        "agent_root",
-        "weave_agent_root_call_id",
-        "weave_agent_root_ref",
-        "weave_agent_root_url",
-        "agent_graph_verified",
-    ),
 )
 
 
@@ -1021,17 +1049,6 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
         ):
             failures.append(f"does not verify the {slot} Weave link")
             continue
-        evidence_kind = None
-        if slot == "agent_root":
-            evidence_kind = _agent_evidence_kind(row)
-            evidence_failure = _agent_evidence_failure(
-                row,
-                evidence_kind=evidence_kind,
-                call_id=call_id,
-            )
-            if evidence_failure:
-                failures.append(evidence_failure)
-                continue
         links.append(
             {
                 "slot": slot,
@@ -1041,7 +1058,65 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
                 "call_id": call_id,
                 "uri": url,
                 "verification_status": "verified",
-                **({"evidence_kind": evidence_kind} if slot == "agent_root" else {}),
+            }
+        )
+    agent_call_id = str(
+        row.get("weave_agent_root_call_id")
+        or row.get("weave_agent_evidence_receipt_call_id")
+        or ""
+    )
+    agent_ref = str(
+        row.get("weave_agent_root_ref")
+        or row.get("weave_agent_evidence_receipt_ref")
+        or ""
+    )
+    agent_url = _safe_immutable_url(
+        row.get("weave_agent_root_url")
+        or row.get("weave_agent_evidence_receipt_url")
+    )
+    evidence_kind = _agent_evidence_kind(row)
+    evidence_failure = _agent_evidence_failure(
+        row,
+        evidence_kind=evidence_kind,
+        call_id=agent_call_id,
+    )
+    if (
+        row.get("agent_graph_verified") is not True
+        or not agent_call_id
+        or agent_call_id in otel_ids
+        or not _weave_call_ref_matches(agent_ref, project, agent_call_id)
+        or not _weave_call_url_matches(
+            agent_url,
+            project,
+            agent_call_id,
+            app_base_url,
+        )
+    ):
+        failures.append("does not verify the Agent evidence Weave link")
+    elif evidence_failure:
+        failures.append(evidence_failure)
+    else:
+        native_call = evidence_kind == "native_weave_call_v1"
+        links.append(
+            {
+                "slot": "agent_root" if native_call else "agent_evidence_receipt",
+                "system": "weave",
+                "kind": "agent_root" if native_call else "agent_evidence_receipt",
+                "ref": agent_ref,
+                "call_id": agent_call_id,
+                "uri": agent_url,
+                "verification_status": "verified",
+                "evidence_kind": evidence_kind,
+                "native_trajectory_status": (
+                    "native_weave_call" if native_call else "otel_correlated"
+                ),
+                "conversation_correlation_status": (
+                    "verified"
+                    if row.get("conversation_correlation_verified") is True
+                    else "unverified"
+                    if row.get("conversation_correlation_verified") is False
+                    else "not_recorded"
+                ),
             }
         )
     dataset_ref = str(
@@ -1070,7 +1145,21 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
                 "verification_status": "verified",
             }
         )
-    if len({str(item["slot"]) for item in links}) != 5:
+    semantic_slots = {
+        (
+            "agent_evidence"
+            if str(item["slot"]) in {"agent_root", "agent_evidence_receipt"}
+            else str(item["slot"])
+        )
+        for item in links
+    }
+    if semantic_slots != {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence",
+        "dataset",
+    }:
         failures.append("does not contain exactly five verified Weave link slots")
     return {
         "schema_version": 1,
@@ -1092,6 +1181,7 @@ def _agent_evidence_kind(row: Mapping[str, Any]) -> str:
         row.get("weave_agent_root_is_native_call") is False
         or row.get("agent_cross_transport_edge")
         or row.get("weave_agent_root_call_materialization_source")
+        or row.get("weave_agent_evidence_receipt_call_id")
     ):
         return "native_otel_cross_transport_receipt_v1"
     return "unclassified_legacy_agent_evidence_v1"
@@ -1106,6 +1196,8 @@ def _agent_evidence_failure(
     if evidence_kind == "native_weave_call_v1":
         if row.get("weave_agent_root_is_native_call") is not True:
             return "does not verify native Agent Call provenance"
+        if row.get("conversation_correlation_verified") is not True:
+            return "does not verify the Agent conversation correlation"
         return None
     if evidence_kind != "native_otel_cross_transport_receipt_v1":
         return "does not recognize the Agent evidence kind"
@@ -1127,6 +1219,8 @@ def _agent_evidence_failure(
         or str(edge.get("receipt_call_id") or "") != call_id
     ):
         return "does not verify the Agent receipt cross-transport edge"
+    if row.get("conversation_correlation_verified") is not True:
+        return "does not verify the Agent conversation correlation"
     return None
 
 

@@ -166,15 +166,23 @@ this one locked task. That narrow `unchanged` result does not retroactively
 repair V1, qualify a general Skill Creator upgrade claim, or provide a valid
 loop-engineering failure card.
 
-## Conference-grade confirmatory Study (V3)
+## Descriptive measurement-development Study (V2)
 
-`confirmatory-v1.yaml` is a new, preregistered V3 Study over the same exact
-source revisions. It contains eight development tasks and sixteen untouched
-holdouts, two arms, and four attempts per task: **192 governed cells**. Attempts
-are within-task replication; the task is the inference unit. The primary
-analysis is the candidate-minus-baseline effect on the holdout partition, with
-safety regressions, mechanism evidence, infrastructure, and the advisory judge
-reported separately.
+`confirmatory-v1.yaml` and its generated previews remain immutable preparation
+history; no V1 Agent cell ran and no behavioral result exists. Its base fixture
+changed only `schema_version`, so it did not prove that the substantive scorer
+dimensions rejected their intended defects. `confirmatory-v2.yaml` is the fresh
+Study identity. It preserves the exact tasks, private truth, scorer, Skill
+revisions, model, harness, limits, scheduling, and 192-cell matrix while binding
+dimension-targeted mutation qualification and an explicit compatibility product
+contract.
+
+This is measurement-development evidence for the exact authored benchmark, not
+a population or conference-qualified claim. It contains eight development
+tasks and sixteen untouched holdouts, two arms, and four attempts per task:
+**192 governed cells**. Attempts are within-task replication; the task is the
+inference unit. Candidate-minus-baseline effects, safety regressions, mechanism
+evidence, infrastructure, and the advisory judge are reported separately.
 
 The Agent-visible task identities, prompts, and mounted archives do not name a
 frontmatter field or disclose boundary answers. The answer-bearing family
@@ -185,42 +193,45 @@ the returned frontmatter, applies the canonical schema and boundary rules,
 checks preservation hashes and allowed paths, and ignores self-reported pass
 booleans.
 
-Before a preview, preparation must run the exact upstream zero-model matrix for
+Before a V2 preview, preparation must run the exact upstream zero-model matrix for
 frontmatter absence, empty and bounded scalar values, over-bound and non-string
 values, unknown fields, name lengths 40/41/64/65, and initializer help. It also
 builds one deterministic, read-only archive per task from checked-in inputs:
 
 ```bash
 uv run python \
-  examples/comparisons/anthropic-skill-creator-upgrade/prepare_confirmatory.py \
+  examples/comparisons/anthropic-skill-creator-upgrade/prepare_confirmatory_v2.py \
   --anthropic-repo /PATH/TO/anthropics-skills
 
 uv run python \
   examples/comparisons/community-skill-upgrades/prepare_local_source_lock.py \
-  examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v1.yaml \
-  --extra .fugue/comparison-resources/anthropic-skill-creator-upgrade/confirmatory-preparation.lock.json \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-preregistration.json \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-task-family-lock.json \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/qualification_fixtures.py \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/prepare_confirmatory.py \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/prepare_sources.py \
-  --extra examples/comparisons/anthropic-skill-creator-upgrade/zero_model_conformance.py \
-  --output .fugue/qualification/community-skill-confirmatory/anthropic/source.lock.json
+  examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v2.yaml \
+  --output .fugue/qualification/community-skill-confirmatory/anthropic-v2/source.lock.json
 ```
 
-The V3 source topology declares
+The V2 spec declares every preparation receipt, validator, fixture generator,
+source preparer, task-family lock, Skill revision lock, analysis input, and
+scientific-report input as an approval-bound `qualification_input`. The source
+lock collector resolves those declarations directly and fails before preview if
+any file is absent or drifted; no README-only supplemental file list is
+authoritative.
+
+The V2 source topology declares
 `wandb/fugue-anthropic-skill-creator-source-v1` for the public task/source-lock
-Dataset and `wandb/fugue-anthropic-skill-creator-confirmatory-v1` for results.
+Dataset and `wandb/fugue-anthropic-skill-creator-confirmatory-v2` for results.
 Cells use the digest-locked mounted archives as their actual inputs; they do
 not query the hosted source project. Result publication must never write into
-the source project.
+the source project. `prepare_confirmatory_v2.py` recomputes the host-only
+mutation suite, requires the checked-in receipt to match byte-for-byte, verifies
+the product contract, and binds both into a V2 preparation lock. Neither the
+receipt nor the lock serializes private expected values or mutated artifacts.
 
 Use the normal governed flow with a fresh preview and approval. The exact
 finite ceiling is `$1640` for 192 Agent calls plus advisory judge reserve; it
 is an approval identity, not a spending target:
 
 ```bash
-SPEC=examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v1.yaml
+SPEC=examples/comparisons/anthropic-skill-creator-upgrade/confirmatory-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" \
@@ -237,4 +248,6 @@ exact result project, five Weave links, candidate/runtime identity,
 private-label scan, cost, and Harbor cleanup reconcile. The same-family Sonnet
 judge remains descriptive until two independent reviewers adjudicate the frozen
 calibration; it cannot satisfy or override a deterministic gate. The read-only
-Study Console profile is `study-console-confirmatory-v1.yaml` on port `18101`.
+Study Console profile is `study-console-confirmatory-v2.yaml` on port `18105`.
+Its title and objective keep the non-conference descriptive claim boundary
+visible alongside every result.

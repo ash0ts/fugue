@@ -52,8 +52,9 @@ independently sampled tasks.
 
 ### Confirmatory cost and approval boundary
 
-The deferred confirmatory limits are frozen in
-`confirmatory-budget-policy-v1.json`. They are intentionally much larger than
+The current descriptive measurement-development limits are frozen in
+`confirmatory-budget-policy-v2.json` for exact Superpowers V6, Anthropic V2,
+and Vercel V2 specs. They are intentionally much larger than
 the original canary budget: each Study reserves 192 × ($8.40 Agent + $0.10
 advisory judge) = **$1,632**. The independent hard caps are $1,700 for
 Superpowers and $1,640 each for Anthropic and Vercel, for 576 cells, $4,896 of
@@ -61,11 +62,13 @@ estimated reserve, and at most $4,980 across three separately approved runs.
 
 The checked-in policy is not approval, and no confirmatory execution is
 currently authorized. Each Study would require a fresh receipt for
-its exact preview and cap. The historical `campaign-manifest.json` and
+its exact preview and cap. The V1 budget policy, historical
+`campaign-manifest.json`, and
 `budget-ledger.json` describe the original four-cell canaries and their $110
 ceiling only; neither those files nor any approval derived from them authorizes
-one of these 192-cell confirmatory Studies. The completed judge diagnostic is
-an advisory prerequisite and contributes no new cells or spend to this policy.
+one of these 192-cell confirmatory Studies. The current judge diagnostic still
+awaits independent human review and remains advisory; its exact V2 artifact is
+bound without contributing new cells or spend to this policy.
 
 The governed comparison contract is intentionally two-arm. V1 estimates the
 exact candidate-minus-baseline revision effect. It does not estimate absolute
@@ -174,7 +177,8 @@ revisions and Study destinations, the 36/12 balanced calibration split, the
 non-approved $110 canary ceiling, and the claim-free scientific report
 template. It does not authorize or price the confirmatory cohort. The focused
 confirmatory contract test independently reconciles
-`confirmatory-budget-policy-v1.json` with all three active specs. Validation
+`confirmatory-budget-policy-v2.json` with all three active specs while retaining
+the V1 policy as immutable audit history. Validation
 also hashes the exact calibration case bytes and rejects drift before emitting
 judge input or making a provider request. It exits successfully when the
 fixture set is internally valid while reporting `pending_human_review`; the
@@ -299,7 +303,8 @@ the exact checked-in spec, for example:
 uv run python \
   examples/comparisons/community-skill-upgrades/generate_scientific_report.py \
   --result .fugue/results/comparisons/PREVIEW_DIGEST/result.json \
-  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v5.yaml \
+  --spec examples/comparisons/superpowers-writing-plans-upgrade/confirmatory-v6.yaml \
+  --confirmatory-analysis /tmp/STUDY.confirmatory-analysis.json \
   --audit-selection /tmp/STUDY.trace-audit-selection.json \
   --audit-review /tmp/STUDY.trace-audit-completed.json \
   --output .fugue/results/comparisons/PREVIEW_DIGEST/scientific-report.json

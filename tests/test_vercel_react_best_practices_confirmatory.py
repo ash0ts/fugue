@@ -14,6 +14,7 @@ import yaml
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
+    _judge_execution_calibration_issue,
     _run_custom_verifier,
     check_comparison,
     load_comparison,
@@ -21,12 +22,20 @@ from fugue.bench.comparison import (
 
 EXAMPLE = Path("examples/comparisons/vercel-react-best-practices-upgrade")
 SPEC = EXAMPLE / "confirmatory-v1.yaml"
+SPEC_V2 = EXAMPLE / "confirmatory-v2.yaml"
 TASKS = EXAMPLE / "confirmatory-tasks.jsonl"
+TASKS_V2 = EXAMPLE / "confirmatory-tasks-v2.jsonl"
 PRIVATE = EXAMPLE / "confirmatory-private-labels.jsonl"
 LOCK = EXAMPLE / "confirmatory-fixtures.lock.json"
 PREREGISTRATION = EXAMPLE / "confirmatory-preregistration.json"
 CATALOG = EXAMPLE / "conference_fixture_catalog.py"
 SCORER = EXAMPLE / "vercel_confirmatory_scorer.py"
+SCORER_V2 = EXAMPLE / "vercel_confirmatory_scorer_v2.py"
+MECHANISM_SCORER_V2 = EXAMPLE / "vercel_mechanism_scorer_v2.py"
+PUBLIC_BEHAVIORAL_SCORER_V1 = (
+    EXAMPLE / "vercel_public_behavioral_scorer_v1.py"
+)
+AMENDMENT_V2 = EXAMPLE / "confirmatory-v2-amendment.json"
 HOST_VERIFIER = EXAMPLE / "host_node_verifier.cjs"
 PREPARE = EXAMPLE / "prepare_confirmatory_fixtures.py"
 NODE_IMAGE = "node:22-bookworm-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf"
@@ -86,6 +95,225 @@ def _fixtures() -> tuple[dict, ...]:
 
 def _scorer():
     return runpy.run_path(SCORER.as_posix())["score"]
+
+
+def _mechanism_scorer_v2():
+    return runpy.run_path(MECHANISM_SCORER_V2.as_posix())["score"]
+
+
+def _public_behavioral_scorer_v1():
+    return runpy.run_path(PUBLIC_BEHAVIORAL_SCORER_V1.as_posix())["score"]
+
+
+@pytest.mark.parametrize(
+    ("tag", "rule"),
+    (
+        ("server-action-security", "rules/server-auth-actions.md"),
+        ("rsc-serialization", "rules/server-dedup-props.md"),
+        ("dom-batching-control", "rules/js-batch-dom-css.md"),
+        ("large-array-control", "rules/js-min-max-loop.md"),
+        ("hook-timing-control", "rules/advanced-use-latest.md"),
+        ("event-signature-control", "rules/advanced-event-handler-refs.md"),
+    ),
+)
+def test_v2_mechanism_scorer_requires_the_task_relevant_rule(
+    tag: str, rule: str
+) -> None:
+    score = _mechanism_scorer_v2()
+    task = {"id": f"task-{tag}", "tags": [tag]}
+
+    missing = score(task, {}, {"opened_paths": [], "tool_calls": []})
+    observed = score(
+        task,
+        {},
+        {
+            "opened_paths": [
+                "/opt/skills/react-best-practices/SKILL.md",
+                f"/opt/skills/react-best-practices/{rule}",
+            ],
+            "tool_calls": [],
+        },
+    )
+
+    assert missing == {
+        "skill_material_opened": False,
+        "task_relevant_rule_opened": False,
+    }
+    assert observed == {
+        "skill_material_opened": True,
+        "task_relevant_rule_opened": True,
+    }
+
+
+def test_v2_mechanism_scorer_does_not_treat_generic_assignment_as_rule_opening() -> None:
+    score = _mechanism_scorer_v2()
+    result = score(
+        {"id": "target", "tags": ["server-action-security"]},
+        {},
+        {
+            "opened_paths": ["/opt/skills/react-best-practices/SKILL.md"],
+            "tool_calls": [],
+            "skills_assigned": ["vercel-react-best-practices-after"],
+        },
+    )
+
+    assert result["skill_material_opened"] is True
+    assert result["task_relevant_rule_opened"] is False
+
+
+def test_v2_mechanism_scorer_does_not_treat_a_tool_argument_as_an_open() -> None:
+    score = _mechanism_scorer_v2()
+    result = score(
+        {"id": "target", "tags": ["server-action-security"]},
+        {},
+        {
+            "opened_paths": [],
+            "tool_calls": [
+                {
+                    "name": "search",
+                    "arguments": {
+                        "query": "rules/server-auth-actions.md",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert result == {
+        "skill_material_opened": False,
+        "task_relevant_rule_opened": False,
+    }
+
+
+def test_v2_public_behavioral_scorer_requires_the_verified_host_receipt() -> None:
+    scorer = _public_behavioral_scorer_v1()
+    receipt = _host_receipt(True, "target")
+    receipt["evaluator_id"] = "vercel-public-behavioral"
+
+    assert scorer(
+        {"id": "target"}, {}, {"host_verifier_receipt": receipt}
+    ) == {"public_regression_test_success": True}
+
+    failed = copy.deepcopy(receipt)
+    failed.update(
+        status="failed",
+        failure_kind="public_test_failed",
+        exit_code=1,
+        pass_count=0,
+        fail_count=1,
+    )
+    assert scorer(
+        {"id": "target"}, {}, {"host_verifier_receipt": failed}
+    ) == {"public_regression_test_success": False}
+
+
+def test_v2_spec_separates_outcome_safety_and_mechanism_dimensions() -> None:
+    spec = load_comparison(SPEC_V2, repo_root=Path.cwd())
+    evaluators = {item.id: item for item in spec.evaluators}
+
+    assert spec.id == "vercel-react-best-practices-confirmatory-v2"
+    assert spec.execution.research_id == spec.id
+    assert spec.execution.evidence_project == (
+        "wandb/fugue-vercel-react-best-practices-confirmatory-v2"
+    )
+    assert spec.execution.source_lock.endswith("vercel-v2/source.lock.json")
+    assert spec.execution.scheduling_seed == (
+        "community-skill-upgrade-measurement-development-v2"
+    )
+    assert spec.execution.qualification_inputs[
+        "confirmatory_budget_policy_sha256"
+    ].endswith("confirmatory-budget-policy-v2.json")
+    assert spec.execution.qualification_inputs[
+        "scientific_report_generator_sha256"
+    ].endswith("generate_scientific_report.py")
+    assert spec.execution.qualification_inputs[
+        "scientific_report_template_sha256"
+    ].endswith("scientific-report-template-v3.json")
+    assert set(evaluators) == {
+        "vercel-confirmatory",
+        "vercel-public-behavioral",
+        "vercel-mechanism",
+        "community-usefulness",
+    }
+    assert evaluators["vercel-public-behavioral"].dimension_roles == {
+        "public_regression_test_success": "outcome"
+    }
+    assert set(evaluators["vercel-mechanism"].dimension_roles.values()) == {
+        "mechanism"
+    }
+    assert set(evaluators["vercel-confirmatory"].dimension_roles.values()) == {
+        "outcome",
+        "safety_gate",
+    }
+    assert evaluators["vercel-confirmatory"].verifier is None
+
+
+def test_v2_task_identity_makes_the_public_behavioral_outcome_critical() -> None:
+    historical = _jsonl(TASKS)
+    current = _jsonl(TASKS_V2)
+
+    assert tuple(item["id"] for item in current) == EXPECTED_IDS
+    assert len(current) == len(historical) == 24
+    for before, after in zip(historical, current, strict=True):
+        expected = copy.deepcopy(before)
+        expected["critical_dimensions"] = [
+            (
+                "vercel-public-behavioral.public_regression_test_success"
+                if value == "vercel-confirmatory.verification"
+                else value
+            )
+            for value in expected["critical_dimensions"]
+        ]
+        expected["tags"].append("measurement-development-v2")
+        assert after == expected
+        assert (
+            "vercel-public-behavioral.public_regression_test_success"
+            in after["critical_dimensions"]
+        )
+
+
+def test_v2_public_behavior_is_scored_once_and_named_honestly() -> None:
+    source = SCORER_V2.read_text(encoding="utf-8")
+    public_source = PUBLIC_BEHAVIORAL_SCORER_V1.read_text(encoding="utf-8")
+    score = runpy.run_path(SCORER_V2.as_posix())["score"]
+    fixture = _fixtures()[0]
+    result = score(
+        {"id": fixture["id"]},
+        _output(fixture, "gold", 0),
+        {"expected": _expected(fixture)},
+    )
+
+    assert set(result) == DIMENSIONS - {"verification"}
+    assert "host_verifier_receipt" not in source
+    assert "hidden_behavioral" not in public_source
+    assert 'evaluator_id") == "vercel-public-behavioral"' in public_source
+
+
+def test_v2_shared_judge_rubric_is_compatible_but_still_advisory() -> None:
+    spec = load_comparison(SPEC_V2, repo_root=Path.cwd())
+    judge = next(item for item in spec.evaluators if item.type == "llm_judge")
+
+    assert judge.required is False
+    assert (
+        _judge_execution_calibration_issue(
+            judge,
+            repo_root=Path.cwd(),
+            approved_inputs=None,
+        )
+        is None
+    )
+
+
+def test_v2_amendment_digest_and_descriptive_claim_boundary_are_frozen() -> None:
+    amendment = json.loads(AMENDMENT_V2.read_text(encoding="utf-8"))
+    supplied = amendment.pop("amendment_digest")
+
+    assert supplied == _stable_digest(amendment)
+    assert amendment["diagnosis"]["made_before_v2_execution"] is True
+    assert amendment["diagnosis"]["outcome_dependent"] is False
+    assert "descriptive measurement-development" in amendment["repairs"][
+        "claim_scope"
+    ]
 
 
 def _expected(fixture: dict) -> dict:

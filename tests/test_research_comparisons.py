@@ -1393,6 +1393,9 @@ def _direct_attempt(
             f"weave:///wandb/projection-test/call/{call}-agent"
         ),
         "weave_agent_url": f"{base}/calls/{call}-agent",
+        "weave_agent_root_evidence_kind": "native_weave_call_v1",
+        "weave_agent_root_is_native_call": True,
+        "conversation_correlation_verified": True,
         "trace_link_status": "linked",
         "agent_graph_verified": True,
         "otel_root_span_id": f"otel-{call}",

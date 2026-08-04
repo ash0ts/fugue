@@ -1,0 +1,236 @@
+{
+  "schema_version": 2,
+  "id": "community-skill-upgrade-measurement-development-v2",
+  "title": "Repaired descriptive public Skill revision measurement studies",
+  "status": "frozen_protocol_pending_exact_repaired_previews",
+  "claim_role": "measurement_development_descriptive",
+  "conference_claim_eligible": false,
+  "preregistration": {
+    "path": "conference-preregistration-v2.json",
+    "sha256": "50e1fa2a24fc5be8d33e3ebc225c90542800f670e837e5c318963abf01fe2e78",
+    "id": "community-skill-upgrade-measurement-development-v2"
+  },
+  "prospective_power_design": {
+    "path": "prospective-power-design-v1.json",
+    "sha256": "947d76fd583c90632e0159a565e14714882d432290331e712066eb74bf1cc2c8",
+    "id": "community-skill-upgrade-prospective-power-design-v1",
+    "status": "design_diagnostic_not_execution_approval"
+  },
+  "analysis_profile": {
+    "path": "confirmatory-analysis-profiles-v2.json",
+    "sha256": "cc574e78795055726be3cfe100e9f2f852b3b66bc479f33593960c4216c112f6",
+    "id": "community-skill-upgrade-analysis-profiles-v2"
+  },
+  "historical_v1_audit": {
+    "manifest_path": "conference-campaign-manifest.json",
+    "manifest_sha256": "b4bde568c569cf736dd0ac7afeae0a6a054d0a8bfb6184315271a44b23467a35",
+    "preregistration_path": "conference-preregistration.json",
+    "preregistration_sha256": "f339962b2f24cf695a1efddc840ecd9161e0689060ce2e0ea418161b37ad45ec",
+    "mutation_allowed": false
+  },
+  "budget_policy": {
+    "path": "confirmatory-budget-policy-v2.json",
+    "sha256": "2b3d6296f34a981dce49ccd354add95f17f268b69861fcab306694e129bdc3a5",
+    "id": "community-skill-upgrade-measurement-development-budget-policy-v2",
+    "status": "limits_only_not_approval",
+    "claim_effect": "These finite limits govern only the three exact descriptive V2 campaign Studies. The policy authorizes no model call, preview approval, conference claim, powered holdout, or campaign-wide spend."
+  },
+  "execution_order": [
+    "superpowers-writing-plans-confirmatory-v6",
+    "anthropic-skill-creator-confirmatory-v2",
+    "vercel-react-best-practices-confirmatory-v2"
+  ],
+  "final_four": [
+    {
+      "id": "superpowers-writing-plans-confirmatory-v6",
+      "kind": "governed_comparison",
+      "study_class": "measurement_development_descriptive",
+      "conference_claim_eligible": false,
+      "spec": "../superpowers-writing-plans-upgrade/confirmatory-v6.yaml",
+      "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v6",
+      "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+      "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_new_preview",
+      "preregistration": [
+        {
+          "role": "campaign_protocol",
+          "path": "conference-preregistration-v2.json",
+          "sha256": "50e1fa2a24fc5be8d33e3ebc225c90542800f670e837e5c318963abf01fe2e78",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-measurement-development-v2",
+          "applies_to": "superpowers-writing-plans-confirmatory-v6"
+        },
+        {
+          "role": "repository_protocol",
+          "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+          "sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7",
+          "identity_field": "preregistration_id",
+          "identity": "superpowers-writing-plans-confirmatory-v1",
+          "applies_to": "superpowers-writing-plans-confirmatory-v6"
+        },
+        {
+          "role": "prospective_power_design",
+          "path": "prospective-power-design-v1.json",
+          "sha256": "947d76fd583c90632e0159a565e14714882d432290331e712066eb74bf1cc2c8",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-prospective-power-design-v1",
+          "applies_to": "superpowers-writing-plans-confirmatory-v6"
+        }
+      ],
+      "amendment": {
+        "path": "../superpowers-writing-plans-upgrade/preregistration-confirmatory-v6-amendment.json",
+        "sha256": "24ceacb1fffd4f9485028ba345b97a3fbf7c86559d9ab196e119aa9ac75d41c4",
+        "amendment_digest": "efca6870ff05e40368b93396fd5816667f1f1c35c51ea41b199da2d31a99bff3"
+      },
+      "supersedes": [
+        "superpowers-writing-plans-confirmatory-v1",
+        "superpowers-writing-plans-confirmatory-v2",
+        "superpowers-writing-plans-confirmatory-v3",
+        "superpowers-writing-plans-confirmatory-v4",
+        "superpowers-writing-plans-confirmatory-v5"
+      ]
+    },
+    {
+      "id": "anthropic-skill-creator-confirmatory-v2",
+      "kind": "governed_comparison",
+      "study_class": "measurement_development_descriptive",
+      "conference_claim_eligible": false,
+      "spec": "../anthropic-skill-creator-upgrade/confirmatory-v2.yaml",
+      "evidence_project": "wandb/fugue-anthropic-skill-creator-confirmatory-v2",
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_new_preview",
+      "preregistration": [
+        {
+          "role": "campaign_protocol",
+          "path": "conference-preregistration-v2.json",
+          "sha256": "50e1fa2a24fc5be8d33e3ebc225c90542800f670e837e5c318963abf01fe2e78",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-measurement-development-v2",
+          "applies_to": "anthropic-skill-creator-confirmatory-v2"
+        },
+        {
+          "role": "repository_protocol",
+          "path": "../anthropic-skill-creator-upgrade/confirmatory-preregistration.json",
+          "sha256": "46fb86c8e9d5d4d1500d37a6e2b12eac54a3d7563549e0f77b877f70dd3efc42",
+          "identity_field": "id",
+          "identity": "anthropic-skill-creator-confirmatory-v1",
+          "applies_to": "anthropic-skill-creator-confirmatory-v2"
+        },
+        {
+          "role": "prospective_power_design",
+          "path": "prospective-power-design-v1.json",
+          "sha256": "947d76fd583c90632e0159a565e14714882d432290331e712066eb74bf1cc2c8",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-prospective-power-design-v1",
+          "applies_to": "anthropic-skill-creator-confirmatory-v2"
+        }
+      ],
+      "amendment": {
+        "path": "../anthropic-skill-creator-upgrade/confirmatory-v2-amendment.json",
+        "sha256": "12168a6c4384aaf888a5dda6dc18183526e428bf79dda4b35ce2ce56f37d0311",
+        "amendment_digest": "7959e83a85820b7bb22b764a9caa307779af4e551096d7ea454b0168f5c0f5e7"
+      },
+      "supersedes": ["anthropic-skill-creator-confirmatory-v1"]
+    },
+    {
+      "id": "vercel-react-best-practices-confirmatory-v2",
+      "kind": "governed_comparison",
+      "study_class": "measurement_development_descriptive",
+      "conference_claim_eligible": false,
+      "spec": "../vercel-react-best-practices-upgrade/confirmatory-v2.yaml",
+      "evidence_project": "wandb/fugue-vercel-react-best-practices-confirmatory-v2",
+      "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+      "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+      "tasks": 24,
+      "attempts": 4,
+      "cells": 192,
+      "status": "pending_new_preview",
+      "preregistration": [
+        {
+          "role": "campaign_protocol",
+          "path": "conference-preregistration-v2.json",
+          "sha256": "50e1fa2a24fc5be8d33e3ebc225c90542800f670e837e5c318963abf01fe2e78",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-measurement-development-v2",
+          "applies_to": "vercel-react-best-practices-confirmatory-v2"
+        },
+        {
+          "role": "repository_protocol",
+          "path": "../vercel-react-best-practices-upgrade/confirmatory-preregistration.json",
+          "sha256": "2893b25932acb5c3d5c742cbce8efe7b89802181fdb2315b5c912c884df30254",
+          "identity_field": "id",
+          "identity": "vercel-react-best-practices-confirmatory-v1",
+          "applies_to": "vercel-react-best-practices-confirmatory-v2"
+        },
+        {
+          "role": "prospective_power_design",
+          "path": "prospective-power-design-v1.json",
+          "sha256": "947d76fd583c90632e0159a565e14714882d432290331e712066eb74bf1cc2c8",
+          "identity_field": "id",
+          "identity": "community-skill-upgrade-prospective-power-design-v1",
+          "applies_to": "vercel-react-best-practices-confirmatory-v2"
+        }
+      ],
+      "amendment": {
+        "path": "../vercel-react-best-practices-upgrade/confirmatory-v2-amendment.json",
+        "sha256": "d5fcef1b4349d7c1a72b3c9493c52982bd528c4c0c21ef020bb6e135f4ef0d6a",
+        "amendment_digest": "32187a99acbc3c191c25dc80cec2a90e78b116b99276eb89c3d0df3d48ac38e5"
+      },
+      "supersedes": ["vercel-react-best-practices-confirmatory-v1"]
+    }
+  ],
+  "reserved_powered_studies": [
+    {
+      "repository": "superpowers-writing-plans",
+      "development_study_id": "superpowers-writing-plans-conference-development-v1",
+      "holdout_study_id": "superpowers-writing-plans-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "fb253e9a738f16dccb4ec540483cc656ac55282b020fce657621ebddba4fa6f6"},
+        "schema": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "9849a60b0dfde7575cd0ca79d5ee3ee883e4aa1d9ffd0eab40cc3dae67b76bdd"},
+        "validator": {"path": "../superpowers-writing-plans-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "db97b97b40a6ec208bb1a7ddc3272c7b9264553e352c948eab3eee11e6f847c6"},
+        "blocker": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "70a69d08a1733906f7db4109f00314235a47b807a0c7d363477192de13bcefad", "eligible_sources": 0, "required_sources": 288}
+      }
+    },
+    {
+      "repository": "anthropic-skill-creator",
+      "development_study_id": "anthropic-skill-creator-conference-development-v1",
+      "holdout_study_id": "anthropic-skill-creator-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "3b6fe7d34c98357abba2793004df6b6775da607697dff91c3d86e7c841e899e3"},
+        "schema": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "0e6dec485175cc4844fae04f7ac3b95027da0e4d41fc977e50e8fae789460218"},
+        "validator": {"path": "../anthropic-skill-creator-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "3eb41f2c9ed26f306242ea028df758b0bf398e3d76949ab7d7d5e48f0a026bc5"},
+        "blocker": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "b1682ac10d9101f42e6ca1c54973d41ee03c5498dba145a16896facc8b074192", "eligible_sources": 0, "required_sources": 288}
+      }
+    },
+    {
+      "repository": "vercel-react-best-practices",
+      "development_study_id": "vercel-react-best-practices-conference-development-v1",
+      "holdout_study_id": "vercel-react-best-practices-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "f057f964bac2aba0f28a42d487912e27345e99e13c166053c39117bf2608aeb3"},
+        "schema": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "5d745bb3f5b07c4be1ccaf99b44f20262ca410a5482b9ca220c306698b433761"},
+        "validator": {"path": "../vercel-react-best-practices-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "2968b7dadf4110b52eee75d296c2f6c8a56f526a4fa512220a646b5a03ddd9cc"},
+        "blocker": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "5d156f71965932b0bf7c27a1668ea479278914925251f1e7122c0c9ea18488f4", "eligible_sources": 0, "required_sources": 288}
+      }
+    }
+  ],
+  "execution": {
+    "backend": "local_docker_harbor",
+    "harness": "claude-code",
+    "model": "anthropic/claude-sonnet-5",
+    "approval_required": true,
+    "preparation_required": true,
+    "finite_per_preview_ceiling_required": true,
+    "power_design_authorizes_execution_or_spend": false
+  }
+}

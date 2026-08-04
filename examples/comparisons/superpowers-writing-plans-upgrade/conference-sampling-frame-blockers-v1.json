@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "blocked_missing_reviewed_public_sampling_frame",
+  "reserved_studies": {
+    "development": "superpowers-writing-plans-conference-development-v1",
+    "holdout": "superpowers-writing-plans-conference-holdout-v1"
+  },
+  "required_independent_repository_clusters": {
+    "development": 32,
+    "target_holdout": 192,
+    "safety_control": 64,
+    "total": 288
+  },
+  "eligible_reviewed_sources_present": 0,
+  "exact_missing_sources": {
+    "development": 32,
+    "target_holdout": 192,
+    "safety_control": 64,
+    "total": 288
+  },
+  "known_historical_source": {
+    "repository": "https://github.com/ash0ts/fugue",
+    "commit": "faa60280841bad8c1a301bd14006d486a86dde5e",
+    "tree": "b301da496caa8894534c29c43df6b59d60815a57",
+    "eligibility": "not_eligible_for_powered_frame",
+    "reasons": [
+      "It is one repository cluster, not an independently sampled population.",
+      "Its handcrafted briefs and expected contracts were used in prior Superpowers measurement development.",
+      "It was not selected from a frozen public-record population using the prospective protocol."
+    ]
+  },
+  "missing_bundle_inputs": [
+    "A frozen population snapshot containing at least 288 eligible, unique canonical GitHub repositories and public maintenance records.",
+    "A query receipt, eligibility-decision ledger, unpredictable selection seed, and deterministic selection receipt created before task authoring.",
+    "Exact remote commit/tree, license, source archive, source manifest, and public-record snapshot receipts for every selected repository.",
+    "A treatment-blind public task and separate mode-0600 host-only label for every selected repository.",
+    "A prospective power simulation over the completed frame and an independently reviewed judge calibration/validation packet."
+  ],
+  "not_generated": [
+    "superpowers-writing-plans-conference-development-v1 comparison spec",
+    "superpowers-writing-plans-conference-holdout-v1 comparison spec",
+    "public task manifests",
+    "host-only private-label manifests",
+    "source locks and task images",
+    "preview or approval digests"
+  ],
+  "scientific_reason": "Generating near-duplicate briefs from the existing Fugue tree would create pseudo-replication. Four Agent attempts per task measure repeatability but cannot substitute for independent repository clusters.",
+  "next_action": "Acquire and review the public population in trusted preparation, freeze the seed and selection order, author treatment-blind tasks, materialize immutable archives, then require validate_conference_sampling_frame_v1.py to emit status=ready before creating either Study spec."
+}

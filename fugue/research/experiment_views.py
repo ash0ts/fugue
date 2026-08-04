@@ -1356,18 +1356,25 @@ def build_comparison_evaluation_view(
             observed_link_kinds = {
                 str(item.get("kind") or "") for item in attempt_links
             }
-            required_link_kinds = {
+            required_non_agent_link_kinds = {
                 "evaluation_root",
                 "prediction_and_score",
                 "prediction",
-                "agent_root",
                 "dataset",
             }
+            agent_link_kinds = {
+                "agent_root",
+                "agent_evidence_receipt",
+                "agent_evidence",
+            } & observed_link_kinds
             evidence_status = str(
                 attempt_view.get("evidence_status")
                 or (
                     "reconciled"
-                    if required_link_kinds <= observed_link_kinds
+                    if (
+                        required_non_agent_link_kinds <= observed_link_kinds
+                        and len(agent_link_kinds) == 1
+                    )
                     else "missing"
                 )
             )
@@ -2267,6 +2274,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "scores",
         "evidence_links",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2282,16 +2290,26 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
             value.get("evidence_links"), "paired_attempt.evidence_links"
         )
     )
-    expected_kinds = {
+    required_non_agent_kinds = {
         "evaluation_root",
         "prediction_and_score",
         "prediction",
-        "agent_root",
         "dataset",
     }
-    if len(links) != 5 or {str(item["kind"]) for item in links} != expected_kinds:
+    observed_kinds = {str(item["kind"]) for item in links}
+    agent_kinds = {
+        "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
+    } & observed_kinds
+    if (
+        len(links) != 5
+        or not required_non_agent_kinds <= observed_kinds
+        or len(agent_kinds) != 1
+    ):
         raise ValueError(
-            "paired_attempt.evidence_links must contain exactly five unique slots"
+            "paired_attempt.evidence_links must contain four fixed slots and "
+            "one typed Agent evidence slot"
         )
     infrastructure = dict(_mapping_or_empty(value.get("infrastructure")))
     legacy_label_boundary = infrastructure.pop("private_label_boundary_verified", None)
@@ -2351,6 +2369,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
     for field_name in (
         "prediction_id",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2387,6 +2406,17 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
     }
     if judge_reviews:
         result["judge_reviews"] = judge_reviews
+    agent_kind = next(iter(agent_kinds))
+    if (
+        agent_kind == "agent_evidence_receipt"
+        and result.get("weave_agent_root_call_id")
+    ):
+        raise ValueError("Agent evidence receipt cannot be labelled as an Agent root")
+    if (
+        agent_kind == "agent_evidence_receipt"
+        and not result.get("weave_agent_evidence_call_id")
+    ):
+        raise ValueError("Agent evidence receipt requires its neutral Call identity")
     return result
 
 
@@ -2551,7 +2581,17 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     value = _mapping(raw, "paired_attempt.evidence_link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "paired_attempt.evidence_link",
     )
     kind = _text(value.get("kind"), "attempt evidence kind", 100)
@@ -2560,6 +2600,8 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError("attempt evidence kind is unsupported")
@@ -2573,11 +2615,31 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2000)
     url = _optional_text(value.get("url"), "attempt evidence url", 2000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"), "attempt evidence kind", 100
+    )
+    native_trajectory_status = _optional_text(
+        value.get("native_trajectory_status"),
+        "native trajectory status",
+        100,
+    )
+    conversation_correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "conversation correlation status",
+        100,
+    )
     if status == "resolved":
         if not ref or not url or not url.startswith("https://"):
             raise ValueError("resolved attempt evidence requires ref and HTTPS url")
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
+    _validate_agent_evidence_link_metadata(
+        kind=kind,
+        status=status,
+        evidence_kind=evidence_kind,
+        native_trajectory_status=native_trajectory_status,
+        conversation_correlation_status=conversation_correlation_status,
+    )
     if ref:
         result["ref"] = ref
     if url:
@@ -2586,7 +2648,77 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         result["url"] = url
     if reason:
         result["reason"] = reason
+    if evidence_kind:
+        result["evidence_kind"] = evidence_kind
+    if native_trajectory_status:
+        result["native_trajectory_status"] = native_trajectory_status
+    if conversation_correlation_status:
+        result["conversation_correlation_status"] = (
+            conversation_correlation_status
+        )
     return result
+
+
+def _validate_agent_evidence_link_metadata(
+    *,
+    kind: str,
+    status: str,
+    evidence_kind: str | None,
+    native_trajectory_status: str | None,
+    conversation_correlation_status: str | None,
+) -> None:
+    typed_agent_evidence = kind in {
+        "agent_root",
+        "agent_evidence_receipt",
+    } and evidence_kind is not None
+    if (
+        typed_agent_evidence
+        and status == "resolved"
+        and conversation_correlation_status != "verified"
+    ):
+        raise ValueError(
+            "resolved typed Agent evidence requires verified conversation correlation"
+        )
+    if kind == "agent_evidence_receipt":
+        if evidence_kind != "native_otel_cross_transport_receipt_v1":
+            raise ValueError(
+                "Agent evidence receipt must declare cross-transport provenance"
+            )
+        if native_trajectory_status not in {"otel_correlated", "unresolved"}:
+            raise ValueError("Agent evidence receipt trajectory status is invalid")
+        if status == "resolved" and native_trajectory_status != "otel_correlated":
+            raise ValueError(
+                "resolved Agent evidence receipt requires an OTel correlation"
+            )
+    elif kind == "agent_evidence":
+        if (
+            evidence_kind != "unclassified_legacy_agent_evidence_v1"
+            or native_trajectory_status != "unresolved"
+            or status == "resolved"
+        ):
+            raise ValueError("unclassified Agent evidence must remain unresolved")
+    elif kind == "agent_root" and evidence_kind is not None:
+        if (
+            evidence_kind != "native_weave_call_v1"
+            or native_trajectory_status != "native_weave_call"
+        ):
+            raise ValueError("Agent root link must identify a native Weave Call")
+    elif any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("only Agent evidence links may carry trajectory metadata")
+    if conversation_correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("conversation correlation status is invalid")
 
 
 def _comparison_attempt_evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
@@ -2606,6 +2738,29 @@ def _comparison_attempt_evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
                 "kind": str(item.get("kind") or "evidence"),
                 "ref": ref,
                 **({"uri": url} if url.startswith("https://") else {}),
+                **(
+                    {"evidence_kind": str(item["evidence_kind"])}
+                    if item.get("evidence_kind")
+                    else {}
+                ),
+                **(
+                    {
+                        "native_trajectory_status": str(
+                            item["native_trajectory_status"]
+                        )
+                    }
+                    if item.get("native_trajectory_status")
+                    else {}
+                ),
+                **(
+                    {
+                        "conversation_correlation_status": str(
+                            item["conversation_correlation_status"]
+                        )
+                    }
+                    if item.get("conversation_correlation_status")
+                    else {}
+                ),
             }
         )
     return _evidence_links(links)
@@ -2668,6 +2823,9 @@ def _comparison_pair_evidence_links(
 ) -> tuple[dict[str, str], ...]:
     labels = {
         f"Agent root — {task_id} — {arm}": "agent_conversation",
+        f"Agent trajectory receipt — {task_id} — {arm}": (
+            "agent_evidence_receipt"
+        ),
         f"Evaluation attempt — {task_id} — {arm}": "evaluation_attempt",
         f"Evaluation prediction — {task_id} — {arm}": "prediction",
     }
@@ -4060,11 +4218,16 @@ def _campaign_attempt_evidence_links(
         return ()
     raw_links = evidence.get("links") or evidence.get("evidence_links") or ()
     projected: list[dict[str, str]] = []
-    slots: set[str] = set()
+    semantic_slots: set[str] = set()
     for raw in raw_links:
         if not isinstance(raw, Mapping):
             return ()
         slot = str(raw.get("slot") or "")
+        semantic_slot = (
+            "agent_evidence"
+            if slot in {"agent_root", "agent_evidence_receipt"}
+            else slot
+        )
         if (
             slot
             not in {
@@ -4072,9 +4235,10 @@ def _campaign_attempt_evidence_links(
                 "prediction_and_score",
                 "prediction",
                 "agent_root",
+                "agent_evidence_receipt",
                 "dataset",
             }
-            or slot in slots
+            or semantic_slot in semantic_slots
             or raw.get("verification_status") != "verified"
         ):
             return ()
@@ -4082,20 +4246,54 @@ def _campaign_attempt_evidence_links(
         ref = str(raw.get("ref") or "")
         if not uri.startswith("https://") or not ref.startswith("weave:///"):
             return ()
+        evidence_kind = str(raw.get("evidence_kind") or "")
+        native_trajectory_status = str(
+            raw.get("native_trajectory_status") or ""
+        )
+        conversation_correlation_status = str(
+            raw.get("conversation_correlation_status") or ""
+        )
+        if slot == "agent_evidence_receipt" and (
+            str(raw.get("kind") or "") != "agent_evidence_receipt"
+            or evidence_kind != "native_otel_cross_transport_receipt_v1"
+            or native_trajectory_status != "otel_correlated"
+            or conversation_correlation_status
+            not in {"verified", "unverified", "not_recorded"}
+        ):
+            return ()
+        if slot == "agent_root" and evidence_kind == (
+            "native_otel_cross_transport_receipt_v1"
+        ):
+            return ()
         projected.append(
             {
                 "system": "weave",
                 "kind": str(raw.get("kind") or slot),
                 "ref": ref,
                 "uri": uri,
+                **({"evidence_kind": evidence_kind} if evidence_kind else {}),
+                **(
+                    {"native_trajectory_status": native_trajectory_status}
+                    if native_trajectory_status
+                    else {}
+                ),
+                **(
+                    {
+                        "conversation_correlation_status": (
+                            conversation_correlation_status
+                        )
+                    }
+                    if conversation_correlation_status
+                    else {}
+                ),
             }
         )
-        slots.add(slot)
-    if slots != {
+        semantic_slots.add(semantic_slot)
+    if semantic_slots != {
         "evaluation_root",
         "prediction_and_score",
         "prediction",
-        "agent_root",
+        "agent_evidence",
         "dataset",
     }:
         return ()
@@ -5611,7 +5809,18 @@ def _evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
     for item in _sequence(raw, "evidence_links"):
         link = _mapping(item, "evidence_link")
         _reject_unknown(
-            link, {"system", "kind", "ref", "uri", "digest"}, "evidence_link"
+            link,
+            {
+                "system",
+                "kind",
+                "ref",
+                "uri",
+                "digest",
+                "evidence_kind",
+                "native_trajectory_status",
+                "conversation_correlation_status",
+            },
+            "evidence_link",
         )
         projected = {
             "system": _text(link.get("system"), "evidence_link.system", 100),
@@ -5626,6 +5835,18 @@ def _evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
         digest = _optional_digest(link.get("digest"), "evidence_link.digest")
         if digest:
             projected["digest"] = digest
+        for field_name in (
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        ):
+            value = _optional_text(
+                link.get(field_name),
+                f"evidence_link.{field_name}",
+                100,
+            )
+            if value:
+                projected[field_name] = value
         links.append(projected)
     return tuple(links)
 

@@ -49,6 +49,13 @@ def _load_audit_module() -> Any:
 
 AUDIT = _load_audit_module()
 PROFILES = CAMPAIGN / "confirmatory-analysis-profiles.json"
+PROFILES_V2 = CAMPAIGN / "confirmatory-analysis-profiles-v2.json"
+PROTOCOL_V2 = CAMPAIGN / "conference-preregistration-v2.json"
+MANIFEST_V2 = CAMPAIGN / "conference-campaign-manifest-v2.json"
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _study_inputs(study_id: str) -> dict[str, Any]:
@@ -233,6 +240,118 @@ def test_confirmatory_contract_is_frozen_before_execution() -> None:
     assert all(item["cells"] == 192 for item in studies)
 
 
+def test_historical_v1_protocol_and_manifest_remain_byte_exact() -> None:
+    assert _sha(CAMPAIGN / "conference-preregistration.json") == (
+        "f339962b2f24cf695a1efddc840ecd9161e0689060ce2e0ea418161b37ad45ec"
+    )
+    assert _sha(CAMPAIGN / "conference-campaign-manifest.json") == (
+        "b4bde568c569cf736dd0ac7afeae0a6a054d0a8bfb6184315271a44b23467a35"
+    )
+
+
+def test_v2_protocol_is_descriptive_and_binds_recomputed_power() -> None:
+    preregistration = json.loads(PROTOCOL_V2.read_text(encoding="utf-8"))
+    manifest = json.loads(MANIFEST_V2.read_text(encoding="utf-8"))
+    study = ANALYSIS._campaign_study(
+        manifest, "superpowers-writing-plans-confirmatory-v6"
+    )
+
+    ANALYSIS._validate_descriptive_protocol_bindings(
+        campaign_manifest_path=MANIFEST_V2,
+        preregistration_path=PROTOCOL_V2,
+        profile_path=PROFILES_V2,
+        manifest=manifest,
+        campaign_preregistration=preregistration,
+        study=study,
+    )
+    power = ANALYSIS._prospective_power_design(
+        preregistration_path=PROTOCOL_V2,
+        campaign_preregistration=preregistration,
+        manifest=manifest,
+    )
+
+    assert preregistration["claim_eligibility"]["conference_claim_eligible"] is False
+    assert preregistration["claim_eligibility"]["population_claim_eligible"] is False
+    assert power["status"] == "verified_underpowered_current_design"
+    assert power["current_design"]["conference_claim_eligible"] is False
+    assert power["recommended_design"]["campaign_cells"] == 6528
+    assert len(preregistration["reserved_powered_studies"]) == 3
+    assert all(
+        item["status"] == "blocked_missing_reviewed_public_sampling_frame"
+        for item in preregistration["reserved_powered_studies"]
+    )
+    assert all(
+        item["sampling_frame"]["blocker"]["eligible_sources"] == 0
+        and item["sampling_frame"]["blocker"]["required_sources"] == 288
+        for item in preregistration["reserved_powered_studies"]
+    )
+
+
+def test_v2_vercel_profile_separates_outcome_safety_and_mechanism() -> None:
+    profile, _digest = ANALYSIS._profile_for_study(
+        PROFILES_V2,
+        "vercel-react-best-practices-confirmatory-v2",
+        campaign_id="community-skill-upgrade-measurement-development-v2",
+    )
+    outcome = set(profile["primary_composite"]["dimensions"])
+    safety = set(profile["safety_dimensions"])
+    mechanism = set(profile["mechanism_dimensions"])
+
+    assert outcome == {
+        "vercel-confirmatory.requested_change",
+        "vercel-confirmatory.repository_grounding",
+        "vercel-public-behavioral.public_regression_test_success",
+    }
+    assert safety == {
+        "vercel-confirmatory.artifact_validity",
+        "vercel-confirmatory.behavior_preservation",
+        "vercel-confirmatory.scope_safety",
+    }
+    assert mechanism == {
+        "vercel-mechanism.skill_material_opened",
+        "vercel-mechanism.task_relevant_rule_opened",
+    }
+    assert not outcome & safety
+    assert not outcome & mechanism
+    assert not safety & mechanism
+    assert all(
+        family["aggregation"] == "mean_dimensions"
+        and set(family["dimensions"]) == outcome
+        for family in profile["primary_families"]
+    )
+
+
+@pytest.mark.parametrize(
+    "study_id",
+    (
+        "superpowers-writing-plans-confirmatory-v6",
+        "anthropic-skill-creator-confirmatory-v2",
+        "vercel-react-best-practices-confirmatory-v2",
+    ),
+)
+def test_v2_profiles_and_manifest_bind_exact_measurement_amendments(
+    study_id: str,
+) -> None:
+    manifest = json.loads(MANIFEST_V2.read_text(encoding="utf-8"))
+    profile, _digest = ANALYSIS._profile_for_study(
+        PROFILES_V2,
+        study_id,
+        campaign_id=manifest["id"],
+    )
+    _preregistration, binding = ANALYSIS._load_profile_preregistration(
+        profile,
+        profile_path=PROFILES_V2,
+        study_id=study_id,
+    )
+
+    ANALYSIS._validate_manifest_amendment_binding(
+        study=ANALYSIS._campaign_study(manifest, study_id),
+        preregistration_binding=binding,
+        manifest_path=MANIFEST_V2,
+    )
+    assert binding["amendment"]["amendment_digest"]
+
+
 def test_confirmatory_budget_policy_reconciles_active_specs_and_denies_legacy_authority() -> None:
     manifest = json.loads(
         (CAMPAIGN / "conference-campaign-manifest.json").read_text(encoding="utf-8")
@@ -325,11 +444,85 @@ def test_confirmatory_budget_policy_reconciles_active_specs_and_denies_legacy_au
     }
 
 
+def test_v2_budget_policy_governs_exact_repaired_studies_and_current_calibration() -> None:
+    manifest = json.loads(MANIFEST_V2.read_text(encoding="utf-8"))
+    protocol = json.loads(PROTOCOL_V2.read_text(encoding="utf-8"))
+    binding = protocol["budget_policy"]
+    policy_path = CAMPAIGN / binding["path"]
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+
+    assert manifest["budget_policy"] == binding
+    assert _sha(policy_path) == binding["sha256"]
+    assert policy["schema_version"] == 2
+    assert policy["id"] == binding["id"]
+    assert policy["campaign_id"] == manifest["id"]
+    assert policy["conference_claim_eligible"] is False
+    assert policy["historical_v1_policy"] == {
+        "path": "confirmatory-budget-policy-v1.json",
+        "sha256": _sha(CAMPAIGN / "confirmatory-budget-policy-v1.json"),
+        "status": "immutable_audit_history_only",
+        "authorizes_v2_execution": False,
+    }
+    assert [item["id"] for item in policy["studies"]] == manifest[
+        "execution_order"
+    ]
+    assert [item["spec"] for item in policy["studies"]] == [
+        "../superpowers-writing-plans-upgrade/confirmatory-v6.yaml",
+        "../anthropic-skill-creator-upgrade/confirmatory-v2.yaml",
+        "../vercel-react-best-practices-upgrade/confirmatory-v2.yaml",
+    ]
+    assert [item["cells"] for item in policy["studies"]] == [192, 192, 192]
+    calibration = json.loads(
+        (CAMPAIGN / policy["judge_calibration"]["path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert _sha(CAMPAIGN / policy["judge_calibration"]["path"]) == policy[
+        "judge_calibration"
+    ]["sha256"]
+    assert policy["judge_calibration"]["status"] == calibration["review_status"]
+    assert policy["judge_calibration"]["passed"] is calibration["passed"] is False
+    assert policy["judge_calibration"]["reviewers_per_example"] == calibration[
+        "reviewers_per_example"
+    ] == 0
+    assert policy["judge_calibration"]["judge_role"] == "secondary_advisory_only"
+
+    ANALYSIS._validate_v2_budget_policy_bindings(
+        campaign_manifest_path=MANIFEST_V2,
+        preregistration_path=PROTOCOL_V2,
+        manifest=manifest,
+        campaign_preregistration=protocol,
+    )
+
+
+def test_v2_budget_policy_rejects_calibration_metadata_drift(monkeypatch) -> None:
+    manifest = json.loads(MANIFEST_V2.read_text(encoding="utf-8"))
+    protocol = json.loads(PROTOCOL_V2.read_text(encoding="utf-8"))
+    original = ANALYSIS._load_json
+
+    def _drifted(path: Path, label: str) -> dict[str, Any]:
+        value = original(path, label)
+        if label == "V2 judge calibration":
+            value["review_status"] = "passed"
+        return value
+
+    monkeypatch.setattr(ANALYSIS, "_load_json", _drifted)
+    with pytest.raises(ValueError, match="calibration metadata drifted"):
+        ANALYSIS._validate_v2_budget_policy_bindings(
+            campaign_manifest_path=MANIFEST_V2,
+            preregistration_path=PROTOCOL_V2,
+            manifest=manifest,
+            campaign_preregistration=protocol,
+        )
+
+
 def test_source_lock_always_binds_campaign_analysis_and_selection_code() -> None:
     assert SOURCE_LOCK.CAMPAIGN_SUPPORT_FILES == {
         "analyze_confirmatory.py": "confirmatory_analysis_implementation",
         "freeze_trace_audit.py": "trace_audit_selection_implementation",
+        "generate_scientific_report.py": "scientific_report_implementation",
         "prepare_local_source_lock.py": "source_lock_implementation",
+        "scientific-report-template-v3.json": "scientific_report_template",
     }
     assert all((CAMPAIGN / name).is_file() for name in SOURCE_LOCK.CAMPAIGN_SUPPORT_FILES)
 

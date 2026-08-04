@@ -1032,6 +1032,7 @@ def _verification_row(
         "weave_agent_root_evidence_kind": "native_weave_call_v1",
         "weave_agent_root_is_native_call": True,
         "agent_graph_verified": True,
+        "conversation_correlation_verified": True,
         "weave_dataset_id": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",
         "weave_dataset_ref": f"weave:///{LOOP_PROJECT}/object/loop-dataset:v1",
         "weave_dataset_url": f"{weave_base}/objects/loop-dataset/versions/v1",

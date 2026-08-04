@@ -1,4 +1,14 @@
-# Vercel React Best Practices confirmatory study
+# Vercel React Best Practices measurement-development study
+
+The runnable descriptive identity is
+`vercel-react-best-practices-confirmatory-v2`. V1 remains immutable audit
+history and is not eligible for a behavioral claim because it pooled outcome,
+safety, and mechanism dimensions. V2 reports one host-confirmed rerun of the
+Agent-visible public Node test, authored output quality, safety gates, and
+task-relevant Skill-rule opening as four distinct forms of evidence. Its
+sixteen authored holdouts are still too
+small and lack a population sampling frame, so V2 is not conference- or
+community-population-qualified.
 
 This governed study compares the exact public Skill revisions
 `ac6a79af08f6d32c34ee03c829824990f3de0a6d` and
@@ -20,16 +30,20 @@ requires base failure and gold success, independently scores both sources, and
 emits immutable archive and preflight receipts. Trials may not install, clone,
 download, or access the Docker socket.
 
-The deterministic scorer checks the submitted final sources and executable-test
-receipt; it never treats a self-reported pass as task correctness. The Sonnet 5
-judge is blinded and advisory because its separate two-reviewer calibration is
-not yet complete. Judge labels cannot override deterministic security, scope,
-behavior-preservation, privacy, or evidence failures.
+The deterministic output scorer checks the submitted final sources. A separate
+required evaluator binds the public regression-test outcome to Fugue's verified
+digest-pinned Node receipt; this is not described as hidden evidence. A
+mechanism-only scorer records whether the Agent opened the assigned Skill and
+the exact rule relevant to the task; it cannot
+change the required pass. The Sonnet 5 judge is blinded and advisory because
+its separate two-reviewer calibration is not yet complete. Judge labels cannot
+override deterministic behavior, security, scope, privacy, or evidence
+failures.
 
 Preparation and preview are separate:
 
 ```bash
-SPEC=examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-v1.yaml
+SPEC=examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-v2.yaml
 ENV_FILE=/Users/ashah/Documents/common_tools/.env
 
 python3 examples/comparisons/vercel-react-best-practices-upgrade/prepare_confirmatory_fixtures.py
@@ -42,7 +56,9 @@ uv run python \
   --extra examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-fixtures.lock.json \
   --extra examples/comparisons/vercel-react-best-practices-upgrade/prepare_confirmatory_fixtures.py \
   --extra examples/comparisons/vercel-react-best-practices-upgrade/host_node_verifier.cjs \
-  --output .fugue/qualification/community-skill-confirmatory/vercel/source.lock.json
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-v2-amendment.json \
+  --extra examples/comparisons/vercel-react-best-practices-upgrade/confirmatory-study-console-v2.yaml \
+  --output .fugue/qualification/community-skill-confirmatory/vercel-v2/source.lock.json
 env -u OPENAI_API_KEY uv run fugue check "$SPEC" --env-file "$ENV_FILE" --json
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --prepare --env-file "$ENV_FILE" --json
 env -u OPENAI_API_KEY uv run fugue compare "$SPEC" --preview --env-file "$ENV_FILE" --json

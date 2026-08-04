@@ -1,0 +1,141 @@
+{
+  "schema_version": 2,
+  "id": "community-skill-upgrade-measurement-development-v2",
+  "status": "frozen_before_execution",
+  "study_class": "measurement_development_descriptive",
+  "supersedes_for_future_execution": "community-skill-upgrade-confirmatory-campaign-v1",
+  "historical_protocol_is_immutable": true,
+  "research_question": "For each repository separately, what descriptive locked-benchmark signal does the exact candidate Skill revision produce relative to the exact baseline after repairing the measurement and evidence contracts?",
+  "claims_scope": "Descriptive evidence for the exact Skill revisions, authored 24-task benchmark, Claude Code harness, Anthropic Sonnet 5 route, and locked local Harbor runtime only. These Studies do not estimate a community task population and are not conference-claim eligible.",
+  "repositories_are_pooled": false,
+  "primary_contrast": "candidate_minus_baseline",
+  "claim_eligibility": {
+    "conference_claim_eligible": false,
+    "population_claim_eligible": false,
+    "reason": "The repaired Studies retain sixteen authored holdout tasks per repository, lack a population sampling frame, and are far below the prospective independent-task requirement.",
+    "allowed_claim": "A task- and revision-specific descriptive locked-benchmark finding with exact effect estimates, intervals, adjusted p-values, and limitations.",
+    "forbidden_claims": [
+      "population improvement",
+      "community-wide Skill superiority",
+      "conference-qualified efficacy",
+      "universal repository or Skill ranking"
+    ]
+  },
+  "diagnostic_no_skill_contrast": {
+    "status": "not_run_in_v2",
+    "reason": "The governed ComparisonSpecV1 contract is two-arm. A generic three-arm run would not preserve comparison approval and result contracts.",
+    "claim_limitation": "Prompt-ceiling and absolute Skill benefit cannot be estimated without a separately governed no-Skill contrast."
+  },
+  "sampling": {
+    "tasks_per_repository": 24,
+    "development_tasks": 8,
+    "untouched_holdout_tasks": 16,
+    "attempts_per_task_per_arm": 4,
+    "arms": 2,
+    "cells_per_repository": 192,
+    "total_agent_cells": 576,
+    "inference_unit": "task",
+    "attempt_role": "within-task replication",
+    "task_replacement_after_unblinding": false,
+    "population_sampling_frame": "absent_authored_benchmark_only"
+  },
+  "prospective_power_design": {
+    "path": "prospective-power-design-v1.json",
+    "sha256": "947d76fd583c90632e0159a565e14714882d432290331e712066eb74bf1cc2c8",
+    "id": "community-skill-upgrade-prospective-power-design-v1",
+    "status": "current_design_not_conference_claim_eligible",
+    "claim_effect": "The repaired 16-holdout Studies remain descriptive measurement development. Population or conference-qualified behavioral claims require sealed sampling frames and separately approved adequately powered Studies."
+  },
+  "budget_policy": {
+    "path": "confirmatory-budget-policy-v2.json",
+    "sha256": "2b3d6296f34a981dce49ccd354add95f17f268b69861fcab306694e129bdc3a5",
+    "id": "community-skill-upgrade-measurement-development-budget-policy-v2",
+    "status": "limits_only_not_approval",
+    "claim_effect": "These finite limits govern only the three exact descriptive V2 campaign Studies. The policy authorizes no model call, preview approval, conference claim, powered holdout, or campaign-wide spend."
+  },
+  "reserved_powered_studies": [
+    {
+      "repository": "superpowers-writing-plans",
+      "development_study_id": "superpowers-writing-plans-conference-development-v1",
+      "holdout_study_id": "superpowers-writing-plans-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "fb253e9a738f16dccb4ec540483cc656ac55282b020fce657621ebddba4fa6f6"},
+        "schema": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "9849a60b0dfde7575cd0ca79d5ee3ee883e4aa1d9ffd0eab40cc3dae67b76bdd"},
+        "validator": {"path": "../superpowers-writing-plans-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "db97b97b40a6ec208bb1a7ddc3272c7b9264553e352c948eab3eee11e6f847c6"},
+        "blocker": {"path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "70a69d08a1733906f7db4109f00314235a47b807a0c7d363477192de13bcefad", "eligible_sources": 0, "required_sources": 288}
+      }
+    },
+    {
+      "repository": "anthropic-skill-creator",
+      "development_study_id": "anthropic-skill-creator-conference-development-v1",
+      "holdout_study_id": "anthropic-skill-creator-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "3b6fe7d34c98357abba2793004df6b6775da607697dff91c3d86e7c841e899e3"},
+        "schema": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "0e6dec485175cc4844fae04f7ac3b95027da0e4d41fc977e50e8fae789460218"},
+        "validator": {"path": "../anthropic-skill-creator-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "3eb41f2c9ed26f306242ea028df758b0bf398e3d76949ab7d7d5e48f0a026bc5"},
+        "blocker": {"path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "b1682ac10d9101f42e6ca1c54973d41ee03c5498dba145a16896facc8b074192", "eligible_sources": 0, "required_sources": 288}
+      }
+    },
+    {
+      "repository": "vercel-react-best-practices",
+      "development_study_id": "vercel-react-best-practices-conference-development-v1",
+      "holdout_study_id": "vercel-react-best-practices-conference-holdout-v1",
+      "status": "blocked_missing_reviewed_public_sampling_frame",
+      "sampling_frame": {
+        "protocol": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-protocol-v1.json", "sha256": "f057f964bac2aba0f28a42d487912e27345e99e13c166053c39117bf2608aeb3"},
+        "schema": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-v1.schema.json", "sha256": "5d745bb3f5b07c4be1ccaf99b44f20262ca410a5482b9ca220c306698b433761"},
+        "validator": {"path": "../vercel-react-best-practices-upgrade/validate_conference_sampling_frame_v1.py", "sha256": "2968b7dadf4110b52eee75d296c2f6c8a56f526a4fa512220a646b5a03ddd9cc"},
+        "blocker": {"path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-blockers-v1.json", "sha256": "5d156f71965932b0bf7c27a1668ea479278914925251f1e7122c0c9ea18488f4", "eligible_sources": 0, "required_sources": 288}
+      }
+    }
+  ],
+  "randomization": {
+    "blocked_by": ["repository", "task_id", "attempt"],
+    "arm_order": "deterministically counterbalanced from the immutable attempt identity",
+    "outcome_dependent_retries": false,
+    "time_window_balance_required": true
+  },
+  "endpoints": {
+    "primary": "Task-level mean of the preregistered outcome dimensions, with safety gates reported separately and verified by the host outside the Agent workspace.",
+    "minimum_meaningful_improvement": 0.15,
+    "equivalence_margin": 0.1,
+    "confidence": 0.95,
+    "familywise_correction": "Holm within repository",
+    "judge_role": "secondary_advisory",
+    "mechanism_role": "assignment, opening, and invocation evidence; never a task-outcome pass",
+    "safety_role": "zero-tolerance descriptive gate reported separately from the outcome estimand"
+  },
+  "analysis": {
+    "primary_model": "task-clustered paired candidate-minus-baseline difference",
+    "interval": "deterministic task-cluster bootstrap with the repository-profile resample count",
+    "paired_test": "two-sided exact sign test over nonzero task-level differences",
+    "multiplicity": "Holm within repository",
+    "report_task_and_attempt_effects_separately": true,
+    "claim_interpretation": "All p-values and intervals are descriptive for the authored locked benchmark because the sampling frame and prospective power requirements are unmet."
+  },
+  "missingness": {
+    "infrastructure_failure_is_task_failure": false,
+    "invalid_evidence_is_task_failure": false,
+    "silent_exclusion_allowed": false,
+    "rerun_policy": "Only the exact interrupted or infrastructure-failed attempt may resume under the locked retry contract; no outcome-dependent retry is permitted."
+  },
+  "trace_audit": {
+    "minimum_stratified_fraction": 0.1,
+    "include_all_discordant_pairs": true,
+    "include_all_critical_failures": true,
+    "required_links": ["evaluation_root", "prediction_and_score", "prediction", "agent_root", "dataset"],
+    "required_checks": ["attempt_identity", "result_project", "candidate_and_runtime_locks", "skill_registered_opened_and_invoked", "host_verifier_receipt", "privacy", "cleanup"]
+  },
+  "release_gates": [
+    "Exact public task, private label, scorer, Skill, model, runtime, protocol, and power-design locks",
+    "All planned terminal cells reconcile uniquely to canonical rows",
+    "All five evidence links resolve in the declared W&B project",
+    "No private-label or credential value appears in Agent-visible evidence",
+    "No duplicate attempts or run-scoped Harbor orphans",
+    "Manual trace audit is complete and signed",
+    "Every limitation and missing row is reported",
+    "No descriptive Study is presented as population- or conference-qualified"
+  ]
+}

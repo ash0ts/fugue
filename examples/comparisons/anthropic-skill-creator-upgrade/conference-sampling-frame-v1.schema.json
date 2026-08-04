@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ash0ts/fugue/blob/main/examples/comparisons/anthropic-skill-creator-upgrade/conference-sampling-frame-v1.schema.json",
+  "title": "Anthropic Skill Creator powered sampling frame V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "frame_id",
+    "frame_digest",
+    "reserved_studies",
+    "skill_treatment",
+    "population_snapshot",
+    "selection_protocol",
+    "public_tasks",
+    "private_labels",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "frame_id": {"const": "anthropic-skill-creator-conference-sampling-frame-v1"},
+    "frame_digest": {"$ref": "#/$defs/sha256"},
+    "reserved_studies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["development", "holdout"],
+      "properties": {
+        "development": {"const": "anthropic-skill-creator-conference-development-v1"},
+        "holdout": {"const": "anthropic-skill-creator-conference-holdout-v1"}
+      }
+    },
+    "skill_treatment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "path",
+        "lock_path",
+        "lock_sha256",
+        "baseline_commit",
+        "baseline_bundle_sha256",
+        "candidate_commit",
+        "candidate_bundle_sha256"
+      ],
+      "properties": {
+        "repository": {"const": "https://github.com/anthropics/skills"},
+        "path": {"const": "skills/skill-creator"},
+        "lock_path": {"$ref": "#/$defs/relativePath"},
+        "lock_sha256": {"$ref": "#/$defs/sha256"},
+        "baseline_commit": {"const": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc"},
+        "baseline_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "candidate_commit": {"const": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563"},
+        "candidate_bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "population_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_cutoff_utc",
+        "records_path",
+        "records_sha256",
+        "record_count",
+        "query_receipt_path",
+        "query_receipt_sha256",
+        "eligibility_protocol_path",
+        "eligibility_protocol_sha256",
+        "selection_code_path",
+        "selection_code_sha256"
+      ],
+      "properties": {
+        "selection_cutoff_utc": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "records_path": {"$ref": "#/$defs/relativePath"},
+        "records_sha256": {"$ref": "#/$defs/sha256"},
+        "record_count": {"type": "integer", "minimum": 288},
+        "query_receipt_path": {"$ref": "#/$defs/relativePath"},
+        "query_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "eligibility_protocol_path": {"$ref": "#/$defs/relativePath"},
+        "eligibility_protocol_sha256": {"$ref": "#/$defs/sha256"},
+        "selection_code_path": {"$ref": "#/$defs/relativePath"},
+        "selection_code_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "selection_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed_sha256",
+        "algorithm",
+        "cluster_unit",
+        "unique_clusters_across_partitions",
+        "strata"
+      ],
+      "properties": {
+        "seed_sha256": {"$ref": "#/$defs/sha256"},
+        "algorithm": {"const": "sha256_seeded_sort_v1"},
+        "cluster_unit": {"const": "canonical_github_repository"},
+        "unique_clusters_across_partitions": {"const": true},
+        "strata": {
+          "const": {
+            "development": {
+              "missing_declared_compatibility": 8,
+              "valid_declared_compatibility": 8,
+              "invalid_declared_compatibility": 8,
+              "long_valid_name": 8
+            },
+            "target_holdout": {
+              "missing_declared_compatibility": 48,
+              "valid_declared_compatibility": 48,
+              "invalid_declared_compatibility": 48,
+              "long_valid_name": 48
+            },
+            "safety_control": {
+              "compatibility_not_applicable": 16,
+              "unrelated_metadata_preservation": 16,
+              "unsupported_exact_name": 16,
+              "no_change_required": 16
+            }
+          }
+        }
+      }
+    },
+    "public_tasks": {"$ref": "#/$defs/publicManifest"},
+    "private_labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "count", "host_only", "required_mode"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "count": {"const": 288},
+        "host_only": {"const": true},
+        "required_mode": {"const": "0600"}
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 288,
+      "maxItems": 288,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000\\r\\n]+$"
+    },
+    "skillPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"
+    },
+    "publicManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "count"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "count": {"const": 288}
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "partition",
+        "stratum",
+        "selection_rank",
+        "repository_url",
+        "repository_owner",
+        "repository_name",
+        "commit_sha",
+        "tree_sha",
+        "skill_path",
+        "skill_tree_sha",
+        "skill_blob_url",
+        "skill_content_sha256",
+        "public_basis_url",
+        "public_basis_kind",
+        "public_basis_id",
+        "provenance_cluster_id",
+        "population_record_digest",
+        "selection_score_sha256",
+        "source_archive_path",
+        "source_archive_sha256",
+        "source_manifest_path",
+        "source_manifest_sha256",
+        "provenance_receipt_path",
+        "provenance_receipt_sha256",
+        "public_task_digest",
+        "private_label_digest",
+        "license"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^as-conf-(dev|target|control)-[a-z0-9][a-z0-9-]{2,87}$"
+        },
+        "partition": {"enum": ["development", "target_holdout", "safety_control"]},
+        "stratum": {
+          "enum": [
+            "missing_declared_compatibility",
+            "valid_declared_compatibility",
+            "invalid_declared_compatibility",
+            "long_valid_name",
+            "compatibility_not_applicable",
+            "unrelated_metadata_preservation",
+            "unsupported_exact_name",
+            "no_change_required"
+          ]
+        },
+        "selection_rank": {"type": "integer", "minimum": 1},
+        "repository_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "repository_owner": {"type": "string", "minLength": 1},
+        "repository_name": {"type": "string", "minLength": 1},
+        "commit_sha": {"$ref": "#/$defs/gitSha"},
+        "tree_sha": {"$ref": "#/$defs/gitSha"},
+        "skill_path": {"$ref": "#/$defs/skillPath"},
+        "skill_tree_sha": {"$ref": "#/$defs/gitSha"},
+        "skill_blob_url": {"type": "string", "format": "uri"},
+        "skill_content_sha256": {"$ref": "#/$defs/sha256"},
+        "public_basis_url": {"type": "string", "format": "uri"},
+        "public_basis_kind": {"enum": ["skill_blob", "issue", "pull_request", "commit"]},
+        "public_basis_id": {"type": "string", "minLength": 1},
+        "provenance_cluster_id": {
+          "type": "string",
+          "pattern": "^github:[a-z0-9_.-]+/[a-z0-9_.-]+$"
+        },
+        "population_record_digest": {"$ref": "#/$defs/sha256"},
+        "selection_score_sha256": {"$ref": "#/$defs/sha256"},
+        "source_archive_path": {"$ref": "#/$defs/relativePath"},
+        "source_archive_sha256": {"$ref": "#/$defs/sha256"},
+        "source_manifest_path": {"$ref": "#/$defs/relativePath"},
+        "source_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "provenance_receipt_path": {"$ref": "#/$defs/relativePath"},
+        "provenance_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "public_task_digest": {"$ref": "#/$defs/sha256"},
+        "private_label_digest": {"$ref": "#/$defs/sha256"},
+        "license": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spdx_id", "path", "sha256"],
+          "properties": {
+            "spdx_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$",
+              "not": {"enum": ["NONE", "NOASSERTION"]}
+            },
+            "path": {"$ref": "#/$defs/relativePath"},
+            "sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    }
+  }
+}

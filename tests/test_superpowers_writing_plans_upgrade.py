@@ -33,10 +33,12 @@ CONFIRMATORY_V2 = EXAMPLE / "confirmatory-v2.yaml"
 CONFIRMATORY_V3 = EXAMPLE / "confirmatory-v3.yaml"
 CONFIRMATORY_V4 = EXAMPLE / "confirmatory-v4.yaml"
 CONFIRMATORY_V5 = EXAMPLE / "confirmatory-v5.yaml"
+CONFIRMATORY_V6 = EXAMPLE / "confirmatory-v6.yaml"
 CONFIRMATORY_TASKS = EXAMPLE / "tasks-conference-v1.jsonl"
 CONFIRMATORY_PRIVATE = EXAMPLE / "private-labels-conference-v1.jsonl"
 CONFIRMATORY_SCORER = EXAMPLE / "plan_quality_scorer_v2.py"
 CONFIRMATORY_SCORER_V3 = EXAMPLE / "plan_quality_scorer_v3.py"
+CONFIRMATORY_SCORER_V4 = EXAMPLE / "plan_quality_scorer_v4.py"
 CONFIRMATORY_PREREGISTRATION = EXAMPLE / "preregistration-confirmatory-v1.json"
 CONFIRMATORY_V2_AMENDMENT = (
     EXAMPLE / "preregistration-confirmatory-v2-amendment.json"
@@ -49,8 +51,10 @@ CONFIRMATORY_V3_CONSOLE = EXAMPLE / "study-console-confirmatory-v3.yaml"
 CONFIRMATORY_V4_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v4-amendment.json"
 CONFIRMATORY_V4_CONSOLE = EXAMPLE / "study-console-confirmatory-v4.yaml"
 CONFIRMATORY_V5_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v5-amendment.json"
+CONFIRMATORY_V6_AMENDMENT = EXAMPLE / "preregistration-confirmatory-v6-amendment.json"
 CONFIRMATORY_V5_CONSOLE = EXAMPLE / "study-console-confirmatory-v5.yaml"
 CONFIRMATORY_PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"
+CONFIRMATORY_PREPARER_V6 = EXAMPLE / "prepare_confirmatory_sources_v6.py"
 CONFIRMATORY_DIMENSIONS = {
     "artifact_validity",
     "global_constraint_fidelity",
@@ -59,6 +63,10 @@ CONFIRMATORY_DIMENSIONS = {
     "repository_grounding",
     "verification_matrix",
     "scope_secret_safety",
+}
+CONFIRMATORY_V6_DIMENSIONS = {
+    *CONFIRMATORY_DIMENSIONS,
+    "artifact_size_safety",
 }
 V3_DIMENSIONS = {
     "artifact_validity",
@@ -112,6 +120,10 @@ def _confirmatory_v3_score():
 
 def _confirmatory_v3_scorer_module() -> dict:
     return runpy.run_path(CONFIRMATORY_SCORER_V3.as_posix())
+
+
+def _confirmatory_v4_score():
+    return runpy.run_path(CONFIRMATORY_SCORER_V4.as_posix())["score"]
 
 
 def _confirmatory_labels() -> dict[str, dict]:
@@ -797,6 +809,218 @@ def test_confirmatory_v5_versions_measurement_repairs_without_rewriting_v4() -> 
         "default_study_id": v5.id,
         "read_only": True,
     }
+
+
+def test_confirmatory_v6_versions_length_measurement_without_rewriting_v5() -> None:
+    v5_raw = yaml.safe_load(CONFIRMATORY_V5.read_text(encoding="utf-8"))
+    v6_raw = yaml.safe_load(CONFIRMATORY_V6.read_text(encoding="utf-8"))
+    v6 = load_comparison(CONFIRMATORY_V6, repo_root=Path.cwd())
+    amendment = json.loads(CONFIRMATORY_V6_AMENDMENT.read_text(encoding="utf-8"))
+    unsigned = dict(amendment)
+    amendment_digest = unsigned.pop("amendment_digest")
+
+    for field in ("question", "taskset", "baseline", "candidate", "changed"):
+        assert v6_raw[field] == v5_raw[field]
+    assert v5_raw["evaluators"][0]["scorer"] == "plan_quality_scorer_v3.py"
+    assert v6_raw["evaluators"][0]["scorer"] == "plan_quality_scorer_v4.py"
+    assert set(v6_raw["evaluators"][0]["dimensions"]) == (
+        CONFIRMATORY_V6_DIMENSIONS
+    )
+    assert v6_raw["evaluators"][0]["dimension_roles"] == {
+        **v5_raw["evaluators"][0]["dimension_roles"],
+        "artifact_size_safety": "safety_gate",
+    }
+    assert v6_raw["evaluators"][1] == v5_raw["evaluators"][1]
+
+    assert v6.id == "superpowers-writing-plans-confirmatory-v6"
+    assert v6.execution.research_id == v6.id
+    assert v6.execution.evidence_project == (
+        "wandb/fugue-superpowers-writing-plans-confirmatory-v6"
+    )
+    assert v6.execution.source_lock == (
+        ".fugue/qualification/community-skill-confirmatory/"
+        "superpowers-v6/source.lock.json"
+    )
+    assert v6.execution.study_console_base_url == "http://127.0.0.1:18104"
+    assert v6.execution.attempts == 4
+    assert v6.execution.evidence_checkpoint_cells == 2
+    assert v6.execution.qualification_inputs["repository_amendment_sha256"] == (
+        "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "preregistration-confirmatory-v6-amendment.json"
+    )
+    assert v6.execution.qualification_inputs["source_preparer_sha256"] == (
+        "examples/comparisons/superpowers-writing-plans-upgrade/"
+        "prepare_confirmatory_sources_v6.py"
+    )
+    assert v6.execution.qualification_inputs[
+        "confirmatory_budget_policy_sha256"
+    ].endswith("confirmatory-budget-policy-v2.json")
+    assert v6.execution.qualification_inputs[
+        "scientific_report_generator_sha256"
+    ].endswith("generate_scientific_report.py")
+    assert v6.execution.qualification_inputs[
+        "scientific_report_template_sha256"
+    ].endswith("scientific-report-template-v3.json")
+    wrapper = CONFIRMATORY_PREPARER_V6.read_text(encoding="utf-8")
+    assert 'SCORER = EXAMPLE / "plan_quality_scorer_v4.py"' in wrapper
+    assert 'PREPARER = EXAMPLE / "prepare_confirmatory_sources.py"' in wrapper
+
+    assert amendment_digest == stable_digest(unsigned)
+    assert amendment["prior_amendment"]["sha256"] == _sha256(
+        CONFIRMATORY_V5_AMENDMENT
+    )
+    assert amendment["superseded_execution"] == {
+        "comparison_id": "superpowers-writing-plans-confirmatory-v5",
+        "preview_digest": (
+            "fc45306ff5c7b11d5c5223cc975a047830cf99bdb7ea70690496fe2d473c45d0"
+        ),
+        "approval_digest": None,
+        "run_id": None,
+        "status": "invalidated_before_approval_or_execution",
+        "reason_code": "outcome_dependent_artifact_length_ceiling",
+        "behavioral_result_eligible": False,
+        "planned_cells": 192,
+        "started_cells": 0,
+        "canonical_result_published": False,
+    }
+    revision = amendment["measurement_revision"]
+    assert revision["prior_scorer_sha256"] == _sha256(CONFIRMATORY_SCORER_V3)
+    assert revision["replacement_scorer_sha256"] == _sha256(
+        CONFIRMATORY_SCORER_V4
+    )
+    assert revision["maximum_artifact_bytes"] == 1_048_576
+    assert revision["artifact_length_reporting"] == {
+        "source": (
+            "comparison_deterministic_scorer_receipts."
+            "plan-quality-confirmatory.primary_artifact_bytes"
+        ),
+        "role": "efficiency",
+        "direction": "lower_is_more_efficient",
+        "task_correctness_effect_below_safety_cap": "none",
+    }
+    assert amendment["changes"]["taskset"] is False
+    assert amendment["changes"]["private_expected_values"] is False
+    assert amendment["changes"]["deterministic_scorer"] is True
+    assert amendment["changes"]["artifact_length_role"] is True
+
+
+def test_confirmatory_v6_preparation_never_rewrites_historical_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wrapper = runpy.run_path(CONFIRMATORY_PREPARER_V6.as_posix())
+    output = tmp_path / "comparison-resources"
+    output.mkdir()
+    historical_receipt = output / "preparation.receipt.json"
+    historical_receipt.write_text("historical-v1-v5-receipt\n", encoding="utf-8")
+    historical_stat = historical_receipt.stat()
+
+    fake_globals: dict[str, object] = {
+        "ARCHIVE_NAME": "fugue-test-source.tar",
+        "ARCHIVE_RELATIVE": Path("unused/fugue-test-source.tar"),
+        "OUTPUT": tmp_path / "unused",
+        "REPO_ROOT": tmp_path,
+        "SCORER": CONFIRMATORY_SCORER_V3,
+        "Path": Path,
+        "hashlib": hashlib,
+        "json": json,
+    }
+    exec(
+        """
+def main():
+    output = Path(OUTPUT)
+    output.mkdir(parents=True, exist_ok=True)
+    archive = output / ARCHIVE_NAME
+    archive.write_bytes(b'exact-v6-source-archive')
+    manifest = {
+        'schema_version': 1,
+        'source': {
+            'archive': Path(ARCHIVE_RELATIVE).as_posix(),
+            'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+            'contains_task_oracle': False,
+        },
+        'design': {'planned_cells': 192},
+        'artifacts': {
+            'scorer_sha256': hashlib.sha256(Path(SCORER).read_bytes()).hexdigest(),
+        },
+    }
+    manifest['manifest_digest'] = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
+    (output / 'preparation.receipt.json').write_text(
+        json.dumps(manifest, sort_keys=True), encoding='utf-8'
+    )
+""",
+        fake_globals,
+    )
+    monkeypatch.setattr(
+        wrapper["runpy"],
+        "run_path",
+        lambda _path: {"main": fake_globals["main"]},
+    )
+
+    receipt = wrapper["prepare"](output=output)
+
+    assert historical_receipt.read_text(encoding="utf-8") == (
+        "historical-v1-v5-receipt\n"
+    )
+    assert historical_receipt.stat().st_mtime_ns == historical_stat.st_mtime_ns
+    assert (output / "fugue-test-source.tar").read_bytes() == (
+        b"exact-v6-source-archive"
+    )
+    assert (output / "preparation-v6.base.receipt.json").is_file()
+    assert (output / "preparation-v6.receipt.json").is_file()
+    assert receipt["base_preparation_receipt_sha256"] == _sha256(
+        output / "preparation-v6.base.receipt.json"
+    )
+
+
+def test_confirmatory_v4_scorer_does_not_fail_a_long_correct_plan() -> None:
+    score = _confirmatory_v4_score()
+    label = _confirmatory_labels()["sp-dev-evidence-destination"]
+    long_plan = label["gold_output"]
+    padding = (
+        "\n\nAdditional maintainer rationale preserves the same bounded change, "
+        "cohesive unit, and verification plan."
+    )
+    while len(long_plan) <= 20_000:
+        long_plan += padding
+
+    scores = score(
+        {"id": label["id"]},
+        long_plan,
+        {"expected": label["expected"]},
+    )
+
+    assert len(long_plan) > 18_000
+    assert set(scores) == CONFIRMATORY_V6_DIMENSIONS
+    assert all(scores.values()), scores
+
+
+def test_confirmatory_v4_scorer_keeps_oversize_and_secret_safety_gates() -> None:
+    score = _confirmatory_v4_score()
+    label = _confirmatory_labels()["sp-dev-evidence-destination"]
+    gold = label["gold_output"]
+    oversize = gold + ("\nEvidence note." * 75_000)
+    unsafe = gold + '\n\nANTHROPIC_API_KEY="sk-private-value"'
+
+    oversize_scores = score(
+        {"id": label["id"]},
+        oversize,
+        {"expected": label["expected"]},
+    )
+    unsafe_scores = score(
+        {"id": label["id"]},
+        unsafe,
+        {"expected": label["expected"]},
+    )
+
+    assert len(oversize.encode("utf-8")) > 1_048_576
+    assert oversize_scores["artifact_validity"] is True
+    assert oversize_scores["artifact_size_safety"] is False
+    assert oversize_scores["global_constraint_fidelity"] is True
+    assert unsafe_scores["artifact_size_safety"] is True
+    assert unsafe_scores["scope_secret_safety"] is False
 
 
 def test_confirmatory_prompts_are_natural_and_keep_oracles_private() -> None:

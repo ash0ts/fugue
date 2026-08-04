@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "amendment_id": "vercel-react-best-practices-confirmatory-v2-public-behavior-and-rule-opening-separation",
+  "status": "frozen_before_v2_preview",
+  "amendment_kind": "public_behavioral_outcome_and_skill_rule_opening_restart",
+  "prior_study": {
+    "comparison_id": "vercel-react-best-practices-confirmatory-v1",
+    "status": "superseded_before_valid_execution",
+    "behavioral_result_eligible": false
+  },
+  "diagnosis": {
+    "made_before_v2_execution": true,
+    "outcome_dependent": false,
+    "defects": [
+      "the V1 primary composite pooled outcome and safety dimensions",
+      "the V1 scorer treated the host-rerun public Node test as a safety dimension rather than one behavioral outcome",
+      "an intermediate V2 draft duplicated that public test under an inaccurate hidden-behavior label",
+      "the V1 spec did not report task-relevant changed-rule opening as separate Skill mechanism evidence"
+    ]
+  },
+  "repairs": {
+    "public_behavioral_outcome": "vercel-public-behavioral.public_regression_test_success is emitted once from Fugue's digest-pinned host rerun of the exact Agent-visible public test and is not described as hidden evidence",
+    "outcomes": [
+      "vercel-confirmatory.requested_change",
+      "vercel-confirmatory.repository_grounding",
+      "vercel-public-behavioral.public_regression_test_success"
+    ],
+    "safety_gates": [
+      "vercel-confirmatory.artifact_validity",
+      "vercel-confirmatory.behavior_preservation",
+      "vercel-confirmatory.scope_safety"
+    ],
+    "mechanism": [
+      "vercel-mechanism.skill_material_opened",
+      "vercel-mechanism.task_relevant_rule_opened"
+    ],
+    "claim_scope": "descriptive measurement-development evidence only; the authored 24-task V2 Study is not a powered population claim"
+  },
+  "replacement_execution": {
+    "comparison_id": "vercel-react-best-practices-confirmatory-v2",
+    "research_id": "vercel-react-best-practices-confirmatory-v2",
+    "result_project": "wandb/fugue-vercel-react-best-practices-confirmatory-v2",
+    "source_lock_path": ".fugue/qualification/community-skill-confirmatory/vercel-v2/source.lock.json",
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": true,
+    "taskset_change_scope": "required_public_behavioral_criticality_and_v2_audit_tag_only",
+    "treatments": false,
+    "model_or_harness": false,
+    "outcome_safety_roles": true,
+    "evaluators": true,
+    "public_behavioral_outcome": true,
+    "skill_rule_opening_evidence": true,
+    "execution_identity": true,
+    "result_destination": true
+  },
+  "amendment_digest": "32187a99acbc3c191c25dc80cec2a90e78b116b99276eb89c3d0df3d48ac38e5"
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "receipt_id": "vercel-react-best-practices-conference-sampling-frame-blockers-v1",
+  "receipt_digest": "31c3ec4d7784e079d25c72822582357a263bc7b877081a91c06d0cbc5ae67667",
+  "status": "blocked_missing_reviewed_public_sampling_frame",
+  "reserved_studies": {
+    "development": "vercel-react-best-practices-conference-development-v1",
+    "holdout": "vercel-react-best-practices-conference-holdout-v1"
+  },
+  "required_independent_repository_clusters": {
+    "development": 32,
+    "target_holdout": 192,
+    "safety_control": 64,
+    "total": 288
+  },
+  "eligible_reviewed_sources_present": 0,
+  "exact_missing_sources": {
+    "development": 32,
+    "target_holdout": 192,
+    "safety_control": 64,
+    "total": 288
+  },
+  "known_historical_sources": {
+    "fixture_count": 24,
+    "provenance_cluster_count": 0,
+    "eligibility": "not_eligible_for_powered_frame",
+    "reasons": [
+      "The existing conference_fixture_catalog.py entries are generated microfixtures rather than independently sampled public repositories.",
+      "They have no frozen public-population query, canonical repository cluster, public maintenance-record snapshot, or remote commit/tree receipt.",
+      "Repeated Agent attempts over those fixtures measure execution repeatability, not population-level generalization."
+    ]
+  },
+  "missing_bundle_inputs": [
+    "A frozen population snapshot with at least 288 eligible unique public TypeScript Next.js repositories and maintenance records.",
+    "A query receipt, eligibility ledger, unpredictable selection seed, and deterministic selection receipt frozen before task authoring.",
+    "Exact remote commit/tree, license, package-manifest, dependency-lock, React/Next dependency, TypeScript target, source archive, and public-record receipts for every selected repository.",
+    "A treatment-blind public task, public executable regression test, and separate mode-0600 host verifier and label for every selected repository.",
+    "Pinned-runtime receipts proving base failure and frozen-gold success for both public tests and host verifiers.",
+    "A prospective power simulation over the completed frame and an independently reviewed judge validation packet."
+  ],
+  "not_generated": [
+    "vercel-react-best-practices-conference-development-v1 comparison spec",
+    "vercel-react-best-practices-conference-holdout-v1 comparison spec",
+    "public task manifests",
+    "host-only private-label and verifier manifests",
+    "source locks and task images",
+    "preview or approval digests"
+  ],
+  "scientific_reason": "Generating variants of the 24 local fixtures would create pseudo-replication. The powered estimand requires real public maintenance provenance and independent repository clusters; attempts and generated cases cannot substitute for those units.",
+  "next_action": "Acquire and review the public population in trusted preparation, freeze the seed and selection order, qualify every public test and host verifier, then require validate_conference_sampling_frame_v1.py to emit status=ready before creating either Study spec."
+}

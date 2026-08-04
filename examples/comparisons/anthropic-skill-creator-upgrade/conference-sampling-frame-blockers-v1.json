@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "status": "blocked_missing_reviewed_public_skill_sampling_frame",
+  "reserved_studies": {
+    "development": "anthropic-skill-creator-conference-development-v1",
+    "holdout": "anthropic-skill-creator-conference-holdout-v1"
+  },
+  "required_independent_repository_clusters": {
+    "development": 32,
+    "target_holdout": 192,
+    "safety_control": 64,
+    "total": 288
+  },
+  "prepared_eligible_public_sources_present": 0,
+  "exact_missing_sources": {
+    "development": {
+      "missing_declared_compatibility": 8,
+      "valid_declared_compatibility": 8,
+      "invalid_declared_compatibility": 8,
+      "long_valid_name": 8,
+      "total": 32
+    },
+    "target_holdout": {
+      "missing_declared_compatibility": 48,
+      "valid_declared_compatibility": 48,
+      "invalid_declared_compatibility": 48,
+      "long_valid_name": 48,
+      "total": 192
+    },
+    "safety_control": {
+      "compatibility_not_applicable": 16,
+      "unrelated_metadata_preservation": 16,
+      "unsupported_exact_name": 16,
+      "no_change_required": 16,
+      "total": 64
+    }
+  },
+  "known_local_material": [
+    {
+      "path": "confirmatory-tasks.jsonl",
+      "eligibility": "not_eligible_for_powered_frame",
+      "reasons": [
+        "Its twenty-four tasks are handcrafted measurement-development fixtures, not a prospectively sampled population of public Skill packages.",
+        "Its archives were generated from checked-in benchmark templates and do not establish independent public repository provenance.",
+        "Its development and holdout families were already inspected while repairing the deterministic scorer."
+      ]
+    },
+    {
+      "path": "fixtures/create-skill-workspace",
+      "eligibility": "not_eligible_for_powered_frame",
+      "reasons": [
+        "This is a Fugue-authored local fixture rather than a public third-party Skill package.",
+        "It has no independent repository, commit, Skill subtree, public basis record, or license receipt."
+      ]
+    },
+    {
+      "path": "fixtures/update-skill-workspace",
+      "eligibility": "not_eligible_for_powered_frame",
+      "reasons": [
+        "This is a Fugue-authored local fixture rather than a public third-party Skill package.",
+        "It has no independent repository, commit, Skill subtree, public basis record, or license receipt."
+      ]
+    },
+    {
+      "repository": "https://github.com/anthropics/skills",
+      "path": "skills/skill-creator",
+      "eligibility": "treatment_only_not_task_population",
+      "reasons": [
+        "This repository supplies the two compared Skill Creator revisions.",
+        "Reusing the treatment repository as 288 task clusters would be circular and pseudo-replicated."
+      ]
+    }
+  ],
+  "missing_bundle_inputs": [
+    "A frozen population snapshot with at least 288 eligible, unique canonical GitHub repositories, each containing one complete public Skill package and a public source basis for its stratum.",
+    "A query/pagination receipt, inclusion and exclusion ledger, unpredictable seed commitment, locked pre-treatment stratum classifier, and deterministic selection receipt created before task authoring.",
+    "Exact remote commit/tree, Skill subtree/blob, package-content, public-basis, license, source-archive, source-manifest, and provenance receipts for every selected package.",
+    "One treatment-blind public task and one mode-0600 host-only label for every selected package, with no generated package reused as an independent cluster.",
+    "A prospective power simulation over the completed frozen frame and an independently reviewed judge calibration/validation packet."
+  ],
+  "not_generated": [
+    "anthropic-skill-creator-conference-development-v1 comparison spec",
+    "anthropic-skill-creator-conference-holdout-v1 comparison spec",
+    "conference public task manifests",
+    "conference host-only private-label manifests",
+    "conference source archives, source locks, and task images",
+    "preview, approval, run, or result digests"
+  ],
+  "scientific_reason": "Generating additional package variants from the existing twenty-four fixtures would be pseudo-replication. Four Agent attempts per task estimate repeatability but do not create independent public Skill-package or repository evidence.",
+  "next_action": "Acquire and review the public Skill-package population in trusted preparation, freeze its eligibility ledger and seed, select one package per repository, author treatment-blind tasks, materialize immutable safe archives and host-only labels, then require validate_conference_sampling_frame_v1.py to emit status=ready before creating either reserved Study spec."
+}

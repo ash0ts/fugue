@@ -9,6 +9,7 @@ import fugue.bench.run_conformance as run_conformance
 from fugue.bench.campaign_evidence import (
     _harbor_conformance_failures,
     apply_campaign_run_conformance,
+    safe_prediction_row,
     verified_trace_link_set,
 )
 from fugue.bench.campaign_lifecycle import CampaignService
@@ -75,6 +76,27 @@ def test_trace_link_set_rejects_unknown_agent_evidence_kind() -> None:
     assert "does not recognize the Agent evidence kind" in result["failures"]
 
 
+def test_trace_link_set_reserves_agent_root_for_native_weave_call() -> None:
+    row = _verified_trace_row()
+    row.update(
+        {
+            "weave_agent_root_evidence_kind": "native_weave_call_v1",
+            "weave_agent_root_is_native_call": True,
+            "conversation_correlation_verified": True,
+        }
+    )
+
+    result = verified_trace_link_set(row)
+
+    assert result["verified"] is True
+    agent_link = next(
+        link for link in result["links"] if link["slot"] == "agent_root"
+    )
+    assert agent_link["kind"] == "agent_root"
+    assert agent_link["native_trajectory_status"] == "native_weave_call"
+    assert agent_link["conversation_correlation_status"] == "verified"
+
+
 def test_trace_link_set_requires_exact_receipt_cross_transport_edge() -> None:
     row = _verified_trace_row()
     row.update(
@@ -104,13 +126,29 @@ def test_trace_link_set_requires_exact_receipt_cross_transport_edge() -> None:
 
     row["agent_cross_transport_edge"]["source_trace_id"] = "b" * 32  # type: ignore[index]
     result = verified_trace_link_set(row)
+    assert result["verified"] is False
+    assert "does not verify the Agent conversation correlation" in result["failures"]
+
+    row["conversation_correlation_verified"] = True
+    result = verified_trace_link_set(row)
     assert result["verified"] is True
     agent_link = next(
-        link for link in result["links"] if link["slot"] == "agent_root"
+        link
+        for link in result["links"]
+        if link["slot"] == "agent_evidence_receipt"
     )
+    assert agent_link["kind"] == "agent_evidence_receipt"
     assert agent_link["evidence_kind"] == (
         "native_otel_cross_transport_receipt_v1"
     )
+    assert agent_link["native_trajectory_status"] == "otel_correlated"
+    assert agent_link["conversation_correlation_status"] == "verified"
+
+    row["execution_kind"] = "agent"
+    safe_row = safe_prediction_row(row)
+    assert "weave_agent_root_call_id" not in safe_row
+    assert safe_row["weave_agent_evidence_receipt_call_id"] == "agent-evidence"
+    assert safe_row["native_trajectory_status"] == "otel_correlated"
 
 
 def test_local_harbor_receipt_gates_every_agent_row_not_a_workload_label(

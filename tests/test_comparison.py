@@ -925,6 +925,7 @@ def _decision_row(
         "agent_url": f"{base_url}/call/{call_prefix}-agent",
         "trace_link_status": "linked",
         "agent_graph_verified": True,
+        "conversation_correlation_verified": True,
         "otel_root_span_id": f"otel-{call_prefix}",
         "infrastructure_conformance_complete": True,
         "privacy_contract_version": 2,
@@ -1192,6 +1193,41 @@ def test_v2_decision_requires_exact_human_attestation() -> None:
     assert mismatched.decision.status == "invalid"
 
 
+def test_v2_historical_null_attempt_outcomes_keep_their_digest_bytes(
+    tmp_path: Path,
+) -> None:
+    result = analyze_comparison_rows(
+        comparison_id="historical-v2-result",
+        preview_digest="a" * 64,
+        rows=[
+            _decision_row(variant="baseline", passed=False),
+            _decision_row(variant="candidate"),
+        ],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+        decision_policy=_decision_policy(),
+    )
+    raw = result.to_dict()
+    for pair in raw["paired_cases"]:
+        for arm in ("baseline", "candidate"):
+            attempt = pair[arm]
+            assert attempt["benchmark_outcome"] is None
+            assert attempt["runtime_outcome"] is None
+            attempt.pop("weave_agent_evidence_call_id", None)
+            for link in attempt["evidence_links"]:
+                link.pop("evidence_kind", None)
+                link.pop("native_trajectory_status", None)
+                link.pop("conversation_correlation_status", None)
+    raw["qualification_digest"] = _comparison_qualification_digest(raw)
+    raw["result_digest"] = raw["qualification_digest"]
+    path = tmp_path / "historical-v2-result.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    reloaded = read_comparison_result(path)
+
+    assert reloaded.to_dict() == raw
+
+
 def test_v3_result_round_trips_source_topology_and_canonical_view(
     tmp_path: Path,
 ) -> None:
@@ -1428,7 +1464,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     incomplete_evidence_chain = result.to_dict()
     incomplete_evidence_chain["paired_cases"][0]["candidate"]["evidence_links"].pop()
-    with pytest.raises(ValueError, match="exactly five unique evidence links"):
+    with pytest.raises(ValueError, match="exactly one typed Agent evidence link"):
         read_comparison_result(
             write_rehashed_result(
                 incomplete_evidence_chain,
@@ -2206,6 +2242,102 @@ def test_unverified_agent_relationship_invalidates_behavioral_evidence() -> None
     assert isinstance(view, ExperimentViewV2)
     assert view.paired_cases == ()
     assert "cells" not in view.to_dict()
+
+
+@pytest.mark.parametrize("correlation", [False, None])
+def test_unverified_conversation_correlation_invalidates_behavioral_evidence(
+    correlation: bool | None,
+) -> None:
+    baseline = _decision_row(variant="baseline", passed=False)
+    candidate = _decision_row(variant="candidate", passed=True)
+    if correlation is None:
+        candidate.pop("conversation_correlation_verified")
+    else:
+        candidate["conversation_correlation_verified"] = correlation
+
+    result = analyze_comparison_rows(
+        comparison_id="invalid-conversation-correlation",
+        preview_digest="c" * 64,
+        rows=[baseline, candidate],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    assert result.integrity["status"] == "invalid"
+    assert result.integrity["invalid_evidence_attempts"] == 1
+    assert result.behavioral_summary.status == "invalid"
+    candidate_attempt = result.paired_cases[0].candidate
+    assert candidate_attempt is not None
+    agent_link = next(
+        link
+        for link in candidate_attempt.evidence_links
+        if link.kind == "agent_root"
+    )
+    assert agent_link.status == "invalid"
+    assert agent_link.conversation_correlation_status == (
+        "unverified" if correlation is False else "not_recorded"
+    )
+
+
+def test_cross_transport_receipt_is_not_presented_as_agent_root() -> None:
+    baseline = _decision_row(variant="baseline", passed=False)
+    candidate = _decision_row(variant="candidate", passed=True)
+    receipt_call_id = str(candidate.pop("native_agent_root_call_id"))
+    candidate.update(
+        {
+            "weave_agent_root_call_id": receipt_call_id,
+            "weave_agent_root_evidence_kind": (
+                "native_otel_cross_transport_receipt_v1"
+            ),
+            "weave_agent_root_is_native_call": False,
+            "otel_trace_id": "a" * 32,
+            "otel_root_span_id": "b" * 16,
+            "conversation_correlation_verified": True,
+            "agent_cross_transport_edge": {
+                "schema_version": 1,
+                "status": "verified",
+                "source_system": "otel",
+                "source_trace_id": "a" * 32,
+                "source_span_id": "b" * 16,
+                "receipt_system": "weave",
+                "receipt_call_id": receipt_call_id,
+            },
+        }
+    )
+
+    result = analyze_comparison_rows(
+        comparison_id="typed-agent-evidence",
+        preview_digest="c" * 64,
+        rows=[baseline, candidate],
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+
+    candidate_attempt = result.paired_cases[0].candidate
+    assert candidate_attempt is not None
+    receipt = next(
+        link
+        for link in candidate_attempt.evidence_links
+        if link.kind == "agent_evidence_receipt"
+    )
+    assert receipt.status == "resolved"
+    assert receipt.evidence_kind == "native_otel_cross_transport_receipt_v1"
+    assert receipt.native_trajectory_status == "otel_correlated"
+    assert receipt.conversation_correlation_status == "verified"
+    assert candidate_attempt.weave_agent_root_call_id is None
+    assert candidate_attempt.weave_agent_evidence_call_id == receipt_call_id
+
+    view = build_comparison_evaluation_view(result.to_dict())
+    candidate_view = view.paired_cases[0]["candidate"]
+    receipt_view = next(
+        link
+        for link in candidate_view["evidence_links"]
+        if link["kind"] == "agent_evidence_receipt"
+    )
+    assert receipt_view["native_trajectory_status"] == "otel_correlated"
+    assert receipt_view["conversation_correlation_status"] == "verified"
+    assert "weave_agent_root_call_id" not in candidate_view
+    assert candidate_view["weave_agent_evidence_call_id"] == receipt_call_id
 
 
 @pytest.mark.parametrize(
@@ -4403,6 +4535,137 @@ def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
         "trial_index": 1,
     }
     assert "--network" not in str(observed["source"])
+
+
+def test_optional_deterministic_mechanism_does_not_change_required_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    scorer_path = root / ".fugue" / "test-optional-mechanism-scorer.py"
+    scorer_path.parent.mkdir(parents=True, exist_ok=True)
+    scorer_path.write_text(
+        "def score(task, output, evidence):\n"
+        "    return {'skill_rule_opened': False}\n"
+    )
+
+    def fake_runner(*, source, evidence, reference, profile, limits):
+        return {
+            "score": 0.0,
+            "reason": "custom deterministic scorer",
+            "details": {"skill_rule_opened": False},
+            **_fake_scorer_receipts(
+                source=source,
+                evidence=evidence,
+                reference=reference,
+                profile=profile,
+            ),
+        }
+
+    monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    optional = ComparisonEvaluatorV1(
+        id="skill-mechanism",
+        type="deterministic",
+        required=False,
+        scorer=scorer_path.relative_to(root).as_posix(),
+        runtime="python312-sandbox-v1",
+        dimensions=("skill_rule_opened",),
+        dimension_roles={"skill_rule_opened": "mechanism"},
+    )
+    try:
+        [row] = score_comparison_rows(
+            replace(spec, evaluators=(*spec.evaluators, optional)),
+            [
+                {
+                    "task_id": "expense-limit",
+                    "variant_id": "candidate",
+                    "harness": "codex",
+                    "trial_index": 1,
+                    "answer": {
+                        "amount": 125,
+                        "source": "expense-policy-v4.md",
+                    },
+                }
+            ],
+            repo_root=root,
+        )
+    finally:
+        scorer_path.unlink(missing_ok=True)
+
+    assert row["pass"] is True
+    assert row["comparison_deterministic_scores"][
+        "skill-mechanism.skill_rule_opened"
+    ] is False
+    assert row["comparison_dimension_roles"][
+        "skill-mechanism.skill_rule_opened"
+    ] == "mechanism"
+
+
+def test_required_evaluator_excludes_mechanism_from_task_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    scorer_path = root / ".fugue" / "test-role-aware-scorer.py"
+    scorer_path.parent.mkdir(parents=True, exist_ok=True)
+    scorer_path.write_text(
+        "def score(task, output, evidence):\n"
+        "    return {'fact_correct': True, 'skill_rule_opened': False}\n"
+    )
+
+    def fake_runner(*, source, evidence, reference, profile, limits):
+        return {
+            "score": 0.0,
+            "reason": "custom deterministic scorer",
+            "details": {
+                "fact_correct": True,
+                "skill_rule_opened": False,
+            },
+            **_fake_scorer_receipts(
+                source=source,
+                evidence=evidence,
+                reference=reference,
+                profile=profile,
+            ),
+        }
+
+    monkeypatch.setattr("fugue.bench.task_authoring.run_inline_scorer", fake_runner)
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    evaluator = replace(
+        spec.evaluators[0],
+        checks=(),
+        scorer=scorer_path.relative_to(root).as_posix(),
+        runtime="python312-sandbox-v1",
+        dimensions=("fact_correct", "skill_rule_opened"),
+        dimension_roles={
+            "fact_correct": "outcome",
+            "skill_rule_opened": "mechanism",
+        },
+    )
+    try:
+        [row] = score_comparison_rows(
+            replace(spec, schema_version=3, evaluators=(evaluator,)),
+            [
+                {
+                    "task_id": "expense-limit",
+                    "variant_id": "candidate",
+                    "harness": "codex",
+                    "trial_index": 1,
+                    "answer": {
+                        "amount": 125,
+                        "source": "expense-policy-v4.md",
+                    },
+                }
+            ],
+            repo_root=root,
+        )
+    finally:
+        scorer_path.unlink(missing_ok=True)
+
+    assert row["pass"] is True
+    assert row["comparison_deterministic_scores"] == {
+        "fact-and-source.fact_correct": True,
+        "fact-and-source.skill_rule_opened": False,
+    }
 
 
 def test_deterministic_scorer_rejects_primary_artifact_receipt_mismatch(

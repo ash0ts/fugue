@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "protocol_id": "vercel-react-best-practices-conference-sampling-frame-protocol-v1",
+  "status": "prospective_not_yet_sampled",
+  "reserved_studies": {
+    "development": "vercel-react-best-practices-conference-development-v1",
+    "holdout": "vercel-react-best-practices-conference-holdout-v1"
+  },
+  "treatment": {
+    "repository": "https://github.com/vercel-labs/agent-skills",
+    "path": "skills/react-best-practices",
+    "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5"
+  },
+  "estimand": {
+    "unit": "one treatment-blind maintenance task from one canonical public GitHub repository",
+    "cluster": "canonical GitHub repository",
+    "target_population": "eligible TypeScript Next.js maintenance records frozen before task authoring",
+    "primary_partition": "target_holdout",
+    "development_partition_use": "measurement development only; excluded from confirmatory inference",
+    "safety_control_use": "unchanged-rule non-inferiority and critical-failure gates; never pooled into the primary outcome"
+  },
+  "eligibility": {
+    "repository": [
+      "The repository is public, non-archived, non-fork, and has an OSI-identifiable license at the frozen source commit.",
+      "The exact source commit and tree are reachable from the canonical HTTPS GitHub repository at the selection cutoff.",
+      "A frozen package.json and dependency lock prove the React and Next.js declarations and resolved dependency graph, and at least one task target is TypeScript or TSX.",
+      "The source can be archived during trusted preparation without submodules, unsafe links, secret-bearing paths, generated dependency trees, or network-dependent trial setup.",
+      "A repository may contribute at most one task across development, target holdout, and safety-control partitions."
+    ],
+    "maintenance_record": [
+      "The record is a public issue, pull request, or commit belonging to the selected repository and predating task authoring.",
+      "The record supplies a concrete Server Action authorization, RSC serialization, DOM batching, large-array, hook-timing, or event-handler maintenance concern.",
+      "The base source predates the repair; a public executable regression test and a separately held host verifier both fail on base and pass on a frozen gold tree during trusted preparation.",
+      "The record snapshot and eligibility decision have immutable SHA-256 digests and do not expose the private expected patch to the Agent."
+    ],
+    "task": [
+      "The public task is treatment-blind and asks for an implementation in the frozen read-only archive plus an isolated writable worktree.",
+      "The task requires no clone, fetch, install, download, build-image, mutable reference resolution, or external network access during the Agent trial.",
+      "The public executable test is present in the source manifest; the host verifier and expected values remain outside the Agent archive in a mode-0600 private bundle.",
+      "Outcome, safety, and mechanism dimensions are declared independently. Opening a rule is mechanism evidence and cannot make an incorrect implementation pass."
+    ]
+  },
+  "sampling": {
+    "population_snapshot": "Freeze every eligible record, source identity, stack evidence, and eligibility decision before selecting or authoring tasks.",
+    "selection_seed": "Freeze one unpredictable 256-bit seed before inspecting treatment outputs.",
+    "algorithm": "Within each partition and stratum, sort eligible records by SHA256(seed + newline + canonical lower-case repository URL + newline + public record URL + newline), then select the first quota while enforcing one repository cluster globally.",
+    "replacement": "If a selected record fails source preparation or base-fail/gold-pass qualification, retain its exact failure receipt and take the next record in the precomputed order; never hand-pick a replacement.",
+    "quotas": {
+      "development": {
+        "server_action_authorization": 16,
+        "rsc_serialization": 16,
+        "total": 32
+      },
+      "target_holdout": {
+        "server_action_authorization": 96,
+        "rsc_serialization": 96,
+        "total": 192
+      },
+      "safety_control": {
+        "dom_batching": 16,
+        "large_array_iteration": 16,
+        "hook_timing": 16,
+        "event_handler_reference": 16,
+        "total": 64
+      }
+    }
+  },
+  "preparation": {
+    "boundary": "All GitHub reads, source archiving, license and stack checks, regression-test qualification, host-verifier qualification, and digest generation occur in trusted setup --prepare before preview approval.",
+    "trial_restrictions": [
+      "No clone, fetch, install, download, image build or pull, Docker-socket access, or mutable reference resolution is permitted in an Agent trial.",
+      "Each trial receives one digest-verified source archive and public test plus a writable overlay; the source population and labels are never mounted.",
+      "Private labels and host verifiers remain mode 0600 on the host; only their digests and derived scores may enter snapshots and results."
+    ],
+    "required_receipts": [
+      "population query, eligibility-decision, and deterministic-selection receipts",
+      "remote commit/tree, public-record snapshot, package-manifest, dependency-lock, TypeScript target, and license receipts per selected repository",
+      "source archive and file-manifest digests per selected repository",
+      "public executable test and host-only verifier digests per task",
+      "base-fail/gold-pass receipts for both the public test and host verifier in the pinned verifier runtime",
+      "public-task and host-only private-label manifest digests"
+    ]
+  },
+  "sealing": {
+    "development": "Development tasks may be opened only after their separate preview is approved; they do not license holdout access.",
+    "holdout": "Target holdouts and safety controls are sealed before development outputs are inspected and receive a separate preview, approval, budget, and execution identity.",
+    "contamination": "Exposure of a holdout prompt, verifier, expected value, repair commit, or repository cluster before holdout execution invalidates that task and invokes deterministic replacement.",
+    "approval": "Every Study requires an exact finite preview. This protocol authorizes no execution or spend."
+  },
+  "analysis_constraints": [
+    "Attempts estimate repeatability but do not increase the number of independent repository clusters.",
+    "The primary analysis clusters by canonical repository and uses only the 192 target holdouts.",
+    "The two intended changed-rule families are primary outcomes; four unchanged-rule families are separate safety controls.",
+    "Deterministic outcome, safety, mechanism, qualitative-judge, and efficiency evidence remain separate.",
+    "A prospective power simulation over the completed frozen frame is required before holdout preview approval.",
+    "A same-model-family judge remains advisory until an independent reviewed validation satisfies its declared gate."
+  ],
+  "readiness": {
+    "validator": "validate_conference_sampling_frame_v1.py",
+    "schema": "conference-sampling-frame-v1.schema.json",
+    "required_status": "ready",
+    "fail_closed": "No development or holdout spec, source lock, task archive, or paid preview may be generated until the complete 288-cluster bundle validates."
+  }
+}

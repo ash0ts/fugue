@@ -55,7 +55,14 @@ REQUIRED_AUDIT_CHECKS = {
     "privacy",
     "cleanup",
 }
-PROFILE_PATH = Path(__file__).with_name("confirmatory-analysis-profiles.json")
+PROFILE_PATH = Path(__file__).with_name("confirmatory-analysis-profiles-v2.json")
+CAMPAIGN_MANIFEST_PATH = Path(__file__).with_name(
+    "conference-campaign-manifest-v2.json"
+)
+CAMPAIGN_PREREGISTRATION_PATH = Path(__file__).with_name(
+    "conference-preregistration-v2.json"
+)
+POWER_DESIGN_PATH = Path(__file__).with_name("prospective-power-design-v1.json")
 
 
 def _load_json(path: Path, label: str) -> dict[str, Any]:
@@ -137,6 +144,220 @@ def _two_sided_sign_p(task_differences: Mapping[str, float]) -> float:
     return min(1.0, 2 * one_tail)
 
 
+def _two_sided_sign_count_p(positive: int, negative: int) -> float:
+    """Return the exact sign-test p value for one discordant-count outcome."""
+
+    total = positive + negative
+    if total == 0:
+        return 1.0
+    extreme = min(positive, negative)
+    one_tail = sum(math.comb(total, index) for index in range(extreme + 1)) / (
+        2**total
+    )
+    return min(1.0, 2 * one_tail)
+
+
+def _binomial_mass(total: int, successes: int, probability: float) -> float:
+    return (
+        math.comb(total, successes)
+        * probability**successes
+        * (1.0 - probability) ** (total - successes)
+    )
+
+
+def _exact_sign_test_power(
+    *,
+    independent_tasks: int,
+    alpha: float,
+    candidate_win_probability: float,
+    baseline_win_probability: float,
+) -> float:
+    """Compute prospective exact-sign power under a frozen multinomial model.
+
+    This is a design diagnostic, not a fitted model.  A task is either a
+    candidate win, a baseline win, or a tie.  Conditioning on the number of
+    discordant tasks yields a binomial sign test, while the outer binomial
+    accounts for the prospective discordance probability.
+    """
+
+    if independent_tasks < 1 or not 0 < alpha < 1:
+        raise ValueError("power design requires positive tasks and alpha")
+    discordance = candidate_win_probability + baseline_win_probability
+    if (
+        candidate_win_probability < 0
+        or baseline_win_probability < 0
+        or not 0 < discordance <= 1
+    ):
+        raise ValueError("power design probabilities are invalid")
+    conditional_candidate_win = candidate_win_probability / discordance
+    power = 0.0
+    for discordant in range(independent_tasks + 1):
+        discordant_mass = _binomial_mass(
+            independent_tasks, discordant, discordance
+        )
+        for candidate_wins in range(discordant + 1):
+            if (
+                _two_sided_sign_count_p(
+                    candidate_wins, discordant - candidate_wins
+                )
+                <= alpha
+            ):
+                power += discordant_mass * _binomial_mass(
+                    discordant,
+                    candidate_wins,
+                    conditional_candidate_win,
+                )
+    return power
+
+
+def _prospective_power_design(
+    *,
+    preregistration_path: Path,
+    campaign_preregistration: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Load and independently recompute the frozen prospective design."""
+
+    binding = campaign_preregistration.get("prospective_power_design")
+    manifest_binding = manifest.get("prospective_power_design")
+    if not isinstance(binding, Mapping) or set(binding) != {
+        "path",
+        "sha256",
+        "id",
+        "status",
+        "claim_effect",
+    }:
+        raise ValueError("campaign prospective power binding is incomplete")
+    if not isinstance(manifest_binding, Mapping) or any(
+        manifest_binding.get(field) != binding.get(field)
+        for field in ("path", "sha256", "id")
+    ):
+        raise ValueError("manifest prospective power binding disagrees")
+    path = (preregistration_path.parent / str(binding["path"])).resolve()
+    if (
+        not path.is_file()
+        or path.is_symlink()
+        or not _is_digest(binding["sha256"])
+        or _sha256(path) != binding["sha256"]
+    ):
+        raise ValueError("prospective power design is unavailable or drifted")
+    design = _load_json(path, "prospective power design")
+    expected_fields = {
+        "schema_version",
+        "id",
+        "status",
+        "role",
+        "estimand",
+        "inference_unit",
+        "illustrative_scenario",
+        "verified_power_points",
+        "current_design",
+        "recommended_design",
+        "analysis_contract",
+        "limitations",
+    }
+    if (
+        set(design) != expected_fields
+        or design.get("schema_version") != 1
+        or design.get("id") != binding.get("id")
+        or design.get("status") != "frozen_before_next_valid_preview"
+        or design.get("role") != "design_diagnostic_not_execution_approval"
+    ):
+        raise ValueError("unsupported prospective power design schema")
+    scenario = design.get("illustrative_scenario")
+    if not isinstance(scenario, Mapping):
+        raise ValueError("prospective power scenario is unavailable")
+    candidate_win = float(scenario.get("candidate_win_probability"))
+    baseline_win = float(scenario.get("baseline_win_probability"))
+    tie = float(scenario.get("tie_probability"))
+    if (
+        not math.isclose(candidate_win + baseline_win + tie, 1.0)
+        or not math.isclose(
+            candidate_win - baseline_win,
+            float(scenario.get("net_effect")),
+        )
+    ):
+        raise ValueError("prospective power scenario probabilities drifted")
+    points = design.get("verified_power_points")
+    if not isinstance(points, list) or not points:
+        raise ValueError("prospective power design has no verified points")
+    verified_points: list[dict[str, Any]] = []
+    for point in points:
+        if not isinstance(point, Mapping) or set(point) != {
+            "independent_tasks",
+            "alpha",
+            "power",
+            "interpretation",
+        }:
+            raise ValueError("prospective power point is malformed")
+        recomputed = _exact_sign_test_power(
+            independent_tasks=int(point["independent_tasks"]),
+            alpha=float(point["alpha"]),
+            candidate_win_probability=candidate_win,
+            baseline_win_probability=baseline_win,
+        )
+        if not math.isclose(recomputed, float(point["power"]), abs_tol=1e-9):
+            raise ValueError("prospective power point does not recompute")
+        verified_points.append({**dict(point), "recomputed_power": recomputed})
+    current = design.get("current_design")
+    sampling = campaign_preregistration.get("sampling")
+    if not isinstance(current, Mapping) or not isinstance(sampling, Mapping):
+        raise ValueError("current prospective design is unavailable")
+    expected_current = {
+        "development_tasks_per_repository": sampling.get("development_tasks"),
+        "holdout_tasks_per_repository": sampling.get("untouched_holdout_tasks"),
+        "attempts_per_task_per_arm": sampling.get("attempts_per_task_per_arm"),
+        "arms": sampling.get("arms"),
+        "cells_per_repository": sampling.get("cells_per_repository"),
+        "campaign_cells": sampling.get("total_agent_cells"),
+    }
+    if any(current.get(field) != value for field, value in expected_current.items()):
+        raise ValueError("power design current matrix disagrees with preregistration")
+    if current.get("conference_claim_eligible") is not False:
+        raise ValueError("underpowered current design cannot be claim eligible")
+    recommended = design.get("recommended_design")
+    if not isinstance(recommended, Mapping):
+        raise ValueError("recommended prospective design is unavailable")
+    development_cells = (
+        int(recommended["development_tasks_per_repository"])
+        * int(recommended["development_attempts_per_task_per_arm"])
+        * int(recommended["arms"])
+    )
+    holdout_cells = (
+        (
+            int(recommended["target_holdout_tasks_per_repository"])
+            + int(recommended["safety_control_tasks_per_repository"])
+        )
+        * int(recommended["holdout_attempts_per_task_per_arm"])
+        * int(recommended["arms"])
+    )
+    if (
+        development_cells != recommended.get("development_cells_per_repository")
+        or holdout_cells != recommended.get("holdout_cells_per_repository")
+        or development_cells + holdout_cells
+        != recommended.get("total_cells_per_repository")
+        or (development_cells + holdout_cells) * int(recommended["repositories"])
+        != recommended.get("campaign_cells")
+    ):
+        raise ValueError("recommended prospective design arithmetic drifted")
+    return {
+        "status": "verified_underpowered_current_design",
+        "artifact": {
+            "id": design["id"],
+            "path": path.as_posix(),
+            "sha256": binding["sha256"],
+            "design_digest": stable_digest(design),
+        },
+        "scenario": dict(scenario),
+        "verified_power_points": verified_points,
+        "current_design": dict(current),
+        "recommended_design": dict(recommended),
+        "analysis_contract": dict(design["analysis_contract"]),
+        "limitations": list(design["limitations"]),
+        "claim_effect": binding["claim_effect"],
+    }
+
+
 def _holm(values: Mapping[str, float]) -> dict[str, float]:
     ordered = sorted(values.items(), key=lambda item: (item[1], item[0]))
     adjusted: dict[str, float] = {}
@@ -157,11 +378,16 @@ def _profile_for_study(
 ) -> tuple[dict[str, Any], str]:
     document = _load_json(path, "confirmatory analysis profiles")
     if (
-        document.get("schema_version") != 1
+        document.get("schema_version") not in {1, 2}
         or document.get("status") != "frozen_before_execution"
         or not str(document.get("campaign_id") or "")
     ):
         raise ValueError("unsupported confirmatory analysis profile schema")
+    if document.get("schema_version") == 2 and (
+        document.get("claim_role") != "measurement_development_descriptive"
+        or document.get("conference_claim_eligible") is not False
+    ):
+        raise ValueError("analysis profile overclaims the descriptive design")
     if campaign_id is not None and document.get("campaign_id") != campaign_id:
         raise ValueError("analysis profile belongs to another campaign")
     profiles = document.get("profiles")
@@ -264,26 +490,66 @@ def _load_profile_preregistration(
         changes = amendment_value.get("changes")
         if not isinstance(changes, Mapping):
             raise ValueError("preregistration amendment changes are malformed")
-        measurement_restart = amendment_value.get("amendment_kind") == (
+        amendment_kind = amendment_value.get("amendment_kind")
+        primary_artifact_restart = amendment_kind == (
             "scorer_and_primary_artifact_integrity_full_restart"
         )
+        artifact_length_restart = amendment_kind == (
+            "scorer_artifact_length_role_correction_full_restart"
+        )
+        scorer_qualification_restart = amendment_kind == (
+            "scorer_mutation_product_contract_and_claim_scope_restart"
+        )
+        vercel_role_restart = amendment_kind == (
+            "public_behavioral_outcome_and_skill_rule_opening_restart"
+        )
         evaluator_change_allowed = bool(
-            measurement_restart
-            and changes.get("deterministic_scorer") is True
-            and changes.get("primary_artifact_contract") is True
-            and changes.get("judge_requiredness") is False
-            and isinstance(amendment_value.get("measurement_revision"), Mapping)
+            (
+                isinstance(amendment_value.get("measurement_revision"), Mapping)
+                and (
+                (
+                    primary_artifact_restart
+                    and changes.get("deterministic_scorer") is True
+                    and changes.get("primary_artifact_contract") is True
+                    and changes.get("judge_requiredness") is False
+                )
+                or (
+                    artifact_length_restart
+                    and changes.get("deterministic_scorer") is True
+                    and changes.get("artifact_length_role") is True
+                    and changes.get("artifact_safety_gate") is True
+                    and changes.get("primary_analysis") is False
+                )
+            )
+            )
+            or (
+                scorer_qualification_restart
+                and changes.get("deterministic_scorer") is False
+                and changes.get("scorer_qualification") is True
+                and changes.get("compatibility_product_contract") is True
+                and changes.get("claim_scope") is True
+            )
+            or (
+                vercel_role_restart
+                and changes.get("outcome_safety_roles") is True
+                and changes.get("public_behavioral_outcome") is True
+                and changes.get("skill_rule_opening_evidence") is True
+            )
+        )
+        evaluators_unchanged = changes.get("evaluators") is False
+        taskset_change_allowed = bool(
+            vercel_role_restart
+            and changes.get("taskset") is True
+            and changes.get("taskset_change_scope")
+            == "required_public_behavioral_criticality_and_v2_audit_tag_only"
         )
         if (
             not isinstance(replacement, Mapping)
             or replacement.get("comparison_id") != study_id
             or changes.get("hypotheses") is not False
-            or changes.get("taskset") is not False
+            or (changes.get("taskset") is not False and not taskset_change_allowed)
             or changes.get("treatments") is not False
-            or (
-                changes.get("evaluators") is not False
-                and not evaluator_change_allowed
-            )
+            or (not evaluators_unchanged and not evaluator_change_allowed)
         ):
             raise ValueError("preregistration amendment changes behavioral inputs")
         binding["amendment"] = {
@@ -1840,6 +2106,183 @@ def _preregistered_analysis(
     }
 
 
+def _validate_descriptive_protocol_bindings(
+    *,
+    campaign_manifest_path: Path,
+    preregistration_path: Path,
+    profile_path: Path,
+    manifest: Mapping[str, Any],
+    campaign_preregistration: Mapping[str, Any],
+    study: Mapping[str, Any],
+) -> None:
+    """Fail closed unless the new descriptive identities bind exact artifacts.
+
+    The V1 protocol and manifest are immutable audit history.  Repaired Studies
+    must use V2 identities, explicitly disclaim population/conference efficacy,
+    and bind the exact protocol and analysis profile that will interpret them.
+    """
+
+    if (
+        campaign_preregistration.get("schema_version") != 2
+        or manifest.get("schema_version") != 2
+        or campaign_preregistration.get("study_class")
+        != "measurement_development_descriptive"
+        or manifest.get("claim_role") != "measurement_development_descriptive"
+        or manifest.get("conference_claim_eligible") is not False
+    ):
+        raise ValueError("confirmatory analyzer requires the descriptive V2 protocol")
+    eligibility = campaign_preregistration.get("claim_eligibility")
+    if (
+        not isinstance(eligibility, Mapping)
+        or eligibility.get("conference_claim_eligible") is not False
+        or eligibility.get("population_claim_eligible") is not False
+    ):
+        raise ValueError("descriptive protocol claim eligibility is malformed")
+    protocol_binding = manifest.get("preregistration")
+    if (
+        not isinstance(protocol_binding, Mapping)
+        or protocol_binding.get("id") != campaign_preregistration.get("id")
+        or protocol_binding.get("sha256") != _sha256(preregistration_path)
+        or (campaign_manifest_path.parent / str(protocol_binding.get("path") or "")).resolve()
+        != preregistration_path.resolve()
+    ):
+        raise ValueError("manifest does not bind the exact V2 preregistration")
+    profile_binding = manifest.get("analysis_profile")
+    profile_document = _load_json(profile_path, "confirmatory analysis profiles")
+    if (
+        not isinstance(profile_binding, Mapping)
+        or profile_binding.get("id") != profile_document.get("id")
+        or profile_binding.get("sha256") != _sha256(profile_path)
+        or (campaign_manifest_path.parent / str(profile_binding.get("path") or "")).resolve()
+        != profile_path.resolve()
+    ):
+        raise ValueError("manifest does not bind the exact V2 analysis profile")
+    if (
+        study.get("study_class") != "measurement_development_descriptive"
+        or study.get("conference_claim_eligible") is not False
+    ):
+        raise ValueError("Study overclaims the descriptive measurement design")
+    _validate_v2_budget_policy_bindings(
+        campaign_manifest_path=campaign_manifest_path,
+        preregistration_path=preregistration_path,
+        manifest=manifest,
+        campaign_preregistration=campaign_preregistration,
+    )
+
+
+def _validate_v2_budget_policy_bindings(
+    *,
+    campaign_manifest_path: Path,
+    preregistration_path: Path,
+    manifest: Mapping[str, Any],
+    campaign_preregistration: Mapping[str, Any],
+) -> None:
+    expected_fields = {"path", "sha256", "id", "status", "claim_effect"}
+    manifest_binding = manifest.get("budget_policy")
+    protocol_binding = campaign_preregistration.get("budget_policy")
+    if (
+        not isinstance(manifest_binding, Mapping)
+        or not isinstance(protocol_binding, Mapping)
+        or set(manifest_binding) != expected_fields
+        or set(protocol_binding) != expected_fields
+        or dict(manifest_binding) != dict(protocol_binding)
+    ):
+        raise ValueError("V2 budget policy binding is incomplete or inconsistent")
+    policy_path = (
+        preregistration_path.parent / str(protocol_binding.get("path") or "")
+    ).resolve()
+    expected_sha256 = str(protocol_binding.get("sha256") or "")
+    if (
+        not policy_path.is_file()
+        or policy_path.is_symlink()
+        or not _is_digest(expected_sha256)
+        or _sha256(policy_path) != expected_sha256
+    ):
+        raise ValueError("V2 budget policy is unavailable or drifted")
+    policy = _load_json(policy_path, "V2 budget policy")
+    if (
+        policy.get("schema_version") != 2
+        or policy.get("id") != protocol_binding.get("id")
+        or policy.get("campaign_id") != manifest.get("id")
+        or policy.get("status") != "limits_only_not_approval"
+        or policy.get("study_class") != "measurement_development_descriptive"
+        or policy.get("conference_claim_eligible") is not False
+        or policy.get("claim_boundary") != protocol_binding.get("claim_effect")
+    ):
+        raise ValueError("V2 budget policy identity or claim boundary drifted")
+    studies = policy.get("studies")
+    execution_order = manifest.get("execution_order")
+    if not isinstance(studies, list) or not isinstance(execution_order, list):
+        raise ValueError("V2 budget policy Study list is malformed")
+    by_id = {
+        str(item.get("id") or ""): item
+        for item in studies
+        if isinstance(item, Mapping)
+    }
+    if list(by_id) != execution_order or len(by_id) != len(studies):
+        raise ValueError("V2 budget policy does not govern the exact execution order")
+    manifest_studies = {
+        str(item.get("id") or ""): item
+        for item in manifest.get("final_four", [])
+        if isinstance(item, Mapping) and item.get("kind") == "governed_comparison"
+    }
+    if set(by_id) != set(manifest_studies):
+        raise ValueError("V2 budget policy and campaign Studies disagree")
+    repo_root = campaign_manifest_path.resolve().parents[3]
+    for study_id, budget in by_id.items():
+        campaign_study = manifest_studies[study_id]
+        spec_path = (policy_path.parent / str(budget.get("spec") or "")).resolve()
+        declared_spec = (
+            campaign_manifest_path.parent / str(campaign_study.get("spec") or "")
+        ).resolve()
+        if spec_path != declared_spec:
+            raise ValueError(f"V2 budget policy spec path drifted for {study_id}")
+        spec = load_comparison(spec_path, repo_root=repo_root)
+        task_count = len(_public_tasks(repo_root / spec.taskset.tasks))
+        cells = task_count * 2 * spec.execution.attempts * len(spec.execution.harnesses)
+        judge_reserve = sum(
+            evaluator.reserve_cost_usd
+            for evaluator in spec.evaluators
+            if evaluator.type == "llm_judge"
+        )
+        if (
+            budget.get("tasks") != task_count
+            or budget.get("arms") != 2
+            or budget.get("attempts_per_task_per_arm") != spec.execution.attempts
+            or budget.get("cells") != cells
+            or budget.get("maximum_cost_usd") != spec.execution.max_cost_usd
+            or not math.isclose(
+                float(budget.get("judge_reserve_per_cell_usd") or 0),
+                judge_reserve,
+            )
+            or budget.get("approval_status") != "fresh_exact_preview_required"
+        ):
+            raise ValueError(f"V2 budget policy matrix drifted for {study_id}")
+    calibration = policy.get("judge_calibration")
+    if not isinstance(calibration, Mapping):
+        raise ValueError("V2 budget policy judge calibration is missing")
+    calibration_path = (
+        policy_path.parent / str(calibration.get("path") or "")
+    ).resolve()
+    if (
+        calibration.get("status") != "pending_human_review"
+        or calibration.get("passed") is not False
+        or calibration.get("judge_role") != "secondary_advisory_only"
+        or not calibration_path.is_file()
+        or _sha256(calibration_path) != calibration.get("sha256")
+    ):
+        raise ValueError("V2 budget policy overstates judge qualification")
+    calibration_result = _load_json(calibration_path, "V2 judge calibration")
+    if (
+        calibration_result.get("schema_version") != 2
+        or calibration_result.get("review_status") != calibration.get("status")
+        or calibration_result.get("passed") is not calibration.get("passed")
+        or calibration_result.get("reviewers_per_example")
+        != calibration.get("reviewers_per_example")
+    ):
+        raise ValueError("V2 budget policy judge calibration metadata drifted")
+
+
 def analyze(
     *,
     attempts_path: Path,
@@ -1861,6 +2304,19 @@ def analyze(
     ):
         raise ValueError("campaign preregistration is not frozen for this manifest")
     study = _campaign_study(manifest, study_id)
+    _validate_descriptive_protocol_bindings(
+        campaign_manifest_path=campaign_manifest_path,
+        preregistration_path=preregistration_path,
+        profile_path=profile_path,
+        manifest=manifest,
+        campaign_preregistration=campaign_preregistration,
+        study=study,
+    )
+    prospective_power = _prospective_power_design(
+        preregistration_path=preregistration_path,
+        campaign_preregistration=campaign_preregistration,
+        manifest=manifest,
+    )
     profile, profile_sha256 = _profile_for_study(
         profile_path,
         study_id,
@@ -1933,12 +2389,18 @@ def analyze(
         tags=tags,
     )
     report: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "community_skill_confirmatory_analysis",
         "campaign_id": manifest["id"],
         "study_id": study_id,
         "status": "complete",
+        "study_class": "measurement_development_descriptive",
+        "conference_claim_eligible": False,
         "scope": campaign_preregistration["claims_scope"],
+        "claim_eligibility": dict(campaign_preregistration["claim_eligibility"]),
+        "reserved_powered_studies": list(
+            campaign_preregistration["reserved_powered_studies"]
+        ),
         "exact_revisions": {
             "baseline": profile["baseline_commit"],
             "candidate": profile["candidate_commit"],
@@ -1951,6 +2413,7 @@ def analyze(
             "arms": 2,
             "rows": len(rows),
         },
+        "prospective_power_design": prospective_power,
         "deterministic": deterministic,
         "judge": _judge_summary(result),
         "mechanism": _mechanism_summary(result, rows, holdout),
@@ -1976,6 +2439,9 @@ def analyze(
             "canonical_result_recomputed": True,
         },
         "limitations": [
+            prospective_power["claim_effect"],
+            *prospective_power["limitations"],
+            campaign_preregistration["claim_eligibility"]["reason"],
             campaign_preregistration["diagnostic_no_skill_contrast"][
                 "claim_limitation"
             ],
@@ -1999,12 +2465,12 @@ def main() -> None:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path(__file__).with_name("conference-campaign-manifest.json"),
+        default=CAMPAIGN_MANIFEST_PATH,
     )
     parser.add_argument(
         "--preregistration",
         type=Path,
-        default=Path(__file__).with_name("conference-preregistration.json"),
+        default=CAMPAIGN_PREREGISTRATION_PATH,
     )
     parser.add_argument("--profiles", type=Path, default=PROFILE_PATH)
     parser.add_argument("--output", type=Path)

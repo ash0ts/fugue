@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: vercel-react-best-practices-confirmatory-v2
+  name: Vercel React Best Practices Measurement-Development Study
+  description: Exact upstream Skill revisions on 24 authored repeated maintenance tasks with one host-confirmed public-test outcome, independent safety gates, and observed Skill-rule opening separated.
+  objective: Measure the changed Server Action and RSC outcomes descriptively without pooling safety gates, mechanism use, or repeated attempts as independent tasks.
+wandb:
+  entity: wandb
+  project: fugue-vercel-react-best-practices-confirmatory-v2
+database: .study-console/confirmatory-studies-v2.sqlite3
+primary_metric:
+  name: task_clustered_outcome_difference
+  goal: maximize
+presentation:
+  default_study_id: vercel-react-best-practices-confirmatory-v2
+  read_only: true

@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "amendment_id": "superpowers-writing-plans-confirmatory-v6-artifact-length-measurement-restart",
+  "status": "frozen_after_v5_preview_before_approval_or_execution",
+  "amendment_kind": "scorer_artifact_length_role_correction_full_restart",
+  "prior_preregistration": {
+    "id": "superpowers-writing-plans-confirmatory-v1",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v1.json",
+    "sha256": "2a1c5a4ddda5d2921e4fb986f1cb121956718656a3db338850b41abc338053e7"
+  },
+  "prior_amendment": {
+    "id": "superpowers-writing-plans-confirmatory-v5-measurement-integrity-restart",
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/preregistration-confirmatory-v5-amendment.json",
+    "sha256": "acccc950f236102a19be1f023f6451c284a2f8b7b375788c9373f1e3ec1cce37"
+  },
+  "superseded_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v5",
+    "preview_digest": "fc45306ff5c7b11d5c5223cc975a047830cf99bdb7ea70690496fe2d473c45d0",
+    "approval_digest": null,
+    "run_id": null,
+    "status": "invalidated_before_approval_or_execution",
+    "reason_code": "outcome_dependent_artifact_length_ceiling",
+    "behavioral_result_eligible": false,
+    "planned_cells": 192,
+    "started_cells": 0,
+    "canonical_result_published": false
+  },
+  "v5_measurement_diagnosis": {
+    "detected_by": "pre_execution_scorer_audit",
+    "candidate_neutral_audit": true,
+    "v5_agent_outputs_observed": false,
+    "defect": "artifact_validity rejected every artifact longer than 18000 characters, coupling a critical correctness gate to candidate-dependent verbosity even though Fugue safely retains and scores complete primary artifacts up to one MiB",
+    "historical_trigger_artifact_bytes": 26556,
+    "claim_effect": "The V5 preview and any approval derived from it are invalid. V5 has no behavioral rows and cannot be pooled into V6. V1-V5 remain immutable audit history."
+  },
+  "measurement_revision": {
+    "prior_scorer": "plan_quality_scorer_v3.py",
+    "prior_scorer_sha256": "b67862e8c63bfa97ba6ea56fc3d3bdcb72e463a87e5bc433be0ead5258164b4a",
+    "replacement_scorer": "plan_quality_scorer_v4.py",
+    "replacement_scorer_sha256": "981411ad4c6348a74e270eaca45dbd955972585f4ca8d00c9c0eee235ba7cb49",
+    "minimum_artifact_characters": 700,
+    "maximum_artifact_bytes": 1048576,
+    "artifact_length_reporting": {
+      "source": "comparison_deterministic_scorer_receipts.plan-quality-confirmatory.primary_artifact_bytes",
+      "role": "efficiency",
+      "direction": "lower_is_more_efficient",
+      "task_correctness_effect_below_safety_cap": "none"
+    },
+    "repairs": [
+      "score the complete primary artifact for every outcome and safety dimension",
+      "remove the 18000-character maximum from artifact validity",
+      "retain a separate one-MiB UTF-8 byte and NUL-free artifact safety gate",
+      "report exact artifact bytes from the bound scorer receipt as secondary efficiency evidence",
+      "forbid artifact length from establishing a behavioral improvement or regression below the safety cap"
+    ]
+  },
+  "execution_integrity_requirements": [
+    "persist one exact primary artifact path, byte count, and sha256",
+    "bind the complete deterministic scorer input to that artifact without truncation",
+    "reject an artifact larger than 1048576 UTF-8 bytes before or during scoring",
+    "skip scoring and judging for missing, multiple, externally cancelled, or otherwise incomplete primary artifacts",
+    "retain five-link Weave reconciliation, privacy checks, cost evidence, and run-scoped cleanup before releasing the remaining cohort"
+  ],
+  "restart_decision": {
+    "basis": "pre_execution_measurement_role_defect",
+    "outcome_dependent": false,
+    "made_before_any_v5_agent_cell_or_hypothesis_test": true,
+    "restart_scope": "all_192_cells_from_scratch",
+    "resume_or_selective_rerun": false,
+    "v1_through_v5_rows_in_v6_analysis": false,
+    "interim_efficacy_stopping": false
+  },
+  "replacement_execution": {
+    "comparison_id": "superpowers-writing-plans-confirmatory-v6",
+    "research_id": "superpowers-writing-plans-confirmatory-v6",
+    "result_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v6",
+    "source_lock_path": ".fugue/qualification/community-skill-confirmatory/superpowers-v6/source.lock.json",
+    "source_lock_policy": "Generate a fresh lock from the V6 spec and prepared immutable source; never hand-edit or reuse the V5 result-project lock.",
+    "evidence_checkpoint_cells": 2,
+    "full_terminal_cohort_required": true
+  },
+  "frozen_behavioral_inputs": {
+    "public_tasks_sha256": "9612919179b86b62b381712f5e6f79bd686beed3e3b0fb431a66248976a2382f",
+    "private_labels_sha256": "5c2110565b8622dd4d5d89047c462906675b138e022af4e8c8edff8e5f890fa0",
+    "skill_revision_lock_sha256": "47f56e275f85d80193f5f7c5647a92c4689aeb12f493ecd06de61c37036bf583",
+    "agent_visible_source_archive_sha256": "c1bd998358d7eff1269f3d2da951d12331df1dc1df635a176bb3d129305311b0",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "source_project": "wandb/fugue-superpowers-writing-plans-source-v1",
+    "model_route": "anthropic/claude-sonnet-5",
+    "harness": "claude-code",
+    "tasks": 24,
+    "arms": 2,
+    "attempts_per_task_arm": 4,
+    "planned_cells": 192
+  },
+  "changes": {
+    "hypotheses": false,
+    "taskset": false,
+    "holdout_membership": false,
+    "private_expected_values": false,
+    "treatments": false,
+    "model_or_harness": false,
+    "task_or_agent_limits": false,
+    "budget_ceiling": false,
+    "scheduling_seed": false,
+    "primary_analysis": false,
+    "deterministic_scorer": true,
+    "artifact_length_role": true,
+    "artifact_safety_gate": true,
+    "execution_identity": true,
+    "result_destination": true,
+    "source_lock_location": true
+  },
+  "claim_boundary": "Only a complete V6 cohort scored with the V4 scorer and complete-artifact contract may support the frozen behavioral question. Exact artifact length is secondary efficiency evidence and cannot affect correctness below the one-MiB safety cap. V1-V5 remain immutable audit history and contribute no behavioral rows.",
+  "amendment_digest": "efca6870ff05e40368b93396fd5816667f1f1c35c51ea41b199da2d31a99bff3"
+}

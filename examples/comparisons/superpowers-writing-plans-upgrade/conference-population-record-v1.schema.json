@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ash0ts/fugue/blob/main/examples/comparisons/superpowers-writing-plans-upgrade/conference-population-record-v1.schema.json",
+  "title": "Superpowers writing-plans eligible public population record V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "repository_url",
+    "repository_owner",
+    "repository_name",
+    "commit_sha",
+    "tree_sha",
+    "public_record_url",
+    "public_record_kind",
+    "public_record_id",
+    "public_record_snapshot_sha256",
+    "provenance_cluster_id",
+    "sampling_family",
+    "stratum",
+    "selection_score_sha256",
+    "source_archive_path",
+    "source_archive_sha256",
+    "source_manifest_path",
+    "source_manifest_sha256",
+    "provenance_receipt_path",
+    "provenance_receipt_sha256",
+    "eligibility_receipt_sha256",
+    "license"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "record_id": {"type": "string", "pattern": "^sp-pop-[0-9a-f]{16}$"},
+    "repository_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "repository_owner": {"type": "string", "minLength": 1},
+    "repository_name": {"type": "string", "minLength": 1},
+    "commit_sha": {"$ref": "#/$defs/gitSha"},
+    "tree_sha": {"$ref": "#/$defs/gitSha"},
+    "public_record_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/.+/(issues|pull|commit)/.+$"
+    },
+    "public_record_kind": {"enum": ["issue", "pull_request", "commit"]},
+    "public_record_id": {"type": "string", "minLength": 1},
+    "public_record_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_cluster_id": {
+      "type": "string",
+      "pattern": "^github:[a-z0-9_.-]+/[a-z0-9_.-]+$"
+    },
+    "sampling_family": {"enum": ["target", "safety_control"]},
+    "stratum": {
+      "enum": [
+        "security_privacy",
+        "identity_migration",
+        "lifecycle_recovery",
+        "integration_runtime",
+        "docs_only",
+        "unsafe_request",
+        "no_change_required",
+        "single_surface"
+      ]
+    },
+    "selection_score_sha256": {"$ref": "#/$defs/sha256"},
+    "source_archive_path": {"$ref": "#/$defs/relativePath"},
+    "source_archive_sha256": {"$ref": "#/$defs/sha256"},
+    "source_manifest_path": {"$ref": "#/$defs/relativePath"},
+    "source_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_receipt_path": {"$ref": "#/$defs/relativePath"},
+    "provenance_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "eligibility_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_id", "path", "sha256"],
+      "properties": {
+        "spdx_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$",
+          "not": {"enum": ["NONE", "NOASSERTION"]}
+        },
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"sampling_family": {"const": "target"}}},
+      "then": {
+        "properties": {
+          "stratum": {
+            "enum": [
+              "security_privacy",
+              "identity_migration",
+              "lifecycle_recovery",
+              "integration_runtime"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "stratum": {
+            "enum": [
+              "docs_only",
+              "unsafe_request",
+              "no_change_required",
+              "single_surface"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000\\r\\n]+$"
+    }
+  }
+}

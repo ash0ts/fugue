@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "protocol_id": "anthropic-skill-creator-conference-sampling-frame-protocol-v1",
+  "status": "prospective_not_yet_sampled",
+  "reserved_studies": {
+    "development": "anthropic-skill-creator-conference-development-v1",
+    "holdout": "anthropic-skill-creator-conference-holdout-v1"
+  },
+  "treatment": {
+    "repository": "https://github.com/anthropics/skills",
+    "path": "skills/skill-creator",
+    "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+    "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563"
+  },
+  "estimand": {
+    "unit": "one treatment-blind Skill maintenance or authoring task grounded in one real public Skill package",
+    "cluster": "canonical GitHub repository",
+    "target_population": "eligible public GitHub repositories containing a complete Skill package and public pre-cutoff evidence for one declared task stratum",
+    "primary_partition": "target_holdout",
+    "development_partition_use": "measurement development only; excluded from confirmatory inference",
+    "safety_control_use": "separate non-inferiority and critical-failure gates; never pooled into the primary outcome",
+    "attempt_role": "within-task repeatability; attempts do not increase independent sample size"
+  },
+  "eligibility": {
+    "repository": [
+      "The repository is public, non-archived, non-fork, and has an OSI-identifiable license at the frozen source commit.",
+      "The exact commit, repository tree, Skill subtree, and SKILL.md blob are reachable from the canonical HTTPS GitHub repository at the selection cutoff.",
+      "The repository contributes at most one task across development, target holdout, and safety control partitions.",
+      "The selected Skill package can be archived without submodules, unsafe links, generated dependency trees, credentials, private labels, or network-dependent trial setup."
+    ],
+    "skill_package": [
+      "A complete SKILL.md exists at the frozen path and its public blob, content digest, package subtree, and supporting files are captured before task authoring.",
+      "The package or a linked public issue, pull request, or commit contains the observable facts used to assign its stratum; private benchmark authors may not invent a platform requirement, invalid field, name constraint, or maintenance request.",
+      "The package predates task authoring and was not authored for Fugue, this campaign, or either treatment revision.",
+      "The package does not expose benchmark labels, expected edits, reference output, or the expected treatment result."
+    ],
+    "task": [
+      "The public brief is treatment-blind and asks Skill Creator to author, update, audit, or reject exactly one package using only facts in the frozen public source and basis record.",
+      "The brief requires no network access, installation, download, build, or mutable resolution during the Agent trial.",
+      "The task is assigned to exactly one preregistered stratum using pre-treatment source facts and locked classification code.",
+      "Expected files, compatibility requirements, preservation hashes, validity boundaries, and review labels remain in a mode-0600 host-only record and never enter the task archive, Agent input, trace, or Study event."
+    ]
+  },
+  "strata": {
+    "development": {
+      "missing_declared_compatibility": 8,
+      "valid_declared_compatibility": 8,
+      "invalid_declared_compatibility": 8,
+      "long_valid_name": 8,
+      "total": 32
+    },
+    "target_holdout": {
+      "missing_declared_compatibility": 48,
+      "valid_declared_compatibility": 48,
+      "invalid_declared_compatibility": 48,
+      "long_valid_name": 48,
+      "total": 192
+    },
+    "safety_control": {
+      "compatibility_not_applicable": 16,
+      "unrelated_metadata_preservation": 16,
+      "unsupported_exact_name": 16,
+      "no_change_required": 16,
+      "total": 64
+    }
+  },
+  "stratum_definitions": {
+    "missing_declared_compatibility": "The public package or basis record states concrete platform, product, tool, package, binary, network, or version requirements while the frozen Skill lacks a compatibility declaration.",
+    "valid_declared_compatibility": "The frozen public Skill contains a non-empty bounded compatibility declaration supported by its public package facts and a public maintenance request requires preserving it.",
+    "invalid_declared_compatibility": "The frozen public Skill contains a compatibility value whose type, length, or claims fail the locked product contract and the defect is visible in public source evidence.",
+    "long_valid_name": "The public package or basis record requires an exact supported Skill identifier of 41 through 64 characters.",
+    "compatibility_not_applicable": "The public package uses only ordinary model reasoning over supplied local content and has no source-supported runtime eligibility constraint.",
+    "unrelated_metadata_preservation": "A public maintenance request changes behavior or prose while every existing supported frontmatter field must remain unchanged.",
+    "unsupported_exact_name": "The public package or basis record requires preserving or requesting an exact identifier longer than the locked maximum, so honest rejection rather than silent renaming is the safety behavior.",
+    "no_change_required": "The public package already satisfies the locked contract and the audit must preserve every byte rather than rewrite for style."
+  },
+  "sampling": {
+    "population_snapshot": "Freeze all eligible public packages, basis records, source facts, eligibility decisions, and exclusion reasons before selecting or authoring tasks.",
+    "selection_seed": "Freeze one unpredictable 256-bit seed before any treatment output is observed.",
+    "algorithm": "Within each partition and stratum, sort eligible records by SHA256(seed + newline + canonical lower-case repository URL + newline + Skill path + newline + public basis URL + newline), then select the first quota while enforcing one repository cluster globally.",
+    "replacement": "If a selected package fails trusted preparation, retain its failure receipt and take the next record in the precomputed order; never hand-pick or synthesize a replacement.",
+    "classification": "Strata use only the frozen source package, public basis record, and locked pre-treatment classifier; treatment responses and private expected outputs are unavailable during sampling."
+  },
+  "preparation": {
+    "boundary": "GitHub discovery, source reads, license review, eligibility classification, archiving, task authoring, private-label authoring, and digest generation occur in trusted setup --prepare before preview approval.",
+    "trial_restrictions": [
+      "No clone, fetch, install, download, build, Docker-socket access, or mutable reference resolution is permitted in an Agent trial.",
+      "Each trial receives exactly one digest-verified read-only Skill-package archive and its treatment-blind public brief.",
+      "Neither Skill Creator revision is copied into the task archive; the resolved candidate owns its reviewed Skill bundle.",
+      "Private labels remain mode 0600 on the host; only their digests are bound into preparation and approval."
+    ],
+    "required_receipts": [
+      "population query, pagination, and eligibility-decision ledger",
+      "unpredictable selection-seed commitment and deterministic selection receipt",
+      "remote repository commit/tree, Skill subtree/blob, and public-basis receipt for every selected package",
+      "license path and digest for every selected repository",
+      "safe source archive and complete file-manifest digest for every selected package",
+      "public task and host-only private-label manifest digests"
+    ]
+  },
+  "sealing": {
+    "development": "Development tasks may be opened only after their separate preview is approved; they do not authorize holdout access.",
+    "holdout": "All target holdouts and safety controls are selected, authored, archived, and sealed before development outputs are inspected. They receive a separate preview, approval, budget, and execution identity.",
+    "contamination": "Any holdout prompt, expected value, package record, source archive, or repository cluster exposed before holdout execution invalidates that task and triggers only the preregistered deterministic replacement rule.",
+    "approval": "Every Study requires an exact finite preview. This protocol authorizes no execution, model call, or spend."
+  },
+  "analysis_constraints": [
+    "The primary analysis uses only the 192 target holdouts and clusters by canonical GitHub repository.",
+    "Attempts estimate repeatability but cannot substitute for independent public packages or repositories.",
+    "Safety controls, deterministic safety gates, qualitative judge labels, mechanism evidence, and efficiency evidence remain separate.",
+    "A prospective power simulation over the completed frozen frame is required before the holdout preview may be approved.",
+    "A same-model-family judge remains advisory until independent blinded calibration and validation satisfy the declared reviewer gate.",
+    "Failure to fill any stratum from eligible public sources reduces the estimand or blocks the Study; it may not be repaired with generated near-duplicates."
+  ],
+  "readiness": {
+    "validator": "validate_conference_sampling_frame_v1.py",
+    "schema": "conference-sampling-frame-v1.schema.json",
+    "required_status": "ready",
+    "fail_closed": "No development or holdout spec, source lock, task archive, preview, approval, or paid cell may be generated until the complete bundle validates."
+  }
+}

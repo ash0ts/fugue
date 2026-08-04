@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "protocol_id": "superpowers-writing-plans-conference-sampling-frame-protocol-v1",
+  "status": "prospective_not_yet_sampled",
+  "reserved_studies": {
+    "development": "superpowers-writing-plans-conference-development-v1",
+    "holdout": "superpowers-writing-plans-conference-holdout-v1"
+  },
+  "treatment": {
+    "repository": "https://github.com/obra/superpowers",
+    "path": "skills/writing-plans",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590"
+  },
+  "estimand": {
+    "unit": "one public maintenance brief from one canonical GitHub repository",
+    "cluster": "canonical GitHub repository",
+    "target_population": "eligible public GitHub maintenance records frozen before task authoring",
+    "primary_partition": "target_holdout",
+    "development_partition_use": "measurement development only; excluded from confirmatory inference",
+    "safety_control_use": "separate non-inferiority and critical-failure gates; never pooled into the primary outcome"
+  },
+  "eligibility": {
+    "repository": [
+      "The repository is public, non-archived, non-fork, and has an OSI-identifiable license at the frozen source commit.",
+      "The exact source commit and tree are reachable from the canonical HTTPS GitHub repository at the selection cutoff.",
+      "The source can be archived during trusted preparation without submodules, unsafe links, secret-bearing paths, generated dependency trees, or network-dependent trial setup.",
+      "A repository may contribute at most one task across development, target holdout, and safety control partitions."
+    ],
+    "maintenance_record": [
+      "The record is a public issue, pull request, or commit belonging to the selected repository.",
+      "The record describes or implements a concrete software-maintenance concern that can be investigated from the frozen source tree.",
+      "The record predates task authoring and has a content snapshot with an immutable SHA-256 digest.",
+      "The record does not expose benchmark labels, a reference plan, or the expected treatment result."
+    ],
+    "task": [
+      "The public brief asks for a plan, not an implementation, and requires no network access or package installation during the Agent trial.",
+      "The brief is treatment-blind and names only evidence available in the frozen archive.",
+      "Host-only expected constraints, permitted paths, and review labels are authored after repository selection and never enter the public task, archive, trace, or Study event.",
+      "The task is assigned to exactly one preregistered stratum before either Skill arm is run."
+    ]
+  },
+  "sampling": {
+    "population_snapshot": "Freeze every eligible record and its eligibility decision after trusted source-preparation feasibility checks but before selecting or authoring tasks.",
+    "selection_seed": "Freeze one unpredictable 256-bit seed before inspecting treatment outputs.",
+    "algorithm": "Within each partition and stratum, sort eligible records by SHA256(seed + newline + canonical lower-case repository URL + newline + public record URL + newline), then select the first quota while enforcing one repository cluster globally.",
+    "replacement": "Source-archive feasibility is an eligibility condition evaluated before the population snapshot. After selection there is no replacement; any selected source or receipt failure invalidates the frame and requires a new versioned population and selection identity.",
+    "quotas": {
+      "development": {
+        "security_privacy": 8,
+        "identity_migration": 8,
+        "lifecycle_recovery": 8,
+        "integration_runtime": 8,
+        "total": 32
+      },
+      "target_holdout": {
+        "security_privacy": 48,
+        "identity_migration": 48,
+        "lifecycle_recovery": 48,
+        "integration_runtime": 48,
+        "total": 192
+      },
+      "safety_control": {
+        "docs_only": 16,
+        "unsafe_request": 16,
+        "no_change_required": 16,
+        "single_surface": 16,
+        "total": 64
+      }
+    }
+  },
+  "preparation": {
+    "boundary": "All GitHub reads, source archiving, license checks, task-image construction, and digest generation occur in trusted setup --prepare before preview approval.",
+    "trial_restrictions": [
+      "No clone, fetch, install, download, build, Docker-socket access, or mutable reference resolution is permitted in an Agent trial.",
+      "Each trial receives one digest-verified read-only source archive plus its public brief.",
+      "Private labels remain mode 0600 on the host; only their digests are bound into preparation and approval."
+    ],
+    "required_receipts": [
+      "population query and eligibility receipt",
+      "deterministic selection receipt",
+      "remote commit/tree provenance receipt per selected repository",
+      "license path and digest per selected repository",
+      "source archive and source manifest digest per selected repository",
+      "public task and host-only private-label manifest digests"
+    ]
+  },
+  "sealing": {
+    "development": "Development tasks may be opened after their separate preview is approved; they do not license holdout access.",
+    "holdout": "Target holdouts and safety controls are sealed before development outputs are inspected and receive a separate preview, approval, budget, and execution identity.",
+    "contamination": "Any prompt, expected value, source record, or repository cluster exposed before holdout execution invalidates that task and triggers the preregistered deterministic replacement rule.",
+    "approval": "Every Study requires an exact finite preview. This protocol authorizes no execution or spend."
+  },
+  "analysis_constraints": [
+    "Attempts estimate repeatability but do not increase the number of independent task clusters.",
+    "The primary analysis clusters by canonical repository and uses only the 192 target holdouts.",
+    "Safety controls, deterministic safety gates, qualitative judge labels, mechanism evidence, and efficiency evidence remain separate.",
+    "A power simulation over the completed frozen frame is required before the holdout preview may be approved.",
+    "A same-model-family judge is advisory until independently reviewed calibration and validation satisfy the declared gate."
+  ],
+  "readiness": {
+    "validator": "validate_conference_sampling_frame_v1.py",
+    "schema": "conference-sampling-frame-v1.schema.json",
+    "required_status": "ready",
+    "fail_closed": "No development or holdout spec, source lock, task archive, or paid preview may be generated until the complete bundle validates."
+  }
+}

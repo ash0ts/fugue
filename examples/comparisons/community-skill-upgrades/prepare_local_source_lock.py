@@ -15,7 +15,9 @@ from fugue.bench.source_locks import build_local_source_lock
 CAMPAIGN_SUPPORT_FILES = {
     "analyze_confirmatory.py": "confirmatory_analysis_implementation",
     "freeze_trace_audit.py": "trace_audit_selection_implementation",
+    "generate_scientific_report.py": "scientific_report_implementation",
     "prepare_local_source_lock.py": "source_lock_implementation",
+    "scientific-report-template-v3.json": "scientific_report_template",
 }
 
 

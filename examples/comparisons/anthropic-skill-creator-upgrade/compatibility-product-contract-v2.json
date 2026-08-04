@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "id": "anthropic-skill-creator-compatibility-product-contract-v2",
+  "status": "frozen_before_expanded_holdout",
+  "treatment_scope": {
+    "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+    "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+    "skill_path": "skills/skill-creator"
+  },
+  "upstream_conformance_observation": {
+    "role": "infrastructure_behavior_not_task_correctness",
+    "baseline": {
+      "compatibility_field_supported": false
+    },
+    "candidate": {
+      "compatibility_field_supported": true,
+      "accepted_scalar_length_range": [
+        0,
+        500
+      ],
+      "rejects_non_string_and_unknown_fields": true
+    },
+    "limitation": "Acceptance by the exact upstream validator describes implementation behavior; it does not establish that an empty or uninformative value satisfies a maintainer task."
+  },
+  "task_outcome_policy": {
+    "required": {
+      "field_present": true,
+      "minimum_length": 1,
+      "maximum_length": 500,
+      "must_cover_every_host_locked_requirement_group": true
+    },
+    "absent": {
+      "field_present": false,
+      "reason": "Portable Skills must not acquire invented platform or tool restrictions."
+    },
+    "exact": {
+      "must_equal_host_locked_value": true
+    },
+    "boundary_cases": {
+      "empty_and_whitespace_only": "upstream_acceptance_observation_only_never_a_task_pass",
+      "one_character": "may_parse_but_fails_any_task_whose_locked_requirements_are_not_expressed",
+      "length_500": "eligible_only_when_all_locked_requirements_are_expressed",
+      "length_501": "invalid"
+    }
+  },
+  "evidence_roles": {
+    "frontmatter_semantics": "outcome",
+    "compatibility_selection": "outcome",
+    "behavior_preservation": "safety_gate",
+    "assigned_script_use": "mechanism"
+  },
+  "claims_excluded": [
+    "The candidate validator's acceptance of an empty string is desirable.",
+    "Validator acceptance alone proves that an authored Skill is useful.",
+    "A mechanism-use signal can override an incorrect or unsafe artifact."
+  ]
+}

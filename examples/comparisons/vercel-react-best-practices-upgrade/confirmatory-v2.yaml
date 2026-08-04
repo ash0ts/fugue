@@ -1,0 +1,136 @@
+schema_version: 3
+id: vercel-react-best-practices-confirmatory-v2
+question: On the authored measurement-development benchmark, does exact Vercel React Best Practices revision 20987af improve the changed Server Action and RSC outcomes relative to ac6a79af while preserving independent safety gates, and did the Agent open the task-relevant Skill rule?
+taskset:
+  tasks: confirmatory-tasks-v2.jsonl
+  private_labels: confirmatory-private-labels.jsonl
+baseline:
+  label: Vercel React Best Practices at ac6a79af
+  skills: [vercel-react-best-practices-before]
+candidate:
+  label: Vercel React Best Practices at 20987af2
+  skills: [vercel-react-best-practices-after]
+changed: [skills]
+evaluators:
+  - id: vercel-confirmatory
+    type: deterministic
+    required: true
+    scorer: vercel_confirmatory_scorer_v2.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - artifact_validity
+      - requested_change
+      - repository_grounding
+      - behavior_preservation
+      - scope_safety
+    dimension_roles:
+      artifact_validity: safety_gate
+      requested_change: outcome
+      repository_grounding: outcome
+      behavior_preservation: safety_gate
+      scope_safety: safety_gate
+  - id: vercel-public-behavioral
+    type: deterministic
+    required: true
+    scorer: vercel_public_behavioral_scorer_v1.py
+    runtime: python312-sandbox-v1
+    verifier:
+      type: node_test
+      source: host_node_verifier.cjs
+      runtime: node22-verifier-v1
+      dimension: public_regression_test_success
+    dimensions: [public_regression_test_success]
+    dimension_roles:
+      public_regression_test_success: outcome
+  - id: vercel-mechanism
+    type: deterministic
+    required: false
+    scorer: vercel_mechanism_scorer_v2.py
+    runtime: python312-sandbox-v1
+    dimensions: [skill_material_opened, task_relevant_rule_opened]
+    dimension_roles:
+      skill_material_opened: mechanism
+      task_relevant_rule_opened: mechanism
+  - id: community-usefulness
+    type: llm_judge
+    required: false
+    profile: anthropic/claude-sonnet-5
+    calibration: ../community-skill-upgrades/judge-calibration-v2.json
+    rubric: >-
+      Judge the artifact type requested (plan, implemented change, or
+      recommendation) for its usefulness on the stated repository task. Score
+      only whether it is actionable, grounds claims in the inspected repository,
+      is reviewable by a maintainer, and calibrates risk and uncertainty to the
+      available evidence. The inspected_paths and changed_paths values are
+      audited activity, not proof of repository contents or task correctness.
+      Their status fields state whether collection was available. An available
+      empty changed_paths list means the collector observed no edits and is
+      expected for plans and recommendations; an unavailable status is not an
+      empty receipt. Judge the requested artifact modality; do not require diffs,
+      line numbers, file bodies, test output, or completed implementation when
+      the task requests a plan or recommendation. Credit repository grounding
+      when concrete components, contracts, sequencing, verification, and rollback
+      are internally consistent with the available path activity. Set
+      missing_evidence true only when evidence materially required to assess
+      actionability, grounding, reviewability, or risk is absent, not because
+      deterministic evidence is out of scope. Do not infer correctness from
+      fluency, treatment identity, repository popularity, or Skill assignment.
+      For this acceptable-versus-defective calibration, adequate is the minimum
+      acceptable qualitative label and its limitations must remain visible; weak
+      and unusable are defective, while strong and exceptional exceed the
+      minimum. Deterministic scorers own build, test, schema, security, scope, and
+      task-correctness gates. A qualitative label cannot override a deterministic
+      critical failure.
+    dimensions:
+      - useful_actionability
+      - repository_grounding
+      - reviewability
+      - risk_calibration
+    dimension_roles:
+      useful_actionability: outcome
+      repository_grounding: outcome
+      reviewability: outcome
+      risk_calibration: outcome
+    evidence: [inspected_paths, changed_paths]
+    reserve_cost_usd: 0.10
+execution:
+  source_lock: ../../../.fugue/qualification/community-skill-confirmatory/vercel-v2/source.lock.json
+  source_evidence_project: wandb/fugue-vercel-react-best-practices-source-v1
+  source_evidence_destination:
+    entity: wandb
+    project: fugue-vercel-react-best-practices-source-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-vercel-react-best-practices-confirmatory-v2
+  evidence_destination:
+    entity: wandb
+    project: fugue-vercel-react-best-practices-confirmatory-v2
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  research_id: vercel-react-best-practices-confirmatory-v2
+  study_console_base_url: http://127.0.0.1:18091
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 4
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  scheduling_seed: community-skill-upgrade-measurement-development-v2
+  qualification_inputs:
+    confirmatory_analysis_profile_sha256: ../community-skill-upgrades/confirmatory-analysis-profiles-v2.json
+    confirmatory_analyzer_sha256: ../community-skill-upgrades/analyze_confirmatory.py
+    campaign_preregistration_sha256: ../community-skill-upgrades/conference-preregistration-v2.json
+    campaign_manifest_sha256: ../community-skill-upgrades/conference-campaign-manifest-v2.json
+    prospective_power_design_sha256: ../community-skill-upgrades/prospective-power-design-v1.json
+    confirmatory_budget_policy_sha256: ../community-skill-upgrades/confirmatory-budget-policy-v2.json
+    scientific_report_generator_sha256: ../community-skill-upgrades/generate_scientific_report.py
+    scientific_report_template_sha256: ../community-skill-upgrades/scientific-report-template-v3.json
+    repository_preregistration_sha256: confirmatory-preregistration.json
+    repository_amendment_sha256: confirmatory-v2-amendment.json
+  max_cost_usd: 1640
+  reserve_per_attempt_usd: 8.4
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}

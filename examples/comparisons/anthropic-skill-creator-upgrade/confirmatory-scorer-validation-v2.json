@@ -1,0 +1,75 @@
+{
+  "dimensions": {
+    "artifact_validity": {
+      "case_ids_digest": "88724d7e0faa827dd5048528b8265bab2f553dcd4e5fd94b7b2846989479c6e1",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    },
+    "assigned_script_use": {
+      "case_ids_digest": "c12e593dcc1f5964338be70f8b951cb1c8626ceb2f32d414ba444e610b703586",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    },
+    "behavior_preservation": {
+      "case_ids_digest": "df5daf65e7c7e256da925537cf3a526612aaa93e9adf8e1ba635e720d16ac2f0",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 12
+    },
+    "compatibility_selection": {
+      "case_ids_digest": "0cae873708cf4d255527dd238be9161d7e6bf7d17874d8051fc041bbf1905d13",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 22
+    },
+    "dependency_secret_safety": {
+      "case_ids_digest": "c8e41239692e07c5e69aa792dcb851e40ab0359f35c27c32dce8b6689bca2251",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    },
+    "frontmatter_semantics": {
+      "case_ids_digest": "d221b54b7939e57aff05eab50cf21e62cd4cd16eb3aadc560c1e139753eef1b4",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 23
+    },
+    "instruction_quality": {
+      "case_ids_digest": "05279df99ef6a98f4f9045218b8e54a13f63d993e761008c4bc9a20f4c4693ea",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    },
+    "name_help_consistency": {
+      "case_ids_digest": "adff38996b1013e844f3414cd835e2b18e2813242dbce703c5cb1eeda3dc470e",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    },
+    "packaging": {
+      "case_ids_digest": "793b6227c2e4ba363b5321422f2e537dcd99bfdcb2951ae03075d331e91eddd2",
+      "positive_cases": 24,
+      "positive_failures": 0,
+      "targeted_false_accepts": 0,
+      "targeted_negative_cases": 24
+    }
+  },
+  "id": "anthropic-skill-creator-confirmatory-scorer-validation-v2",
+  "minimum_targeted_negative_cases_per_dimension": 8,
+  "private_inputs_serialized": false,
+  "private_labels_sha256": "2297fe640c51aafa5d7fbd57b90baaab457f56c8f4482b178abc0c0998cfeede",
+  "receipt_digest": "d39b490814548cc2e569076d14026027b58d1a1b79c139e82ee8d43dc9c5553c",
+  "schema_version": 2,
+  "scorer_sha256": "c98fe2a020e8d96542a5611966a430d2828257f837bc565573e534b997005977",
+  "status": "passed"
+}

@@ -1,0 +1,16 @@
+version: 1
+research:
+  id: anthropic-skill-creator-confirmatory-v2
+  name: Anthropic Skill Creator Measurement Study
+  description: Descriptive four-attempt, task-stratified comparison of exact compatibility-aware Skill Creator revisions.
+  objective: Report this authored benchmark without a population or conference-qualified claim, keeping safety, mechanism, judge, and infrastructure evidence separate.
+wandb:
+  entity: wandb
+  project: fugue-anthropic-skill-creator-confirmatory-v2
+database: .study-console/anthropic-skill-creator-confirmatory-v2.sqlite3
+primary_metric:
+  name: behavior_pass
+  goal: maximize
+presentation:
+  default_study_id: anthropic-skill-creator-confirmatory-v2
+  read_only: true

@@ -538,7 +538,24 @@ EvidenceLinkKind = Literal[
     "prediction_and_score",
     "prediction",
     "agent_root",
+    "agent_evidence_receipt",
+    "agent_evidence",
     "dataset",
+]
+AgentEvidenceKind = Literal[
+    "native_weave_call_v1",
+    "native_otel_cross_transport_receipt_v1",
+    "unclassified_legacy_agent_evidence_v1",
+]
+NativeTrajectoryStatus = Literal[
+    "native_weave_call",
+    "otel_correlated",
+    "unresolved",
+]
+ConversationCorrelationStatus = Literal[
+    "verified",
+    "unverified",
+    "not_recorded",
 ]
 
 
@@ -550,6 +567,9 @@ class AttemptEvidenceLinkV1:
     ref: str | None = None
     url: str | None = None
     reason: str | None = None
+    evidence_kind: AgentEvidenceKind | None = None
+    native_trajectory_status: NativeTrajectoryStatus | None = None
+    conversation_correlation_status: ConversationCorrelationStatus | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -613,6 +633,7 @@ class PairedAttemptV2:
     runtime_outcome: Literal[
         "completed", "timed_out", "cancelled", "not_started", "not_applicable"
     ] | None = None
+    weave_agent_evidence_call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(_json_value(asdict(self)), preserve_false=True)
@@ -673,6 +694,7 @@ class PairedAttemptV3:
     runtime_outcome: Literal[
         "completed", "timed_out", "cancelled", "not_started", "not_applicable"
     ] | None = None
+    weave_agent_evidence_call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(_json_value(asdict(self)), preserve_false=True)
@@ -912,7 +934,9 @@ class ComparisonResultV2:
     result_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return _drop_empty(asdict(self), preserve_false=True)
+        value = _json_value(asdict(self))
+        _prune_unset_paired_attempt_fields(value)
+        return _drop_empty(value, preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -976,6 +1000,7 @@ class ComparisonResultV3:
 
     def to_dict(self) -> dict[str, Any]:
         value = _json_value(asdict(self))
+        _prune_unset_paired_attempt_fields(value)
         value["evidence_topology"] = self.evidence_topology.to_dict()
         value["aligned_analysis"] = self.aligned_analysis.to_dict()
         value["task_validity"] = [
@@ -1003,6 +1028,38 @@ class ComparisonResultV3:
             item.to_dict() for item in self.supersedes
         ]
         return serialized
+
+
+def _prune_unset_paired_attempt_fields(value: dict[str, Any]) -> None:
+    """Keep historical result serialization byte-equivalent.
+
+    Parent dataclass serialization retains nested ``None`` values. The Agent
+    evidence fields were added after V2/V3 artifacts already existed, so only
+    those newly introduced absent fields are removed. ``benchmark_outcome``
+    and ``runtime_outcome`` predate this compatibility shim and must retain
+    their historical nested ``null`` representation. Populated fields remain
+    part of the immutable qualification digest.
+    """
+
+    for pair in value.get("paired_cases") or ():
+        if not isinstance(pair, dict):
+            continue
+        for arm in ("baseline", "candidate"):
+            attempt = pair.get(arm)
+            if not isinstance(attempt, dict):
+                continue
+            if attempt.get("weave_agent_evidence_call_id") is None:
+                attempt.pop("weave_agent_evidence_call_id", None)
+            for link in attempt.get("evidence_links") or ():
+                if not isinstance(link, dict):
+                    continue
+                for field_name in (
+                    "evidence_kind",
+                    "native_trajectory_status",
+                    "conversation_correlation_status",
+                ):
+                    if link.get(field_name) is None:
+                        link.pop(field_name, None)
 
 
 ComparisonResult = ComparisonResultV1 | ComparisonResultV2 | ComparisonResultV3
@@ -6767,6 +6824,21 @@ def _paired_attempt_view(
         return None
     tool_names, tool_call_count = _observed_tool_activity(row)
     input_tokens, output_tokens = _row_token_usage(row)
+    evidence_links = _attempt_evidence_links(row)
+    agent_link = next(
+        (
+            item
+            for item in evidence_links
+            if item.kind
+            in {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+        ),
+        None,
+    )
+    agent_evidence_call_id = (
+        _row_text(row, "weave_agent_root_call_id")
+        or _row_text(row, "weave_agent_evidence_receipt_call_id")
+        or _row_text(row, "native_agent_root_call_id")
+    )
     infrastructure = _drop_empty(
         {
             "backend": (
@@ -6871,10 +6943,11 @@ def _paired_attempt_view(
         tools=tuple(tool_names),
         queried_projects=tuple(sorted(_queried_projects(row))),
         scores=dict(_mapping_or_empty(row.get("comparison_deterministic_scores"))),
-        evidence_links=_attempt_evidence_links(row),
+        evidence_links=evidence_links,
         weave_agent_root_call_id=(
-            _row_text(row, "weave_agent_root_call_id")
-            or _row_text(row, "native_agent_root_call_id")
+            agent_evidence_call_id
+            if agent_link is not None and agent_link.kind == "agent_root"
+            else None
         ),
         otel_root_span_id=(
             _row_text(row, "otel_root_span_id")
@@ -6890,6 +6963,7 @@ def _paired_attempt_view(
         judge_reviews=_judge_reviews(row),
         benchmark_outcome=_row_benchmark_outcome(row),
         runtime_outcome=_row_runtime_outcome(row),
+        weave_agent_evidence_call_id=agent_evidence_call_id,
     )
 
 
@@ -6952,6 +7026,7 @@ def _paired_attempt_view_v3(
         infrastructure=legacy.infrastructure,
         benchmark_outcome=legacy.benchmark_outcome,
         runtime_outcome=legacy.runtime_outcome,
+        weave_agent_evidence_call_id=legacy.weave_agent_evidence_call_id,
     )
 
 
@@ -7295,13 +7370,23 @@ def _attempt_evidence_links(
         *,
         relationship_ok: bool = True,
         missing_reason: str,
+        evidence_kind: AgentEvidenceKind | None = None,
+        native_trajectory_status: NativeTrajectoryStatus | None = None,
+        conversation_correlation_status: ConversationCorrelationStatus
+        | None = None,
     ) -> None:
+        presentation = {
+            "evidence_kind": evidence_kind,
+            "native_trajectory_status": native_trajectory_status,
+            "conversation_correlation_status": conversation_correlation_status,
+        }
         if not call_id or not stable_ref:
             result.append(
                 AttemptEvidenceLinkV1(
                     kind=kind,
                     status="missing",
                     reason=missing_reason,
+                    **presentation,
                 )
             )
             return
@@ -7320,6 +7405,7 @@ def _attempt_evidence_links(
                         "evidence Call identity or application origin does "
                         "not match the locked destination"
                     ),
+                    **presentation,
                 )
             )
             return
@@ -7336,6 +7422,7 @@ def _attempt_evidence_links(
                     ref=stable_ref,
                     url=uri,
                     reason="evidence relationship did not reconcile",
+                    **presentation,
                 )
             )
             return
@@ -7345,6 +7432,7 @@ def _attempt_evidence_links(
                 status="resolved",
                 ref=stable_ref,
                 url=uri,
+                **presentation,
             )
         )
 
@@ -7431,11 +7519,6 @@ def _attempt_evidence_links(
             ("weave_prediction_call_id", "prediction_call_id"),
             ("weave_prediction_ref",),
         ),
-        (
-            "agent_root",
-            ("weave_agent_root_call_id", "native_agent_root_call_id"),
-            ("weave_agent_root_ref",),
-        ),
     ):
         ref = next(
             (str(row.get(field) or "") for field in id_fields if row.get(field)),
@@ -7450,32 +7533,133 @@ def _attempt_evidence_links(
             "",
         )
         relationship_ok = (
-            str(row.get("trace_link_status") or "") == "linked"
-            and row.get("agent_graph_verified") is True
-            if kind == "agent_root"
-            else (
-                row.get("eval_predict_and_score_object_verified") is True
-                and row.get("evaluation_root_prediction_relationship_verified")
-                is True
-                and row.get("evaluation_prediction_graph_verified") is True
-                if kind == "prediction_and_score"
-                else row.get("weave_prediction_object_verified") is True
-                and row.get("prediction_child_relationship_verified") is True
-                and row.get("evaluation_prediction_graph_verified") is True
-            )
+            row.get("eval_predict_and_score_object_verified") is True
+            and row.get("evaluation_root_prediction_relationship_verified") is True
+            and row.get("evaluation_prediction_graph_verified") is True
+            if kind == "prediction_and_score"
+            else row.get("weave_prediction_object_verified") is True
+            and row.get("prediction_child_relationship_verified") is True
+            and row.get("evaluation_prediction_graph_verified") is True
         )
         add_call(
             kind,  # type: ignore[arg-type]
             ref,
             stable_ref,
             relationship_ok=relationship_ok,
-            missing_reason=(
-                "Verified Agent root Call is unavailable"
-                if kind == "agent_root"
-                else f"{kind.replace('_', ' ').title()} Call is unavailable"
-            ),
+            missing_reason=f"{kind.replace('_', ' ').title()} Call is unavailable",
         )
+    agent_call_id = str(
+        row.get("weave_agent_root_call_id")
+        or row.get("weave_agent_evidence_receipt_call_id")
+        or row.get("native_agent_root_call_id")
+        or ""
+    )
+    agent_ref = str(
+        row.get("weave_agent_root_ref")
+        or row.get("weave_agent_evidence_receipt_ref")
+        or ""
+    )
+    agent_presentation = _agent_evidence_presentation(
+        row,
+        call_id=agent_call_id,
+    )
+    agent_kind: EvidenceLinkKind = (
+        "agent_root"
+        if agent_presentation["evidence_kind"] == "native_weave_call_v1"
+        else "agent_evidence_receipt"
+        if agent_presentation["evidence_kind"]
+        == "native_otel_cross_transport_receipt_v1"
+        else "agent_evidence"
+    )
+    add_call(
+        agent_kind,
+        agent_call_id,
+        agent_ref,
+        relationship_ok=bool(
+            str(row.get("trace_link_status") or "") == "linked"
+            and row.get("agent_graph_verified") is True
+            and row.get("conversation_correlation_verified") is True
+            and agent_presentation["native_trajectory_status"] != "unresolved"
+        ),
+        missing_reason=(
+            "Verified native Agent Call is unavailable"
+            if agent_kind == "agent_root"
+            else "Verified Agent evidence receipt is unavailable"
+            if agent_kind == "agent_evidence_receipt"
+            else "Classified Agent evidence is unavailable"
+        ),
+        evidence_kind=agent_presentation["evidence_kind"],
+        native_trajectory_status=agent_presentation[
+            "native_trajectory_status"
+        ],
+        conversation_correlation_status=agent_presentation[
+            "conversation_correlation_status"
+        ],
+    )
     return tuple(result)
+
+
+def _agent_evidence_presentation(
+    row: Mapping[str, Any],
+    *,
+    call_id: str,
+) -> dict[str, Any]:
+    declared = str(row.get("weave_agent_root_evidence_kind") or "")
+    if declared in {
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+    }:
+        evidence_kind = declared
+    elif row.get("weave_agent_root_is_native_call") is True or (
+        row.get("native_agent_root_call_id")
+        and row.get("weave_agent_root_is_native_call") is not False
+    ):
+        # ``native_agent_root_call_id`` is a backward-readable producer field
+        # whose name explicitly asserted native Weave Call provenance.
+        evidence_kind = "native_weave_call_v1"
+    elif (
+        row.get("weave_agent_root_is_native_call") is False
+        or row.get("agent_cross_transport_edge")
+        or row.get("weave_agent_evidence_receipt_call_id")
+    ):
+        evidence_kind = "native_otel_cross_transport_receipt_v1"
+    else:
+        evidence_kind = "unclassified_legacy_agent_evidence_v1"
+
+    native_trajectory_status: NativeTrajectoryStatus = "unresolved"
+    if evidence_kind == "native_weave_call_v1":
+        native_trajectory_status = "native_weave_call"
+    elif evidence_kind == "native_otel_cross_transport_receipt_v1":
+        edge = row.get("agent_cross_transport_edge")
+        expected_trace = str(row.get("otel_trace_id") or row.get("trace_id") or "")
+        expected_span = str(
+            row.get("otel_root_span_id") or row.get("root_span_id") or ""
+        )
+        if (
+            isinstance(edge, Mapping)
+            and edge.get("status") == "verified"
+            and str(edge.get("source_system") or "") == "otel"
+            and expected_trace
+            and str(edge.get("source_trace_id") or "") == expected_trace
+            and expected_span
+            and str(edge.get("source_span_id") or "") == expected_span
+            and str(edge.get("receipt_system") or "") == "weave"
+            and call_id
+            and str(edge.get("receipt_call_id") or "") == call_id
+        ):
+            native_trajectory_status = "otel_correlated"
+
+    return {
+        "evidence_kind": evidence_kind,
+        "native_trajectory_status": native_trajectory_status,
+        "conversation_correlation_status": (
+            "verified"
+            if row.get("conversation_correlation_verified") is True
+            else "unverified"
+            if row.get("conversation_correlation_verified") is False
+            else "not_recorded"
+        ),
+    }
 
 
 def _is_local_harbor_row(row: Mapping[str, Any]) -> bool:
@@ -7910,7 +8094,17 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     value = _mapping(raw, "attempt evidence link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "attempt evidence link",
     )
     kind = str(value.get("kind") or "")
@@ -7919,6 +8113,8 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError(f"unknown attempt evidence link kind: {kind}")
@@ -7931,6 +8127,21 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2_000)
     url = _optional_text(value.get("url"), "attempt evidence URL", 2_000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1_000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"),
+        "attempt Agent evidence kind",
+        100,
+    )
+    native_trajectory_status = _optional_text(
+        value.get("native_trajectory_status"),
+        "attempt native trajectory status",
+        100,
+    )
+    conversation_correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "attempt conversation correlation status",
+        100,
+    )
     if status == "resolved":
         if not ref or not url:
             raise ValueError(
@@ -7942,6 +8153,48 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
             )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
+    if kind == "agent_evidence_receipt":
+        if evidence_kind != "native_otel_cross_transport_receipt_v1":
+            raise ValueError(
+                "Agent evidence receipt must declare cross-transport provenance"
+            )
+        if native_trajectory_status not in {"otel_correlated", "unresolved"}:
+            raise ValueError(
+                "Agent evidence receipt has an invalid native trajectory status"
+            )
+        if status == "resolved" and native_trajectory_status != "otel_correlated":
+            raise ValueError(
+                "resolved Agent evidence receipt requires an OTel correlation"
+            )
+    elif kind == "agent_evidence":
+        if (
+            evidence_kind != "unclassified_legacy_agent_evidence_v1"
+            or native_trajectory_status != "unresolved"
+            or status == "resolved"
+        ):
+            raise ValueError("unclassified Agent evidence must remain unresolved")
+    elif kind == "agent_root" and evidence_kind is not None:
+        if (
+            evidence_kind != "native_weave_call_v1"
+            or native_trajectory_status != "native_weave_call"
+        ):
+            raise ValueError("Agent root link must identify a native Weave Call")
+    elif any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("only Agent evidence links may carry trajectory metadata")
+    if conversation_correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("attempt conversation correlation status is invalid")
     return AttemptEvidenceLinkV1(
         kind=kind,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
@@ -7949,6 +8202,11 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         ref=ref,
         url=url,
         reason=reason,
+        evidence_kind=evidence_kind,  # type: ignore[arg-type]
+        native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+        conversation_correlation_status=(
+            conversation_correlation_status  # type: ignore[arg-type]
+        ),
     )
 
 
@@ -8117,6 +8375,9 @@ def _paired_attempt(raw: Any) -> PairedAttemptV2 | None:
             label="paired runtime outcome",
             allowed=_RUNTIME_OUTCOMES,
         ),  # type: ignore[arg-type]
+        weave_agent_evidence_call_id=(
+            str(value.get("weave_agent_evidence_call_id") or "") or None
+        ),
     )
 
 
@@ -8210,6 +8471,9 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             label="V3 paired runtime outcome",
             allowed=_RUNTIME_OUTCOMES,
         ),  # type: ignore[arg-type]
+        weave_agent_evidence_call_id=(
+            str(value.get("weave_agent_evidence_call_id") or "") or None
+        ),
     )
 
 
@@ -9769,20 +10033,25 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
 
             links_by_kind = {item.kind: item for item in attempt.evidence_links}
-            expected_link_kinds = {
+            required_non_agent_link_kinds = {
                 "evaluation_root",
                 "prediction_and_score",
                 "prediction",
-                "agent_root",
                 "dataset",
             }
+            agent_link_kinds = {
+                "agent_root",
+                "agent_evidence_receipt",
+                "agent_evidence",
+            } & set(links_by_kind)
             if (
                 len(attempt.evidence_links) != 5
-                or set(links_by_kind) != expected_link_kinds
+                or not required_non_agent_link_kinds <= set(links_by_kind)
+                or len(agent_link_kinds) != 1
             ):
                 raise ValueError(
-                    "ComparisonResultV3 attempts require exactly five unique "
-                    "evidence links"
+                    "ComparisonResultV3 attempts require four fixed links and "
+                    "exactly one typed Agent evidence link"
                 )
             link_statuses = {item.status for item in attempt.evidence_links}
             expected_evidence_status = (
@@ -9836,14 +10105,41 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                         "stable Weave ref"
                     )
                 resolved_call_ids[kind] = call_id
-            agent_call_id = resolved_call_ids.get("agent_root")
+            agent_link_kind = next(iter(agent_link_kinds))
+            agent_call_id = resolved_call_ids.get(agent_link_kind)
             if (
-                agent_call_id is not None
+                agent_link_kind == "agent_root"
+                and agent_call_id is not None
                 and attempt.weave_agent_root_call_id != agent_call_id
             ):
                 raise ValueError(
                     "ComparisonResultV3 Agent root ID disagrees with its "
                     "verified Weave link"
+                )
+            if (
+                agent_link_kind == "agent_evidence_receipt"
+                and attempt.weave_agent_root_call_id is not None
+            ):
+                raise ValueError(
+                    "ComparisonResultV3 must not label an Agent evidence "
+                    "receipt as an Agent root"
+                )
+            if (
+                agent_call_id is not None
+                and attempt.weave_agent_evidence_call_id is not None
+                and attempt.weave_agent_evidence_call_id != agent_call_id
+            ):
+                raise ValueError(
+                    "ComparisonResultV3 Agent evidence ID disagrees with its "
+                    "verified Weave link"
+                )
+            if (
+                agent_link_kind == "agent_evidence_receipt"
+                and attempt.weave_agent_evidence_call_id != agent_call_id
+            ):
+                raise ValueError(
+                    "ComparisonResultV3 Agent evidence receipt lacks its "
+                    "neutral Weave evidence identity"
                 )
             if attempt.otel_root_span_id and attempt.otel_root_span_id in {
                 *resolved_call_ids.values(),
@@ -12811,6 +13107,8 @@ def _comparison_evidence_links(
         "prediction_and_score": "Prediction and score",
         "prediction": "Prediction",
         "agent_root": "Agent root",
+        "agent_evidence_receipt": "Agent trajectory receipt",
+        "agent_evidence": "Agent evidence (unclassified)",
         "dataset": "Dataset",
     }
     for row in rows:
@@ -15153,10 +15451,21 @@ def _score_deterministic_output(
                 **unsigned_scorer_receipt,
                 "receipt_digest": stable_digest(unsigned_scorer_receipt),
             }
-            evaluator_passes.append(
-                float(payload["score"]) == 1.0
-                and (verifier_passed is None or verifier_passed)
-            )
+            if evaluator.required:
+                task_gate_dimensions = tuple(
+                    name
+                    for name in evaluator.dimensions
+                    if not evaluator.dimension_roles
+                    or evaluator.dimension_roles.get(name)
+                    in {"outcome", "safety_gate"}
+                )
+                if task_gate_dimensions:
+                    evaluator_passes.append(
+                        all(
+                            _bool_score(normalized_details[name]) is True
+                            for name in task_gate_dimensions
+                        )
+                    )
             continue
         check_scores = {
             "answer_present": bool(
@@ -15173,7 +15482,8 @@ def _score_deterministic_output(
             for check in evaluator.checks
         }
         scores.update(selected)
-        evaluator_passes.append(all(selected.values()))
+        if evaluator.required:
+            evaluator_passes.append(all(selected.values()))
     return (
         bool(evaluator_passes) and all(evaluator_passes),
         scores,
