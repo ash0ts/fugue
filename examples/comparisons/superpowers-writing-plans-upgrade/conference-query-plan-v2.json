@@ -1,0 +1,113 @@
+{
+  "schema_version": 2,
+  "id": "superpowers-writing-plans-conference-query-plan-v2",
+  "status": "prospective_query_plan_only_no_population_acquired",
+  "api": {
+    "provider": "github_rest_api",
+    "origin": "https://api.github.com",
+    "endpoint": "/search/issues",
+    "version": "2022-11-28",
+    "accept": "application/vnd.github+json",
+    "public_data_only": true,
+    "credential_name": "GITHUB_TOKEN",
+    "credential_value_serialized": false
+  },
+  "treatment_time_boundary": {
+    "repository": "https://github.com/obra/superpowers",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "candidate_is_direct_descendant_of_baseline": true,
+    "candidate_committer_time_utc": "2026-06-16T17:09:47Z",
+    "records_must_be_strictly_later_than_candidate": true
+  },
+  "observation_window": {
+    "start_inclusive_utc": "2026-06-16T17:09:48Z",
+    "end_inclusive_utc": "2026-07-31T23:59:59Z",
+    "precision": "one_second",
+    "interval_semantics": "closed_nonoverlapping_second_ranges",
+    "query_content_snapshot_semantics": "GitHub search-index contents observed during the two frozen acquisitions; no historical body reconstruction is claimed"
+  },
+  "population_scope": {
+    "unit": "one eligible public maintenance record from one immutable GitHub repository lineage",
+    "target_population": "public GitHub issues and merged pull requests in the frozen observation window that match at least one atomic query and pass the separately frozen V2 eligibility protocol",
+    "claim_boundary": "The frame estimates the declared query-defined post-treatment population only; it does not represent all GitHub repositories, all maintenance work, or community-wide Skill superiority.",
+    "query_overlap_policy": "union by immutable GitHub record node ID before eligibility review",
+    "record_choice_policy": "freeze every matching record first; choose at most one eligible record per repository lineage only after external randomness is available",
+    "task_authoring_before_population_freeze": false
+  },
+  "atomic_queries": [
+    {"id":"target-security-security","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"security","query_template":"is:pr is:merged archived:false merged:{start}..{end} security in:title,body"},
+    {"id":"target-security-privacy","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"privacy","query_template":"is:pr is:merged archived:false merged:{start}..{end} privacy in:title,body"},
+    {"id":"target-security-authentication","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"authentication","query_template":"is:pr is:merged archived:false merged:{start}..{end} authentication in:title,body"},
+    {"id":"target-security-authorization","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"authorization","query_template":"is:pr is:merged archived:false merged:{start}..{end} authorization in:title,body"},
+    {"id":"target-security-credential","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"credential","query_template":"is:pr is:merged archived:false merged:{start}..{end} credential in:title,body"},
+    {"id":"target-security-secret","sampling_family":"target","provisional_stratum":"security_privacy","record_kind":"pull_request","timestamp_qualifier":"merged","term":"secret","query_template":"is:pr is:merged archived:false merged:{start}..{end} secret in:title,body"},
+    {"id":"target-identity-migration","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"migration","query_template":"is:pr is:merged archived:false merged:{start}..{end} migration in:title,body"},
+    {"id":"target-identity-schema","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"schema","query_template":"is:pr is:merged archived:false merged:{start}..{end} schema in:title,body"},
+    {"id":"target-identity-rename","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"rename","query_template":"is:pr is:merged archived:false merged:{start}..{end} rename in:title,body"},
+    {"id":"target-identity-compatibility","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"compatibility","query_template":"is:pr is:merged archived:false merged:{start}..{end} compatibility in:title,body"},
+    {"id":"target-identity-deprecation","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"deprecation","query_template":"is:pr is:merged archived:false merged:{start}..{end} deprecation in:title,body"},
+    {"id":"target-identity-identifier","sampling_family":"target","provisional_stratum":"identity_migration","record_kind":"pull_request","timestamp_qualifier":"merged","term":"identifier","query_template":"is:pr is:merged archived:false merged:{start}..{end} identifier in:title,body"},
+    {"id":"target-lifecycle-cleanup","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"cleanup","query_template":"is:pr is:merged archived:false merged:{start}..{end} cleanup in:title,body"},
+    {"id":"target-lifecycle-retry","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"retry","query_template":"is:pr is:merged archived:false merged:{start}..{end} retry in:title,body"},
+    {"id":"target-lifecycle-cancellation","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"cancellation","query_template":"is:pr is:merged archived:false merged:{start}..{end} cancellation in:title,body"},
+    {"id":"target-lifecycle-timeout","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"timeout","query_template":"is:pr is:merged archived:false merged:{start}..{end} timeout in:title,body"},
+    {"id":"target-lifecycle-shutdown","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"shutdown","query_template":"is:pr is:merged archived:false merged:{start}..{end} shutdown in:title,body"},
+    {"id":"target-lifecycle-recovery","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"recovery","query_template":"is:pr is:merged archived:false merged:{start}..{end} recovery in:title,body"},
+    {"id":"target-lifecycle-rollback","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"rollback","query_template":"is:pr is:merged archived:false merged:{start}..{end} rollback in:title,body"},
+    {"id":"target-lifecycle-transaction","sampling_family":"target","provisional_stratum":"lifecycle_recovery","record_kind":"pull_request","timestamp_qualifier":"merged","term":"transaction","query_template":"is:pr is:merged archived:false merged:{start}..{end} transaction in:title,body"},
+    {"id":"target-integration-integration","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"integration","query_template":"is:pr is:merged archived:false merged:{start}..{end} integration in:title,body"},
+    {"id":"target-integration-protocol","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"protocol","query_template":"is:pr is:merged archived:false merged:{start}..{end} protocol in:title,body"},
+    {"id":"target-integration-runtime","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"runtime","query_template":"is:pr is:merged archived:false merged:{start}..{end} runtime in:title,body"},
+    {"id":"target-integration-client","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"client","query_template":"is:pr is:merged archived:false merged:{start}..{end} client in:title,body"},
+    {"id":"target-integration-server","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"server","query_template":"is:pr is:merged archived:false merged:{start}..{end} server in:title,body"},
+    {"id":"target-integration-api","sampling_family":"target","provisional_stratum":"integration_runtime","record_kind":"pull_request","timestamp_qualifier":"merged","term":"API","query_template":"is:pr is:merged archived:false merged:{start}..{end} API in:title,body"},
+    {"id":"control-docs-documentation","sampling_family":"safety_control","provisional_stratum":"docs_only","record_kind":"pull_request","timestamp_qualifier":"merged","term":"documentation","query_template":"is:pr is:merged archived:false merged:{start}..{end} documentation in:title,body"},
+    {"id":"control-docs-docs","sampling_family":"safety_control","provisional_stratum":"docs_only","record_kind":"pull_request","timestamp_qualifier":"merged","term":"docs","query_template":"is:pr is:merged archived:false merged:{start}..{end} docs in:title,body"},
+    {"id":"control-unsafe-bypass-authentication","sampling_family":"safety_control","provisional_stratum":"unsafe_request","record_kind":"issue","timestamp_qualifier":"closed","term":"bypass authentication","query_template":"is:issue is:closed reason:\"not planned\" archived:false closed:{start}..{end} \"bypass authentication\" in:title,body"},
+    {"id":"control-unsafe-disable-authorization","sampling_family":"safety_control","provisional_stratum":"unsafe_request","record_kind":"issue","timestamp_qualifier":"closed","term":"disable authorization","query_template":"is:issue is:closed reason:\"not planned\" archived:false closed:{start}..{end} \"disable authorization\" in:title,body"},
+    {"id":"control-unsafe-expose-secret","sampling_family":"safety_control","provisional_stratum":"unsafe_request","record_kind":"issue","timestamp_qualifier":"closed","term":"expose secret","query_template":"is:issue is:closed reason:\"not planned\" archived:false closed:{start}..{end} \"expose secret\" in:title,body"},
+    {"id":"control-no-change-not-planned","sampling_family":"safety_control","provisional_stratum":"no_change_required","record_kind":"issue","timestamp_qualifier":"closed","term":null,"query_template":"is:issue is:closed reason:\"not planned\" archived:false closed:{start}..{end}"},
+    {"id":"control-single-surface-fix","sampling_family":"safety_control","provisional_stratum":"single_surface","record_kind":"pull_request","timestamp_qualifier":"merged","term":"fix","query_template":"is:pr is:merged archived:false merged:{start}..{end} fix in:title,body"},
+    {"id":"control-single-surface-bug","sampling_family":"safety_control","provisional_stratum":"single_surface","record_kind":"pull_request","timestamp_qualifier":"merged","term":"bug","query_template":"is:pr is:merged archived:false merged:{start}..{end} bug in:title,body"}
+  ],
+  "sharding": {
+    "initial_interval": "entire_observation_window",
+    "algorithm": "recursively_bisect_at_whole_second_midpoint",
+    "maximum_total_count_per_terminal_shard": 900,
+    "github_search_hard_result_cap": 1000,
+    "terminal_one_second_overflow_policy": "fail_closed_new_protocol_version_required",
+    "boundaries": "closed, second-precise, adjacent, and nonoverlapping",
+    "mutable_query_fallback_allowed": false
+  },
+  "pagination": {
+    "per_page": 100,
+    "sort": "created",
+    "order": "asc",
+    "follow_link_headers": true,
+    "maximum_pages_per_terminal_shard": 9,
+    "page_retry_identity_rule": "a retry must preserve the query atom, shard, API version, and page; divergent item identities fail the acquisition"
+  },
+  "completeness": {
+    "required_incomplete_results": false,
+    "required_http_status": 200,
+    "item_identity": "immutable GitHub node_id",
+    "terminal_shard_check": "unique returned node IDs equal total_count and every advertised page is present",
+    "union_check": "deduplicate by node_id while retaining every query-atom and shard membership",
+    "repeat_acquisition": "two complete acquisitions after the observation window must produce identical node-ID sets for every terminal shard",
+    "content_drift_policy": "any title, body, labels, state reason, repository identity, or timestamp drift between acquisitions blocks the frame",
+    "missing_or_truncated_response_policy": "fail_closed"
+  },
+  "receipts": {
+    "per_request": ["canonical query string", "request URL", "API version", "UTC request time", "HTTP status", "ETag when supplied by GitHub or explicit null", "Date", "Link", "X-RateLimit headers", "response body sha256"],
+    "per_terminal_shard": ["query atom ID", "closed UTC range", "total_count", "incomplete_results", "page count", "ordered node-ID digest", "two-acquisition equality receipt"],
+    "population": ["ordered raw-record JSONL digest", "query-membership ledger digest", "exclusion ledger digest", "acquisition code commit and tree", "query-plan digest"]
+  },
+  "prohibitions": [
+    "No GitHub search result is an eligibility decision.",
+    "No term hit establishes a stratum without blinded review.",
+    "No result outside the frozen atomic-query union may be added.",
+    "No task, private label, model call, treatment output, preview, approval, or paid execution may exist before the population and selection receipts are frozen.",
+    "No credential value, private repository, GitHub Archive, BigQuery mirror, or third-party GitHub dataset enters the population."
+  ]
+}

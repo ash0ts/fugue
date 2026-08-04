@@ -1,0 +1,160 @@
+{
+  "schema_version": 2,
+  "id": "anthropic-skill-creator-github-candidate-query-plan-v2",
+  "status": "prospective_no_queries_executed",
+  "purpose": "Define a reproducible, primary-source GitHub candidate-discovery procedure before any population record, task, treatment output, preview, approval, or model call exists.",
+  "api_contract": {
+    "origin": "https://api.github.com",
+    "rest_api_version": "2022-11-28",
+    "authentication": "A dedicated read-only GitHub App or fine-grained token; credentials are never serialized into receipts.",
+    "required_permissions": [
+      "contents:read",
+      "issues:read",
+      "metadata:read",
+      "pull_requests:read"
+    ],
+    "execution_boundary": "trusted setup --prepare",
+    "network_allowed_in_agent_trials": false
+  },
+  "temporal_contract": {
+    "primary_pre_treatment_cutoff_utc": "2026-02-06T14:59:12Z",
+    "treatment_publication_event": {
+      "kind": "github_pull_request_created",
+      "url": "https://github.com/anthropics/skills/pull/350",
+      "created_at_utc": "2026-02-06T14:59:13Z",
+      "merged_at_utc": "2026-02-06T21:19:33Z",
+      "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+      "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563"
+    },
+    "primary_rule": "The selected Skill package, every public basis fact, and the repository commit used for a primary maintenance task must exist no later than the pre-treatment cutoff.",
+    "post_treatment_rule": "Current or post-treatment packages may enter only a separately identified deployment-sensitivity frame and may not contribute to the primary pre-treatment estimate."
+  },
+  "target_frame": {
+    "primary_population": "Public, non-archived, non-fork GitHub repositories discoverable by the frozen union of repository queries, with an exact-case SKILL.md package and source-supported maintenance facts at or before the pre-treatment cutoff.",
+    "claim_boundary": "The frame supports inference only to the frozen query-discoverable population after documented eligibility and lineage deduplication; it is not a census of every Skill ever hosted on GitHub.",
+    "global_coverage_audit": "Use GitHub's creation-ordered GET /repositories?since= stream for a separately seeded probability audit of repositories omitted by the query union. The audit estimates discovery coverage but does not silently add hand-picked records.",
+    "not_claimed": [
+      "Completeness for repositories that GitHub did not index or return at the cutoff",
+      "Completeness for Skills on non-default branches",
+      "Completeness for files or repositories outside GitHub code-search indexing limits",
+      "Generalization to private repositories or non-GitHub Skill packages"
+    ]
+  },
+  "repository_discovery": {
+    "endpoint": "/search/repositories",
+    "query_templates": [
+      {
+        "id": "readme-skill-md",
+        "query": "\"SKILL.md\" in:readme fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "claude-skills-phrase",
+        "query": "\"Claude Skills\" in:name,description,readme fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "agent-skills-phrase",
+        "query": "\"Agent Skills\" in:name,description,readme fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "topic-claude-skills",
+        "query": "topic:claude-skills fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "topic-agent-skills",
+        "query": "topic:agent-skills fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "topic-claude-code-skills",
+        "query": "topic:claude-code-skills fork:false archived:false created:{start_utc}..{end_utc}"
+      },
+      {
+        "id": "topic-agentskills",
+        "query": "topic:agentskills fork:false archived:false created:{start_utc}..{end_utc}"
+      }
+    ],
+    "date_sharding": {
+      "initial_start_utc": "2008-01-01T00:00:00Z",
+      "initial_end_utc": "2026-02-06T14:59:12Z",
+      "maximum_results_per_leaf": 900,
+      "algorithm": "Bisect an over-limit inclusive UTC interval at whole-second precision into [start, midpoint] and [midpoint + 1 second, end] until every leaf reports at most 900 results.",
+      "pagination": "Request every page in each leaf until the response Link header has no rel=next.",
+      "deduplication_key": "GitHub repository node_id"
+    },
+    "required_query_receipt_fields": [
+      "query_id",
+      "rendered_query",
+      "request_url_sha256",
+      "rest_api_version",
+      "started_at_utc",
+      "completed_at_utc",
+      "http_status",
+      "total_count",
+      "incomplete_results",
+      "page_count",
+      "response_etags_or_explicit_nulls",
+      "response_body_sha256s",
+      "rate_limit_resource",
+      "terminal_link_header_sha256"
+    ],
+    "completeness_gate": "Every leaf must have incomplete_results=false, total_count <= 900, a continuous page ledger, and a deduplicated returned count equal to its declared total_count before the repository-query union is frozen."
+  },
+  "code_candidate_discovery": {
+    "surface": "GitHub new code search",
+    "role": "Candidate expansion and feasibility diagnostics only; code-search results are never used as the population denominator or as a stratum classifier.",
+    "queries": [
+      {
+        "id": "frontmatter-candidates",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)name:[\\t ]+/ /^(?-i)description:[\\t ]+/ NOT is:fork NOT is:archived"
+      },
+      {
+        "id": "declared-compatibility-candidates",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)compatibility:/ NOT is:fork NOT is:archived"
+      },
+      {
+        "id": "missing-compatibility-candidates",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)name:[\\t ]+/ NOT /^(?-i)compatibility:/ NOT is:fork NOT is:archived"
+      },
+      {
+        "id": "long-valid-name-candidates",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)name:[\\t ]+[a-z0-9-]{41,64}[\\t ]*$/ NOT is:fork NOT is:archived"
+      },
+      {
+        "id": "unsupported-name-candidates",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)name:[\\t ]+[a-z0-9-]{65,}[\\t ]*$/ NOT is:fork NOT is:archived"
+      },
+      {
+        "id": "invalid-compatibility-expansion",
+        "query": "path:/(^|\\/)(?-i)SKILL\\.md$/ /^(?-i)compatibility:[\\t ]*(\\[|\\{|true|false|null|[0-9])/ NOT is:fork NOT is:archived"
+      }
+    ],
+    "completeness_caveat": "GitHub code search is dynamic and index-bounded, searches only indexed default-branch files, and a regex can match examples in a Skill body rather than YAML frontmatter. Every hit must be resolved to an immutable blob and parsed by the pinned YAML fact extractor.",
+    "prohibited_uses": [
+      "Treating a displayed approximate file count as an eligible repository count",
+      "Classifying YAML type or semantic validity from regex text",
+      "Selecting a task directly from result order",
+      "Replacing an excluded selected record with an investigator-chosen hit"
+    ]
+  },
+  "repository_verification": {
+    "commit_rule": "Resolve the latest commit on the repository's then-default branch whose committed timestamp is at or before the cohort cutoff; bind commit, tree, branch name, and lookup response digests.",
+    "skill_rule": "Enumerate the immutable recursive tree, accept only exact-case files named SKILL.md, and select at most one eligible package per repository by the externally seeded ordering declared in the V2 protocol.",
+    "required_reads": [
+      "repository metadata and node identity",
+      "default-branch commit at cutoff",
+      "recursive Git tree",
+      "SKILL.md blob and package subtree",
+      "license metadata and exact license blob",
+      "public issue, pull request, commit, or Skill-blob basis records",
+      "fork parent, source repository, and template-repository metadata"
+    ],
+    "exclusion_ledger": "Record every discovered repository and package with a terminal included or excluded decision, reason code, reviewer state, and immutable source identities."
+  },
+  "readiness": {
+    "queries_executed": false,
+    "population_records_present": 0,
+    "authorizes_network_preparation": false,
+    "authorizes_preview": false,
+    "authorizes_model_calls_or_spend": false,
+    "next_gate": "Implement reviewed trusted preparation, execute it with read-only GitHub credentials, and freeze complete query, eligibility, lineage, and coverage-audit receipts under a new population identity."
+  }
+}

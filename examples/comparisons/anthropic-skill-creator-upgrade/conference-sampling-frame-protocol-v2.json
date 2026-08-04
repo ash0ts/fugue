@@ -1,0 +1,273 @@
+{
+  "schema_version": 2,
+  "protocol_id": "anthropic-skill-creator-conference-sampling-frame-protocol-v2",
+  "status": "prospective_not_yet_sampled",
+  "relationship_to_v1": "A new prospective protocol for future powered Studies; V1 remains immutable audit history and is neither rewritten nor treated as an executed frame.",
+  "query_plan": {
+    "path": "conference-github-candidate-query-plan-v2.json",
+    "sha256": "c93a0baf99a889ff06a82d81eafe6028e91a81dbbb9762a9e7069063a862933d",
+    "required_status": "prospective_no_queries_executed"
+  },
+  "treatment": {
+    "repository": "https://github.com/anthropics/skills",
+    "path": "skills/skill-creator",
+    "baseline_commit": "a5bcdd7e58cdff48566bf876f0a72a2008dcefbc",
+    "candidate_commit": "1ed29a03dc852d30fa6ef2ca53a67dc2c2c2c563",
+    "candidate_public_at_utc": "2026-02-06T14:59:13Z",
+    "primary_source_cutoff_utc": "2026-02-06T14:59:12Z"
+  },
+  "cohorts": {
+    "maintenance_primary": {
+      "development_study_id": "anthropic-skill-creator-maintenance-development-v2",
+      "holdout_study_id": "anthropic-skill-creator-maintenance-holdout-v2",
+      "population": "Pre-treatment public GitHub repositories with an existing complete Skill package and immutable public facts supporting exactly one maintenance, audit, preservation, repair, or honest-rejection task.",
+      "primary_inference": true,
+      "source_must_predate_treatment": true,
+      "one_primary_skill_per_repository": true,
+      "globally_disjoint_repository_clusters": true
+    },
+    "creation_secondary": {
+      "development_study_id": "anthropic-skill-creator-creation-development-v2",
+      "holdout_study_id": "anthropic-skill-creator-creation-holdout-v2",
+      "population": "Pre-treatment public GitHub repositories with a public issue, pull request, commit, or repository specification requesting one new Skill and enough immutable facts to verify the authored package without inventing requirements.",
+      "primary_inference": false,
+      "source_must_predate_treatment": true,
+      "existing_skill_package_required": false,
+      "separate_frame_tasks_labels_specs_results_and_analysis": true,
+      "never_pooled_with_maintenance": true,
+      "repository_clusters_disjoint_from_maintenance_holdout": true
+    },
+    "post_treatment_deployment_sensitivity": {
+      "population": "Current query-discoverable public Skill packages first published after the treatment became public.",
+      "primary_inference": false,
+      "separate_frame_and_study_identity": true,
+      "limitation": "The candidate revision may have influenced these packages or their conventions, so this cohort measures current deployment behavior rather than an uncontaminated pre-treatment population effect."
+    }
+  },
+  "eligibility": {
+    "include": [
+      "Repository metadata proves public, non-archived, non-fork status at the frozen source identity.",
+      "An OSI-identifiable repository license and its exact blob are captured at the source commit.",
+      "The maintenance cohort has one exact-case SKILL.md with string name and description fields; a declared compatibility field may be absent or invalid when that condition defines the task.",
+      "Every task requirement is supported by typed facts extracted from immutable same-repository Skill, issue, pull-request, commit, or repository-specification sources.",
+      "The selected package can be archived without submodules, unsafe links, generated dependency trees, credentials, private labels, mutable resolution, or network-dependent trial setup.",
+      "Package source, public basis records, and task facts predate the applicable cohort cutoff."
+    ],
+    "exclude": [
+      "The anthropics/skills treatment repository, Fugue repositories, benchmark fixtures, or packages authored for this campaign.",
+      "Forks, mirrors, registry snapshots, generated catalog copies, or packages assigned to an already selected source-lineage cluster.",
+      "A public task would require invented platform constraints, expected edits, names, compatibility claims, or reference output.",
+      "The required task needs credentials, private data, live services, installation, downloading, building, or network access during an Agent trial.",
+      "The only apparent YAML fact is a regex match in prose, an example, or a fenced block rather than parsed top-level frontmatter.",
+      "Eligibility, stratum, lineage, or reviewer disagreement remains unresolved at frame freeze."
+    ],
+    "terminal_ledger": "Every discovered repository and candidate package receives one immutable included or excluded decision with reason codes; silent drops are forbidden."
+  },
+  "typed_public_facts": {
+    "artifact": "PublicSkillFactsV2",
+    "strict_unknown_fields": "reject",
+    "required_fields": [
+      "fact_id",
+      "cohort",
+      "repository_node_id",
+      "repository_url",
+      "owner_node_id",
+      "commit_sha",
+      "commit_committed_at_utc",
+      "skill_path",
+      "skill_blob_sha",
+      "skill_content_sha256",
+      "skill_first_public_commit_utc",
+      "frontmatter",
+      "requirement_groups",
+      "public_basis_refs",
+      "classifier_revision",
+      "predates_treatment_publication"
+    ],
+    "frontmatter": {
+      "parser": "Pinned YAML safe loader over only the first complete top-level frontmatter document in the immutable SKILL.md blob.",
+      "fields": {
+        "name": {
+          "present_type": "boolean",
+          "yaml_type": "string|null|boolean|integer|number|sequence|mapping",
+          "value_sha256_type": "sha256|null",
+          "normalized_length_type": "integer|null",
+          "valid_kebab_case_type": "boolean|null"
+        },
+        "description": {
+          "present_type": "boolean",
+          "yaml_type": "string|null|boolean|integer|number|sequence|mapping",
+          "value_sha256_type": "sha256|null",
+          "normalized_length_type": "integer|null"
+        },
+        "compatibility": {
+          "present_type": "boolean",
+          "yaml_type": "string|null|boolean|integer|number|sequence|mapping",
+          "value_sha256_type": "sha256|null",
+          "normalized_length_type": "integer|null",
+          "contract_status_type": "absent|valid|invalid_type|empty|overlong|unsupported_claim|unverifiable"
+        },
+        "allowed_key_names_type": "sorted_array_of_strings",
+        "unknown_key_names_type": "sorted_array_of_strings",
+        "document_sha256_type": "sha256"
+      }
+    },
+    "requirement_group": {
+      "allowed_kinds": [
+        "binary",
+        "network",
+        "operating_system",
+        "package",
+        "platform",
+        "product",
+        "tool",
+        "version"
+      ],
+      "required_fields": [
+        "group_id",
+        "kind",
+        "public_basis_ref_ids",
+        "fact_sha256",
+        "applicability"
+      ],
+      "applicability_values": [
+        "required",
+        "not_applicable",
+        "unsupported",
+        "uncertain"
+      ]
+    },
+    "public_basis_ref": {
+      "allowed_kinds": [
+        "skill_blob",
+        "issue",
+        "pull_request",
+        "commit",
+        "repository_file"
+      ],
+      "required_fields": [
+        "ref_id",
+        "kind",
+        "url",
+        "immutable_id",
+        "published_at_utc",
+        "content_sha256"
+      ]
+    },
+    "privacy": "Typed public facts contain source-derived assertions and digests only. Expected outputs, gold edits, private reviewer notes, and treatment responses remain absent."
+  },
+  "review_and_adjudication": {
+    "reviewers_per_candidate": 2,
+    "reviewer_independence": "Two different human reviewers independently assess source eligibility, typed facts, proposed stratum, task support, and lineage before seeing any baseline or candidate output.",
+    "blinding": [
+      "No treatment outputs",
+      "No judge outputs",
+      "No private expected artifact",
+      "No seeded selection rank until eligibility and lineage are frozen"
+    ],
+    "review_record": {
+      "required_fields": [
+        "review_id",
+        "reviewer_pseudonym",
+        "fact_id",
+        "eligibility_decision",
+        "reason_codes",
+        "stratum",
+        "lineage_cluster_id",
+        "reviewed_at_utc",
+        "record_sha256"
+      ],
+      "eligibility_values": [
+        "include",
+        "exclude",
+        "uncertain"
+      ]
+    },
+    "adjudication": "Any disagreement on inclusion, exclusion, source fact, stratum, or lineage is resolved by a third human adjudicator with a signed reason; unresolved records are excluded before selection.",
+    "agreement_reporting": "Report raw agreement and chance-corrected agreement separately for eligibility and stratum assignment before unsealing development tasks.",
+    "models_may_review_or_adjudicate": false
+  },
+  "lineage_and_independence": {
+    "primary_inference_cluster": "source_lineage_cluster_id",
+    "repository_rule": "At most one primary holdout Skill is selected from a canonical GitHub repository, even when that repository contains multiple eligible packages.",
+    "cross_repository_lineage_rule": "Repositories connected by fork/source/template identity or copied and near-copied Skill content share one lineage cluster and contribute at most one primary holdout unit.",
+    "signals": [
+      "GitHub repository node_id, fork parent, source repository, and template_repository identities",
+      "repository owner node_id",
+      "exact SKILL.md Git blob SHA and content SHA-256",
+      "normalized package-tree digest",
+      "explicit upstream, origin, copied-from, or generated-from URLs",
+      "five-token-shingle MinHash similarity over normalized SKILL.md content"
+    ],
+    "near_copy_rule": {
+      "normalization": "Unicode NFC, LF newlines, trailing-space removal, and collapse of runs of horizontal whitespace outside fenced code; retain words, headings, and code content.",
+      "shingle_tokens": 5,
+      "minhash_permutations": 256,
+      "jaccard_threshold": 0.9,
+      "decision": "A threshold hit is reviewer-confirmed as same-lineage or documented as an adjudicated false positive before frame freeze."
+    },
+    "owner_sensitivity": "Report a secondary owner-clustered sensitivity analysis; attempts and multiple packages from one repository never increase the primary independent sample size.",
+    "multiple_packages_policy": "Additional eligible packages from a selected repository may be used only in development or an explicitly secondary repository-clustered sensitivity analysis."
+  },
+  "sampling_and_randomness": {
+    "population_freeze": "Freeze query receipts, terminal eligibility ledger, typed public facts, lineage assignments, repository exclusions, stratum counts, and their canonical bundle digest before choosing a beacon round.",
+    "external_randomness": {
+      "provider": "drand",
+      "chain_hash_required": true,
+      "future_round_committed_before_available": true,
+      "bls_signature_verification_required": true,
+      "population_bundle_digest": "SHA256 of canonical UTF-8 JSON containing the exact query-plan digest, final collector-receipt digest, candidate JSONL digest, population JSONL digest, provenance JSONL digest, terminal eligibility-ledger digest, reviewer-registry digest, authenticated review-verification digest, authenticated sampling-design-amendment digest, and authenticated prospective-power-receipt digest; keys are sorted, separators are comma/colon, ASCII escaping is disabled, and no trailing newline is included.",
+      "seed_formula": "SHA256(UTF8(lowercase_population_bundle_sha256 + newline + lowercase_drand_chain_hash + newline + decimal_round + newline + lowercase_randomness_hex)); no trailing newline is included."
+    },
+    "selection_algorithm": "Within each cohort and declared stratum, sort lineage-eligible repository/package records by SHA256(UTF8(lowercase_selection_seed_hex + newline + source_lineage_cluster_id + newline + repository_node_id + newline + skill_path + newline + lowercase_public_basis_bundle_sha256)); no trailing newline is included and the stable record ID is the deterministic collision tie-break.",
+    "package_within_repository": "When a repository has multiple eligible packages, retain only the first package under the externally seeded package ordering before repository-level selection.",
+    "partition_order": "Freeze all partitions together; allocate sealed primary holdouts first, then development, then safety controls from the remaining ordered records without replacement.",
+    "replacement": "A post-selection preparation failure is recorded at its original rank and replaced only by the next precomputed eligible record in the same cohort and stratum. No investigator choice is allowed.",
+    "quota_rule": "Holdout sizes and any rare-stratum oversampling are frozen only after a population-based prospective simulation, before treatment output, under a separately digested sampling-design amendment.",
+    "insufficient_stratum_rule": "Use a finite census with an explicit descriptive claim, redefine the estimand under a new preregistration, or block. Never synthesize packages or count attempts as independent sources."
+  },
+  "inclusion_weights_and_analysis": {
+    "primary_population_estimator": "Stratified Hajek paired mean with a Horvitz-Thompson total as a sensitivity analysis.",
+    "weight_record_required_fields": [
+      "stratum",
+      "eligible_lineage_clusters_N_h",
+      "selected_primary_clusters_n_h",
+      "inclusion_probability_numerator",
+      "inclusion_probability_denominator",
+      "inverse_probability_weight",
+      "finite_population_fraction",
+      "selection_rank"
+    ],
+    "inclusion_probability": "For simple seeded sampling without replacement inside stratum h, pi_i = n_h / N_h; any additional discovery or feasibility stage must contribute its documented probability rather than being ignored.",
+    "weighting_rule": "Primary community estimates use frozen inclusion weights. An unweighted equal-stratum mean is reported only as a balanced-benchmark secondary estimand.",
+    "repeated_attempts": "Attempts estimate within-task repeatability and are nested inside task, repository, owner, and lineage; they never increase independent N.",
+    "variance": "Use a design-consistent stratified variance with finite-population correction and a preregistered lineage/owner-clustered sensitivity analysis.",
+    "safety_and_judge": "Critical deterministic safety gates, qualitative judge labels, mechanism evidence, and efficiency remain separate from the weighted primary outcome.",
+    "power_gate": "Recompute prospective power from frozen stratum sizes, expected discordance assumptions, inclusion weights, and lineage design effect before generating a holdout preview."
+  },
+  "task_authoring_and_sealing": {
+    "public_brief": "Treatment-blind, grounded only in the selected immutable package and typed public facts, and requests exactly one bounded authoring, maintenance, audit, preservation, repair, or rejection outcome.",
+    "private_label": "Mode-0600 host-only artifact containing expected files, source-derived requirements, preservation hashes, validity boundaries, and scoring inputs; only its digest enters preparation and approval.",
+    "authoring_review": "A reviewer who did not write the task confirms that the brief neither exposes the expected treatment result nor requires facts absent from PublicSkillFactsV2.",
+    "holdout_access": "Holdout packages, briefs, and private labels are encrypted or access-controlled for the execution role until a separate exact holdout preview is approved; every access is audited.",
+    "trial_boundary": "Agent trials receive one digest-verified read-only source archive and public brief. They may not clone, fetch, install, download, build, access the Docker socket, inspect another partition, or resolve mutable references."
+  },
+  "raw_public_data_privacy": {
+    "source_bytes_are_immutable": true,
+    "storage": "Acquisition directories are mode 0700 and raw response, candidate, and receipt files are mode 0600; symbolic-link targets are rejected.",
+    "scan_boundary": "A pinned credential-pattern scanner records only pattern IDs, affected immutable record IDs, response digests, and JSON paths. Matched values are never copied into a receipt, review ledger, task, trace, or report.",
+    "affected_record_policy": "A token-shaped or private-value finding blocks the record from task authoring and export until a separately digested reviewer decision excludes it or a sanitized derivative is created without modifying the immutable raw source.",
+    "zero_finding_is_not_safety_proof": true
+  },
+  "readiness": {
+    "population_records_present": 0,
+    "query_receipts_present": false,
+    "reviewed_lineage_clusters_present": 0,
+    "sampling_design_present": false,
+    "external_randomness_receipt_present": false,
+    "development_or_holdout_specs_present": false,
+    "authorizes_preview": false,
+    "authorizes_model_calls_or_spend": false,
+    "fail_closed": "No source lock, task archive, comparison spec, preview, approval, model call, or paid cell may be created from this protocol alone. A complete validated V2 frame and separate exact Study artifacts are required."
+  }
+}

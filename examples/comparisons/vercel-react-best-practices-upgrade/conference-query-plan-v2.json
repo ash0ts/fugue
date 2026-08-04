@@ -1,0 +1,337 @@
+{
+  "schema_version": 2,
+  "query_plan_id": "vercel-react-best-practices-conference-query-plan-v2",
+  "status": "prospective_not_executed",
+  "artifact_digest": "7a653385ebbd50a7fff15ce0bb806e1424ce04042ef609a2a8cd3c0185f44844",
+  "treatment_preperiod": {
+    "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "baseline_committed_at_utc": "2026-01-18T01:42:22Z",
+    "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+    "candidate_committed_at_utc": "2026-01-20T13:43:49Z",
+    "record_window_start_utc": "2023-01-01T00:00:00Z",
+    "record_cutoff_utc": "2026-01-17T23:59:59Z",
+    "github_merged_qualifier": "merged:2023-01-01..2026-01-17",
+    "rationale": "Every maintenance repair must predate both locked Skill revisions so the public record cannot have been produced in response to either treatment."
+  },
+  "github_api": {
+    "base_url": "https://api.github.com",
+    "endpoint": "/search/issues",
+    "method": "GET",
+    "accept": "application/vnd.github+json",
+    "api_version": "2022-11-28",
+    "authentication": "required research credential with read-only public-metadata scope",
+    "fixed_parameters": {
+      "sort": "created",
+      "order": "asc",
+      "per_page": 100
+    },
+    "maximum_retrievable_results_per_query": 900,
+    "sharding": {
+      "field": "merged",
+      "interval_granularity": "whole_utc_day",
+      "algorithm": "bisect closed adjacent nonoverlapping whole-UTC-day ranges until every terminal shard reports at most 900 results",
+      "single_day_overflow": "fail_closed_new_protocol_version_required",
+      "boundaries": "closed_adjacent_nonoverlapping_utc_days",
+      "query_mutation_after_freeze": "forbidden"
+    },
+    "acquisition_repetition": {
+      "acquisitions": 2,
+      "minimum_server_time_separation_seconds": 3600,
+      "immediate_replay_counts_as_independent": false,
+      "required_cross_acquisition_check": "exact per-query terminal-shard boundaries, counts, and ordered identity digests"
+    },
+    "required_page_receipt_fields": [
+      "requested_url",
+      "final_url",
+      "redirect_chain",
+      "canonical_request_url",
+      "atomic_query_id",
+      "shard_start_utc",
+      "shard_end_utc",
+      "page",
+      "request_started_at_utc",
+      "request_completed_at_utc",
+      "response_date",
+      "etag",
+      "link",
+      "x_ratelimit_limit",
+      "x_ratelimit_remaining",
+      "x_ratelimit_reset",
+      "x_ratelimit_resource",
+      "x_ratelimit_used",
+      "total_count",
+      "incomplete_results",
+      "body_sha256",
+      "request_url_sha256",
+      "headers_sha256",
+      "collector_source_commit",
+      "collector_source_tree",
+      "collector_sha256",
+      "compiler_sha256"
+    ],
+    "failure_conditions": [
+      "incomplete_results is not false",
+      "a shard reports more than 900 results",
+      "a required page or mandatory response header is absent; ETag is recorded as explicit null when GitHub omits it",
+      "a page is fetched after the frozen cutoff without a matching immutable receipt",
+      "GitHub returns an error, abuse limit, or rate-limit response that cannot be resumed within the bounded pacing policy",
+      "the exact per-query terminal-shard boundaries, counts, or ordered identity digests differ across two server-time-separated acquisitions at least 3600 seconds apart"
+    ]
+  },
+  "families": [
+    {
+      "id": "server_action_authorization",
+      "role": "changed_rule_primary",
+      "upstream_rule_path": "skills/react-best-practices/rules/server-auth-actions.md",
+      "query_ids": [
+        "server-action-authorization",
+        "server-action-permission",
+        "server-action-unauthorized",
+        "server-action-unauthenticated",
+        "use-server-auth"
+      ]
+    },
+    {
+      "id": "rsc_serialization",
+      "role": "changed_rule_primary",
+      "upstream_rule_path": "skills/react-best-practices/rules/server-dedup-props.md",
+      "query_ids": [
+        "rsc-props",
+        "rsc-payload-props",
+        "server-component-serialization",
+        "server-component-derived-props",
+        "client-component-derived-props",
+        "rsc-duplicate-serialization"
+      ]
+    },
+    {
+      "id": "dom_batching",
+      "role": "unchanged_rule_safety_control",
+      "upstream_rule_path": "skills/react-best-practices/rules/js-batch-dom-css.md",
+      "query_ids": [
+        "layout-thrashing-react",
+        "forced-reflow-react",
+        "bounding-rect-reflow-react",
+        "offset-width-reflow-react"
+      ]
+    },
+    {
+      "id": "large_array_iteration",
+      "role": "unchanged_rule_safety_control",
+      "upstream_rule_path": "skills/react-best-practices/rules/js-min-max-loop.md",
+      "query_ids": [
+        "math-max-spread-array",
+        "math-min-spread-array",
+        "maximum-call-stack-spread",
+        "argument-limit-array"
+      ]
+    },
+    {
+      "id": "hook_timing",
+      "role": "unchanged_rule_safety_control",
+      "upstream_rule_path": "skills/react-best-practices/rules/advanced-use-latest.md",
+      "query_ids": [
+        "stale-closure-hook",
+        "stale-callback-hook",
+        "use-latest-callback",
+        "layout-effect-callback-ref"
+      ]
+    },
+    {
+      "id": "event_handler_reference",
+      "role": "unchanged_rule_safety_control",
+      "upstream_rule_path": "skills/react-best-practices/rules/advanced-event-handler-refs.md",
+      "query_ids": [
+        "handler-ref-event",
+        "stable-event-handler",
+        "resubscribe-event-handler",
+        "event-listener-stale-callback"
+      ]
+    }
+  ],
+  "queries": [
+    {
+      "id": "server-action-authorization",
+      "family": "server_action_authorization",
+      "lexical_basis": "server action authorization",
+      "query": "\"server action\" authorization in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "server-action-permission",
+      "family": "server_action_authorization",
+      "lexical_basis": "server action permission",
+      "query": "\"server action\" permission in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "server-action-unauthorized",
+      "family": "server_action_authorization",
+      "lexical_basis": "server action unauthorized",
+      "query": "\"server action\" unauthorized in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "server-action-unauthenticated",
+      "family": "server_action_authorization",
+      "lexical_basis": "server action unauthenticated",
+      "query": "\"server action\" unauthenticated in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "use-server-auth",
+      "family": "server_action_authorization",
+      "lexical_basis": "use server auth",
+      "query": "\"use server\" auth in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "rsc-props",
+      "family": "rsc_serialization",
+      "lexical_basis": "RSC props",
+      "query": "\"RSC props\" in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "rsc-payload-props",
+      "family": "rsc_serialization",
+      "lexical_basis": "RSC payload props",
+      "query": "\"RSC payload\" props in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "server-component-serialization",
+      "family": "rsc_serialization",
+      "lexical_basis": "server component serialization",
+      "query": "\"server component\" serialization in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "server-component-derived-props",
+      "family": "rsc_serialization",
+      "lexical_basis": "server component derived props",
+      "query": "\"server component\" \"derived props\" in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "client-component-derived-props",
+      "family": "rsc_serialization",
+      "lexical_basis": "client component derived props",
+      "query": "\"client component\" \"derived props\" in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "rsc-duplicate-serialization",
+      "family": "rsc_serialization",
+      "lexical_basis": "RSC duplicate serialization",
+      "query": "RSC \"duplicate serialization\" in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "layout-thrashing-react",
+      "family": "dom_batching",
+      "lexical_basis": "layout thrashing React",
+      "query": "\"layout thrashing\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "forced-reflow-react",
+      "family": "dom_batching",
+      "lexical_basis": "forced reflow React",
+      "query": "\"forced reflow\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "bounding-rect-reflow-react",
+      "family": "dom_batching",
+      "lexical_basis": "getBoundingClientRect reflow React",
+      "query": "getBoundingClientRect reflow React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "offset-width-reflow-react",
+      "family": "dom_batching",
+      "lexical_basis": "offsetWidth reflow React",
+      "query": "offsetWidth reflow React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "math-max-spread-array",
+      "family": "large_array_iteration",
+      "lexical_basis": "Math.max spread array",
+      "query": "\"Math.max\" spread array in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "math-min-spread-array",
+      "family": "large_array_iteration",
+      "lexical_basis": "Math.min spread array",
+      "query": "\"Math.min\" spread array in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "maximum-call-stack-spread",
+      "family": "large_array_iteration",
+      "lexical_basis": "maximum call stack spread JavaScript",
+      "query": "\"maximum call stack\" spread JavaScript in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "argument-limit-array",
+      "family": "large_array_iteration",
+      "lexical_basis": "argument limit array JavaScript",
+      "query": "\"argument limit\" array JavaScript in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "stale-closure-hook",
+      "family": "hook_timing",
+      "lexical_basis": "stale closure hook React",
+      "query": "\"stale closure\" hook React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "stale-callback-hook",
+      "family": "hook_timing",
+      "lexical_basis": "stale callback hook React",
+      "query": "\"stale callback\" hook React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "use-latest-callback",
+      "family": "hook_timing",
+      "lexical_basis": "useLatest callback React",
+      "query": "useLatest callback React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "layout-effect-callback-ref",
+      "family": "hook_timing",
+      "lexical_basis": "useLayoutEffect callback ref React",
+      "query": "useLayoutEffect \"callback ref\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "handler-ref-event",
+      "family": "event_handler_reference",
+      "lexical_basis": "handler ref event React",
+      "query": "\"handler ref\" event React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "stable-event-handler",
+      "family": "event_handler_reference",
+      "lexical_basis": "stable event handler React",
+      "query": "\"stable event handler\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "resubscribe-event-handler",
+      "family": "event_handler_reference",
+      "lexical_basis": "resubscribe event handler React",
+      "query": "resubscribe \"event handler\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    },
+    {
+      "id": "event-listener-stale-callback",
+      "family": "event_handler_reference",
+      "lexical_basis": "addEventListener stale callback React",
+      "query": "addEventListener \"stale callback\" React in:title,body is:pr is:merged is:public merged:2023-01-01..2026-01-17 -repo:vercel-labs/agent-skills"
+    }
+  ],
+  "union_and_screening": {
+    "union_key": "GitHub pull-request node_id",
+    "canonical_record_key": "lower-case canonical repository URL plus pull-request number",
+    "query_overlap_policy": "retain every query and page receipt, then deduplicate records without changing inclusion probability metadata",
+    "screening_order": [
+      "deduplicate exact pull-request node IDs",
+      "freeze the complete candidate union",
+      "fetch immutable repository, pull-request, commit, tree, file, archive, package, lock, and license evidence",
+      "apply the frozen eligibility protocol",
+      "perform treatment-blind two-reviewer family classification",
+      "freeze included and excluded records with reason codes before external randomness is requested"
+    ],
+    "prohibited": [
+      "Boolean OR queries",
+      "relevance-ranked truncation",
+      "dropping a candidate without an exclusion receipt",
+      "adding terms after viewing treatment outputs",
+      "counting multiple query hits for one PR as independent records"
+    ]
+  },
+  "claim_boundary": "The resulting frame represents only test-qualified public TypeScript Next.js merged repairs discoverable through these frozen atomic queries in the treatment-preperiod. It does not represent every React or Next.js repository, issue, or maintenance task."
+}

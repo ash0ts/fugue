@@ -1,0 +1,82 @@
+{
+  "schema_version": 2,
+  "receipt_id": "community-skill-github-collector-live-pilot-v2",
+  "status": "passed_candidate_discovery_transport_only",
+  "executed_at_utc": "2026-08-04T01:37:51Z",
+  "execution": {
+    "network_operation": "read_only_authenticated_github_search_public_visibility_not_proven",
+    "model_calls": 0,
+    "paid_cells": 0,
+    "credential_value_serialized": false,
+    "raw_responses_committed_to_git": false
+  },
+  "code_locks": {
+    "collector_path": "examples/comparisons/community-skill-upgrades/github_population_v2.py",
+    "collector_sha256": "5cf40ddb87e6241533c21d4563a315e798eca7a1a535e5776bb78498bf2142aa",
+    "compiler_path": "examples/comparisons/community-skill-upgrades/compile_github_collector_plan_v2.py",
+    "compiler_sha256": "b24ef230620eb554ad67bc9ec747223bccc2b856b9c51833adc57c1ea2d01e44",
+    "selector_path": "examples/comparisons/community-skill-upgrades/select_population_v2.py",
+    "selector_sha256": "c3fbe36eb2f26f82046857f57888751a31e2f850f2d36738dbf40592fd3100b4"
+  },
+  "query": {
+    "lane": "superpowers-writing-plans",
+    "source_query_plan_sha256": "9bfc0c3ca8042f8b55f38c561daa1c600f998392740007612da235e048d753fe",
+    "compiled_pilot_plan_sha256": "eea2ecbadc6aea9bbb80383a034c28878eddcac12bab10114930655892a23621",
+    "query_id": "control-unsafe-bypass-authentication",
+    "start_utc": "2026-06-16T17:09:48Z",
+    "end_utc": "2026-07-31T23:59:59Z",
+    "acquisition_repetitions": 1
+  },
+  "observations": {
+    "terminal_shards": 1,
+    "pages": 2,
+    "candidate_records": 194,
+    "incomplete_results": false,
+    "candidate_union_sha256": "f3676f13871430daa5d9b1d455cf7bffc1d94a2a0866841538921e300083ce04",
+    "response_body_sha256s": [
+      "a35a1b3ae612c1a7273c91274f05cca3151e83737ef43c79e9e378e47bd26c8c",
+      "cc7fd6513d442bb44258202cadea25fcc69e5a5b919b5d6278d47a6806e29800"
+    ],
+    "github_etag_values": [null, null],
+    "pagination_link_contract": "passed",
+    "audit_header_contract": "passed",
+    "collector_receipt_sha256": "696c36119bd6057f0633bbcf5b9361e5586b2d6fdcc90ea7e80677f6315ba194"
+  },
+  "manual_diagnostic_read": {
+    "sample": "first 20 canonical candidate rows; diagnostic only, not randomized or inferential",
+    "finding": "Visible titles included security-news aggregation, unrelated support requests, and repeated repositories alongside plausible maintenance records.",
+    "implication": "Keyword search is useful candidate discovery but cannot supply eligibility, stratum labels, or an independent population without immutable-source review and lineage collapse."
+  },
+  "visibility_audit": {
+    "candidate_items_checked": 194,
+    "candidate_items_with_embedded_repository_visibility": 0,
+    "repository_url_present": true,
+    "public_visibility_proven": false,
+    "downstream_status": "blocked_until_unauthenticated_or_independently_resolved_public_visibility",
+    "interpretation": "The pilot proves authenticated GitHub Search transport only. It does not prove that every returned repository was public and must not be used as a public population receipt."
+  },
+  "public_record_privacy_scan": {
+    "scanner_scope": "candidate rows and immutable raw GitHub response bytes",
+    "candidate_records_with_token_shaped_values": 1,
+    "pattern_ids": [
+      "github_classic_token_shape"
+    ],
+    "matched_values_copied_to_receipt": false,
+    "raw_artifact_permissions_corrected_to": "directories 0700; files 0600",
+    "downstream_status": "blocked_pending_review_or_exclusion",
+    "interpretation": "This is a public-source privacy finding, not evidence that the operator credential was serialized and not proof that the token-shaped value is live."
+  },
+  "protocol_correction": {
+    "finding": "GitHub omitted ETag on both live Search API pages while providing Date, Link, request ID, rate-limit metadata, and stable response bytes.",
+    "change": "V2 query contracts now require an explicit null when ETag is absent and use body digests plus repeated acquisitions for drift detection instead of pretending ETag is always available."
+  },
+  "claim_boundary": {
+    "candidate_discovery_transport_qualified": true,
+    "public_only_candidate_discovery_qualified": false,
+    "population_frame_ready": false,
+    "eligibility_review_complete": false,
+    "selection_authorized": false,
+    "experiment_authorized": false,
+    "conference_claim_supported": false
+  }
+}

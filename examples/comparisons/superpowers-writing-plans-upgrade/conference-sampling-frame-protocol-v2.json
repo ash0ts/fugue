@@ -1,0 +1,223 @@
+{
+  "schema_version": 2,
+  "protocol_id": "superpowers-writing-plans-conference-sampling-frame-protocol-v2",
+  "status": "prospective_not_yet_sampled",
+  "supersedes_without_mutating": {
+    "protocol": "conference-sampling-frame-protocol-v1.json",
+    "reason": "V1 correctly blocked pseudo-replication but did not define an enumerable query population, immutable GitHub lineage, externally verifiable randomization, reviewer separation, or design weights.",
+    "v1_evidence_reused": false
+  },
+  "query_plan": {
+    "path": "examples/comparisons/superpowers-writing-plans-upgrade/conference-query-plan-v2.json",
+    "sha256": "9bfc0c3ca8042f8b55f38c561daa1c600f998392740007612da235e048d753fe",
+    "required_status": "prospective_query_plan_only_no_population_acquired"
+  },
+  "treatment": {
+    "repository": "https://github.com/obra/superpowers",
+    "path": "skills/writing-plans",
+    "baseline_commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "baseline_bundle_sha256": "44212153d6c10186e77ec4e68140f12372f38682179b831e268c94515c7dd8f8",
+    "candidate_commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "candidate_bundle_sha256": "25cc345550095417590edec3d3e5157c6682f173a1122372943ce46050a23846",
+    "candidate_is_direct_descendant_of_baseline": true,
+    "candidate_committer_time_utc": "2026-06-16T17:09:47Z",
+    "task_record_window_starts_utc": "2026-06-16T17:09:48Z",
+    "whole_revision_estimand_only": true,
+    "component_attribution_allowed": false
+  },
+  "estimand": {
+    "primary_unit": "one treatment-blind planning task from one independent GitHub owner/source-lineage cluster",
+    "paired_contrast": "candidate Skill revision minus baseline Skill revision on the same task",
+    "target_population": "eligible post-treatment public GitHub maintenance records in the exact query-plan union",
+    "primary_partition": "target_holdout",
+    "development_role": "measurement development only and excluded from confirmatory inference",
+    "safety_control_role": "separate zero-tolerance operational gates and never pooled into the target outcome",
+    "attempt_role": "within-task repeatability; attempts never increase the independent sample size",
+    "external_validity_boundary": "No inference beyond the exact query-defined GitHub population, locked Skill revisions, harness, model route, runtime, and task-authoring contract."
+  },
+  "population": {
+    "raw_record_source": "the complete two-acquisition union produced by conference-query-plan-v2.json",
+    "raw_population_may_contain_multiple_records_per_repository": true,
+    "eligibility_frozen_before_randomness": true,
+    "all_inclusions_and_exclusions_retained": true,
+    "minimum_eligible_clusters_before_selection": {
+      "security_privacy": 168,
+      "identity_migration": 168,
+      "lifecycle_recovery": 168,
+      "integration_runtime": 168,
+      "docs_only": 48,
+      "unsafe_request": 48,
+      "no_change_required": 48,
+      "single_surface": 48,
+      "total": 864
+    },
+    "shortfall_policy": "fail closed and publish a new prospective protocol version before inspecting any treatment output; never add hand-picked records or reduce quotas"
+  },
+  "eligibility": {
+    "repository": [
+      "Public, non-archived, non-disabled, non-fork repository at the acquisition snapshot.",
+      "Immutable GitHub repository REST ID, node ID, owner node ID, canonical URL, and source/fork/template lineage are recorded.",
+      "An OSI-identifiable license blob is present in the exact task source tree.",
+      "The exact source tree can be archived without gitlinks, unsafe links, unavailable LFS objects, secret-bearing paths, generated dependency trees, or executable preparation inside an Agent trial.",
+      "The repository, record, base tree, and source digest are absent from every prior Fugue task, prompt-development set, judge calibration set, and trace audit."
+    ],
+    "record": [
+      "The immutable record node ID belongs to the selected repository lineage and falls inside the query-plan observation window.",
+      "A target, docs-only, or single-surface record is a merged human-authored pull request with a reachable pre-change base commit and merge result.",
+      "A no-change-required or unsafe-request control is a closed public issue with an adjudicated no-change or safety rationale and a frozen acquisition-time default-branch tree.",
+      "Dependency-only, generated-only, bot-authored, vague, embargoed, personal-data-bearing, or solution-only records are excluded.",
+      "The maintenance question is answerable by inspecting the read-only task source without network access, installation, or execution."
+    ],
+    "task": [
+      "The public brief is authored from the frozen problem record and task source, is blind to treatment identity, and asks for a plan or an explicit no-plan/safety response.",
+      "The Agent-visible brief omits the pull-request URL, merged diff, expected paths, expected symbols, reference plan, reviewer labels, and private scoring contract.",
+      "The host-only label is authored from public merged or adjudication evidence by a separate reviewer and remains mode 0600.",
+      "Every task is assigned exactly one stratum before external randomness is revealed."
+    ],
+    "classification": {
+      "reviewers": 2,
+      "independent_first_pass": true,
+      "treatment_output_blinded": true,
+      "agreement_required": true,
+      "adjudication_required_on_disagreement": true,
+      "mutually_exclusive_final_stratum": true,
+      "query_term_hit_is_sufficient": false
+    }
+  },
+  "immutable_lineage": {
+    "repository_fields": ["repository_rest_id", "repository_node_id", "owner_node_id", "canonical_url", "fork", "archived", "disabled", "source_repository_node_id", "parent_repository_node_id", "template_repository_node_id"],
+    "record_fields": ["record_node_id", "record_url", "record_kind", "created_at", "closed_or_merged_at", "snapshot_path", "snapshot_sha256", "query_membership_digest"],
+    "pull_request_fields": ["base_repository_node_id", "base_ref", "base_commit_sha", "base_tree_sha", "head_commit_sha", "merge_commit_sha", "changed_files_manifest_sha256"],
+    "issue_control_fields": ["acquisition_default_branch", "acquisition_commit_sha", "acquisition_tree_sha", "state_reason", "adjudication_receipt_sha256"],
+    "source_fields": ["task_commit_sha", "task_tree_sha", "archive_path", "archive_sha256", "tree_manifest_path", "tree_manifest_sha256", "license_path", "license_blob_sha", "license_sha256", "safety_scan_receipt_sha256"],
+    "provenance_checks": [
+      "For a pull-request task, task_commit_sha equals base_commit_sha and task_tree_sha equals the base commit's Git tree SHA.",
+      "The base repository node ID equals the selected immutable repository node ID.",
+      "The merge commit is reachable and records the selected pull request; the merged diff is host-only evaluation evidence and is absent from the task archive.",
+      "The archive expands exactly to the recursively fetched base tree manifest with no extra or missing paths.",
+      "The license blob and digest are resolved at task_commit_sha rather than inferred from the mutable default branch."
+    ]
+  },
+  "independence": {
+    "repository_identity": "immutable GitHub repository node ID, not URL",
+    "cluster_identity": "owner node ID plus source-root node ID plus template-root node ID",
+    "one_selected_task_per_repository": true,
+    "one_selected_repository_per_independence_cluster": true,
+    "duplicate_guards": ["repository node ID", "record node ID", "owner/source/template cluster", "task tree SHA", "source archive SHA-256", "prior-campaign contamination ledger"],
+    "fallback_if_cluster_quota_is_unmet": "blocked; owner/source/template lineage reuse cannot be counted as an independent task",
+    "multiple_agent_attempts_are_independent_units": false
+  },
+  "reviewer_roles": {
+    "acquisition_steward": "May read GitHub responses and provenance; may not author tasks, labels, or inspect treatment outputs.",
+    "eligibility_reviewers": "Independently decide inclusion and stratum from frozen public evidence; may not inspect Skill-arm outputs or selection ranks.",
+    "eligibility_adjudicator": "Resolves reviewer disagreements before randomness is revealed and signs the decision ledger.",
+    "public_task_author": "Receives only the frozen problem record and pre-change task tree; may not inspect the merged diff, private label, or treatment output.",
+    "private_label_author": "May inspect the public resolution and merged diff; may not inspect treatment outputs or modify the public task.",
+    "leakage_reviewer": "Compares public tasks against private evidence, treatment names, prior tasks, and forbidden strings before sealing.",
+    "analysis_steward": "Receives identities and terminal rows only after task, scorer, selection, and holdout locks are immutable.",
+    "role_overlap_policy": "Acquisition and analysis administration may overlap; task author, label author, and leakage reviewer must be distinct for a task, and no reviewer may evaluate their own artifact."
+  },
+  "external_randomness": {
+    "provider": "NIST Randomness Beacon 2.0",
+    "endpoint": "https://beacon.nist.gov/beacon/2.0/pulse/time/{unix_time_ms}",
+    "pulse_rule": "Use the first signed pulse at least 24 hours after the public GitHub population-freeze commit timestamp.",
+    "population_freeze_before_pulse": true,
+    "operator_chosen_seed_allowed": false,
+    "required_receipt": ["public population-freeze Git commit URL and SHA", "population digest", "pulse time", "signed pulse JSON digest", "signature and certificate verification receipt", "derivation code commit and tree"],
+    "master_seed_derivation": "SHA256(UTF8(protocol_id + newline + lowercase_population_sha256 + newline + lowercase_pulse_output_hex + newline)); the lowercase 64-hex digest is the master_seed_hex.",
+    "domain_seed_derivation": "For each literal label in domain_separated_seeds, domain_seed_hex = SHA256(UTF8(master_seed_hex + newline + label + newline)). No NUL bytes, length prefixes, Unicode normalization, or operator-provided salt are permitted.",
+    "domain_separated_seeds": ["record-choice-v2", "independence-cluster-choice-v2", "partition-selection-v2", "arm-order-v2"],
+    "selection_score_encoding": {
+      "record": "SHA256(UTF8(record-choice-v2 domain_seed_hex + newline + record_node_id + newline))",
+      "repository_record_pair": "SHA256(UTF8(independence-cluster-choice-v2 domain_seed_hex + newline + independence_cluster_id + newline + repository_node_id + newline + record_node_id + newline))",
+      "partition": "SHA256(UTF8(partition-selection-v2 domain_seed_hex + newline + independence_cluster_id + newline + selected_record_node_id + newline))",
+      "arm_order": "SHA256(UTF8(arm-order-v2 domain_seed_hex + newline + stable_attempt_id + newline + arm_id + newline))",
+      "ordering": "ascending lowercase hexadecimal digest with the final stable identifier as the deterministic collision tie-break",
+      "claim": "These byte formulas prospectively amend ambiguous prose elsewhere in this V2 protocol and are authoritative before any population or beacon is frozen."
+    },
+    "missing_or_invalid_pulse_policy": "fail closed; do not substitute local randomness or a later operator-selected pulse"
+  },
+  "selection": {
+    "record_choice": "Within each immutable repository node ID and final stratum, select the eligible record with the smallest SHA256(record-choice seed || newline || record node ID || newline).",
+    "cluster_choice": "Within each owner/source/template independence cluster and final stratum, select the repository-record pair with the smallest domain-separated cluster score.",
+    "partition_order": "Within each stratum, sort surviving independent clusters by SHA256(partition-selection seed || newline || cluster ID || newline || record node ID || newline).",
+    "quotas": {
+      "development": {"security_privacy":8,"identity_migration":8,"lifecycle_recovery":8,"integration_runtime":8,"total":32},
+      "target_holdout": {"security_privacy":48,"identity_migration":48,"lifecycle_recovery":48,"integration_runtime":48,"total":192},
+      "safety_control": {"docs_only":16,"unsafe_request":16,"no_change_required":16,"single_surface":16,"total":64}
+    },
+    "allocation": "For each target stratum, ranks 1-8 are development and 9-56 are sealed holdout. For each safety-control stratum, ranks 1-16 are sealed controls.",
+    "replacement": "No post-output replacement. A pre-execution immutable-source failure invalidates the frame version rather than advancing to an unregistered alternate.",
+    "selection_receipt": "Publish every eligible cluster score and rank, not only the selected rows."
+  },
+  "population_weighting": {
+    "primary_estimand": "design-weighted mean paired candidate-minus-baseline effect across the eligible query-defined target population",
+    "stratum_population_count": "N_h is the frozen number of eligible independent clusters after deterministic record and cluster choice in target stratum h",
+    "holdout_sample_count": "n_h equals 48 for each target stratum",
+    "inclusion_probability": "pi_h = n_h / N_h",
+    "analysis_weight": "w_h = N_h / n_h, normalized across the 192 target holdouts",
+    "development_weight": "none; development rows are excluded from confirmatory estimates",
+    "safety_control_weight": "none; safety controls are reported as separate gates",
+    "required_fields_per_selected_task": ["N_h", "n_h", "inclusion_probability", "analysis_weight", "selection_rank", "independence_cluster_id"],
+    "equal_stratum_sensitivity": "Report an unweighted equal-stratum estimate only as a preregistered sensitivity analysis.",
+    "missing_weight_policy": "A missing, nonfinite, or recomputed-disagreeing weight invalidates confirmatory analysis."
+  },
+  "task_authoring_and_leakage": {
+    "all_288_tasks_frozen_before_first_agent_output": true,
+    "public_and_private_authors_separated": true,
+    "public_task_inputs": ["sanitized problem statement", "immutable read-only pre-change archive", "public task ID and stratum"],
+    "host_only_inputs": ["merged diff", "expected paths and symbols", "reference constraints", "review labels", "private scorer inputs"],
+    "automated_checks": ["prior-task identity and digest collision", "forbidden treatment and PR identifiers", "unexpected path and symbol overlap", "credential and private-value scan", "archive-versus-base-tree equality"],
+    "manual_check": "A leakage reviewer signs every task after seeing both views and before private labels are sealed mode 0600.",
+    "leak_or_contamination_policy": "Invalidate the frame before execution; never rewrite an exposed holdout in place."
+  },
+  "raw_public_data_privacy": {
+    "source_bytes_are_immutable": true,
+    "storage": "Acquisition directories are mode 0700 and raw response, candidate, and receipt files are mode 0600; symbolic-link targets are rejected.",
+    "scan_boundary": "A pinned credential-pattern scanner records only pattern IDs, affected immutable record IDs, response digests, and JSON paths. Matched values are never copied into a receipt, review ledger, task, trace, or report.",
+    "affected_record_policy": "A token-shaped or private-value finding blocks the record from task authoring and export until a separately digested reviewer decision excludes it or a sanitized derivative is created without modifying the immutable raw source.",
+    "zero_finding_is_not_safety_proof": true
+  },
+  "preparation": {
+    "trusted_boundary": "All GitHub reads, review ledgers, source archiving, license resolution, task authoring, task-image construction, and digest generation occur in setup --prepare before preview.",
+    "trial_prohibitions": ["clone", "fetch", "install", "download", "build", "network", "Docker socket", "mutable reference resolution", "private-label access"],
+    "task_runtime": "One digest-verified read-only pre-change archive and one public task; no merged diff or GitHub metadata endpoint is available.",
+    "required_receipts": ["query completeness", "eligibility and adjudication", "external randomness", "selection and weights", "immutable GitHub lineage", "base-tree archive", "license", "source safety", "public task", "private label", "leakage review"]
+  },
+  "sealing": {
+    "development": "A separate exact development Study preview may open only the 32 development tasks after all 288 tasks are frozen.",
+    "holdout": "The 192 target holdouts and 64 safety controls remain inaccessible until development analysis is frozen and a separate exact holdout preview is approved.",
+    "outcome_dependent_task_scorer_or_weight_change": false,
+    "interim_efficacy_stopping": false,
+    "administrative_stop_only": ["integrity", "privacy", "routing", "cleanup", "budget", "immutable-source failure"]
+  },
+  "analysis": {
+    "primary_unit": "independent owner/source/template cluster task mean over valid repeated attempts",
+    "primary_model": "design-weighted paired candidate-minus-baseline estimator with cluster-respecting uncertainty",
+    "power": "Recompute prospectively from the complete frozen frame, observed N_h, planned attempts, conservative discordance assumptions, and any remaining higher-order cluster design effect before holdout preview.",
+    "multiplicity": "Holm across the three repository-level campaign hypotheses; dimension-level families remain secondary within repository.",
+    "safety": "Critical failures and safety controls are zero-tolerance gates, not positive outcome points.",
+    "judge": "A same-model-family judge remains advisory until independently reviewed calibration and validation pass; deterministic and human-reviewed outcomes remain separate.",
+    "trace_audit": "Inspect every discordant task, every critical failure, and a preregistered stratified sample of concordant tasks with exact Agent, Skill-use, scorer, cost, and cleanup evidence.",
+    "null_result": "A valid null, mixed, or regressed result is publishable and must not trigger task replacement or scorer tuning."
+  },
+  "readiness": {
+    "protocol_only": true,
+    "population_records_present": 0,
+    "required_selected_tasks": 288,
+    "development_or_holdout_spec_generated": false,
+    "preview_or_approval_generated": false,
+    "required_next_artifacts": ["V2 population-record schema", "V2 frame schema", "trusted collector", "review ledger schema", "external-randomness verifier", "selection implementation", "completed frame validator"],
+    "execution_gate": "No comparison spec, source lock, task image, preview, approval, or paid cell may be generated until a completed V2 bundle validates and a prospective power receipt passes."
+  },
+  "claim_boundary": "This V2 artifact is a prospective protocol, not evidence. It authorizes no GitHub acquisition, task authoring, model call, spend, behavioral claim, conference claim, or community-wide conclusion.",
+  "not_generated": [
+    "population snapshot",
+    "eligibility or reviewer ledger",
+    "external randomness receipt",
+    "selection or weighting receipt",
+    "public tasks or private labels",
+    "development or holdout comparison specs",
+    "source locks, task images, previews, approvals, results, or reports"
+  ]
+}

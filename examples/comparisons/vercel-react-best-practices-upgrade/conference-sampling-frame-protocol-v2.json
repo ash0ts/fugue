@@ -1,0 +1,529 @@
+{
+  "schema_version": 2,
+  "protocol_id": "vercel-react-best-practices-conference-sampling-frame-protocol-v2",
+  "status": "prospective_not_yet_sampled",
+  "artifact_digest": "5005f93222ee84569b2b47fdca90ea6bb37650de7c8af8ee278ce8d10e470027",
+  "predecessor": {
+    "path": "examples/comparisons/vercel-react-best-practices-upgrade/conference-sampling-frame-protocol-v1.json",
+    "relationship": "superseded_for_new_population_acquisition_only",
+    "v1_artifact_remains_immutable": true
+  },
+  "query_plan": {
+    "path": "examples/comparisons/vercel-react-best-practices-upgrade/conference-query-plan-v2.json",
+    "artifact_digest": "7a653385ebbd50a7fff15ce0bb806e1424ce04042ef609a2a8cd3c0185f44844"
+  },
+  "treatment": {
+    "repository": "https://github.com/vercel-labs/agent-skills",
+    "path": "skills/react-best-practices",
+    "baseline_commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "baseline_committed_at_utc": "2026-01-18T01:42:22Z",
+    "baseline_bundle_sha256": "042dce52998aa6288b4b5eac3fae325113559a666d959a10dd164a981b8ab797",
+    "candidate_commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+    "candidate_committed_at_utc": "2026-01-20T13:43:49Z",
+    "candidate_bundle_sha256": "c9a31361925582718024d9ed69078e4dc3a41293f18642436a05a396d91134de",
+    "changed_rule_families": [
+      "server_action_authorization",
+      "rsc_serialization"
+    ],
+    "unchanged_control_families": [
+      "dom_batching",
+      "large_array_iteration",
+      "hook_timing",
+      "event_handler_reference"
+    ]
+  },
+  "estimand": {
+    "unit": "one treatment-blind repair task from one independent public code-lineage cluster",
+    "cluster": "public_code_lineage",
+    "treatment_contrast": "candidate Skill bundle minus baseline Skill bundle under the same task, harness, model route, runtime, limits, and attempt coordinate",
+    "target_population": "test-qualified public TypeScript Next.js merged repairs discoverable by the frozen V2 atomic query plan and merged from 2023-01-01 through 2026-01-17",
+    "primary_families": [
+      "server_action_authorization",
+      "rsc_serialization"
+    ],
+    "safety_control_families": [
+      "dom_batching",
+      "large_array_iteration",
+      "hook_timing",
+      "event_handler_reference"
+    ],
+    "attempt_role": "four attempts estimate repeatability within a task and never increase the independent task or lineage count",
+    "claim_boundary": "Family-specific causal evidence for supplying the locked Skill revision within this query-discoverable, test-qualified frame; no prevalence estimate or universal React, Next.js, GitHub, or agent claim."
+  },
+  "authorization_gate": {
+    "execution_authorized": false,
+    "spend_authorized": false,
+    "required_ready_status": "ready_after_population_feasibility_power_and_qualification",
+    "prohibited_before_ready": [
+      "development or holdout comparison specs",
+      "task archives or source locks",
+      "preview or approval digests",
+      "Agent, judge, or paid model calls",
+      "population, community, or conference efficacy claims"
+    ],
+    "material_change_policy": "Any query, cutoff, family, eligibility rule, lineage rule, quota, endpoint, power assumption, treatment identity, task-authoring rule, or qualification rule requires a new protocol version before treatment outputs are observed.",
+    "authenticated_selection_boundary": {
+      "status": "blocked_trust_roots_not_registered",
+      "algorithm": "ed25519-detached-signature-v1",
+      "source_verifier_public_key_sha256": null,
+      "beacon_verifier_public_key_sha256": null,
+      "review_governance_public_key_sha256": null,
+      "power_verifier_public_key_sha256": null,
+      "required_artifacts": [
+        "acquisition candidates",
+        "repository receipts",
+        "pull-request receipts",
+        "source receipts",
+        "stack receipts",
+        "lineage ledger",
+        "balanced calibration ledger",
+        "reviewer detached signatures",
+        "source-verifier detached signature",
+        "source-authenticated public precommit publication",
+        "raw beacon response",
+        "beacon-verifier detached signature",
+        "prospective power receipt"
+      ],
+      "failure_policy": "Until independently controlled Ed25519 public-key trust roots are registered through a reviewed prospective amendment, selection emits only a typed blocked receipt with no seed, assignment, replacement, preview, or experiment authorization."
+    }
+  },
+  "population_eligibility": {
+    "repository_required": [
+      "The canonical GitHub repository and its API object are public, non-archived, non-disabled, non-fork, and not a mirror at the acquisition cutoff.",
+      "An OSI-identifiable license file exists in the frozen base tree and its path, bytes, SPDX decision, and reviewer receipt are immutable.",
+      "The exact pull-request base, head, merge commit, base tree, and gold tree are reachable through authoritative GitHub endpoints.",
+      "The task target is TypeScript or TSX inside a package boundary whose frozen package.json and supported dependency lock prove both React and Next.js declarations and resolved versions.",
+      "The base archive contains no submodule, unsafe path, symbolic or hard link, vendored dependency tree, generated build output, credential-bearing file, or trial-time network/install requirement."
+    ],
+    "pull_request_required": [
+      "The record is a merged GitHub pull request returned by at least one frozen atomic-query shard and merged no later than 2026-01-17T23:59:59Z.",
+      "The base tree predates the repair and becomes the Agent task source; the verified merge tree is the frozen natural gold tree.",
+      "The public title, body, linked issue, changed-file list, patch, diff, reviews, base/head/merge identities, and API responses have immutable digests.",
+      "The maintenance behavior belongs to exactly one preregistered family after independent treatment-blind review.",
+      "The PR does not reference either locked Skill revision, Fugue, this Study, or a task generated from this evaluation campaign."
+    ],
+    "task_required": [
+      "A task author who cannot see either Skill bundle or the gold diff can derive a bounded public maintenance request from the frozen public record and base source.",
+      "A public executable regression test and an independently authored host-only verifier can be frozen without encoding the exact gold patch.",
+      "The unmodified public test and host verifier both fail on the base tree and pass on the natural gold tree in the pinned verifier runtime.",
+      "No task, public test, Agent archive, prompt, snapshot, trace, or result exposes the gold tree, host verifier, private expected values, selection score, or sealed partition."
+    ],
+    "exclusion_reason_codes": [
+      "not_public",
+      "archived_disabled_fork_or_mirror",
+      "missing_or_unreviewable_license",
+      "outside_treatment_preperiod",
+      "not_a_merged_pull_request",
+      "unreachable_base_head_merge_or_tree",
+      "not_typescript_nextjs_react",
+      "missing_supported_dependency_lock",
+      "unsafe_or_nonhermetic_source",
+      "skill_or_campaign_contamination",
+      "no_exact_family_consensus",
+      "duplicate_public_record",
+      "duplicate_code_lineage",
+      "public_test_not_authorable_blind",
+      "host_verifier_not_authorable_independently",
+      "base_did_not_fail",
+      "gold_did_not_pass",
+      "qualification_runtime_or_receipt_invalid"
+    ]
+  },
+  "immutable_evidence_contract": {
+    "candidate_discovery_acquisition_required_fields": [
+      "lane_id",
+      "credential_profile_id",
+      "credential_env_name",
+      "credential_present_without_value",
+      "collector_source_commit",
+      "collector_source_tree",
+      "collector_sha256",
+      "compiler_sha256",
+      "requested_url",
+      "final_url",
+      "redirect_chain",
+      "request_started_at_utc",
+      "request_completed_at_utc",
+      "github_api_version",
+      "response_date",
+      "x_github_request_id",
+      "x_ratelimit_limit",
+      "x_ratelimit_remaining",
+      "x_ratelimit_reset",
+      "x_ratelimit_resource",
+      "x_ratelimit_used",
+      "request_url_sha256",
+      "headers_sha256",
+      "body_sha256",
+      "repository_public_visibility_receipt_sha256",
+      "terminal_shard_manifest_sha256",
+      "ordered_identity_sha256",
+      "candidate_identity_sha256",
+      "checkpoint_sha256"
+    ],
+    "repository_receipt_required_fields": [
+      "canonical_repository_url",
+      "repository_node_id",
+      "owner_node_id",
+      "owner_login",
+      "visibility",
+      "private",
+      "fork",
+      "fork_network_root",
+      "template_repository",
+      "mirror_url",
+      "archived",
+      "disabled",
+      "default_branch",
+      "api_response_sha256",
+      "etag",
+      "fetched_at_utc"
+    ],
+    "pull_request_receipt_required_fields": [
+      "pull_request_url",
+      "pull_request_node_id",
+      "pull_request_number",
+      "merged_at_utc",
+      "base_repository_node_id",
+      "base_commit_sha",
+      "base_tree_sha",
+      "head_repository_node_id",
+      "head_commit_sha",
+      "head_tree_sha",
+      "merge_commit_sha",
+      "gold_tree_sha",
+      "api_response_sha256",
+      "diff_sha256",
+      "patch_sha256",
+      "changed_files_manifest_sha256",
+      "review_manifest_sha256",
+      "linked_issue_manifest_sha256"
+    ],
+    "source_receipt_required_fields": [
+      "base_archive_sha256",
+      "gold_archive_sha256",
+      "base_tree_listing_sha256",
+      "gold_tree_listing_sha256",
+      "archive_file_manifest_sha256",
+      "submodule_check",
+      "unsafe_link_check",
+      "path_traversal_check",
+      "secret_path_check",
+      "generated_dependency_tree_check",
+      "source_size_bytes"
+    ],
+    "stack_receipt_required_fields": [
+      "package_boundary_path",
+      "package_manifest_path",
+      "package_manifest_sha256",
+      "dependency_lock_path",
+      "dependency_lock_sha256",
+      "lock_format",
+      "react_declared_requirement",
+      "react_resolved_version",
+      "next_declared_requirement",
+      "next_resolved_version",
+      "typescript_target_paths",
+      "target_file_manifest_sha256",
+      "parser_runtime_sha256"
+    ],
+    "receipt_rules": [
+      "Every receipt uses exact keys, schema version, canonical serialization, and a self-verifying SHA-256 digest.",
+      "Remote verification records authoritative request URLs, API version, response headers, response bytes, and object identities rather than self-attested booleans.",
+      "Every search query includes exactly one public-only qualifier, and every returned repository is independently resolved as visibility=public and private=false before any search response body or candidate content is persisted.",
+      "The two acquisitions are separated by at least 3600 seconds of GitHub server time; an immediate replay is diagnostic only and cannot establish frame stability.",
+      "Finalization independently recomputes page sizes, item totals, unique ordered identities, per-shard identity digests, and exact cross-acquisition shard equality from private raw responses.",
+      "The package and lock parsers must derive dependency facts from frozen bytes; manually copied version strings are invalid.",
+      "The archive verifier must enumerate and compare every archive member with the tree and file manifests before any task image is built."
+    ]
+  },
+  "lineage_deduplication": {
+    "primary_cluster": "public_code_lineage",
+    "one_selected_task_per_lineage_across_all_partitions": true,
+    "canonical_repository_url_alone_is_sufficient": false,
+    "collapse_conditions": [
+      "the repositories share a GitHub fork-network root",
+      "one repository declares the other or a common repository as its template source",
+      "the selected base trees share at least 0.80 of non-vendor Git objects",
+      "normalized TypeScript and TSX five-token-shingle MinHash Jaccard similarity is at least 0.85 after generated files, locks, fixtures, and framework boilerplate are excluded",
+      "the normalized pull-request patch digest is identical",
+      "a reviewed provenance receipt identifies a mirror, benchmark copy, generated clone, or repository rename"
+    ],
+    "lineage_cluster_id": "SHA256 of the sorted canonical fork root, template root, qualifying source-fingerprint roots, patch roots, and reviewed mirror roots",
+    "owner_controls": {
+      "maximum_selected_lineages_per_owner": 4,
+      "maximum_target_holdout_lineages_per_owner": 2,
+      "required_sensitivity_analysis": "owner-clustered interval plus leave-one-owner-out estimates"
+    },
+    "duplicate_policy": "Keep the lowest frozen record score within a lineage-family pair and preserve every excluded duplicate with its evidence and reason code."
+  },
+  "two_reviewer_classification": {
+    "reviewers": 2,
+    "independence": "Reviewers classify separately before seeing the other decision.",
+    "masked_from_reviewers": [
+      "baseline and candidate Skill contents",
+      "treatment arm labels",
+      "selection seed and score",
+      "development or holdout partition",
+      "Agent, judge, or treatment outputs"
+    ],
+    "review_view": [
+      "immutable public pull-request record",
+      "base source and public project documentation",
+      "gold diff only for family and natural-repair classification",
+      "repository, stack, license, and lineage receipts"
+    ],
+    "required_decision_fields": [
+      "reviewer_id_hash",
+      "record_digest",
+      "include_or_exclude",
+      "exactly_one_family_or_none",
+      "reason_codes",
+      "natural_repair_confirmed",
+      "task_authorable_without_gold",
+      "decision_timestamp_utc",
+      "decision_digest"
+    ],
+    "calibration": {
+      "minimum_records": 48,
+      "coverage": "at least eight reviewed examples per behavior family, balanced across acceptable and unacceptable records",
+      "minimum_cohens_kappa": 0.8,
+      "critical_false_inclusions_allowed": 0
+    },
+    "adjudication": "Every disagreement is resolved by a third treatment-blind adjudicator before the eligibility ledger is frozen; the original decisions remain immutable.",
+    "role_separation": "A reviewer or adjudicator may not author the public test or host verifier for a record they classified."
+  },
+  "task_authoring_and_qualification": {
+    "task_author_view": [
+      "sanitized public maintenance record",
+      "frozen base source",
+      "public project documentation"
+    ],
+    "task_author_forbidden_view": [
+      "baseline or candidate Skill bundle",
+      "gold diff or gold tree",
+      "host verifier",
+      "selection score or sealed partition"
+    ],
+    "public_test_author": "independent from record classification and blinded to Skill bundles and gold diff",
+    "host_verifier_author": "independent from record classification and public-test author, blinded to Skill bundles and gold diff",
+    "freeze_before_replay": [
+      "public task digest",
+      "public executable test digest",
+      "host-only verifier digest",
+      "private evaluation label digest",
+      "Node verifier runtime image digest",
+      "command profile and limits"
+    ],
+    "runtime_profile": {
+      "id": "node22-verifier-v2",
+      "network": "none",
+      "root_filesystem": "read_only",
+      "required_image_identity": "sha256 registry digest plus SBOM and vulnerability-scan receipt",
+      "public_test_command_profile": "prepared-node-public-test-v2",
+      "host_verifier_command_profile": "prepared-node-host-verifier-v2"
+    },
+    "execution_receipt_required_fields": [
+      "task_id",
+      "tree_role",
+      "tree_sha",
+      "archive_sha256",
+      "test_or_verifier_sha256",
+      "runtime_image_digest",
+      "command_profile_id",
+      "argv_digest",
+      "started_at_utc",
+      "finished_at_utc",
+      "exit_code",
+      "stdout_sha256",
+      "stderr_sha256",
+      "structured_outcome",
+      "cleanup_receipt_sha256"
+    ],
+    "qualification_conjunction": [
+      "base public test has a verified task-relevant failure",
+      "gold public test passes",
+      "base host verifier has a verified task-relevant failure",
+      "gold host verifier passes",
+      "all four receipts use the exact same frozen test, verifier, runtime, and command profiles",
+      "no source, test, verifier, label, or runtime drift occurred"
+    ],
+    "failed_qualification_policy": "Retain the immutable failure and stop. No replacement is executable until a reviewed prospective amendment freezes a complete residual augmentation for every allowed failure set under the quotas and owner caps. Never edit a frozen test or verifier to make the natural gold tree pass."
+  },
+  "raw_public_data_privacy": {
+    "source_bytes_are_immutable": true,
+    "storage": "Acquisition directories are mode 0700 and raw response, candidate, and receipt files are mode 0600; symbolic-link targets are rejected.",
+    "scan_boundary": "A pinned credential-pattern scanner records only pattern IDs, affected immutable record IDs, response digests, and JSON paths. Matched values are never copied into a receipt, review ledger, task, trace, or report.",
+    "affected_record_policy": "A token-shaped or private-value finding blocks the record from task authoring and export until a separately digested reviewer decision excludes it or a sanitized derivative is created without modifying the immutable raw source.",
+    "zero_finding_is_not_safety_proof": true
+  },
+  "external_randomness": {
+    "requested_only_after": [
+      "query pages and receipts are complete",
+      "candidate union and exclusion ledger are frozen",
+      "lineage clusters and reviewer adjudications are frozen",
+      "population, eligibility-ledger, query-plan, and selection-code digests are publicly timestamped"
+    ],
+    "allowed_sources": [
+      "NIST Randomness Beacon 2.0 signed pulse",
+      "drand mainnet verified round"
+    ],
+    "receipt_required_fields": [
+      "provider",
+      "canonical_endpoint",
+      "pulse_or_round",
+      "published_at_utc",
+      "random_value",
+      "signature",
+      "verification_material_sha256",
+      "response_sha256",
+      "retrieved_at_utc"
+    ],
+    "seed_derivation": "SHA256(random_value + newline + population_digest + newline + eligibility_ledger_digest + newline + query_plan_digest + newline + selection_code_digest + newline)",
+    "failure_policy": "If the pulse, round, signature, timestamp ordering, or derivation cannot be independently verified, stop without selecting tasks."
+  },
+  "deterministic_selection": {
+    "slot_order": [
+      "development/server_action_authorization/001..016",
+      "development/rsc_serialization/001..016",
+      "target_holdout/server_action_authorization/001..096",
+      "target_holdout/rsc_serialization/001..096",
+      "safety_control/dom_batching/001..016",
+      "safety_control/large_array_iteration/001..016",
+      "safety_control/hook_timing/001..016",
+      "safety_control/event_handler_reference/001..016"
+    ],
+    "record_score": "SHA256(seed + newline + lineage_cluster_id + newline + family + newline + canonical_pull_request_url + newline)",
+    "allocation": "Construct the complete eligible lineage-to-slot bipartite graph and compute the deterministic maximum-cardinality minimum-cost matching over record scores; resolve exact ties by canonical pull-request URL then slot ID.",
+    "global_constraints": [
+      "one selected task per public code-lineage cluster across all partitions",
+      "one public pull request per selected task",
+      "exact family and partition quotas",
+      "owner caps",
+      "development and holdout identities remain disjoint"
+    ],
+    "replacement_policy": "The V2 selector emits a non-executable replacement receipt. A direct per-slot substitute is not proof that the full residual assignment remains feasible; replacement requires a separately reviewed complete residual-augmentation artifact before randomness.",
+    "selection_receipt_required_fields": [
+      "seed_receipt_sha256",
+      "population_digest",
+      "eligibility_ledger_digest",
+      "lineage_ledger_digest",
+      "selection_code_sha256",
+      "slot_manifest_sha256",
+      "selected_assignment_sha256",
+      "replacement_receipt_sha256",
+      "constraint_check_sha256",
+      "solver_runtime_sha256"
+    ],
+    "manual_substitution": "forbidden"
+  },
+  "quotas_and_feasibility_stop": {
+    "selected_quotas": {
+      "development": {
+        "server_action_authorization": 16,
+        "rsc_serialization": 16,
+        "total": 32
+      },
+      "target_holdout": {
+        "server_action_authorization": 96,
+        "rsc_serialization": 96,
+        "total": 192
+      },
+      "safety_control": {
+        "dom_batching": 16,
+        "large_array_iteration": 16,
+        "hook_timing": 16,
+        "event_handler_reference": 16,
+        "total": 64
+      },
+      "grand_total": 288
+    },
+    "minimum_eligible_lineages_before_randomness": {
+      "server_action_authorization": 140,
+      "rsc_serialization": 140,
+      "dom_batching": 20,
+      "large_array_iteration": 20,
+      "hook_timing": 20,
+      "event_handler_reference": 20,
+      "unique_lineage_grand_total": 360
+    },
+    "reserve_rationale": "At least 25 percent more independently eligible lineages than selected slots are required as a feasibility buffer. The buffer does not authorize replacement or hand-picking without a complete frozen residual-augmentation artifact.",
+    "stop_rule": "If any family, the global unique-lineage total, or the owner constraints cannot satisfy its minimum before external randomness, publish only a feasibility report and generate no task, spec, preview, approval, or efficacy claim.",
+    "amendment_rule": "A smaller frame or broader population requires a newly reviewed protocol, estimand, query plan, and power analysis before any treatment output is observed."
+  },
+  "prospective_power_stop": {
+    "independent_unit": "target-holdout public code-lineage task",
+    "primary_task_success": "at least three of four attempts pass every critical deterministic outcome and safety dimension",
+    "tests": "two family-specific exact paired tests with Holm family-wise alpha 0.05",
+    "minimum_power": 0.9,
+    "minimum_supported_absolute_improvement": 0.15,
+    "simulation_repetitions": 100000,
+    "discordance_grid": {
+      "candidate_only_success_probability": [
+        0.2,
+        0.25,
+        0.3,
+        0.35
+      ],
+      "baseline_only_success_probability": [
+        0.02,
+        0.05,
+        0.1,
+        0.15
+      ],
+      "included_scenarios": "all valid probability pairs with candidate-only minus baseline-only at least 0.15"
+    },
+    "safety_control_noninferiority": {
+      "margin": -0.05,
+      "familywise_alpha": 0.05,
+      "minimum_power": 0.9,
+      "critical_regressions_allowed": 0
+    },
+    "required_receipt_fields": [
+      "analysis_code_sha256",
+      "runtime_sha256",
+      "simulation_seed",
+      "simulation_repetitions",
+      "assumption_grid",
+      "family_sample_sizes",
+      "scenario_power_results",
+      "minimum_observed_power_micros",
+      "supported_effect_boundary_micros",
+      "safety_control_power_results",
+      "authentication",
+      "receipt_sha256"
+    ],
+    "stop_rule": "No development or holdout spec may be generated unless every primary and safety-control power gate passes. If 96 target tasks per primary family is insufficient for the frozen assumptions, increase quotas through a new protocol version or stop; do not weaken assumptions after observing outputs."
+  },
+  "analysis_and_trace_audit": {
+    "primary_analysis": "Family-stratified paired task estimates over the 192 target holdouts only; attempts remain within-task repeatability observations.",
+    "multiplicity": "Holm correction across the two changed-rule primary families; safety controls are a separate conjunction of non-inferiority and zero-critical-regression gates.",
+    "population_weighting": "Equal family quotas support family-specific estimates only. Any aggregate requires frozen inclusion probabilities and design weights and must not be described as natural prevalence.",
+    "sensitivity": [
+      "owner-clustered intervals",
+      "leave-one-owner-out estimates",
+      "leave-one-lineage-source-channel-out estimates",
+      "result excluding every source that failed post-selection qualification",
+      "result under all preregistered task-success thresholds"
+    ],
+    "manual_trace_review": [
+      "100 percent of primary-family discordant baseline/candidate task pairs",
+      "100 percent of critical failures and deterministic/judge disagreements",
+      "100 percent of lineage, routing, privacy, duplicate, and cleanup anomalies",
+      "a selection-seed-derived 10 percent sample of concordant successes and concordant failures within every family"
+    ],
+    "trace_reviewers": 2,
+    "trace_review_required_fields": [
+      "stable attempt identity",
+      "source, task, Skill, model, runtime, and scorer locks",
+      "submitted patch and verification receipts",
+      "Skill registration, opening, and relevant-rule use",
+      "native Agent root and Evaluation linkage",
+      "tokens, latency, cost, tool calls, and terminal status",
+      "privacy, label, credential, and cross-project checks",
+      "reviewer decision, rationale, and adjudication"
+    ],
+    "judge_policy": "Qualitative judge evidence remains separate and advisory unless an independent reviewed calibration meets its own preregistered gate.",
+    "release_condition": "A scientific report must expose the complete flow diagram, exclusions, lineage clusters, query coverage, task validity, missingness, effect estimates, uncertainty, multiplicity, power, trace audit, limitations, and immutable evidence references."
+  }
+}
