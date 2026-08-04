@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import inspect
 import json
 import runpy
 import shutil
@@ -120,6 +121,11 @@ def test_v2_mechanism_scorer_requires_the_task_relevant_rule(
     tag: str, rule: str
 ) -> None:
     score = _mechanism_scorer_v2()
+    assert tuple(inspect.signature(score).parameters) == (
+        "task",
+        "output",
+        "evidence",
+    )
     task = {"id": f"task-{tag}", "tags": [tag]}
 
     missing = score(task, {}, {"opened_paths": [], "tool_calls": []})

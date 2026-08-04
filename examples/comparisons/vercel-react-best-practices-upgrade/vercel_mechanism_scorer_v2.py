@@ -40,7 +40,8 @@ def _required_rule(task):
     return matches[0] if len(matches) == 1 else None
 
 
-def score(task, _output, evidence):
+def score(task, output, evidence):
+    del output
     opened_paths = _opened_paths(evidence)
     required = _required_rule(task)
     skill_opened = any(
