@@ -6,8 +6,8 @@
   "source_descriptive_head": "44a5a84a78944ef77290316b662a3da7a0d7da8e",
   "source_descriptive_tree": "4e1c91dbaa8894380296e41bb9bf4745b42f2d3d",
   "source_spec": {
-    "path": "../anthropic-skill-creator-upgrade/comparison-v2.yaml",
-    "sha256": "fbdfd97d7e4b8b6978a790eb13de125b8a413c1df2ff6ff3af2a0014680f7dc9"
+    "path": "../anthropic-skill-creator-upgrade/confirmatory-v2.yaml",
+    "sha256": "25c53648f6ba640fc7257e661b9bdacae480a5113c11b511a195f868ac2b4f1e"
   },
   "source_prepared_preview": {
     "bytes_sha256": "0c9f67d2c7f63cb6c82670183ab08a158412c64805d8b7b7d599c932dc9707ef",

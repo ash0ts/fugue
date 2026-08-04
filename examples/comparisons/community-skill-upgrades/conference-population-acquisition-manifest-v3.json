@@ -44,7 +44,7 @@
         "preview_digest": "fee496ac0b4ebf787a39e4f64bd758ffd67a15a91af8bddce049e8aa11c8d0a2",
         "preview_projection": {
           "path": "descriptive-preview-anthropic-v2.json",
-          "sha256": "d8ee35d66c79e54e47c03f31ad4f1507e7ac053f83ee0ab5a8ca6f1a823d4ee1"
+          "sha256": "b9bd224959e8ce0d702f6c2b0a87ee9338836748cf5c4b642372628853dd5e27"
         },
         "planned_cells": 192,
         "maximum_usd": 1640,
@@ -57,7 +57,7 @@
         "preview_digest": "21c065bb4b122b68eec4f0d3346eba33a8214807c1abd2bf4cc27244c735dfcc",
         "preview_projection": {
           "path": "descriptive-preview-vercel-v2.json",
-          "sha256": "2e50235c6e8f2682c2e1623a41f6ff328bff797caa6dd4f733604acfcad0e9d7"
+          "sha256": "5f491230490ca2ceb1d31a61556b8171b9f4d9eb19720df52d9850e90c2c2d8d"
         },
         "planned_cells": 192,
         "maximum_usd": 1640,
