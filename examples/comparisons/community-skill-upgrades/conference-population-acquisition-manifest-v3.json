@@ -1,0 +1,264 @@
+{
+  "schema_version": 3,
+  "campaign_id": "community-skill-upgrade-public-population-v3",
+  "status": "collector_implementation_committed_live_acquisition_not_started_selection_blocked",
+  "claim_boundary": {
+    "candidate_acquisition_implementation_committed": true,
+    "candidate_acquisition_executed": false,
+    "population_frame_ready": false,
+    "authenticated_selection_ready": false,
+    "task_authoring_ready": false,
+    "population_experiment_preview_generated": false,
+    "population_experiment_execution_authorized": false,
+    "community_or_conference_claim_supported": false
+  },
+  "implementation_commit": {
+    "source_commit": "4b26d5608bac9a89f4fbdf956a722b707704f36a",
+    "source_tree": "bc32e2c024450d11a9faf7738995e9660a6c55e1",
+    "collector_sha256": "b2ed6105f3155c64ce4125412e39c6d1a69fc4894859402f6b1fbc18183b1ba7",
+    "compiler_sha256": "6b6c11ba7b721d7918a99746e85ae36792386ab1b8021fcaf7b01958b1cc013f",
+    "files_match_commit": true,
+    "lock_sha256": "a91ddd3167f462439d988b438a092ce44b4146e58b694b92eae2c094ab19d84a",
+    "metadata_commit_policy": "This manifest, its contract test, sanitized preview projections, and documentation may follow in one metadata-only commit. A collector, compiler, query-plan, or sampling-protocol change requires a new collector implementation lock and newly compiled plans. A selector change requires a new lane-specific selection implementation lock and invalidates every later selection receipt, task artifact, preview, and approval bound to the old lock."
+  },
+  "relationship_to_descriptive_campaign": {
+    "descriptive_campaign_branch": "codex/community-skill-upgrade-campaign",
+    "descriptive_campaign_head": "44a5a84a78944ef77290316b662a3da7a0d7da8e",
+    "descriptive_campaign_tree": "4e1c91dbaa8894380296e41bb9bf4745b42f2d3d",
+    "previews": [
+      {
+        "lane": "superpowers_writing_plans",
+        "preview_digest": "6a4b531b7aa96c4670924adc06fd3c88f9c5c433327fa5d56335390fa56f945e",
+        "preview_projection": {
+          "path": "descriptive-preview-superpowers-v6.json",
+          "sha256": "7ea5a760ad364a3a19d649796b13f38a66afe46ee07d213c8b4e0fe4d0a56aae"
+        },
+        "planned_cells": 192,
+        "maximum_usd": 1700,
+        "status": "unexecuted_authored_benchmark_preview",
+        "approval_state": "fresh_exact_approval_required",
+        "approval_receipt_sha256": null
+      },
+      {
+        "lane": "anthropic_skill_creator",
+        "preview_digest": "fee496ac0b4ebf787a39e4f64bd758ffd67a15a91af8bddce049e8aa11c8d0a2",
+        "preview_projection": {
+          "path": "descriptive-preview-anthropic-v2.json",
+          "sha256": "d8ee35d66c79e54e47c03f31ad4f1507e7ac053f83ee0ab5a8ca6f1a823d4ee1"
+        },
+        "planned_cells": 192,
+        "maximum_usd": 1640,
+        "status": "unexecuted_authored_benchmark_preview",
+        "approval_state": "fresh_exact_approval_required",
+        "approval_receipt_sha256": null
+      },
+      {
+        "lane": "vercel_react_best_practices",
+        "preview_digest": "21c065bb4b122b68eec4f0d3346eba33a8214807c1abd2bf4cc27244c735dfcc",
+        "preview_projection": {
+          "path": "descriptive-preview-vercel-v2.json",
+          "sha256": "2e50235c6e8f2682c2e1623a41f6ff328bff797caa6dd4f733604acfcad0e9d7"
+        },
+        "planned_cells": 192,
+        "maximum_usd": 1640,
+        "status": "unexecuted_authored_benchmark_preview",
+        "approval_state": "fresh_exact_approval_required",
+        "approval_receipt_sha256": null
+      }
+    ],
+    "total_planned_cells": 576,
+    "total_maximum_usd": 4980,
+    "executed_cells": 0,
+    "descriptive_previews_remain_immutable": true,
+    "population_work_changes_descriptive_preview_identity": false,
+    "fresh_preview_and_approval_required_for_population_execution": true,
+    "claim_separation": "The three descriptive previews cover authored benchmarks only and have not executed. Population-frame evidence requires separately acquired, reviewed, authenticated, selected, powered, task-qualified, previewed, and approved Studies; this population work does not retroactively authorize or mutate the descriptive previews."
+  },
+  "shared_implementation": {
+    "collector": {
+      "path": "github_population_v2.py",
+      "sha256": "b2ed6105f3155c64ce4125412e39c6d1a69fc4894859402f6b1fbc18183b1ba7",
+      "role": "bounded public GitHub acquisition with repeated-query, visibility, drift, privacy, and provenance receipts",
+      "status": "implementation_committed_no_live_v3_acquisition"
+    },
+    "compiler": {
+      "path": "compile_github_collector_plan_v2.py",
+      "sha256": "6b6c11ba7b721d7918a99746e85ae36792386ab1b8021fcaf7b01958b1cc013f",
+      "role": "strict query-and-protocol compiler bound to the implementation commit",
+      "status": "implementation_committed_three_plans_compiled_offline"
+    },
+    "generic_selector": {
+      "path": "select_population_v2.py",
+      "sha256": "dbc7af1e517e56b4d5f1de503412c5d779e3b68efc1e145fc7c3244a3471d890",
+      "role": "Superpowers and Anthropic structural validation with fail-closed authenticated selection boundary",
+      "status": "blocked",
+      "blocker_code": "authenticated_verification_boundary_unavailable",
+      "selected_count": 0
+    },
+    "vercel_selector": {
+      "path": "select_vercel_population_v2.py",
+      "sha256": "b43944b363c0839485d43515eb205a692cb1ecb4e438fb93ef4e3a83441eb700",
+      "role": "Vercel authenticated source, review, beacon, power, allocation, and replacement validation",
+      "status": "blocked_authenticated_evidence_required",
+      "blocker_code": "protocol_trust_roots_not_registered",
+      "required_registered_ed25519_trust_roots": 4,
+      "assignment_emitted": false
+    },
+    "selection_implementation_locks": {
+      "generic": {
+        "lock": {
+          "schema_version": 1,
+          "lanes": [
+            "superpowers_writing_plans",
+            "anthropic_skill_creator"
+          ],
+          "selector_path": "select_population_v2.py",
+          "selector_sha256": "dbc7af1e517e56b4d5f1de503412c5d779e3b68efc1e145fc7c3244a3471d890"
+        },
+        "lock_sha256": "fb96288c3f2ffee982f10dfb58d8294656e1bc8b81b9ecb083e6d203c45c3318"
+      },
+      "vercel": {
+        "lock": {
+          "schema_version": 1,
+          "lanes": [
+            "vercel_react_best_practices"
+          ],
+          "selector_path": "select_vercel_population_v2.py",
+          "selector_sha256": "b43944b363c0839485d43515eb205a692cb1ecb4e438fb93ef4e3a83441eb700"
+        },
+        "lock_sha256": "d36bf9d4c3e9e650def96a8d18923e74940fc07a6ec1ab1d4299bfe2654ebce7"
+      }
+    },
+    "common_selection_invariants": [
+      "every frozen population record receives exactly one eligibility-ledger decision",
+      "two independent reviewers agree or an independent adjudicator resolves the record",
+      "attempts never increase the independent task count",
+      "a preparation failure requires a new frame identity rather than investigator replacement",
+      "a blocked selector emits no assignment, seed, objective, replacement order, preview, or experiment authority"
+    ],
+    "generic_selection_invariants": [
+      "one externally randomized record is retained per independence cluster before stratum allocation",
+      "every selected partition receives its preregistered slice of one frozen stratum permutation",
+      "inclusion probabilities and inverse-probability weights are emitted per selected task"
+    ],
+    "vercel_selection_invariants": [
+      "the complete eligible lineage-to-slot graph is allocated with exact minimum-cost flow and deterministic owner-constraint branching",
+      "one task is selected per public code-lineage cluster across all partitions",
+      "exact family and partition quotas plus all-partition and holdout owner caps must hold",
+      "development and holdout identities remain disjoint",
+      "replacement is non-executable until a reviewed complete residual-augmentation artifact is frozen"
+    ]
+  },
+  "lanes": {
+    "superpowers_writing_plans": {
+      "query_plan": {
+        "path": "../superpowers-writing-plans-upgrade/conference-query-plan-v2.json",
+        "sha256": "9bfc0c3ca8042f8b55f38c561daa1c600f998392740007612da235e048d753fe"
+      },
+      "protocol": {
+        "path": "../superpowers-writing-plans-upgrade/conference-sampling-frame-protocol-v2.json",
+        "sha256": "5cfb8c4e4e97658eed2d69dd2f0bb4a126ea5f23ec1db0064a9ad67ea3407b3c"
+      },
+      "compiled_plan": {
+        "canonical_sha256": "54ad6b3d9416c2a1fa2882725f149b9c38818e59fe3825d526e71c403e2077dd",
+        "serialized_bytes_sha256": "5b14245cbc48bfc01d7a4bc1b1f63cd510c6d4707d98170ac5e9f00aac86afb8",
+        "implementation_lock_sha256": "a91ddd3167f462439d988b438a092ce44b4146e58b694b92eae2c094ab19d84a"
+      },
+      "temporal_estimand": "post-treatment public maintenance records in the frozen query-discoverable observation window",
+      "collector_readiness": {
+        "status": "compiled_not_acquired",
+        "required_acquisitions": 2,
+        "completed_acquisitions": 0,
+        "minimum_separation_seconds": 3600,
+        "operator_execution_authorized": false
+      },
+      "selector_readiness": {
+        "status": "blocked",
+        "blocker_code": "authenticated_verification_boundary_unavailable",
+        "selected_count": 0,
+        "selection_implementation_lock_sha256": "fb96288c3f2ffee982f10dfb58d8294656e1bc8b81b9ecb083e6d203c45c3318"
+      }
+    },
+    "anthropic_skill_creator": {
+      "query_plan": {
+        "path": "../anthropic-skill-creator-upgrade/conference-github-candidate-query-plan-v2.json",
+        "sha256": "c93a0baf99a889ff06a82d81eafe6028e91a81dbbb9762a9e7069063a862933d"
+      },
+      "protocol": {
+        "path": "../anthropic-skill-creator-upgrade/conference-sampling-frame-protocol-v2.json",
+        "sha256": "f2c91e5b4d7a51ecf3ff268821f05b0b2c183e0ad3f397d95e05bac7785f5bde"
+      },
+      "compiled_plan": {
+        "canonical_sha256": "af23b83f0a3aa2901a04b67a714ac0527b63960b3c4d2c11dae3de61d7a2303b",
+        "serialized_bytes_sha256": "fc5afcc680dae736db231f2377635ec02abbe14544c3118adeec0459d7e269dd",
+        "implementation_lock_sha256": "a91ddd3167f462439d988b438a092ce44b4146e58b694b92eae2c094ab19d84a"
+      },
+      "temporal_estimand": "primary pre-treatment public Skill-package repository frame",
+      "collector_readiness": {
+        "status": "compiled_not_acquired",
+        "required_acquisitions": 2,
+        "completed_acquisitions": 0,
+        "minimum_separation_seconds": 3600,
+        "operator_execution_authorized": false
+      },
+      "selector_readiness": {
+        "status": "blocked",
+        "blocker_code": "authenticated_verification_boundary_unavailable",
+        "selected_count": 0,
+        "selection_implementation_lock_sha256": "fb96288c3f2ffee982f10dfb58d8294656e1bc8b81b9ecb083e6d203c45c3318"
+      }
+    },
+    "vercel_react_best_practices": {
+      "query_plan": {
+        "path": "../vercel-react-best-practices-upgrade/conference-query-plan-v2.json",
+        "sha256": "ef9609e9256b90a8c4d554c3287b933b5c1c61531b14ba6770e7114e8f2a2075"
+      },
+      "protocol": {
+        "path": "../vercel-react-best-practices-upgrade/conference-sampling-frame-protocol-v2.json",
+        "sha256": "1e1824c85bd528397377eab725e88f7f75bd9ef9e653aaf7ca257506417af900"
+      },
+      "compiled_plan": {
+        "canonical_sha256": "aa3d9b15f280ee670809a9e5be21563a2737b5ac418ebcfa1326a6596ccee500",
+        "serialized_bytes_sha256": "ee1eb058d50ed018fa0724e56d75e045da9a3034f3e1721b44ea96c8840848c8",
+        "implementation_lock_sha256": "a91ddd3167f462439d988b438a092ce44b4146e58b694b92eae2c094ab19d84a"
+      },
+      "temporal_estimand": "primary pre-treatment test-qualified public TypeScript Next.js repair frame",
+      "collector_readiness": {
+        "status": "compiled_not_acquired",
+        "required_acquisitions": 2,
+        "completed_acquisitions": 0,
+        "minimum_separation_seconds": 3600,
+        "operator_execution_authorized": false
+      },
+      "selector_readiness": {
+        "status": "blocked_authenticated_evidence_required",
+        "blocker_code": "protocol_trust_roots_not_registered",
+        "required_registered_ed25519_trust_roots": 4,
+        "assignment_emitted": false,
+        "selection_implementation_lock_sha256": "d36bf9d4c3e9e650def96a8d18923e74940fc07a6ec1ab1d4299bfe2654ebce7"
+      },
+      "feasibility": "exact RSC family yield and powered quotas remain unproven until both acquisitions, review, lineage collapse, and prospective power analysis complete"
+    }
+  },
+  "historical_live_pilot": {
+    "classification": "historical_superseded_transport_diagnostic",
+    "path": "github-collector-live-pilot-v2.json",
+    "sha256": "8c3028b26c5356fecd6a63b157ca7d0b1150d154ca2df0f299f5dc871d2c2c33",
+    "candidate_records": 194,
+    "acquisition_repetitions": 1,
+    "public_visibility_proven": false,
+    "source_records_with_token_shaped_values": 1,
+    "credential_nonleakage_qualified": false,
+    "qualified_claim": "The historical diagnostic demonstrated one bounded authenticated GitHub Search query, complete pagination, omission of known credential header and environment fields from its receipt, non-copying of the one matched token-shaped source value into that receipt, and candidate-only output. This is not a global credential non-leakage qualification. It did not use the committed V3 implementation lock and does not establish a public population, authenticated selection, task validity, experiment result, or community claim."
+  },
+  "next_gates": [
+    "Commit this manifest, its contract test, and documentation without changing any implementation, query-plan, or sampling-protocol byte; recompile all plans and require identical canonical digests.",
+    "Obtain explicit operator authorization for read-only public GitHub acquisition, then run two live acquisitions per lane at least 3600 seconds apart using the exact committed implementation lock.",
+    "Finalize each acquisition only after exact drift, pagination, repository-publicness, provenance, privacy, and transaction receipts pass; preserve a complete exclusion ledger.",
+    "Complete calibrated blinded review, adjudication, immutable lineage clustering, and source-authenticated evidence under separated roles.",
+    "Register prospective authenticated selector trust roots or amendments before any selection; publish the precommit and independently verifiable randomness evidence before allocation.",
+    "Run frame-specific prospective power analysis and stop or narrow the estimand if the preregistered quotas are infeasible.",
+    "Author public tasks and mode-0600 private labels under separated roles, then validate base failure and gold success or no-change truth.",
+    "Generate new population-study previews and exact approvals only after every prior gate; this manifest authorizes no network acquisition, model call, experiment cell, or spend."
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "projection_id": "vercel-react-best-practices-confirmatory-v2-descriptive-preview",
+  "artifact_type": "sanitized_unexecuted_descriptive_preview_projection",
+  "source_descriptive_branch": "codex/community-skill-upgrade-campaign",
+  "source_descriptive_head": "44a5a84a78944ef77290316b662a3da7a0d7da8e",
+  "source_descriptive_tree": "4e1c91dbaa8894380296e41bb9bf4745b42f2d3d",
+  "source_spec": {
+    "path": "../vercel-react-best-practices-upgrade/comparison-v2.yaml",
+    "sha256": "5dc335336741d6f8064018d533a2bb576acef8b20327019a6c79276e4f63d589"
+  },
+  "source_prepared_preview": {
+    "bytes_sha256": "f9d66f42526b9c7ac00bf8a09ce757e8d18a63b7e7d4d554c67c8cdc807f7b7d",
+    "committed": false,
+    "retention": "local_runtime_artifact_not_execution_authority"
+  },
+  "comparison_id": "vercel-react-best-practices-confirmatory-v2",
+  "preview_digest": "21c065bb4b122b68eec4f0d3346eba33a8214807c1abd2bf4cc27244c735dfcc",
+  "readiness_digest": "e8350f8f66c9fd5b178176ce24fa96f98abe5640b67c39ea6bcc0e497e1688b4",
+  "taskset_digest": "21d5bacff20524838ba99872141ea2f50eaa33892e2da26452f1f68b6129f59a",
+  "private_labels_digest": "00a2eb673cc3cce9bfbd11a117e480a139d6f95e2cdaa131177fd55d7517433a",
+  "readiness_status": "needs_review",
+  "warnings": [
+    "judge community-usefulness calibration is not adjudicated"
+  ],
+  "task_count": 24,
+  "attempts_per_task_and_arm": 4,
+  "estimated_cells": 192,
+  "estimated_cost_usd": 1632.0,
+  "hard_cap_usd": 1640,
+  "evidence_project": "wandb/fugue-vercel-react-best-practices-confirmatory-v2",
+  "approval": {
+    "state": "fresh_exact_approval_required",
+    "receipt_sha256": null
+  },
+  "execution": {
+    "started": false,
+    "terminal_cells": 0
+  },
+  "claim_boundary": "This projection proves the identity and readiness summary of one unexecuted authored-benchmark preview. It is not approval, execution evidence, a population sample, or a community claim."
+}

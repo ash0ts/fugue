@@ -1,5 +1,37 @@
 # Community Skill upgrade campaign
 
+## Scientific status: descriptive previews versus population evidence
+
+The three 192-cell Superpowers, Anthropic, and Vercel Studies are frozen,
+**unexecuted authored-benchmark previews**. Together they plan 576 cells with
+independent hard caps totaling $4,980. They can estimate performance on their
+locked authored task sets after fresh exact approvals; they cannot establish
+community prevalence or external validity.
+
+The separate public-population extension is frozen in
+`conference-population-acquisition-manifest-v3.json`. Its collector/compiler
+implementation is committed at `4b26d5608bac9a89f4fbdf956a722b707704f36a`,
+and all three query/protocol pairs compile reproducibly against that exact
+implementation lock. No V3 population acquisition has run, no eligible frame
+has been reviewed, and no population task or experiment preview exists.
+Superpowers and Anthropic selection fail closed because authenticated external
+verification is not available. Vercel selection additionally requires four
+independently controlled Ed25519 trust roots that the prospective protocol has
+not registered. Every selector therefore emits zero assignments.
+
+`github-collector-live-pilot-v2.json` is historical, superseded transport
+diagnostic evidence only. Its 194 candidates came from one query acquisition;
+repository publicness was not independently proven and one source record
+contained a token-shaped value. The receipt's field-level statement that the
+operator credential was not serialized is not a global non-leakage proof.
+
+The next scientific boundary is explicit operator authorization for two
+read-only public GitHub acquisitions per lane, at least one hour apart. Drift,
+publicness, privacy, provenance, review, lineage, authenticated randomness, and
+prospective power must then pass in that order before task authoring, a new
+preview, approval, model execution, or any community/conference claim. The
+population manifest authorizes none of those actions.
+
 ## Current executable canaries
 
 The current execution authority is

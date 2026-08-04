@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "projection_id": "superpowers-writing-plans-confirmatory-v6-descriptive-preview",
+  "artifact_type": "sanitized_unexecuted_descriptive_preview_projection",
+  "source_descriptive_branch": "codex/community-skill-upgrade-campaign",
+  "source_descriptive_head": "44a5a84a78944ef77290316b662a3da7a0d7da8e",
+  "source_descriptive_tree": "4e1c91dbaa8894380296e41bb9bf4745b42f2d3d",
+  "source_spec": {
+    "path": "../superpowers-writing-plans-upgrade/confirmatory-v6.yaml",
+    "sha256": "fa204bf237d6b4caa70ce62a5b8d227307242a181af3403e9534bbe0a9344153"
+  },
+  "source_prepared_preview": {
+    "bytes_sha256": "59d804dd96432c033261cb636cb31a343b45ae9b3372622a6dc44da90ad8849a",
+    "committed": false,
+    "retention": "local_runtime_artifact_not_execution_authority"
+  },
+  "comparison_id": "superpowers-writing-plans-confirmatory-v6",
+  "preview_digest": "6a4b531b7aa96c4670924adc06fd3c88f9c5c433327fa5d56335390fa56f945e",
+  "readiness_digest": "c79489a910d7aa7a72cec76c9c6fe13830b4b48b146f864523348ae50a1a86d0",
+  "taskset_digest": "9612919179b86b62b381712f5e6f79bd686beed3e3b0fb431a66248976a2382f",
+  "private_labels_digest": "5c2110565b8622dd4d5d89047c462906675b138e022af4e8c8edff8e5f890fa0",
+  "readiness_status": "needs_review",
+  "warnings": [
+    "judge community-usefulness calibration is not adjudicated"
+  ],
+  "task_count": 24,
+  "attempts_per_task_and_arm": 4,
+  "estimated_cells": 192,
+  "estimated_cost_usd": 1632.0,
+  "hard_cap_usd": 1700,
+  "evidence_project": "wandb/fugue-superpowers-writing-plans-confirmatory-v6",
+  "approval": {
+    "state": "fresh_exact_approval_required",
+    "receipt_sha256": null
+  },
+  "execution": {
+    "started": false,
+    "terminal_cells": 0
+  },
+  "claim_boundary": "This projection proves the identity and readiness summary of one unexecuted authored-benchmark preview. It is not approval, execution evidence, a population sample, or a community claim."
+}

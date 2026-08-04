@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "projection_id": "anthropic-skill-creator-confirmatory-v2-descriptive-preview",
+  "artifact_type": "sanitized_unexecuted_descriptive_preview_projection",
+  "source_descriptive_branch": "codex/community-skill-upgrade-campaign",
+  "source_descriptive_head": "44a5a84a78944ef77290316b662a3da7a0d7da8e",
+  "source_descriptive_tree": "4e1c91dbaa8894380296e41bb9bf4745b42f2d3d",
+  "source_spec": {
+    "path": "../anthropic-skill-creator-upgrade/comparison-v2.yaml",
+    "sha256": "fbdfd97d7e4b8b6978a790eb13de125b8a413c1df2ff6ff3af2a0014680f7dc9"
+  },
+  "source_prepared_preview": {
+    "bytes_sha256": "0c9f67d2c7f63cb6c82670183ab08a158412c64805d8b7b7d599c932dc9707ef",
+    "committed": false,
+    "retention": "local_runtime_artifact_not_execution_authority"
+  },
+  "comparison_id": "anthropic-skill-creator-confirmatory-v2",
+  "preview_digest": "fee496ac0b4ebf787a39e4f64bd758ffd67a15a91af8bddce049e8aa11c8d0a2",
+  "readiness_digest": "f1752f86499b2ebe0a723e5190e0aff53d53533f42e8d8a5c4c3be15a2567188",
+  "taskset_digest": "0cd90f0214108bb0c49aa7b25c279eb980057a9ec1142ab46349ac8b272ec641",
+  "private_labels_digest": "2297fe640c51aafa5d7fbd57b90baaab457f56c8f4482b178abc0c0998cfeede",
+  "readiness_status": "needs_review",
+  "warnings": [
+    "judge community-usefulness calibration is not adjudicated"
+  ],
+  "task_count": 24,
+  "attempts_per_task_and_arm": 4,
+  "estimated_cells": 192,
+  "estimated_cost_usd": 1632.0,
+  "hard_cap_usd": 1640,
+  "evidence_project": "wandb/fugue-anthropic-skill-creator-confirmatory-v2",
+  "approval": {
+    "state": "fresh_exact_approval_required",
+    "receipt_sha256": null
+  },
+  "execution": {
+    "started": false,
+    "terminal_cells": 0
+  },
+  "claim_boundary": "This projection proves the identity and readiness summary of one unexecuted authored-benchmark preview. It is not approval, execution evidence, a population sample, or a community claim."
+}

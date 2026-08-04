@@ -783,6 +783,15 @@ domains. GitHub Pages builds only the committed snapshots. It receives no W&B
 credential and makes no browser API call; Weave links are user-initiated and
 explicitly labeled as requiring sign-in.
 
+Population-based Skill studies use an additional prospective boundary before
+they can enter the Atlas. A committed collector plan is not a sampled task
+population, and an authored benchmark preview is not external-validity
+evidence. The community Skill campaign records these states separately in
+`examples/comparisons/community-skill-upgrades/conference-population-acquisition-manifest-v3.json`:
+live acquisition, independent review, lineage collapse, authenticated
+randomization, prospective power, base/gold qualification, preview, and
+approval must each complete before model execution or a community claim.
+
 ```bash
 uv run python tools/experiment_atlas.py \
   --editorial-dir atlas/editorial \
