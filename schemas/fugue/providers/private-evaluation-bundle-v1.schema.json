@@ -1,0 +1,59 @@
+{
+  "$id": "https://fugue.local/schemas/provider/private-evaluation-bundle-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "metadata": {
+      "type": "object"
+    },
+    "private_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "suite_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "tasks": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluator_config": {
+            "type": "object"
+          },
+          "expected": {
+            "type": "object"
+          },
+          "task_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "expected",
+          "evaluator_config"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "suite_digest",
+    "tasks",
+    "metadata",
+    "private_digest"
+  ],
+  "title": "private-evaluation-bundle",
+  "type": "object"
+}
