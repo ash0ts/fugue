@@ -1,0 +1,4 @@
+{"id":"expense-limit","input":{"question":"Return JSON containing the current expense amount and its source."},"partition":"holdout","tags":["policy"]}
+{"id":"retention-window","input":{"question":"Return JSON containing the current retention duration and its source."},"partition":"holdout","tags":["contract"]}
+{"id":"equipment-allowance","input":{"question":"Return JSON containing the current equipment allowance and its source."},"partition":"holdout","tags":["policy"]}
+{"id":"incident-escalation","input":{"question":"Return JSON containing the current escalation window and its source."},"partition":"holdout","tags":["runbook"]}

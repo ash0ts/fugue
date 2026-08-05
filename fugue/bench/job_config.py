@@ -68,6 +68,11 @@ from fugue.bench.services import (
 )
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
 from fugue.bench.task_runtime import read_task_runtime_lock
+from fugue.bench.wandb_sandbox import (
+    bind_wandb_job_environment,
+    wandb_execution_identity,
+    wandb_harbor_command,
+)
 from fugue.model_plane import (
     ModelRoute,
     model_route_identity,
@@ -312,15 +317,20 @@ def _build_jobs(
                     write=write_configs,
                     bridge_required=_bridge_required(route, harness.name),
                 )
-                trial_policy = _render_trial_policy_compose(
-                    runtime_root,
-                    job_name,
-                    write=write_configs,
+                selected_environment = _merge_dicts(
+                    experiment.environment,
+                    variant.environment,
                 )
-                binding = replace(
-                    binding,
-                    compose_files=(*binding.compose_files, trial_policy),
-                )
+                if str(selected_environment.get("type") or "docker") != "wandb":
+                    trial_policy = _render_trial_policy_compose(
+                        runtime_root,
+                        job_name,
+                        write=write_configs,
+                    )
+                    binding = replace(
+                        binding,
+                        compose_files=(*binding.compose_files, trial_policy),
+                    )
                 integration_binding = bind_integrations(
                     effective_selections(experiment.integrations, variant.integrations),
                     repo_root=repo_root,
@@ -421,6 +431,20 @@ def _build_jobs(
                         "sandbox_policy_version": SANDBOX_POLICY_VERSION,
                         "fugue_source": selected_source_provenance,
                         **(
+                            {
+                                "sandbox_runtime": wandb_execution_identity(
+                                    selected_environment,
+                                    harness=harness.name,
+                                    repo_root=repo_root,
+                                )
+                            }
+                            if str(
+                                selected_environment.get("type") or "docker"
+                            )
+                            == "wandb"
+                            else {}
+                        ),
+                        **(
                             {"context_runtime": context_runtime}
                             if context_runtime is not None
                             else {}
@@ -480,14 +504,24 @@ def _build_jobs(
                     scorer_hashes=scorer_hashes,
                 )
                 config_path = config_dir / f"{job_name}.json"
+                wandb_identity = config["fugue"].get(
+                    "wandb_serverless_runtime"
+                )
                 if write_configs:
                     bridge_required = _bridge_required(route, harness.name)
-                    config["fugue"]["sandbox_attestation"] = attest_harbor_job(
-                        config,
-                        repo_root=repo_root,
-                        bridge_required=bridge_required,
-                        require_files=True,
-                    ).to_dict()
+                    if wandb_identity is not None:
+                        config["fugue"]["sandbox_attestation"] = {
+                            "schema_version": 1,
+                            "source": "wandb-serverless-runtime-lock",
+                            **wandb_identity,
+                        }
+                    else:
+                        config["fugue"]["sandbox_attestation"] = attest_harbor_job(
+                            config,
+                            repo_root=repo_root,
+                            bridge_required=bridge_required,
+                            require_files=True,
+                        ).to_dict()
                     config_path.write_text(
                         json.dumps(config, indent=2, sort_keys=True) + "\n"
                     )
@@ -520,13 +554,18 @@ def _build_jobs(
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
                     execution_fingerprint=resolved_candidate.execution_fingerprint,
+                    sandbox_runtime=wandb_identity,
                     expected_artifact_paths=config.get("fugue", {}).get(
                         "expected_artifact_paths", []
                     ),
                 )
                 rendered.append(
                     RenderedJob(
-                        command=["harbor", "run", "--config", config_path.as_posix()],
+                        command=wandb_harbor_command(
+                            config_path,
+                            environment=selected_environment,
+                            repo_root=repo_root,
+                        ),
                         config_path=config_path,
                         result_path=selected_jobs_dir / job_name / "result.json",
                         config=config,
@@ -613,33 +652,48 @@ def _job_config(
 ) -> dict[str, Any]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     task_architecture = _task_architecture(tasks[0])
-    environment = _merge_dicts(experiment.environment, variant.environment)
+    selected_environment = _merge_dicts(
+        experiment.environment,
+        variant.environment,
+    )
+    environment, wandb_identity = bind_wandb_job_environment(
+        selected_environment,
+        harness=harness.name,
+        repo_root=repo_root,
+    )
+    is_wandb = wandb_identity is not None
     prepared_agent_mount = agent_runtime_mount(
         harness.name,
         repo_root,
         task_architecture,
     )
-    if prepared_agent_mount is not None:
+    if prepared_agent_mount is not None and not is_wandb:
         environment["mounts"] = [
             *environment.get("mounts", []),
             prepared_agent_mount,
         ]
-    if context_binding.mounts:
+    if context_binding.mounts and not is_wandb:
         environment["mounts"] = [
             *environment.get("mounts", []),
             *context_binding.mounts,
         ]
+    if context_binding.compose_files and is_wandb:
+        raise ValueError("W&B Serverless does not support context Compose services")
     if context_binding.compose_files:
         environment["extra_docker_compose"] = [
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in context_binding.compose_files],
         ]
+    if integration_binding.compose_files and is_wandb:
+        raise ValueError(
+            "W&B Serverless requires embedded managed MCP runtimes, not Compose"
+        )
     if integration_binding.compose_files:
         environment["extra_docker_compose"] = [
             *environment.get("extra_docker_compose", []),
             *[path.as_posix() for path in integration_binding.compose_files],
         ]
-    if integration_binding.mounts:
+    if integration_binding.mounts and not is_wandb:
         environment["mounts"] = [
             *environment.get("mounts", []),
             *integration_binding.mounts,
@@ -648,7 +702,7 @@ def _job_config(
         *context_binding.mcp_servers,
         *integration_binding.mcp_servers,
     ]
-    if _needs_mcp_proxy(selected_mcp_servers):
+    if _needs_mcp_proxy(selected_mcp_servers) and not is_wandb:
         mounts = list(environment.get("mounts", []))
         if not any(
             isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
@@ -754,6 +808,7 @@ def _job_config(
         "scorer_hashes": scorer_hashes,
         "expected_artifact_paths": artifact_source_paths(expected_artifacts),
         "task_authoring": _task_authoring_metadata(tasks[0]),
+        "wandb_serverless_runtime": wandb_identity,
     }
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
@@ -935,6 +990,7 @@ def _job_env(
     comparison_example_id: str,
     candidate_id: str,
     execution_fingerprint: str,
+    sandbox_runtime: Mapping[str, Any] | None,
     expected_artifact_paths: list[str],
 ) -> dict[str, str]:
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
@@ -1034,6 +1090,10 @@ def _job_env(
             "FUGUE_COMPARISON_EXAMPLE_ID": comparison_example_id,
             "FUGUE_CANDIDATE_ID": candidate_id,
             "FUGUE_EXECUTION_FINGERPRINT": execution_fingerprint,
+            "FUGUE_SANDBOX_RUNTIME": json.dumps(
+                sandbox_runtime or {},
+                sort_keys=True,
+            ),
             "FUGUE_EXECUTION_KIND": "agent",
             "FUGUE_IDENTITY_SCHEMA_VERSION": str(CANDIDATE_IDENTITY_SCHEMA_VERSION),
             "FUGUE_MODEL": route.display_model,
@@ -1547,7 +1607,7 @@ def _candidate_agent_configuration(
         {
             "agent_kwargs": _merge_dicts(experiment.agent_kwargs, variant.agent_kwargs),
             "agent_env": _merge_dicts(experiment.agent_env, variant.agent_env),
-            "environment": _merge_dicts(experiment.environment, variant.environment),
+            "environment": dict(variant.environment),
         }
     )
 

@@ -10,6 +10,7 @@ import webbrowser
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +162,63 @@ def _parser() -> FugueArgumentParser:
     demo.add_argument("--repo-root", type=Path, default=Path.cwd())
     demo.set_defaults(handler=_comparison_demo)
 
+    sandbox = subparsers.add_parser(
+        "sandbox", help="Build and qualify remote Sandbox runtimes"
+    )
+    sandbox_backends = sandbox.add_subparsers(
+        dest="sandbox_backend", metavar="BACKEND", required=True
+    )
+    wandb_sandbox = sandbox_backends.add_parser(
+        "wandb", help="Qualify W&B Serverless Sandbox execution"
+    )
+    wandb_actions = wandb_sandbox.add_subparsers(
+        dest="wandb_action", metavar="ACTION", required=True
+    )
+    wandb_build = wandb_actions.add_parser(
+        "build-runtime",
+        help="Build, scan, publish, and attest public Agent runtime images",
+    )
+    wandb_build.add_argument(
+        "--comparison",
+        type=Path,
+        action="append",
+        required=True,
+        dest="comparisons",
+    )
+    wandb_build.add_argument("--platform", default="linux/amd64")
+    wandb_build.add_argument("--image", required=True)
+    wandb_build.add_argument("--push", action="store_true")
+    wandb_build.add_argument("--output-manifest", type=Path, required=True)
+    wandb_build.add_argument("--sbom-dir", type=Path)
+    wandb_build.add_argument("--repo-root", type=Path, default=Path.cwd())
+    wandb_build.set_defaults(handler=_wandb_sandbox)
+    wandb_lock = wandb_actions.add_parser(
+        "lock-runtime",
+        help="Accept one published, anonymously pullable runtime manifest",
+    )
+    wandb_lock.add_argument("--manifest", type=Path, required=True)
+    wandb_lock.add_argument(
+        "--output",
+        type=Path,
+        default=Path(".fugue/wandb-serverless-runtime.lock.json"),
+    )
+    wandb_lock.set_defaults(handler=_wandb_sandbox)
+    wandb_doctor_parser = wandb_actions.add_parser(
+        "doctor",
+        help="Create, probe, delete, and verify one disposable W&B Sandbox",
+    )
+    wandb_doctor_parser.add_argument(
+        "--lock",
+        type=Path,
+        default=Path(".fugue/wandb-serverless-runtime.lock.json"),
+    )
+    wandb_doctor_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+    )
+    wandb_doctor_parser.set_defaults(handler=_wandb_sandbox)
+
     taskset = subparsers.add_parser(
         "taskset", help="Build or import simple Agent evaluation tasksets"
     )
@@ -217,6 +275,10 @@ def _parser() -> FugueArgumentParser:
         if action_name == "lock":
             action_parser.add_argument(
                 "--acknowledge-package-code", action="store_true"
+            )
+            action_parser.add_argument(
+                "--platform",
+                choices=("linux/amd64", "linux/arm64"),
             )
         action_parser.set_defaults(handler=_component_mcp)
 
@@ -756,24 +818,35 @@ def _comparison_demo(args: argparse.Namespace) -> int:
     )
 
     root = args.repo_root.resolve()
-    demo_root = root / "examples" / "comparisons" / "source-use-replay"
-    spec = load_comparison(demo_root / "comparison.yaml", repo_root=root)
-    preview = preview_comparison(
-        spec,
-        repo_root=root,
-        operator=OperatorService(root),
-    )
-    source_rows = [
-        json.loads(line)
-        for line in (demo_root / "attempts.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    rows = score_comparison_rows(spec, source_rows, repo_root=root)
+    resource = files("fugue").joinpath("resources", "source-use-replay")
+    with as_file(resource) as extracted:
+        demo_root = Path(extracted)
+        spec = load_comparison(
+            demo_root / "comparison.yaml",
+            repo_root=demo_root,
+        )
+        preview = preview_comparison(
+            spec,
+            repo_root=demo_root,
+            operator=OperatorService(demo_root),
+        )
+        source_rows = [
+            json.loads(line)
+            for line in (demo_root / "attempts.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        rows = score_comparison_rows(
+            spec,
+            source_rows,
+            repo_root=demo_root,
+        )
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
         rows=rows,
-        source="immutable-replay",
+        source="bundled-replay",
     )
     destination = (
         args.out.resolve()
@@ -797,6 +870,37 @@ def _comparison_demo(args: argparse.Namespace) -> int:
         CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
         CONSOLE.print(f"\nResult JSON: {json_path}")
     return 0 if not result.incomplete else 3
+
+
+def _wandb_sandbox(args: argparse.Namespace) -> int:
+    from fugue.bench.wandb_sandbox import (
+        build_wandb_runtime,
+        lock_wandb_runtime,
+        read_wandb_runtime_lock,
+        wandb_doctor,
+    )
+
+    if args.wandb_action == "build-runtime":
+        root = args.repo_root.resolve()
+        manifest = build_wandb_runtime(
+            comparisons=args.comparisons,
+            repo_root=root,
+            platform=args.platform,
+            image=args.image,
+            push=args.push,
+            output_manifest=args.output_manifest,
+            sbom_dir=args.sbom_dir,
+        )
+        print(json.dumps(manifest.to_dict(), indent=2, sort_keys=True))
+        return 0
+    if args.wandb_action == "lock-runtime":
+        lock = lock_wandb_runtime(args.manifest, output=args.output)
+        print(json.dumps(lock.to_dict(), indent=2, sort_keys=True))
+        return 0
+    lock = read_wandb_runtime_lock(args.lock)
+    result = wandb_doctor(lock, env_file=args.env_file)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result["deleted"] and result["orphans"] == 0 else 3
 
 
 def _print_comparison_readiness(readiness: Any) -> None:
@@ -1332,6 +1436,7 @@ def _component_mcp(args: argparse.Namespace) -> int:
             args.import_id,
             root,
             acknowledge_package_code=args.acknowledge_package_code,
+            target_platform=args.platform,
         )
         payload = value.to_dict()
     print(json.dumps(payload, indent=2, sort_keys=True))

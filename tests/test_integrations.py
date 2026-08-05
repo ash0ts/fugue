@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 import yaml
 
 from fugue.bench.integrations import (
+    IntegrationInterface,
+    IntegrationRuntime,
+    IntegrationSpec,
     bind_integrations,
     effective_selections,
     load_integration,
@@ -13,6 +19,82 @@ from fugue.bench.integrations import (
 from fugue.bench.library import IntegrationSelection
 
 IMAGE = "ghcr.io/example/retrieval@sha256:" + "a" * 64
+
+
+def test_undeclared_platform_preserves_existing_integration_identities(
+    tmp_path: Path,
+) -> None:
+    spec = IntegrationSpec(
+        id="builtin",
+        version="1",
+        support="experimental",
+        runtime=IntegrationRuntime(type="builtin", command=("example",)),
+        interfaces=(IntegrationInterface(type="mcp", name="builtin", transport="stdio"),),
+    )
+    old_value = asdict(spec)
+    del old_value["runtime"]["platform"]
+    old_payload = json.dumps(old_value, sort_keys=True, separators=(",", ":"))
+    assert spec.config_hash == hashlib.sha256(old_payload.encode()).hexdigest()
+
+    root = tmp_path / "configs" / "fugue" / "integrations"
+    root.mkdir(parents=True)
+    (root / "builtin.yaml").write_text(
+        """
+id: builtin
+version: "1"
+runtime: {type: builtin, command: [example]}
+interfaces:
+  - {type: mcp, name: builtin, transport: stdio}
+"""
+    )
+    binding = bind_integrations(
+        [IntegrationSelection("builtin")],
+        repo_root=tmp_path,
+        runtime_root=tmp_path / ".fugue" / "runtime",
+        job_name="job",
+        env={},
+        write=False,
+    )
+    behavior = {
+        "id": "builtin",
+        "version": "1",
+        "runtime": old_value["runtime"],
+        "interfaces": [asdict(spec.interfaces[0])],
+        "capabilities": [],
+        "required_env": [],
+        "allowed_hosts": [],
+        "instruction_digests": [],
+        "selection_config_hash": hashlib.sha256(b"{}").hexdigest(),
+    }
+    expected = hashlib.sha256(
+        json.dumps(behavior, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert binding.identity[0]["behavior_hash"] == expected
+
+
+def test_existing_managed_lock_without_platform_remains_readable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "configs" / "fugue" / "integrations"
+    root.mkdir(parents=True)
+    (root / "managed.yaml").write_text(
+        f"""
+id: managed
+version: "1"
+runtime:
+  type: managed
+  source: .fugue/runtime/mcp/managed/runtime
+  digest: sha256:{'a' * 64}
+  command: [/fugue-components/managed/bin/server]
+interfaces:
+  - {{type: mcp, name: managed, transport: stdio}}
+"""
+    )
+
+    spec = load_integration("managed", tmp_path)
+
+    assert spec.runtime.type == "managed"
+    assert spec.runtime.platform is None
 
 
 def test_compose_integration_is_pinned_hardened_and_secret_free(tmp_path: Path) -> None:

@@ -3483,6 +3483,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
             context_events["context_telemetry_available"]
             or meta.get("context_artifact")
         )
+    wandb_serverless = _wandb_serverless_evidence(trial_dir, meta)
     return {
         "schema_version": 1,
         "record_type": "trial",
@@ -3537,6 +3538,7 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "harbor_config": meta.get("harbor_config"),
         "harbor_environment": meta.get("harbor_environment"),
         "harbor_resources": meta.get("harbor_resources", {}),
+        "sandbox_runtime": meta.get("sandbox_runtime", {}),
         "agent_config_hash": meta.get("agent_config_hash"),
         "tags": meta.get("tags", []),
         "dataset": meta.get("dataset"),
@@ -3618,6 +3620,92 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         ),
         "agent_response_bytes": len(agent_response.encode()) if agent_response else 0,
         "trial_dir": trial_dir.as_posix(),
+        **wandb_serverless,
+    }
+
+
+def _wandb_serverless_evidence(
+    trial_dir: Path,
+    meta: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = meta.get("sandbox_runtime")
+    if not isinstance(expected, Mapping):
+        expected = {}
+    is_wandb = (
+        str(meta.get("harbor_environment") or "") == "wandb"
+        or expected.get("backend") == "wandb-serverless"
+    )
+    path = trial_dir / "artifacts" / "wandb-serverless-attestation.json"
+    if not path.is_file():
+        return (
+            {
+                "wandb_serverless_eligible": False,
+                "wandb_serverless_attestation_status": "missing",
+            }
+            if is_wandb
+            else {}
+        )
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        value = {}
+    if not isinstance(value, Mapping):
+        value = {}
+    attestation = dict(value)
+    supplied = str(attestation.pop("attestation_digest", ""))
+    digest_valid = bool(supplied) and _stable_digest(attestation) == supplied
+    required_shape = {
+        "schema_version",
+        "backend",
+        "lock_digest",
+        "manifest_digest",
+        "harness",
+        "runtime_image",
+        "sandbox_id",
+        "state",
+        "deleted",
+        "orphans",
+        "secret_delivery",
+        "secret_env_names",
+        "raw_secret_overlays_forwarded",
+        "recorded_at",
+    }
+    shape_valid = set(attestation) == required_shape
+    identity_valid = (
+        not expected
+        or (
+            attestation.get("lock_digest") == expected.get("lock_digest")
+            and attestation.get("manifest_digest")
+            == expected.get("manifest_digest")
+            and attestation.get("runtime_image")
+            == expected.get("runtime_image")
+            and attestation.get("harness") == expected.get("harness")
+        )
+    )
+    eligible = bool(
+        shape_valid
+        and digest_valid
+        and attestation.get("schema_version") == 1
+        and attestation.get("backend") == "wandb-serverless"
+        and identity_valid
+        and attestation.get("state") == "deleted"
+        and attestation.get("deleted") is True
+        and attestation.get("orphans") == 0
+        and attestation.get("sandbox_id")
+        and attestation.get("secret_delivery") == "wandb-secrets-manager"
+        and set(attestation.get("secret_env_names") or [])
+        == {"ANTHROPIC_API_KEY", "WANDB_API_KEY"}
+        and attestation.get("raw_secret_overlays_forwarded") is False
+    )
+    return {
+        "wandb_serverless_eligible": eligible,
+        "wandb_serverless_attestation_status": (
+            "verified" if eligible else "invalid"
+        ),
+        "wandb_serverless_attestation_digest": supplied or None,
+        "wandb_serverless_runtime_image": attestation.get("runtime_image"),
+        "wandb_serverless_sandbox_id": attestation.get("sandbox_id"),
+        "wandb_serverless_orphans": attestation.get("orphans"),
     }
 
 

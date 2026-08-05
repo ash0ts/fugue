@@ -51,6 +51,22 @@ _DIGEST_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SECRET_NAME_RE = re.compile(
     r"(?:api.?key|credential|password|secret|token)", re.IGNORECASE
 )
+_SAFE_MCP_PROCESS_ENV = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+)
 _MCP_PYTHON_IMAGE = (
     "python:3.12.10-slim-bookworm@"
     "sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
@@ -288,6 +304,7 @@ def lock_mcp_import(
     repo_root: Path,
     *,
     acknowledge_package_code: bool = False,
+    target_platform: str | None = None,
 ) -> MCPImportLockV1:
     draft = load_mcp_draft(import_id, repo_root)
     source_digest = _stable_digest(draft.to_dict())
@@ -298,7 +315,11 @@ def lock_mcp_import(
                 "locking a package-backed MCP server requires "
                 "--acknowledge-package-code"
             )
-        runtime_platform = _managed_runtime_platform()
+        runtime_platform = target_platform or _managed_runtime_platform()
+        if runtime_platform not in _UV_PYTHON_PLATFORMS:
+            raise ValueError(
+                "managed MCP target platform must be linux/amd64 or linux/arm64"
+            )
         runtime_digest, command = _materialize_stdio_runtime(
             draft,
             repo_root,
@@ -317,6 +338,7 @@ def lock_mcp_import(
                 runtime_platform=runtime_platform,
                 required_env=draft.required_env,
                 fixed_env=draft.fixed_env,
+                allowed_hosts=draft.allowed_hosts,
             )
             if kind == "python"
             else ((runtime_source / "bin" / "server").as_posix(),)
@@ -335,6 +357,7 @@ def lock_mcp_import(
         support = "supported"
         runtime = {
             "type": "managed",
+            "platform": runtime_platform,
             "source": (
                 MANAGED_MCP_RUNTIME_ROOT
                 / import_id
@@ -424,17 +447,11 @@ def _probe_stdio_manifest(
             from mcp.client.stdio import stdio_client
         except ImportError as exc:
             raise RuntimeError(
-                "MCP conformance inspection requires "
-                "`uv sync --extra research-worker`"
+                "MCP conformance inspection requires `uv sync --extra research-worker`"
             ) from exc
 
-        environment = {
-            name: os.environ[name]
-            for name in draft.required_env
-            if os.environ.get(name)
-        }
-        environment.update(dict(draft.fixed_env))
-        missing = sorted(set(draft.required_env) - set(environment))
+        environment = _mcp_process_environment(draft)
+        missing = sorted(name for name in draft.required_env if name not in environment)
         if missing:
             raise ValueError(
                 "MCP inspection requires runtime credential environment: "
@@ -445,12 +462,14 @@ def _probe_stdio_manifest(
             args=list(draft.command[1:]),
             env=environment or None,
         )
+        initialized: Any = None
+        listed: Any = None
         async with stdio_client(parameters) as streams:
             async with ClientSession(*streams) as session:
-                initialized = await asyncio.wait_for(
-                    session.initialize(), timeout=90
-                )
+                initialized = await asyncio.wait_for(session.initialize(), timeout=90)
                 listed = await asyncio.wait_for(session.list_tools(), timeout=30)
+        if initialized is None or listed is None:
+            raise RuntimeError("MCP server exited before conformance inspection")
         tools = tuple(
             sorted(
                 (
@@ -477,6 +496,23 @@ def _probe_stdio_manifest(
         return asyncio.run(probe())
     except TimeoutError as exc:
         raise RuntimeError("MCP initialization or tools/list timed out") from exc
+
+
+def _mcp_process_environment(draft: MCPImportDraftV1) -> dict[str, str]:
+    environment = {
+        name: os.environ[name]
+        for name in _SAFE_MCP_PROCESS_ENV
+        if os.environ.get(name)
+    }
+    environment.update(
+        {
+            name: os.environ[name]
+            for name in draft.required_env
+            if os.environ.get(name)
+        }
+    )
+    environment.update(dict(draft.fixed_env))
+    return environment
 
 
 def import_skill(
@@ -517,9 +553,7 @@ def inspect_skill_import(skill_id: str, repo_root: Path) -> dict[str, Any]:
     draft = load_skill_draft(skill_id, repo_root)
     source_path, cleanup = _skill_source_path(draft, repo_root)
     try:
-        digest, declared_name = digest_local_skill(
-            source_path, fallback_name=skill_id
-        )
+        digest, declared_name = digest_local_skill(source_path, fallback_name=skill_id)
         inventory = _skill_inventory(source_path)
         return {
             "draft": draft.to_dict(),
@@ -560,9 +594,7 @@ def lock_skill_import(skill_id: str, repo_root: Path) -> ImportedSkillLockV1:
     draft = load_skill_draft(skill_id, repo_root)
     source_path, cleanup = _skill_source_path(draft, repo_root)
     try:
-        digest, declared_name = digest_local_skill(
-            source_path, fallback_name=skill_id
-        )
+        digest, declared_name = digest_local_skill(source_path, fallback_name=skill_id)
         inventory = _skill_inventory(source_path)
         cache = (
             repo_root
@@ -619,7 +651,9 @@ def resolve_imported_skill(skill_id: str, repo_root: Path) -> ResolvedSkill | No
         raise ValueError(f"{path}: unsupported or mismatched Skill lock")
     declared_name = str(raw["declared_name"])
     digest = str(raw["digest"])
-    cache = repo_root / SKILL_CACHE_ROOT / digest.removeprefix("sha256:") / declared_name
+    cache = (
+        repo_root / SKILL_CACHE_ROOT / digest.removeprefix("sha256:") / declared_name
+    )
     actual = digest_local_skill(cache, fallback_name=declared_name)
     if actual != (digest, declared_name):
         raise ValueError(f"imported Skill {skill_id} cache drifted from its lock")
@@ -715,7 +749,9 @@ def _draft_from_server(
         executable = raw.get("command")
         args = raw.get("args") or []
         if not isinstance(executable, str) or not isinstance(args, list):
-            raise ValueError("stdio MCP requires command as a string and args as an array")
+            raise ValueError(
+                "stdio MCP requires command as a string and args as an array"
+            )
         command = (executable, *(str(value) for value in args))
         _validate_argv(list(command))
         _classify_stdio_command(list(command))
@@ -803,13 +839,11 @@ def _classify_stdio_command(
     if executable == "uvx":
         if len(command) < 4 or command[1] != "--from":
             raise ValueError(
-                "uvx MCP declarations must use: "
-                "uvx --from PACKAGE==VERSION COMMAND"
+                "uvx MCP declarations must use: uvx --from PACKAGE==VERSION COMMAND"
             )
         package = command[2]
         if not (
-            _PYTHON_PACKAGE_RE.fullmatch(package)
-            or _PYTHON_GIT_RE.fullmatch(package)
+            _PYTHON_PACKAGE_RE.fullmatch(package) or _PYTHON_GIT_RE.fullmatch(package)
         ):
             raise ValueError(
                 "uvx MCP packages must use an exact name==version or a public "
@@ -847,9 +881,7 @@ def _install_python_tool(
         return None
 
     if _PYTHON_GIT_RE.fullmatch(package):
-        install_source, requirements_lock, cleanup = _build_exact_git_wheel(
-            package
-        )
+        install_source, requirements_lock, cleanup = _build_exact_git_wheel(package)
     else:
         requirements_lock, cleanup = _lock_python_distribution(
             package,
@@ -872,8 +904,7 @@ def _install_python_tool(
     launcher = bin_dir / "server"
     module, function = entrypoint
     fixed_environment = "".join(
-        f"os.environ[{name!r}] = {value!r}\n"
-        for name, value in fixed_env
+        f"os.environ[{name!r}] = {value!r}\n" for name, value in fixed_env
     )
     launcher.write_text(
         "#!/usr/bin/env python3\n"
@@ -982,11 +1013,7 @@ def _build_locked_wheelhouse(
                 "--memory",
                 "2g",
                 "--mount",
-                (
-                    "type=bind,"
-                    f"src={requirements_lock.parent},"
-                    "dst=/input,readonly"
-                ),
+                (f"type=bind,src={requirements_lock.parent},dst=/input,readonly"),
                 "--mount",
                 f"type=bind,src={wheelhouse},dst=/wheelhouse",
                 "--tmpfs",
@@ -1219,8 +1246,7 @@ def _install_node_tool(
     bin_dir.mkdir()
     launcher = bin_dir / "server"
     fixed_environment = "".join(
-        f"export {name}={shlex.quote(value)}\n"
-        for name, value in fixed_env
+        f"export {name}={shlex.quote(value)}\n" for name, value in fixed_env
     )
     launcher.write_text(
         "#!/bin/sh\n"
@@ -1235,9 +1261,7 @@ def _install_node_tool(
     _make_tree_read_only(destination)
 
 
-def _skill_source_path(
-    draft: SkillImportDraftV1, repo_root: Path
-) -> tuple[Path, Any]:
+def _skill_source_path(draft: SkillImportDraftV1, repo_root: Path) -> tuple[Path, Any]:
     if draft.kind == "local":
         source = Path(draft.source)
         return source, lambda: None
@@ -1245,7 +1269,14 @@ def _skill_source_path(
     temporary = Path(tempfile.mkdtemp(prefix="fugue-skill-"))
     checkout = temporary / "repo"
     subprocess.run(
-        ["git", "clone", "--filter=blob:none", "--no-checkout", draft.git_url, checkout],
+        [
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            draft.git_url,
+            checkout,
+        ],
         check=True,
         timeout=120,
     )
@@ -1314,7 +1345,9 @@ def _looks_like_secret(relative: str, content: bytes) -> bool:
         return True
     text = content.decode("utf-8", errors="ignore")
     return bool(
-        re.search(r"(?i)(?:api.?key|secret|token)\s*[:=]\s*['\"][A-Za-z0-9_-]{16,}", text)
+        re.search(
+            r"(?i)(?:api.?key|secret|token)\s*[:=]\s*['\"][A-Za-z0-9_-]{16,}", text
+        )
         or re.search(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", text)
     )
 
@@ -1334,7 +1367,9 @@ def _copy_skill_bundle(source: Path, destination: Path) -> None:
 def _runtime_directory_digest(root: Path) -> str:
     hasher = hashlib.sha256()
     found = False
-    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(
+        root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()
+    ):
         if path.is_symlink():
             raise ValueError(f"managed runtime may not contain symlinks: {path}")
         if not path.is_file():
@@ -1359,9 +1394,7 @@ def _remove_symlinks(root: Path) -> None:
 def _managed_runtime_platform() -> str:
     docker = shutil.which("docker")
     if docker is None:
-        raise RuntimeError(
-            "Docker is required to prepare a managed MCP runtime"
-        )
+        raise RuntimeError("Docker is required to prepare a managed MCP runtime")
     completed = subprocess.run(
         [docker, "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
         check=True,
@@ -1406,12 +1439,11 @@ def _managed_python_probe_command(
     runtime_platform: str,
     required_env: tuple[str, ...],
     fixed_env: tuple[tuple[str, str], ...],
+    allowed_hosts: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     docker = shutil.which("docker")
     if docker is None:
-        raise RuntimeError(
-            "Docker is required to inspect a managed MCP runtime"
-        )
+        raise RuntimeError("Docker is required to inspect a managed MCP runtime")
     _ensure_mcp_python_image(docker)
     command = [
         docker,
@@ -1423,7 +1455,7 @@ def _managed_python_probe_command(
         "--platform",
         runtime_platform,
         "--network",
-        "none",
+        "bridge" if allowed_hosts else "none",
         "--read-only",
         "--cap-drop",
         "ALL",
@@ -1561,8 +1593,7 @@ def _fixed_env_tuple(value: Any) -> tuple[tuple[str, str], ...]:
     if value in (None, {}):
         return ()
     if not isinstance(value, dict) or not all(
-        isinstance(name, str) and isinstance(item, str)
-        for name, item in value.items()
+        isinstance(name, str) and isinstance(item, str) for name, item in value.items()
     ):
         raise ValueError("fixed_env must be an object of string values")
     return tuple(sorted(value.items()))
@@ -1578,7 +1609,9 @@ def _validate_remote_mcp_url(value: str) -> None:
         or parsed.query
         or parsed.fragment
     ):
-        raise ValueError("remote MCP URLs must be credential-free HTTPS origins or paths")
+        raise ValueError(
+            "remote MCP URLs must be credential-free HTTPS origins or paths"
+        )
 
 
 def _validate_id(value: str) -> str:
@@ -1646,9 +1679,7 @@ def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
             os.unlink(temporary)
 
 
-def _reject_unknown(
-    raw: dict[str, Any], allowed: set[str], path: Path
-) -> None:
+def _reject_unknown(raw: dict[str, Any], allowed: set[str], path: Path) -> None:
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(f"{path}: unknown field(s): {', '.join(unknown)}")

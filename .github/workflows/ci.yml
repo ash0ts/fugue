@@ -93,7 +93,7 @@ jobs:
           tests/test_support_data_authority.py tests/test_enterprise_evidence_use.py
           tests/test_experiment_views.py tests/test_comparison.py
           tests/test_component_imports.py tests/test_tasksets.py
-          tests/test_mcp_release_qualification.py
+          tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
 
   quality:
     name: Quality, build, and command smoke
@@ -132,6 +132,7 @@ jobs:
           uv run fugue run pilot --preview --json
           uv run fugue runs --json
           uv run fugue research --help
+          uv run fugue sandbox wandb --help
           uv run fugue check examples/comparisons/source-use-skill/comparison.yaml
           uv run fugue demo source-use --out /tmp/fugue-source-use-replay --json
       - name: Render README Mermaid diagrams

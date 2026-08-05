@@ -1,0 +1,55 @@
+schema_version: 1
+id: wandb-mcp-maintenance-discovery-claude-serverless-v1
+question: Does the exact 0.4 candidate change how Claude investigates the frozen discovery evidence compared with the exact 0.3.7 baseline?
+taskset:
+  tasks: discovery-tasks.jsonl
+  private_labels: discovery-private-labels.jsonl
+baseline:
+  label: W&B MCP 0.3.7 exact revision
+  integrations: [wandb-mcp-0-3-7]
+candidate:
+  label: W&B MCP 0.4 candidate exact revision
+  integrations: [wandb-mcp-0-4]
+changed: [integrations]
+evaluators:
+  - id: maintenance-facts
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+  - id: maintainer-quality
+    type: llm_judge
+    required: true
+    profile: anthropic/claude-sonnet-5
+    calibration: judge-calibration.json
+    rubric: >-
+      Score only evidence grounding, usefulness to a maintainer, prioritization
+      and actionability, and calibration about incomplete investigation. A
+      confident completeness claim without inspected support is a critical
+      failure. Do not reward verbosity or familiarity with a particular MCP
+      revision.
+    dimensions:
+      - evidence_grounding
+      - maintainer_usefulness
+      - prioritization
+      - uncertainty_calibration
+    evidence: [tool_names]
+    reserve_cost_usd: 0.10
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  max_cost_usd: 20
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  trace_content: full
+  environment:
+    type: wandb
+    runtime_lock: .fugue/wandb-serverless-runtime.lock.json
+    cpus: 2
+    memory_mb: 4096
+    storage_mb: 10240
+    network_mode: public
+    max_timeout_seconds: 1800
+    max_lifetime_seconds: 2400
+    delete: true
