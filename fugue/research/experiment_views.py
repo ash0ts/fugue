@@ -439,6 +439,669 @@ def experiment_view_from_dict(raw: Mapping[str, Any]) -> ExperimentViewV1:
     return view
 
 
+def build_comparison_design_view(
+    preview: Mapping[str, Any],
+    *,
+    approval_state: str = "awaiting_approval",
+) -> ExperimentViewV1:
+    """Project one governed comparison preview into the canonical public design."""
+
+    comparison = _mapping(preview.get("comparison"), "comparison")
+    readiness = _mapping(preview.get("readiness"), "readiness")
+    matrix = _mapping(preview.get("matrix"), "matrix")
+    experiment = _mapping_or_empty(preview.get("experiment"))
+    execution = _mapping(comparison.get("execution"), "comparison.execution")
+    environment = _mapping_or_empty(execution.get("environment"))
+    research_view = _mapping_or_empty(experiment.get("research_view"))
+    task_count = int(readiness.get("task_count") or 0)
+    taskset_digest = str(readiness.get("taskset_digest") or "")
+    comparison_id = str(comparison.get("id") or "")
+    preview_digest = str(preview.get("preview_digest") or "")
+    harness_ids = _ordered_values(
+        [str(item) for item in execution.get("harnesses") or ()]
+        + [str(item) for item in matrix.get("harnesses") or ()]
+    )
+    raw_cells = [
+        item for item in matrix.get("matrix_cells") or () if isinstance(item, Mapping)
+    ]
+    attempts: Counter[tuple[str, str, str]] = Counter()
+    cells: list[ExperimentCellViewV1] = []
+    for raw in raw_cells[:EXPERIMENT_VIEW_CELL_LIMIT]:
+        variant = str(raw.get("variant_id") or "")
+        harness = str(raw.get("harness") or "")
+        task_id = str(raw.get("task_id") or "")
+        coordinate = (variant, harness, task_id)
+        attempts[coordinate] += 1
+        applicable = bool(raw.get("applicable", True))
+        cells.append(
+            ExperimentCellViewV1(
+                cell_id=_opaque_cell_id({**raw, "trial_index": attempts[coordinate]}),
+                task_label=humanize_display_id(task_id),
+                factor_levels={"candidate": variant},
+                attempt=attempts[coordinate],
+                execution_status="queued" if applicable else "not_applicable",
+                task_outcome="pending" if applicable else "not_applicable",
+                evaluation_status="pending" if applicable else "not_applicable",
+                evidence_status="pending" if applicable else "not_applicable",
+                reason_code=None if applicable else "not_applicable",
+            )
+        )
+    matrix_size = int(
+        readiness.get("estimated_cells")
+        or matrix.get("estimated_trials")
+        or matrix.get("cells")
+        or len(raw_cells)
+    )
+    model = str(execution.get("model") or "")
+    attempts_per_cell = int(execution.get("attempts") or 0)
+    environment_type = str(environment.get("type") or "harbor")
+    runtime_label = (
+        "W&B Serverless Sandbox"
+        if environment_type == "wandb"
+        else humanize_display_id(environment_type)
+    )
+    runtime_details: dict[str, str | int | bool] = {
+        "locked_before_execution": True,
+    }
+    if environment.get("runtime_lock"):
+        runtime_details["runtime_lock"] = str(environment["runtime_lock"])
+    if environment.get("delete") is not None:
+        runtime_details["delete_after_run"] = bool(environment["delete"])
+    fixed_conditions = [
+        ExperimentFactorV1(
+            name="model",
+            levels=(model,),
+            label="Model",
+        ),
+        ExperimentFactorV1(
+            name="harness",
+            levels=harness_ids,
+            label="Harness",
+        ),
+        ExperimentFactorV1(
+            name="taskset",
+            levels=(taskset_digest,),
+            label="Locked taskset",
+        ),
+        ExperimentFactorV1(
+            name="attempts",
+            levels=(str(attempts_per_cell),),
+            label="Attempts per aligned cell",
+        ),
+        ExperimentFactorV1(
+            name="environment",
+            levels=(environment_type,),
+            label="Execution environment",
+        ),
+    ]
+    fixed_conditions = [
+        item for item in fixed_conditions if all(level for level in item.levels)
+    ]
+    baseline = _mapping(comparison.get("baseline"), "comparison.baseline")
+    candidate = _mapping(comparison.get("candidate"), "comparison.candidate")
+    baseline_label = str(baseline.get("label") or "Baseline")
+    candidate_label = str(candidate.get("label") or "Candidate")
+    taskset = ExperimentDescriptorV1(
+        id=f"{comparison_id}-taskset",
+        label=f"{task_count} locked comparison tasks",
+        digest=taskset_digest or None,
+        details={"task_count": task_count},
+    )
+    task_design = _research_task_design(research_view, {})
+    if task_design is not None and not task_design.evidence_links:
+        task_design = ExperimentTaskDesignV1(
+            title=task_design.title,
+            summary=task_design.summary,
+            interaction_mode=task_design.interaction_mode,
+            tools=task_design.tools,
+            resources=task_design.resources,
+            evidence_links=(
+                {
+                    "system": "fugue",
+                    "kind": "task_definition",
+                    "ref": taskset.id,
+                    **({"digest": taskset_digest} if taskset_digest else {}),
+                },
+            ),
+        )
+    return experiment_view_from_dict(
+        ExperimentViewV1(
+            schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
+            kind="design",
+            question=str(comparison.get("question") or ""),
+            hypothesis=(
+                "The candidate will improve required evaluation outcomes without "
+                "critical regressions relative to the exact baseline."
+            ),
+            context=(
+                "Only the declared candidate change varies; task inputs, attempts, "
+                "harnesses, model, evaluator revisions, and runtime policy remain "
+                "locked."
+            ),
+            observation=str(research_view.get("observation") or "").strip() or None,
+            rationale=str(research_view.get("rationale") or "").strip() or None,
+            alternative_explanations=tuple(
+                str(item)
+                for item in research_view.get("alternative_explanations") or ()
+                if str(item).strip()
+            ),
+            success_definition=(
+                str(research_view.get("success_definition") or "").strip() or None
+            ),
+            task_design=task_design,
+            prompt_design=_research_prompt_design(research_view),
+            evaluation_design=_research_evaluation_design(research_view),
+            fixed_conditions=tuple(fixed_conditions),
+            varied_factors=(
+                ExperimentFactorV1(
+                    name="candidate",
+                    levels=("baseline", "candidate"),
+                    label="Compared candidate",
+                    level_labels={
+                        "baseline": baseline_label,
+                        "candidate": candidate_label,
+                    },
+                ),
+            ),
+            treatment_arms=(
+                ExperimentTreatmentArmV1(
+                    id="baseline",
+                    label=baseline_label,
+                    factor_levels={"candidate": "baseline"},
+                ),
+                ExperimentTreatmentArmV1(
+                    id="candidate",
+                    label=candidate_label,
+                    factor_levels={"candidate": "candidate"},
+                ),
+            ),
+            measured_outcomes=tuple(
+                str(item.get("id"))
+                for item in comparison.get("evaluators") or ()
+                if isinstance(item, Mapping) and item.get("id")
+            ),
+            taskset=taskset,
+            harnesses=tuple(
+                ExperimentDescriptorV1(
+                    id=value,
+                    label=humanize_display_id(value),
+                )
+                for value in harness_ids
+            ),
+            runtime=ExperimentDescriptorV1(
+                id=environment_type,
+                label=runtime_label,
+                details=runtime_details,
+            ),
+            matrix_size=matrix_size,
+            preview_digest=preview_digest or None,
+            approval_state=approval_state,
+            cell_limit=matrix_size,
+            reserved_cost_usd=float(readiness.get("estimated_cost_usd") or 0.0),
+            cells=tuple(cells),
+            omitted_cells=max(0, len(raw_cells) - len(cells)),
+        ).to_dict()
+    )
+
+
+def build_comparison_progress_view(
+    preview: Mapping[str, Any],
+    *,
+    phase: str,
+    completed_cells: int = 0,
+    state_counts: Mapping[str, int] | None = None,
+) -> ExperimentViewV1:
+    """Publish comparison lifecycle without inventing unobserved cell state."""
+
+    readiness = _mapping(preview.get("readiness"), "readiness")
+    matrix = _mapping(preview.get("matrix"), "matrix")
+    matrix_size = int(
+        readiness.get("estimated_cells")
+        or matrix.get("estimated_trials")
+        or matrix.get("cells")
+        or 0
+    )
+    return experiment_view_from_dict(
+        ExperimentViewV1(
+            schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
+            kind="progress",
+            matrix_size=matrix_size,
+            preview_digest=str(preview.get("preview_digest") or "") or None,
+            approval_state="approved",
+            cell_limit=matrix_size,
+            reserved_cost_usd=float(readiness.get("estimated_cost_usd") or 0.0),
+            phase=phase,
+            completed_cells=completed_cells,
+            state_counts=dict(state_counts or {}),
+            omitted_cells=matrix_size,
+        ).to_dict()
+    )
+
+
+def build_comparison_evaluation_view(
+    result: Mapping[str, Any],
+    *,
+    result_ref: str | None = None,
+) -> ExperimentViewV1:
+    """Project comparison output while preserving outcome/evidence boundaries."""
+
+    rows = int(result.get("rows") or 0)
+    pairs = [
+        item for item in result.get("paired_cases") or () if isinstance(item, Mapping)
+    ]
+    baseline_total = sum(bool(item.get("baseline_prediction_id")) for item in pairs)
+    candidate_total = sum(bool(item.get("candidate_prediction_id")) for item in pairs)
+    if not pairs and rows:
+        baseline_total = rows // 2
+        candidate_total = rows - baseline_total
+    operational = _mapping_or_empty(result.get("operational_summary"))
+    execution_states = {
+        str(key): int(value)
+        for key, value in _mapping_or_empty(operational.get("execution_states")).items()
+    }
+    evidence_states = {
+        str(key): int(value)
+        for key, value in _mapping_or_empty(operational.get("evidence_states")).items()
+    }
+    infrastructure_failures = int(operational.get("infrastructure_failures") or 0)
+    incomplete = int(result.get("incomplete") or 0)
+    required_incomplete = int(result.get("required_evaluations_incomplete") or 0)
+    missing_evidence = sum(
+        count
+        for state, count in evidence_states.items()
+        if state not in {"ok", "linked", "reconciled", "not_applicable"}
+    )
+    evidence_eligible = (
+        rows > 0
+        and not incomplete
+        and not required_incomplete
+        and not infrastructure_failures
+        and not missing_evidence
+    )
+    limitations = [
+        str(item) for item in result.get("limitations") or () if str(item).strip()
+    ]
+    if rows == 0:
+        limitations.append("No comparison rows were observed.")
+    if required_incomplete:
+        limitations.append(
+            f"{required_incomplete} required authored or judge evaluations are incomplete."
+        )
+    if infrastructure_failures:
+        limitations.append(
+            f"{infrastructure_failures} attempts had infrastructure failures."
+        )
+    if missing_evidence:
+        limitations.append(
+            f"{missing_evidence} attempts lack reconciled required evidence."
+        )
+    evidence_links = _comparison_evidence_links(
+        result.get("evidence_links"),
+        result_ref=result_ref,
+        result_source=str(result.get("source") or ""),
+        result_digest=str(result.get("result_digest") or ""),
+    )
+    aligned_pairs = (
+        int(result.get("improved") or 0)
+        + int(result.get("regressed") or 0)
+        + int(result.get("unchanged") or 0)
+    )
+    result_digest = str(result.get("result_digest") or "")
+    arm_totals = (
+        {
+            "arm": "baseline",
+            "arm_label": "Baseline",
+            "harness": "all",
+            "passed": int(result.get("baseline_passed") or 0),
+            "total": baseline_total,
+            "factor_levels": {"candidate": "baseline"},
+        },
+        {
+            "arm": "candidate",
+            "arm_label": "Candidate",
+            "harness": "all",
+            "passed": int(result.get("candidate_passed") or 0),
+            "total": candidate_total,
+            "factor_levels": {"candidate": "candidate"},
+        },
+    )
+    return experiment_view_from_dict(
+        ExperimentViewV1(
+            schema_version=EXPERIMENT_VIEW_SCHEMA_VERSION,
+            kind="evaluation",
+            matrix_size=rows,
+            preview_digest=str(result.get("preview_digest") or "") or None,
+            approval_state="approved",
+            cell_limit=rows,
+            phase="completed",
+            completed_cells=rows,
+            observed_cost_usd=_optional_float(operational.get("observed_cost_usd")),
+            state_counts=execution_states,
+            omitted_cells=rows,
+            infrastructure_health=(
+                "unavailable"
+                if rows == 0
+                else "degraded"
+                if infrastructure_failures
+                else "healthy"
+            ),
+            arm_totals=arm_totals,
+            aligned_comparisons=(
+                {
+                    "analysis_id": "deterministic-pass-rate-delta",
+                    "comparison_id": str(result.get("comparison_id") or ""),
+                    "estimate": (
+                        (int(result.get("candidate_passed") or 0) / candidate_total)
+                        - (int(result.get("baseline_passed") or 0) / baseline_total)
+                        if baseline_total and candidate_total
+                        else 0.0
+                    ),
+                    "pairs": aligned_pairs,
+                    **({"digest": result_digest} if result_digest else {}),
+                },
+            ),
+            behavioral_measures=_comparison_behavioral_measures(operational),
+            mechanism_funnel=_comparison_mechanism_funnel(
+                result.get("mechanism_summary")
+            ),
+            outcome_summaries=_comparison_outcome_summaries(
+                result,
+                baseline_total=baseline_total,
+                candidate_total=candidate_total,
+                infrastructure_failures=infrastructure_failures,
+                missing_evidence=missing_evidence,
+            ),
+            score_summaries=_comparison_score_summaries(result),
+            evidence_eligible=evidence_eligible,
+            limitations=tuple(dict.fromkeys(limitations)),
+            evidence_links=evidence_links,
+        ).to_dict()
+    )
+
+
+def _comparison_evidence_links(
+    raw: Any,
+    *,
+    result_ref: str | None,
+    result_source: str,
+    result_digest: str,
+) -> tuple[dict[str, str], ...]:
+    links: list[dict[str, str]] = []
+    for item in _sequence(raw, "comparison evidence links"):
+        if not isinstance(item, Mapping):
+            continue
+        label = str(item.get("label") or "Evidence")
+        url = str(item.get("url") or "")
+        if not url or len(url) > 1000:
+            continue
+        kind = label.lower().replace(" ", "_")
+        link = {
+            "system": "weave" if "weave" in url.lower() else "wandb",
+            "kind": kind,
+            "ref": url,
+        }
+        if url.startswith("https://"):
+            link["uri"] = url
+        links.append(link)
+    digest = result_digest if len(result_digest) == 64 else ""
+    if result_source and len(result_source) <= 1000:
+        links.append(
+            {
+                "system": "wandb",
+                "kind": "comparison_rows",
+                "ref": result_source,
+            }
+        )
+    if result_ref and len(result_ref) <= 1000:
+        links.append(
+            {
+                "system": "fugue",
+                "kind": "comparison_result",
+                "ref": result_ref,
+                **({"digest": digest} if digest else {}),
+            }
+        )
+    return _evidence_links(links)
+
+
+def _comparison_behavioral_measures(
+    operational: Mapping[str, Any],
+) -> dict[str, Any]:
+    measures: dict[str, Any] = {}
+    usage_rows = int(operational.get("usage_rows") or 0)
+    for key in ("input_tokens", "output_tokens"):
+        value = operational.get(key)
+        if (
+            usage_rows
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+        ):
+            measures[key] = {
+                "observed": usage_rows,
+                "mean": float(value) / usage_rows,
+            }
+    latency_rows = int(operational.get("latency_rows") or 0)
+    latency_ms = operational.get("latency_ms")
+    if (
+        latency_rows
+        and isinstance(latency_ms, int | float)
+        and not isinstance(latency_ms, bool)
+    ):
+        measures["wall_time_sec"] = {
+            "observed": latency_rows,
+            "mean": float(latency_ms) / latency_rows / 1000,
+        }
+    return measures
+
+
+def _comparison_mechanism_funnel(raw: Any) -> tuple[ExperimentMechanismStageV1, ...]:
+    stages: list[ExperimentMechanismStageV1] = []
+    for stage_id, raw_stage in _mapping_or_empty(raw).items():
+        if not isinstance(raw_stage, Mapping):
+            continue
+        by_arm: list[ExperimentMechanismArmV1] = []
+        for arm in ("baseline", "candidate"):
+            values = raw_stage.get(arm)
+            if not isinstance(values, Mapping):
+                continue
+            eligible = int(values.get("applicable") or 0)
+            reached = min(eligible, int(values.get("observed") or 0))
+            by_arm.append(
+                ExperimentMechanismArmV1(
+                    arm=arm,
+                    harness="all",
+                    eligible=eligible,
+                    reached=reached,
+                )
+            )
+        stages.append(
+            ExperimentMechanismStageV1(
+                id=str(stage_id),
+                label=humanize_display_id(str(stage_id)),
+                eligible=sum(item.eligible for item in by_arm),
+                reached=sum(item.reached for item in by_arm),
+                by_arm=tuple(by_arm),
+            )
+        )
+    return tuple(stages)
+
+
+def _comparison_outcome_summaries(
+    result: Mapping[str, Any],
+    *,
+    baseline_total: int,
+    candidate_total: int,
+    infrastructure_failures: int,
+    missing_evidence: int,
+) -> tuple[ExperimentOutcomeSummaryV1, ...]:
+    def arm_summary(
+        arm: str,
+        label: str,
+        passed: int,
+        total: int,
+    ) -> ExperimentOutcomeSummaryV1:
+        return ExperimentOutcomeSummaryV1(
+            id=f"{arm}-deterministic",
+            label=label,
+            status=(
+                "unavailable"
+                if not total
+                else "passed"
+                if passed == total
+                else "failed"
+            ),
+            passed=passed,
+            total=total,
+            unavailable=0,
+        )
+
+    rows = int(result.get("rows") or 0)
+    summaries = [
+        arm_summary(
+            "baseline",
+            "Baseline deterministic task outcome",
+            int(result.get("baseline_passed") or 0),
+            baseline_total,
+        ),
+        arm_summary(
+            "candidate",
+            "Candidate deterministic task outcome",
+            int(result.get("candidate_passed") or 0),
+            candidate_total,
+        ),
+        ExperimentOutcomeSummaryV1(
+            id="infrastructure",
+            label="Infrastructure execution",
+            status=(
+                "unavailable"
+                if not rows
+                else "passed"
+                if not infrastructure_failures
+                else "failed"
+            ),
+            passed=max(0, rows - infrastructure_failures),
+            total=rows,
+            unavailable=0,
+        ),
+        ExperimentOutcomeSummaryV1(
+            id="evidence-reconciliation",
+            label="Required evidence reconciliation",
+            status=(
+                "unavailable"
+                if not rows
+                else "passed"
+                if not missing_evidence
+                else "failed"
+            ),
+            passed=max(0, rows - missing_evidence),
+            total=rows,
+            unavailable=missing_evidence,
+        ),
+    ]
+    judge = _mapping_or_empty(result.get("judge_summary"))
+    judge_status = str(judge.get("status") or "not_used")
+    unavailable = int(judge.get("unavailable_attempts") or judge.get("attempts") or 0)
+    if judge_status == "not_used":
+        summaries.append(
+            ExperimentOutcomeSummaryV1(
+                id="judge-evidence",
+                label="Judge evidence completeness",
+                status="not_applicable",
+                unavailable=0,
+            )
+        )
+    elif judge_status == "unavailable":
+        summaries.append(
+            ExperimentOutcomeSummaryV1(
+                id="judge-evidence",
+                label="Judge evidence completeness",
+                status="unavailable",
+                total=unavailable,
+                unavailable=unavailable,
+            )
+        )
+    else:
+        observed = sum(
+            int(values.get("evaluated") or 0)
+            for dimensions in _mapping_or_empty(judge.get("by_variant")).values()
+            if isinstance(dimensions, Mapping)
+            for values in dimensions.values()
+            if isinstance(values, Mapping)
+        )
+        summaries.append(
+            ExperimentOutcomeSummaryV1(
+                id="judge-evidence",
+                label="Judge evidence completeness",
+                status=(
+                    "unavailable"
+                    if not observed
+                    else "passed"
+                    if not unavailable
+                    else "failed"
+                ),
+                passed=max(0, observed - unavailable),
+                total=observed,
+                unavailable=unavailable,
+            )
+        )
+    return tuple(summaries)
+
+
+def _comparison_score_summaries(
+    result: Mapping[str, Any],
+) -> tuple[ExperimentScoreSummaryV1, ...]:
+    summaries: list[ExperimentScoreSummaryV1] = []
+    deterministic = _mapping_or_empty(result.get("deterministic_summary"))
+    dimensions: defaultdict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for arm in ("baseline", "candidate"):
+        arm_summary = deterministic.get(arm)
+        if not isinstance(arm_summary, Mapping):
+            continue
+        for dimension, values in _mapping_or_empty(
+            arm_summary.get("dimensions")
+        ).items():
+            if isinstance(values, Mapping):
+                dimensions[str(dimension)].append(values)
+    for dimension, values in sorted(dimensions.items()):
+        observed = sum(int(item.get("evaluated") or 0) for item in values)
+        passed = sum(int(item.get("passed") or 0) for item in values)
+        means = [
+            float(item["mean"])
+            for item in values
+            if isinstance(item.get("mean"), int | float)
+            and not isinstance(item.get("mean"), bool)
+        ]
+        summaries.append(
+            ExperimentScoreSummaryV1(
+                id=f"deterministic-{dimension}",
+                label=f"Deterministic: {humanize_display_id(dimension)}",
+                observed=observed,
+                passed=passed,
+                failed=max(0, observed - passed),
+                mean=(sum(means) / len(means) if means else None),
+            )
+        )
+    judge = _mapping_or_empty(result.get("judge_summary"))
+    for arm, raw_dimensions in _mapping_or_empty(judge.get("by_variant")).items():
+        if not isinstance(raw_dimensions, Mapping):
+            continue
+        for dimension, values in raw_dimensions.items():
+            if not isinstance(values, Mapping):
+                continue
+            summaries.append(
+                ExperimentScoreSummaryV1(
+                    id=f"judge-{arm}-{dimension}",
+                    label=(
+                        f"Judge {humanize_display_id(str(arm))}: "
+                        f"{humanize_display_id(str(dimension))}"
+                    ),
+                    observed=int(values.get("evaluated") or 0),
+                    mean=_optional_float(values.get("mean")),
+                )
+            )
+    return tuple(summaries)
+
+
 def build_design_view(
     preview: Mapping[str, Any], *, approval_state: str = "awaiting_approval"
 ) -> ExperimentViewV1:
@@ -1967,9 +2630,7 @@ def _record_evidence_links(record: Mapping[str, Any]) -> tuple[dict[str, str], .
                         "ref": f"{project}/call/{call_id}",
                     }
                 )
-    manifest_digest = str(
-        provenance.get("reviewed_cohort_manifest_digest") or ""
-    )
+    manifest_digest = str(provenance.get("reviewed_cohort_manifest_digest") or "")
     if manifest_digest:
         links.append(
             {

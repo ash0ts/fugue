@@ -143,6 +143,103 @@ def create_mcp_server(  # noqa: C901
         return research.catalog(research_id)
 
     @mcp.tool()
+    def fugue_comparison_catalog(study_id: str) -> dict[str, Any]:
+        """List allowlisted comparisons; arbitrary paths are never accepted."""
+
+        require("research:read", study_id)
+        research.store.get_study(study_id)
+        return {"comparisons": list(research.comparisons.catalog())}
+
+    @mcp.tool()
+    def fugue_comparison_readiness(
+        study_id: str,
+        comparison_id: str,
+    ) -> dict[str, Any]:
+        """Check one registered comparison without preparing or executing it."""
+
+        require("research:read", study_id)
+        research.store.get_study(study_id)
+        return research.comparisons.readiness(comparison_id)
+
+    @mcp.tool()
+    def fugue_comparison_preview(
+        study_id: str,
+        comparison_id: str,
+    ) -> dict[str, Any]:
+        """Create the immutable plan for one registered comparison."""
+
+        require("study:preview", study_id)
+        return research.comparisons.preview(study_id, comparison_id)
+
+    @mcp.tool()
+    def fugue_comparison_request_approval(
+        study_id: str,
+        comparison_id: str,
+        preview_digest: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Request human approval for an exact comparison preview."""
+
+        require("approval:request", study_id)
+        result = research.comparisons.request_approval(
+            study_id,
+            comparison_id,
+            preview_digest,
+            idempotency_key=idempotency_key,
+        )
+        research.publish_records()
+        return result
+
+    @mcp.tool()
+    def fugue_comparison_start(
+        study_id: str,
+        comparison_id: str,
+        preview_digest: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Start only an already-approved exact preview; never approve it."""
+
+        require("study:start-approved", study_id)
+        result = research.comparisons.start(
+            study_id,
+            comparison_id,
+            preview_digest,
+            idempotency_key=idempotency_key,
+        )
+        research.publish_records()
+        return result
+
+    @mcp.tool()
+    def fugue_comparison_watch(
+        study_id: str,
+        comparison_id: str,
+        preview_digest: str,
+    ) -> dict[str, Any]:
+        """Read bounded status for one exact comparison execution."""
+
+        require("study:watch", study_id)
+        return research.comparisons.watch(
+            study_id,
+            comparison_id,
+            preview_digest,
+        )
+
+    @mcp.tool()
+    def fugue_comparison_result(
+        study_id: str,
+        comparison_id: str,
+        preview_digest: str,
+    ) -> dict[str, Any]:
+        """Read the safe exported result for a completed comparison."""
+
+        require("research:read", study_id)
+        return research.comparisons.result(
+            study_id,
+            comparison_id,
+            preview_digest,
+        )
+
+    @mcp.tool()
     def fugue_study_create(
         study_id: str,
         title: str,

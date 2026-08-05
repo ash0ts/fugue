@@ -22,6 +22,7 @@ from fugue.bench.task_authoring import (
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.candidate_sources import CandidateSourceRegistry
+from fugue.research.comparisons import ComparisonControlService
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     TERMINAL_EXPERIMENT_STATES,
@@ -129,12 +130,19 @@ class ResearchService:
         lease_heartbeat_interval: float | None = None,
     ) -> None:
         self.repo_root = repo_root.resolve()
+        self.env_file = env_file.resolve() if env_file is not None else None
         self.campaign = campaign_service or CampaignService(self.repo_root, env_file)
         self.store = store or StudyStore(self.repo_root)
         self.record_publisher = (
             record_publisher or ResearchRecordPublisher.from_environment(self.store)
         )
         self.approvals = approval_ledger or ApprovalLedger(self.store.path)
+        self.comparisons = ComparisonControlService(
+            self.repo_root,
+            store=self.store,
+            approvals=self.approvals,
+            env_file=self.env_file,
+        )
         self.trace_registry = trace_registry or TraceSourceRegistry.from_file(
             _optional_config(
                 self.repo_root / "configs/fugue/research/trace-sources.yaml"
@@ -173,6 +181,7 @@ class ResearchService:
             "trace_sources": list(self.trace_registry.catalog()),
             "candidate_sources": list(self.candidate_sources.catalog()),
             "task_recipes": list(reviewed_task_recipe_ids()),
+            "comparisons": list(self.comparisons.catalog()),
         }
 
     def request_study_approval(

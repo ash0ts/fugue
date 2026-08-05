@@ -102,6 +102,21 @@ class RequestStudyApprovalBody(StrictBody):
     idempotency_key: str
 
 
+class ComparisonStartBody(StrictBody):
+    preview_digest: str
+    idempotency_key: str
+
+
+class ComparisonPreviewBody(StrictBody):
+    comparison_id: str
+
+
+class ComparisonApprovalBody(StrictBody):
+    comparison_id: str
+    preview_digest: str
+    idempotency_key: str
+
+
 class CancelExperimentBody(StrictBody):
     idempotency_key: str
     reason: str
@@ -311,6 +326,88 @@ def create_app(  # noqa: C901
     @app.get("/v1/research/{research_id}/catalog")
     def get_research_catalog(research_id: str) -> dict[str, Any]:
         return research.catalog(research_id)
+
+    @app.get("/v1/research/{research_id}/comparisons")
+    def comparison_catalog(research_id: str) -> dict[str, Any]:
+        research.store.get_study(research_id)
+        return {"comparisons": list(research.comparisons.catalog())}
+
+    @app.get(
+        "/v1/research/{research_id}/comparisons/{comparison_id}/readiness"
+    )
+    def comparison_readiness(
+        research_id: str,
+        comparison_id: str,
+    ) -> dict[str, Any]:
+        research.store.get_study(research_id)
+        return research.comparisons.readiness(comparison_id)
+
+    @app.post("/v1/research/{research_id}/comparisons:preview")
+    def comparison_preview(
+        research_id: str,
+        body: ComparisonPreviewBody,
+    ) -> dict[str, Any]:
+        return research.comparisons.preview(research_id, body.comparison_id)
+
+    @app.post("/v1/research/{research_id}/comparisons:request-approval")
+    def comparison_request_approval(
+        research_id: str,
+        body: ComparisonApprovalBody,
+    ) -> dict[str, Any]:
+        result = research.comparisons.request_approval(
+            research_id,
+            body.comparison_id,
+            body.preview_digest,
+            idempotency_key=body.idempotency_key,
+        )
+        research.publish_records()
+        return result
+
+    @app.post(
+        "/v1/research/{research_id}/comparisons/{comparison_id}:start"
+    )
+    def comparison_start(
+        research_id: str,
+        comparison_id: str,
+        body: ComparisonStartBody,
+    ) -> dict[str, Any]:
+        result = research.comparisons.start(
+            research_id,
+            comparison_id,
+            body.preview_digest,
+            idempotency_key=body.idempotency_key,
+        )
+        research.publish_records()
+        return result
+
+    @app.get(
+        "/v1/research/{research_id}/comparisons/{comparison_id}/{preview_digest}"
+    )
+    def comparison_watch(
+        research_id: str,
+        comparison_id: str,
+        preview_digest: str,
+    ) -> dict[str, Any]:
+        return research.comparisons.watch(
+            research_id,
+            comparison_id,
+            preview_digest,
+        )
+
+    @app.get(
+        "/v1/research/{research_id}/comparisons/{comparison_id}/"
+        "{preview_digest}/result"
+    )
+    def comparison_result(
+        research_id: str,
+        comparison_id: str,
+        preview_digest: str,
+    ) -> dict[str, Any]:
+        return research.comparisons.result(
+            research_id,
+            comparison_id,
+            preview_digest,
+        )
 
     @app.get("/v1/studies/{study_id}/context")
     def get_study_context(

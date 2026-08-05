@@ -44,9 +44,11 @@ from fugue.research.contracts import (
 from fugue.research.database import connect_database
 from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
+    ExperimentViewV1,
     build_design_view,
     build_evaluation_view,
     build_progress_view,
+    experiment_view_from_dict,
 )
 from fugue.research.records import (
     ResearchEvidenceRefV1,
@@ -1894,9 +1896,7 @@ class StudyStore:
             or not isinstance(call_ids, list)
             or not call_ids
             or any(
-                not isinstance(call_id, str)
-                or not call_id
-                or len(call_id) > 200
+                not isinstance(call_id, str) or not call_id or len(call_id) > 200
                 for call_id in call_ids
             )
         ):
@@ -1996,9 +1996,7 @@ class StudyStore:
                 ):
                     return ()
             merged.append({**safe_prediction_row(stored), **public})
-        if set(stored_rows) != {
-            str(row.get("prediction_id") or "") for row in merged
-        }:
+        if set(stored_rows) != {str(row.get("prediction_id") or "") for row in merged}:
             return ()
         return tuple(merged)
 
@@ -2092,6 +2090,46 @@ class StudyStore:
                 for row in rows
             ],
         }
+
+    def record_experiment_view_event(
+        self,
+        *,
+        research_id: str,
+        experiment_id: str,
+        producer_event_id: str,
+        classification: Any,
+        state: Any,
+        message: str,
+        view: ExperimentViewV1,
+        progress: Mapping[str, Any] | None = None,
+        reserved_cost_usd: float | None = None,
+        observed_cost_usd: float | None = None,
+        evidence: tuple[ResearchEvidenceRefV1, ...] = (),
+        attribution: AttributionV1 | None = None,
+    ) -> ResearchLogEventV1:
+        """Append one idempotent, schema-checked canonical experiment view."""
+
+        self.get_study(research_id)
+        accepted = experiment_view_from_dict(view.to_dict())
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            event = self._append_research_log_event(
+                conn,
+                producer_event_id=producer_event_id,
+                research_id=research_id,
+                study_id=experiment_id,
+                classification=classification,
+                state=state,
+                message=message,
+                progress=progress,
+                reserved_cost_usd=reserved_cost_usd,
+                observed_cost_usd=observed_cost_usd,
+                evidence=evidence,
+                summary={"experiment_view": accepted.to_dict()},
+                actor=attribution,
+            )
+            conn.commit()
+        return event
 
     def _append_research_log_event(
         self,
