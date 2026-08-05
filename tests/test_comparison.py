@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from fugue.bench.comparison import (
     analyze_comparison_rows,
     check_comparison,
     comparison_from_dict,
+    compile_comparison,
     load_comparison,
     preview_comparison,
     scaffold_comparison,
@@ -20,6 +22,7 @@ from fugue.bench.comparison import (
 )
 
 EXAMPLE = Path("examples/comparisons/source-use-replay")
+LIVE_SKILL_EXAMPLE = Path("examples/comparisons/source-use-skill")
 
 
 def test_source_use_comparison_is_ready_and_exact() -> None:
@@ -39,6 +42,27 @@ def test_source_use_comparison_is_ready_and_exact() -> None:
     assert preview.matrix["estimated_trials"] == 16
     assert preview.matrix["applicable_cells"] == 16
     assert not (root / COMPARISON_RUNTIME_ROOT / spec.spec_digest).exists()
+
+
+def test_live_source_use_skill_comparison_has_locked_holdout_resources() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        LIVE_SKILL_EXAMPLE / "comparison.yaml", repo_root=root
+    )
+
+    readiness = check_comparison(spec, repo_root=root)
+    preview = preview_comparison(spec, repo_root=root)
+
+    assert readiness.status == "ready"
+    assert readiness.task_count == 8
+    assert readiness.base_failures == 8
+    assert readiness.gold_passes == 8
+    assert readiness.actual_changes == ("skills",)
+    assert readiness.estimated_cells == 32
+    assert preview.matrix["estimated_trials"] == 32
+    assert {cell["harness"] for cell in preview.matrix["matrix_cells"]} == {
+        "codex"
+    }
 
 
 def test_comparison_rejects_unknown_fields_and_undeclared_changes() -> None:
@@ -119,6 +143,108 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
     assert result.regressed == 1
     assert result.unchanged == 2
     assert result.incomplete == 0
+    assert result.judge_summary == {"status": "not_used"}
+    assert result.deterministic_summary["candidate"]["passed"] == 6
+
+
+def test_public_task_resources_are_digest_locked_into_the_task(tmp_path: Path) -> None:
+    (tmp_path / "configs/fugue/skills/verify-current-source").mkdir(
+        parents=True
+    )
+    (tmp_path / "configs/fugue/skills/verify-current-source/SKILL.md").write_text(
+        "---\nname: verify-current-source\ndescription: Verify sources.\n---\n"
+    )
+    (tmp_path / "corpus").mkdir()
+    resource = tmp_path / "corpus" / "policy.json"
+    resource.write_text('{"documents": []}\n')
+    (tmp_path / "tasks.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "policy",
+                "input": {"question": "Read the corpus and answer."},
+                "resources": [
+                    {
+                        "path": "corpus/policy.json",
+                        "target": "/workspace/resources/corpus.json",
+                    }
+                ],
+                "partition": "holdout",
+            }
+        )
+        + "\n"
+    )
+    (tmp_path / "labels.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "policy",
+                "expected": {"answer": "yes"},
+                "base_output": {"answer": "no"},
+                "gold_output": {"answer": "yes"},
+            }
+        )
+        + "\n"
+    )
+    raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
+    raw["taskset"] = {"tasks": "tasks.jsonl", "private_labels": "labels.jsonl"}
+    spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+    _, _, public = compile_comparison(spec, repo_root=tmp_path)
+
+    assert public[0]["attachments"] == [
+        {
+            "locked_relative": "corpus/policy.json",
+            "sha256": hashlib.sha256(resource.read_bytes()).hexdigest(),
+            "target": "/workspace/resources/corpus.json",
+        }
+    ]
+    assert "@sha256:" in public[0]["environment"]["base_image"]
+
+
+def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    rows = [
+        {
+            "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+            "harness": "codex",
+            "prediction_id": "candidate-1",
+            "task_id": "expense-limit",
+            "trial_index": 1,
+            "variant_id": "candidate",
+            "skills_assigned": ["verify-current-source"],
+            "skills_registered": ["verify-current-source"],
+            "skill_registration_status": "registered",
+            "skill_invocation_evidence": {
+                "status": "observed",
+                "skills_invoked": ["verify-current-source"],
+            },
+            "inspected_paths": ["/workspace/resources/expense-policy-v4.md"],
+        },
+        {
+            "answer": {"amount": 100, "source": "expense-policy-v3.md"},
+            "harness": "codex",
+            "prediction_id": "baseline-1",
+            "task_id": "expense-limit",
+            "trial_index": 1,
+            "variant_id": "baseline",
+        },
+    ]
+    scored = score_comparison_rows(spec, rows, repo_root=root)
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest="a" * 64,
+        rows=scored,
+        source="test",
+    )
+
+    assert result.mechanism_summary["skill_assigned"]["candidate"] == {
+        "observed": 1,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert result.mechanism_summary["relevant_source_used"]["candidate"][
+        "observed"
+    ] == 1
 
 
 def test_zero_row_comparison_cannot_succeed() -> None:
