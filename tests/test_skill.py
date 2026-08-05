@@ -35,9 +35,18 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
         "only to the execution fingerprint",
         "Comparison example identity contains dataset, workload, and logical task",
         "required context.delivery",
+        "public comparison surface as an experiment compiler",
+        "taskset, baseline, candidate, evaluator, and execution policy",
+        "compute the actual candidate diff",
+        "Keep comparison preview and readiness pure",
+        "public tasks and answer-bearing labels in separate inputs",
         "one canonical V1",
         "do not add prerelease compatibility paths",
         "typed immutable repository task sources",
+        "Standard MCP JSON, Codex TOML, stdio argv",
+        "explicit import boundary that emits a reviewed typed integration",
+        "Accept standard Agent Skills only through explicit import and review",
+        "Never inherit a user's global MCP configuration",
         "Common and variant integrations add together",
         "same pure resolved plan",
         "setup --prepare is the only plan-resolved preparation boundary",
@@ -55,6 +64,8 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
         "Vector treatments fail closed",
         "BM25 and vector modes are different candidates",
         "confirmed skill/context registration",
+        "blind-judge results separate",
+        "Judge failure means evaluation unavailable",
         "one versioned prediction row",
         "one ordered pipeline",
         "versioned treatment-selection lock",
@@ -67,6 +78,9 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
         "Final-head live proof must use the exact code and runtime locks",
         "evidence from an earlier head cannot satisfy",
         "every applicable cell is terminal",
+        "technical preview until unfamiliar users",
+        "Do not rename or publish the distribution",
+        "zero-task, zero-cell, or zero-row comparison can never succeed",
         "Terminal unscored cells are permitted",
         "Curator output stays inside its immutable declaration allowlist",
     )
@@ -75,4 +89,4 @@ def test_fugue_dev_skill_preserves_release_semantics() -> None:
 
     assert "unscored cells block" not in content.lower()
     assert "raw public MCP configuration" in content
-    assert len(content.splitlines()) < 160
+    assert len(content.splitlines()) < 190
