@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 from collections.abc import Mapping
@@ -17,6 +18,7 @@ from fugue.model_plane import (
     BRIDGE_MASTER_KEY_ENV,
     ModelRoute,
     model_route_identity,
+    provider_api_key,
     provider_api_key_env,
     provider_request_headers,
     resolve_model_route,
@@ -216,6 +218,12 @@ def bridge_up(
         judge_route=judge_route,
         env=env,
     )
+    process_env = _bridge_process_environment(
+        route,
+        builder_route=builder_route,
+        judge_route=judge_route,
+        env=env,
+    )
     subprocess.run(
         docker_compose_command(
             "-f",
@@ -226,7 +234,7 @@ def bridge_up(
         ),
         cwd=Path.cwd() if repo_root is None else Path(repo_root),
         check=True,
-        env=dict(env) if env is not None else None,
+        env=process_env,
     )
     deadline = time.monotonic() + 60
     status: dict[str, Any] = {"ok": False, "error": "bridge did not start"}
@@ -243,6 +251,25 @@ def bridge_up(
             return files
         time.sleep(0.25)
     raise RuntimeError(f"LiteLLM bridge did not become ready: {status}")
+
+
+def _bridge_process_environment(
+    route: ModelRoute,
+    *,
+    builder_route: ModelRoute | None = None,
+    judge_route: ModelRoute | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Materialize provider-only aliases for Compose without persisting secrets."""
+
+    values = dict(os.environ)
+    if env is not None:
+        values.update(env)
+    for selected in (route, builder_route or route, judge_route or route):
+        credential = provider_api_key(selected, values)
+        if credential:
+            values[provider_api_key_env(selected)] = credential
+    return values
 
 
 def bridge_status(
@@ -426,7 +453,31 @@ def _verify_bridge_runtime(
     image_id = str(container.get("Image") or "")
     if not image_id.startswith("sha256:"):
         raise RuntimeError("bridge container has no immutable image id")
-    return {"runtime_lock": actual, "resolved_image_id": image_id}
+    container_environment = {
+        name: value
+        for item in (container.get("Config") or {}).get("Env") or []
+        if "=" in str(item)
+        for name, value in [str(item).split("=", 1)]
+    }
+    required_credentials = tuple(
+        dict.fromkeys(
+            provider_api_key_env(selected)
+            for selected in (route, builder_route or route, judge_route or route)
+        )
+    )
+    missing_credentials = tuple(
+        name for name in required_credentials if not container_environment.get(name, "")
+    )
+    if missing_credentials:
+        raise RuntimeError(
+            "bridge container is missing required provider credential(s): "
+            + ", ".join(missing_credentials)
+        )
+    return {
+        "runtime_lock": actual,
+        "resolved_image_id": image_id,
+        "credential_env": list(required_credentials),
+    }
 
 
 def _json_digest(value: Mapping[str, Any]) -> str:

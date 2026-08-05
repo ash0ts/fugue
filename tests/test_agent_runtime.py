@@ -22,7 +22,8 @@ def test_agent_endpoint_helpers_consume_the_canonical_harness_routes() -> None:
 def test_codex_runtime_is_locked_and_trial_install_is_verification_only() -> None:
     spec = agent_runtime.RUNTIMES["codex"]
     assert spec.version == (
-        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+fugue-mcp-meta.1+skill-use.1"
+        "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+"
+        "fugue-mcp-meta.1+skill-use.1+shell-env.1"
     )
     assert "npm ci --ignore-scripts" in spec.dockerfile
     assert "cargo build --locked --release -p codex-cli" in spec.dockerfile
@@ -135,7 +136,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert "FUGUE_WEAVE_SINGLE_TURN_KEY" in patch_source
     assert "stableTurn.end();" in patch_source
     claude_runtime = agent_runtime.RUNTIMES["claude-code"]
-    assert claude_runtime.version.endswith("+empty-response.1")
+    assert claude_runtime.version.endswith("+eval-parent.1")
     assert "npm ci --ignore-scripts" in claude_runtime.dockerfile
     assert "lib/node_modules/npm" in claude_runtime.dockerfile
     assert "bin/npm" in claude_runtime.dockerfile
@@ -150,6 +151,8 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     assert 'hook_event_name:"SessionEnd"' in ranges["claude-code"]
     assert "fugue_trial_finalized" in ranges["claude-code"]
+    assert 'command:\\"shutdown\\"' in ranges["claude-code"]
+    assert "daemon.sock" in ranges["claude-code"]
     assert ranges["claude-code"].index("_finalize_weave_session") < ranges[
         "claude-code"
     ].index("_finish_trial")
@@ -163,6 +166,10 @@ def test_weave_claude_patch_closes_empty_response_without_fake_usage() -> None:
     assert "existingSpan?.end()" in source
     assert "session.emittedChatSpanResponseKeys.add(key)" in source
     assert "usage: 0" not in source
+    assert "FUGUE_WEAVE_TRACEPARENT" in source
+    assert "FUGUE_WEAVE_TRACE_SERVER_URL" in source
+    assert "WF_TRACE_SERVER_URL" in source
+    assert "propagation.extract" in source
 
 
 def test_trial_mutator_lock_covers_task_image_conda_environments() -> None:

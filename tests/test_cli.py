@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.cli import main
+from fugue.bench.comparison import scaffold_comparison
 from fugue.bench.operator import (
     OperatorService,
     PreviewSummary,
@@ -41,9 +44,9 @@ def test_public_command_surface_is_intentionally_small() -> None:
         "result",
         "demo",
         "sandbox",
-        "provider",
         "mcp",
         "skills",
+        "provider",
         "taskset",
         "plan",
         "run",
@@ -62,6 +65,77 @@ def test_public_command_surface_is_intentionally_small() -> None:
     )
     assert "publications" in research_actions.choices
     assert "replay" in research_actions.choices["publications"].format_help()
+
+
+def test_local_preview_without_required_credentials_is_not_approvable(
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    comparison = scaffold_comparison(tmp_path / "comparison")
+    raw = yaml.safe_load(comparison.read_text(encoding="utf-8"))
+    raw["execution"]["model"] = "anthropic/claude-sonnet-5"
+    raw["execution"]["harnesses"] = ["claude-code"]
+    raw["baseline"]["integrations"] = ["missing-key-a"]
+    raw["candidate"]["skills"] = []
+    raw["candidate"]["integrations"] = ["missing-key-b"]
+    raw["changed"] = ["integrations"]
+    comparison.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
+    root = comparison.parent
+    integration_root = root / "configs/fugue/integrations"
+    integration_root.mkdir(parents=True, exist_ok=True)
+    for integration_id in ("missing-key-a", "missing-key-b"):
+        (integration_root / f"{integration_id}.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": integration_id,
+                    "version": "v1",
+                    "support": "supported",
+                    "runtime": {
+                        "type": "external",
+                        "url": f"https://api.example.com/{integration_id}",
+                    },
+                    "interfaces": [
+                        {
+                            "type": "mcp",
+                            "name": integration_id,
+                            "transport": "streamable-http",
+                            "url": f"https://api.example.com/{integration_id}",
+                        }
+                    ],
+                    "required_env": ["ANTHROPIC_API_KEY", "WANDB_API_KEY"],
+                    "allowed_hosts": ["api.example.com"],
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+
+    assert (
+        main(
+            [
+                "compare",
+                comparison.as_posix(),
+                "--preview",
+                "--json",
+                "--env-file",
+                (tmp_path / "missing.env").as_posix(),
+                "--repo-root",
+                root.as_posix(),
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload["preview_digest"], str)
+    assert payload["approval_eligible"] is False
+    assert payload["matrix"]["applicable_cells"] == 0
+    assert payload["matrix"]["estimated_trials"] == 0
 
 
 @pytest.mark.parametrize(
@@ -251,6 +325,45 @@ def test_runs_status_is_observational_across_supervisor_boundaries(
     )
     assert observed == [False]
     assert '"status": "running"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["runs", "cancel", "--run-id", "run-1"],
+        ["runs", "cancel", "run-1"],
+    ),
+)
+def test_runs_cancel_accepts_action_first_recovery_grammar(
+    argv: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fugue.bench.supervisor import RunSupervisor
+
+    cancelled: list[str] = []
+
+    def cancel(self, run_id: str):
+        del self
+        cancelled.append(run_id)
+        return SimpleNamespace(run_id=run_id, status="cancelled")
+
+    monkeypatch.setattr(RunSupervisor, "cancel", cancel)
+    assert (
+        main(
+            [
+                *argv,
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    assert cancelled == ["run-1"]
+    assert "cancelled" in capsys.readouterr().out
 
 
 def test_rich_command_center_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:

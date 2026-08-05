@@ -18,6 +18,10 @@ from fugue.bench.context_contracts import (
 from fugue.bench.files import as_list as _list
 from fugue.bench.files import as_mapping as _dict
 from fugue.bench.files import require_unique
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    evidence_destination_from_dict,
+)
 
 CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
@@ -321,11 +325,13 @@ class PresetSpec:
     workloads: list[str] = field(default_factory=list)
     systems: list[str] = field(default_factory=list)
     harnesses: list[str] = field(default_factory=list)
+    environment: dict[str, Any] = field(default_factory=dict)
     n_tasks: int | None = None
     n_attempts: int | None = None
     n_concurrent: int | None = None
     scheduling_seed: str | None = None
     selection_lock_required: bool = False
+    selection_lock_kind: Literal["treatment", "intervention"] = "treatment"
     workload_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -339,6 +345,10 @@ class ExperimentSpec:
     builder_model: str | None = None
     judge_model: str | None = None
     run_name: str | None = None
+    source_evidence_project: str | None = None
+    source_evidence_destination: EvidenceDestinationV1 | None = None
+    evidence_project: str | None = None
+    evidence_destination: EvidenceDestinationV1 | None = None
     tags: list[str] = field(default_factory=list)
     harnesses: list[str] = field(default_factory=list)
     variants: list[FeatureVariant] = field(default_factory=list)
@@ -364,6 +374,14 @@ class ExperimentSpec:
 
     def to_dict(self) -> dict[str, Any]:
         value = _paths_to_strings(asdict(self))
+        if self.source_evidence_project is None:
+            value.pop("source_evidence_project", None)
+        if self.source_evidence_destination is None:
+            value.pop("source_evidence_destination", None)
+        if self.evidence_project is None:
+            value.pop("evidence_project", None)
+        if self.evidence_destination is None:
+            value.pop("evidence_destination", None)
         value["variants"] = [
             _paths_to_strings(variant.to_dict()) for variant in self.variants
         ]
@@ -610,6 +628,26 @@ def experiment_from_data(
     default_preset = _optional_str(raw.get("default_preset"))
     if default_preset and default_preset not in {preset.id for preset in presets}:
         raise ValueError(f"unknown default preset: {default_preset}")
+    source_evidence_project = _optional_evidence_project(
+        raw.get("source_evidence_project"),
+        label="source_evidence_project",
+    )
+    source_evidence_destination = _optional_evidence_destination(
+        raw.get("source_evidence_destination"),
+        evidence_project=source_evidence_project,
+        label="source_evidence_destination",
+    )
+    evidence_project = _optional_evidence_project(raw.get("evidence_project"))
+    evidence_destination = _optional_evidence_destination(
+        raw.get("evidence_destination"),
+        evidence_project=evidence_project,
+    )
+    if (source_evidence_project is None) != (
+        source_evidence_destination is None
+    ):
+        raise ValueError(
+            "source evidence project and destination must be declared together"
+        )
     return ExperimentSpec(
         id=experiment_id,
         title=str(raw.get("title") or experiment_id),
@@ -619,6 +657,10 @@ def experiment_from_data(
         builder_model=_optional_str(raw.get("builder_model")),
         judge_model=_optional_str(raw.get("judge_model")),
         run_name=_optional_str(raw.get("run_name")),
+        source_evidence_project=source_evidence_project,
+        source_evidence_destination=source_evidence_destination,
+        evidence_project=evidence_project,
+        evidence_destination=evidence_destination,
         tags=_string_list(raw.get("tags")),
         harnesses=_string_list(raw.get("harnesses")),
         variants=variants,
@@ -1090,12 +1132,20 @@ def _presets(raw: Any) -> list[PresetSpec]:
             raise ValueError("preset must be a mapping")
         _reject_unknown(value, PresetSpec, kind="preset")
         preset_id = validate_id(value.get("id") or f"preset-{index}", kind="preset id")
+        selection_lock_kind = str(
+            value.get("selection_lock_kind") or "treatment"
+        )
+        if selection_lock_kind not in {"treatment", "intervention"}:
+            raise ValueError(
+                f"preset {preset_id} selection_lock_kind must be treatment or intervention"
+            )
         presets.append(
             PresetSpec(
                 id=preset_id,
                 workloads=_string_list(value.get("workloads")),
                 systems=_string_list(value.get("systems")),
                 harnesses=_string_list(value.get("harnesses")),
+                environment=_dict(value.get("environment")),
                 n_tasks=_positive_int(
                     value.get("n_tasks"), kind=f"preset {preset_id} n_tasks"
                 ),
@@ -1110,6 +1160,7 @@ def _presets(raw: Any) -> list[PresetSpec]:
                 selection_lock_required=bool(
                     value.get("selection_lock_required", False)
                 ),
+                selection_lock_kind=selection_lock_kind,  # type: ignore[arg-type]
                 workload_overrides=_workload_overrides(
                     value.get("workload_overrides"), preset_id
                 ),
@@ -1180,6 +1231,41 @@ def _optional_str(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _optional_evidence_project(
+    value: Any,
+    *,
+    label: str = "evidence_project",
+) -> str | None:
+    project = _optional_str(value)
+    if project is None:
+        return None
+    parts = project.split("/")
+    if len(parts) != 2 or any(not _ID_RE.fullmatch(part) for part in parts):
+        raise ValueError(
+            f"{label} must be an exact W&B entity/project slug"
+        )
+    return project
+
+
+def _optional_evidence_destination(
+    value: Any,
+    *,
+    evidence_project: Any,
+    label: str = "evidence_destination",
+) -> EvidenceDestinationV1 | None:
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping")
+    destination = evidence_destination_from_dict(value)
+    project = _optional_evidence_project(evidence_project)
+    if project is not None and destination.project_slug != project:
+        raise ValueError(
+            f"{label} must match the declared project"
+        )
+    return destination
 
 
 def _trace_content(value: Any) -> str:

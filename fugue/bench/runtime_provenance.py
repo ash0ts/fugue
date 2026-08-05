@@ -34,6 +34,9 @@ def resolve_fugue_source_provenance(repo_root: Path) -> dict[str, Any]:
             "digest": digest,
             "files": files,
         }
+    tree = _git(root, "rev-parse", "--verify", "HEAD^{tree}")
+    if tree is None:
+        raise ValueError(f"unable to resolve Fugue source tree: {root}")
     status = _git_bytes(
         root,
         "status",
@@ -47,6 +50,7 @@ def resolve_fugue_source_provenance(repo_root: Path) -> dict[str, Any]:
         "schema_version": SOURCE_PROVENANCE_SCHEMA_VERSION,
         "kind": "git",
         "commit": commit.decode().strip(),
+        "tree": tree.decode().strip(),
         "dirty": bool(status),
     }
     if status:

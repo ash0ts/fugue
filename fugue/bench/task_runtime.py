@@ -25,7 +25,7 @@ from fugue.bench.manifest import (
 )
 
 TASK_RUNTIME_ROOT = Path(".fugue/runtime/task-images")
-TASK_RUNTIME_CONTRACT_VERSION = 9
+TASK_RUNTIME_CONTRACT_VERSION = 10
 
 VerifierRuntime = DatasetVerifierRuntimeSpec | VerifierRuntimeSpec
 VerificationKind = Literal["swe-bench-patch", "solution-script"]
@@ -248,6 +248,37 @@ def task_runtime_ready(
     if inspected.get("Id") != lock.get("image_id"):
         return False, "prepared task image drifted from its lock"
     return True, f"{lock['image_id']} is available"
+
+
+def task_runtime_lock_digest(
+    lock: dict[str, Any],
+    *,
+    repo_root: Path,
+) -> str:
+    """Digest a task runtime lock without binding it to a checkout location."""
+    return _digest(task_runtime_lock_identity(lock, repo_root=repo_root))
+
+
+def task_runtime_lock_identity(
+    lock: dict[str, Any],
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Return the checkout-portable identity projection of a task lock."""
+    value = dict(lock)
+    dataset_path = Path(str(value.get("dataset_path") or "")).resolve()
+    resolved_root = repo_root.resolve()
+    try:
+        relative_path = dataset_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(
+            "task runtime dataset_path must be inside the repository root"
+        ) from exc
+    value["dataset_path"] = {
+        "scope": "repository",
+        "relative_path": relative_path.as_posix(),
+    }
+    return value
 
 
 def task_architecture(task: TaskSpec) -> str:
@@ -578,6 +609,12 @@ def _lock_verifier_script(
         rewritten = _rewrite_task_verifier(source, task, runtime, original_sha256)
     _reject_trial_resolvers(rewritten, task)
     script.write_text(rewritten)
+    # Harbor executes tests/test.sh directly. Dataset materializers and archive
+    # extraction do not reliably preserve its executable bit, while setup's
+    # gold/base probes deliberately invoke it through a shell. Lock the runtime
+    # mode here so those probes cannot pass and leave the live verifier unable
+    # to start.
+    script.chmod(0o555)
     return {
         "original_sha256": original_sha256,
         "prepared_sha256": hashlib.sha256(rewritten.encode()).hexdigest(),

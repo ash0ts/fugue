@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -30,6 +32,12 @@ DEFAULT_BRIDGE_MASTER_KEY = "sk-fugue-local"
 WANDB_INFERENCE_PROJECT_HEADER = "OpenAI-Project"
 OPENAI_PROJECT_ENV = "OPENAI_PROJECT"
 OPENAI_PROJECT_ID_ENV = "OPENAI_PROJECT_ID"
+EVIDENCE_DESTINATION_SCHEMA_VERSION = 1
+DEFAULT_WANDB_API_BASE_URL = "https://api.wandb.ai"
+DEFAULT_WEAVE_TRACE_BASE_URL = "https://trace.wandb.ai"
+DEFAULT_WANDB_APP_BASE_URL = "https://wandb.ai"
+EVIDENCE_DESTINATION_DIGEST_ENV = "FUGUE_EVIDENCE_DESTINATION_DIGEST"
+EVIDENCE_DESTINATION_JSON_ENV = "FUGUE_EVIDENCE_DESTINATION_JSON"
 
 # GLM-5.2 rejected image-bearing tool results through both bridge protocols in
 # the release canary. Keep this model-specific: other W&B routes may be visual.
@@ -53,6 +61,153 @@ class ModelRoute:
     messages_base_url: str | None
     litellm_model: str
     tool_result_modalities: tuple[ToolResultModality, ...]
+
+
+@dataclass(frozen=True)
+class EvidenceDestinationV1:
+    """One immutable, secret-free destination shared by every evidence sink."""
+
+    entity: str
+    project: str
+    api_base_url: str
+    trace_base_url: str
+    app_base_url: str
+    schema_version: int = EVIDENCE_DESTINATION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != EVIDENCE_DESTINATION_SCHEMA_VERSION:
+            raise ValueError("unsupported evidence destination schema version")
+        if (
+            not self.entity
+            or not self.project
+            or "/" in self.entity
+            or "/" in self.project
+        ):
+            raise ValueError(
+                "evidence destination requires an exact W&B entity/project"
+            )
+        for label, value in (
+            ("API", self.api_base_url),
+            ("trace", self.trace_base_url),
+            ("application", self.app_base_url),
+        ):
+            _validated_evidence_base_url(value, label=label)
+
+    @property
+    def project_slug(self) -> str:
+        return f"{self.entity}/{self.project}"
+
+    @property
+    def destination_digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "schema_version": self.schema_version,
+                    "entity": self.entity,
+                    "project": self.project,
+                    "api_base_url": self.api_base_url,
+                    "trace_base_url": self.trace_base_url,
+                    "app_base_url": self.app_base_url,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "schema_version": self.schema_version,
+            "entity": self.entity,
+            "project": self.project,
+            "project_slug": self.project_slug,
+            "api_base_url": self.api_base_url,
+            "trace_base_url": self.trace_base_url,
+            "app_base_url": self.app_base_url,
+            "destination_digest": self.destination_digest,
+        }
+
+    def environment(self) -> dict[str, str]:
+        identity = self.to_dict()
+        return {
+            WEAVE_PROJECT_ENV: self.project_slug,
+            "WEAVE_PROJECT": self.project_slug,
+            "WANDB_ENTITY": self.entity,
+            "WANDB_PROJECT": self.project,
+            WEAVE_BASE_URL_ENV: self.api_base_url,
+            "WANDB_BASE_URL": self.api_base_url,
+            WEAVE_TRACE_SERVER_URL_ENV: self.trace_base_url,
+            "WF_TRACE_SERVER_URL": self.trace_base_url,
+            "WANDB_APP_BASE_URL": self.app_base_url,
+            EVIDENCE_DESTINATION_DIGEST_ENV: self.destination_digest,
+            EVIDENCE_DESTINATION_JSON_ENV: json.dumps(
+                identity, sort_keys=True, separators=(",", ":")
+            ),
+        }
+
+
+def evidence_destination_from_dict(
+    value: Mapping[str, object],
+) -> EvidenceDestinationV1:
+    """Load a destination while verifying any supplied derived identity."""
+
+    allowed = {
+        "schema_version",
+        "entity",
+        "project",
+        "project_slug",
+        "api_base_url",
+        "trace_base_url",
+        "app_base_url",
+        "destination_digest",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(
+            "unknown evidence destination field(s): " + ", ".join(unknown)
+        )
+    required = {
+        "entity",
+        "project",
+        "api_base_url",
+        "trace_base_url",
+        "app_base_url",
+    }
+    missing = sorted(required - set(value))
+    if missing:
+        raise ValueError(
+            "missing evidence destination field(s): " + ", ".join(missing)
+        )
+    destination = EvidenceDestinationV1(
+        entity=str(value["entity"]),
+        project=str(value["project"]),
+        api_base_url=str(value["api_base_url"]),
+        trace_base_url=str(value["trace_base_url"]),
+        app_base_url=str(value["app_base_url"]),
+        schema_version=int(
+            value.get(
+                "schema_version",
+                EVIDENCE_DESTINATION_SCHEMA_VERSION,
+            )
+        ),
+    )
+    supplied_project_slug = str(value.get("project_slug") or "")
+    if supplied_project_slug and supplied_project_slug != destination.project_slug:
+        raise ValueError("evidence destination project_slug does not match")
+    supplied_digest = str(value.get("destination_digest") or "")
+    if supplied_digest and supplied_digest != destination.destination_digest:
+        raise ValueError("evidence destination digest does not match")
+    return destination
+
+
+def evidence_destination_environment(
+    destination: EvidenceDestinationV1,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Apply an immutable declared destination with precedence over legacy env."""
+
+    result = dict(env if env is not None else os.environ)
+    result.update(destination.environment())
+    return trace_project_environment(destination.project_slug, result)
 
 
 def select_model(
@@ -162,6 +317,14 @@ def model_route_identity(
 
 def resolve_harness_model_route(route: ModelRoute, harness: str) -> dict[str, object]:
     normalized = harness.removeprefix("fugue-").strip().lower()
+    if normalized in {"direct", "sequence"}:
+        return {
+            "harness": normalized,
+            "wire_protocol": None,
+            "endpoint_kind": "not_applicable",
+            "upstream_host": None,
+            "bridge_required": False,
+        }
     try:
         protocol = _HARNESS_PROTOCOLS[normalized]
     except KeyError as exc:
@@ -321,26 +484,34 @@ def trace_project_slug(env: Mapping[str, str] | None = None) -> str:
     return f"{entity}/{project}"
 
 
+def trace_project_environment(
+    project_slug: str | None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Bind an explicit evidence destination without changing behavior identity."""
+
+    result = dict(env if env is not None else os.environ)
+    selected = str(project_slug or "").strip()
+    if selected:
+        parts = selected.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError(
+                "evidence project must be an exact W&B entity/project slug"
+            )
+        result[WEAVE_PROJECT_ENV] = selected
+        result["WEAVE_PROJECT"] = selected
+        result["WANDB_ENTITY"], result["WANDB_PROJECT"] = parts
+    result.update(resolve_evidence_destination(result).environment())
+    for key in ("WANDB_INSECURE_DISABLE_SSL", "WEAVE_INSECURE_DISABLE_SSL"):
+        value = result.get(key, "").strip()
+        if value:
+            result[key] = value
+    return result
+
+
 def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    entity, project = trace_entity_project(env)
     values = env if env is not None else os.environ
-    result = {
-        "WANDB_ENTITY": entity,
-        "WANDB_PROJECT": project,
-        "WEAVE_PROJECT": f"{entity}/{project}",
-    }
-    base_url = (
-        values.get(WEAVE_BASE_URL_ENV, "").strip()
-        or values.get("WANDB_BASE_URL", "").strip()
-    )
-    trace_server_url = (
-        values.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
-        or values.get("WF_TRACE_SERVER_URL", "").strip()
-    )
-    if base_url:
-        result["WANDB_BASE_URL"] = base_url
-    if trace_server_url:
-        result["WF_TRACE_SERVER_URL"] = trace_server_url
+    result = resolve_evidence_destination(values).environment()
     for key in ("WANDB_INSECURE_DISABLE_SSL", "WEAVE_INSECURE_DISABLE_SSL"):
         value = values.get(key, "").strip()
         if value:
@@ -350,31 +521,74 @@ def trace_env_defaults(env: Mapping[str, str] | None = None) -> dict[str, str]:
 
 def trace_destination_identity(
     env: Mapping[str, str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | int]:
     """Return a secret-free identity for the evidence publication destination."""
+
+    return resolve_evidence_destination(env).to_dict()
+
+
+def resolve_evidence_destination(
+    env: Mapping[str, str] | None = None,
+) -> EvidenceDestinationV1:
+    """Resolve all evidence endpoints once so every sink receives one identity."""
 
     values = env if env is not None else os.environ
     entity, project = trace_entity_project(values)
-    base_url = (
+    api_base_url = _validated_evidence_base_url(
         values.get(WEAVE_BASE_URL_ENV, "").strip()
         or values.get("WANDB_BASE_URL", "").strip()
-        or "https://api.wandb.ai"
+        or DEFAULT_WANDB_API_BASE_URL,
+        label="API",
     )
-    trace_server_url = (
+    configured_trace_base = (
         values.get(WEAVE_TRACE_SERVER_URL_ENV, "").strip()
         or values.get("WF_TRACE_SERVER_URL", "").strip()
     )
-    return {
-        "entity": entity,
-        "project": project,
-        "project_slug": f"{entity}/{project}",
-        "base_url": base_url.rstrip("/"),
-        **(
-            {"trace_server_url": trace_server_url.rstrip("/")}
-            if trace_server_url
-            else {}
-        ),
-    }
+    public_base = values.get("WANDB_PUBLIC_BASE_URL", "").strip()
+    trace_base_url = _validated_evidence_base_url(
+        configured_trace_base
+        or _derived_trace_base_url(api_base_url, public_base=public_base),
+        label="trace",
+    )
+    app_base_url = _validated_evidence_base_url(
+        values.get("WANDB_APP_BASE_URL", "").strip()
+        or DEFAULT_WANDB_APP_BASE_URL,
+        label="application",
+    )
+    return EvidenceDestinationV1(
+        entity=entity,
+        project=project,
+        api_base_url=api_base_url,
+        trace_base_url=trace_base_url,
+        app_base_url=app_base_url,
+    )
+
+
+def _derived_trace_base_url(api_base_url: str, *, public_base: str) -> str:
+    selected = public_base.rstrip("/") if public_base else api_base_url
+    return (
+        DEFAULT_WEAVE_TRACE_BASE_URL
+        if selected == DEFAULT_WANDB_API_BASE_URL
+        else f"{selected.rstrip('/')}/traces"
+    )
+
+
+def _validated_evidence_base_url(value: str, *, label: str) -> str:
+    normalized = str(value or "").strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"evidence {label} base URL must be an absolute, credential-free "
+            "HTTP(S) URL without query or fragment"
+        )
+    return normalized
 
 
 def provider_request_headers(

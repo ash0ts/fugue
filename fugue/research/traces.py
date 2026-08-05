@@ -1027,16 +1027,28 @@ def _matches(record: Mapping[str, Any], draft: TraceAuditDraftV1) -> bool:
 
 def _clusters(records: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
     grouped: dict[str, list[Mapping[str, Any]]] = {}
+    signatures: dict[str, dict[str, Any]] = {}
     for record in records:
         errors = record.get("errors") if isinstance(record.get("errors"), dict) else {}
-        key = str(errors.get("type") or record.get("status") or "unknown")
-        if key.lower() in {"ok", "passed", "success", "succeeded"}:
+        label = str(errors.get("type") or record.get("status") or "unknown")
+        if label.lower() in {"ok", "passed", "success", "succeeded"}:
             continue
+        signature = {
+            "status": _clean_text(record.get("status") or "unknown", 100),
+            "error_type": _clean_text(errors.get("type") or "unknown", 200),
+            "operation": _clean_text(record.get("operation") or "unknown", 300),
+            "tools": _failure_tool_names(record.get("tools")),
+            "evidence_gaps": _failure_evidence_gaps(record),
+        }
+        key = stable_digest(signature)
+        signatures[key] = signature
         grouped.setdefault(key, []).append(record)
     return tuple(
         {
             "id": f"cluster-{stable_digest(key)[:12]}",
-            "label": _clean_text(key, 300),
+            "label": _clean_text(
+                signatures[key].get("error_type") or "unknown", 300
+            ),
             "count": len(values),
             "representative_trace_ids": [str(item["trace_id"]) for item in values[:3]],
             "harnesses": sorted(
@@ -1045,11 +1057,45 @@ def _clusters(records: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...
             "operations": sorted(
                 {str(item["operation"]) for item in values if item.get("operation")}
             ),
+            "failure_signature": signatures[key],
+            "failure_signature_digest": key,
+            "failure_card": {
+                "affected_traces": len(values),
+                "representative_trace_count": min(3, len(values)),
+                "public_summary": (
+                    "Observed a bounded failure pattern with the declared status, "
+                    "operation, tools, and evidence gaps."
+                ),
+                "untrusted_trace_content_excluded": True,
+            },
         }
         for key, values in sorted(
             grouped.items(), key=lambda item: (-len(item[1]), item[0])
         )
     )
+
+
+def _failure_tool_names(raw: Any) -> list[str]:
+    if isinstance(raw, Mapping):
+        values = raw.get("names") or raw.get("tools") or raw.keys()
+    else:
+        values = raw
+    if not isinstance(values, (list, tuple, set, frozenset, dict)):
+        return []
+    iterable = values.keys() if isinstance(values, dict) else values
+    return sorted({_clean_text(value, 200) for value in iterable if str(value).strip()})[
+        :20
+    ]
+
+
+def _failure_evidence_gaps(record: Mapping[str, Any]) -> list[str]:
+    gaps = []
+    for key in ("tools", "errors", "operation"):
+        if record.get(key) in (None, "", [], {}):
+            gaps.append(f"missing_{key}")
+    if record.get("trace_id") in (None, ""):
+        gaps.append("missing_trace_id")
+    return gaps
 
 
 def _trace_ref(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -1194,9 +1240,16 @@ def _suggested_tasks(
             "id": f"task-{str(cluster['id']).removeprefix('cluster-')}",
             "purpose": f"Reproduce the observed {cluster['label']} failure pattern.",
             "source_cluster_id": cluster["id"],
+            "failure_signature_digest": cluster.get("failure_signature_digest"),
             "representative_trace_ids": cluster["representative_trace_ids"],
             "status": "candidate",
-            "warning": "Validate the task and lock a separate holdout before confirmation.",
+            "authoring_contract": "reviewed-task-recipe-or-registered-taskset",
+            "private_truth_required": True,
+            "holdout_confirmation_required": True,
+            "warning": (
+                "Check existing registered-taskset coverage, confirm private truth, "
+                "and lock a separate holdout before selecting a change."
+            ),
         }
         for cluster in clusters
     )

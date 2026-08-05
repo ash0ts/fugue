@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import configparser
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -75,6 +78,7 @@ _UV_PYTHON_PLATFORMS = {
     "linux/amd64": "x86_64-manylinux_2_36",
     "linux/arm64": "aarch64-manylinux_2_36",
 }
+_REPRODUCIBLE_SOURCE_DATE_EPOCH = "315532800"
 
 
 @dataclass(frozen=True)
@@ -191,7 +195,10 @@ def import_mcp_config(
     draft = _draft_from_server(
         selected,
         import_id=import_id,
-        source=config_path.resolve().as_posix(),
+        source=_portable_mcp_source(
+            config_path.resolve().as_posix(),
+            repo_root=repo_root,
+        ),
         server_name=server,
     )
     if allowed_hosts:
@@ -307,7 +314,9 @@ def lock_mcp_import(
     target_platform: str | None = None,
 ) -> MCPImportLockV1:
     draft = load_mcp_draft(import_id, repo_root)
-    source_digest = _stable_digest(draft.to_dict())
+    portable_source = _portable_mcp_source(draft.source, repo_root=repo_root)
+    source_declaration = {**draft.to_dict(), "source": portable_source}
+    source_digest = _stable_digest(source_declaration)
     if draft.transport == "stdio":
         kind, _, _, _ = _classify_stdio_command(list(draft.command))
         if kind in {"python", "node"} and not acknowledge_package_code:
@@ -395,7 +404,7 @@ def lock_mcp_import(
         schema_version=1,
         id=import_id,
         transport=draft.transport,
-        source=draft.source,
+        source=portable_source,
         source_digest=source_digest,
         runtime_digest=runtime_digest,
         runtime_platform=runtime_platform,
@@ -967,6 +976,7 @@ def _install_python_distribution(
             text=True,
             timeout=180,
         )
+        _normalize_python_install_metadata(site)
         wheel_manifest = {
             path.name: hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(wheelhouse.glob("*.whl"))
@@ -1022,6 +1032,10 @@ def _build_locked_wheelhouse(
                 "HOME=/tmp/home",
                 "--env",
                 "PIP_CACHE_DIR=/tmp/pip-cache",
+                "--env",
+                f"SOURCE_DATE_EPOCH={_REPRODUCIBLE_SOURCE_DATE_EPOCH}",
+                "--env",
+                "PYTHONHASHSEED=0",
                 _MCP_PYTHON_IMAGE,
                 "python",
                 "-m",
@@ -1080,6 +1094,11 @@ def _lock_python_distribution(
             capture_output=True,
             text=True,
             timeout=180,
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": "0",
+                "SOURCE_DATE_EPOCH": _REPRODUCIBLE_SOURCE_DATE_EPOCH,
+            },
         )
         return lock, lambda: shutil.rmtree(temporary)
     except Exception:
@@ -1107,13 +1126,19 @@ def _build_exact_git_wheel(source: str) -> tuple[str, Path, Any]:
             text=True,
             timeout=120,
         )
-        subprocess.run(
-            ["git", "-C", checkout.as_posix(), "checkout", "--detach", commit],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        try:
+            subprocess.run(
+                ["git", "-C", checkout.as_posix(), "checkout", "--detach", commit],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                "pinned Git MCP commit is unavailable from the declared public "
+                "repository; push the reviewed commit before locking it"
+            ) from exc
         resolved = subprocess.run(
             ["git", "-C", checkout.as_posix(), "rev-parse", "HEAD"],
             check=True,
@@ -1158,6 +1183,11 @@ def _build_exact_git_wheel(source: str) -> tuple[str, Path, Any]:
             capture_output=True,
             text=True,
             timeout=180,
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": "0",
+                "SOURCE_DATE_EPOCH": _REPRODUCIBLE_SOURCE_DATE_EPOCH,
+            },
         )
         built = sorted(wheels.glob("*.whl"))
         if len(built) != 1:
@@ -1385,10 +1415,83 @@ def _runtime_directory_digest(root: Path) -> str:
     return f"sha256:{hasher.hexdigest()}"
 
 
+def _normalize_python_install_metadata(site: Path) -> None:
+    """Remove installer-local metadata before hashing a managed runtime.
+
+    ``uv pip install --target`` records wall-clock timestamps and its temporary
+    wheel path. Neither changes executable behavior, but both otherwise make
+    the same reviewed dependency closure produce a different runtime digest.
+    The Git/package source remains bound by the MCP import lock.
+    """
+    removed: set[str] = set()
+    rewritten: set[str] = set()
+    for path in sorted(site.rglob("*"), reverse=True):
+        if path.is_file() and (
+            path.name in {"uv_cache.json", "direct_url.json"}
+            or path.suffix == ".pyc"
+        ):
+            removed.add(path.relative_to(site).as_posix())
+            path.unlink()
+    scripts = site / "bin"
+    if scripts.is_dir():
+        for path in sorted(scripts.iterdir()):
+            if not path.is_file():
+                continue
+            content = path.read_bytes()
+            first_line, separator, remainder = content.partition(b"\n")
+            if (
+                separator
+                and first_line.startswith(b"#!")
+                and b"python" in first_line.lower()
+            ):
+                path.write_bytes(b"#!/usr/bin/env python3\n" + remainder)
+                rewritten.add(path.relative_to(site).as_posix())
+    for record in sorted(site.glob("*.dist-info/RECORD")):
+        rows: list[list[str]] = []
+        for row in csv.reader(io.StringIO(record.read_text(encoding="utf-8"))):
+            if not row or row[0] in removed:
+                continue
+            if row[0] in rewritten:
+                content = (site / row[0]).read_bytes()
+                digest = base64.urlsafe_b64encode(
+                    hashlib.sha256(content).digest()
+                ).rstrip(b"=")
+                row = [
+                    row[0],
+                    f"sha256={digest.decode('ascii')}",
+                    str(len(content)),
+                ]
+            rows.append(row)
+        output = io.StringIO(newline="")
+        csv.writer(output, lineterminator="\n").writerows(rows)
+        record.write_text(output.getvalue(), encoding="utf-8")
+    for path in sorted(site.rglob("__pycache__"), reverse=True):
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+
+
 def _remove_symlinks(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
             path.unlink()
+
+
+def _portable_mcp_source(source: str, *, repo_root: Path) -> str:
+    """Return a checkout-independent source location for an MCP declaration.
+
+    The selected server declaration, exact package/Git revision, and all
+    behavior-bearing fields remain part of ``source_digest``. A repository
+    checkout's absolute host path is provenance metadata, not behavior, so
+    repository-owned config files use a stable ``repo://`` location.
+    """
+    path = Path(source)
+    if not path.is_absolute():
+        return source
+    try:
+        relative = path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return source
+    return f"repo://{relative.as_posix()}"
 
 
 def _managed_runtime_platform() -> str:

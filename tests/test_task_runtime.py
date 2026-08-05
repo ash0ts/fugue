@@ -238,6 +238,60 @@ def test_task_preparation_locks_image_and_disables_trial_network(
     ]
 
 
+def test_task_runtime_lock_digest_is_checkout_portable(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    relative_dataset = Path(".fugue/runtime/task-images/locked/dataset")
+    first_dataset = first_root / relative_dataset
+    second_dataset = second_root / relative_dataset
+    first_dataset.mkdir(parents=True)
+    second_dataset.mkdir(parents=True)
+    shared = {
+        "schema_version": 1,
+        "contract_version": task_runtime.TASK_RUNTIME_CONTRACT_VERSION,
+        "dataset": "local@locked",
+        "task_id": "task-one",
+        "architecture": "arm64",
+        "image_id": "sha256:" + "a" * 64,
+        "prepared_source_sha256": "b" * 64,
+    }
+
+    first = {
+        **shared,
+        "dataset_path": first_dataset.as_posix(),
+    }
+    second = {
+        **shared,
+        "dataset_path": second_dataset.as_posix(),
+    }
+
+    assert task_runtime.task_runtime_lock_digest(
+        first,
+        repo_root=first_root,
+    ) == task_runtime.task_runtime_lock_digest(
+        second,
+        repo_root=second_root,
+    )
+
+
+def test_task_runtime_lock_digest_rejects_external_dataset_path(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_path must be inside the repository root",
+    ):
+        task_runtime.task_runtime_lock_digest(
+            {"dataset_path": external.as_posix()},
+            repo_root=repo_root,
+        )
+
+
 def test_task_preparation_locks_verifier_dependencies_before_the_trial(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -339,6 +393,7 @@ def test_swebench_verifier_is_prepared_for_offline_trial(
     assert "make_test_spec" not in rewritten
     assert "test_spec = SimpleNamespace(" in rewritten
     assert f'{interpreter} parser.py | tee -a "$LOG_FILE"' in rewritten
+    assert prepared.stat().st_mode & 0o777 == 0o555
     assert lock["verifier_script"] == {
         "original_sha256": hashlib.sha256(original_script.encode()).hexdigest(),
         "prepared_sha256": hashlib.sha256(rewritten.encode()).hexdigest(),
@@ -358,6 +413,7 @@ def test_swebench_verifier_accepts_locked_editable_extras(
     )
 
     rewritten = (source / "tests" / "test.sh").read_text()
+    assert (source / "tests" / "test.sh").stat().st_mode & 0o777 == 0o555
     assert "pip install" not in rewritten
     assert "Setup prepared the task environment" in rewritten
 

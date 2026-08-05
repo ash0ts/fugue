@@ -7,10 +7,13 @@ import pytest
 
 from fugue.bench.scoring import (
     SelectionPolicy,
+    build_intervention_selection_lock,
     build_treatment_selection_lock,
     factorial_difference_in_differences,
+    read_intervention_selection_lock,
     read_treatment_selection_lock,
     select_candidate_configuration,
+    write_intervention_selection_lock,
     write_treatment_selection_lock,
 )
 
@@ -224,3 +227,89 @@ def test_treatment_selection_lock_is_immutable_and_digest_verified(
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="digest"):
         read_treatment_selection_lock(path)
+
+
+def test_intervention_selection_lock_binds_candidates_and_discovery(
+    tmp_path: Path,
+) -> None:
+    rankings = (
+        {"variant_id": "production", "candidate_digest": "a" * 64},
+        {"variant_id": "skill-only", "candidate_digest": "b" * 64},
+        {"variant_id": "mcp-only", "candidate_digest": "c" * 64},
+        {"variant_id": "combined", "candidate_digest": "d" * 64},
+    )
+    lock = build_intervention_selection_lock(
+        experiment_id="claude-loop-skill-mcp",
+        source_commit="e" * 40,
+        source_tree="9" * 40,
+        source_dirty_digest="",
+        analysis_snapshot_sha256="f" * 64,
+        discovery_run_snapshot_sha256s=("1" * 64,),
+        comparison_example_ids=("2" * 64, "3" * 64),
+        baseline_variant_id="production",
+        selected_variant_id="combined",
+        rankings=rankings,
+        decision="recommend",
+        rationale="combined is the only arm with a preregistered deterministic gain",
+    )
+    path = write_intervention_selection_lock(tmp_path / "selection.json", lock)
+
+    assert read_intervention_selection_lock(path) == lock
+    payload = json.loads(path.read_text())
+    payload["rankings"][3]["candidate_digest"] = "0" * 64
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="digest"):
+        read_intervention_selection_lock(path)
+
+
+def test_selection_policy_rejects_arms_without_required_paired_gain() -> None:
+    rows = []
+    outcomes = {
+        "production": (False, True),
+        "skill-only": (False, True),
+        "mcp-only": (True, True),
+        "combined": (True, True),
+    }
+    for variant, passes in outcomes.items():
+        for index, passed in enumerate(passes, start=1):
+            skill_ids = (
+                [f"wandb-evidence-{variant}"]
+                if variant in {"skill-only", "combined"}
+                else []
+            )
+            rows.append(
+                {
+                    "variant_id": variant,
+                    "comparison_example_id": f"example-{index}",
+                    "task_name": f"task-{index}",
+                    "harness": "claude-code",
+                    "trial_index": 1,
+                    "pass": passed,
+                    "cost_usd": 1.0,
+                    "wall_time_sec": 1.0,
+                    "skill_ids": skill_ids,
+                    "skill_invocation_evidence": {
+                        "status": "observed",
+                        "skills_invoked": skill_ids,
+                    },
+                    "weave_tool_names": {"summarize_evaluation_tool": 1},
+                }
+            )
+    selection = select_candidate_configuration(
+        rows,
+        SelectionPolicy(
+            selection_unit="variant",
+            baseline_variant_id="production",
+            required_examples=2,
+            required_harnesses=("claude-code",),
+            require_skill_invocation=True,
+            required_any_tool_names=("summarize_evaluation_tool",),
+            minimum_paired_pass_rate_delta=0.5,
+        ),
+        seed="skill-mcp",
+    )
+
+    scores = {item.candidate_id: item for item in selection.candidates}
+    assert scores["skill-only"].eligible is False
+    assert scores["mcp-only"].eligible is True
+    assert scores["combined"].eligible is True

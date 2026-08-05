@@ -9,13 +9,14 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from filelock import FileLock
 
+from fugue.bench.candidates import attempt_id, attempt_identity
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
 from fugue.bench.sandbox_policy import verify_harbor_job_attestation
@@ -67,6 +68,8 @@ class PlannedCell:
     evaluation_asset_lock_sha256: str = ""
     run_snapshot_sha256: str = ""
     source_commit: str = ""
+    source_tree: str = ""
+    source_dirty_digest: str = ""
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
     scorer_hashes: dict[str, str] | None = None
@@ -75,11 +78,30 @@ class PlannedCell:
     skip_reason: str | None = None
     config_sha256: str = ""
     runtime_assets: tuple[tuple[str, str], ...] = ()
+    approved_comparison: dict[str, Any] = field(default_factory=dict)
+    integration_provenance: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def attempt_identity(self) -> dict[str, Any]:
+        return attempt_identity(
+            task_id=self.task_id,
+            arm=self.variant_id,
+            harness=self.harness,
+            attempt=self.trial_index,
+            candidate=self.candidate_id,
+            runtime=self.execution_fingerprint,
+        )
+
+    @property
+    def attempt_id(self) -> str:
+        return attempt_id(**self.attempt_identity)
 
     def record(self, status: CellStatus, **values: Any) -> dict[str, Any]:
         return {
             "schema_version": 1,
             "cell_id": self.id,
+            "attempt_id": self.attempt_id,
+            "attempt_identity": self.attempt_identity,
             "run_id": self.run_id,
             "run_name": self.run_name,
             "workload_id": self.workload_id,
@@ -95,6 +117,7 @@ class PlannedCell:
             "candidate_id": self.candidate_id,
             "execution_fingerprint": self.execution_fingerprint,
             "execution_kind": self.execution_kind,
+            "applicable": self.applicable,
             "config_path": self.config_path.as_posix(),
             "result_path": self.result_path.as_posix(),
             "command": list(self.command),
@@ -103,6 +126,16 @@ class PlannedCell:
             "skip_reason": self.skip_reason,
             "config_sha256": self.config_sha256,
             "runtime_assets": [list(item) for item in self.runtime_assets],
+            "run_snapshot_sha256": self.run_snapshot_sha256 or None,
+            "source_commit": self.source_commit or None,
+            "source_tree": self.source_tree or None,
+            "source_dirty_digest": self.source_dirty_digest or None,
+            "integration_provenance": list(self.integration_provenance),
+            **(
+                {"approved_comparison": self.approved_comparison}
+                if self.approved_comparison
+                else {}
+            ),
             "recorded_at": datetime.now(UTC).isoformat(),
             **values,
         }
@@ -137,9 +170,18 @@ def plan_cells(
     run_name: str,
     scheduling_seed: str | None = None,
     verify_inputs: bool = True,
+    approved_comparison: Mapping[str, Any] | None = None,
 ) -> list[PlannedCell]:
     cells: list[PlannedCell] = []
     for job in jobs:
+        stable_attempt_id = attempt_id(
+            task_id=job.task_id,
+            arm=job.variant_id,
+            harness=job.harness,
+            attempt=job.trial_index,
+            candidate=job.candidate_id,
+            runtime=job.resolved_candidate.execution_fingerprint,
+        )
         identity = ":".join(
             (
                 run_id,
@@ -172,7 +214,7 @@ def plan_cells(
                 config_path=job.config_path,
                 result_path=job.result_path,
                 command=tuple(job.command),
-                env=job.env,
+                env={**job.env, "FUGUE_ATTEMPT_ID": stable_attempt_id},
                 n_attempts=job.n_attempts,
                 context_delivery=job.context_delivery,
                 expected_evidence_paths=job.expected_evidence_paths,
@@ -193,6 +235,8 @@ def plan_cells(
                     if verify_inputs
                     else ()
                 ),
+                approved_comparison=dict(approved_comparison or {}),
+                integration_provenance=job.integration_provenance,
             )
         )
     return schedule_cells(cells, scheduling_seed)
@@ -229,6 +273,7 @@ def execute_cells(
     runner: Callable[..., Any] | None = None,
     event_callback: EventCallback | None = None,
     cell_started: CellStartedCallback | None = None,
+    require_cell_started_success: bool = False,
     cell_finished: CellFinishedCallback | None = None,
     cancellation_event: threading.Event | None = None,
     cancellation_message: str = "Run cancelled by the operator.",
@@ -310,20 +355,18 @@ def execute_cells(
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
-        execution_env = dict(cell.env)
-        cell_started_called = False
-        if cell_started is not None and not (
-            cancellation_event is not None and cancellation_event.is_set()
-        ):
-            try:
-                cell_started_called = True
-                execution_env.update(cell_started(cell) or {})
-            except Exception as exc:
-                store.append_event(
-                    "observability_error",
-                    cell=cell,
-                    message=f"{type(exc).__name__}: {exc}",
-                )
+        execution_env, cell_started_called, start_failure = (
+            _initialize_cell_evidence(
+                cell,
+                store=store,
+                started=started,
+                cell_started=cell_started,
+                require_success=require_cell_started_success,
+                cancellation_event=cancellation_event,
+            )
+        )
+        if start_failure is not None:
+            return start_failure
         if cancellation_event is not None and cancellation_event.is_set():
             outcome = CellOutcome(cell.id, "cancelled", error=cancellation_message)
             ended = datetime.now(UTC)
@@ -444,6 +487,55 @@ def execute_cells(
         for future in as_completed(futures):
             outcomes.append(future.result())
     return outcomes
+
+
+def _initialize_cell_evidence(
+    cell: PlannedCell,
+    *,
+    store: _RunStore,
+    started: datetime,
+    cell_started: CellStartedCallback | None,
+    require_success: bool,
+    cancellation_event: threading.Event | None,
+) -> tuple[dict[str, str], bool, CellOutcome | None]:
+    execution_env = dict(cell.env)
+    if cell_started is None or (
+        cancellation_event is not None and cancellation_event.is_set()
+    ):
+        return execution_env, False, None
+    try:
+        execution_env.update(cell_started(cell) or {})
+        return execution_env, True, None
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        store.append_event("observability_error", cell=cell, message=error)
+        if not require_success:
+            return execution_env, True, None
+        outcome = CellOutcome(
+            cell.id,
+            "failed",
+            error=f"required live-evidence initialization failed: {error}",
+        )
+        ended = datetime.now(UTC)
+        wall_time = (ended - started).total_seconds()
+        store.append_cell(
+            cell.record(
+                "failed",
+                error=outcome.error,
+                benchmark_outcome="unscored",
+                started_at=started.isoformat(),
+                ended_at=ended.isoformat(),
+                wall_time_sec=wall_time,
+            )
+        )
+        store.append_event(
+            "cell_state",
+            cell=cell,
+            status="failed",
+            message=outcome.error,
+            wall_time_sec=wall_time,
+        )
+        return execution_env, True, outcome
 
 
 def _run_cell_process(

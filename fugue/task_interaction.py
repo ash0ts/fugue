@@ -246,16 +246,31 @@ def _interaction_plan(raw: Mapping[str, Any]) -> InteractionPlan:
         "input_cost_per_million",
         "output_cost_per_million",
         "reserve_cost_usd",
+        "controller_digest",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise ValueError(
             "unknown interaction controller field(s): " + ", ".join(unknown)
         )
+    supplied_digest = str(raw.get("controller_digest") or "").strip()
+    if supplied_digest:
+        unsigned = {
+            str(key): value
+            for key, value in raw.items()
+            if key != "controller_digest"
+        }
+        if (
+            len(supplied_digest) != 64
+            or stable_digest(unsigned) != supplied_digest
+        ):
+            raise ValueError("interaction controller digest does not match")
     kind = str(raw.get("type") or "single_turn")
     if kind not in {"single_turn", "scripted", "model"}:
         raise ValueError(f"unsupported task interaction type: {kind}")
-    max_user_turns = _positive_int(raw.get("max_user_turns", 1), "max_user_turns")
+    max_user_turns = _non_negative_int(
+        raw.get("max_user_turns", 1), "max_user_turns"
+    )
     max_agent_turns = _positive_int(raw.get("max_agent_turns", 1), "max_agent_turns")
     scripted = tuple(
         _bounded_turn(str(item), "scripted follow-up")
@@ -263,6 +278,8 @@ def _interaction_plan(raw: Mapping[str, Any]) -> InteractionPlan:
     )
     if kind == "single_turn" and max_agent_turns != 1:
         raise ValueError("single-turn interaction must have one Agent turn")
+    if kind != "single_turn" and max_user_turns < 1:
+        raise ValueError("multi-turn interaction requires a positive max_user_turns")
     if kind == "scripted" and len(scripted) != max_user_turns:
         raise ValueError("scripted interaction count differs from max_user_turns")
     if kind != "single_turn" and max_agent_turns != max_user_turns + 1:
@@ -304,6 +321,15 @@ def _positive_int(value: Any, label: str) -> int:
     result = int(value or 0)
     if result < 1:
         raise ValueError(f"{label} must be a positive integer")
+    return result
+
+
+def _non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a non-negative integer")
+    result = int(value or 0)
+    if result < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
     return result
 
 

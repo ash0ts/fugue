@@ -5,8 +5,9 @@ import hashlib
 import json
 import math
 import os
-import shutil
+import re
 import urllib.parse
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -14,7 +15,26 @@ from typing import Any, Literal
 
 import yaml
 
-from fugue.bench.candidates import stable_digest
+from fugue.bench.analysis_contracts import (
+    AlignedAnalysisV1,
+    AlignedArmV1,
+    AlignedAttemptSetV1,
+    AlignedContrastV1,
+    AlignedDimensionV1,
+    DimensionRole,
+    EvidenceDriftCheckV1,
+    EvidenceTopologyV1,
+    LockDescriptorV1,
+    SupersededResultV1,
+    TaskStratifiedSummaryV1,
+    TaskValidityV1,
+    aligned_analysis_from_dict,
+    evidence_topology_from_dict,
+    lock_descriptor_from_dict,
+    superseded_result_from_dict,
+    task_validity_from_dict,
+)
+from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
 from fugue.bench.operator import (
@@ -22,13 +42,23 @@ from fugue.bench.operator import (
     OperatorService,
     PreviewSummary,
 )
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    evidence_destination_environment,
+    evidence_destination_from_dict,
+    trace_project_environment,
+    trace_project_slug,
+)
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.store import StudyStore
 
-COMPARISON_SCHEMA_VERSION = 1
+COMPARISON_SCHEMA_VERSION = 2
+COMPARISON_RESULT_SCHEMA_VERSION = 3
+COMPARISON_READABLE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 COMPARISON_RUNTIME_ROOT = Path(".fugue/runtime/comparisons")
-COMPARISON_PRIVATE_ROOT = Path(".fugue/private/comparisons")
 COMPARISON_RESULT_ROOT = Path(".fugue/results/comparisons")
+COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
+COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
 
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
@@ -39,9 +69,25 @@ _HARNESS_AGENTS = {
 _READINESS = frozenset(
     {"ready", "needs_review", "blocked", "no_comparison_justified"}
 )
-_PUBLIC_TASK_FIELDS = frozenset({"id", "input", "resources", "tags", "partition"})
+_PUBLIC_TASK_FIELDS = frozenset(
+    {
+        "id",
+        "input",
+        "resources",
+        "tags",
+        "partition",
+        "critical_dimensions",
+    }
+)
 _PRIVATE_LABEL_FIELDS = frozenset(
-    {"id", "expected", "base_output", "gold_output"}
+    {
+        "id",
+        "expected",
+        "base_output",
+        "gold_output",
+        "base_evidence",
+        "gold_evidence",
+    }
 )
 _PRIVATE_WORDS = frozenset(
     {"expected", "gold", "reference_answer", "private", "answer_key"}
@@ -111,7 +157,295 @@ class ComparisonExecutionPolicyV1:
     reserve_per_attempt_usd: float
     approval_required: bool
     trace_content: Literal["full", "metadata"]
+    source_evidence_project: str | None = None
+    source_evidence_destination: EvidenceDestinationV1 | None = None
+    evidence_project: str | None = None
+    evidence_destination: EvidenceDestinationV1 | None = None
+    study_console_base_url: str | None = None
+    research_id: str | None = None
+    infrastructure_receipt: str | None = None
+    evidence_lock: str | None = None
+    release_notes_lock: str | None = None
+    mechanism_receipt: str | None = None
+    preparation_required: bool = False
+    evidence_checkpoint_cells: int = 0
     environment: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+DecisionStatus = Literal[
+    "invalid",
+    "blocked",
+    "hold",
+    "inconclusive",
+    "ready_for_signoff",
+    "go",
+]
+DecisionGateCategory = Literal[
+    "integrity",
+    "task",
+    "infrastructure",
+    "evidence",
+    "efficiency",
+    "privacy",
+]
+
+
+@dataclass(frozen=True)
+class DecisionGatePolicyV1:
+    id: str
+    label: str
+    category: DecisionGateCategory
+    source: str
+    operator: Literal["eq", "lte", "gte"]
+    target: str | float | int | bool
+    critical: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class DecisionPolicyV1:
+    release_target: str
+    candidate_sha: str
+    minimum_evidence_grade: Literal["A", "B", "C"] = "A"
+    human_signoff_required: bool = True
+    gates: tuple[DecisionGatePolicyV1, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class DecisionGateResultV1:
+    id: str
+    label: str
+    category: DecisionGateCategory
+    status: Literal["passed", "failed", "unavailable"]
+    critical: bool
+    actual: str | float | int | bool | None
+    target: str | float | int | bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class DecisionAttestationV1:
+    signer: str
+    signed_result_digest: str
+    signed_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DecisionSummaryV1:
+    status: DecisionStatus
+    recommendation: str
+    release_target: str | None
+    candidate_sha: str | None
+    evidence_grade: Literal["A", "B", "C", "invalid"]
+    gates: tuple[DecisionGateResultV1, ...]
+    critical_blockers: tuple[str, ...]
+    limitations: tuple[str, ...]
+    next_action: str
+    human_signoff_required: bool
+    attestation: DecisionAttestationV1 | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+BehavioralStatus = Literal[
+    "invalid",
+    "incomplete",
+    "improved",
+    "regressed",
+    "mixed",
+    "unchanged",
+]
+PairStatus = Literal["improved", "regressed", "mixed", "unchanged", "incomplete"]
+DimensionStatus = Literal["improved", "regressed", "unchanged", "unavailable"]
+EvidenceLinkStatus = Literal["resolved", "missing", "invalid"]
+EvidenceLinkKind = Literal[
+    "evaluation_root",
+    "prediction_and_score",
+    "prediction",
+    "agent_root",
+    "dataset",
+]
+
+
+@dataclass(frozen=True)
+class AttemptEvidenceLinkV1:
+    kind: EvidenceLinkKind
+    status: EvidenceLinkStatus
+    system: Literal["weave"] = "weave"
+    ref: str | None = None
+    url: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class DimensionChangeV1:
+    id: str
+    status: DimensionStatus
+    baseline: bool | None
+    candidate: bool | None
+    critical: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class DimensionChangeV2:
+    id: str
+    label: str
+    status: DimensionStatus
+    baseline: bool | None
+    candidate: bool | None
+    critical: bool
+    role: DimensionRole
+    baseline_explanation: str | None = None
+    candidate_explanation: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class PairedAttemptV2:
+    attempt_id: str
+    identity: dict[str, Any]
+    prediction_id: str | None
+    passed: bool | None
+    execution_status: str
+    evaluation_status: str
+    evidence_status: str
+    cost_usd: float | None
+    latency_sec: float | None
+    input_tokens: float | None
+    output_tokens: float | None
+    tool_calls: int
+    tools: tuple[str, ...]
+    queried_projects: tuple[str, ...]
+    scores: dict[str, Any]
+    evidence_links: tuple[AttemptEvidenceLinkV1, ...]
+    weave_agent_root_call_id: str | None = None
+    otel_root_span_id: str | None = None
+    execution_fingerprint: str | None = None
+    runtime_lock_digest: str | None = None
+    infrastructure: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class PairedAttemptV3:
+    attempt_id: str
+    identity: dict[str, Any]
+    prediction_id: str | None
+    passed: bool | None
+    execution_status: str
+    evaluation_status: str
+    evidence_status: str
+    cost_usd: float | None
+    latency_sec: float | None
+    input_tokens: float | None
+    output_tokens: float | None
+    tool_calls: int
+    tools: tuple[str, ...]
+    queried_projects: tuple[str, ...]
+    scores: dict[str, Any]
+    score_explanations: dict[str, str]
+    sanitized_answer_excerpt: str | None
+    actual_query_scope: tuple[str, ...]
+    reported_project_identity: str | None
+    evidence_links: tuple[AttemptEvidenceLinkV1, ...]
+    weave_agent_root_call_id: str | None = None
+    otel_root_span_id: str | None = None
+    execution_fingerprint: str | None = None
+    runtime_lock_digest: str | None = None
+    infrastructure: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class PairedCaseV2:
+    pair_id: str
+    task_id: str
+    harness: str
+    attempt: int
+    status: PairStatus
+    dimension_changes: tuple[DimensionChangeV1, ...]
+    baseline: PairedAttemptV2 | None
+    candidate: PairedAttemptV2 | None
+    task_label: str | None = None
+    baseline_passed: bool | None = None
+    candidate_passed: bool | None = None
+    baseline_prediction_id: str | None = None
+    candidate_prediction_id: str | None = None
+    baseline_evaluation_call_id: str | None = None
+    candidate_evaluation_call_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class PairedCaseV3:
+    pair_id: str
+    task_id: str
+    harness: str
+    attempt: int
+    status: PairStatus
+    dimension_changes: tuple[DimensionChangeV2, ...]
+    baseline: PairedAttemptV3 | None
+    candidate: PairedAttemptV3 | None
+    task_label: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class BehavioralSummaryV1:
+    status: BehavioralStatus
+    recommendation: str
+    improved_pairs: int
+    regressed_pairs: int
+    mixed_pairs: int
+    unchanged_pairs: int
+    incomplete_pairs: int
+    candidate_critical_failures: int
+    critical_blockers: tuple[str, ...]
+    supported_claim: str | None
+    limitations: tuple[str, ...]
+    next_action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class CandidateSourceRevisionV1:
+    kind: str
+    id: str
+    version_identity: str
+    runtime_digest: str
+    lock_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -128,13 +462,41 @@ class ComparisonSpecV1:
     changed: tuple[str, ...]
     evaluators: tuple[ComparisonEvaluatorV1, ...]
     execution: ComparisonExecutionPolicyV1
+    decision_policy: DecisionPolicyV1 | None = None
     spec_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
+        value = _json_value(asdict(self))
         execution = value.get("execution")
-        if isinstance(execution, dict) and not execution.get("environment"):
-            execution.pop("environment", None)
+        if isinstance(execution, dict):
+            if not execution.get("environment"):
+                execution.pop("environment", None)
+            if execution.get("evidence_project") is None:
+                execution.pop("evidence_project", None)
+            if execution.get("evidence_destination") is None:
+                execution.pop("evidence_destination", None)
+            if execution.get("source_evidence_project") is None:
+                execution.pop("source_evidence_project", None)
+            if execution.get("source_evidence_destination") is None:
+                execution.pop("source_evidence_destination", None)
+            if execution.get("study_console_base_url") is None:
+                execution.pop("study_console_base_url", None)
+            if execution.get("research_id") is None:
+                execution.pop("research_id", None)
+            if execution.get("infrastructure_receipt") is None:
+                execution.pop("infrastructure_receipt", None)
+            if execution.get("evidence_lock") is None:
+                execution.pop("evidence_lock", None)
+            if execution.get("release_notes_lock") is None:
+                execution.pop("release_notes_lock", None)
+            if execution.get("mechanism_receipt") is None:
+                execution.pop("mechanism_receipt", None)
+            if execution.get("preparation_required") is False:
+                execution.pop("preparation_required", None)
+            if execution.get("evidence_checkpoint_cells") == 0:
+                execution.pop("evidence_checkpoint_cells", None)
+        if value.get("decision_policy") is None:
+            value.pop("decision_policy", None)
         return value
 
 
@@ -143,6 +505,7 @@ class ComparisonReadinessV1:
     schema_version: int
     comparison_id: str
     question: str
+    evidence_project: str | None
     task_count: int
     taskset_digest: str
     private_labels_digest: str
@@ -162,6 +525,8 @@ class ComparisonReadinessV1:
     blockers: tuple[str, ...]
     warnings: tuple[str, ...]
     readiness_digest: str = ""
+    runtime_lock_digests: dict[str, str] = field(default_factory=dict)
+    qualification_input_digests: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,6 +552,7 @@ class ComparisonResultV1:
     comparison_id: str
     preview_digest: str
     source: str
+    evidence_project: str | None
     rows: int
     baseline_passed: int
     candidate_passed: int
@@ -206,6 +572,174 @@ class ComparisonResultV1:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ComparisonResultV2:
+    schema_version: Literal[2]
+    comparison_id: str
+    preview_digest: str
+    source: str
+    evidence_project: str | None
+    rows: int
+    baseline_passed: int
+    candidate_passed: int
+    improved: int
+    regressed: int
+    mixed: int
+    unchanged: int
+    incomplete: int
+    required_evaluations_incomplete: int
+    deterministic_summary: dict[str, Any]
+    judge_summary: dict[str, Any]
+    mechanism_summary: dict[str, Any]
+    operational_summary: dict[str, Any]
+    evidence_links: tuple[dict[str, str], ...]
+    paired_cases: tuple[PairedCaseV2, ...]
+    limitations: tuple[str, ...]
+    integrity: dict[str, Any]
+    behavioral_summary: BehavioralSummaryV1
+    decision_policy: dict[str, Any] | None
+    decision: DecisionSummaryV1
+    candidate_source_revisions: tuple[CandidateSourceRevisionV1, ...] = ()
+    evidence_destination: dict[str, Any] = field(default_factory=dict)
+    qualification_digest: str = ""
+    result_digest: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ComparisonResultV3:
+    schema_version: Literal[3]
+    comparison_id: str
+    preview_digest: str
+    source: str
+    evidence_project: str | None
+    rows: int
+    baseline_passed: int
+    candidate_passed: int
+    improved: int
+    regressed: int
+    mixed: int
+    unchanged: int
+    incomplete: int
+    required_evaluations_incomplete: int
+    deterministic_summary: dict[str, Any]
+    judge_summary: dict[str, Any]
+    mechanism_summary: dict[str, Any]
+    operational_summary: dict[str, Any]
+    evidence_links: tuple[dict[str, str], ...]
+    paired_cases: tuple[PairedCaseV3, ...]
+    limitations: tuple[str, ...]
+    integrity: dict[str, Any]
+    behavioral_summary: BehavioralSummaryV1
+    decision_policy: dict[str, Any] | None
+    decision: DecisionSummaryV1
+    evidence_topology: EvidenceTopologyV1
+    aligned_analysis: AlignedAnalysisV1
+    task_validity: tuple[TaskValidityV1, ...]
+    release_note_coverage: tuple[dict[str, Any], ...]
+    scorer_revisions: tuple[LockDescriptorV1, ...]
+    runtime_locks: tuple[LockDescriptorV1, ...]
+    supersedes: tuple[SupersededResultV1, ...] = ()
+    candidate_source_revisions: tuple[CandidateSourceRevisionV1, ...] = ()
+    evidence_destination: dict[str, Any] = field(default_factory=dict)
+    qualification_digest: str = ""
+    result_digest: str = ""
+
+    def __post_init__(self) -> None:
+        if self.schema_version != COMPARISON_RESULT_SCHEMA_VERSION:
+            raise ValueError("unsupported ComparisonResultV3 schema version")
+        if not self.paired_cases or not self.task_validity:
+            raise ValueError(
+                "ComparisonResultV3 requires nonzero paired cases and task validity"
+            )
+        if not self.scorer_revisions:
+            raise ValueError("ComparisonResultV3 requires scorer revisions")
+        if not self.runtime_locks:
+            raise ValueError("ComparisonResultV3 requires runtime locks")
+        if self.evidence_project != (
+            self.evidence_topology.result_destination.project_slug
+        ):
+            raise ValueError(
+                "ComparisonResultV3 evidence project disagrees with its topology"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = _json_value(asdict(self))
+        value["evidence_topology"] = self.evidence_topology.to_dict()
+        value["aligned_analysis"] = self.aligned_analysis.to_dict()
+        value["task_validity"] = [
+            item.to_dict() for item in self.task_validity
+        ]
+        value["scorer_revisions"] = [
+            item.to_dict() for item in self.scorer_revisions
+        ]
+        value["runtime_locks"] = [
+            item.to_dict() for item in self.runtime_locks
+        ]
+        value["supersedes"] = [item.to_dict() for item in self.supersedes]
+        serialized = _drop_empty(value, preserve_false=True)
+        serialized["deterministic_summary"] = dict(self.deterministic_summary)
+        serialized["judge_summary"] = dict(self.judge_summary)
+        serialized["mechanism_summary"] = dict(self.mechanism_summary)
+        serialized["operational_summary"] = dict(self.operational_summary)
+        serialized["evidence_links"] = [
+            dict(item) for item in self.evidence_links
+        ]
+        serialized["release_note_coverage"] = [
+            dict(item) for item in self.release_note_coverage
+        ]
+        serialized["supersedes"] = [
+            item.to_dict() for item in self.supersedes
+        ]
+        return serialized
+
+
+ComparisonResult = ComparisonResultV1 | ComparisonResultV2 | ComparisonResultV3
+ComparisonPreviewV2 = ComparisonPreviewV1
+
+
+@dataclass(frozen=True)
+class _PairedAnalysis:
+    v2: tuple[PairedCaseV2, ...]
+    v3: tuple[PairedCaseV3, ...]
+    baseline_passed: int
+    candidate_passed: int
+    improved: int
+    regressed: int
+    mixed: int
+    unchanged: int
+    incomplete: int
+
+
+class ComparisonPublicationError(RuntimeError):
+    """A declared Research projection failed at a governed publication boundary."""
+
+    def __init__(
+        self,
+        *,
+        stage: Literal["start", "result"],
+        research_id: str,
+        receipt_path: Path,
+        error_type: str,
+        result: ComparisonResult | None = None,
+        result_path: Path | None = None,
+        markdown_path: Path | None = None,
+    ) -> None:
+        super().__init__(
+            f"Research {stage} publication is incomplete for {research_id} "
+            f"({error_type}); see {receipt_path}"
+        )
+        self.stage = stage
+        self.research_id = research_id
+        self.receipt_path = receipt_path
+        self.error_type = error_type
+        self.result = result
+        self.result_path = result_path
+        self.markdown_path = markdown_path
 
 
 def load_comparison(path: Path, *, repo_root: Path) -> ComparisonSpecV1:
@@ -231,6 +765,7 @@ def comparison_from_dict(
             "changed",
             "evaluators",
             "execution",
+            "decision_policy",
             "spec_digest",
         },
         "comparison",
@@ -280,7 +815,20 @@ def comparison_from_dict(
     )
     if len({item.id for item in evaluators}) != len(evaluators):
         raise ValueError("comparison evaluator ids must be unique")
-    execution = _execution(raw.get("execution"))
+    execution = _execution(
+        raw.get("execution"),
+        source=base,
+        repo_root=repo_root,
+    )
+    if version >= 3 and (
+        execution.evidence_project is None
+        or execution.evidence_destination is None
+        or execution.source_evidence_project is None
+        or execution.source_evidence_destination is None
+    ):
+        raise ValueError(
+            "V3 comparison requires exact source and result evidence destinations"
+        )
     changed = _string_tuple(raw.get("changed"), "changed dimension")
     if len(set(changed)) != len(changed):
         raise ValueError("declared changed dimensions must be unique")
@@ -294,6 +842,7 @@ def comparison_from_dict(
         changed=changed,
         evaluators=evaluators,
         execution=execution,
+        decision_policy=_decision_policy(raw.get("decision_policy")),
     )
     digest = _artifact_digest(unsigned.to_dict(), "spec_digest")
     supplied = str(raw.get("spec_digest") or "")
@@ -305,41 +854,41 @@ def comparison_from_dict(
 def check_comparison(
     spec: ComparisonSpecV1, *, repo_root: Path
 ) -> ComparisonReadinessV1:
-    from fugue.bench.integrations import load_integration
-    from fugue.bench.sources import resolve_skill
-
     tasks = _load_public_tasks(repo_root / spec.taskset.tasks)
     labels = _load_private_labels(repo_root / spec.taskset.private_labels)
     actual_changes, blockers = _comparison_identity_issues(spec)
     warnings: list[str] = []
+    infrastructure_receipt, infrastructure_blockers = (
+        _infrastructure_readiness(spec, repo_root=repo_root)
+    )
+    blockers.extend(infrastructure_blockers)
+    qualification_input_digests, qualification_blockers = (
+        _qualification_input_readiness(spec, repo_root=repo_root)
+    )
+    blockers.extend(qualification_blockers)
     task_ids = tuple(str(item["id"]) for item in tasks)
     blockers.extend(_task_label_issues(task_ids, labels))
-    for candidate_name, candidate in (
-        ("baseline", spec.baseline),
-        ("candidate", spec.candidate),
-    ):
-        for skill_id in candidate.skills:
-            try:
-                resolve_skill(skill_id, repo_root)
-            except (FileNotFoundError, ValueError, RuntimeError) as exc:
-                blockers.append(
-                    f"{candidate_name} Skill {skill_id!r} is not locked and usable: {exc}"
-                )
-        for selection in candidate.integrations:
-            integration_id = str(selection["id"])
-            try:
-                integration = load_integration(integration_id, repo_root)
-            except (FileNotFoundError, ValueError) as exc:
-                blockers.append(
-                    f"{candidate_name} integration {integration_id!r} is not locked "
-                    f"and usable: {exc}"
-                )
-                continue
-            if integration.support != "supported":
-                warnings.append(
-                    f"{candidate_name} integration {integration_id!r} is "
-                    f"{integration.support}; its evidence is exploratory"
-                )
+    asset_blockers, asset_warnings = _candidate_asset_readiness(
+        spec, repo_root=repo_root
+    )
+    blockers.extend(asset_blockers)
+    warnings.extend(asset_warnings)
+    runtime_lock_digests, runtime_blockers = _runtime_readiness(
+        spec, repo_root=repo_root
+    )
+    blockers.extend(runtime_blockers)
+    preparation_digest, preparation_blockers = _preparation_receipt_readiness(
+        spec,
+        repo_root=repo_root,
+        runtime_lock_digests=runtime_lock_digests,
+        qualification_input_digests=qualification_input_digests,
+    )
+    blockers.extend(preparation_blockers)
+    if preparation_digest:
+        runtime_lock_digests = {
+            **runtime_lock_digests,
+            "comparison_preparation": preparation_digest,
+        }
     deterministic = tuple(
         item.id for item in spec.evaluators if item.type == "deterministic"
     )
@@ -421,6 +970,7 @@ def check_comparison(
         schema_version=COMPARISON_SCHEMA_VERSION,
         comparison_id=spec.id,
         question=spec.question,
+        evidence_project=spec.execution.evidence_project,
         task_count=len(tasks),
         taskset_digest=_sha256_path(repo_root / spec.taskset.tasks),
         private_labels_digest=_sha256_path(
@@ -435,13 +985,24 @@ def check_comparison(
         evaluator_digests={
             item.id: _evaluator_digest(item, repo_root)
             for item in spec.evaluators
-        },
+        }
+        | (
+            {
+                "infrastructure_receipt": str(
+                    infrastructure_receipt["receipt_digest"]
+                )
+            }
+            if infrastructure_receipt is not None
+            else {}
+        ),
         attempts=spec.execution.attempts,
         estimated_cells=estimated_cells,
         estimated_cost_usd=round(estimated_cost, 6),
         status=status,  # type: ignore[arg-type]
         blockers=tuple(dict.fromkeys(blockers)),
         warnings=tuple(dict.fromkeys(warnings)),
+        runtime_lock_digests=runtime_lock_digests,
+        qualification_input_digests=qualification_input_digests,
     )
     return replace(
         unsigned,
@@ -449,6 +1010,407 @@ def check_comparison(
             unsigned.to_dict(), "readiness_digest"
         ),
     )
+
+
+def _infrastructure_readiness(
+    spec: ComparisonSpecV1, *, repo_root: Path
+) -> tuple[dict[str, Any] | None, list[str]]:
+    receipt_path = spec.execution.infrastructure_receipt
+    if not receipt_path:
+        blockers = (
+            ["a governed release decision requires an infrastructure receipt"]
+            if spec.decision_policy is not None
+            else []
+        )
+        return None, blockers
+    try:
+        receipt = _load_infrastructure_receipt(
+            repo_root / receipt_path,
+            repo_root=repo_root,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        return None, [f"infrastructure receipt is not usable: {exc}"]
+    conformance = _mapping_or_empty(receipt.get("infrastructure_conformance"))
+    if conformance.get("complete") is True:
+        return receipt, []
+    unavailable = ", ".join(
+        str(item) for item in conformance.get("unavailable") or ()
+    )
+    failed = ", ".join(str(item) for item in conformance.get("failed") or ())
+    detail = "; ".join(
+        item
+        for item in (
+            f"failed: {failed}" if failed else "",
+            f"unavailable: {unavailable}" if unavailable else "",
+        )
+        if item
+    )
+    blocker = "infrastructure conformance is incomplete"
+    if detail:
+        blocker += f" ({detail})"
+    return receipt, [blocker]
+
+
+def _qualification_input_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], list[str]]:
+    """Verify optional MCP release evidence without treating it as release CI.
+
+    These inputs qualify the mechanism exercised by a behavioral comparison.
+    They are deliberately distinct from ``infrastructure_receipt``: a local
+    Harbor study may bind exact hosted evidence and MCP probes while leaving
+    the package-release infrastructure decision unevaluated.
+    """
+    declared = {
+        "evidence_lock": spec.execution.evidence_lock,
+        "release_notes_lock": spec.execution.release_notes_lock,
+        "mechanism_receipt": spec.execution.mechanism_receipt,
+    }
+    if not any(declared.values()):
+        return {}, []
+    if spec.schema_version >= 3 and (
+        spec.execution.source_evidence_project is None
+        or spec.execution.source_evidence_destination is None
+    ):
+        return {}, [
+            "V3 mechanism qualification requires a distinct immutable "
+            "source evidence destination"
+        ]
+    if (
+        spec.schema_version >= 3
+        and spec.execution.source_evidence_project
+        == spec.execution.evidence_project
+    ):
+        return {}, [
+            "MCP mechanism qualification requires source and result evidence "
+            "projects to be different"
+        ]
+    missing = [name for name, value in declared.items() if not value]
+    if missing:
+        return {}, [
+            "comparison mechanism qualification must declare "
+            + ", ".join(sorted(declared))
+            + " together"
+        ]
+
+    try:
+        evidence_path = _safe_input_path(
+            Path(str(declared["evidence_lock"])),
+            repo_root,
+            "evidence lock",
+        )
+        release_path = _safe_input_path(
+            Path(str(declared["release_notes_lock"])),
+            repo_root,
+            "release-notes lock",
+        )
+        receipt_path = _safe_input_path(
+            Path(str(declared["mechanism_receipt"])),
+            repo_root,
+            "mechanism receipt",
+        )
+        evidence_raw = _load_json_object(evidence_path, "evidence lock")
+        release_raw = _load_json_object(release_path, "release-notes lock")
+        receipt = _load_digest_receipt(receipt_path, "mechanism receipt")
+
+        from fugue.bench.mcp_release_qualification import (
+            validate_evidence_lock,
+            validate_release_notes_lock,
+        )
+
+        source_project = (
+            spec.execution.source_evidence_project
+            or spec.execution.evidence_project
+            or ""
+        )
+        evidence = validate_evidence_lock(
+            evidence_raw,
+            expected_project=str(source_project),
+        )
+        release = validate_release_notes_lock(release_raw)
+        if receipt.get("kind") != "mcp-release-mechanism-qualification":
+            raise ValueError("mechanism receipt kind does not match")
+        if receipt.get("project") != source_project:
+            raise ValueError("mechanism receipt source project does not match")
+        if receipt.get("evidence_lock_digest") != evidence.get(
+            "evidence_lock_digest"
+        ):
+            raise ValueError("mechanism receipt evidence lock does not match")
+        if receipt.get("release_notes_lock") != release:
+            raise ValueError("mechanism receipt release-notes lock does not match")
+
+        receipt_candidates = {
+            str(item.get("id") or ""): item
+            for item in _sequence(
+                receipt.get("candidates"),
+                "mechanism receipt candidates",
+            )
+            if isinstance(item, Mapping)
+        }
+        integration_ids = tuple(
+            dict.fromkeys(
+                str(selection["id"])
+                for candidate in (spec.baseline, spec.candidate)
+                for selection in candidate.integrations
+            )
+        )
+        digests = {
+            "evidence_lock": str(evidence["evidence_lock_digest"]),
+            "evidence_lock_file": _sha256_path(evidence_path),
+            "release_notes_lock": _sha256_path(release_path),
+            "mechanism_receipt": str(receipt["receipt_digest"]),
+        }
+        for integration_id in integration_ids:
+            lock_path = (
+                repo_root
+                / ".fugue/imports/mcp/locks"
+                / f"{integration_id}.json"
+            )
+            lock = _load_json_object(
+                _safe_input_path(lock_path, repo_root, f"MCP lock {integration_id}"),
+                f"MCP lock {integration_id}",
+            )
+            observed = receipt_candidates.get(integration_id)
+            if observed is None:
+                raise ValueError(
+                    f"mechanism receipt is missing candidate {integration_id!r}"
+                )
+            for field_name in (
+                "version_identity",
+                "runtime_digest",
+                "tool_manifest_digest",
+            ):
+                if observed.get(field_name) != lock.get(field_name):
+                    raise ValueError(
+                        f"mechanism receipt {integration_id!r} "
+                        f"{field_name} does not match its MCP lock"
+                    )
+            if observed.get("initialized_manifest_matches_lock") is not True:
+                raise ValueError(
+                    f"mechanism receipt {integration_id!r} tool manifest "
+                    "was not verified"
+                )
+            runtime_digest = str(lock.get("runtime_digest") or "")
+            manifest_digest = str(lock.get("tool_manifest_digest") or "")
+            for label, value in (
+                ("runtime", runtime_digest),
+                ("tool manifest", manifest_digest),
+            ):
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+                    raise ValueError(
+                        f"MCP lock {integration_id!r} {label} digest is invalid"
+                    )
+            digests[f"mcp_lock:{integration_id}"] = _sha256_path(lock_path)
+            digests[f"mcp_runtime:{integration_id}"] = runtime_digest.removeprefix(
+                "sha256:"
+            )
+            digests[
+                f"mcp_tool_manifest:{integration_id}"
+            ] = manifest_digest.removeprefix("sha256:")
+        return dict(sorted(digests.items())), []
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        return {}, [f"mechanism qualification inputs are not usable: {exc}"]
+
+
+def _candidate_asset_readiness(
+    spec: ComparisonSpecV1, *, repo_root: Path
+) -> tuple[list[str], list[str]]:
+    from fugue.bench.integrations import load_integration
+    from fugue.bench.sources import resolve_skill
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    for candidate_name, candidate in (
+        ("baseline", spec.baseline),
+        ("candidate", spec.candidate),
+    ):
+        for skill_id in candidate.skills:
+            try:
+                resolve_skill(skill_id, repo_root)
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                blockers.append(
+                    f"{candidate_name} Skill {skill_id!r} is not locked and usable: {exc}"
+                )
+        for selection in candidate.integrations:
+            integration_id = str(selection["id"])
+            try:
+                integration = load_integration(integration_id, repo_root)
+            except (FileNotFoundError, ValueError) as exc:
+                blockers.append(
+                    f"{candidate_name} integration {integration_id!r} is not locked "
+                    f"and usable: {exc}"
+                )
+                continue
+            if integration.support != "supported":
+                warnings.append(
+                    f"{candidate_name} integration {integration_id!r} is "
+                    f"{integration.support}; its evidence is exploratory"
+                )
+    return blockers, warnings
+
+
+def _runtime_readiness(
+    spec: ComparisonSpecV1, *, repo_root: Path
+) -> tuple[dict[str, str], list[str]]:
+    environment_type = str(spec.execution.environment.get("type") or "docker")
+    if environment_type == "docker" and spec.execution.preparation_required:
+        return _local_runtime_readiness(spec, repo_root=repo_root)
+    if environment_type != "wandb":
+        return {}, []
+
+    from fugue.bench.wandb_sandbox import wandb_execution_identity
+
+    digests: dict[str, str] = {}
+    blockers: list[str] = []
+    for harness in spec.execution.harnesses:
+        try:
+            identity = wandb_execution_identity(
+                spec.execution.environment,
+                harness=harness,
+                repo_root=repo_root,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            blockers.append(
+                f"W&B Serverless runtime for {harness!r} is not locked "
+                f"and usable: {exc}"
+            )
+            continue
+        if identity is None:
+            blockers.append(
+                f"W&B Serverless runtime for {harness!r} did not resolve"
+            )
+            continue
+        digests[harness] = str(identity["lock_digest"])
+    return digests, blockers
+
+
+def _local_runtime_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[dict[str, str], list[str]]:
+    """Verify the exact local Agent and task images selected by the compiler."""
+    from fugue.bench.agent_runtime import (
+        read_runtime_lock,
+        runtime_ready,
+        runtime_spec,
+    )
+    from fugue.bench.manifest import load_manifest
+    from fugue.bench.task_runtime import (
+        read_task_runtime_lock,
+        task_architecture,
+        task_runtime_lock_digest,
+        task_runtime_ready,
+    )
+
+    try:
+        experiment, raw_manifest, _public_rows = compile_comparison(
+            spec,
+            repo_root=repo_root,
+        )
+        manifest = load_manifest(
+            repo_root / experiment.manifest,
+            text=yaml.safe_dump(raw_manifest, sort_keys=False),
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        return {}, [f"local comparison runtime cannot be resolved: {exc}"]
+
+    digests: dict[str, str] = {}
+    blockers: list[str] = []
+    architectures = sorted(
+        {task_architecture(task) for task in manifest.tasks}
+    )
+    for harness in spec.execution.harnesses:
+        if runtime_spec(harness) is None:
+            continue
+        for architecture in architectures:
+            ready, detail = runtime_ready(harness, repo_root, architecture)
+            lock = read_runtime_lock(harness, repo_root, architecture)
+            key = f"agent:{harness}:{architecture}"
+            if not ready or lock is None:
+                blockers.append(
+                    f"local {key} is not prepared and locked: {detail}"
+                )
+            else:
+                digests[key] = stable_digest(lock)
+    for task in manifest.tasks:
+        architecture = task_architecture(task)
+        ready, detail = task_runtime_ready(manifest, task, repo_root)
+        lock = read_task_runtime_lock(manifest, task, repo_root)
+        key = f"task:{task.id}:{architecture}"
+        if not ready or lock is None:
+            blockers.append(
+                f"local {key} is not prepared and locked: {detail}"
+            )
+        else:
+            try:
+                digests[key] = task_runtime_lock_digest(
+                    lock,
+                    repo_root=repo_root,
+                )
+            except ValueError as exc:
+                blockers.append(f"local {key} lock is not portable: {exc}")
+    return dict(sorted(digests.items())), blockers
+
+
+def _comparison_preparation_receipt_path(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> Path:
+    return (
+        repo_root
+        / COMPARISON_RUNTIME_ROOT
+        / spec.spec_digest
+        / "preparation.json"
+    )
+
+
+def _preparation_receipt_readiness(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+    runtime_lock_digests: Mapping[str, str],
+    qualification_input_digests: Mapping[str, str],
+) -> tuple[str | None, list[str]]:
+    if not spec.execution.preparation_required:
+        return None, []
+    path = _comparison_preparation_receipt_path(spec, repo_root=repo_root)
+    try:
+        receipt = _load_digest_receipt(path, "comparison preparation receipt")
+        if receipt.get("kind") != "comparison_preparation":
+            raise ValueError("comparison preparation receipt kind does not match")
+        if receipt.get("spec_digest") != spec.spec_digest:
+            raise ValueError("comparison preparation receipt spec does not match")
+        if receipt.get("runtime_lock_digests") != dict(
+            sorted(runtime_lock_digests.items())
+        ):
+            raise ValueError(
+                "comparison preparation receipt runtime locks do not match"
+            )
+        if receipt.get("qualification_input_digests") != dict(
+            sorted(qualification_input_digests.items())
+        ):
+            raise ValueError(
+                "comparison preparation receipt qualification inputs do not match"
+            )
+        inputs = _mapping(
+            receipt.get("frozen_inputs"),
+            "comparison preparation frozen inputs",
+        )
+        if receipt.get("frozen_inputs_digest") != stable_digest(inputs):
+            raise ValueError(
+                "comparison preparation frozen input digest does not match"
+            )
+        _verify_frozen_comparison_inputs(inputs, repo_root=repo_root)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        return None, [
+            "comparison preparation is missing or drifted; run "
+            f"`fugue compare SPEC --prepare`: {exc}"
+        ]
+    return str(receipt["receipt_digest"]), []
 
 
 def _comparison_identity_issues(
@@ -508,7 +1470,10 @@ def _qualification_results(
                     task=task,
                     output=label["base_output"],
                     expected=label.get("expected"),
-                    evidence={},
+                    evidence=_qualification_fixture_evidence(
+                        label["base_output"],
+                        declared=label.get("base_evidence"),
+                    ),
                     evaluators=evaluators,
                     repo_root=repo_root,
                 )
@@ -528,7 +1493,10 @@ def _qualification_results(
                     task=task,
                     output=label["gold_output"],
                     expected=label.get("expected"),
-                    evidence={},
+                    evidence=_qualification_fixture_evidence(
+                        label["gold_output"],
+                        declared=label.get("gold_evidence"),
+                    ),
                     evaluators=evaluators,
                     repo_root=repo_root,
                 )
@@ -545,6 +1513,36 @@ def _qualification_results(
                         f"{task_id}: known-good output fails the evaluator"
                     )
     return base_failures, gold_passes, blockers, warnings
+
+
+def _qualification_fixture_evidence(
+    output: Any,
+    *,
+    declared: Any = None,
+) -> dict[str, Any]:
+    if declared is not None:
+        return dict(_mapping(declared, "qualification fixture evidence"))
+    if not isinstance(output, Mapping):
+        return {}
+    project = output.get("project")
+    evidence = (
+        {"queried_projects": [project]}
+        if isinstance(project, str) and project
+        else {}
+    )
+    projected_fields = output.get("projected_fields") or output.get(
+        "selected_fields"
+    )
+    if isinstance(projected_fields, list):
+        evidence["mcp_tool_calls"] = [
+            {
+                "tool": "query_wandb_tool",
+                "queried_projects": [project] if isinstance(project, str) else [],
+                "projected_fields": list(projected_fields),
+                "limit": output.get("returned_count"),
+            }
+        ]
+    return evidence
 
 
 def preview_comparison(
@@ -568,9 +1566,9 @@ def preview_comparison(
         ),
         asset_overlay=overlay,
     )
-    if matrix.estimated_trials != readiness.estimated_cells:
+    if matrix.cells != readiness.estimated_cells:
         raise RuntimeError(
-            "comparison compiler and OperatorService resolved different attempt counts"
+            "comparison compiler and OperatorService resolved different planned cells"
         )
     unsigned = ComparisonPreviewV1(
         schema_version=COMPARISON_SCHEMA_VERSION,
@@ -599,7 +1597,12 @@ def compile_comparison(
     evaluator_digests = {
         item.id: _evaluator_digest(item, repo_root) for item in spec.evaluators
     }
-    runtime = COMPARISON_RUNTIME_ROOT / spec.spec_digest
+    runtime = COMPARISON_RUNTIME_ROOT / spec.spec_digest / stable_digest(
+        {
+            "public_cases": taskset_digest,
+            "evaluators": evaluator_digests,
+        }
+    )
     source_path = runtime / "public-cases.jsonl"
     manifest_path = runtime / "manifest.yaml"
     dataset_path = Path(".fugue/cache/simple-task-datasets") / taskset_digest
@@ -672,7 +1675,38 @@ def compile_comparison(
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
             "trace_content": spec.execution.trace_content,
+            "source_evidence_project": spec.execution.source_evidence_project,
+            "source_evidence_destination": (
+                asdict(spec.execution.source_evidence_destination)
+                if spec.execution.source_evidence_destination is not None
+                else None
+            ),
+            "evidence_project": spec.execution.evidence_project,
+            "evidence_destination": (
+                asdict(spec.execution.evidence_destination)
+                if spec.execution.evidence_destination is not None
+                else None
+            ),
             "environment": spec.execution.environment,
+            "agent_env": _drop_empty(
+                {
+                    "FUGUE_SOURCE_EVIDENCE_PROJECT": (
+                        spec.execution.source_evidence_project
+                    ),
+                    "FUGUE_RESULT_EVIDENCE_PROJECT": (
+                        spec.execution.evidence_project
+                    ),
+                    "FUGUE_WANDB_RESEARCH_ID": spec.execution.research_id,
+                    "FUGUE_WANDB_STUDY_ID": spec.id,
+                    "FUGUE_STUDY_CONSOLE_BACKLINK": (
+                        _study_console_backlink(
+                            spec.execution.study_console_base_url,
+                            research_id=spec.execution.research_id,
+                            study_id=spec.id,
+                        )
+                    ),
+                }
+            ),
             "research_view": {
                 "observation": spec.question,
                 "rationale": "Test one declared Agent-system change on aligned tasks.",
@@ -699,8 +1733,166 @@ def compile_comparison(
     return experiment, manifest, public_rows
 
 
+def prepare_comparison(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+    operator: OperatorService | None = None,
+) -> tuple[dict[str, Any], ComparisonPreviewV1, Path]:
+    """Materialize and lock one exact local comparison without running cells.
+
+    Preparation is a trusted, no-spend boundary. It freezes source inputs and
+    builds the exact task and Agent images before the final preview is
+    computed. The resulting receipt intentionally does not contain approval
+    state and cannot authorize execution.
+    """
+    environment_type = str(spec.execution.environment.get("type") or "docker")
+    if environment_type != "docker":
+        raise ValueError(
+            "comparison-scoped preparation currently supports local Docker only"
+        )
+    if not spec.execution.preparation_required:
+        raise ValueError(
+            "comparison does not declare execution.preparation_required"
+        )
+    service = operator or OperatorService(repo_root)
+    experiment, manifest, public_rows = compile_comparison(
+        spec,
+        repo_root=repo_root,
+    )
+    runtime_root = repo_root / Path(experiment.manifest).parent
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    public_text = _jsonl(public_rows)
+    _write_immutable_text(
+        runtime_root / "public-cases.jsonl",
+        public_text,
+        expected_sha256=hashlib.sha256(public_text.encode()).hexdigest(),
+        mode=0o444,
+        label="prepared compiled public cases",
+    )
+    manifest_text = yaml.safe_dump(manifest, sort_keys=False)
+    _write_immutable_text(
+        runtime_root / "manifest.yaml",
+        manifest_text,
+        expected_sha256=hashlib.sha256(manifest_text.encode()).hexdigest(),
+        mode=0o444,
+        label="prepared comparison manifest",
+    )
+
+    # A provisional preview is never approval-eligible. It exists solely to
+    # bind and freeze the source-side input manifest before Docker builds.
+    provisional = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=service,
+    )
+    unexpected_blockers = [
+        str(item)
+        for item in provisional.readiness.get("blockers") or ()
+        if not str(item).startswith("local agent:")
+        and not str(item).startswith("local task:")
+        and not str(item).startswith(
+            "comparison preparation is missing or drifted"
+        )
+    ]
+    if unexpected_blockers:
+        raise ValueError(
+            "comparison has non-preparation blockers:\n- "
+            + "\n- ".join(unexpected_blockers)
+        )
+    if provisional.readiness["status"] == "no_comparison_justified":
+        raise ValueError("comparison does not justify an execution cohort")
+    _materialize_approved_comparison_inputs(
+        spec,
+        preview=provisional,
+        public_rows=public_rows,
+        repo_root=repo_root,
+    )
+    frozen_inputs = _approved_input_manifest(
+        provisional,
+        repo_root=repo_root,
+        public_rows=public_rows,
+    )
+    service.prepare(
+        ExperimentRequest(
+            experiment_id=spec.id,
+            n_concurrent=spec.execution.concurrency,
+            n_attempts=spec.execution.attempts,
+            n_tasks=len(public_rows),
+        ),
+        experiment=experiment,
+    )
+    runtime_lock_digests, runtime_blockers = _runtime_readiness(
+        spec,
+        repo_root=repo_root,
+    )
+    qualification_input_digests, qualification_blockers = (
+        _qualification_input_readiness(spec, repo_root=repo_root)
+    )
+    preparation_blockers = [*runtime_blockers, *qualification_blockers]
+    if preparation_blockers:
+        raise RuntimeError(
+            "comparison preparation did not produce a usable lock set:\n- "
+            + "\n- ".join(preparation_blockers)
+        )
+    unsigned_receipt = {
+        "schema_version": 1,
+        "kind": "comparison_preparation",
+        "comparison_id": spec.id,
+        "spec_digest": spec.spec_digest,
+        "environment_type": environment_type,
+        "runtime_lock_digests": dict(sorted(runtime_lock_digests.items())),
+        "qualification_input_digests": dict(
+            sorted(qualification_input_digests.items())
+        ),
+        "frozen_inputs": frozen_inputs,
+        "frozen_inputs_digest": stable_digest(frozen_inputs),
+        "receipt_digest": "",
+    }
+    receipt = {
+        **unsigned_receipt,
+        "receipt_digest": stable_digest(unsigned_receipt),
+    }
+    receipt_path = _comparison_preparation_receipt_path(
+        spec,
+        repo_root=repo_root,
+    )
+    atomic_write_json(receipt_path, receipt)
+
+    final_preview = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=service,
+    )
+    if final_preview.readiness["status"] not in {"ready", "needs_review"}:
+        blockers = final_preview.readiness.get("blockers") or []
+        raise RuntimeError(
+            "comparison remains blocked after preparation:\n- "
+            + "\n- ".join(str(item) for item in blockers)
+        )
+    _materialize_approved_comparison_inputs(
+        spec,
+        preview=final_preview,
+        public_rows=public_rows,
+        repo_root=repo_root,
+    )
+    stable_preview = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=service,
+    )
+    if stable_preview.preview_digest != final_preview.preview_digest:
+        raise RuntimeError("comparison preview changed while freezing prepared inputs")
+    atomic_write_json(runtime_root / "prepared-preview.json", stable_preview.to_dict())
+    return receipt, stable_preview, receipt_path
+
+
 def materialize_comparison(
-    preview: ComparisonPreviewV1, *, repo_root: Path
+    preview: ComparisonPreviewV1,
+    *,
+    repo_root: Path,
+    operator: OperatorService | None = None,
+    approval_digest: str = "",
 ) -> tuple[ExperimentSpec, ExperimentRequest]:
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
@@ -708,30 +1900,546 @@ def materialize_comparison(
         repo_root=repo_root,
         source=repo_root,
     )
-    current = preview_comparison(spec, repo_root=repo_root)
+    current = preview_comparison(spec, repo_root=repo_root, operator=operator)
     if current.preview_digest != preview.preview_digest:
         raise ValueError("comparison inputs changed after preview")
     experiment, manifest, public_rows = compile_comparison(spec, repo_root=repo_root)
-    root = repo_root / COMPARISON_RUNTIME_ROOT / spec.spec_digest
+    if spec.execution.research_id:
+        experiment = replace(
+            experiment,
+            agent_env={
+                **experiment.agent_env,
+                "FUGUE_WANDB_RESEARCH_ID": spec.execution.research_id,
+                "FUGUE_WANDB_STUDY_ID": spec.id,
+            },
+        )
+    root = repo_root / Path(experiment.manifest).parent
     root.mkdir(parents=True, exist_ok=True)
-    _atomic_text(root / "public-cases.jsonl", _jsonl(public_rows))
-    _atomic_text(root / "manifest.yaml", yaml.safe_dump(manifest, sort_keys=False))
+    _materialize_approved_comparison_inputs(
+        spec,
+        preview=preview,
+        public_rows=public_rows,
+        repo_root=repo_root,
+    )
+    _write_immutable_text(
+        root / "public-cases.jsonl",
+        _jsonl(public_rows),
+        expected_sha256=str(
+            _mapping(preview.manifest["dataset"], "preview dataset")
+            .get("source", {})
+            .get("sha256")
+            or ""
+        ),
+        mode=0o444,
+        label="approved compiled public cases",
+    )
+    _write_immutable_text(
+        root / "manifest.yaml",
+        yaml.safe_dump(manifest, sort_keys=False),
+        expected_sha256=hashlib.sha256(
+            yaml.safe_dump(preview.manifest, sort_keys=False).encode()
+        ).hexdigest(),
+        mode=0o444,
+        label="approved comparison manifest",
+    )
     _atomic_text(
         root / "comparison.yaml",
         yaml.safe_dump(spec.to_dict(), sort_keys=False),
     )
-    private_root = repo_root / COMPARISON_PRIVATE_ROOT / spec.spec_digest
-    private_root.mkdir(parents=True, exist_ok=True)
-    private_target = private_root / "labels.jsonl"
-    shutil.copyfile(repo_root / spec.taskset.private_labels, private_target)
-    private_target.chmod(0o600)
     atomic_write_json(root / "preview.json", preview.to_dict())
+    approved_comparison = _approved_comparison_execution_lock(
+        preview,
+        approval_digest=approval_digest,
+        repo_root=repo_root,
+        public_rows=public_rows,
+    )
     return experiment, ExperimentRequest(
         experiment_id=spec.id,
         n_concurrent=spec.execution.concurrency,
         n_attempts=spec.execution.attempts,
         n_tasks=int(preview.readiness["task_count"]),
+        approved_comparison=approved_comparison,
     )
+
+
+def _approved_input_manifest(
+    preview: ComparisonPreviewV1,
+    *,
+    repo_root: Path,
+    public_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    spec = comparison_from_dict(
+        preview.comparison,
+        repo_root=repo_root,
+        source=repo_root,
+    )
+    readiness = _mapping(preview.readiness, "preview readiness")
+    taskset_digest = _sha256_path(repo_root / spec.taskset.tasks)
+    private_digest = _sha256_path(repo_root / spec.taskset.private_labels)
+    if taskset_digest != str(readiness.get("taskset_digest") or ""):
+        raise ValueError("public taskset changed after approval preview")
+    if private_digest != str(readiness.get("private_labels_digest") or ""):
+        raise ValueError("private labels changed after approval preview")
+    expected_evaluators = _mapping(
+        readiness.get("evaluator_digests"),
+        "preview evaluator digests",
+    )
+    evaluator_artifacts: dict[str, dict[str, str]] = {}
+    for evaluator in spec.evaluators:
+        if _evaluator_digest(evaluator, repo_root) != str(
+            expected_evaluators.get(evaluator.id) or ""
+        ):
+            raise ValueError(
+                f"evaluator {evaluator.id!r} changed after approval preview"
+            )
+        artifacts: dict[str, str] = {}
+        if evaluator.scorer:
+            artifacts["scorer_sha256"] = _sha256_path(
+                _safe_input_path(
+                    Path(evaluator.scorer),
+                    repo_root,
+                    "deterministic scorer",
+                )
+            )
+        if evaluator.calibration:
+            artifacts["calibration_sha256"] = _sha256_path(
+                _safe_input_path(
+                    Path(evaluator.calibration),
+                    repo_root,
+                    "judge calibration",
+                )
+            )
+        evaluator_artifacts[evaluator.id] = artifacts
+    source = _mapping(
+        _mapping(preview.manifest.get("dataset"), "preview dataset").get("source"),
+        "preview dataset source",
+    )
+    compiled_digest = hashlib.sha256(_jsonl(public_rows).encode()).hexdigest()
+    if compiled_digest != str(source.get("sha256") or ""):
+        raise ValueError("compiled public cases changed after approval preview")
+    resources = sorted(
+        (
+            {
+                "locked_relative": str(attachment["locked_relative"]),
+                "sha256": str(attachment["sha256"]),
+            }
+            for row in public_rows
+            for attachment in row.get("attachments") or ()
+            if isinstance(attachment, Mapping)
+        ),
+        key=lambda item: (item["locked_relative"], item["sha256"]),
+    )
+    return {
+        "schema_version": 1,
+        "public_tasks_sha256": taskset_digest,
+        "compiled_public_cases_sha256": compiled_digest,
+        "private_labels_sha256": private_digest,
+        "evaluator_digests": dict(sorted(expected_evaluators.items())),
+        "evaluator_artifacts": dict(sorted(evaluator_artifacts.items())),
+        "task_resources": resources,
+    }
+
+
+def _materialize_approved_comparison_inputs(
+    spec: ComparisonSpecV1,
+    *,
+    preview: ComparisonPreviewV1,
+    public_rows: Sequence[Mapping[str, Any]],
+    repo_root: Path,
+) -> None:
+    approved = _approved_input_manifest(
+        preview,
+        repo_root=repo_root,
+        public_rows=public_rows,
+    )
+    public_digest = str(approved["public_tasks_sha256"])
+    private_digest = str(approved["private_labels_sha256"])
+    _write_immutable_bytes(
+        _frozen_public_tasks_path(repo_root, public_digest),
+        (repo_root / spec.taskset.tasks).read_bytes(),
+        expected_sha256=public_digest,
+        mode=0o444,
+        label="approved public taskset",
+    )
+    _write_immutable_bytes(
+        _frozen_private_labels_path(repo_root, private_digest),
+        (repo_root / spec.taskset.private_labels).read_bytes(),
+        expected_sha256=private_digest,
+        mode=0o400,
+        label="approved private labels",
+    )
+    for evaluator in spec.evaluators:
+        artifacts = _mapping(
+            _mapping(
+                approved["evaluator_artifacts"],
+                "approved evaluator artifacts",
+            ).get(evaluator.id),
+            f"approved evaluator {evaluator.id} artifacts",
+        )
+        if evaluator.scorer:
+            digest = str(artifacts.get("scorer_sha256") or "")
+            source = _safe_input_path(
+                Path(evaluator.scorer),
+                repo_root,
+                "deterministic scorer",
+            )
+            _write_immutable_bytes(
+                _frozen_evaluator_artifact_path(
+                    repo_root,
+                    digest,
+                    kind="scorer",
+                ),
+                source.read_bytes(),
+                expected_sha256=digest,
+                mode=0o400,
+                label=f"approved scorer {evaluator.id}",
+            )
+        if evaluator.calibration:
+            digest = str(artifacts.get("calibration_sha256") or "")
+            source = _safe_input_path(
+                Path(evaluator.calibration),
+                repo_root,
+                "judge calibration",
+            )
+            _write_immutable_bytes(
+                _frozen_evaluator_artifact_path(
+                    repo_root,
+                    digest,
+                    kind="calibration",
+                ),
+                source.read_bytes(),
+                expected_sha256=digest,
+                mode=0o400,
+                label=f"approved calibration {evaluator.id}",
+            )
+    tasks = _load_public_tasks(repo_root / spec.taskset.tasks)
+    expected_resources = {
+        (str(item["locked_relative"]), str(item["sha256"]))
+        for item in approved["task_resources"]
+        if isinstance(item, Mapping)
+    }
+    observed_resources: set[tuple[str, str]] = set()
+    for task in tasks:
+        for raw in task.get("resources") or ():
+            relative = _safe_resource_relative_path(
+                raw.get("path"),
+                label=f"public task {task['id']} resource",
+            )
+            source = repo_root / relative
+            digest = _sha256_path(source)
+            target = _frozen_resource_path(repo_root, digest, source.name)
+            frozen_relative = target.relative_to(repo_root).as_posix()
+            observed_resources.add((frozen_relative, digest))
+            _write_immutable_bytes(
+                target,
+                source.read_bytes(),
+                expected_sha256=digest,
+                mode=0o444,
+                label=f"approved task resource {task['id']}",
+            )
+    if observed_resources != expected_resources:
+        raise ValueError("approved task resources changed after preview")
+
+
+def _frozen_public_tasks_path(repo_root: Path, digest: str) -> Path:
+    return repo_root / COMPARISON_INPUT_ROOT / "tasksets" / f"{digest}.jsonl"
+
+
+def _frozen_private_labels_path(repo_root: Path, digest: str) -> Path:
+    return repo_root / COMPARISON_PRIVATE_INPUT_ROOT / "labels" / f"{digest}.jsonl"
+
+
+def _frozen_evaluator_artifact_path(
+    repo_root: Path,
+    digest: str,
+    *,
+    kind: Literal["scorer", "calibration"],
+) -> Path:
+    suffix = ".py" if kind == "scorer" else ".json"
+    return repo_root / COMPARISON_PRIVATE_INPUT_ROOT / kind / f"{digest}{suffix}"
+
+
+def _frozen_resource_path(repo_root: Path, digest: str, name: str) -> Path:
+    return repo_root / COMPARISON_INPUT_ROOT / "resources" / digest / name
+
+
+def _verify_frozen_comparison_inputs(
+    inputs: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> None:
+    checks = (
+        (
+            _frozen_public_tasks_path(
+                repo_root,
+                str(inputs.get("public_tasks_sha256") or ""),
+            ),
+            str(inputs.get("public_tasks_sha256") or ""),
+            "prepared public taskset",
+        ),
+        (
+            _frozen_private_labels_path(
+                repo_root,
+                str(inputs.get("private_labels_sha256") or ""),
+            ),
+            str(inputs.get("private_labels_sha256") or ""),
+            "prepared private labels",
+        ),
+    )
+    for path, digest, label in checks:
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not path.is_file()
+            or path.is_symlink()
+            or _sha256_path(path) != digest
+        ):
+            raise ValueError(f"{label} immutable copy changed")
+    artifacts = _mapping(
+        inputs.get("evaluator_artifacts"),
+        "prepared evaluator artifacts",
+    )
+    for evaluator_id, raw in artifacts.items():
+        values = _mapping(raw, f"prepared evaluator {evaluator_id} artifacts")
+        for digest_field, kind in (
+            ("scorer_sha256", "scorer"),
+            ("calibration_sha256", "calibration"),
+        ):
+            digest = str(values.get(digest_field) or "")
+            if not digest:
+                continue
+            path = _frozen_evaluator_artifact_path(
+                repo_root,
+                digest,
+                kind=kind,  # type: ignore[arg-type]
+            )
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not path.is_file()
+                or path.is_symlink()
+                or _sha256_path(path) != digest
+            ):
+                raise ValueError(
+                    f"prepared {kind} {evaluator_id!r} immutable copy changed"
+                )
+    for raw in _sequence(
+        inputs.get("task_resources"),
+        "prepared task resources",
+        allow_empty=True,
+    ):
+        resource = _mapping(raw, "prepared task resource")
+        relative = _safe_resource_relative_path(
+            resource.get("locked_relative"),
+            label="prepared task resource",
+        )
+        path = repo_root / relative
+        digest = str(resource.get("sha256") or "")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not path.is_file()
+            or path.is_symlink()
+            or _sha256_path(path) != digest
+        ):
+            raise ValueError(f"prepared task resource changed: {relative}")
+
+
+def _approved_comparison_execution_lock(
+    preview: ComparisonPreviewV1,
+    *,
+    approval_digest: str,
+    repo_root: Path,
+    public_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
+    comparison = _mapping(preview.comparison, "preview comparison")
+    comparison_execution = _mapping(
+        comparison.get("execution"),
+        "preview comparison execution",
+    )
+    readiness = _mapping(preview.readiness, "preview readiness")
+    matrix = _mapping(preview.matrix, "preview matrix")
+    evidence_destination = _evidence_destination(
+        matrix.get("evidence_destination"),
+        "preview evidence destination",
+    )
+    source_project = str(matrix.get("source_evidence_project") or "")
+    source_destination = (
+        _evidence_destination(
+            matrix.get("source_evidence_destination"),
+            "preview source evidence destination",
+        )
+        if source_project
+        else None
+    )
+    cells: list[dict[str, Any]] = []
+    coordinates: set[tuple[str, str, str, int]] = set()
+    attempt_ids: set[str] = set()
+    for raw in _sequence(matrix.get("matrix_cells"), "preview matrix cells"):
+        item = _mapping(raw, "preview matrix cell")
+        task_id = validate_id(str(item.get("task_id") or ""), kind="task id")
+        variant_id = validate_id(
+            str(item.get("variant_id") or ""), kind="variant id"
+        )
+        harness = validate_id(str(item.get("harness") or ""), kind="harness")
+        trial_index = int(item.get("trial_index") or 0)
+        if trial_index < 1:
+            raise ValueError("preview matrix trial_index must be positive")
+        candidate_id = str(item.get("candidate_id") or "")
+        execution_fingerprint = str(item.get("execution_fingerprint") or "")
+        if len(candidate_id) != 64 or len(execution_fingerprint) != 64:
+            raise ValueError(
+                "preview matrix candidate and execution identities must be exact digests"
+            )
+        identity = attempt_identity(
+            task_id=task_id,
+            arm=variant_id,
+            harness=harness,
+            attempt=trial_index,
+            candidate=candidate_id,
+            runtime=execution_fingerprint,
+        )
+        resolved_attempt_id = attempt_id(**identity)
+        if str(item.get("attempt_id") or "") != resolved_attempt_id:
+            raise ValueError(
+                f"preview attempt identity disagrees for {task_id}/{variant_id}"
+            )
+        coordinate = (task_id, variant_id, harness, trial_index)
+        if coordinate in coordinates:
+            raise ValueError("preview matrix contains duplicate attempt coordinates")
+        if resolved_attempt_id in attempt_ids:
+            raise ValueError("preview matrix contains duplicate attempt identities")
+        coordinates.add(coordinate)
+        attempt_ids.add(resolved_attempt_id)
+        cells.append(
+            {
+                "attempt_id": resolved_attempt_id,
+                "attempt_identity": identity,
+                "task_id": task_id,
+                "variant_id": variant_id,
+                "harness": harness,
+                "trial_index": trial_index,
+                "candidate_id": candidate_id,
+                "execution_fingerprint": execution_fingerprint,
+                "applicable": bool(item.get("applicable")),
+                "skip_reason": str(item.get("reason") or ""),
+                "integration_provenance_digest": stable_digest(
+                    item.get("integration_provenance") or []
+                ),
+            }
+        )
+    cells.sort(key=lambda item: str(item["attempt_id"]))
+    expected_count = int(matrix.get("cells") or 0)
+    if expected_count != len(cells):
+        raise ValueError("preview matrix cell count disagrees with its manifest")
+    evaluator_digests = _mapping(
+        readiness.get("evaluator_digests"), "preview evaluator digests"
+    )
+    qualification_input_digests = _mapping(
+        readiness.get("qualification_input_digests") or {},
+        "preview qualification input digests",
+    )
+    approved_inputs = _approved_input_manifest(
+        preview,
+        repo_root=repo_root,
+        public_rows=public_rows,
+    )
+    integration_change = _integration_change_required(comparison)
+    candidate_cells = [
+        item
+        for item in _sequence(matrix.get("matrix_cells"), "preview matrix cells")
+        if isinstance(item, Mapping)
+        and str(item.get("variant_id") or "") == "candidate"
+    ]
+    candidate_revisions = _consistent_source_revisions(
+        candidate_cells,
+        required=integration_change,
+        label="approved candidate",
+    )
+    candidate_ids = sorted(
+        {str(item.get("candidate_id") or "") for item in candidate_cells}
+    )
+    if integration_change and len(candidate_ids) != 1:
+        raise ValueError(
+            "integration-changing comparison must resolve one candidate identity"
+        )
+    unsigned = {
+        "schema_version": 1,
+        "kind": "approved_comparison_execution",
+        "comparison_id": validate_id(
+            str(comparison.get("id") or ""), kind="comparison id"
+        ),
+        "preview_digest": preview.preview_digest,
+        "approval_digest": approval_digest,
+        "spec_digest": str(comparison.get("spec_digest") or ""),
+        "taskset_digest": str(readiness.get("taskset_digest") or ""),
+        "private_labels_digest": str(
+            readiness.get("private_labels_digest") or ""
+        ),
+        "scorer_digests": dict(sorted(evaluator_digests.items())),
+        "approved_inputs": approved_inputs,
+        "approved_inputs_digest": stable_digest(approved_inputs),
+        "source_evidence_project": source_project,
+        "source_evidence_destination": source_destination,
+        "source_lock_digest": str(
+            qualification_input_digests.get("evidence_lock")
+            or (
+                readiness.get("taskset_digest")
+                if source_project and source_destination
+                else ""
+            )
+            or ""
+        ),
+        "evidence_project": str(matrix.get("evidence_project") or ""),
+        "evidence_destination": evidence_destination,
+        "evidence_checkpoint_cells": int(
+            comparison_execution.get("evidence_checkpoint_cells") or 0
+        ),
+        "candidate_source_revisions_required": integration_change,
+        "candidate_source_revisions": [
+            item.to_dict() for item in candidate_revisions
+        ],
+        "candidate_source_identity_digest": stable_digest(
+            {
+                "candidate_ids": candidate_ids,
+                "source_revisions": [
+                    item.to_dict() for item in candidate_revisions
+                ],
+            }
+        ),
+        "expected_cell_count": len(cells),
+        "expected_cells_digest": stable_digest(cells),
+        "expected_cells": cells,
+    }
+    unsigned["evidence_topology_identity"] = stable_digest(
+        {
+            "source_evidence_project": unsigned["source_evidence_project"],
+            "source_evidence_destination": unsigned[
+                "source_evidence_destination"
+            ],
+            "source_lock_digest": unsigned["source_lock_digest"],
+            "result_evidence_project": unsigned["evidence_project"],
+            "result_evidence_destination": unsigned["evidence_destination"],
+        }
+    )
+    for key in (
+        "preview_digest",
+        "spec_digest",
+        "taskset_digest",
+        "private_labels_digest",
+        "expected_cells_digest",
+    ):
+        value = str(unsigned[key])
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"approved comparison {key} must be an exact digest")
+    if approval_digest and (
+        len(approval_digest) != 64
+        or any(char not in "0123456789abcdef" for char in approval_digest)
+    ):
+        raise ValueError("approved comparison approval_digest must be an exact digest")
+    if not unsigned["evidence_project"]:
+        raise ValueError("approved comparison must lock an exact evidence project")
+    locked = {**unsigned, "lock_digest": stable_digest(unsigned)}
+    _verify_approved_comparison_execution_lock(locked)
+    return locked
 
 
 def claim_comparison_approval(
@@ -741,9 +2449,10 @@ def claim_comparison_approval(
     repo_root: Path,
 ) -> None:
     readiness = ComparisonReadinessV1(**preview.readiness)
-    if readiness.status != "ready":
+    if readiness.status not in {"ready", "needs_review"}:
         raise ValueError(
-            f"comparison is {readiness.status}; only ready comparisons may run"
+            f"comparison is {readiness.status}; blocked and unjustified "
+            "comparisons may not run"
         )
     store = StudyStore(repo_root)
     ApprovalLedger(store.path).claim(
@@ -762,103 +2471,1595 @@ def analyze_comparison_rows(
     preview_digest: str,
     rows: Sequence[Mapping[str, Any]],
     source: str,
-) -> ComparisonResultV1:
-    normalized = [dict(row) for row in rows]
+    expected_evidence_project: str | None = None,
+    expected_source_evidence_project: str | None = None,
+    approved_comparison: Mapping[str, Any] | None = None,
+    decision_policy: DecisionPolicyV1 | Mapping[str, Any] | None = None,
+    attestation: DecisionAttestationV1 | Mapping[str, Any] | None = None,
+    result_schema_version: Literal[2, 3] = 2,
+    study_intent: str = "candidate_comparison",
+    evidence_topology: EvidenceTopologyV1 | Mapping[str, Any] | None = None,
+    release_note_coverage: Sequence[Mapping[str, Any]] = (),
+    supersedes: Sequence[SupersededResultV1 | Mapping[str, Any]] = (),
+) -> ComparisonResultV2 | ComparisonResultV3:
+    execution_lock = _resolve_approved_comparison_execution_lock(
+        rows,
+        supplied=approved_comparison,
+    )
+    normalized = [_bind_attempt_identity(row) for row in rows]
     if not normalized:
         raise ValueError("comparison result requires at least one attempt row")
-    pairs: dict[tuple[str, str, int], dict[str, dict[str, Any]]] = {}
-    baseline_passed = 0
-    candidate_passed = 0
-    for row in normalized:
-        variant = str(row.get("variant_id") or "")
-        if variant not in {"baseline", "candidate"}:
-            continue
-        task = str(row.get("task_id") or row.get("task_name") or "")
-        harness = str(row.get("harness") or "")
-        attempt = int(row.get("trial_index") or 1)
-        pairs.setdefault((task, harness, attempt), {})[variant] = row
-        baseline_passed += variant == "baseline" and row.get("pass") is True
-        candidate_passed += variant == "candidate" and row.get("pass") is True
-    paired_cases: list[dict[str, Any]] = []
-    improved = regressed = unchanged = incomplete = 0
-    for (task, harness, attempt), pair in sorted(pairs.items()):
-        base = pair.get("baseline")
-        candidate = pair.get("candidate")
+    if execution_lock is not None:
+        _validate_approved_comparison_rows(
+            normalized,
+            source=source,
+            approved=execution_lock,
+        )
+        locked_project = str(execution_lock.get("evidence_project") or "")
+        if expected_evidence_project and expected_evidence_project != locked_project:
+            raise ValueError(
+                "analysis evidence project disagrees with the approved comparison "
+                f"({expected_evidence_project!r} != {locked_project!r})"
+            )
+        expected_evidence_project = locked_project
+        locked_source_project = str(
+            execution_lock.get("source_evidence_project") or ""
+        )
         if (
-            base is None
-            or candidate is None
-            or base.get("wandb_serverless_eligible") is False
-            or candidate.get("wandb_serverless_eligible") is False
+            expected_source_evidence_project
+            and expected_source_evidence_project != locked_source_project
         ):
-            status = "incomplete"
-            incomplete += 1
-        elif base.get("pass") is False and candidate.get("pass") is True:
-            status = "improved"
-            improved += 1
-        elif base.get("pass") is True and candidate.get("pass") is False:
-            status = "regressed"
-            regressed += 1
-        else:
-            status = "unchanged"
-            unchanged += 1
-        paired_cases.append(
+            raise ValueError(
+                "analysis source evidence project disagrees with the approved "
+                f"comparison ({expected_source_evidence_project!r} != "
+                f"{locked_source_project!r})"
+            )
+        expected_source_evidence_project = (
+            locked_source_project or expected_source_evidence_project
+        )
+    resolved_destination = _resolve_result_evidence_destination(
+        normalized,
+        execution_lock=execution_lock,
+    )
+    observed_evidence_projects = sorted(
+        {
+            str(row.get("trace_project") or "")
+            for row in normalized
+            if str(row.get("trace_project") or "")
+        }
+    )
+    if expected_evidence_project:
+        mismatched = sorted(
             {
-                "task_id": task,
-                "harness": harness,
-                "attempt": attempt,
-                "status": status,
-                "baseline_prediction_id": (
-                    str(base.get("prediction_id") or "") if base else None
-                ),
-                "candidate_prediction_id": (
-                    str(candidate.get("prediction_id") or "") if candidate else None
-                ),
+                str(row.get("trace_project") or "unreported")
+                for row in normalized
+                if str(row.get("trace_project") or "")
+                != expected_evidence_project
             }
         )
+        if mismatched:
+            raise ValueError(
+                "comparison rows disagree with the locked evidence project "
+                f"{expected_evidence_project}: {', '.join(mismatched)}"
+            )
+    elif len(observed_evidence_projects) > 1:
+        raise ValueError(
+            "comparison rows disagree on the evidence project: "
+            + ", ".join(observed_evidence_projects)
+        )
+    policy = (
+        decision_policy
+        if isinstance(decision_policy, DecisionPolicyV1)
+        else _decision_policy(decision_policy)
+    )
+    signed = _decision_attestation(attestation)
+    attempt_ids = [str(row["attempt_id"]) for row in normalized]
+    duplicate_attempt_ids = sorted(
+        value for value, count in Counter(attempt_ids).items() if count > 1
+    )
+    paired = _analyze_aligned_pairs(
+        normalized,
+        result_schema_version=result_schema_version,
+    )
+    paired_cases_v2 = list(paired.v2)
+    paired_cases_v3 = list(paired.v3)
+    baseline_passed = paired.baseline_passed
+    candidate_passed = paired.candidate_passed
+    improved = paired.improved
+    regressed = paired.regressed
+    mixed = paired.mixed
+    unchanged = paired.unchanged
+    incomplete = paired.incomplete
     limitations = [
         "Task outcomes and authored evaluations must be interpreted separately.",
         "The result applies only to the locked taskset, candidates, and attempts.",
     ]
     if incomplete:
         limitations.append("At least one aligned pair is incomplete.")
-    unsigned = ComparisonResultV1(
-        schema_version=COMPARISON_SCHEMA_VERSION,
-        comparison_id=validate_id(comparison_id, kind="comparison id"),
-        preview_digest=preview_digest,
-        source=source,
-        rows=len(normalized),
-        baseline_passed=baseline_passed,
-        candidate_passed=candidate_passed,
+    required_incomplete = sum(
+        1
+        for row in normalized
+        if row.get("comparison_required_evaluation_complete") is False
+    )
+    operational = _operational_summary(normalized)
+    evidence_statuses = [_attempt_evidence_status(row) for row in normalized]
+    unresolved_evidence = sum(
+        status in {"missing", "invalid"} for status in evidence_statuses
+    )
+    invalid_evidence = sum(status == "invalid" for status in evidence_statuses)
+    cross_project_attempts = sum(
+        bool(
+            _cross_project_queries(
+                row,
+                expected_source_evidence_project
+                or expected_evidence_project,
+            )
+        )
+        for row in normalized
+    )
+    harbor_conformance_failed_attempts = sum(
+        _local_harbor_conformance_failed(row) for row in normalized
+    )
+    harbor_conformance_unavailable_attempts = sum(
+        _local_harbor_conformance_unavailable(row) for row in normalized
+    )
+    local_privacy_failed_attempts = sum(
+        _privacy_scan_status(row, "local_artifact_privacy_scan_status")
+        == "failed"
+        for row in normalized
+    )
+    hosted_privacy_failed_attempts = sum(
+        _privacy_scan_status(row, "hosted_evidence_privacy_scan_status")
+        == "failed"
+        for row in normalized
+    )
+    local_privacy_unavailable_attempts = sum(
+        _privacy_scan_status(row, "local_artifact_privacy_scan_status")
+        in {"legacy", "unavailable", "not_applicable"}
+        for row in normalized
+    )
+    hosted_privacy_unavailable_attempts = sum(
+        _privacy_scan_status(row, "hosted_evidence_privacy_scan_status")
+        in {"legacy", "unavailable", "not_applicable"}
+        for row in normalized
+    )
+    integrity = {
+        "status": (
+            "invalid"
+            if (
+                duplicate_attempt_ids
+                or invalid_evidence
+                or cross_project_attempts
+                or harbor_conformance_failed_attempts
+            )
+            else "reconciled"
+        ),
+        "row_count": len(normalized),
+        "unique_attempts": len(set(attempt_ids)),
+        "duplicate_attempt_ids": duplicate_attempt_ids,
+        "unresolved_evidence_attempts": unresolved_evidence,
+        "invalid_evidence_attempts": invalid_evidence,
+        "cross_project_attempts": cross_project_attempts,
+        "harbor_conformance_failed_attempts": (
+            harbor_conformance_failed_attempts
+        ),
+        "harbor_conformance_unavailable_attempts": (
+            harbor_conformance_unavailable_attempts
+        ),
+        "local_artifact_privacy_failed_attempts": (
+            local_privacy_failed_attempts
+        ),
+        "hosted_evidence_privacy_failed_attempts": (
+            hosted_privacy_failed_attempts
+        ),
+        "local_artifact_privacy_unavailable_attempts": (
+            local_privacy_unavailable_attempts
+        ),
+        "hosted_evidence_privacy_unavailable_attempts": (
+            hosted_privacy_unavailable_attempts
+        ),
+        "privacy_complete_attempts": sum(
+            _privacy_scans_complete(row) for row in normalized
+        ),
+        "rows_digest": stable_digest(normalized),
+        "recomputed": True,
+        "approved_manifest_status": (
+            "reconciled" if execution_lock is not None else "not_provided"
+        ),
+        "approved_manifest_digest": (
+            str(execution_lock["lock_digest"])
+            if execution_lock is not None
+            else None
+        ),
+        "expected_cell_count": (
+            int(execution_lock["expected_cell_count"])
+            if execution_lock is not None
+            else None
+        ),
+    }
+    deterministic = _deterministic_summary(normalized)
+    behavioral = _behavioral_summary(
+        rows=normalized,
+        integrity=integrity,
         improved=improved,
         regressed=regressed,
+        mixed=mixed,
         unchanged=unchanged,
         incomplete=incomplete,
-        required_evaluations_incomplete=sum(
-            1
-            for row in normalized
-            if row.get("comparison_required_evaluation_complete") is False
+        required_incomplete=required_incomplete,
+        unresolved_evidence=unresolved_evidence,
+        cross_project_attempts=cross_project_attempts,
+    )
+    topology: EvidenceTopologyV1 | None = None
+    task_validity: tuple[TaskValidityV1, ...] = ()
+    aligned_analysis: AlignedAnalysisV1 | None = None
+    if result_schema_version == 3:
+        topology = _resolve_evidence_topology_v3(
+            normalized,
+            execution_lock=execution_lock,
+            supplied=evidence_topology,
+            result_destination=resolved_destination,
+        )
+        task_validity = _task_validity_v3(
+            paired_cases_v3,
+            topology=topology,
+        )
+        behavioral = _behavioral_summary_v3(
+            behavioral,
+            paired_cases=paired_cases_v3,
+            task_validity=task_validity,
+        )
+        aligned_analysis = _aligned_analysis_v3(
+            paired_cases_v3,
+            rows=normalized,
+            study_intent=study_intent,
+            task_validity=task_validity,
+        )
+    decision = _evaluate_decision(
+        policy=policy,
+        rows=normalized,
+        deterministic=deterministic,
+        operational=operational,
+        improved=improved,
+        regressed=regressed,
+        incomplete=incomplete,
+        required_incomplete=required_incomplete,
+        integrity=integrity,
+        attestation=signed,
+    )
+    if result_schema_version == 3 and topology is not None:
+        decision = _apply_v3_decision_validity(
+            decision,
+            task_validity=task_validity,
+            topology=topology,
+            release_note_coverage=release_note_coverage,
+        )
+    common = {
+        "comparison_id": validate_id(comparison_id, kind="comparison id"),
+        "preview_digest": preview_digest,
+        "source": source,
+        "evidence_project": (
+            expected_evidence_project
+            or (
+                observed_evidence_projects[0]
+                if observed_evidence_projects
+                else None
+            )
         ),
-        deterministic_summary=_deterministic_summary(normalized),
-        judge_summary=_judge_summary(normalized),
-        mechanism_summary=_mechanism_summary(normalized),
-        operational_summary=_operational_summary(normalized),
-        evidence_links=_comparison_evidence_links(normalized),
-        paired_cases=tuple(paired_cases),
-        limitations=tuple(limitations),
+        "rows": len(normalized),
+        "baseline_passed": baseline_passed,
+        "candidate_passed": candidate_passed,
+        "improved": improved,
+        "regressed": regressed,
+        "mixed": mixed,
+        "unchanged": unchanged,
+        "incomplete": incomplete,
+        "required_evaluations_incomplete": required_incomplete,
+        "deterministic_summary": deterministic,
+        "judge_summary": _judge_summary(normalized),
+        "mechanism_summary": _mechanism_summary(normalized),
+        "operational_summary": operational,
+        "evidence_links": _comparison_evidence_links(normalized),
+        "limitations": tuple(limitations),
+        "integrity": integrity,
+        "behavioral_summary": behavioral,
+        "decision_policy": policy.to_dict() if policy else None,
+        "decision": decision,
+        "candidate_source_revisions": _candidate_source_revisions(normalized),
+        "evidence_destination": resolved_destination,
+    }
+    if result_schema_version == 3:
+        if topology is None or aligned_analysis is None:
+            raise AssertionError("V3 comparison analysis was not materialized")
+        unsigned: ComparisonResultV2 | ComparisonResultV3 = ComparisonResultV3(
+            schema_version=COMPARISON_RESULT_SCHEMA_VERSION,
+            paired_cases=tuple(paired_cases_v3),
+            evidence_topology=topology,
+            aligned_analysis=aligned_analysis,
+            task_validity=task_validity,
+            release_note_coverage=_release_note_coverage_v3(
+                release_note_coverage
+            ),
+            scorer_revisions=_scorer_revisions_v3(execution_lock),
+            runtime_locks=_runtime_locks_v3(normalized),
+            supersedes=tuple(
+                item
+                if isinstance(item, SupersededResultV1)
+                else superseded_result_from_dict(item)
+                for item in supersedes
+            ),
+            **common,
+        )
+    else:
+        unsigned = ComparisonResultV2(
+            schema_version=COMPARISON_SCHEMA_VERSION,
+            paired_cases=tuple(paired_cases_v2),
+            **common,
+        )
+    qualification_digest = _comparison_qualification_digest(unsigned.to_dict())
+    qualified = replace(
+        unsigned,
+        decision=_apply_decision_attestation(
+            unsigned.decision,
+            signed,
+            qualification_digest=qualification_digest,
+        ),
+        qualification_digest=qualification_digest,
+    )
+    # Before sign-off, result_digest is the exact immutable digest the release
+    # owner must attest. Once an attestation is attached, result_digest becomes
+    # an envelope digest that also binds signer and signed_at without making the
+    # signed qualification digest circular.
+    result_digest = (
+        qualification_digest
+        if signed is None
+        else _comparison_result_digest(qualified.to_dict())
+    )
+    return replace(qualified, result_digest=result_digest)
+
+
+def _analyze_aligned_pairs(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    result_schema_version: Literal[2, 3],
+) -> _PairedAnalysis:
+    grouped: dict[tuple[str, str, int], dict[str, dict[str, Any]]] = {}
+    baseline_passed = 0
+    candidate_passed = 0
+    for row in rows:
+        variant = str(row.get("variant_id") or "")
+        if variant not in {"baseline", "candidate"}:
+            continue
+        task = str(row.get("task_id") or row.get("task_name") or "")
+        harness = str(row.get("harness") or "")
+        attempt = int(row.get("trial_index") or 1)
+        grouped.setdefault((task, harness, attempt), {})[variant] = dict(row)
+        baseline_passed += variant == "baseline" and row.get("pass") is True
+        candidate_passed += variant == "candidate" and row.get("pass") is True
+    paired_cases_v2: list[PairedCaseV2] = []
+    paired_cases_v3: list[PairedCaseV3] = []
+    counts: Counter[str] = Counter()
+    for (task, harness, attempt), pair in sorted(grouped.items()):
+        base = pair.get("baseline")
+        candidate = pair.get("candidate")
+        dimension_changes_v2 = _paired_dimension_changes(base, candidate)
+        dimension_changes_v3 = _paired_dimension_changes_v3(base, candidate)
+        if (
+            base is None
+            or candidate is None
+            or base.get("wandb_serverless_eligible") is False
+            or candidate.get("wandb_serverless_eligible") is False
+            or base.get("comparison_required_evaluation_complete") is False
+            or candidate.get("comparison_required_evaluation_complete") is False
+            or any(
+                item.status == "unavailable" for item in dimension_changes_v2
+            )
+        ):
+            status: PairStatus = "incomplete"
+        else:
+            status = (
+                _pair_status_v3(dimension_changes_v3)
+                if result_schema_version == 3
+                else _pair_status_v2(dimension_changes_v2)
+            )
+        counts[status] += 1
+        pair_id = stable_digest(
+            {
+                "schema_version": 1,
+                "task_id": task,
+                "harness": harness,
+                "attempt": attempt,
+            }
+        )
+        task_label = (
+            _row_text(candidate, "task_name")
+            or _row_text(base, "task_name")
+            or task
+        )
+        if result_schema_version == 3:
+            paired_cases_v3.append(
+                PairedCaseV3(
+                    pair_id=pair_id,
+                    task_id=task,
+                    harness=harness,
+                    attempt=attempt,
+                    status=status,
+                    dimension_changes=dimension_changes_v3,
+                    baseline=_paired_attempt_view_v3(base),
+                    candidate=_paired_attempt_view_v3(candidate),
+                    task_label=task_label,
+                )
+            )
+            continue
+        paired_cases_v2.append(
+            PairedCaseV2(
+                pair_id=pair_id,
+                task_id=task,
+                harness=harness,
+                attempt=attempt,
+                status=status,
+                dimension_changes=dimension_changes_v2,
+                baseline=_paired_attempt_view(base),
+                candidate=_paired_attempt_view(candidate),
+                task_label=task_label,
+                baseline_passed=base.get("pass") if base else None,
+                candidate_passed=candidate.get("pass") if candidate else None,
+                baseline_prediction_id=_row_text(base, "prediction_id"),
+                candidate_prediction_id=_row_text(candidate, "prediction_id"),
+                baseline_evaluation_call_id=_row_text(
+                    base, "eval_predict_and_score_call_id"
+                ),
+                candidate_evaluation_call_id=_row_text(
+                    candidate, "eval_predict_and_score_call_id"
+                ),
+            )
+        )
+    return _PairedAnalysis(
+        v2=tuple(paired_cases_v2),
+        v3=tuple(paired_cases_v3),
+        baseline_passed=baseline_passed,
+        candidate_passed=candidate_passed,
+        improved=counts["improved"],
+        regressed=counts["regressed"],
+        mixed=counts["mixed"],
+        unchanged=counts["unchanged"],
+        incomplete=counts["incomplete"],
+    )
+
+
+def _resolve_result_evidence_destination(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    execution_lock: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    locked = (
+        _evidence_destination(
+            execution_lock.get("evidence_destination"),
+            "approved evidence destination",
+        )
+        if execution_lock is not None
+        else None
+    )
+    observed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        receipt = row.get("trace_receipt")
+        if receipt is None:
+            if locked is not None:
+                raise ValueError(
+                    "approved comparison row is missing its evidence destination "
+                    "receipt"
+                )
+            continue
+        destination = _evidence_destination(
+            receipt,
+            "comparison row evidence destination",
+        )
+        observed[str(destination["destination_digest"])] = destination
+        if locked is not None and destination != locked:
+            raise ValueError(
+                "comparison row evidence destination disagrees with the "
+                "approved destination"
+            )
+    if len(observed) > 1:
+        raise ValueError("comparison rows disagree on the evidence destination")
+    return locked or next(iter(observed.values()), {})
+
+
+def _resolve_evidence_topology_v3(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    execution_lock: Mapping[str, Any] | None,
+    supplied: EvidenceTopologyV1 | Mapping[str, Any] | None,
+    result_destination: Mapping[str, Any],
+) -> EvidenceTopologyV1:
+    if isinstance(supplied, EvidenceTopologyV1):
+        topology = supplied
+    elif isinstance(supplied, Mapping):
+        topology = evidence_topology_from_dict(supplied)
+    else:
+        if execution_lock is None:
+            raise ValueError(
+                "ComparisonResultV3 requires an approved evidence topology"
+            )
+        source_destination = evidence_destination_from_dict(
+            _mapping(
+                execution_lock.get("source_evidence_destination"),
+                "approved source evidence destination",
+            )
+        )
+        result = evidence_destination_from_dict(result_destination)
+        source_lock_digest = str(
+            execution_lock.get("source_lock_digest") or ""
+        )
+        pre = _consistent_drift_check(
+            rows,
+            field="source_pre_run_drift",
+            expected_digest=source_lock_digest,
+            missing_reason="pre-run source drift verification was not recorded",
+        )
+        post = _consistent_drift_check(
+            rows,
+            field="source_post_run_drift",
+            expected_digest=source_lock_digest,
+            missing_reason="post-run source drift verification was not recorded",
+        )
+        topology = EvidenceTopologyV1(
+            source_destination=source_destination,
+            result_destination=result,
+            source_lock_digest=source_lock_digest,
+            pre_run_drift=pre,
+            post_run_drift=post,
+            execution_identity=str(
+                execution_lock.get("evidence_topology_identity") or ""
+            ),
+        )
+    if topology.result_destination.to_dict() != dict(result_destination):
+        raise ValueError(
+            "V3 evidence topology result destination disagrees with rows"
+        )
+    if execution_lock is not None:
+        if topology.source_destination.project_slug != execution_lock.get(
+            "source_evidence_project"
+        ):
+            raise ValueError(
+                "V3 evidence topology source project disagrees with approval"
+            )
+        if topology.source_lock_digest != execution_lock.get(
+            "source_lock_digest"
+        ):
+            raise ValueError(
+                "V3 evidence topology source lock disagrees with approval"
+            )
+    return topology
+
+
+def _consistent_drift_check(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    field: str,
+    expected_digest: str,
+    missing_reason: str,
+) -> EvidenceDriftCheckV1:
+    observed = [
+        dict(value)
+        for row in rows
+        if isinstance((value := row.get(field)), Mapping)
+    ]
+    if not observed:
+        return EvidenceDriftCheckV1(
+            status="unavailable",
+            expected_digest=expected_digest,
+            reason=missing_reason,
+        )
+    if len(observed) != len(rows) or any(
+        value != observed[0] for value in observed[1:]
+    ):
+        raise ValueError(f"comparison rows disagree on {field}")
+    parsed = EvidenceDriftCheckV1(
+        status=str(observed[0].get("status") or ""),  # type: ignore[arg-type]
+        expected_digest=str(
+            observed[0].get("expected_digest") or expected_digest
+        ),
+        observed_digest=(
+            str(observed[0].get("observed_digest"))
+            if observed[0].get("observed_digest")
+            else None
+        ),
+        reason=(
+            str(observed[0].get("reason"))
+            if observed[0].get("reason")
+            else None
+        ),
+    )
+    if parsed.expected_digest != expected_digest:
+        raise ValueError(f"{field} expected digest disagrees with approval")
+    return parsed
+
+
+def _task_validity_v3(
+    pairs: Sequence[PairedCaseV3],
+    *,
+    topology: EvidenceTopologyV1,
+) -> tuple[TaskValidityV1, ...]:
+    by_task: dict[str, list[PairedCaseV3]] = {}
+    for pair in pairs:
+        by_task.setdefault(pair.task_id, []).append(pair)
+    result: list[TaskValidityV1] = []
+    topology_statuses = {
+        topology.pre_run_drift.status,
+        topology.post_run_drift.status,
+    }
+    for task_id, task_pairs in sorted(by_task.items()):
+        discriminating = sorted(
+            {
+                change.id
+                for pair in task_pairs
+                for change in pair.dimension_changes
+                if change.role == "outcome"
+                and change.status in {"improved", "regressed"}
+            }
+        )
+        shared_failures = sorted(
+            {
+                change.id
+                for pair in task_pairs
+                for change in pair.dimension_changes
+                if change.role in {"outcome", "safety_gate"}
+                and change.critical
+                and change.baseline is False
+                and change.candidate is False
+            }
+        )
+        statuses = {
+            _pair_task_validity(
+                pair.baseline,
+                pair.candidate,
+                pair.dimension_changes,
+            )
+            for pair in task_pairs
+        }
+        pair_outcomes = {pair.status for pair in task_pairs}
+        if "drifted" in topology_statuses:
+            status = "drifted"
+            reasons = ("the immutable source project drifted during execution",)
+            blockers = (f"{task_id}: source evidence drifted",)
+        elif "unavailable" in topology_statuses:
+            status = "inconclusive"
+            reasons = ("source drift verification is incomplete",)
+            blockers = (f"{task_id}: source drift verification is unavailable",)
+        elif "invalid" in statuses:
+            status = "invalid"
+            reasons = ("the task contract or deterministic output was invalid",)
+            blockers = (f"{task_id}: task evidence is invalid",)
+        elif "inconclusive" in statuses or "incomplete" in pair_outcomes or (
+            len(pair_outcomes & {"improved", "regressed", "mixed"}) > 1
+        ):
+            status = "inconclusive"
+            reasons = ("repeated aligned attempts did not agree",)
+            blockers = (f"{task_id}: aligned attempts disagree",)
+        elif statuses == {"non_discriminating"}:
+            status = "non_discriminating"
+            reasons = (
+                "both revisions retained the same critical failure",
+            )
+            blockers = tuple(
+                f"{task_id}: {dimension} failed in both arms"
+                for dimension in shared_failures
+            ) or (f"{task_id}: no declared outcome discriminated the arms",)
+        else:
+            status = "valid"
+            reasons = (
+                (
+                    "the task produced a stable aligned behavioral contrast",
+                )
+                if discriminating
+                else (
+                    "the task produced stable non-regression evidence with "
+                    "candidate critical dimensions passing",
+                )
+            )
+            blockers = ()
+        result.append(
+            TaskValidityV1(
+                task_id=task_id,
+                status=status,  # type: ignore[arg-type]
+                reasons=tuple(reasons),
+                discriminating_dimensions=tuple(discriminating),
+                blockers=tuple(blockers),
+            )
+        )
+    return tuple(result)
+
+
+def _behavioral_summary_v3(
+    legacy: BehavioralSummaryV1,
+    *,
+    paired_cases: Sequence[PairedCaseV3],
+    task_validity: Sequence[TaskValidityV1],
+) -> BehavioralSummaryV1:
+    if legacy.status in {"invalid", "incomplete"}:
+        return legacy
+    blockers = tuple(
+        dict.fromkeys(
+            [
+                *(
+                    blocker
+                    for validity in task_validity
+                    for blocker in validity.blockers
+                ),
+                *(
+                    f"{pair.task_id}: {change.id} failed for the candidate"
+                    for pair in paired_cases
+                    for change in pair.dimension_changes
+                    if change.role in {"outcome", "safety_gate"}
+                    and change.critical
+                    and change.candidate is False
+                ),
+            ]
+        )
+    )
+    improved = sum(item.status == "improved" for item in paired_cases)
+    regressed = sum(item.status == "regressed" for item in paired_cases)
+    mixed = sum(item.status == "mixed" for item in paired_cases)
+    unchanged = sum(item.status == "unchanged" for item in paired_cases)
+    incomplete = sum(item.status == "incomplete" for item in paired_cases)
+    candidate_critical_failures = sum(
+        change.critical
+        and change.role in {"outcome", "safety_gate"}
+        and change.candidate is False
+        for pair in paired_cases
+        for change in pair.dimension_changes
+    )
+    if mixed or (improved and regressed):
+        status: BehavioralStatus = "mixed"
+        recommendation = (
+            "MIXED — outcome improvements and regressions coexist."
+        )
+        claim = None
+        next_action = "Inspect the named regressed dimensions before promotion."
+    elif regressed:
+        status = "regressed"
+        recommendation = "REGRESSED — the candidate is worse on a locked outcome."
+        claim = (
+            f"The candidate regressed on {regressed} aligned outcome pair(s)."
+        )
+        next_action = "Do not promote the candidate; inspect the regressions."
+    elif improved and not blockers:
+        status = "improved"
+        recommendation = (
+            "IMPROVED — the candidate improved a locked outcome without "
+            "a critical regression."
+        )
+        claim = (
+            f"The candidate improved {improved} aligned outcome pair(s), "
+            "regressed none, and passed every candidate critical dimension."
+        )
+        next_action = "Run the separately approved confirmation cohort."
+    else:
+        status = "unchanged"
+        recommendation = (
+            "UNCHANGED — no release-qualifying behavioral improvement was "
+            "established."
+        )
+        claim = (
+            f"No release-qualifying improvement was established across "
+            f"{len(paired_cases)} aligned pair(s)."
+        )
+        next_action = (
+            "Repair the named blockers or use harder pre-frozen tasks."
+            if blockers
+            else "Use harder pre-frozen tasks if the decision still matters."
+        )
+    return BehavioralSummaryV1(
+        status=status,
+        recommendation=recommendation,
+        improved_pairs=improved,
+        regressed_pairs=regressed,
+        mixed_pairs=mixed,
+        unchanged_pairs=unchanged,
+        incomplete_pairs=incomplete,
+        candidate_critical_failures=candidate_critical_failures,
+        critical_blockers=blockers,
+        supported_claim=claim,
+        limitations=legacy.limitations,
+        next_action=next_action,
+    )
+
+
+def _apply_v3_decision_validity(
+    decision: DecisionSummaryV1,
+    *,
+    task_validity: Sequence[TaskValidityV1],
+    topology: EvidenceTopologyV1,
+    release_note_coverage: Sequence[Mapping[str, Any]],
+) -> DecisionSummaryV1:
+    blockers = [
+        blocker
+        for item in task_validity
+        if item.status != "valid"
+        for blocker in item.blockers
+    ]
+    for label, drift in (
+        ("pre-run", topology.pre_run_drift),
+        ("post-run", topology.post_run_drift),
+    ):
+        if drift.status != "matched":
+            blockers.append(
+                f"{label} source drift check is {drift.status}"
+            )
+    unqualified_release_notes = [
+        str(item.get("release_note") or "")
+        for item in release_note_coverage
+        if str(item.get("status") or "") == "unqualified"
+    ]
+    if decision.release_target and unqualified_release_notes:
+        blockers.append(
+            "unqualified release-note behavior(s): "
+            + ", ".join(sorted(unqualified_release_notes))
+        )
+    if not blockers:
+        return decision
+    status: DecisionStatus = (
+        "invalid"
+        if any(item.status in {"drifted", "invalid"} for item in task_validity)
+        or topology.pre_run_drift.status == "drifted"
+        or topology.post_run_drift.status == "drifted"
+        else "hold"
     )
     return replace(
-        unsigned,
-        result_digest=_artifact_digest(unsigned.to_dict(), "result_digest"),
+        decision,
+        status=status,
+        recommendation=(
+            "INVALID — source or task validity failed."
+            if status == "invalid"
+            else "HOLD — the behavioral study is not release-complete."
+        ),
+        critical_blockers=tuple(
+            dict.fromkeys((*decision.critical_blockers, *blockers))
+        ),
+        next_action=(
+            "Repair the named task/topology blockers and create a new "
+            "immutable preview."
+        ),
+        attestation=None,
     )
+
+
+def _aligned_analysis_v3(
+    pairs: Sequence[PairedCaseV3],
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    study_intent: str,
+    task_validity: Sequence[TaskValidityV1],
+) -> AlignedAnalysisV1:
+    dimensions: dict[str, AlignedDimensionV1] = {}
+    for pair in pairs:
+        for change in pair.dimension_changes:
+            dimensions.setdefault(
+                change.id,
+                AlignedDimensionV1(
+                    id=change.id,
+                    label=change.label,
+                    role=change.role,
+                    critical=change.critical,
+                ),
+            )
+    arms = []
+    for arm_id, label in (("baseline", "Baseline"), ("candidate", "Candidate")):
+        revisions = _consistent_source_revisions(
+            [
+                row
+                for row in rows
+                if str(row.get("variant_id") or "") == arm_id
+            ],
+            required=False,
+            label=f"{arm_id} aligned analysis",
+        )
+        arms.append(
+            AlignedArmV1(
+                id=arm_id,
+                label=label,
+                source_revision=(
+                    {"revisions": [item.to_dict() for item in revisions]}
+                    if revisions
+                    else None
+                ),
+            )
+        )
+    validities = {item.task_id: item for item in task_validity}
+    task_summaries = []
+    for task_id in sorted(validities):
+        selected = [item for item in pairs if item.task_id == task_id]
+        task_summaries.append(
+            TaskStratifiedSummaryV1(
+                task_id=task_id,
+                validity=validities[task_id].status,
+                pair_counts=dict(
+                    Counter(item.status for item in selected)
+                ),
+                blockers=validities[task_id].blockers,
+            )
+        )
+    return AlignedAnalysisV1(
+        study_intent=study_intent,
+        reference_arm="baseline",
+        arms=tuple(arms),
+        contrasts=(
+            AlignedContrastV1(
+                id="candidate-vs-baseline",
+                reference_arm="baseline",
+                treatment_arms=("candidate",),
+                dimensions=tuple(dimensions[key] for key in sorted(dimensions)),
+            ),
+        ),
+        aligned_attempts=tuple(
+            AlignedAttemptSetV1(
+                alignment_id=pair.pair_id,
+                task_id=pair.task_id,
+                task_label=pair.task_label,
+                harness=pair.harness,
+                attempt=pair.attempt,
+                attempt_ids_by_arm={
+                    "baseline": pair.baseline.attempt_id,
+                    "candidate": pair.candidate.attempt_id,
+                },
+            )
+            for pair in pairs
+            if pair.baseline is not None and pair.candidate is not None
+        ),
+        task_summaries=tuple(task_summaries),
+    )
+
+
+def _scorer_revisions_v3(
+    execution_lock: Mapping[str, Any] | None,
+) -> tuple[LockDescriptorV1, ...]:
+    if execution_lock is None:
+        return ()
+    scorers = _mapping_or_empty(execution_lock.get("scorer_digests"))
+    return tuple(
+        LockDescriptorV1(
+            id=str(scorer_id),
+            label=str(scorer_id).replace("-", " ").title(),
+            digest=str(digest),
+            details={"kind": "scorer"},
+        )
+        for scorer_id, digest in sorted(scorers.items())
+    )
+
+
+def _runtime_locks_v3(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[LockDescriptorV1, ...]:
+    values: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        digest = str(row.get("execution_fingerprint") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            continue
+        key = (
+            f"{row.get('variant_id') or 'arm'}-"
+            f"{row.get('harness') or 'harness'}"
+        )
+        values.setdefault(
+            key,
+            {
+                "digest": digest,
+                "details": {
+                    "variant_id": str(row.get("variant_id") or ""),
+                    "harness": str(row.get("harness") or ""),
+                    "backend": (
+                        row.get("harbor_environment")
+                        or _mapping_or_empty(
+                            row.get("sandbox_runtime")
+                        ).get("provider")
+                        or "harbor-docker"
+                    ),
+                },
+            },
+        )
+        if values[key]["digest"] != digest:
+            raise ValueError(f"runtime execution identity drifted for {key}")
+    return tuple(
+        LockDescriptorV1(
+            id=key,
+            label=key.replace("-", " ").title(),
+            digest=str(value["digest"]),
+            details=dict(value["details"]),
+        )
+        for key, value in sorted(values.items())
+    )
+
+
+def _release_note_coverage_v3(
+    raw: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    allowed_statuses = {
+        "observed_delta",
+        "already_on_main",
+        "infrastructure_only",
+        "unqualified",
+        "not_applicable",
+    }
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw, start=1):
+        value = dict(item)
+        _reject_unknown(
+            value,
+            {
+                "release_note",
+                "status",
+                "task_ids",
+                "dimensions",
+                "infrastructure_gates",
+                "rationale",
+            },
+            f"release-note coverage {index}",
+        )
+        release_note = validate_id(
+            str(value.get("release_note") or ""),
+            kind="release-note behavior",
+        )
+        if release_note in seen:
+            raise ValueError(
+                f"release-note behavior {release_note!r} was classified twice"
+            )
+        seen.add(release_note)
+        status = str(value.get("status") or "")
+        if status not in allowed_statuses:
+            raise ValueError(
+                f"release-note behavior {release_note!r} has unsupported status"
+            )
+        rationale = _text(
+            value.get("rationale"),
+            f"release-note behavior {release_note} rationale",
+            2000,
+        )
+        result.append(
+            {
+                "release_note": release_note,
+                "status": status,
+                "task_ids": list(
+                    _string_tuple(
+                        value.get("task_ids") or [],
+                        "release-note task id",
+                        allow_empty=True,
+                    )
+                ),
+                "dimensions": list(
+                    _string_tuple(
+                        value.get("dimensions") or [],
+                        "release-note dimension",
+                        allow_empty=True,
+                    )
+                ),
+                "infrastructure_gates": list(
+                    _string_tuple(
+                        value.get("infrastructure_gates") or [],
+                        "release-note infrastructure gate",
+                        allow_empty=True,
+                    )
+                ),
+                "rationale": rationale,
+            }
+        )
+    return tuple(result)
+
+
+def _resolve_approved_comparison_execution_lock(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    supplied: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    embedded = [
+        dict(value)
+        for row in rows
+        if isinstance((value := row.get("approved_comparison")), Mapping)
+    ]
+    if supplied is None and not embedded:
+        return None
+    expected = dict(supplied) if supplied is not None else embedded[0]
+    _verify_approved_comparison_execution_lock(expected)
+    if len(embedded) != len(rows):
+        raise ValueError(
+            "every comparison row must carry the approved comparison execution lock"
+        )
+    if any(value != expected for value in embedded):
+        raise ValueError("comparison rows disagree on the approved execution lock")
+    return expected
+
+
+def _verify_approved_comparison_execution_lock(
+    approved: Mapping[str, Any],
+) -> None:
+    if approved.get("schema_version") != 1:
+        raise ValueError("approved comparison execution lock schema_version must be 1")
+    if approved.get("kind") != "approved_comparison_execution":
+        raise ValueError("approved comparison execution lock kind is invalid")
+    supplied_digest = str(approved.get("lock_digest") or "")
+    unsigned = {key: value for key, value in approved.items() if key != "lock_digest"}
+    if len(supplied_digest) != 64 or supplied_digest != stable_digest(unsigned):
+        raise ValueError("approved comparison execution lock digest does not match")
+    expected_cells = approved.get("expected_cells")
+    if not isinstance(expected_cells, list) or not expected_cells:
+        raise ValueError("approved comparison execution lock has no expected cells")
+    if int(approved.get("expected_cell_count") or 0) != len(expected_cells):
+        raise ValueError("approved comparison expected cell count does not match")
+    if str(approved.get("expected_cells_digest") or "") != stable_digest(
+        expected_cells
+    ):
+        raise ValueError("approved comparison expected cell manifest digest does not match")
+    validate_id(
+        str(approved.get("comparison_id") or ""),
+        kind="approved comparison id",
+    )
+    for key in (
+        "preview_digest",
+        "spec_digest",
+        "taskset_digest",
+        "private_labels_digest",
+    ):
+        value = str(approved.get(key) or "")
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise ValueError(f"approved comparison {key} must be an exact digest")
+    approval_digest = str(approved.get("approval_digest") or "")
+    if approval_digest and (
+        len(approval_digest) != 64
+        or any(char not in "0123456789abcdef" for char in approval_digest)
+    ):
+        raise ValueError("approved comparison approval_digest must be an exact digest")
+    if not str(approved.get("evidence_project") or ""):
+        raise ValueError("approved comparison evidence project must be exact")
+    evidence_destination = _evidence_destination(
+        approved.get("evidence_destination"),
+        "approved evidence destination",
+    )
+    if evidence_destination["project_slug"] != approved.get("evidence_project"):
+        raise ValueError(
+            "approved evidence destination disagrees with its project lock"
+        )
+    source_project, source_destination_raw, source_lock_digest = (
+        _verified_source_topology_lock(approved)
+    )
+    checkpoint_cells = _non_negative_int(
+        approved.get("evidence_checkpoint_cells", 0),
+        "approved evidence checkpoint cells",
+    )
+    if checkpoint_cells > len(expected_cells):
+        raise ValueError(
+            "approved evidence checkpoint exceeds the expected cell count"
+        )
+    scorer_digests = approved.get("scorer_digests")
+    if not isinstance(scorer_digests, Mapping) or not scorer_digests:
+        raise ValueError("approved comparison must lock scorer digests")
+    for scorer_id, digest in scorer_digests.items():
+        if (
+            not str(scorer_id)
+            or len(str(digest)) != 64
+            or any(char not in "0123456789abcdef" for char in str(digest))
+        ):
+            raise ValueError("approved comparison scorer digest is invalid")
+    _verify_approved_source_contract(
+        approved,
+        expected_cells=expected_cells,
+        scorer_digests=scorer_digests,
+    )
+    _verify_approved_topology_identity(
+        approved,
+        source_project=source_project,
+        source_destination=source_destination_raw,
+        source_lock_digest=source_lock_digest,
+    )
+    for item in expected_cells:
+        _verify_approved_expected_cell(
+            _mapping(item, "approved comparison expected cell")
+        )
+
+
+def _verified_source_topology_lock(
+    approved: Mapping[str, Any],
+) -> tuple[str, Any, str]:
+    source_project = str(approved.get("source_evidence_project") or "")
+    source_destination_raw = approved.get("source_evidence_destination")
+    source_lock_digest = str(approved.get("source_lock_digest") or "")
+    if not any((source_project, source_destination_raw, source_lock_digest)):
+        return source_project, source_destination_raw, source_lock_digest
+    if not all((source_project, source_destination_raw, source_lock_digest)):
+        raise ValueError("approved source evidence topology is incomplete")
+    source_destination = _evidence_destination(
+        source_destination_raw,
+        "approved source evidence destination",
+    )
+    if source_destination["project_slug"] != source_project:
+        raise ValueError(
+            "approved source evidence destination disagrees with its project"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", source_lock_digest):
+        raise ValueError("approved source evidence lock digest is invalid")
+    return source_project, source_destination_raw, source_lock_digest
+
+
+def _verify_approved_topology_identity(
+    approved: Mapping[str, Any],
+    *,
+    source_project: str,
+    source_destination: Any,
+    source_lock_digest: str,
+) -> None:
+    expected = stable_digest(
+        {
+            "source_evidence_project": source_project,
+            "source_evidence_destination": source_destination,
+            "source_lock_digest": source_lock_digest,
+            "result_evidence_project": approved.get("evidence_project"),
+            "result_evidence_destination": approved.get(
+                "evidence_destination"
+            ),
+        }
+    )
+    if approved.get("evidence_topology_identity") != expected:
+        raise ValueError("approved evidence topology identity does not match")
+
+
+def _verify_approved_source_contract(
+    approved: Mapping[str, Any],
+    *,
+    expected_cells: Sequence[Any],
+    scorer_digests: Mapping[str, Any],
+) -> None:
+    approved_inputs = _mapping(
+        approved.get("approved_inputs"),
+        "approved comparison inputs",
+    )
+    if str(approved.get("approved_inputs_digest") or "") != stable_digest(
+        approved_inputs
+    ):
+        raise ValueError("approved comparison input manifest digest does not match")
+    if approved_inputs.get("public_tasks_sha256") != approved.get(
+        "taskset_digest"
+    ) or approved_inputs.get("private_labels_sha256") != approved.get(
+        "private_labels_digest"
+    ):
+        raise ValueError("approved comparison input digests disagree")
+    if approved_inputs.get("evaluator_digests") != dict(scorer_digests):
+        raise ValueError("approved evaluator artifacts disagree with scorer digests")
+    candidate_revisions = tuple(
+        _candidate_source_revision(item)
+        for item in _sequence(
+            approved.get("candidate_source_revisions"),
+            "approved candidate source revisions",
+            allow_empty=True,
+        )
+    )
+    revisions_required = approved.get("candidate_source_revisions_required")
+    if not isinstance(revisions_required, bool):
+        raise ValueError(
+            "approved candidate source revision requirement must be boolean"
+        )
+    if revisions_required and not candidate_revisions:
+        raise ValueError(
+            "integration-changing comparison has no approved candidate source revision"
+        )
+    candidate_ids = sorted(
+        {
+            str(item.get("candidate_id") or "")
+            for item in expected_cells
+            if isinstance(item, Mapping)
+            and str(item.get("variant_id") or "") == "candidate"
+        }
+    )
+    if revisions_required and len(candidate_ids) != 1:
+        raise ValueError(
+            "integration-changing comparison must lock one candidate identity"
+        )
+    if str(approved.get("candidate_source_identity_digest") or "") != stable_digest(
+        {
+            "candidate_ids": candidate_ids,
+            "source_revisions": [
+                item.to_dict() for item in candidate_revisions
+            ],
+        }
+    ):
+        raise ValueError("approved candidate source identity digest does not match")
+
+
+def _verify_approved_expected_cell(cell: Mapping[str, Any]) -> None:
+    applicable = cell.get("applicable")
+    skip_reason = cell.get("skip_reason")
+    if not isinstance(applicable, bool) or not isinstance(skip_reason, str):
+        raise ValueError("approved comparison applicability contract is incomplete")
+    if applicable == bool(skip_reason):
+        raise ValueError("approved comparison applicability and skip reason disagree")
+    provenance_digest = str(cell.get("integration_provenance_digest") or "")
+    if (
+        len(provenance_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in provenance_digest
+        )
+    ):
+        raise ValueError(
+            "approved comparison integration provenance digest is invalid"
+        )
+    identity = attempt_identity(
+        task_id=str(cell.get("task_id") or ""),
+        arm=str(cell.get("variant_id") or ""),
+        harness=str(cell.get("harness") or ""),
+        attempt=int(cell.get("trial_index") or 0),
+        candidate=str(cell.get("candidate_id") or ""),
+        runtime=str(cell.get("execution_fingerprint") or ""),
+    )
+    if cell.get("attempt_identity") != identity:
+        raise ValueError("approved comparison expected cell identity does not match")
+    if str(cell.get("attempt_id") or "") != attempt_id(**identity):
+        raise ValueError("approved comparison expected attempt id does not match")
+
+
+def _verified_approved_inputs(
+    approved: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    _verify_approved_comparison_execution_lock(approved)
+    inputs = dict(
+        _mapping(approved.get("approved_inputs"), "approved comparison inputs")
+    )
+    checks = (
+        (
+            _frozen_public_tasks_path(
+                repo_root,
+                str(inputs["public_tasks_sha256"]),
+            ),
+            str(inputs["public_tasks_sha256"]),
+            "approved public taskset",
+        ),
+        (
+            _frozen_private_labels_path(
+                repo_root,
+                str(inputs["private_labels_sha256"]),
+            ),
+            str(inputs["private_labels_sha256"]),
+            "approved private labels",
+        ),
+    )
+    for path, digest, label in checks:
+        if not path.is_file() or path.is_symlink() or _sha256_path(path) != digest:
+            raise ValueError(f"{label} immutable copy changed")
+    artifacts = _mapping(
+        inputs.get("evaluator_artifacts"),
+        "approved evaluator artifacts",
+    )
+    for evaluator_id, raw in artifacts.items():
+        values = _mapping(raw, f"approved evaluator {evaluator_id} artifacts")
+        for digest_field, kind in (
+            ("scorer_sha256", "scorer"),
+            ("calibration_sha256", "calibration"),
+        ):
+            digest = str(values.get(digest_field) or "")
+            if not digest:
+                continue
+            path = _frozen_evaluator_artifact_path(
+                repo_root,
+                digest,
+                kind=kind,  # type: ignore[arg-type]
+            )
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or _sha256_path(path) != digest
+            ):
+                raise ValueError(
+                    f"approved {kind} {evaluator_id!r} immutable copy changed"
+                )
+    for raw in _sequence(
+        inputs.get("task_resources"),
+        "approved task resources",
+        allow_empty=True,
+    ):
+        resource = _mapping(raw, "approved task resource")
+        relative = _safe_resource_relative_path(
+            resource.get("locked_relative"),
+            label="approved task resource",
+        )
+        path = repo_root / relative
+        digest = str(resource.get("sha256") or "")
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or _sha256_path(path) != digest
+        ):
+            raise ValueError("approved task resource immutable copy changed")
+    return inputs
+
+
+def _validate_approved_comparison_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    source: str,
+    approved: Mapping[str, Any],
+) -> None:
+    expected_cells = [
+        _mapping(item, "approved comparison expected cell")
+        for item in _sequence(
+            approved.get("expected_cells"),
+            "approved comparison expected cells",
+        )
+    ]
+    expected_by_attempt = {
+        str(item.get("attempt_id") or ""): item for item in expected_cells
+    }
+    if len(expected_by_attempt) != len(expected_cells):
+        raise ValueError("approved comparison manifest has duplicate attempt identities")
+    expected_coordinates = [
+        _attempt_coordinate(item, label="approved comparison expected cell")
+        for item in expected_cells
+    ]
+    if len(set(expected_coordinates)) != len(expected_coordinates):
+        raise ValueError("approved comparison manifest has duplicate coordinates")
+    arm_bindings: dict[str, set[str]] = {}
+    for item in expected_cells:
+        arm_bindings.setdefault(str(item.get("variant_id") or ""), set()).add(
+            str(item.get("candidate_id") or "")
+        )
+    drifted_arms = sorted(
+        arm for arm, identities in arm_bindings.items() if len(identities) != 1
+    )
+    if drifted_arms:
+        raise ValueError(
+            "approved comparison manifest has per-arm identity drift: "
+            + ", ".join(drifted_arms)
+        )
+    row_attempt_ids = [str(row.get("attempt_id") or "") for row in rows]
+    if len(set(row_attempt_ids)) != len(row_attempt_ids):
+        raise ValueError("comparison rows contain duplicate attempt identities")
+    row_coordinates = [
+        _attempt_coordinate(row, label="comparison row") for row in rows
+    ]
+    if len(set(row_coordinates)) != len(row_coordinates):
+        raise ValueError("comparison rows contain duplicate attempt coordinates")
+    if len(rows) != len(expected_cells):
+        raise ValueError(
+            "comparison row count disagrees with the approved cell manifest "
+            f"(expected {len(expected_cells)}, got {len(rows)})"
+        )
+    if set(row_attempt_ids) != set(expected_by_attempt):
+        missing = sorted(set(expected_by_attempt) - set(row_attempt_ids))
+        unexpected = sorted(set(row_attempt_ids) - set(expected_by_attempt))
+        raise ValueError(
+            "comparison attempt identities disagree with the approved cell manifest "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
+    if not source:
+        raise ValueError("comparison source run id must not be empty")
+    row_run_ids = {str(row.get("run_id") or "") for row in rows}
+    if row_run_ids != {source}:
+        raise ValueError(
+            "comparison row run ids disagree with the analyzed source run "
+            f"{source!r}: {sorted(row_run_ids)}"
+        )
+    for row in rows:
+        expected = expected_by_attempt[str(row["attempt_id"])]
+        for key in (
+            "task_id",
+            "variant_id",
+            "harness",
+            "trial_index",
+            "candidate_id",
+            "execution_fingerprint",
+            "attempt_identity",
+            "applicable",
+        ):
+            observed = (
+                row.get("task_id") or row.get("task_name")
+                if key == "task_id"
+                else row.get(key)
+            )
+            if observed != expected.get(key):
+                raise ValueError(
+                    "comparison row identity drifted from the approved cell "
+                    f"{row['attempt_id']} at {key}"
+                )
+        if str(row.get("skip_reason") or "") != str(
+            expected.get("skip_reason") or ""
+        ):
+            raise ValueError(
+                "comparison row applicability drifted from the approved cell "
+                f"{row['attempt_id']} at skip_reason"
+            )
+        if stable_digest(row.get("integration_provenance") or []) != str(
+            expected.get("integration_provenance_digest") or ""
+        ):
+            raise ValueError(
+                "comparison row integration provenance drifted from the "
+                f"approved cell {row['attempt_id']}"
+            )
+    observed_revisions = _consistent_source_revisions(
+        [
+            row
+            for row in rows
+            if str(row.get("variant_id") or "") == "candidate"
+        ],
+        required=bool(approved.get("candidate_source_revisions_required")),
+        label="comparison candidate",
+    )
+    approved_revisions = tuple(
+        _candidate_source_revision(item)
+        for item in _sequence(
+            approved.get("candidate_source_revisions"),
+            "approved candidate source revisions",
+            allow_empty=True,
+        )
+    )
+    if observed_revisions != approved_revisions:
+        raise ValueError(
+            "comparison candidate source revisions disagree with the approved "
+            "candidate identity"
+        )
+
+
+def _attempt_coordinate(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+) -> tuple[str, str, str, int]:
+    task_id = str(value.get("task_id") or value.get("task_name") or "")
+    variant_id = str(value.get("variant_id") or "")
+    harness = str(value.get("harness") or "")
+    attempt = int(value.get("trial_index") or value.get("attempt") or 0)
+    if not task_id or not variant_id or not harness or attempt < 1:
+        raise ValueError(f"{label} has incomplete attempt coordinates")
+    return task_id, variant_id, harness, attempt
 
 
 def write_comparison_result(
-    result: ComparisonResultV1, *, destination: Path
+    result: ComparisonResult, *, destination: Path
 ) -> tuple[Path, Path]:
     destination.mkdir(parents=True, exist_ok=True)
     json_path = destination / "result.json"
     markdown_path = destination / "result.md"
+    attempts_path = destination / "attempts.jsonl"
+    if isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        if not attempts_path.is_file():
+            raise FileNotFoundError(
+                "ComparisonResultV2/V3 requires final attempts.jsonl before "
+                "result writing"
+            )
+        is_v3 = isinstance(result, ComparisonResultV3)
+        recomputed = analyze_comparison_rows(
+            comparison_id=result.comparison_id,
+            preview_digest=result.preview_digest,
+            rows=_read_jsonl(attempts_path, "comparison attempt rows"),
+            source=result.source,
+            expected_evidence_project=result.evidence_project,
+            expected_source_evidence_project=(
+                result.evidence_topology.source_destination.project_slug
+                if is_v3
+                else None
+            ),
+            decision_policy=result.decision_policy,
+            attestation=result.decision.attestation,
+            result_schema_version=3 if is_v3 else 2,
+            study_intent=(
+                result.aligned_analysis.study_intent
+                if is_v3
+                else "candidate_comparison"
+            ),
+            evidence_topology=(
+                result.evidence_topology if is_v3 else None
+            ),
+            release_note_coverage=(
+                result.release_note_coverage if is_v3 else ()
+            ),
+            supersedes=result.supersedes if is_v3 else (),
+        )
+        if recomputed.to_dict() != result.to_dict():
+            raise RuntimeError(
+                "comparison result disagrees with the final exported attempt rows"
+            )
     atomic_write_json(json_path, result.to_dict())
+    reloaded = read_comparison_result(json_path)
+    if reloaded.to_dict() != result.to_dict():
+        raise RuntimeError("persisted comparison result does not round-trip exactly")
     _atomic_text(markdown_path, _result_markdown(result))
     artifacts = {
         path.name: _sha256_path(path)
@@ -895,6 +4096,2427 @@ def write_comparison_result(
         },
     )
     return json_path, markdown_path
+
+
+def read_comparison_result(path: Path) -> ComparisonResult:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("comparison result must be a mapping")
+    version = raw.get("schema_version")
+    if version == 1:
+        allowed = {item.name for item in ComparisonResultV1.__dataclass_fields__.values()}
+        _reject_unknown(raw, allowed, "comparison result")
+        value = dict(raw)
+        value["evidence_links"] = tuple(value.get("evidence_links") or ())
+        value["paired_cases"] = tuple(value.get("paired_cases") or ())
+        value["limitations"] = tuple(value.get("limitations") or ())
+        result = ComparisonResultV1(**value)
+    elif version == 2:
+        allowed = {item.name for item in ComparisonResultV2.__dataclass_fields__.values()}
+        _reject_unknown(raw, allowed, "comparison result")
+        has_qualification_digest = bool(raw.get("qualification_digest"))
+        value = dict(raw)
+        value["evidence_links"] = tuple(value.get("evidence_links") or ())
+        value["paired_cases"] = tuple(
+            _paired_case(item) for item in value.get("paired_cases") or ()
+        )
+        value["limitations"] = tuple(value.get("limitations") or ())
+        value["behavioral_summary"] = _behavioral_summary_from_dict(
+            value.get("behavioral_summary")
+        )
+        value["decision"] = _decision_summary(value.get("decision"))
+        value["candidate_source_revisions"] = tuple(
+            _candidate_source_revision(item)
+            for item in value.get("candidate_source_revisions") or ()
+        )
+        value.setdefault("evidence_project", None)
+        value.setdefault("decision_policy", None)
+        if value["decision_policy"] is not None:
+            parsed_policy = _decision_policy(value["decision_policy"])
+            value["decision_policy"] = (
+                parsed_policy.to_dict() if parsed_policy is not None else None
+            )
+        value.setdefault("deterministic_summary", {})
+        value.setdefault("judge_summary", {})
+        value.setdefault("mechanism_summary", {})
+        value.setdefault("operational_summary", {})
+        value.setdefault("evidence_destination", {})
+        if value["evidence_destination"]:
+            value["evidence_destination"] = _evidence_destination(
+                value["evidence_destination"],
+                "comparison result evidence destination",
+            )
+        value.setdefault("qualification_digest", "")
+        result = ComparisonResultV2(**value)
+    elif version == 3:
+        allowed = {
+            item.name for item in ComparisonResultV3.__dataclass_fields__.values()
+        }
+        _reject_unknown(raw, allowed, "comparison result")
+        required = {
+            "behavioral_summary",
+            "decision",
+            "evidence_destination",
+            "evidence_topology",
+            "aligned_analysis",
+            "task_validity",
+            "release_note_coverage",
+            "scorer_revisions",
+            "runtime_locks",
+            "supersedes",
+            "qualification_digest",
+            "result_digest",
+        }
+        missing = sorted(required - set(raw))
+        if missing:
+            raise ValueError(
+                "ComparisonResultV3 is missing required field(s): "
+                + ", ".join(missing)
+            )
+        has_qualification_digest = True
+        value = dict(raw)
+        value["evidence_links"] = tuple(value.get("evidence_links") or ())
+        value["paired_cases"] = tuple(
+            _paired_case_v3(item) for item in value.get("paired_cases") or ()
+        )
+        value["limitations"] = tuple(value.get("limitations") or ())
+        value["behavioral_summary"] = _behavioral_summary_from_dict(
+            value.get("behavioral_summary")
+        )
+        value["decision"] = _decision_summary(value.get("decision"))
+        value["candidate_source_revisions"] = tuple(
+            _candidate_source_revision(item)
+            for item in value.get("candidate_source_revisions") or ()
+        )
+        value["evidence_destination"] = _evidence_destination(
+            value.get("evidence_destination"),
+            "comparison result evidence destination",
+        )
+        value["evidence_topology"] = evidence_topology_from_dict(
+            _mapping(value.get("evidence_topology"), "evidence topology")
+        )
+        value["aligned_analysis"] = aligned_analysis_from_dict(
+            _mapping(value.get("aligned_analysis"), "aligned analysis")
+        )
+        value["task_validity"] = tuple(
+            task_validity_from_dict(
+                _mapping(item, "task validity")
+            )
+            for item in value.get("task_validity") or ()
+        )
+        value["release_note_coverage"] = _release_note_coverage_v3(
+            tuple(
+                _mapping(item, "release-note coverage")
+                for item in value.get("release_note_coverage") or ()
+            )
+        )
+        value["scorer_revisions"] = tuple(
+            lock_descriptor_from_dict(
+                _mapping(item, "scorer revision")
+            )
+            for item in value.get("scorer_revisions") or ()
+        )
+        value["runtime_locks"] = tuple(
+            lock_descriptor_from_dict(
+                _mapping(item, "runtime lock")
+            )
+            for item in value.get("runtime_locks") or ()
+        )
+        value["supersedes"] = tuple(
+            superseded_result_from_dict(
+                _mapping(item, "superseded result")
+            )
+            for item in value.get("supersedes") or ()
+        )
+        value.setdefault("evidence_project", None)
+        value.setdefault("decision_policy", None)
+        if value["decision_policy"] is not None:
+            parsed_policy = _decision_policy(value["decision_policy"])
+            value["decision_policy"] = (
+                parsed_policy.to_dict() if parsed_policy is not None else None
+            )
+        result = ComparisonResultV3(**value)
+    else:
+        raise ValueError("comparison result schema_version must be 1, 2, or 3")
+    if isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        _verify_v2_result_integrity(
+            result,
+            has_qualification_digest=has_qualification_digest,
+        )
+    elif result.result_digest != _legacy_comparison_result_digest(result.to_dict()):
+        raise ValueError("comparison result digest does not match")
+    return result
+
+
+def _bind_attempt_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    value = dict(row)
+    task_id = str(value.get("task_id") or value.get("task_name") or "")
+    variant = str(value.get("variant_id") or "")
+    harness = str(value.get("harness") or "")
+    attempt = int(value.get("trial_index") or value.get("attempt") or 1)
+    candidate_identity = str(
+        value.get("candidate_digest")
+        or value.get("candidate_lock_digest")
+        or value.get("candidate_id")
+        or variant
+    )
+    runtime_identity = str(
+        value.get("execution_fingerprint")
+        or value.get("runtime_lock_digest")
+        or value.get("runtime_digest")
+        or "unreported"
+    )
+    identity = attempt_identity(
+        task_id=task_id,
+        arm=variant,
+        harness=harness,
+        attempt=attempt,
+        candidate=candidate_identity,
+        runtime=runtime_identity,
+    )
+    resolved_attempt_id = attempt_id(**identity)
+    supplied = str(value.get("attempt_id") or "")
+    if supplied and supplied != resolved_attempt_id:
+        raise ValueError(
+            f"attempt identity disagrees with locked coordinates for {task_id}"
+        )
+    value["attempt_id"] = resolved_attempt_id
+    value["attempt_identity"] = identity
+    return value
+
+
+def _row_text(row: Mapping[str, Any] | None, key: str) -> str | None:
+    if row is None:
+        return None
+    value = str(row.get(key) or "")
+    return value or None
+
+
+def _paired_dimension_changes(
+    baseline: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any] | None,
+) -> tuple[DimensionChangeV1, ...]:
+    if baseline is None or candidate is None:
+        return ()
+    baseline_scores = _mapping_or_empty(
+        baseline.get("comparison_deterministic_scores")
+    )
+    candidate_scores = _mapping_or_empty(
+        candidate.get("comparison_deterministic_scores")
+    )
+    baseline_critical = _mapping_or_empty(
+        baseline.get("comparison_deterministic_criticality")
+    )
+    candidate_critical = _mapping_or_empty(
+        candidate.get("comparison_deterministic_criticality")
+    )
+    dimensions = sorted(set(baseline_scores) | set(candidate_scores))
+    changes: list[DimensionChangeV1] = []
+    for dimension in dimensions:
+        baseline_value = _bool_score(baseline_scores.get(dimension))
+        candidate_value = _bool_score(candidate_scores.get(dimension))
+        if baseline_value is None or candidate_value is None:
+            status: DimensionStatus = "unavailable"
+        elif baseline_value is False and candidate_value is True:
+            status = "improved"
+        elif baseline_value is True and candidate_value is False:
+            status = "regressed"
+        else:
+            status = "unchanged"
+        changes.append(
+            DimensionChangeV1(
+                id=str(dimension),
+                status=status,
+                baseline=baseline_value,
+                candidate=candidate_value,
+                critical=bool(
+                    baseline_critical.get(dimension)
+                    or candidate_critical.get(dimension)
+                ),
+            )
+        )
+    if changes:
+        return tuple(changes)
+    baseline_pass = _bool_score(baseline.get("pass"))
+    candidate_pass = _bool_score(candidate.get("pass"))
+    if baseline_pass is None or candidate_pass is None:
+        status = "unavailable"
+    elif baseline_pass is False and candidate_pass is True:
+        status = "improved"
+    elif baseline_pass is True and candidate_pass is False:
+        status = "regressed"
+    else:
+        status = "unchanged"
+    return (
+        DimensionChangeV1(
+            id="task_pass",
+            status=status,
+            baseline=baseline_pass,
+            candidate=candidate_pass,
+            critical=True,
+        ),
+    )
+
+
+def _pair_status_v2(
+    changes: Sequence[DimensionChangeV1],
+) -> PairStatus:
+    improved = any(item.status == "improved" for item in changes)
+    regressed = any(item.status == "regressed" for item in changes)
+    candidate_critical_failure = any(
+        item.critical and item.candidate is False for item in changes
+    )
+    if improved and (regressed or candidate_critical_failure):
+        return "mixed"
+    if improved:
+        return "improved"
+    if regressed:
+        return "regressed"
+    return "unchanged"
+
+
+def _pair_status_v3(
+    changes: Sequence[DimensionChangeV2],
+) -> PairStatus:
+    behavioral = tuple(
+        item
+        for item in changes
+        if item.role == "outcome"
+    )
+    improved = any(item.status == "improved" for item in behavioral)
+    regressed = any(item.status == "regressed" for item in behavioral)
+    candidate_critical_failure = any(
+        item.critical and item.candidate is False for item in changes
+    )
+    if improved and regressed:
+        return "mixed"
+    if regressed:
+        return "regressed"
+    if improved and candidate_critical_failure:
+        return "incomplete"
+    if improved:
+        return "improved"
+    return "unchanged"
+
+
+def _pair_task_validity(
+    baseline: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any] | None,
+    changes: Sequence[DimensionChangeV2],
+) -> Literal[
+    "valid",
+    "non_discriminating",
+    "drifted",
+    "invalid",
+    "inconclusive",
+]:
+    if baseline is None or candidate is None or any(
+        item.status == "unavailable" for item in changes
+    ):
+        return "inconclusive"
+    behavioral = tuple(
+        item
+        for item in changes
+        if item.role == "outcome"
+    )
+    discriminating = any(
+        item.status in {"improved", "regressed"} for item in behavioral
+    )
+    shared_critical_failure = any(
+        item.critical
+        and item.baseline is False
+        and item.candidate is False
+        for item in changes
+    )
+    if not discriminating and shared_critical_failure:
+        return "non_discriminating"
+    return "valid"
+
+
+def _bool_score(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, Mapping):
+        passed = value.get("passed")
+        return passed if isinstance(passed, bool) else None
+    return None
+
+
+def _paired_attempt_view(
+    row: Mapping[str, Any] | None,
+) -> PairedAttemptV2 | None:
+    if row is None:
+        return None
+    usage = _mapping_or_empty(row.get("usage"))
+    tool_names, tool_call_count = _observed_tool_activity(row)
+    infrastructure = _drop_empty(
+        {
+            "backend": (
+                row.get("harbor_environment")
+                or _mapping_or_empty(row.get("sandbox_runtime")).get("provider")
+                or _mapping_or_empty(row.get("sandbox_runtime")).get("type")
+                or ("harbor-docker" if row.get("harbor_config") else None)
+            ),
+            "image_digest": (
+                row.get("runtime_image_digest")
+                or _mapping_or_empty(row.get("sandbox_runtime")).get("image_digest")
+            ),
+            "policy_attestation_digest": (
+                row.get("sandbox_attestation_digest")
+                or row.get("harbor_policy_attestation_digest")
+            ),
+            "policy_attestation_verified": row.get(
+                "harbor_policy_attestation_verified"
+            ),
+            "conformance_receipt_digest": row.get(
+                "harbor_conformance_receipt_digest"
+            ),
+            "conformance_status": row.get("harbor_conformance_status"),
+            "privacy_contract_version": row.get("privacy_contract_version"),
+            "local_artifact_privacy_scan_status": row.get(
+                "local_artifact_privacy_scan_status"
+            ),
+            "local_artifact_privacy_scan_digest": row.get(
+                "local_artifact_privacy_scan_digest"
+            ),
+            "hosted_evidence_privacy_scan_status": row.get(
+                "hosted_evidence_privacy_scan_status"
+            ),
+            "hosted_evidence_privacy_scan_digest": row.get(
+                "hosted_evidence_privacy_scan_digest"
+            ),
+            "privacy_complete": _privacy_scans_complete(row),
+            "legacy_privacy_scan_complete": (
+                row.get("privacy_scan_complete")
+                if row.get("privacy_contract_version") != 2
+                else None
+            ),
+            "private_label_boundary_verified": row.get(
+                "private_label_boundary_verified"
+            ),
+            "cleanup_verified": (
+                row.get("harbor_cleanup_verified")
+                if row.get("harbor_cleanup_verified") is not None
+                else row.get("sandbox_cleanup_verified")
+            ),
+            "orphaned": row.get("orphaned_sandbox"),
+        },
+        preserve_false=True,
+    )
+    return PairedAttemptV2(
+        attempt_id=str(row.get("attempt_id") or ""),
+        identity=dict(_mapping_or_empty(row.get("attempt_identity"))),
+        prediction_id=_row_text(row, "prediction_id"),
+        passed=_bool_score(row.get("pass")),
+        execution_status=str(
+            row.get("status") or row.get("execution_status") or "unknown"
+        ),
+        evaluation_status=str(
+            row.get("comparison_evaluation_status") or "unknown"
+        ),
+        evidence_status=_attempt_evidence_status(row),
+        cost_usd=_row_number(
+            row, "cost_usd", "observed_cost_usd", "total_cost_usd"
+        ),
+        latency_sec=_row_latency_sec(row),
+        input_tokens=_number_or_none(
+            usage.get("input_tokens") or row.get("input_tokens")
+        ),
+        output_tokens=_number_or_none(
+            usage.get("output_tokens") or row.get("output_tokens")
+        ),
+        tool_calls=tool_call_count,
+        tools=tuple(tool_names),
+        queried_projects=tuple(sorted(_queried_projects(row))),
+        scores=dict(_mapping_or_empty(row.get("comparison_deterministic_scores"))),
+        evidence_links=_attempt_evidence_links(row),
+        weave_agent_root_call_id=_row_text(row, "weave_agent_root_call_id"),
+        otel_root_span_id=(
+            _row_text(row, "otel_root_span_id")
+            or _row_text(row, "native_root_span_id")
+            or _row_text(row, "root_span_id")
+        ),
+        execution_fingerprint=_row_text(row, "execution_fingerprint"),
+        runtime_lock_digest=(
+            _row_text(row, "runtime_lock_digest")
+            or _row_text(row, "runtime_digest")
+        ),
+        infrastructure=infrastructure,
+    )
+
+
+def _paired_attempt_view_v3(
+    row: Mapping[str, Any] | None,
+) -> PairedAttemptV3 | None:
+    legacy = _paired_attempt_view(row)
+    if legacy is None or row is None:
+        return None
+    scores = dict(_mapping_or_empty(row.get("comparison_deterministic_scores")))
+    return PairedAttemptV3(
+        attempt_id=legacy.attempt_id,
+        identity=legacy.identity,
+        prediction_id=legacy.prediction_id,
+        passed=legacy.passed,
+        execution_status=legacy.execution_status,
+        evaluation_status=legacy.evaluation_status,
+        evidence_status=legacy.evidence_status,
+        cost_usd=legacy.cost_usd,
+        latency_sec=legacy.latency_sec,
+        input_tokens=legacy.input_tokens,
+        output_tokens=legacy.output_tokens,
+        tool_calls=legacy.tool_calls,
+        tools=legacy.tools,
+        queried_projects=legacy.queried_projects,
+        scores=legacy.scores,
+        score_explanations={
+            dimension: _safe_score_explanation(
+                dimension,
+                _bool_score(value),
+                row=row,
+            )
+            for dimension, value in scores.items()
+        },
+        sanitized_answer_excerpt=_sanitized_answer_excerpt(row),
+        actual_query_scope=tuple(sorted(_queried_projects(row))),
+        reported_project_identity=_reported_project_identity(row),
+        evidence_links=legacy.evidence_links,
+        weave_agent_root_call_id=legacy.weave_agent_root_call_id,
+        otel_root_span_id=legacy.otel_root_span_id,
+        execution_fingerprint=legacy.execution_fingerprint,
+        runtime_lock_digest=legacy.runtime_lock_digest,
+        infrastructure=legacy.infrastructure,
+    )
+
+
+def _paired_dimension_changes_v3(
+    baseline: Mapping[str, Any] | None,
+    candidate: Mapping[str, Any] | None,
+) -> tuple[DimensionChangeV2, ...]:
+    return tuple(
+        DimensionChangeV2(
+            id=item.id,
+            label=item.id.rsplit(".", 1)[-1].replace("_", " ").title(),
+            status=item.status,
+            baseline=item.baseline,
+            candidate=item.candidate,
+            critical=item.critical,
+            role=_dimension_role(item.id),
+            baseline_explanation=(
+                _safe_score_explanation(
+                    item.id,
+                    item.baseline,
+                    row=baseline,
+                )
+                if baseline is not None
+                else None
+            ),
+            candidate_explanation=(
+                _safe_score_explanation(
+                    item.id,
+                    item.candidate,
+                    row=candidate,
+                )
+                if candidate is not None
+                else None
+            ),
+        )
+        for item in _paired_dimension_changes(baseline, candidate)
+    )
+
+
+def _dimension_role(dimension: str) -> DimensionRole:
+    normalized = dimension.rsplit(".", 1)[-1].lower()
+    if normalized in {
+        "release_mechanism_used",
+        "skill_used",
+        "mcp_used",
+        "memory_used",
+        "source_used",
+    } or any(
+        token in normalized
+        for token in ("mechanism", "invoked", "registered")
+    ):
+        return "mechanism"
+    if any(
+        token in normalized
+        for token in ("cost", "latency", "token", "tool_call", "duration")
+    ):
+        return "efficiency"
+    if any(
+        token in normalized
+        for token in (
+            "privacy",
+            "credential",
+            "secret",
+            "scope",
+            "leak",
+            "bounded",
+        )
+    ):
+        return "safety_gate"
+    if any(
+        token in normalized
+        for token in ("infrastructure", "cleanup", "attestation", "runtime")
+    ):
+        return "infrastructure"
+    return "outcome"
+
+
+def _safe_score_explanation(
+    dimension: str,
+    passed: bool | None,
+    *,
+    row: Mapping[str, Any] | None,
+) -> str:
+    label = dimension.rsplit(".", 1)[-1].replace("_", " ")
+    if passed is None:
+        return f"{label}: the required evidence was unavailable."
+    if dimension.endswith("locked_project_scope") and row is not None:
+        actual = sorted(_queried_projects(row))
+        reported = _reported_project_identity(row)
+        if passed:
+            return (
+                f"locked project scope passed; actual MCP reads stayed in "
+                f"{', '.join(actual) if actual else 'the locked scope'}."
+            )
+        if actual and reported:
+            return (
+                "locked project scope failed in the serialized answer; "
+                f"actual MCP scope was {', '.join(actual)}, while the answer "
+                f"reported {reported}."
+            )
+        return (
+            "locked project scope failed; the answer or normalized MCP evidence "
+            "did not prove the exact locked source project."
+        )
+    return (
+        f"{label} {'passed' if passed else 'failed'} under the pinned "
+        "deterministic scorer."
+    )
+
+
+def _sanitized_answer_excerpt(row: Mapping[str, Any]) -> str | None:
+    raw = row.get("agent_response")
+    if raw is None:
+        raw = row.get("final_output")
+    if raw is None:
+        raw = row.get("answer")
+    if raw is None:
+        return None
+    text = (
+        json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        if not isinstance(raw, str)
+        else raw
+    )
+    text = " ".join(text.strip().split())
+    if not text:
+        return None
+    text = re.sub(
+        r"(?i)(api[_ -]?key|token|password|secret)\s*[:=]\s*[^,\s\"'}]+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    return text[:1000]
+
+
+def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
+    raw = row.get("agent_response")
+    if raw is None:
+        raw = row.get("final_output")
+    if isinstance(raw, str):
+        raw = _extract_structured_result(raw)
+    if not isinstance(raw, Mapping):
+        return None
+    value = raw.get("project")
+    return str(value).strip() or None if value is not None else None
+
+
+def _attempt_evidence_links(
+    row: Mapping[str, Any],
+) -> tuple[AttemptEvidenceLinkV1, ...]:
+    project = str(row.get("trace_project") or "")
+    result: list[AttemptEvidenceLinkV1] = []
+
+    def add(
+        kind: EvidenceLinkKind,
+        ref: str,
+        uri: str,
+        *,
+        relationship_ok: bool = True,
+        missing_reason: str,
+    ) -> None:
+        if not ref or not uri:
+            result.append(
+                AttemptEvidenceLinkV1(
+                    kind=kind,
+                    status="missing",
+                    reason=missing_reason,
+                )
+            )
+            return
+        if not _safe_evidence_url(uri):
+            result.append(
+                AttemptEvidenceLinkV1(
+                    kind=kind,
+                    status="invalid",
+                    ref=ref,
+                    reason="evidence URL is not an allowlisted HTTPS URL",
+                )
+            )
+            return
+        if not relationship_ok:
+            result.append(
+                AttemptEvidenceLinkV1(
+                    kind=kind,
+                    status="invalid",
+                    ref=ref,
+                    url=uri,
+                    reason="evidence relationship did not reconcile",
+                )
+            )
+            return
+        result.append(
+            AttemptEvidenceLinkV1(
+                kind=kind,
+                status="resolved",
+                ref=ref,
+                url=uri,
+            )
+        )
+
+    evaluation_url = str(
+        row.get("weave_evaluation_root_url")
+        or row.get("evaluation_url")
+        or row.get("weave_evaluation_url")
+        or ""
+    )
+    add(
+        "evaluation_root",
+        str(
+            row.get("weave_evaluation_root_call_id")
+            or row.get("evaluation_root_call_id")
+            or ""
+        ),
+        evaluation_url,
+        relationship_ok=bool(
+            row.get("evaluation_root_object_verified") is True
+            and row.get("evaluation_root_dataset_relationship_verified") is True
+            and row.get("evaluation_root_prediction_relationship_verified") is True
+            and row.get("evaluation_prediction_graph_verified") is True
+        ),
+        missing_reason="Evaluation root reference is unavailable",
+    )
+    dataset_url = str(
+        row.get("dataset_url") or row.get("weave_dataset_url") or ""
+    )
+    add(
+        "dataset",
+        str(row.get("weave_dataset_id") or row.get("dataset_id") or dataset_url),
+        dataset_url,
+        relationship_ok=bool(
+            row.get("dataset_version_object_verified") is True
+            and row.get("evaluation_root_dataset_relationship_verified") is True
+            and row.get("evaluation_prediction_graph_verified") is True
+        ),
+        missing_reason="Dataset reference is unavailable",
+    )
+    for kind, id_fields, url_fields in (
+        (
+            "prediction_and_score",
+            ("eval_predict_and_score_call_id",),
+            ("eval_predict_and_score_url",),
+        ),
+        (
+            "prediction",
+            ("weave_prediction_call_id", "prediction_call_id"),
+            ("weave_prediction_url", "prediction_url"),
+        ),
+        (
+            "agent_root",
+            ("weave_agent_root_call_id", "native_agent_root_call_id"),
+            ("weave_agent_root_url", "weave_agent_url", "agent_url"),
+        ),
+    ):
+        ref = next(
+            (str(row.get(field) or "") for field in id_fields if row.get(field)),
+            "",
+        )
+        url = next(
+            (str(row.get(field) or "") for field in url_fields if row.get(field)),
+            "",
+        )
+        if not url and ref:
+            receipt = row.get("trace_receipt")
+            app_base_url = (
+                str(receipt.get("app_base_url") or "https://wandb.ai")
+                if isinstance(receipt, Mapping)
+                else "https://wandb.ai"
+            )
+            url = _weave_call_url(
+                project,
+                ref,
+                app_base_url=app_base_url,
+            )
+        relationship_ok = (
+            str(row.get("trace_link_status") or "") == "linked"
+            and row.get("agent_graph_verified") is True
+            if kind == "agent_root"
+            else (
+                row.get("eval_predict_and_score_object_verified") is True
+                and row.get("evaluation_root_prediction_relationship_verified")
+                is True
+                and row.get("evaluation_prediction_graph_verified") is True
+                if kind == "prediction_and_score"
+                else row.get("weave_prediction_object_verified") is True
+                and row.get("prediction_child_relationship_verified") is True
+                and row.get("evaluation_prediction_graph_verified") is True
+            )
+        )
+        add(
+            kind,  # type: ignore[arg-type]
+            ref or url,
+            url,
+            relationship_ok=relationship_ok,
+            missing_reason=(
+                "Verified Agent root Call is unavailable"
+                if kind == "agent_root"
+                else f"{kind.replace('_', ' ').title()} Call is unavailable"
+            ),
+        )
+    return tuple(result)
+
+
+def _is_local_harbor_row(row: Mapping[str, Any]) -> bool:
+    return bool(
+        row.get("harbor_config")
+        or str(row.get("harbor_environment") or "").startswith("local_harbor")
+    )
+
+
+def _local_harbor_conformance_failed(row: Mapping[str, Any]) -> bool:
+    if not _is_local_harbor_row(row):
+        return False
+    return bool(
+        row.get("harbor_conformance_status") == "failed"
+        or row.get("harbor_policy_attestation_verified") is False
+        or _privacy_scans_failed(row)
+        or row.get("private_label_boundary_verified") is False
+        or row.get("sandbox_cleanup_verified") is False
+        or row.get("orphaned_sandbox") is True
+    )
+
+
+def _local_harbor_conformance_unavailable(row: Mapping[str, Any]) -> bool:
+    if not _is_local_harbor_row(row) or _local_harbor_conformance_failed(row):
+        return False
+    return bool(
+        row.get("harbor_conformance_status") != "passed"
+        or row.get("harbor_policy_attestation_verified") is not True
+        or not _privacy_scans_complete(row)
+        or row.get("private_label_boundary_verified") is not True
+        or row.get("sandbox_cleanup_verified") is not True
+        or row.get("orphaned_sandbox") is not False
+    )
+
+
+def _privacy_scan_status(
+    row: Mapping[str, Any],
+    field: str,
+) -> str:
+    if row.get("privacy_contract_version") != 2:
+        return "legacy"
+    status = str(row.get(field) or "")
+    return (
+        status
+        if status in {"passed", "failed", "unavailable", "not_applicable"}
+        else "unavailable"
+    )
+
+
+def _privacy_scans_complete(row: Mapping[str, Any]) -> bool:
+    return bool(
+        row.get("privacy_contract_version") == 2
+        and _privacy_scan_status(
+            row, "local_artifact_privacy_scan_status"
+        )
+        == "passed"
+        and _privacy_scan_status(
+            row, "hosted_evidence_privacy_scan_status"
+        )
+        == "passed"
+        and row.get("private_label_boundary_verified") is True
+    )
+
+
+def _privacy_scans_failed(row: Mapping[str, Any]) -> bool:
+    if row.get("privacy_contract_version") != 2:
+        return False
+    return bool(
+        _privacy_scan_status(row, "local_artifact_privacy_scan_status")
+        == "failed"
+        or _privacy_scan_status(
+            row, "hosted_evidence_privacy_scan_status"
+        )
+        == "failed"
+    )
+
+
+def _privacy_scan_evidence_available(row: Mapping[str, Any]) -> bool:
+    if row.get("privacy_contract_version") != 2:
+        return False
+    return bool(
+        _privacy_scan_status(row, "local_artifact_privacy_scan_status")
+        in {"passed", "failed"}
+        and _privacy_scan_status(
+            row, "hosted_evidence_privacy_scan_status"
+        )
+        in {"passed", "failed"}
+        and isinstance(row.get("private_label_boundary_verified"), bool)
+    )
+
+
+def _attempt_evidence_status(row: Mapping[str, Any]) -> str:
+    links = _attempt_evidence_links(row)
+    if not str(row.get("trace_project") or ""):
+        return "not_applicable"
+    statuses = {item.status for item in links}
+    if statuses == {"resolved"} and len(links) == 5:
+        return "reconciled"
+    return "invalid" if "invalid" in statuses else "missing"
+
+
+def _queried_projects(row: Mapping[str, Any]) -> set[str]:
+    result: set[str] = set()
+    for key in ("queried_projects", "mcp_queried_projects", "project_reads"):
+        raw = row.get(key) or ()
+        if isinstance(raw, str):
+            result.add(raw)
+        elif isinstance(raw, Sequence):
+            result.update(str(item) for item in raw if str(item))
+    return result
+
+
+def _cross_project_queries(
+    row: Mapping[str, Any], expected_project: str | None
+) -> tuple[str, ...]:
+    if not expected_project:
+        return ()
+    return tuple(sorted(_queried_projects(row) - {expected_project}))
+
+
+def _observed_tool_activity(row: Mapping[str, Any]) -> tuple[list[str], int]:
+    local_names: list[str] = []
+    local_count = 0
+    for item in row.get("tool_calls") or ():
+        if isinstance(item, str):
+            local_names.append(item)
+            local_count += 1
+        elif isinstance(item, Mapping):
+            name = str(item.get("name") or item.get("tool_name") or "")
+            if name:
+                local_names.append(name)
+            local_count += 1
+    normalized_mcp_count = 0
+    for item in row.get("mcp_tool_calls") or ():
+        if not isinstance(item, Mapping):
+            continue
+        name = str(
+            item.get("tool")
+            or item.get("name")
+            or item.get("tool_name")
+            or ""
+        )
+        if name:
+            local_names.append(name)
+        normalized_mcp_count += 1
+    explicit = row.get("mcp_tool_names") or ()
+    if isinstance(explicit, str):
+        local_names.append(explicit)
+    elif isinstance(explicit, Sequence):
+        local_names.extend(str(item) for item in explicit if str(item))
+    traced = row.get("weave_tool_names")
+    traced_count = 0
+    traced_names: list[str] = []
+    if isinstance(traced, Mapping):
+        for raw_name, raw_count in traced.items():
+            name = str(raw_name)
+            count = (
+                max(raw_count, 0)
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                else 0
+            )
+            if name and count:
+                traced_names.append(name)
+            traced_count += count
+    declared_count = row.get("tool_call_count")
+    if isinstance(declared_count, int) and not isinstance(declared_count, bool):
+        local_count = max(local_count, declared_count)
+    # The normalized MCP receipt is attempt-scoped. Native Weave summaries may
+    # include cumulative or non-MCP activity, so they are only a fallback when
+    # an attempt has no normalized MCP calls.
+    if normalized_mcp_count:
+        return sorted(set(local_names)), normalized_mcp_count
+    if traced_names:
+        return sorted(set(traced_names)), traced_count
+    return sorted(set(local_names)), local_count
+
+
+def _row_number(row: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _number_or_none(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _row_latency_sec(row: Mapping[str, Any]) -> float | None:
+    direct = _row_number(row, "latency_sec", "wall_time_sec")
+    if direct is not None:
+        return direct
+    milliseconds = _row_number(row, "latency_ms")
+    return round(milliseconds / 1000, 6) if milliseconds is not None else None
+
+
+def _number_or_none(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _decision_attestation(
+    raw: DecisionAttestationV1 | Mapping[str, Any] | None,
+) -> DecisionAttestationV1 | None:
+    if raw is None or isinstance(raw, DecisionAttestationV1):
+        return raw
+    value = _mapping(raw, "decision attestation")
+    _reject_unknown(
+        value,
+        {"signer", "signed_result_digest", "signed_at"},
+        "decision attestation",
+    )
+    return DecisionAttestationV1(
+        signer=_text(value.get("signer"), "attestation signer", 300),
+        signed_result_digest=_text(
+            value.get("signed_result_digest"),
+            "signed result digest",
+            200,
+        ),
+        signed_at=_text(value.get("signed_at"), "attestation time", 100),
+    )
+
+
+def _decision_summary(raw: Any) -> DecisionSummaryV1:
+    value = _mapping(raw, "decision summary")
+    attestation = _decision_attestation(value.get("attestation"))
+    gates = tuple(
+        DecisionGateResultV1(**_mapping(item, "decision gate result"))
+        for item in _sequence(value.get("gates") or [], "decision gate results", allow_empty=True)
+    )
+    return DecisionSummaryV1(
+        status=str(value.get("status") or "invalid"),  # type: ignore[arg-type]
+        recommendation=_text(
+            value.get("recommendation"), "decision recommendation", 1000
+        ),
+        release_target=str(value.get("release_target") or "") or None,
+        candidate_sha=str(value.get("candidate_sha") or "") or None,
+        evidence_grade=str(value.get("evidence_grade") or "invalid"),  # type: ignore[arg-type]
+        gates=gates,
+        critical_blockers=tuple(
+            str(item) for item in value.get("critical_blockers") or ()
+        ),
+        limitations=tuple(str(item) for item in value.get("limitations") or ()),
+        next_action=_text(value.get("next_action"), "decision next action", 1000),
+        human_signoff_required=bool(value.get("human_signoff_required", True)),
+        attestation=attestation,
+    )
+
+
+def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
+    value = _mapping(raw, "attempt evidence link")
+    _reject_unknown(
+        value,
+        {"kind", "status", "system", "ref", "url", "reason"},
+        "attempt evidence link",
+    )
+    kind = str(value.get("kind") or "")
+    if kind not in {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    }:
+        raise ValueError(f"unknown attempt evidence link kind: {kind}")
+    status = str(value.get("status") or "")
+    if status not in {"resolved", "missing", "invalid"}:
+        raise ValueError(f"unknown attempt evidence link status: {status}")
+    system = str(value.get("system") or "weave")
+    if system != "weave":
+        raise ValueError("attempt evidence link system must be weave")
+    return AttemptEvidenceLinkV1(
+        kind=kind,  # type: ignore[arg-type]
+        status=status,  # type: ignore[arg-type]
+        system="weave",
+        ref=str(value.get("ref") or "") or None,
+        url=str(value.get("url") or "") or None,
+        reason=str(value.get("reason") or "") or None,
+    )
+
+
+def _dimension_change(raw: Any) -> DimensionChangeV1:
+    value = _mapping(raw, "dimension change")
+    _reject_unknown(
+        value,
+        {"id", "status", "baseline", "candidate", "critical"},
+        "dimension change",
+    )
+    status = str(value.get("status") or "")
+    if status not in {"improved", "regressed", "unchanged", "unavailable"}:
+        raise ValueError(f"unknown dimension change status: {status}")
+    return DimensionChangeV1(
+        id=_text(value.get("id"), "dimension id", 300),
+        status=status,  # type: ignore[arg-type]
+        baseline=(
+            value.get("baseline")
+            if isinstance(value.get("baseline"), bool)
+            else None
+        ),
+        candidate=(
+            value.get("candidate")
+            if isinstance(value.get("candidate"), bool)
+            else None
+        ),
+        critical=bool(value.get("critical")),
+    )
+
+
+def _dimension_change_v3(raw: Any) -> DimensionChangeV2:
+    value = _mapping(raw, "V3 dimension change")
+    _reject_unknown(
+        value,
+        {
+            "id",
+            "label",
+            "status",
+            "baseline",
+            "candidate",
+            "critical",
+            "role",
+            "baseline_explanation",
+            "candidate_explanation",
+        },
+        "V3 dimension change",
+    )
+    status = str(value.get("status") or "")
+    if status not in {"improved", "regressed", "unchanged", "unavailable"}:
+        raise ValueError(f"unknown V3 dimension change status: {status}")
+    role = str(value.get("role") or "")
+    if role not in {
+        "outcome",
+        "mechanism",
+        "safety_gate",
+        "infrastructure",
+        "efficiency",
+    }:
+        raise ValueError(f"unknown V3 dimension role: {role}")
+    critical = value.get("critical")
+    if not isinstance(critical, bool):
+        raise ValueError("V3 dimension change critical must be boolean")
+    return DimensionChangeV2(
+        id=_text(value.get("id"), "V3 dimension id", 300),
+        label=_text(value.get("label"), "V3 dimension label", 300),
+        status=status,  # type: ignore[arg-type]
+        baseline=(
+            value.get("baseline")
+            if isinstance(value.get("baseline"), bool)
+            else None
+        ),
+        candidate=(
+            value.get("candidate")
+            if isinstance(value.get("candidate"), bool)
+            else None
+        ),
+        critical=critical,
+        role=role,  # type: ignore[arg-type]
+        baseline_explanation=_optional_text(
+            value.get("baseline_explanation"),
+            "baseline score explanation",
+            2000,
+        ),
+        candidate_explanation=_optional_text(
+            value.get("candidate_explanation"),
+            "candidate score explanation",
+            2000,
+        ),
+    )
+
+
+def _paired_attempt(raw: Any) -> PairedAttemptV2 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "paired attempt")
+    allowed = {
+        item.name for item in PairedAttemptV2.__dataclass_fields__.values()
+    }
+    _reject_unknown(value, allowed, "paired attempt")
+    return PairedAttemptV2(
+        attempt_id=_text(value.get("attempt_id"), "attempt id", 200),
+        identity=dict(_mapping(value.get("identity"), "attempt identity")),
+        prediction_id=str(value.get("prediction_id") or "") or None,
+        passed=(
+            value.get("passed") if isinstance(value.get("passed"), bool) else None
+        ),
+        execution_status=_text(
+            value.get("execution_status"), "execution status", 100
+        ),
+        evaluation_status=_text(
+            value.get("evaluation_status"), "evaluation status", 100
+        ),
+        evidence_status=_text(
+            value.get("evidence_status"), "evidence status", 100
+        ),
+        cost_usd=_number_or_none(value.get("cost_usd")),
+        latency_sec=_number_or_none(value.get("latency_sec")),
+        input_tokens=_number_or_none(value.get("input_tokens")),
+        output_tokens=_number_or_none(value.get("output_tokens")),
+        tool_calls=_non_negative_int(value.get("tool_calls", 0), "tool calls"),
+        tools=tuple(str(item) for item in value.get("tools") or ()),
+        queried_projects=tuple(
+            str(item) for item in value.get("queried_projects") or ()
+        ),
+        scores=dict(_mapping_or_empty(value.get("scores"))),
+        evidence_links=tuple(
+            _attempt_evidence_link(item)
+            for item in value.get("evidence_links") or ()
+        ),
+        weave_agent_root_call_id=(
+            str(value.get("weave_agent_root_call_id") or "") or None
+        ),
+        otel_root_span_id=str(value.get("otel_root_span_id") or "") or None,
+        execution_fingerprint=(
+            str(value.get("execution_fingerprint") or "") or None
+        ),
+        runtime_lock_digest=(
+            str(value.get("runtime_lock_digest") or "") or None
+        ),
+        infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+    )
+
+
+def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "V3 paired attempt")
+    allowed = {
+        item.name for item in PairedAttemptV3.__dataclass_fields__.values()
+    }
+    _reject_unknown(value, allowed, "V3 paired attempt")
+    score_explanations = _mapping(
+        value.get("score_explanations"), "V3 score explanations"
+    )
+    return PairedAttemptV3(
+        attempt_id=_text(value.get("attempt_id"), "V3 attempt id", 200),
+        identity=dict(_mapping(value.get("identity"), "V3 attempt identity")),
+        prediction_id=str(value.get("prediction_id") or "") or None,
+        passed=(
+            value.get("passed") if isinstance(value.get("passed"), bool) else None
+        ),
+        execution_status=_text(
+            value.get("execution_status"), "V3 execution status", 100
+        ),
+        evaluation_status=_text(
+            value.get("evaluation_status"), "V3 evaluation status", 100
+        ),
+        evidence_status=_text(
+            value.get("evidence_status"), "V3 evidence status", 100
+        ),
+        cost_usd=_number_or_none(value.get("cost_usd")),
+        latency_sec=_number_or_none(value.get("latency_sec")),
+        input_tokens=_number_or_none(value.get("input_tokens")),
+        output_tokens=_number_or_none(value.get("output_tokens")),
+        tool_calls=_non_negative_int(value.get("tool_calls", 0), "tool calls"),
+        tools=_string_tuple(
+            value.get("tools") or [], "V3 tool", allow_empty=True
+        ),
+        queried_projects=_string_tuple(
+            value.get("queried_projects") or [],
+            "V3 queried project",
+            allow_empty=True,
+        ),
+        scores=dict(_mapping_or_empty(value.get("scores"))),
+        score_explanations={
+            str(key): _text(item, "V3 score explanation", 2000)
+            for key, item in score_explanations.items()
+        },
+        sanitized_answer_excerpt=_optional_text(
+            value.get("sanitized_answer_excerpt"),
+            "sanitized answer excerpt",
+            1000,
+        ),
+        actual_query_scope=_string_tuple(
+            value.get("actual_query_scope") or [],
+            "V3 actual query scope",
+            allow_empty=True,
+        ),
+        reported_project_identity=_optional_text(
+            value.get("reported_project_identity"),
+            "reported project identity",
+            300,
+        ),
+        evidence_links=tuple(
+            _attempt_evidence_link(item)
+            for item in value.get("evidence_links") or ()
+        ),
+        weave_agent_root_call_id=(
+            str(value.get("weave_agent_root_call_id") or "") or None
+        ),
+        otel_root_span_id=str(value.get("otel_root_span_id") or "") or None,
+        execution_fingerprint=(
+            str(value.get("execution_fingerprint") or "") or None
+        ),
+        runtime_lock_digest=(
+            str(value.get("runtime_lock_digest") or "") or None
+        ),
+        infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+    )
+
+
+def _paired_case(raw: Any) -> PairedCaseV2:
+    value = _mapping(raw, "paired case")
+    allowed = {item.name for item in PairedCaseV2.__dataclass_fields__.values()}
+    _reject_unknown(value, allowed, "paired case")
+    status = str(value.get("status") or "")
+    if status not in {"improved", "regressed", "mixed", "unchanged", "incomplete"}:
+        raise ValueError(f"unknown paired case status: {status}")
+    return PairedCaseV2(
+        pair_id=_text(value.get("pair_id"), "pair id", 200),
+        task_id=_text(value.get("task_id"), "paired task id", 300),
+        harness=_text(value.get("harness"), "paired harness", 100),
+        attempt=_positive_int(value.get("attempt"), "paired attempt"),
+        status=status,  # type: ignore[arg-type]
+        dimension_changes=tuple(
+            _dimension_change(item)
+            for item in value.get("dimension_changes") or ()
+        ),
+        baseline=_paired_attempt(value.get("baseline")),
+        candidate=_paired_attempt(value.get("candidate")),
+        task_label=str(value.get("task_label") or "") or None,
+        baseline_passed=(
+            value.get("baseline_passed")
+            if isinstance(value.get("baseline_passed"), bool)
+            else None
+        ),
+        candidate_passed=(
+            value.get("candidate_passed")
+            if isinstance(value.get("candidate_passed"), bool)
+            else None
+        ),
+        baseline_prediction_id=(
+            str(value.get("baseline_prediction_id") or "") or None
+        ),
+        candidate_prediction_id=(
+            str(value.get("candidate_prediction_id") or "") or None
+        ),
+        baseline_evaluation_call_id=(
+            str(value.get("baseline_evaluation_call_id") or "") or None
+        ),
+        candidate_evaluation_call_id=(
+            str(value.get("candidate_evaluation_call_id") or "") or None
+        ),
+    )
+
+
+def _paired_case_v3(raw: Any) -> PairedCaseV3:
+    value = _mapping(raw, "V3 paired case")
+    allowed = {item.name for item in PairedCaseV3.__dataclass_fields__.values()}
+    _reject_unknown(value, allowed, "V3 paired case")
+    status = str(value.get("status") or "")
+    if status not in {"improved", "regressed", "mixed", "unchanged", "incomplete"}:
+        raise ValueError(f"unknown V3 paired case status: {status}")
+    return PairedCaseV3(
+        pair_id=_text(value.get("pair_id"), "V3 pair id", 200),
+        task_id=_text(value.get("task_id"), "V3 paired task id", 300),
+        harness=_text(value.get("harness"), "V3 paired harness", 100),
+        attempt=_positive_int(value.get("attempt"), "V3 paired attempt"),
+        status=status,  # type: ignore[arg-type]
+        dimension_changes=tuple(
+            _dimension_change_v3(item)
+            for item in value.get("dimension_changes") or ()
+        ),
+        baseline=_paired_attempt_v3(value.get("baseline")),
+        candidate=_paired_attempt_v3(value.get("candidate")),
+        task_label=str(value.get("task_label") or "") or None,
+    )
+
+
+def _behavioral_summary_from_dict(raw: Any) -> BehavioralSummaryV1:
+    value = _mapping(raw, "behavioral summary")
+    allowed = {
+        item.name for item in BehavioralSummaryV1.__dataclass_fields__.values()
+    }
+    _reject_unknown(value, allowed, "behavioral summary")
+    status = str(value.get("status") or "")
+    if status not in {
+        "invalid",
+        "incomplete",
+        "improved",
+        "regressed",
+        "mixed",
+        "unchanged",
+    }:
+        raise ValueError(f"unknown behavioral status: {status}")
+    return BehavioralSummaryV1(
+        status=status,  # type: ignore[arg-type]
+        recommendation=_text(
+            value.get("recommendation"), "behavioral recommendation", 1000
+        ),
+        improved_pairs=_non_negative_int(
+            value.get("improved_pairs", 0), "improved pairs"
+        ),
+        regressed_pairs=_non_negative_int(
+            value.get("regressed_pairs", 0), "regressed pairs"
+        ),
+        mixed_pairs=_non_negative_int(value.get("mixed_pairs", 0), "mixed pairs"),
+        unchanged_pairs=_non_negative_int(
+            value.get("unchanged_pairs", 0), "unchanged pairs"
+        ),
+        incomplete_pairs=_non_negative_int(
+            value.get("incomplete_pairs", 0), "incomplete pairs"
+        ),
+        candidate_critical_failures=_non_negative_int(
+            value.get("candidate_critical_failures", 0),
+            "candidate critical failures",
+        ),
+        critical_blockers=tuple(
+            str(item) for item in value.get("critical_blockers") or ()
+        ),
+        supported_claim=str(value.get("supported_claim") or "") or None,
+        limitations=tuple(str(item) for item in value.get("limitations") or ()),
+        next_action=_text(value.get("next_action"), "behavioral next action", 1000),
+    )
+
+
+def _candidate_source_revision(raw: Any) -> CandidateSourceRevisionV1:
+    value = _mapping(raw, "candidate source revision")
+    allowed = {
+        item.name
+        for item in CandidateSourceRevisionV1.__dataclass_fields__.values()
+    }
+    _reject_unknown(value, allowed, "candidate source revision")
+    kind = validate_id(
+        _text(value.get("kind"), "candidate source revision kind", 100),
+        kind="candidate source revision kind",
+    )
+    source_id = validate_id(
+        _text(value.get("id"), "candidate source revision id", 300),
+        kind="candidate source revision id",
+    )
+    version_identity = _text(
+        value.get("version_identity"),
+        "candidate source version identity",
+        500,
+    )
+    runtime_digest = _text(
+        value.get("runtime_digest"),
+        "candidate source runtime digest",
+        200,
+    )
+    if not runtime_digest.startswith("sha256:"):
+        raise ValueError("candidate source runtime digest must be sha256-qualified")
+    lock_digest = str(value.get("lock_digest") or "") or None
+    if lock_digest is not None and not lock_digest.startswith("sha256:"):
+        raise ValueError("candidate source lock digest must be sha256-qualified")
+    return CandidateSourceRevisionV1(
+        kind=kind,
+        id=source_id,
+        version_identity=version_identity,
+        runtime_digest=runtime_digest,
+        lock_digest=lock_digest,
+    )
+
+
+def _candidate_source_revisions(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[CandidateSourceRevisionV1, ...]:
+    candidate_rows = [
+        row
+        for row in rows
+        if str(row.get("variant_id") or "") == "candidate"
+    ]
+    return _consistent_source_revisions(
+        candidate_rows,
+        required=False,
+        label="candidate result",
+    )
+
+
+def _integration_change_required(comparison: Mapping[str, Any]) -> bool:
+    return any(
+        str(value) == "integrations"
+        or str(value).startswith("integrations.")
+        for value in comparison.get("changed") or ()
+    )
+
+
+def _consistent_source_revisions(
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    required: bool,
+    label: str,
+) -> tuple[CandidateSourceRevisionV1, ...]:
+    observed: list[tuple[CandidateSourceRevisionV1, ...]] = []
+    for cell in cells:
+        observed.append(
+            _source_revisions_from_provenance(
+                cell.get("integration_provenance"),
+                required=required,
+                label=label,
+            )
+        )
+    if not observed:
+        if required:
+            raise ValueError(f"{label} has no source-revision-bearing cells")
+        return ()
+    first = observed[0]
+    if any(value != first for value in observed[1:]):
+        raise ValueError(f"{label} source revisions drift across attempts")
+    if required and not first:
+        raise ValueError(f"{label} has no candidate source revisions")
+    return first
+
+
+def _source_revisions_from_provenance(
+    raw: Any,
+    *,
+    required: bool,
+    label: str,
+) -> tuple[CandidateSourceRevisionV1, ...]:
+    provenance = raw or ()
+    if isinstance(provenance, Mapping):
+        provenance = (provenance,)
+    if not isinstance(provenance, Sequence) or isinstance(
+        provenance,
+        str | bytes,
+    ):
+        raise ValueError(f"{label} integration provenance must be an array")
+    revisions: dict[
+        tuple[str, str, str, str, str | None],
+        CandidateSourceRevisionV1,
+    ] = {}
+    missing: list[str] = []
+    for raw_item in provenance:
+        if not isinstance(raw_item, Mapping):
+            raise ValueError(f"{label} integration provenance must contain objects")
+        fields = ("kind", "id", "version_identity", "runtime_digest")
+        if any(not str(raw_item.get(field) or "") for field in fields):
+            if required:
+                missing.append(str(raw_item.get("id") or "unknown"))
+            continue
+        revision = _candidate_source_revision(
+            {
+                field: raw_item[field]
+                for field in (*fields, "lock_digest")
+                if raw_item.get(field) is not None
+            }
+        )
+        key = (
+            revision.kind,
+            revision.id,
+            revision.version_identity,
+            revision.runtime_digest,
+            revision.lock_digest,
+        )
+        revisions[key] = revision
+    if missing:
+        raise ValueError(
+            f"{label} integration provenance lacks immutable source revisions: "
+            + ", ".join(sorted(missing))
+        )
+    return tuple(
+        revisions[key]
+        for key in sorted(
+            revisions,
+            key=lambda value: tuple(item or "" for item in value),
+        )
+    )
+
+
+def _evaluate_decision(
+    *,
+    policy: DecisionPolicyV1 | None,
+    rows: Sequence[Mapping[str, Any]],
+    deterministic: Mapping[str, Any],
+    operational: Mapping[str, Any],
+    improved: int,
+    regressed: int,
+    incomplete: int,
+    required_incomplete: int,
+    integrity: Mapping[str, Any],
+    attestation: DecisionAttestationV1 | None,
+) -> DecisionSummaryV1:
+    evidence_grade = _evidence_grade(integrity, rows)
+    if integrity.get("status") == "invalid":
+        return DecisionSummaryV1(
+            status="invalid",
+            recommendation="INVALID — do not use this result for a release decision.",
+            release_target=policy.release_target if policy else None,
+            candidate_sha=policy.candidate_sha if policy else None,
+            evidence_grade=evidence_grade,
+            gates=(),
+            critical_blockers=("result integrity is invalid",),
+            limitations=(
+                "Task and operational observations remain mechanism evidence only.",
+            ),
+            next_action="Repair result integrity and create a new Study identity.",
+            human_signoff_required=(
+                policy.human_signoff_required if policy else True
+            ),
+            attestation=attestation,
+        )
+    if policy is None:
+        return DecisionSummaryV1(
+            status="inconclusive",
+            recommendation=(
+                "Package release not evaluated by this Study."
+            ),
+            release_target=None,
+            candidate_sha=None,
+            evidence_grade=evidence_grade,
+            gates=(),
+            critical_blockers=("decision policy is unavailable",),
+            limitations=(
+                "Task and operational observations are evidence, not a release decision.",
+            ),
+            next_action=(
+                "Use this Study only for its bounded behavioral verdict; run the "
+                "separate governed release qualification for a package decision."
+            ),
+            human_signoff_required=True,
+            attestation=None,
+        )
+    facts = _decision_facts(
+        rows=rows,
+        deterministic=deterministic,
+        operational=operational,
+        improved=improved,
+        regressed=regressed,
+        incomplete=incomplete,
+        required_incomplete=required_incomplete,
+        integrity=integrity,
+        evidence_grade=evidence_grade,
+    )
+    policies = list(policy.gates)
+    existing = {gate.id for gate in policies}
+    implicit = (
+        DecisionGatePolicyV1(
+            id="result-integrity",
+            label="Result rows and summary reconcile",
+            category="integrity",
+            source="integrity.valid",
+            operator="eq",
+            target=True,
+        ),
+        DecisionGatePolicyV1(
+            id="unique-attempts",
+            label="Every terminal attempt identity is unique",
+            category="integrity",
+            source="attempts.duplicates",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="critical-regressions",
+            label="No critical task regression",
+            category="task",
+            source="task.critical_regressions",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="required-evaluations",
+            label="Required evaluations are complete",
+            category="evidence",
+            source="evidence.required_incomplete",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="cross-project-scope",
+            label="Every query stays in the locked project",
+            category="privacy",
+            source="evidence.cross_project_attempts",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="infrastructure",
+            label="Infrastructure conformance has no failures",
+            category="infrastructure",
+            source="infrastructure.failures",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="credentials-and-private-labels",
+            label="No credential or private-label leak",
+            category="privacy",
+            source="privacy.leaks",
+            operator="eq",
+            target=0,
+        ),
+        DecisionGatePolicyV1(
+            id="local-artifact-privacy",
+            label="Local run artifacts pass privacy scanning",
+            category="privacy",
+            source="privacy.local_artifacts_passed",
+            operator="eq",
+            target=True,
+        ),
+        DecisionGatePolicyV1(
+            id="hosted-evidence-privacy",
+            label="Hosted evidence passes post-publication privacy scanning",
+            category="privacy",
+            source="privacy.hosted_evidence_passed",
+            operator="eq",
+            target=True,
+        ),
+        DecisionGatePolicyV1(
+            id="sandbox-cleanup",
+            label="No orphaned sandbox",
+            category="infrastructure",
+            source="cleanup.orphans",
+            operator="eq",
+            target=0,
+        ),
+    )
+    policies.extend(gate for gate in implicit if gate.id not in existing)
+    gate_results: list[DecisionGateResultV1] = []
+    for gate in policies:
+        actual = facts.get(gate.source)
+        gate_results.append(
+            DecisionGateResultV1(
+                id=gate.id,
+                label=gate.label,
+                category=gate.category,
+                status=_gate_status(actual, gate.operator, gate.target),
+                critical=gate.critical,
+                actual=actual,
+                target=gate.target,
+            )
+        )
+    grade_passed = _grade_rank(evidence_grade) >= _grade_rank(
+        policy.minimum_evidence_grade
+    )
+    gate_results.append(
+        DecisionGateResultV1(
+            id="evidence-grade",
+            label="Minimum evidence grade",
+            category="evidence",
+            status="passed" if grade_passed else "failed",
+            critical=True,
+            actual=evidence_grade,
+            target=policy.minimum_evidence_grade,
+        )
+    )
+    blockers = tuple(
+        gate.label
+        for gate in gate_results
+        if gate.critical and gate.status != "passed"
+    )
+    if any(gate.status == "unavailable" for gate in gate_results if gate.critical):
+        status: DecisionStatus = "blocked"
+        recommendation = "BLOCKED — required release evidence is unavailable."
+        next_action = "Collect the missing required evidence and rerun qualification."
+    elif blockers:
+        status = "hold"
+        recommendation = "HOLD — one or more critical release gates failed."
+        next_action = "Address the critical blockers, then approve a new immutable preview."
+    elif policy.human_signoff_required:
+        status = "ready_for_signoff"
+        recommendation = (
+            "READY FOR SIGN-OFF — automated gates passed; this is not yet GO."
+        )
+        next_action = "Have the release owner sign the immutable result digest."
+    else:
+        status = "go"
+        recommendation = "GO — all governed gates passed."
+        next_action = "Proceed through the separate package release procedure."
+    return DecisionSummaryV1(
+        status=status,
+        recommendation=recommendation,
+        release_target=policy.release_target,
+        candidate_sha=policy.candidate_sha,
+        evidence_grade=evidence_grade,
+        gates=tuple(gate_results),
+        critical_blockers=blockers,
+        limitations=(
+            "The decision applies only to the exact candidate, runtime, taskset, scorers, and project in the approved preview.",
+            "Managed-service and Helm release gates are not covered.",
+        ),
+        next_action=next_action,
+        human_signoff_required=policy.human_signoff_required,
+        attestation=attestation,
+    )
+
+
+def _decision_facts(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    deterministic: Mapping[str, Any],
+    operational: Mapping[str, Any],
+    improved: int,
+    regressed: int,
+    incomplete: int,
+    required_incomplete: int,
+    integrity: Mapping[str, Any],
+    evidence_grade: str,
+) -> dict[str, str | float | int | bool | None]:
+    candidate = _mapping_or_empty(deterministic.get("candidate"))
+    critical_failures = _critical_dimension_failures(rows, "candidate")
+    critical_regressions = _critical_regressions(rows)
+    row_privacy_leaks = sum(
+        int(bool(row.get("credential_leak") or row.get("private_label_leak")))
+        for row in rows
+    )
+    privacy_leaks = (
+        row_privacy_leaks
+        + max(
+            (
+                int(row.get("local_artifact_privacy_match_count") or 0)
+                for row in rows
+            ),
+            default=0,
+        )
+        + max(
+            (
+                int(row.get("hosted_evidence_privacy_match_count") or 0)
+                for row in rows
+            ),
+            default=0,
+        )
+    )
+    orphans = sum(
+        int(
+            row.get("sandbox_deleted") is False
+            or row.get("orphaned_sandbox") is True
+        )
+        for row in rows
+    )
+    infrastructure_complete = bool(rows) and all(
+        row.get("infrastructure_conformance_complete") is True for row in rows
+    )
+    privacy_evidence_available = bool(rows) and all(
+        _privacy_scan_evidence_available(row) for row in rows
+    )
+    cleanup_complete = bool(rows) and all(
+        row.get("sandbox_cleanup_verified") is True for row in rows
+    )
+    facts: dict[str, str | float | int | bool | None] = {
+        "integrity.valid": integrity.get("status") == "reconciled",
+        "attempts.duplicates": len(integrity.get("duplicate_attempt_ids") or ()),
+        "matrix.rows": len(rows),
+        "matrix.aligned_pairs": improved + regressed + max(0, len(rows) // 2 - improved - regressed - incomplete),
+        "task.candidate_passed": int(candidate.get("passed") or 0),
+        "task.candidate_evaluated": int(candidate.get("evaluated") or 0),
+        "task.candidate_critical_failures": critical_failures,
+        "task.critical_regressions": critical_regressions,
+        "task.incomplete_pairs": incomplete,
+        "evidence.required_incomplete": required_incomplete,
+        "evidence.unresolved_attempts": int(
+            integrity.get("unresolved_evidence_attempts") or 0
+        ),
+        "evidence.cross_project_attempts": int(
+            integrity.get("cross_project_attempts") or 0
+        ),
+        "evidence.grade": evidence_grade,
+        "infrastructure.failures": (
+            int(operational.get("infrastructure_failures") or 0)
+            if infrastructure_complete
+            else None
+        ),
+        "privacy.leaks": (
+            privacy_leaks if privacy_evidence_available else None
+        ),
+        "privacy.local_artifacts_passed": _privacy_component_fact(
+            rows,
+            "local_artifact_privacy_scan_status",
+        ),
+        "privacy.hosted_evidence_passed": _privacy_component_fact(
+            rows,
+            "hosted_evidence_privacy_scan_status",
+        ),
+        "cleanup.orphans": orphans if cleanup_complete else None,
+    }
+    facts.update(_efficiency_regressions(rows))
+    facts.update(_locked_decision_facts(rows))
+    facts.update(_infrastructure_gate_facts(rows))
+    return facts
+
+
+def _privacy_component_fact(
+    rows: Sequence[Mapping[str, Any]],
+    field: str,
+) -> bool | None:
+    if not rows:
+        return None
+    statuses = [_privacy_scan_status(row, field) for row in rows]
+    if any(status == "failed" for status in statuses):
+        return False
+    if all(status == "passed" for status in statuses):
+        return True
+    return None
+
+
+def _infrastructure_gate_facts(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, bool | None]:
+    if not rows:
+        return {}
+    digests = {
+        str(row.get("infrastructure_receipt_digest") or "") for row in rows
+    }
+    if len(digests) != 1 or not next(iter(digests)):
+        return {}
+    mappings = [
+        _mapping_or_empty(row.get("infrastructure_gate_statuses"))
+        for row in rows
+    ]
+    gate_ids = (
+        set.intersection(*(set(value) for value in mappings))
+        if mappings
+        else set()
+    )
+    facts: dict[str, bool | None] = {}
+    for gate_id in sorted(gate_ids):
+        statuses = {str(value.get(gate_id) or "") for value in mappings}
+        if len(statuses) != 1:
+            continue
+        status = next(iter(statuses))
+        facts[f"infrastructure.gate.{gate_id}"] = (
+            True
+            if status == "passed"
+            else False
+            if status == "failed"
+            else None
+        )
+    return facts
+
+
+def _critical_dimension_failures(
+    rows: Sequence[Mapping[str, Any]], variant: str
+) -> int:
+    failures = 0
+    for row in rows:
+        if str(row.get("variant_id") or "") != variant:
+            continue
+        critical = row.get("comparison_deterministic_criticality") or {}
+        scores = _mapping_or_empty(row.get("comparison_deterministic_scores"))
+        if isinstance(critical, Mapping):
+            failures += sum(
+                not _dimension_passed(scores.get(str(name)))
+                for name, required in critical.items()
+                if required is True
+            )
+    return failures
+
+
+def _critical_regressions(rows: Sequence[Mapping[str, Any]]) -> int:
+    pairs: dict[tuple[str, str, int], dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        variant = str(row.get("variant_id") or "")
+        if variant not in {"baseline", "candidate"}:
+            continue
+        key = (
+            str(row.get("task_id") or row.get("task_name") or ""),
+            str(row.get("harness") or ""),
+            int(row.get("trial_index") or 1),
+        )
+        pairs.setdefault(key, {})[variant] = row
+    regressions = 0
+    for pair in pairs.values():
+        baseline = pair.get("baseline")
+        candidate = pair.get("candidate")
+        if baseline is None or candidate is None:
+            continue
+        critical = candidate.get("comparison_deterministic_criticality") or {}
+        baseline_scores = _mapping_or_empty(
+            baseline.get("comparison_deterministic_scores")
+        )
+        candidate_scores = _mapping_or_empty(
+            candidate.get("comparison_deterministic_scores")
+        )
+        if isinstance(critical, Mapping):
+            regressions += sum(
+                _dimension_passed(baseline_scores.get(str(name)))
+                and not _dimension_passed(candidate_scores.get(str(name)))
+                for name, required in critical.items()
+                if required is True
+            )
+    return regressions
+
+
+def _behavioral_summary(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    integrity: Mapping[str, Any],
+    improved: int,
+    regressed: int,
+    mixed: int,
+    unchanged: int,
+    incomplete: int,
+    required_incomplete: int,
+    unresolved_evidence: int,
+    cross_project_attempts: int,
+) -> BehavioralSummaryV1:
+    candidate_critical_failures = _critical_dimension_failures(rows, "candidate")
+    local_conformance_failed = bool(
+        integrity.get("harbor_conformance_failed_attempts")
+    )
+    local_conformance_unavailable = bool(
+        integrity.get("harbor_conformance_unavailable_attempts")
+    )
+    common_limitations = (
+        "This is behavioral evidence for the exact locked candidates, taskset, model, harness, attempts, and execution fingerprint.",
+        "A local Harbor result does not qualify W&B Serverless or authorize a package release.",
+    )
+    if (
+        integrity.get("status") == "invalid"
+        or cross_project_attempts
+        or local_conformance_failed
+    ):
+        blockers = (
+            ("result integrity is invalid",)
+            if integrity.get("status") == "invalid"
+            else ()
+        ) + (
+            ("one or more attempts queried outside the locked evidence project",)
+            if cross_project_attempts
+            else ()
+        ) + (
+            ("local Harbor privacy, policy, or cleanup conformance failed",)
+            if local_conformance_failed
+            else ()
+        )
+        return BehavioralSummaryV1(
+            status="invalid",
+            recommendation="INVALID — do not use this result as behavioral evidence.",
+            improved_pairs=improved,
+            regressed_pairs=regressed,
+            mixed_pairs=mixed,
+            unchanged_pairs=unchanged,
+            incomplete_pairs=incomplete,
+            candidate_critical_failures=candidate_critical_failures,
+            critical_blockers=blockers,
+            supported_claim=None,
+            limitations=common_limitations,
+            next_action="Repair result integrity and create a new Study identity.",
+        )
+    if (
+        incomplete
+        or required_incomplete
+        or unresolved_evidence
+        or local_conformance_unavailable
+    ):
+        blockers = tuple(
+            item
+            for item in (
+                (
+                    f"{incomplete} aligned pair(s) are incomplete"
+                    if incomplete
+                    else ""
+                ),
+                (
+                    f"{required_incomplete} required evaluation(s) are incomplete"
+                    if required_incomplete
+                    else ""
+                ),
+                (
+                    f"{unresolved_evidence} attempt(s) have unresolved evidence links"
+                    if unresolved_evidence
+                    else ""
+                ),
+                (
+                    "local Harbor privacy, policy, or cleanup evidence is unavailable"
+                    if local_conformance_unavailable
+                    else ""
+                ),
+            )
+            if item
+        )
+        return BehavioralSummaryV1(
+            status="incomplete",
+            recommendation="INCOMPLETE — required behavioral evidence is unavailable.",
+            improved_pairs=improved,
+            regressed_pairs=regressed,
+            mixed_pairs=mixed,
+            unchanged_pairs=unchanged,
+            incomplete_pairs=incomplete,
+            candidate_critical_failures=candidate_critical_failures,
+            critical_blockers=blockers,
+            supported_claim=None,
+            limitations=common_limitations,
+            next_action="Resolve the missing attempts or evidence links and rerun.",
+        )
+    if mixed or (improved and regressed) or candidate_critical_failures:
+        blockers = (
+            (
+                f"{candidate_critical_failures} candidate critical dimension(s) failed",
+            )
+            if candidate_critical_failures
+            else ()
+        )
+        return BehavioralSummaryV1(
+            status="mixed",
+            recommendation="MIXED — the candidate has both useful and blocking behavior.",
+            improved_pairs=improved,
+            regressed_pairs=regressed,
+            mixed_pairs=mixed,
+            unchanged_pairs=unchanged,
+            incomplete_pairs=incomplete,
+            candidate_critical_failures=candidate_critical_failures,
+            critical_blockers=blockers,
+            supported_claim=None,
+            limitations=common_limitations,
+            next_action="Inspect the discordant dimensions before selecting the candidate.",
+        )
+    if regressed:
+        return BehavioralSummaryV1(
+            status="regressed",
+            recommendation="REGRESSED — the candidate is worse on the locked comparison.",
+            improved_pairs=improved,
+            regressed_pairs=regressed,
+            mixed_pairs=mixed,
+            unchanged_pairs=unchanged,
+            incomplete_pairs=incomplete,
+            candidate_critical_failures=candidate_critical_failures,
+            critical_blockers=("one or more aligned pairs regressed",),
+            supported_claim=(
+                f"The candidate regressed on {regressed} aligned pair(s) "
+                "under the locked execution."
+            ),
+            limitations=common_limitations,
+            next_action="Do not promote this candidate; inspect the regressed attempts.",
+        )
+    if improved:
+        return BehavioralSummaryV1(
+            status="improved",
+            recommendation="IMPROVED — the candidate is better on the locked comparison.",
+            improved_pairs=improved,
+            regressed_pairs=regressed,
+            mixed_pairs=mixed,
+            unchanged_pairs=unchanged,
+            incomplete_pairs=incomplete,
+            candidate_critical_failures=candidate_critical_failures,
+            critical_blockers=(),
+            supported_claim=(
+                f"The candidate improved {improved} aligned pair(s), regressed "
+                "none, and passed every candidate critical dimension under "
+                "the locked execution."
+            ),
+            limitations=common_limitations,
+            next_action="Use a separately approved confirmation cohort before promotion.",
+        )
+    return BehavioralSummaryV1(
+        status="unchanged",
+        recommendation="UNCHANGED — no behavioral difference was detected.",
+        improved_pairs=improved,
+        regressed_pairs=regressed,
+        mixed_pairs=mixed,
+        unchanged_pairs=unchanged,
+        incomplete_pairs=incomplete,
+        candidate_critical_failures=candidate_critical_failures,
+        critical_blockers=(),
+        supported_claim=(
+            f"No behavioral difference was detected across {unchanged} aligned pair(s)."
+        ),
+        limitations=common_limitations,
+        next_action="Use harder pre-frozen tasks if the decision still matters.",
+    )
+
+
+def _efficiency_regressions(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, float | None]:
+    result: dict[str, float | None] = {}
+    for label, extractor in (
+        ("cost", lambda row: _row_number(row, "cost_usd", "observed_cost_usd")),
+        ("latency", _row_latency_sec),
+        ("tool_calls", lambda row: float(_observed_tool_activity(row)[1])),
+    ):
+        by_variant = {
+            variant: [
+                value
+                for row in rows
+                if str(row.get("variant_id") or "") == variant
+                and (value := extractor(row)) is not None
+            ]
+            for variant in ("baseline", "candidate")
+        }
+        baseline = by_variant["baseline"]
+        candidate = by_variant["candidate"]
+        if not baseline or not candidate or sum(baseline) == 0:
+            result[f"efficiency.{label}_regression_pct"] = None
+        else:
+            result[f"efficiency.{label}_regression_pct"] = round(
+                ((sum(candidate) / len(candidate)) / (sum(baseline) / len(baseline)) - 1)
+                * 100,
+                6,
+            )
+        paired_regressions: list[float] = []
+        pairs: dict[tuple[str, str, int], dict[str, float]] = {}
+        for row in rows:
+            variant = str(row.get("variant_id") or "")
+            value = extractor(row)
+            if variant not in {"baseline", "candidate"} or value is None:
+                continue
+            key = (
+                str(row.get("task_id") or row.get("task_name") or ""),
+                str(row.get("harness") or ""),
+                int(row.get("trial_index") or 1),
+            )
+            pairs.setdefault(key, {})[variant] = value
+        for pair in pairs.values():
+            baseline_value = pair.get("baseline")
+            candidate_value = pair.get("candidate")
+            if baseline_value and candidate_value is not None:
+                paired_regressions.append(
+                    (candidate_value / baseline_value - 1) * 100
+                )
+        result[f"efficiency.max_task_{label}_regression_pct"] = (
+            round(max(paired_regressions), 6) if paired_regressions else None
+        )
+    return result
+
+
+def _locked_decision_facts(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, str | float | int | bool | None]:
+    values: dict[str, set[str]] = {}
+    decoded: dict[tuple[str, str], str | float | int | bool | None] = {}
+    for row in rows:
+        facts = row.get("decision_facts")
+        if not isinstance(facts, Mapping):
+            continue
+        for key, value in facts.items():
+            name = str(key)
+            if not name.startswith(
+                ("infrastructure.", "privacy.", "cleanup.", "evidence.")
+            ):
+                continue
+            if value is not None and not isinstance(value, str | int | float | bool):
+                continue
+            encoded = json.dumps(value, sort_keys=True)
+            values.setdefault(name, set()).add(encoded)
+            decoded[(name, encoded)] = value
+    return {
+        name: (
+            decoded[(name, next(iter(observed)))]
+            if len(observed) == 1
+            else None
+        )
+        for name, observed in values.items()
+    }
+
+
+def _evidence_grade(
+    integrity: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> Literal["A", "B", "C", "invalid"]:
+    if integrity.get("status") == "invalid":
+        return "invalid"
+    if int(integrity.get("cross_project_attempts") or 0):
+        return "C"
+    live_rows = [row for row in rows if str(row.get("trace_project") or "")]
+    missing = int(integrity.get("unresolved_evidence_attempts") or 0)
+    if live_rows and missing == 0:
+        return "A"
+    if missing == 0:
+        return "B"
+    return "C"
+
+
+def _grade_rank(value: str) -> int:
+    return {"invalid": 0, "C": 1, "B": 2, "A": 3}.get(value, 0)
+
+
+def _gate_status(
+    actual: str | float | int | bool | None,
+    operator: str,
+    target: str | float | int | bool,
+) -> Literal["passed", "failed", "unavailable"]:
+    if actual is None:
+        return "unavailable"
+    if operator == "eq":
+        passed = actual == target
+    elif (
+        operator in {"lte", "gte"}
+        and isinstance(actual, int | float)
+        and not isinstance(actual, bool)
+        and isinstance(target, int | float)
+        and not isinstance(target, bool)
+    ):
+        passed = actual <= target if operator == "lte" else actual >= target
+    else:
+        return "unavailable"
+    return "passed" if passed else "failed"
+
+
+def _apply_decision_attestation(
+    decision: DecisionSummaryV1,
+    attestation: DecisionAttestationV1 | None,
+    *,
+    qualification_digest: str,
+) -> DecisionSummaryV1:
+    if attestation is None:
+        return replace(decision, attestation=None)
+    if (
+        decision.status != "ready_for_signoff"
+        or attestation.signed_result_digest != qualification_digest
+    ):
+        return replace(
+            decision,
+            status="invalid",
+            recommendation="INVALID — the release attestation does not match the qualified result.",
+            critical_blockers=tuple(
+                dict.fromkeys(
+                    (*decision.critical_blockers, "release attestation mismatch")
+                )
+            ),
+            next_action="Sign the exact immutable qualification digest.",
+            attestation=attestation,
+        )
+    return replace(
+        decision,
+        status="go",
+        recommendation="GO — all governed gates passed and the release owner signed.",
+        next_action="Proceed through the separate package release procedure.",
+        attestation=attestation,
+    )
+
+
+def _comparison_result_digest(raw: Mapping[str, Any]) -> str:
+    """Digest the complete post-attestation result envelope."""
+
+    value = _json_value(dict(raw))
+    value.pop("result_digest", None)
+    return stable_digest(value)
+
+
+def _comparison_qualification_digest(raw: Mapping[str, Any]) -> str:
+    """Digest the immutable qualification state a release owner signs."""
+
+    value = _json_value(dict(raw))
+    value.pop("result_digest", None)
+    value.pop("qualification_digest", None)
+    decision = value.get("decision")
+    if isinstance(decision, dict):
+        decision.pop("attestation", None)
+        if decision.get("status") == "go":
+            decision["status"] = "ready_for_signoff"
+            decision["recommendation"] = (
+                "READY FOR SIGN-OFF — automated gates passed; this is not yet GO."
+            )
+            decision["next_action"] = (
+                "Have the release owner sign the immutable result digest."
+            )
+    return stable_digest(value)
+
+
+def _legacy_comparison_result_digest(raw: Mapping[str, Any]) -> str:
+    """Read pre-envelope V1/V2 results without trusting a legacy GO."""
+
+    return _comparison_qualification_digest(raw)
+
+
+def _verify_v2_result_integrity(
+    result: ComparisonResultV2 | ComparisonResultV3,
+    *,
+    has_qualification_digest: bool,
+) -> None:
+    attestation = result.decision.attestation
+    if not has_qualification_digest:
+        if result.decision.status == "go" or attestation is not None:
+            raise ValueError(
+                "legacy ComparisonResultV2 cannot carry a trusted release attestation"
+            )
+        if result.result_digest != _legacy_comparison_result_digest(
+            result.to_dict()
+        ):
+            raise ValueError("comparison result digest does not match")
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", result.qualification_digest):
+        raise ValueError("comparison qualification digest is invalid")
+    expected_qualification = _comparison_qualification_digest(result.to_dict())
+    if result.qualification_digest != expected_qualification:
+        raise ValueError("comparison qualification digest does not match")
+    if attestation is None:
+        if result.decision.status == "go":
+            raise ValueError("GO comparison result is missing release attestation")
+        if result.result_digest != result.qualification_digest:
+            raise ValueError(
+                "unsigned comparison result must expose its qualification digest"
+            )
+        return
+    expected_envelope = _comparison_result_digest(result.to_dict())
+    if result.result_digest != expected_envelope:
+        raise ValueError("attested comparison result envelope digest does not match")
+    if result.decision.status == "go":
+        if not re.fullmatch(r"[0-9a-f]{64}", attestation.signed_result_digest):
+            raise ValueError("GO release attestation digest is invalid")
+        if attestation.signed_result_digest != result.qualification_digest:
+            raise ValueError(
+                "GO release attestation does not sign the qualification digest"
+            )
+    if isinstance(result, ComparisonResultV3):
+        _verify_v3_result_shape(result)
+
+
+def _verify_v3_result_shape(result: ComparisonResultV3) -> None:
+    if result.evidence_project != (
+        result.evidence_topology.result_destination.project_slug
+    ):
+        raise ValueError(
+            "ComparisonResultV3 evidence project disagrees with its topology"
+        )
+    validity_by_task = {item.task_id: item.status for item in result.task_validity}
+    if len(validity_by_task) != len(result.task_validity):
+        raise ValueError("ComparisonResultV3 task validity IDs must be unique")
+    paired_tasks = {item.task_id for item in result.paired_cases}
+    if paired_tasks != set(validity_by_task):
+        raise ValueError(
+            "ComparisonResultV3 task validity does not cover every paired task"
+        )
+    attempt_ids = {
+        attempt.attempt_id
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+        if attempt is not None
+    }
+    aligned_attempt_ids = {
+        attempt_id
+        for aligned in result.aligned_analysis.aligned_attempts
+        for attempt_id in aligned.attempt_ids_by_arm.values()
+    }
+    complete_pair_attempt_ids = {
+        attempt.attempt_id
+        for pair in result.paired_cases
+        if pair.baseline is not None and pair.candidate is not None
+        for attempt in (pair.baseline, pair.candidate)
+    }
+    if aligned_attempt_ids != complete_pair_attempt_ids:
+        raise ValueError(
+            "ComparisonResultV3 aligned analysis does not cover every complete "
+            "paired attempt"
+        )
+    if result.rows != len(attempt_ids):
+        raise ValueError(
+            "ComparisonResultV3 row count disagrees with unique paired attempts"
+        )
 
 
 def scaffold_comparison(destination: Path, *, force: bool = False) -> Path:
@@ -1014,16 +6636,36 @@ def score_comparison_rows(
     *,
     repo_root: Path,
     env: Mapping[str, str] | None = None,
+    approved_comparison: Mapping[str, Any] | None = None,
     judge_request: Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]
     | None = None,
 ) -> list[dict[str, Any]]:
+    approved_inputs = (
+        _verified_approved_inputs(approved_comparison, repo_root=repo_root)
+        if approved_comparison
+        else None
+    )
     public_tasks = {
         str(item["id"]): item
-        for item in _load_public_tasks(repo_root / spec.taskset.tasks)
+        for item in _load_public_tasks(
+            _frozen_public_tasks_path(
+                repo_root,
+                str(approved_inputs["public_tasks_sha256"]),
+            )
+            if approved_inputs is not None
+            else repo_root / spec.taskset.tasks
+        )
     }
     labels = {
         str(item["id"]): item
-        for item in _load_private_labels(repo_root / spec.taskset.private_labels)
+        for item in _load_private_labels(
+            _frozen_private_labels_path(
+                repo_root,
+                str(approved_inputs["private_labels_sha256"]),
+            )
+            if approved_inputs is not None
+            else repo_root / spec.taskset.private_labels
+        )
     }
     deterministic = tuple(
         evaluator
@@ -1032,7 +6674,7 @@ def score_comparison_rows(
     )
     scored: list[dict[str, Any]] = []
     for source in rows:
-        row = dict(source)
+        row = _bind_attempt_identity(source)
         task_id = str(row.get("task_id") or row.get("task_name") or "")
         output = (
             row.get("final_output")
@@ -1055,6 +6697,23 @@ def score_comparison_rows(
                     evidence=_custom_scorer_evidence(row),
                     evaluators=deterministic,
                     repo_root=repo_root,
+                    scorer_source_digests={
+                        evaluator_id: str(
+                            _mapping(
+                                _mapping(
+                                    approved_inputs["evaluator_artifacts"],
+                                    "approved evaluator artifacts",
+                                ).get(evaluator_id),
+                                f"approved evaluator {evaluator_id} artifacts",
+                            ).get("scorer_sha256")
+                            or ""
+                        )
+                        for evaluator_id in (
+                            item.id for item in deterministic if item.scorer
+                        )
+                    }
+                    if approved_inputs is not None
+                    else None,
                 )
             except Exception as exc:
                 row["pass"] = None
@@ -1068,6 +6727,15 @@ def score_comparison_rows(
                 row["pass"] = passed
                 row["comparison_evaluation_status"] = "scored"
                 row["comparison_deterministic_scores"] = dimensions
+                critical_dimensions = tuple(
+                    str(item)
+                    for item in public_tasks.get(task_id, {}).get(
+                        "critical_dimensions", ()
+                    )
+                )
+                row["comparison_deterministic_criticality"] = {
+                    name: True for name in critical_dimensions
+                }
                 row["comparison_mechanism"] = _comparison_mechanism(
                     row,
                     expected=label["expected"],
@@ -1233,11 +6901,29 @@ def _comparison_judge_evidence(
 
 
 def _comparison_output(row: Mapping[str, Any]) -> Any:
-    return (
-        row.get("final_output")
-        if row.get("final_output") is not None
-        else row.get("answer")
-    )
+    for key in ("final_output", "answer", "agent_response"):
+        if row.get(key) is not None:
+            return row[key]
+    return None
+
+
+def _comparison_trial_output(row: Mapping[str, Any]) -> Any:
+    raw_trial_dir = row.get("trial_dir")
+    if isinstance(raw_trial_dir, str) and raw_trial_dir:
+        trial_dir = Path(raw_trial_dir)
+        if trial_dir.is_dir():
+            answers = sorted(trial_dir.rglob("fugue-answer.md"))
+            if answers:
+                try:
+                    value = answers[0].read_text(
+                        encoding="utf-8", errors="replace"
+                    ).strip()
+                except OSError:
+                    pass
+                else:
+                    if value:
+                        return value[:16_000]
+    return _comparison_output(row)
 
 
 def _validate_comparison_judge_payload(
@@ -1580,24 +7266,68 @@ def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def _comparison_evidence_links(
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[str, str], ...]:
-    fields = {
-        "agent_url": "Agent trace",
-        "weave_agent_url": "Agent trace",
-        "evaluation_url": "Evaluation",
-        "weave_evaluation_url": "Evaluation",
-        "dataset_url": "Dataset",
-        "weave_dataset_url": "Dataset",
-    }
     result: list[dict[str, str]] = []
     seen: set[str] = set()
+    labels = {
+        "evaluation_root": "Evaluation root",
+        "prediction_and_score": "Prediction and score",
+        "prediction": "Prediction",
+        "agent_root": "Agent root",
+        "dataset": "Dataset",
+    }
     for row in rows:
-        for field_name, label in fields.items():
-            value = str(row.get(field_name) or "")
-            if not _safe_evidence_url(value) or value in seen:
+        project = str(row.get("trace_project") or "")
+        task = str(row.get("task_id") or row.get("task_name") or "task")
+        variant = str(row.get("variant_id") or "candidate")
+        overview = _weave_project_url(project)
+        if overview and overview not in seen:
+            seen.add(overview)
+            result.append({"label": "Weave project", "url": overview})
+        for link in _attempt_evidence_links(row):
+            if link.status != "resolved":
+                continue
+            value = str(link.url or "")
+            kind = str(link.kind)
+            if value in seen:
                 continue
             seen.add(value)
-            result.append({"label": label, "url": value})
+            result.append(
+                {
+                    "label": f"{labels.get(kind, kind)} — {task} — {variant}",
+                    "url": value,
+                }
+            )
     return tuple(result)
+
+
+def _weave_project_url(project: str) -> str:
+    parts = project.split("/")
+    if len(parts) != 2:
+        return ""
+    try:
+        entity, project_id = (
+            validate_id(parts[0], kind="W&B entity"),
+            validate_id(parts[1], kind="W&B project"),
+        )
+    except ValueError:
+        return ""
+    return f"https://wandb.ai/{entity}/{project_id}/weave"
+
+
+def _weave_call_url(
+    project: str,
+    call_id: str,
+    *,
+    app_base_url: str = "https://wandb.ai",
+) -> str:
+    overview = _weave_project_url(project)
+    if not overview or not call_id or len(call_id) > 200:
+        return ""
+    entity, project_id = project.split("/", 1)
+    return (
+        f"{app_base_url.rstrip('/')}/{entity}/{project_id}/weave/calls/"
+        f"{urllib.parse.quote(call_id, safe='')}"
+    )
 
 
 def _safe_evidence_url(value: str) -> bool:
@@ -1605,6 +7335,44 @@ def _safe_evidence_url(value: str) -> bool:
     if parsed.scheme == "https" and parsed.netloc:
         return True
     return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
+
+
+def _safe_application_base_url(value: Any, *, label: str) -> str | None:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return None
+    parsed = urllib.parse.urlsplit(text)
+    safe_scheme = parsed.scheme == "https" or (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+    )
+    if (
+        not safe_scheme
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            f"{label} must be credential-free HTTPS or loopback HTTP"
+        )
+    return text
+
+
+def _study_console_backlink(
+    base_url: str | None,
+    *,
+    research_id: str | None,
+    study_id: str,
+) -> str | None:
+    if base_url is None or research_id is None:
+        return None
+    return (
+        f"{base_url}/?research_id="
+        f"{urllib.parse.quote(research_id, safe='')}&study_id="
+        f"{urllib.parse.quote(study_id, safe='')}"
+    )
 
 
 def _operational_summary(
@@ -1622,7 +7390,12 @@ def _operational_summary(
     infrastructure_failures = 0
     wandb_rows = 0
     wandb_eligible = 0
+    evidence_projects: set[str] = set()
+    mcp_tool_usage: dict[str, dict[str, int]] = {}
     for row in rows:
+        trace_project = str(row.get("trace_project") or "")
+        if _weave_project_url(trace_project):
+            evidence_projects.add(trace_project)
         status = str(
             row.get("status")
             or row.get("execution_status")
@@ -1642,6 +7415,21 @@ def _operational_summary(
         if "wandb_serverless_eligible" in row:
             wandb_rows += 1
             wandb_eligible += row.get("wandb_serverless_eligible") is True
+        variant = str(row.get("variant_id") or "unknown")
+        tool_counts = row.get("weave_tool_names") or {}
+        if isinstance(tool_counts, Mapping):
+            for raw_name, raw_count in tool_counts.items():
+                name = str(raw_name)
+                if not name.startswith("mcp__"):
+                    continue
+                public_name = name.split("__", 2)[-1]
+                count = (
+                    int(raw_count)
+                    if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                    else 0
+                )
+                usage = mcp_tool_usage.setdefault(variant, {})
+                usage[public_name] = usage.get(public_name, 0) + count
         cost = row.get("accounted_cost_usd", row.get("cost_usd"))
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
@@ -1667,6 +7455,11 @@ def _operational_summary(
         "input_tokens": input_tokens if usage_rows else None,
         "output_tokens": output_tokens if usage_rows else None,
         "usage_rows": usage_rows,
+        "evidence_projects": sorted(evidence_projects),
+        "mcp_tool_usage": {
+            variant: dict(sorted(tool_counts.items()))
+            for variant, tool_counts in sorted(mcp_tool_usage.items())
+        },
     }
     if wandb_rows:
         result["wandb_serverless"] = {
@@ -1705,13 +7498,35 @@ def execute_comparison(
     repo_root: Path,
     env_file: Path | None = None,
     fetch_weave: bool = True,
-) -> tuple[ComparisonResultV1, Path, Path]:
+    publish_research: bool = True,
+) -> tuple[ComparisonResult, Path, Path]:
+    """Execute one approved comparison.
+
+    Direct CLI execution owns Research publication by default. The governed
+    Research worker disables this path because its control service already
+    owns the start, failure, and terminal-result projections.
+    """
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
         preview.comparison,
         repo_root=repo_root,
         source=repo_root,
     )
+    service = OperatorService(repo_root, env_file)
+    current = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=service,
+    )
+    if current.preview_digest != preview.preview_digest:
+        raise ValueError(
+            "comparison preparation or inputs changed after preview; "
+            "prepare and approve a new exact preview"
+        )
+    if current.readiness["status"] not in {"ready", "needs_review"}:
+        raise ValueError(
+            "comparison is no longer execution-ready; prepare and preview it again"
+        )
     if spec.execution.approval_required:
         if not approval_digest:
             raise ValueError("comparison execution requires an approval digest")
@@ -1720,29 +7535,81 @@ def execute_comparison(
             approval_digest=approval_digest,
             repo_root=repo_root,
         )
-    experiment, request = materialize_comparison(preview, repo_root=repo_root)
-    service = OperatorService(repo_root, env_file)
-    service.prepare(request, experiment=experiment)
+    experiment, request = materialize_comparison(
+        preview,
+        repo_root=repo_root,
+        operator=service,
+        approval_digest=approval_digest,
+    )
+    destination = repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest
+    research_publication_path = destination / "research-publication.json"
+    research_projection: dict[str, Any] | None = None
+    if publish_research and spec.execution.research_id:
+        try:
+            from fugue.research.comparisons import project_direct_comparison_start
+
+            research_projection = project_direct_comparison_start(
+                repo_root,
+                spec.execution.research_id,
+                preview,
+            )
+        except Exception as exc:
+            research_projection = {
+                "schema_version": 1,
+                "research_id": spec.execution.research_id,
+                "publication_complete": False,
+                "status": "publication_incomplete",
+                "stage": "start",
+                "error_type": type(exc).__name__,
+            }
+            atomic_write_json(research_publication_path, research_projection)
+            raise ComparisonPublicationError(
+                stage="start",
+                research_id=spec.execution.research_id,
+                receipt_path=research_publication_path,
+                error_type=type(exc).__name__,
+            ) from None
+        research_projection = {
+            **research_projection,
+            "publication_complete": False,
+            "status": "started",
+            "stage": "start",
+        }
+        atomic_write_json(research_publication_path, research_projection)
+
+    approved_inputs = _verified_approved_inputs(
+        request.approved_comparison,
+        repo_root=repo_root,
+    )
     from fugue.bench.execution import new_run_id
 
     run_id = new_run_id()
 
     def evaluate_attempt(row: dict[str, Any]) -> None:
+        evaluation_row = dict(row)
+        evaluation_row["final_output"] = _comparison_trial_output(row)
         scored = score_comparison_rows(
             spec,
-            [row],
+            [evaluation_row],
             repo_root=repo_root,
             env=service.env,
+            approved_comparison=request.approved_comparison,
         )[0]
+        scored.pop("final_output", None)
         row.update(scored)
 
-    service.execute_run(
+    run_summary = service.execute_run(
         request,
         run_id=run_id,
         experiment=experiment,
         host_evaluator=evaluate_attempt,
         host_scorer_names=_comparison_scorer_names(spec),
     )
+    if run_summary is not None and run_summary.status != "passed":
+        raise RuntimeError(
+            "comparison execution did not pass its required cell/evidence "
+            f"gates (run={run_id}, status={run_summary.status})"
+        )
     export_path = (
         repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest / "attempts.jsonl"
     )
@@ -1753,6 +7620,7 @@ def execute_comparison(
         to_weave=False,
     )
     rows = _read_jsonl(summary.path, "comparison attempt rows")
+    _apply_harbor_conformance(rows, repo_root=repo_root, run_id=run_id)
     scored = []
     for row in rows:
         if row.get("comparison_evaluation_status") in {"scored", "unavailable"}:
@@ -1764,29 +7632,323 @@ def execute_comparison(
                     [row],
                     repo_root=repo_root,
                     env=service.env,
+                    approved_comparison=request.approved_comparison,
                 )
             )
+    infrastructure_receipt = (
+        _load_infrastructure_receipt(
+            repo_root / spec.execution.infrastructure_receipt,
+            repo_root=repo_root,
+        )
+        if spec.execution.infrastructure_receipt
+        else None
+    )
+    if infrastructure_receipt is not None:
+        conformance = _mapping_or_empty(
+            infrastructure_receipt.get("infrastructure_conformance")
+        )
+        gate_statuses = {
+            str(item["id"]): str(item["status"])
+            for item in conformance.get("gates") or ()
+            if isinstance(item, Mapping)
+        }
+        for row in scored:
+            row["infrastructure_conformance_complete"] = (
+                conformance.get("complete") is True
+            )
+            row["infrastructure_gate_statuses"] = gate_statuses
+            row["infrastructure_receipt_digest"] = str(
+                infrastructure_receipt["receipt_digest"]
+            )
+    draft_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=scored,
+        source=run_id,
+        expected_evidence_project=trace_project_slug(
+            _comparison_evidence_environment(spec, service.env)
+        ),
+        approved_comparison=getattr(request, "approved_comparison", None),
+        decision_policy=spec.decision_policy,
+    )
+    publication_payloads: dict[str, Any] = {
+        "result": draft_result.to_dict(),
+    }
+    if publish_research and spec.execution.research_id:
+        from fugue.research.experiment_views import (
+            build_comparison_evaluation_view,
+        )
+
+        publication_payloads["study"] = build_comparison_evaluation_view(
+            draft_result.to_dict(),
+            result_ref=(
+                destination.resolve() / "result.json"
+            ).relative_to(repo_root.resolve()).as_posix(),
+        ).to_dict()
+    from fugue.bench.run_conformance import (
+        write_hosted_evidence_privacy_receipt,
+    )
+
+    hosted_privacy = write_hosted_evidence_privacy_receipt(
+        repo_root=repo_root,
+        run_id=run_id,
+        rows=scored,
+        env=service.env,
+        evidence_project=trace_project_slug(
+            _comparison_evidence_environment(spec, service.env)
+        ),
+        private_labels_path=_frozen_private_labels_path(
+            repo_root,
+            str(approved_inputs["private_labels_sha256"]),
+        ),
+        publication_payloads=publication_payloads,
+        fetch_hosted=fetch_weave,
+    )
+    _apply_hosted_evidence_privacy(
+        scored,
+        repo_root=repo_root,
+        run_id=run_id,
+        receipt_digest=hosted_privacy.sha256,
+    )
     _atomic_text(summary.path, _jsonl(scored))
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
         rows=scored,
         source=run_id,
+        expected_evidence_project=trace_project_slug(
+            _comparison_evidence_environment(spec, service.env)
+        ),
+        approved_comparison=getattr(request, "approved_comparison", None),
+        decision_policy=spec.decision_policy,
     )
-    destination = repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest
     json_path, markdown_path = write_comparison_result(
         result, destination=destination
     )
+    publication_error: ComparisonPublicationError | None = None
+    if publish_research and spec.execution.research_id:
+        try:
+            from fugue.research.comparisons import project_direct_comparison_result
+
+            projected = project_direct_comparison_result(
+                repo_root,
+                spec.execution.research_id,
+                result,
+                json_path,
+            )
+            research_projection = {
+                **(research_projection or {}),
+                **projected,
+                "publication_complete": True,
+                "status": "projected",
+                "stage": "result",
+            }
+        except Exception as exc:
+            research_projection = {
+                **(research_projection or {}),
+                "schema_version": 1,
+                "research_id": spec.execution.research_id,
+                "publication_complete": False,
+                "status": "publication_incomplete",
+                "stage": "result",
+                "error_type": type(exc).__name__,
+                "result_digest": result.result_digest,
+                "result": json_path.relative_to(repo_root).as_posix(),
+            }
+            publication_error = ComparisonPublicationError(
+                stage="result",
+                research_id=spec.execution.research_id,
+                receipt_path=research_publication_path,
+                error_type=type(exc).__name__,
+                result=result,
+                result_path=json_path,
+                markdown_path=markdown_path,
+            )
+        atomic_write_json(
+            research_publication_path,
+            research_projection,
+        )
     atomic_write_json(
         repo_root / COMPARISON_RESULT_ROOT / "latest.json",
         {
             "comparison_id": spec.id,
             "preview_digest": preview.preview_digest,
+            "evidence_project": spec.execution.evidence_project,
             "result": json_path.relative_to(repo_root).as_posix(),
             "markdown": markdown_path.relative_to(repo_root).as_posix(),
+            **(
+                {
+                    "research_publication": {
+                        "status": str(
+                            (research_projection or {}).get("status")
+                            or "not_declared"
+                        ),
+                        "complete": bool(
+                            (research_projection or {}).get(
+                                "publication_complete"
+                            )
+                        ),
+                        "receipt": research_publication_path.relative_to(
+                            repo_root
+                        ).as_posix(),
+                    }
+                }
+                if spec.execution.research_id
+                else {}
+            ),
         },
     )
+    if publication_error is not None:
+        raise publication_error
     return result, json_path, markdown_path
+
+
+def _apply_harbor_conformance(
+    rows: Sequence[dict[str, Any]],
+    *,
+    repo_root: Path,
+    run_id: str,
+) -> None:
+    if not any(row.get("harbor_config") for row in rows):
+        return
+    try:
+        from fugue.bench.run_conformance import (
+            read_harbor_run_conformance_receipt,
+        )
+
+        receipt = read_harbor_run_conformance_receipt(
+            repo_root=repo_root,
+            run_id=run_id,
+        )
+    except (FileNotFoundError, ValueError):
+        for row in rows:
+            row["harbor_conformance_status"] = "unavailable"
+        return
+    if receipt.get("backend") != "local_harbor_docker":
+        return
+    identity = _mapping_or_empty(receipt.get("execution_identity"))
+    receipt_version = int(receipt.get("schema_version") or 1)
+    local_privacy_scan = _mapping_or_empty(
+        receipt.get("local_artifact_privacy_scan")
+        if receipt_version == 2
+        else receipt.get("secret_value_scan")
+    )
+    private_boundary = _mapping_or_empty(receipt.get("private_label_boundary"))
+    cleanup = _mapping_or_empty(receipt.get("docker_cleanup"))
+    matches = cleanup.get("matched_containers") or ()
+    for row in rows:
+        row.update(
+            {
+                "harbor_environment": "local_harbor_docker",
+                "harbor_conformance_status": str(
+                    receipt.get("status") or "unavailable"
+                ),
+                "harbor_conformance_receipt_digest": str(
+                    receipt.get("receipt_sha256") or ""
+                ),
+                "harbor_policy_attestation_verified": _status_boolean(
+                    identity.get("status")
+                ),
+                "private_label_boundary_verified": _status_boolean(
+                    private_boundary.get("status")
+                ),
+                "sandbox_cleanup_verified": _status_boolean(
+                    cleanup.get("status")
+                ),
+                "orphaned_sandbox": bool(matches),
+            }
+        )
+        if receipt_version == 2:
+            row.update(
+                {
+                    "privacy_contract_version": 2,
+                    "local_artifact_privacy_scan_status": str(
+                        local_privacy_scan.get("status") or "unavailable"
+                    ),
+                    "local_artifact_privacy_scan_digest": stable_digest(
+                        local_privacy_scan
+                    ),
+                    "local_artifact_privacy_match_count": sum(
+                        int(item.get("match_count") or 0)
+                        for item in local_privacy_scan.get(
+                            "files_with_matches"
+                        )
+                        or ()
+                        if isinstance(item, Mapping)
+                    ),
+                }
+            )
+        else:
+            # V1 receipts remain readable as historical evidence, but their
+            # aggregate privacy flag cannot qualify a new V2 result.
+            row.update(
+                {
+                    "privacy_contract_version": 1,
+                    "legacy_privacy_scan_complete": _status_boolean(
+                        local_privacy_scan.get("status")
+                    ),
+                }
+            )
+
+
+def _apply_hosted_evidence_privacy(
+    rows: Sequence[dict[str, Any]],
+    *,
+    repo_root: Path,
+    run_id: str,
+    receipt_digest: str,
+) -> None:
+    try:
+        from fugue.bench.run_conformance import (
+            PRIVACY_CONTRACT_VERSION,
+            read_hosted_evidence_privacy_receipt,
+        )
+
+        receipt = read_hosted_evidence_privacy_receipt(
+            repo_root=repo_root,
+            run_id=run_id,
+        )
+    except (FileNotFoundError, ValueError):
+        for row in rows:
+            if row.get("privacy_contract_version") == 2:
+                row["hosted_evidence_privacy_scan_status"] = "unavailable"
+        return
+    digest = str(receipt.get("receipt_sha256") or "")
+    digest_verified = bool(digest and digest == receipt_digest)
+    status = (
+        str(receipt.get("status") or "unavailable")
+        if digest_verified
+        else "unavailable"
+    )
+    match_count = sum(
+        int(receipt.get(field) or 0)
+        for field in (
+            "secret_match_count",
+            "private_corpus_match_count",
+            "private_structure_match_count",
+        )
+    )
+    for row in rows:
+        if row.get("privacy_contract_version") != PRIVACY_CONTRACT_VERSION:
+            continue
+        row.update(
+            {
+                "hosted_evidence_privacy_scan_status": status,
+                "hosted_evidence_privacy_scan_digest": (
+                    digest if digest_verified else None
+                ),
+                "hosted_evidence_privacy_match_count": match_count,
+            }
+        )
+
+
+def _status_boolean(value: Any) -> bool | None:
+    status = str(value or "")
+    if status == "passed":
+        return True
+    if status == "failed":
+        return False
+    return None
 
 
 def _candidate(raw: Any, default_label: str) -> ComparisonCandidateV1:
@@ -1943,7 +8105,12 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     )
 
 
-def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
+def _execution(
+    raw: Any,
+    *,
+    source: Path,
+    repo_root: Path,
+) -> ComparisonExecutionPolicyV1:
     value = _mapping(raw, "execution policy")
     _reject_unknown(
         value,
@@ -1956,6 +8123,18 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
             "reserve_per_attempt_usd",
             "approval_required",
             "trace_content",
+            "source_evidence_project",
+            "source_evidence_destination",
+            "evidence_project",
+            "evidence_destination",
+            "study_console_base_url",
+            "research_id",
+            "infrastructure_receipt",
+            "evidence_lock",
+            "release_notes_lock",
+            "mechanism_receipt",
+            "preparation_required",
+            "evidence_checkpoint_cells",
             "environment",
         },
         "execution policy",
@@ -1967,11 +8146,40 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
     trace_content = str(value.get("trace_content") or "full")
     if trace_content not in {"full", "metadata"}:
         raise ValueError("trace_content must be full or metadata")
+    concurrency = _positive_int(value.get("concurrency", 1), "concurrency")
+    evidence_checkpoint_cells = _non_negative_int(
+        value.get("evidence_checkpoint_cells", 0),
+        "evidence checkpoint cells",
+    )
+    if evidence_checkpoint_cells and concurrency != 1:
+        raise ValueError(
+            "evidence checkpoint cells require comparison concurrency 1"
+        )
+    evidence_project = _evidence_project(value.get("evidence_project"))
+    evidence_destination = _declared_evidence_destination(
+        value.get("evidence_destination"),
+        evidence_project=evidence_project,
+    )
+    source_evidence_project = _evidence_project(
+        value.get("source_evidence_project"),
+        label="source_evidence_project",
+    )
+    source_evidence_destination = _declared_evidence_destination(
+        value.get("source_evidence_destination"),
+        evidence_project=source_evidence_project,
+        label="source_evidence_destination",
+    )
+    if (source_evidence_project is None) != (
+        source_evidence_destination is None
+    ):
+        raise ValueError(
+            "source evidence project and destination must be declared together"
+        )
     return ComparisonExecutionPolicyV1(
         model=_text(value.get("model"), "execution model", 300),
         harnesses=harnesses,
         attempts=_positive_int(value.get("attempts", 1), "attempts"),
-        concurrency=_positive_int(value.get("concurrency", 1), "concurrency"),
+        concurrency=concurrency,
         max_cost_usd=_non_negative_number(
             value.get("max_cost_usd", 0), "maximum cost"
         ),
@@ -1981,9 +8189,155 @@ def _execution(raw: Any) -> ComparisonExecutionPolicyV1:
         ),
         approval_required=bool(value.get("approval_required", True)),
         trace_content=trace_content,  # type: ignore[arg-type]
+        source_evidence_project=source_evidence_project,
+        source_evidence_destination=source_evidence_destination,
+        evidence_project=evidence_project,
+        evidence_destination=evidence_destination,
+        study_console_base_url=_safe_application_base_url(
+            value.get("study_console_base_url"),
+            label="study_console_base_url",
+        ),
+        research_id=(
+            validate_id(str(value["research_id"]), kind="research id")
+            if value.get("research_id")
+            else None
+        ),
+        infrastructure_receipt=(
+            _portable_input_path(
+                value.get("infrastructure_receipt"),
+                source,
+                repo_root,
+                "infrastructure receipt",
+            )
+            if value.get("infrastructure_receipt")
+            else None
+        ),
+        evidence_lock=(
+            _portable_input_path(
+                value.get("evidence_lock"),
+                source,
+                repo_root,
+                "evidence lock",
+            )
+            if value.get("evidence_lock")
+            else None
+        ),
+        release_notes_lock=(
+            _portable_input_path(
+                value.get("release_notes_lock"),
+                source,
+                repo_root,
+                "release-notes lock",
+            )
+            if value.get("release_notes_lock")
+            else None
+        ),
+        mechanism_receipt=(
+            _portable_input_path(
+                value.get("mechanism_receipt"),
+                source,
+                repo_root,
+                "mechanism receipt",
+            )
+            if value.get("mechanism_receipt")
+            else None
+        ),
+        preparation_required=bool(value.get("preparation_required", False)),
+        evidence_checkpoint_cells=evidence_checkpoint_cells,
         environment=dict(
             _mapping(value.get("environment") or {}, "execution environment")
         ),
+    )
+
+
+def _decision_policy(raw: Any) -> DecisionPolicyV1 | None:
+    if raw is None:
+        return None
+    value = _mapping(raw, "decision policy")
+    _reject_unknown(
+        value,
+        {
+            "release_target",
+            "candidate_sha",
+            "minimum_evidence_grade",
+            "human_signoff_required",
+            "gates",
+        },
+        "decision policy",
+    )
+    grade = str(value.get("minimum_evidence_grade") or "A").upper()
+    if grade not in {"A", "B", "C"}:
+        raise ValueError("minimum evidence grade must be A, B, or C")
+    gates: list[DecisionGatePolicyV1] = []
+    for index, raw_gate in enumerate(
+        _sequence(value.get("gates") or [], "decision gates", allow_empty=True),
+        start=1,
+    ):
+        gate = _mapping(raw_gate, f"decision gate {index}")
+        _reject_unknown(
+            gate,
+            {
+                "id",
+                "label",
+                "category",
+                "source",
+                "operator",
+                "target",
+                "critical",
+            },
+            f"decision gate {index}",
+        )
+        category = str(gate.get("category") or "")
+        if category not in {
+            "integrity",
+            "task",
+            "infrastructure",
+            "evidence",
+            "efficiency",
+            "privacy",
+        }:
+            raise ValueError(f"decision gate {index} has an unsupported category")
+        operator = str(gate.get("operator") or "")
+        if operator not in {"eq", "lte", "gte"}:
+            raise ValueError(f"decision gate {index} has an unsupported operator")
+        target = gate.get("target")
+        if (
+            not isinstance(target, str | int | float | bool)
+            or isinstance(target, float)
+            and not math.isfinite(target)
+        ):
+            raise ValueError(f"decision gate {index} target must be scalar")
+        gates.append(
+            DecisionGatePolicyV1(
+                id=validate_id(
+                    str(gate.get("id") or ""), kind="decision gate id"
+                ),
+                label=_text(
+                    gate.get("label") or gate.get("id"),
+                    "decision gate label",
+                    300,
+                ),
+                category=category,  # type: ignore[arg-type]
+                source=_text(
+                    gate.get("source"), "decision gate source", 300
+                ),
+                operator=operator,  # type: ignore[arg-type]
+                target=target,
+                critical=bool(gate.get("critical", True)),
+            )
+        )
+    if len({gate.id for gate in gates}) != len(gates):
+        raise ValueError("decision gate ids must be unique")
+    return DecisionPolicyV1(
+        release_target=_text(
+            value.get("release_target"), "release target", 300
+        ),
+        candidate_sha=_commit_sha(value.get("candidate_sha")),
+        minimum_evidence_grade=grade,  # type: ignore[arg-type]
+        human_signoff_required=bool(
+            value.get("human_signoff_required", True)
+        ),
+        gates=tuple(gates),
     )
 
 
@@ -1998,13 +8352,24 @@ def _public_case(
     input_value = task["input"]
     instruction = (
         str(input_value["question"])
-        if isinstance(input_value, dict) and isinstance(input_value.get("question"), str)
+        if isinstance(input_value, dict)
+        and isinstance(input_value.get("question"), str)
         else json.dumps(input_value, indent=2, sort_keys=True)
     )
     applicability = {
         harness: {"applicable": True, "reason": None}
         for harness in spec.execution.harnesses
     }
+    interaction = {
+        "type": "single_turn",
+        "profile_id": None,
+        "scripted_turns": [],
+        "directions": [],
+        "max_user_turns": 0,
+        "max_agent_turns": 1,
+        "timeout_sec": 900,
+    }
+    interaction["controller_digest"] = stable_digest(interaction)
     return {
         "schema_version": 1,
         "id": task_id,
@@ -2033,18 +8398,7 @@ def _public_case(
                 }
             ),
         },
-        "interaction": {
-            "type": "single_turn",
-            "profile_id": None,
-            "scripted_turns": [],
-            "directions": [],
-            "max_user_turns": 0,
-            "max_agent_turns": 1,
-            "timeout_sec": 900,
-            "controller_digest": stable_digest(
-                {"type": "single_turn", "max_agent_turns": 1}
-            ),
-        },
+        "interaction": interaction,
         "harness_applicability": applicability,
         "profile_digests": {},
         "scenario_id": "comparison",
@@ -2096,10 +8450,17 @@ def _task_attachments(
                 f"public task {task['id']} resource target must be under "
                 "/workspace/resources"
             )
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
         result.append(
             {
-                "locked_relative": relative,
-                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "locked_relative": _frozen_resource_path(
+                    repo_root,
+                    digest,
+                    source.name,
+                )
+                .relative_to(repo_root)
+                .as_posix(),
+                "sha256": digest,
                 "target": target_path.as_posix(),
             }
         )
@@ -2240,6 +8601,18 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
         tags = row.get("tags") or []
         if not isinstance(tags, list) or not all(isinstance(item, str) for item in tags):
             raise ValueError(f"public task {task_id} tags must be strings")
+        critical_dimensions = row.get("critical_dimensions") or []
+        if not isinstance(critical_dimensions, list) or not all(
+            isinstance(item, str) and item.strip()
+            for item in critical_dimensions
+        ):
+            raise ValueError(
+                f"public task {task_id} critical_dimensions must be strings"
+            )
+        if len(critical_dimensions) != len(set(critical_dimensions)):
+            raise ValueError(
+                f"public task {task_id} critical_dimensions must be unique"
+            )
         resources = row.get("resources") or []
         if not isinstance(resources, list):
             raise ValueError(f"public task {task_id} resources must be an array")
@@ -2260,6 +8633,10 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
         row["id"] = task_id
         row["partition"] = partition
         row["tags"] = tags
+        if critical_dimensions:
+            row["critical_dimensions"] = critical_dimensions
+        else:
+            row.pop("critical_dimensions", None)
         row["resources"] = resources
     return rows
 
@@ -2306,6 +8683,7 @@ def _score_deterministic_output(
     evidence: Mapping[str, Any],
     evaluators: Sequence[ComparisonEvaluatorV1],
     repo_root: Path,
+    scorer_source_digests: Mapping[str, str] | None = None,
 ) -> tuple[bool, dict[str, bool | float]]:
     scores: dict[str, bool | float] = {}
     evaluator_passes: list[bool] = []
@@ -2314,10 +8692,15 @@ def _score_deterministic_output(
             payload = _run_custom_scorer(
                 evaluator,
                 task=task,
-                output=output,
+                output=_extract_structured_result(output),
                 evidence=evidence,
                 expected=expected,
                 repo_root=repo_root,
+                approved_source_digest=(
+                    str(scorer_source_digests.get(evaluator.id) or "")
+                    if scorer_source_digests is not None
+                    else None
+                ),
             )
             details = payload["details"]
             if not isinstance(details, Mapping) or not details:
@@ -2361,11 +8744,7 @@ def _score_deterministic_output(
                 and (not isinstance(output, str) or bool(output.strip()))
             ),
             "expected_values": _contains_expected(
-                (
-                    json.loads(output)
-                    if isinstance(output, str) and _is_json(output)
-                    else output
-                ),
+                _extract_structured_result(output),
                 expected,
             ),
         }
@@ -2386,6 +8765,7 @@ def _run_custom_scorer(
     evidence: Mapping[str, Any],
     expected: Any,
     repo_root: Path,
+    approved_source_digest: str | None = None,
 ) -> dict[str, Any]:
     from fugue.bench.task_authoring import (
         TaskAuthoringLimitsV1,
@@ -2395,9 +8775,21 @@ def _run_custom_scorer(
 
     if not evaluator.scorer or not evaluator.runtime:
         raise ValueError("custom scorer is missing its source or runtime")
-    path = _safe_input_path(
-        Path(evaluator.scorer), repo_root, "deterministic scorer"
+    path = (
+        _frozen_evaluator_artifact_path(
+            repo_root,
+            approved_source_digest,
+            kind="scorer",
+        )
+        if approved_source_digest
+        else _safe_input_path(
+            Path(evaluator.scorer), repo_root, "deterministic scorer"
+        )
     )
+    if not path.is_file():
+        raise FileNotFoundError(f"approved deterministic scorer not found: {path}")
+    if approved_source_digest and _sha256_path(path) != approved_source_digest:
+        raise ValueError("approved deterministic scorer immutable copy changed")
     source = path.read_text(encoding="utf-8")
     _validate_custom_scorer_source(source)
     wrapper = (
@@ -2510,6 +8902,10 @@ def _custom_scorer_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
         "opened_paths",
         "retrieved_paths",
         "tool_calls",
+        "mcp_tool_names",
+        "mcp_tool_calls",
+        "queried_projects",
+        "mcp_queried_projects",
         "trace_summary",
     )
     return {
@@ -2539,6 +8935,45 @@ def _is_json(value: str) -> bool:
     except json.JSONDecodeError:
         return False
     return True
+
+
+def _extract_structured_result(output: Any) -> Any:
+    if not isinstance(output, str):
+        return output
+    text = output.strip()
+    if not text:
+        return output
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    fenced: list[Any] = []
+    index = 0
+    while True:
+        start = text.find("```", index)
+        if start < 0:
+            break
+        line_end = text.find("\n", start + 3)
+        if line_end < 0:
+            break
+        fence_end = text.find("```", line_end + 1)
+        if fence_end < 0:
+            break
+        language = text[start + 3 : line_end].strip().lower()
+        body = text[line_end + 1 : fence_end].strip()
+        if language in {"", "json"}:
+            try:
+                parsed, end = decoder.raw_decode(body)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if not body[end:].strip():
+                    fenced.append(parsed)
+        index = fence_end + 3
+    if len(fenced) != 1:
+        return output
+    return fenced[0]
 
 
 def _judge_calibration_issue(
@@ -2612,11 +9047,19 @@ def _preview_dict(value: PreviewSummary) -> dict[str, Any]:
         "variants": list(value.variants),
         "systems": list(value.systems),
         "workloads": list(value.workloads),
+        "source_evidence_project": value.source_evidence_project,
+        "source_evidence_destination": value.source_evidence_destination,
+        "evidence_project": value.evidence_project,
+        "evidence_destination": value.evidence_destination,
         "matrix_cells": [asdict(item) for item in value.matrix_cells],
     }
 
 
-def _result_markdown(result: ComparisonResultV1) -> str:
+def _result_markdown(result: ComparisonResult) -> str:
+    invalid_behavior = (
+        isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        and result.behavioral_summary.status == "invalid"
+    )
     mechanism = "".join(
         (
             f"- {stage.replace('_', ' ').title()}: "
@@ -2632,17 +9075,120 @@ def _result_markdown(result: ComparisonResultV1) -> str:
         if result.judge_summary.get("status") == "not_used"
         else "Blind-judge dimensions are available in `result.json`.\n"
     )
+    pair_rows = (
+        (
+            item.task_id,
+            item.harness,
+            item.attempt,
+            item.baseline_passed,
+            item.candidate_passed,
+            item.status,
+        )
+        if isinstance(item, PairedCaseV2)
+        else (
+            item.task_id,
+            item.harness,
+            item.attempt,
+            item.baseline.passed if item.baseline is not None else None,
+            item.candidate.passed if item.candidate is not None else None,
+            item.status,
+        )
+        if isinstance(item, PairedCaseV3)
+        else (
+            str(item["task_id"]),
+            str(item["harness"]),
+            int(item["attempt"]),
+            item.get("baseline_passed"),
+            item.get("candidate_passed"),
+            str(item["status"]),
+        )
+        for item in result.paired_cases
+    )
+    pairs = (
+        "Aligned outcome claims are suppressed because behavioral evidence is invalid.\n"
+        if invalid_behavior
+        else (
+            "| Task | Harness | Attempt | Baseline | Candidate | Change |\n"
+            "| --- | --- | ---: | --- | --- | --- |\n"
+            + "".join(
+                f"| {task} | {harness} | {attempt} | {_pass_label(baseline)} | "
+                f"{_pass_label(candidate)} | {status} |\n"
+                for task, harness, attempt, baseline, candidate, status in pair_rows
+            )
+        )
+    )
+    evidence = (
+        "- Attempt navigation is suppressed because behavioral evidence is invalid.\n"
+        if invalid_behavior
+        else "".join(
+            f"- [{item['label']}]({item['url']})\n"
+            for item in result.evidence_links
+        )
+    )
+    projects = result.evidence_project or ", ".join(
+        result.operational_summary.get("evidence_projects") or ()
+    )
+    mcp_tools = result.operational_summary.get("mcp_tool_usage") or {}
+    mcp_usage = "".join(
+        f"- {variant}: "
+        + (
+            ", ".join(f"`{name}` × {count}" for name, count in tools.items())
+            if tools
+            else "no observed MCP calls"
+        )
+        + "\n"
+        for variant, tools in mcp_tools.items()
+    )
+    candidate_sources = (
+        ", ".join(
+            f"`{item.id}` at `{item.version_identity}` "
+            f"(runtime `{item.runtime_digest}`)"
+            for item in result.candidate_source_revisions
+        )
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        and result.candidate_source_revisions
+        else "unavailable"
+    )
+    release_candidate = (
+        f"`{result.decision.candidate_sha}`"
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        and result.decision.candidate_sha
+        else "not applicable (no package release policy)"
+    )
+    decision = (
+        (
+            f"- Behavioral verdict: "
+            f"**{result.behavioral_summary.status.upper()}**\n"
+            f"- Behavioral recommendation: "
+            f"{result.behavioral_summary.recommendation}\n"
+            f"- Release decision: **{result.decision.status.upper()}**\n"
+            f"- Evidence grade: **{result.decision.evidence_grade}**\n"
+            f"- Candidate source revisions: {candidate_sources}\n"
+            f"- Governed release candidate SHA: {release_candidate}\n"
+            f"- Recommendation: {result.decision.recommendation}\n"
+        )
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        else "- Release decision: unavailable in V1 result\n"
+    )
     return (
         f"# {result.comparison_id}\n\n"
-        f"- Rows: {result.rows}\n"
+        "## Decision summary\n\n"
+        + decision
+        + f"- Rows: {result.rows}\n"
         f"- Baseline passed: {result.baseline_passed}\n"
         f"- Candidate passed: {result.candidate_passed}\n"
         f"- Improved pairs: {result.improved}\n"
         f"- Regressed pairs: {result.regressed}\n"
+        f"- Mixed pairs: "
+        f"{result.mixed if isinstance(result, ComparisonResultV2 | ComparisonResultV3) else 0}\n"
         f"- Unchanged pairs: {result.unchanged}\n"
         f"- Incomplete pairs: {result.incomplete}\n\n"
         f"- Required evaluations incomplete: "
-        f"{result.required_evaluations_incomplete}\n\n"
+        f"{result.required_evaluations_incomplete}\n"
+        f"- Evidence project: {projects or 'unavailable'}\n\n"
+        "## Aligned cases\n\n"
+        + pairs
+        + "\n"
         "## Operational health\n\n"
         f"- Infrastructure failures: "
         f"{result.operational_summary['infrastructure_failures']}\n"
@@ -2654,12 +9200,20 @@ def _result_markdown(result: ComparisonResultV1) -> str:
         f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
+        + "\n### MCP tool use\n\n"
+        + (mcp_usage or "No MCP tool-use evidence was available.\n")
         + "\n## Blind judge\n\n"
         + judge
+        + "\n## Open the evidence\n\n"
+        + (evidence or "No safe evidence links were available.\n")
         + "\n"
         "## Limitations\n\n"
         + "".join(f"- {item}\n" for item in result.limitations)
     )
+
+
+def _pass_label(value: Any) -> str:
+    return "pass" if value is True else "fail" if value is False else "incomplete"
 
 
 def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
@@ -2710,6 +9264,66 @@ def _safe_input_path(path: Path, repo_root: Path, label: str) -> Path:
     return resolved
 
 
+def _load_infrastructure_receipt(
+    path: Path,
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    selected = _safe_input_path(path, repo_root, "infrastructure receipt")
+    try:
+        raw = json.loads(selected.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("infrastructure receipt is not valid JSON") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("infrastructure receipt must be an object")
+    supplied = str(raw.get("receipt_digest") or "")
+    unsigned = dict(raw)
+    unsigned["receipt_digest"] = ""
+    if len(supplied) != 64 or stable_digest(unsigned) != supplied:
+        raise ValueError("infrastructure receipt digest does not match")
+    conformance = _mapping_or_empty(raw.get("infrastructure_conformance"))
+    gates = conformance.get("gates")
+    if not isinstance(gates, list) or not gates:
+        raise ValueError("infrastructure receipt has no conformance gates")
+    gate_ids: list[str] = []
+    statuses: list[str] = []
+    for item in gates:
+        if not isinstance(item, Mapping):
+            raise ValueError("infrastructure conformance gate is invalid")
+        gate_id = str(item.get("id") or "")
+        status = str(item.get("status") or "")
+        if not gate_id or status not in {"passed", "failed", "unavailable"}:
+            raise ValueError("infrastructure conformance gate is invalid")
+        gate_ids.append(gate_id)
+        statuses.append(status)
+    if len(gate_ids) != len(set(gate_ids)):
+        raise ValueError("infrastructure conformance gate ids must be unique")
+    complete = not any(status != "passed" for status in statuses)
+    if bool(conformance.get("complete")) != complete:
+        raise ValueError("infrastructure conformance completeness disagrees")
+    return raw
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is not valid JSON") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be an object")
+    return raw
+
+
+def _load_digest_receipt(path: Path, label: str) -> dict[str, Any]:
+    raw = _load_json_object(path, label)
+    supplied = str(raw.get("receipt_digest") or "")
+    unsigned = dict(raw)
+    unsigned["receipt_digest"] = ""
+    if len(supplied) != 64 or stable_digest(unsigned) != supplied:
+        raise ValueError(f"{label} digest does not match")
+    return raw
+
+
 def _artifact_digest(value: Mapping[str, Any], field: str) -> str:
     unsigned = dict(value)
     unsigned[field] = ""
@@ -2735,6 +9349,10 @@ def _jsonl(rows: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
+def _json_value(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
 def _atomic_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -2742,19 +9360,79 @@ def _atomic_text(path: Path, value: str) -> None:
     os.replace(temporary, path)
 
 
+def _write_immutable_text(
+    path: Path,
+    value: str,
+    *,
+    expected_sha256: str,
+    mode: int,
+    label: str,
+) -> None:
+    _write_immutable_bytes(
+        path,
+        value.encode(),
+        expected_sha256=expected_sha256,
+        mode=mode,
+        label=label,
+    )
+
+
+def _write_immutable_bytes(
+    path: Path,
+    value: bytes,
+    *,
+    expected_sha256: str,
+    mode: int,
+    label: str,
+) -> None:
+    if (
+        len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+        or hashlib.sha256(value).hexdigest() != expected_sha256
+    ):
+        raise ValueError(f"{label} digest does not match approved content")
+    if path.is_symlink():
+        raise ValueError(f"{label} may not be a symlink")
+    if path.exists():
+        if not path.is_file() or _sha256_path(path) != expected_sha256:
+            raise ValueError(f"{label} immutable copy changed")
+        path.chmod(mode)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_bytes(value)
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _schema(raw: Mapping[str, Any], label: str) -> int:
     version = raw.get("schema_version")
-    if version != COMPARISON_SCHEMA_VERSION:
+    if version not in COMPARISON_READABLE_SCHEMA_VERSIONS:
         raise ValueError(
-            f"{label} schema_version must be {COMPARISON_SCHEMA_VERSION}"
+            f"{label} schema_version must be one of "
+            f"{sorted(COMPARISON_READABLE_SCHEMA_VERSIONS)}"
         )
-    return COMPARISON_SCHEMA_VERSION
+    return int(version)
+
+
+def _commit_sha(value: Any) -> str:
+    sha = str(value or "").strip().lower()
+    if len(sha) != 40 or any(character not in "0123456789abcdef" for character in sha):
+        raise ValueError("candidate SHA must be an exact 40-character commit SHA")
+    return sha
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be a mapping")
     return dict(value)
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _sequence(
@@ -2785,9 +9463,108 @@ def _text(value: Any, label: str, limit: int) -> str:
     return text
 
 
+def _optional_text(value: Any, label: str, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text.encode()) > limit:
+        raise ValueError(f"{label} exceeds {limit} bytes")
+    return text
+
+
+def _evidence_project(
+    value: Any,
+    *,
+    label: str = "evidence_project",
+) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise ValueError(
+            f"execution {label} must be an exact W&B entity/project slug"
+        )
+    for index, part in enumerate(parts):
+        validate_id(
+            part,
+            kind=(
+                "execution evidence entity"
+                if index == 0
+                else f"execution {label}"
+            ),
+        )
+    return text
+
+
+def _declared_evidence_destination(
+    value: Any,
+    *,
+    evidence_project: str | None,
+    label: str = "evidence_destination",
+) -> EvidenceDestinationV1 | None:
+    if value in (None, {}):
+        return None
+    raw = _mapping(value, f"execution {label}")
+    destination = evidence_destination_from_dict(raw)
+    if evidence_project is not None and destination.project_slug != evidence_project:
+        raise ValueError(
+            f"execution {label} must match its project"
+        )
+    return destination
+
+
+def _comparison_evidence_environment(
+    spec: ComparisonSpecV1,
+    env: Mapping[str, str],
+) -> dict[str, str]:
+    destination = spec.execution.evidence_destination
+    if destination is not None:
+        return evidence_destination_environment(destination, env)
+    return trace_project_environment(spec.execution.evidence_project, env)
+
+
+def _evidence_destination(value: Any, label: str) -> dict[str, Any]:
+    raw = _mapping(value, label)
+    _reject_unknown(
+        raw,
+        {
+            "schema_version",
+            "entity",
+            "project",
+            "project_slug",
+            "api_base_url",
+            "trace_base_url",
+            "app_base_url",
+            "destination_digest",
+        },
+        label,
+    )
+    destination = EvidenceDestinationV1(
+        schema_version=int(raw.get("schema_version") or 0),
+        entity=str(raw.get("entity") or ""),
+        project=str(raw.get("project") or ""),
+        api_base_url=str(raw.get("api_base_url") or ""),
+        trace_base_url=str(raw.get("trace_base_url") or ""),
+        app_base_url=str(raw.get("app_base_url") or ""),
+    )
+    canonical = destination.to_dict()
+    if raw != canonical:
+        raise ValueError(f"{label} does not match its canonical identity")
+    return canonical
+
+
 def _positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"{label} must be a positive integer")
+    return value
+
+
+def _non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
     return value
 
 

@@ -22,6 +22,8 @@ class SelectionPolicy:
     required_harnesses: tuple[str, ...] = ()
     require_agent_links: bool = False
     require_registration: bool = False
+    require_skill_invocation: bool = False
+    required_any_tool_names: tuple[str, ...] = ()
     metric: str = "pass_rate"
     confidence: float = 0.95
     noninferiority_margin: float = 0.05
@@ -33,6 +35,7 @@ class SelectionPolicy:
         "recoverable_error_rate",
     )
     incumbent_candidate_id: str | None = None
+    minimum_paired_pass_rate_delta: float | None = None
     minimum_pass_rate_improvement: float = 0.05
     minimum_cost_improvement: float = 0.15
     minimum_latency_improvement: float = 0.15
@@ -130,6 +133,34 @@ class TreatmentSelectionLockV1:
         return value
 
 
+@dataclass(frozen=True)
+class InterventionSelectionLockV1:
+    schema_version: int
+    kind: Literal["intervention_selection"]
+    experiment_id: str
+    source_commit: str
+    source_tree: str
+    source_dirty_digest: str
+    analysis_snapshot_sha256: str
+    discovery_run_snapshot_sha256s: tuple[str, ...]
+    comparison_example_ids: tuple[str, ...]
+    baseline_variant_id: str
+    selected_variant_id: str
+    rankings: tuple[dict[str, Any], ...]
+    decision: Literal["recommend", "promote"]
+    rationale: str
+    lock_sha256: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["discovery_run_snapshot_sha256s"] = list(
+            self.discovery_run_snapshot_sha256s
+        )
+        value["comparison_example_ids"] = list(self.comparison_example_ids)
+        value["rankings"] = list(self.rankings)
+        return value
+
+
 def select_candidate_configuration(
     rows: Iterable[dict[str, Any]],
     policy: SelectionPolicy,
@@ -206,9 +237,20 @@ def select_candidate_configuration(
             for row in candidate_rows
         ):
             reasons.append("context registration is incomplete")
+        reasons.extend(_mechanism_reasons(candidate_rows, policy))
         paired_delta = _paired_baseline_delta(candidate_rows, baseline_rows)
         if policy.baseline_variant_id and paired_delta is None:
             reasons.append("missing same-task/harness baseline")
+        if (
+            policy.minimum_paired_pass_rate_delta is not None
+            and (
+                paired_delta is None
+                or paired_delta < policy.minimum_paired_pass_rate_delta
+            )
+        ):
+            reasons.append(
+                "paired pass-rate delta is below the preregistered minimum"
+            )
         eligible = not reasons
         if eligible:
             eligible_rows[candidate_id] = candidate_rows
@@ -397,10 +439,190 @@ def read_treatment_selection_lock(path: Path) -> TreatmentSelectionLockV1:
     )
 
 
+def build_intervention_selection_lock(
+    *,
+    experiment_id: str,
+    source_commit: str,
+    source_tree: str,
+    source_dirty_digest: str,
+    analysis_snapshot_sha256: str,
+    discovery_run_snapshot_sha256s: Iterable[str],
+    comparison_example_ids: Iterable[str],
+    baseline_variant_id: str,
+    selected_variant_id: str,
+    rankings: Iterable[Mapping[str, Any]],
+    decision: str,
+    rationale: str,
+) -> InterventionSelectionLockV1:
+    experiment = str(experiment_id).strip()
+    baseline = str(baseline_variant_id).strip()
+    selected = str(selected_variant_id).strip()
+    if not experiment:
+        raise ValueError("intervention selection lock requires an experiment id")
+    if not baseline or not selected or baseline == selected:
+        raise ValueError(
+            "intervention selection lock requires distinct baseline and selected variants"
+        )
+    if len(source_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in source_commit
+    ):
+        raise ValueError("intervention selection source commit must be a full Git commit")
+    if len(source_tree) != 40 or any(
+        character not in "0123456789abcdef" for character in source_tree
+    ):
+        raise ValueError("intervention selection source tree must be a full Git tree")
+    if source_dirty_digest:
+        raise ValueError(
+            "intervention selection requires a clean source tree; "
+            "dirty worktrees cannot be qualified"
+        )
+    if not _sha256(analysis_snapshot_sha256):
+        raise ValueError("analysis snapshot must be a SHA-256 digest")
+    run_snapshots = tuple(
+        dict.fromkeys(str(value) for value in discovery_run_snapshot_sha256s)
+    )
+    if not run_snapshots or any(not _sha256(value) for value in run_snapshots):
+        raise ValueError(
+            "intervention selection requires nonzero SHA-256 run snapshots"
+        )
+    examples = tuple(dict.fromkeys(str(value) for value in comparison_example_ids))
+    if not examples or any(not _sha256(value) for value in examples):
+        raise ValueError(
+            "intervention selection requires nonzero comparison example digests"
+        )
+    normalized = tuple(dict(value) for value in rankings)
+    ranked_ids = [str(value.get("variant_id") or "") for value in normalized]
+    if not normalized or len(ranked_ids) != len(set(ranked_ids)) or "" in ranked_ids:
+        raise ValueError("intervention rankings require unique variant_id values")
+    if not {baseline, selected} <= set(ranked_ids):
+        raise ValueError(
+            "baseline and selected variants must appear in the complete rankings"
+        )
+    for ranking in normalized:
+        if not _sha256(str(ranking.get("candidate_digest") or "")):
+            raise ValueError(
+                "every intervention ranking must bind an exact candidate digest"
+            )
+    if decision not in {"recommend", "promote"}:
+        raise ValueError("only a qualified intervention may be locked for holdout")
+    reason = str(rationale).strip()
+    if not reason:
+        raise ValueError("intervention selection lock requires a rationale")
+    base = InterventionSelectionLockV1(
+        schema_version=1,
+        kind="intervention_selection",
+        experiment_id=experiment,
+        source_commit=source_commit,
+        source_tree=source_tree,
+        source_dirty_digest="",
+        analysis_snapshot_sha256=analysis_snapshot_sha256,
+        discovery_run_snapshot_sha256s=run_snapshots,
+        comparison_example_ids=examples,
+        baseline_variant_id=baseline,
+        selected_variant_id=selected,
+        rankings=normalized,
+        decision=decision,  # type: ignore[arg-type]
+        rationale=reason,
+    )
+    digest = _digest(base.to_dict())
+    return InterventionSelectionLockV1(
+        **{**asdict(base), "lock_sha256": digest}
+    )
+
+
+def write_intervention_selection_lock(
+    path: Path, lock: InterventionSelectionLockV1
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = lock.to_dict()
+    if path.exists():
+        if json.loads(path.read_text(encoding="utf-8")) != payload:
+            raise ValueError(f"intervention selection lock already differs: {path}")
+        return path
+    return atomic_write_json(path, payload)
+
+
+def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        int(payload.get("schema_version") or 0) != 1
+        or payload.get("kind") != "intervention_selection"
+    ):
+        raise ValueError("unsupported intervention selection lock schema")
+    expected = str(payload.get("lock_sha256") or "")
+    if not expected or _digest({**payload, "lock_sha256": ""}) != expected:
+        raise ValueError("intervention selection lock digest does not match its content")
+    rebuilt = build_intervention_selection_lock(
+        experiment_id=str(payload.get("experiment_id") or ""),
+        source_commit=str(payload.get("source_commit") or ""),
+        source_tree=str(payload.get("source_tree") or ""),
+        source_dirty_digest=str(payload.get("source_dirty_digest") or ""),
+        analysis_snapshot_sha256=str(
+            payload.get("analysis_snapshot_sha256") or ""
+        ),
+        discovery_run_snapshot_sha256s=tuple(
+            str(value)
+            for value in payload.get("discovery_run_snapshot_sha256s") or ()
+        ),
+        comparison_example_ids=tuple(
+            str(value) for value in payload.get("comparison_example_ids") or ()
+        ),
+        baseline_variant_id=str(payload.get("baseline_variant_id") or ""),
+        selected_variant_id=str(payload.get("selected_variant_id") or ""),
+        rankings=tuple(dict(value) for value in payload.get("rankings") or ()),
+        decision=str(payload.get("decision") or ""),
+        rationale=str(payload.get("rationale") or ""),
+    )
+    if rebuilt.lock_sha256 != expected:
+        raise ValueError("intervention selection lock normalization changed its digest")
+    return rebuilt
+
+
 def _sha256(value: str) -> bool:
     return len(value) == 64 and all(
         character in "0123456789abcdef" for character in value
     )
+
+
+def _assigned_skills_invoked(row: Mapping[str, Any]) -> bool:
+    assigned = {
+        str(value)
+        for value in row.get("skills_assigned") or row.get("skill_ids") or ()
+    }
+    if not assigned:
+        return True
+    evidence = row.get("skill_invocation_evidence")
+    if not isinstance(evidence, Mapping) or evidence.get("status") != "observed":
+        return False
+    invoked = {str(value) for value in evidence.get("skills_invoked") or ()}
+    return assigned <= invoked
+
+
+def _mechanism_reasons(
+    rows: list[dict[str, Any]], policy: SelectionPolicy
+) -> list[str]:
+    reasons: list[str] = []
+    if policy.require_skill_invocation and any(
+        not _assigned_skills_invoked(row)
+        for row in rows
+        if row.get("skill_ids") or row.get("skills_assigned")
+    ):
+        reasons.append("assigned Skill invocation is missing or unproven")
+    if policy.required_any_tool_names and any(
+        not (set(_tool_names(row)) & set(policy.required_any_tool_names))
+        for row in rows
+    ):
+        reasons.append("required MCP tool invocation is missing or unproven")
+    return reasons
+
+
+def _tool_names(row: Mapping[str, Any]) -> tuple[str, ...]:
+    value = row.get("weave_tool_names")
+    if isinstance(value, Mapping):
+        return tuple(str(name) for name, count in value.items() if float(count or 0) > 0)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(name) for name in value)
+    return ()
 
 
 def _digest(value: Any) -> str:

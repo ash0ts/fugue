@@ -240,7 +240,7 @@ RUNTIMES = {
         harness="claude-code",
         version=(
             "claude-code@2.1.210+weave-claude-code@0.2.12+"
-            "fugue-attrs.3+empty-response.1"
+            "fugue-attrs.3+empty-response.1+eval-parent.1"
         ),
         dockerfile=_node_agent_dockerfile("claude-code", "claude", "2.1.210"),
         probe=(
@@ -259,7 +259,7 @@ RUNTIMES = {
         harness="codex",
         version=(
             "codex@0.143.0+fugue-flat-mcp.1+weave-codex@0.1.1+"
-            "fugue-mcp-meta.1+skill-use.1"
+            "fugue-mcp-meta.1+skill-use.1+shell-env.1"
         ),
         dockerfile=_codex_dockerfile(),
         probe=(

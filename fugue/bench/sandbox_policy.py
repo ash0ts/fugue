@@ -37,8 +37,10 @@ _ALLOWED_SERVICE_KEYS = {
     "user",
     "volumes",
 }
-_ALLOWED_MOUNT_KEYS = {"bind", "type", "source", "target", "read_only"}
+_ALLOWED_MOUNT_KEYS = {"bind", "image", "type", "source", "target", "read_only"}
 _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:\.[0-9]+)?[kmgtpe]?(?:i?b)?$", re.I)
+_HARBOR_TASK_CPU_LIMIT = "${CPUS:-8.0}"
+_HARBOR_TASK_MEMORY_LIMIT = "${MEMORY:-16384M}"
 _LOCKED_BRIDGE = "http://host.docker.internal:4000"
 
 
@@ -273,7 +275,16 @@ def _validate_service(
 
 
 def _validate_pid_limit(value: Mapping[str, Any], service_name: str) -> int:
+    deploy = value.get("deploy")
+    resources = deploy.get("resources") if isinstance(deploy, Mapping) else None
+    limits = resources.get("limits") if isinstance(resources, Mapping) else None
+    deploy_pids = limits.get("pids") if isinstance(limits, Mapping) else None
     pids_limit = value.get("pids_limit")
+    if pids_limit is not None and deploy_pids is not None:
+        raise ValueError(
+            f"Harbor service {service_name} may declare only one PID limit"
+        )
+    pids_limit = pids_limit if pids_limit is not None else deploy_pids
     if (
         not isinstance(pids_limit, int)
         or isinstance(pids_limit, bool)
@@ -336,19 +347,25 @@ def _validate_resource_limits(service: Mapping[str, Any], service_name: str) -> 
         raise ValueError(
             f"Harbor service {service_name} requires CPU and memory limits"
         )
-    if set(limits) != {"cpus", "memory"}:
+    permitted = {"cpus", "memory", "pids"}
+    if not {"cpus", "memory"} <= set(limits) or set(limits) - permitted:
         raise ValueError(
-            f"Harbor service {service_name} permits only CPU and memory limits"
+            f"Harbor service {service_name} permits only CPU, memory, and PID limits"
         )
-    try:
-        cpus = float(str(limits["cpus"]))
-    except ValueError as exc:
-        raise ValueError(
-            f"Harbor service {service_name} has an invalid CPU limit"
-        ) from exc
-    if not 0 < cpus <= 64:
-        raise ValueError(f"Harbor service {service_name} has an invalid CPU limit")
-    if not _MEMORY_LIMIT.fullmatch(str(limits["memory"])):
+    cpu_limit = str(limits["cpus"])
+    if service_name != "main" or cpu_limit != _HARBOR_TASK_CPU_LIMIT:
+        try:
+            cpus = float(cpu_limit)
+        except ValueError as exc:
+            raise ValueError(
+                f"Harbor service {service_name} has an invalid CPU limit"
+            ) from exc
+        if not 0 < cpus <= 64:
+            raise ValueError(f"Harbor service {service_name} has an invalid CPU limit")
+    memory_limit = str(limits["memory"])
+    if service_name == "main" and memory_limit == _HARBOR_TASK_MEMORY_LIMIT:
+        return
+    if not _MEMORY_LIMIT.fullmatch(memory_limit):
         raise ValueError(f"Harbor service {service_name} has an invalid memory limit")
 
 
@@ -364,6 +381,9 @@ def _validate_mount(
         target, _, mode = remainder.partition(":")
         read_only = mode == "ro"
     elif isinstance(raw, Mapping):
+        if raw.get("type") == "image":
+            _validate_image_mount(raw, service=service)
+            return
         bind = raw.get("bind") or {}
         if (
             set(raw) - _ALLOWED_MOUNT_KEYS
@@ -409,6 +429,40 @@ def _validate_mount(
             "Harbor source and task input mounts must be read-only; only dedicated "
             "Fugue runtime evidence paths may be writable"
         )
+
+
+def _validate_image_mount(
+    raw: Mapping[str, Any],
+    *,
+    service: str,
+) -> None:
+    image = raw.get("image")
+    if (
+        set(raw) - _ALLOWED_MOUNT_KEYS
+        or not isinstance(image, Mapping)
+        or set(image) != {"subpath"}
+        or raw.get("bind") is not None
+        or raw.get("read_only") is not True
+    ):
+        raise ValueError(
+            f"Harbor service {service} permits only locked read-only image mounts"
+        )
+    source = str(raw.get("source") or "")
+    target = str(raw.get("target") or "")
+    subpath = Path(str(image.get("subpath") or ""))
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", source):
+        raise ValueError(
+            f"Harbor service {service} image mount must use an exact image ID"
+        )
+    if (
+        not target
+        or not Path(target).is_absolute()
+        or ".." in Path(target).parts
+        or subpath.is_absolute()
+        or not subpath.parts
+        or ".." in subpath.parts
+    ):
+        raise ValueError(f"Harbor service {service} has an invalid image mount path")
 
 
 def _locked_path(raw: Any, repo_root: Path) -> Path:

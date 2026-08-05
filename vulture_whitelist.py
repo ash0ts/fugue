@@ -25,6 +25,27 @@ deterministic_evaluators
 judge_evaluators
 readiness_digest
 deterministic_summary
+signer
+signed_at
+queried_projects
+weave_agent_root_call_id
+otel_root_span_id
+pair_id
+baseline_prediction_id
+candidate_prediction_id
+baseline_evaluation_call_id
+candidate_evaluation_call_id
+improved_pairs
+regressed_pairs
+mixed_pairs
+unchanged_pairs
+incomplete_pairs
+candidate_source_revisions
+discriminating_dimensions
+baseline_explanation
+candidate_explanation
+sanitized_answer_excerpt
+reported_project_identity
 tool_manifest_digest
 license_url
 discovery_skill_repositories
@@ -98,6 +119,7 @@ aligned_comparisons
 behavioral_measures
 outcome_summaries
 score_summaries
+release_note_coverage
 model_config
 selected_recipe
 sanitization_report
@@ -130,6 +152,11 @@ runtime_artifacts
 cleanup_obligations
 credential_profile_names
 runtime_lock_digest
+
+# Harbor discovers these members dynamically on custom Agent classes.
+SUPPORTS_ATIF
+_.n_input_tokens
+_.n_output_tokens
 
 # Import-string registries and provider/materializer plugins.
 EmptyContextProvider
