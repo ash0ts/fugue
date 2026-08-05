@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import fugue.bench.component_imports as component_imports
 from fugue.bench.component_imports import (
     add_mcp_command,
     import_mcp_config,
@@ -26,7 +28,7 @@ def test_imports_only_one_selected_codex_mcp_server(tmp_path: Path) -> None:
 [mcp_servers.wandb]
 command = "uvx"
 args = ["--from", "wandb-mcp-server==0.3.7", "wandb-mcp-server"]
-env = { WANDB_API_KEY = "${WANDB_API_KEY}" }
+env = { WANDB_API_KEY = "${WANDB_API_KEY}", MCP_ANALYTICS_LOG_STREAM = "stderr" }
 
 [mcp_servers.other]
 command = "npx"
@@ -39,6 +41,7 @@ args = ["other@1.0.0"]
         server="wandb",
         import_id="wandb-0-3-7",
         repo_root=tmp_path,
+        allowed_hosts=("api.wandb.test", "trace.wandb.test"),
     )
 
     assert draft.command == (
@@ -48,6 +51,8 @@ args = ["other@1.0.0"]
         "wandb-mcp-server",
     )
     assert draft.required_env == ("WANDB_API_KEY",)
+    assert draft.fixed_env == (("MCP_ANALYTICS_LOG_STREAM", "stderr"),)
+    assert draft.allowed_hosts == ("api.wandb.test", "trace.wandb.test")
     assert "other" not in json.dumps(draft.to_dict())
 
 
@@ -79,6 +84,18 @@ def test_mcp_import_rejects_literal_credentials_and_shells(tmp_path: Path) -> No
         )
     with pytest.raises(ValueError, match="shell-backed"):
         add_mcp_command("bad", ["sh", "-c", "server"], repo_root=tmp_path)
+    with pytest.raises(ValueError, match="exact lowercase hostnames"):
+        add_mcp_command(
+            "bad-host",
+            [
+                "uvx",
+                "--from",
+                "wandb-mcp-server==0.3.7",
+                "wandb_mcp_server",
+            ],
+            repo_root=tmp_path,
+            allowed_hosts=("*.wandb.test",),
+        )
 
 
 def test_package_mcp_lock_materializes_read_only_runtime(
@@ -95,9 +112,18 @@ def test_package_mcp_lock_materializes_read_only_runtime(
         repo_root=tmp_path,
     )
 
-    def fake_install(package: str, executable: str, destination: Path) -> None:
+    def fake_install(
+        package: str,
+        executable: str,
+        destination: Path,
+        *,
+        runtime_platform: str,
+        fixed_env: tuple[tuple[str, str], ...],
+    ) -> None:
         assert package == "wandb-mcp-server==0.3.7"
         assert executable == "wandb-mcp-server"
+        assert runtime_platform == "linux/arm64"
+        assert fixed_env == ()
         target = destination / "bin" / "server"
         target.parent.mkdir(parents=True)
         target.write_text("#!/bin/sh\nexit 0\n")
@@ -105,6 +131,17 @@ def test_package_mcp_lock_materializes_read_only_runtime(
 
     monkeypatch.setattr(
         "fugue.bench.component_imports._install_python_tool", fake_install
+    )
+    monkeypatch.setattr(
+        "fugue.bench.component_imports._managed_runtime_platform",
+        lambda: "linux/arm64",
+    )
+    monkeypatch.setattr(
+        "fugue.bench.component_imports._managed_python_probe_command",
+        lambda runtime_source, *, runtime_platform, required_env, fixed_env: (
+            "/usr/bin/docker",
+            "probe",
+        ),
     )
     monkeypatch.setattr(
         "fugue.bench.component_imports._probe_stdio_manifest",
@@ -129,6 +166,7 @@ def test_package_mcp_lock_materializes_read_only_runtime(
     )
 
     assert lock.support == "supported"
+    assert lock.runtime_platform == "linux/arm64"
     assert lock.runtime_digest and lock.runtime_digest.startswith("sha256:")
     assert lock.tool_manifest_digest
     assert lock.allowed_tools == ("query_wandb",)
@@ -158,6 +196,118 @@ def test_package_mcp_lock_materializes_read_only_runtime(
             job_name="test",
             env={},
             write=False,
+        )
+
+
+def test_python_mcp_probe_is_pinned_isolated_and_secret_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(component_imports.shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        component_imports.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    command = component_imports._managed_python_probe_command(
+        tmp_path,
+        runtime_platform="linux/arm64",
+        required_env=("WANDB_API_KEY",),
+        fixed_env=(("MCP_ANALYTICS_LOG_STREAM", "stderr"),),
+    )
+
+    joined = " ".join(command)
+    assert "--interactive" in command
+    assert "--pull never" in joined
+    assert "--network none" in joined
+    assert "--read-only" in command
+    assert "--cap-drop ALL" in joined
+    assert "no-new-privileges" in joined
+    assert "readonly" in joined
+    assert "WANDB_API_KEY" in command
+    assert "MCP_ANALYTICS_LOG_STREAM=stderr" in command
+    assert "technical-preview" not in joined
+    assert "@sha256:" in joined
+
+
+def test_python_mcp_runtime_installs_only_from_locked_wheelhouse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requirements = tmp_path / "requirements.lock"
+    requirements.write_text("dependency==1.0.0\n", encoding="utf-8")
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / "dependency-1.0.0-py3-none-any.whl"
+    wheel.write_bytes(b"reviewed-wheel")
+    package = tmp_path / "server-1.0.0-py3-none-any.whl"
+    package.write_bytes(b"server-wheel")
+    calls: list[list[str]] = []
+    cleaned: list[bool] = []
+
+    monkeypatch.setattr(
+        component_imports,
+        "_build_locked_wheelhouse",
+        lambda requirements_lock, *, runtime_platform: (
+            wheelhouse,
+            lambda: cleaned.append(True),
+        ),
+    )
+    monkeypatch.setattr(
+        component_imports.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append(command)
+        or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    site = tmp_path / "runtime" / "site"
+    site.mkdir(parents=True)
+
+    component_imports._install_python_distribution(
+        package.as_posix(),
+        site,
+        runtime_platform="linux/arm64",
+        requirements_lock=requirements,
+    )
+
+    assert cleaned == [True]
+    assert len(calls) == 1
+    command = calls[0]
+    assert "--no-index" in command
+    assert "--only-binary" in command
+    assert "aarch64-manylinux_2_36" in command
+    assert requirements.as_posix() in command
+    assert package.as_posix() in command
+    manifest = json.loads(
+        (site.parent / "wheelhouse.lock.json").read_text(encoding="utf-8")
+    )
+    assert list(manifest) == [wheel.name]
+    assert len(manifest[wheel.name]) == 64
+
+
+def test_mcp_add_accepts_public_git_source_at_full_commit(tmp_path: Path) -> None:
+    commit = "a2bae7271323ac43262ffb73454b0aff01ddc808"
+    draft = add_mcp_command(
+        "wandb-0-4",
+        [
+            "uvx",
+            "--from",
+            "git+https://github.com/wandb/wandb-mcp-server@" + commit,
+            "wandb-mcp-server",
+        ],
+        repo_root=tmp_path,
+    )
+
+    assert draft.command[2].endswith("@" + commit)
+
+    with pytest.raises(ValueError, match="exact name==version|full commit"):
+        add_mcp_command(
+            "wandb-moving",
+            [
+                "uvx",
+                "--from",
+                "git+https://github.com/wandb/wandb-mcp-server@main",
+                "wandb-mcp-server",
+            ],
+            repo_root=tmp_path,
         )
 
 

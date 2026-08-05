@@ -1,0 +1,42 @@
+{
+  "mcpServers": {
+    "wandb-0-3-7": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server@80252b3aa23ae3c1fdde089ce2b7dfb106dafb38",
+        "wandb_mcp_server"
+      ],
+      "env": {
+      "WANDB_API_KEY": "${WANDB_API_KEY}",
+      "WANDB_BASE_URL": "${WANDB_BASE_URL}",
+      "MCP_ANALYTICS_LOG_STREAM": "stderr"
+      },
+      "allowed_hosts": [
+        "api.wandb.test",
+        "app.wandb.test",
+        "trace.wandb.test"
+      ],
+      "version": "git:80252b3aa23ae3c1fdde089ce2b7dfb106dafb38"
+    },
+    "wandb-0-4": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server@a2bae7271323ac43262ffb73454b0aff01ddc808",
+        "wandb_mcp_server"
+      ],
+      "env": {
+      "WANDB_API_KEY": "${WANDB_API_KEY}",
+      "WANDB_BASE_URL": "${WANDB_BASE_URL}",
+      "MCP_ANALYTICS_LOG_STREAM": "stderr"
+      },
+      "allowed_hosts": [
+        "api.wandb.test",
+        "app.wandb.test",
+        "trace.wandb.test"
+      ],
+      "version": "git:a2bae7271323ac43262ffb73454b0aff01ddc808"
+    }
+  }
+}

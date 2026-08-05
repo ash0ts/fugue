@@ -5,7 +5,7 @@ import json
 import math
 import os
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -88,6 +88,9 @@ class ComparisonEvaluatorV1:
     checks: tuple[str, ...] = ()
     profile: str | None = None
     calibration: str | None = None
+    rubric: str | None = None
+    dimensions: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
     reserve_cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,6 +184,7 @@ class ComparisonResultV1:
     regressed: int
     unchanged: int
     incomplete: int
+    required_evaluations_incomplete: int
     deterministic_summary: dict[str, Any]
     judge_summary: dict[str, Any]
     mechanism_summary: dict[str, Any]
@@ -233,9 +237,25 @@ def comparison_from_dict(
             "private labels",
         ),
     )
-    evaluators = tuple(
+    parsed_evaluators = tuple(
         _evaluator(item)
         for item in _sequence(raw.get("evaluators"), "evaluators")
+    )
+    evaluators = tuple(
+        replace(
+            evaluator,
+            calibration=(
+                _portable_input_path(
+                    evaluator.calibration,
+                    base,
+                    repo_root,
+                    "judge calibration",
+                )
+                if evaluator.calibration
+                else None
+            ),
+        )
+        for evaluator in parsed_evaluators
     )
     if len({item.id for item in evaluators}) != len(evaluators):
         raise ValueError("comparison evaluator ids must be unique")
@@ -722,6 +742,11 @@ def analyze_comparison_rows(
         regressed=regressed,
         unchanged=unchanged,
         incomplete=incomplete,
+        required_evaluations_incomplete=sum(
+            1
+            for row in normalized
+            if row.get("comparison_required_evaluation_complete") is False
+        ),
         deterministic_summary=_deterministic_summary(normalized),
         judge_summary=_judge_summary(normalized),
         mechanism_summary=_mechanism_summary(normalized),
@@ -860,7 +885,14 @@ def score_comparison_rows(
     rows: Sequence[Mapping[str, Any]],
     *,
     repo_root: Path,
+    env: Mapping[str, str] | None = None,
+    judge_request: Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]
+    | None = None,
 ) -> list[dict[str, Any]]:
+    public_tasks = {
+        str(item["id"]): item
+        for item in _load_public_tasks(repo_root / spec.taskset.tasks)
+    }
     labels = {
         str(item["id"]): item
         for item in _load_private_labels(repo_root / spec.taskset.private_labels)
@@ -885,6 +917,7 @@ def score_comparison_rows(
             row["pass"] = None
             row["comparison_evaluation_status"] = "unavailable"
             row["comparison_evaluation_reason"] = "private task label is unavailable"
+            row["comparison_required_evaluation_complete"] = False
         else:
             passed = _score_simple_output(output, label["expected"], checks)
             row["pass"] = passed
@@ -909,8 +942,207 @@ def score_comparison_rows(
                 passed=passed,
                 candidate_skill_ids=spec.candidate.skills,
             )
+            row["comparison_required_evaluation_complete"] = True
+        judge_results: dict[str, Any] = {}
+        judge_scores: dict[str, float] = {}
+        for judge in (
+            evaluator
+            for evaluator in spec.evaluators
+            if evaluator.type == "llm_judge"
+        ):
+            if env is None:
+                judge_results[judge.id] = {
+                    "status": "unavailable",
+                    "reason": "judge execution was not requested",
+                }
+                if judge.required:
+                    row["comparison_required_evaluation_complete"] = False
+                continue
+            try:
+                request = judge_request or _request_comparison_judge
+                payload, usage, receipt = request(
+                    evaluator=judge,
+                    public_task=public_tasks.get(task_id, {}),
+                    row=row,
+                    env=env,
+                )
+                parsed = _validate_comparison_judge_payload(judge, payload)
+                for dimension, value in parsed["scores"].items():
+                    judge_scores[f"{judge.id}.{dimension}"] = value
+                judge_results[judge.id] = {
+                    "status": "scored",
+                    **parsed,
+                    "usage": usage,
+                    "route_receipt": receipt,
+                    "cost_usd": None,
+                }
+            except Exception as exc:
+                judge_results[judge.id] = {
+                    "status": "unavailable",
+                    "reason": (
+                        "judge evaluation failed: "
+                        f"{type(exc).__name__}"
+                    ),
+                }
+                if judge.required:
+                    row["comparison_required_evaluation_complete"] = False
+        if judge_results:
+            row["comparison_judges"] = judge_results
+            row["comparison_judge_status"] = (
+                "scored"
+                if all(value["status"] == "scored" for value in judge_results.values())
+                else "unavailable"
+            )
+        if judge_scores:
+            row["comparison_judge_scores"] = judge_scores
         scored.append(row)
     return scored
+
+
+def _request_comparison_judge(
+    *,
+    evaluator: ComparisonEvaluatorV1,
+    public_task: Mapping[str, Any],
+    row: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    from fugue.bench.evaluations import _post_judge
+    from fugue.model_plane import (
+        model_route_identity,
+        provider_api_key,
+        provider_api_key_env,
+        resolve_model_route,
+    )
+
+    if not evaluator.profile or not evaluator.rubric:
+        raise ValueError("comparison judge is missing its profile or public rubric")
+    route = resolve_model_route(evaluator.profile, env)
+    api_key = provider_api_key(route, env)
+    if not api_key:
+        raise RuntimeError(
+            f"{provider_api_key_env(route)} is required for comparison judging"
+        )
+    permitted = _comparison_judge_evidence(row, evaluator.evidence)
+    payload = {
+        "public_task": {
+            "input": public_task.get("input"),
+            "tags": public_task.get("tags") or [],
+        },
+        "final_response": _comparison_output(row),
+        "permitted_evidence": permitted,
+        "rubric": evaluator.rubric,
+        "dimensions": list(evaluator.dimensions),
+    }
+    prompt = (
+        "Blindly evaluate one Agent attempt. You do not know whether it came from "
+        "the baseline or candidate. Use only the supplied public task, final "
+        "response, permitted evidence, and rubric. Return one JSON object with: "
+        "scores (one 0..1 number per dimension), overall_assessment (brief text), "
+        "uncertainty (0..1), and rationale (at most 500 characters). Do not return "
+        "hidden reasoning or a chain of thought.\n\n"
+        + json.dumps(payload, sort_keys=True, default=str)[:48_000]
+    )
+    import httpx
+
+    with httpx.Client(timeout=120) as client:
+        response, usage = _post_judge(client, route, api_key, env, prompt)
+    return (
+        response,
+        usage,
+        {
+            "schema_version": 1,
+            "role": "blind_comparison_judge",
+            "judge_id": evaluator.id,
+            "profile": evaluator.profile,
+            "route": model_route_identity(route, env),
+            "rubric_digest": _judge_contract_digest(evaluator),
+            "blind_fields": [
+                "baseline_or_candidate",
+                "candidate_revision",
+                "variant_id",
+                "treatment",
+                "harness",
+                "model",
+                "deterministic_scores",
+                "private_expected_values",
+                "receipts",
+                "internal_ids",
+            ],
+            "usage": usage,
+        },
+    )
+
+
+def _comparison_judge_evidence(
+    row: Mapping[str, Any], fields: Sequence[str]
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for field_name in fields:
+        if field_name == "tool_names":
+            names = sorted(
+                {
+                    str(item.get("name") or item.get("tool") or "")
+                    for item in row.get("tool_calls") or []
+                    if isinstance(item, Mapping)
+                    and (item.get("name") or item.get("tool"))
+                }
+            )
+            result[field_name] = names
+        elif field_name in {
+            "artifact_paths",
+            "retrieved_paths",
+            "inspected_paths",
+            "changed_paths",
+        }:
+            values = row.get(field_name)
+            if isinstance(values, list):
+                result[field_name] = [str(value)[:500] for value in values[:100]]
+    return result
+
+
+def _comparison_output(row: Mapping[str, Any]) -> Any:
+    return (
+        row.get("final_output")
+        if row.get("final_output") is not None
+        else row.get("answer")
+    )
+
+
+def _validate_comparison_judge_payload(
+    evaluator: ComparisonEvaluatorV1, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    expected = set(evaluator.dimensions)
+    raw_scores = payload.get("scores")
+    if not isinstance(raw_scores, Mapping) or set(raw_scores) != expected:
+        raise ValueError("judge scores do not match the locked rubric dimensions")
+    scores: dict[str, float] = {}
+    for dimension, raw in raw_scores.items():
+        if (
+            not isinstance(raw, int | float)
+            or isinstance(raw, bool)
+            or not 0 <= float(raw) <= 1
+        ):
+            raise ValueError(f"judge score {dimension!r} must be between zero and one")
+        scores[str(dimension)] = float(raw)
+    assessment = str(payload.get("overall_assessment") or "").strip()
+    rationale = str(payload.get("rationale") or "").strip()
+    uncertainty = payload.get("uncertainty")
+    if not assessment or len(assessment) > 500:
+        raise ValueError("judge overall_assessment must be 1..500 characters")
+    if not rationale or len(rationale) > 500:
+        raise ValueError("judge rationale must be 1..500 characters")
+    if (
+        not isinstance(uncertainty, int | float)
+        or isinstance(uncertainty, bool)
+        or not 0 <= float(uncertainty) <= 1
+    ):
+        raise ValueError("judge uncertainty must be between zero and one")
+    return {
+        "scores": scores,
+        "overall_assessment": assessment,
+        "uncertainty": float(uncertainty),
+        "rationale": rationale,
+    }
 
 
 def _comparison_mechanism(
@@ -1100,6 +1332,14 @@ def _judge_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if isinstance(row.get("comparison_judge_scores"), Mapping)
     ]
     if not scored:
+        if any(row.get("comparison_judge_status") for row in rows):
+            return {
+                "status": "unavailable",
+                "attempts": sum(
+                    row.get("comparison_judge_status") == "unavailable"
+                    for row in rows
+                ),
+            }
         return {"status": "not_used"}
     dimensions = sorted(
         {
@@ -1122,7 +1362,14 @@ def _judge_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             )
             for dimension in dimensions
         }
-    return {"status": "scored", "by_variant": by_variant}
+    return {
+        "status": "scored",
+        "by_variant": by_variant,
+        "unavailable_attempts": sum(
+            row.get("comparison_judge_status") == "unavailable"
+            for row in rows
+        ),
+    }
 
 
 def _numeric_summary(values: Sequence[Any]) -> dict[str, Any]:
@@ -1235,7 +1482,12 @@ def execute_comparison(
         to_weave=False,
     )
     rows = _read_jsonl(summary.path, "comparison attempt rows")
-    scored = score_comparison_rows(spec, rows, repo_root=repo_root)
+    scored = score_comparison_rows(
+        spec,
+        rows,
+        repo_root=repo_root,
+        env=service.env,
+    )
     _atomic_text(summary.path, _jsonl(scored))
     result = analyze_comparison_rows(
         comparison_id=spec.id,
@@ -1334,6 +1586,9 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "checks",
             "profile",
             "calibration",
+            "rubric",
+            "dimensions",
+            "evidence",
             "reserve_cost_usd",
         },
         "evaluator",
@@ -1341,13 +1596,43 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     evaluator_type = str(value.get("type") or "")
     if evaluator_type not in {"deterministic", "llm_judge"}:
         raise ValueError("evaluator type must be deterministic or llm_judge")
-    checks = _string_tuple(value.get("checks") or [], "evaluator check")
+    checks = _string_tuple(
+        value.get("checks") or [],
+        "evaluator check",
+        allow_empty=evaluator_type == "llm_judge",
+    )
     profile = str(value.get("profile") or "") or None
     calibration = str(value.get("calibration") or "") or None
+    rubric = str(value.get("rubric") or "").strip() or None
+    dimensions = _string_tuple(
+        value.get("dimensions") or [], "judge dimension", allow_empty=True
+    )
+    evidence = _string_tuple(
+        value.get("evidence") or [], "judge evidence", allow_empty=True
+    )
     if evaluator_type == "deterministic" and not checks:
         raise ValueError("deterministic evaluator requires checks")
     if evaluator_type == "llm_judge" and not profile:
         raise ValueError("LLM judge evaluator requires a profile")
+    if evaluator_type == "llm_judge" and not rubric:
+        raise ValueError("LLM judge evaluator requires a public rubric")
+    if evaluator_type == "llm_judge" and not dimensions:
+        raise ValueError("LLM judge evaluator requires dimensions")
+    unsupported_evidence = sorted(
+        set(evidence)
+        - {
+            "tool_names",
+            "artifact_paths",
+            "retrieved_paths",
+            "inspected_paths",
+            "changed_paths",
+        }
+    )
+    if unsupported_evidence:
+        raise ValueError(
+            "unsupported blind-judge evidence fields: "
+            + ", ".join(unsupported_evidence)
+        )
     return ComparisonEvaluatorV1(
         id=validate_id(str(value.get("id") or ""), kind="evaluator id"),
         type=evaluator_type,  # type: ignore[arg-type]
@@ -1355,6 +1640,9 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         checks=checks,
         profile=profile,
         calibration=calibration,
+        rubric=rubric,
+        dimensions=dimensions,
+        evidence=evidence,
         reserve_cost_usd=_non_negative_number(
             value.get("reserve_cost_usd", 0), "judge reserve"
         ),
@@ -1574,6 +1862,8 @@ def _research_scorer(value: ComparisonEvaluatorV1) -> dict[str, Any]:
         "required": value.required,
         "model": value.profile,
         "rubric_summary": "Use only permitted evidence and remain calibrated about coverage.",
+        "rubric": value.rubric,
+        "dimensions": list(value.dimensions),
         "blind_fields": [
             "harness",
             "model",
@@ -1582,7 +1872,7 @@ def _research_scorer(value: ComparisonEvaluatorV1) -> dict[str, Any]:
             "candidate_id",
             "treatment",
         ],
-        "evidence_inputs": ["Agent output", "Permitted normalized evidence"],
+        "evidence_inputs": ["Agent output", *value.evidence],
     }
 
 
@@ -1698,6 +1988,18 @@ def _judge_calibration_issue(
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         return f"judge {judge.id} calibration must be a mapping"
+    if value.get("schema_version") != 1:
+        return f"judge {judge.id} calibration schema is unsupported"
+    if value.get("review_status") != "adjudicated":
+        return f"judge {judge.id} calibration is not adjudicated"
+    if int(value.get("reviewers_per_example") or 0) < 2:
+        return f"judge {judge.id} calibration was not double-reviewed"
+    if value.get("disagreements_adjudicated") is not True:
+        return f"judge {judge.id} calibration disagreements are unresolved"
+    if value.get("judge_profile") != judge.profile:
+        return f"judge {judge.id} calibration profile does not match"
+    if value.get("rubric_digest") != _judge_contract_digest(judge):
+        return f"judge {judge.id} calibration rubric does not match"
     examples = int(value.get("examples") or 0)
     true_positive = float(value.get("true_positive_rate") or 0)
     true_negative = float(value.get("true_negative_rate") or 0)
@@ -1709,6 +2011,19 @@ def _judge_calibration_issue(
     if critical_false_passes:
         return f"judge {judge.id} has critical false passes"
     return None
+
+
+def _judge_contract_digest(judge: ComparisonEvaluatorV1) -> str:
+    return stable_digest(
+        {
+            "schema_version": 1,
+            "judge_id": judge.id,
+            "profile": judge.profile,
+            "rubric": judge.rubric,
+            "dimensions": list(judge.dimensions),
+            "evidence": list(judge.evidence),
+        }
+    )
 
 
 def _behavior_diff(
@@ -1764,6 +2079,8 @@ def _result_markdown(result: ComparisonResultV1) -> str:
         f"- Regressed pairs: {result.regressed}\n"
         f"- Unchanged pairs: {result.unchanged}\n"
         f"- Incomplete pairs: {result.incomplete}\n\n"
+        f"- Required evaluations incomplete: "
+        f"{result.required_evaluations_incomplete}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
         + "\n## Blind judge\n\n"

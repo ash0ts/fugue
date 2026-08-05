@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import (
     COMPARISON_RUNTIME_ROOT,
     ComparisonEvaluatorV1,
@@ -23,6 +24,9 @@ from fugue.bench.comparison import (
 
 EXAMPLE = Path("examples/comparisons/source-use-replay")
 LIVE_SKILL_EXAMPLE = Path("examples/comparisons/source-use-skill")
+MCP_MAINTENANCE_EXAMPLE = Path(
+    "examples/comparisons/wandb-mcp-maintenance"
+)
 
 
 def test_source_use_comparison_is_ready_and_exact() -> None:
@@ -63,6 +67,38 @@ def test_live_source_use_skill_comparison_has_locked_holdout_resources() -> None
     assert {cell["harness"] for cell in preview.matrix["matrix_cells"]} == {
         "codex"
     }
+
+
+@pytest.mark.parametrize(
+    ("filename", "tasks", "harnesses", "attempts", "cells"),
+    [
+        ("discovery.yaml", 4, ("codex", "claude-code"), 1, 16),
+        ("primary.yaml", 8, ("codex",), 2, 32),
+        ("claude-replication.yaml", 8, ("claude-code",), 2, 32),
+    ],
+)
+def test_mcp_maintenance_examples_have_exact_staged_designs(
+    filename: str,
+    tasks: int,
+    harnesses: tuple[str, ...],
+    attempts: int,
+    cells: int,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        MCP_MAINTENANCE_EXAMPLE / filename,
+        repo_root=root,
+    )
+    readiness = check_comparison(spec, repo_root=root)
+
+    assert readiness.task_count == tasks
+    assert spec.execution.harnesses == harnesses
+    assert spec.execution.attempts == attempts
+    assert readiness.estimated_cells == cells
+    assert readiness.actual_changes == ("integrations",)
+    assert readiness.status == "blocked"
+    assert any("not adjudicated" in item for item in readiness.blockers)
+    assert any("not locked and usable" in item for item in readiness.blockers)
 
 
 def test_comparison_rejects_unknown_fields_and_undeclared_changes() -> None:
@@ -266,6 +302,9 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
         required=True,
         profile="wandb/openai/gpt-oss-120b",
         calibration=None,
+        rubric="Score evidence grounding and calibration.",
+        dimensions=("evidence_grounding", "calibration"),
+        evidence=("tool_names",),
         reserve_cost_usd=0.1,
     )
     blocked = replace(spec, evaluators=(*spec.evaluators, judge))
@@ -276,8 +315,23 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
     calibration = tmp_path / "calibration.json"
     calibration.write_text(
         json.dumps(
-            {
-                "examples": 48,
+                {
+                    "schema_version": 1,
+                    "review_status": "adjudicated",
+                    "reviewers_per_example": 2,
+                    "disagreements_adjudicated": True,
+                    "judge_profile": judge.profile,
+                    "rubric_digest": stable_digest(
+                        {
+                            "schema_version": 1,
+                            "judge_id": judge.id,
+                            "profile": judge.profile,
+                            "rubric": judge.rubric,
+                            "dimensions": list(judge.dimensions),
+                            "evidence": list(judge.evidence),
+                        }
+                    ),
+                    "examples": 48,
                 "true_positive_rate": 0.9,
                 "true_negative_rate": 0.9,
                 "critical_false_passes": 0,
@@ -299,6 +353,83 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
         assert check_comparison(ready, repo_root=root).status == "ready"
     finally:
         copied.unlink(missing_ok=True)
+
+
+def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score grounding, usefulness, prioritization, and calibration.",
+        dimensions=(
+            "evidence_grounding",
+            "usefulness",
+            "prioritization",
+            "calibration",
+        ),
+        evidence=("tool_names", "inspected_paths"),
+        reserve_cost_usd=0.1,
+    )
+    captured: dict[str, str] = {}
+
+    def fake_post(_client, _route, _key, _env, prompt):
+        captured["prompt"] = prompt
+        return (
+            {
+                "scores": {
+                    "evidence_grounding": 1,
+                    "usefulness": 0.75,
+                    "prioritization": 0.5,
+                    "calibration": 1,
+                },
+                "overall_assessment": "Grounded and appropriately bounded.",
+                "uncertainty": 0.1,
+                "rationale": "The response cites the inspected current source.",
+            },
+            {"input_tokens": 100, "output_tokens": 40},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", fake_post)
+    judged = replace(spec, evaluators=(*spec.evaluators, judge))
+    rows = score_comparison_rows(
+        judged,
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "harness": "secret-harness-name",
+                "prediction_id": "secret-prediction",
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "secret-candidate-revision",
+                "tool_calls": [
+                    {
+                        "name": "search",
+                        "arguments": {"private": "do-not-send"},
+                        "output": "private tool body",
+                    }
+                ],
+                "inspected_paths": ["expense-policy-v4.md"],
+                "comparison_deterministic_scores": {"private": True},
+            }
+        ],
+        repo_root=root,
+        env={"WANDB_API_KEY": "secret", "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test"},
+    )
+
+    prompt = captured["prompt"]
+    assert "secret-candidate-revision" not in prompt
+    assert "secret-harness-name" not in prompt
+    assert "secret-prediction" not in prompt
+    assert "do-not-send" not in prompt
+    assert "private tool body" not in prompt
+    assert '"tool_names": ["search"]' in prompt
+    assert rows[0]["comparison_judge_status"] == "scored"
+    assert rows[0]["comparison_required_evaluation_complete"] is True
 
 
 def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:

@@ -1,0 +1,4 @@
+{"id":"discover-runs-and-calls","input":{"question":"Inspect the locked W&B project and return JSON with run_count, root_conversation_count, and evidence_status."},"tags":["discovery"],"partition":"discovery"}
+{"id":"discover-evaluation","input":{"question":"Find the locked Agent evaluation and return JSON with evaluated_attempts, deterministic_scorer, and evidence_status."},"tags":["discovery"],"partition":"discovery"}
+{"id":"discover-anomaly","input":{"question":"Find the documented latency outlier and return JSON with attempt_label, latency_ms, and evidence_status."},"tags":["discovery"],"partition":"discovery"}
+{"id":"discover-missing-data","input":{"question":"Inspect the partial-evidence fixture and return JSON with missing_evidence, safe_claim, and complete."},"tags":["discovery"],"partition":"discovery"}

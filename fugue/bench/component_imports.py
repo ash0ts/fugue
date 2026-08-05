@@ -6,11 +6,12 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
@@ -38,6 +39,10 @@ _ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _PYTHON_PACKAGE_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*$"
 )
+_PYTHON_GIT_RE = re.compile(
+    r"^git\+https://github\.com/"
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?@[0-9a-f]{40}$"
+)
 _NPM_PACKAGE_RE = re.compile(
     r"^(?:@[A-Za-z0-9_.-]+/)?[A-Za-z0-9_.-]+@[A-Za-z0-9][A-Za-z0-9_.+-]*$"
 )
@@ -46,6 +51,14 @@ _DIGEST_IMAGE_RE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SECRET_NAME_RE = re.compile(
     r"(?:api.?key|credential|password|secret|token)", re.IGNORECASE
 )
+_MCP_PYTHON_IMAGE = (
+    "python:3.12.10-slim-bookworm@"
+    "sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+)
+_UV_PYTHON_PLATFORMS = {
+    "linux/amd64": "x86_64-manylinux_2_36",
+    "linux/arm64": "aarch64-manylinux_2_36",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +69,8 @@ class MCPImportDraftV1:
     command: tuple[str, ...] = ()
     url: str | None = None
     required_env: tuple[str, ...] = ()
+    fixed_env: tuple[tuple[str, str], ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
     source: str = "manual"
     server_name: str | None = None
     version_identity: str | None = None
@@ -65,6 +80,8 @@ class MCPImportDraftV1:
         value = asdict(self)
         value["command"] = list(self.command)
         value["required_env"] = list(self.required_env)
+        value["fixed_env"] = dict(self.fixed_env)
+        value["allowed_hosts"] = list(self.allowed_hosts)
         value["allowed_tools"] = list(self.allowed_tools)
         return value
 
@@ -77,10 +94,13 @@ class MCPImportLockV1:
     source: str
     source_digest: str
     runtime_digest: str | None
+    runtime_platform: str | None = None
     command: tuple[str, ...] = ()
     url: str | None = None
     version_identity: str | None = None
     required_env: tuple[str, ...] = ()
+    fixed_env: tuple[tuple[str, str], ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
     allowed_tools: tuple[str, ...] = ()
     tool_manifest: tuple[dict[str, Any], ...] = ()
     tool_manifest_digest: str | None = None
@@ -91,6 +111,8 @@ class MCPImportLockV1:
         value = asdict(self)
         value["command"] = list(self.command)
         value["required_env"] = list(self.required_env)
+        value["fixed_env"] = dict(self.fixed_env)
+        value["allowed_hosts"] = list(self.allowed_hosts)
         value["allowed_tools"] = list(self.allowed_tools)
         value["tool_manifest"] = list(self.tool_manifest)
         return value
@@ -136,6 +158,7 @@ def import_mcp_config(
     server: str,
     import_id: str,
     repo_root: Path,
+    allowed_hosts: tuple[str, ...] = (),
 ) -> MCPImportDraftV1:
     _validate_id(import_id)
     if not config_path.is_file():
@@ -155,6 +178,18 @@ def import_mcp_config(
         source=config_path.resolve().as_posix(),
         server_name=server,
     )
+    if allowed_hosts:
+        _validate_allowed_hosts(allowed_hosts)
+        draft = MCPImportDraftV1(
+            **{
+                **draft.to_dict(),
+                "command": draft.command,
+                "required_env": draft.required_env,
+                "fixed_env": draft.fixed_env,
+                "allowed_hosts": tuple(allowed_hosts),
+                "allowed_tools": draft.allowed_tools,
+            }
+        )
     _write_json(_mcp_draft_path(repo_root, import_id), draft.to_dict())
     return draft
 
@@ -165,16 +200,20 @@ def add_mcp_command(
     *,
     repo_root: Path,
     required_env: tuple[str, ...] = (),
+    allowed_hosts: tuple[str, ...] = (),
 ) -> MCPImportDraftV1:
     _validate_id(import_id)
     _validate_argv(command)
+    _classify_stdio_command(command)
     _validate_env_names(required_env)
+    _validate_allowed_hosts(allowed_hosts)
     draft = MCPImportDraftV1(
         schema_version=1,
         id=import_id,
         transport="stdio",
         command=tuple(command),
         required_env=tuple(required_env),
+        allowed_hosts=tuple(allowed_hosts),
         source="argv",
         server_name=import_id,
     )
@@ -202,6 +241,8 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
             "command",
             "url",
             "required_env",
+            "fixed_env",
+            "allowed_hosts",
             "source",
             "server_name",
             "version_identity",
@@ -213,8 +254,12 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
         raise ValueError(f"{path}: unsupported or mismatched MCP draft")
     command = _string_tuple(raw.get("command"))
     required_env = _string_tuple(raw.get("required_env"))
+    fixed_env = _fixed_env_tuple(raw.get("fixed_env"))
+    allowed_hosts = _string_tuple(raw.get("allowed_hosts"))
     allowed_tools = _string_tuple(raw.get("allowed_tools"))
     _validate_env_names(required_env)
+    _validate_fixed_env(fixed_env, required_env=required_env)
+    _validate_allowed_hosts(allowed_hosts)
     transport = str(raw.get("transport") or "")
     if transport == "stdio":
         _validate_argv(list(command))
@@ -227,6 +272,8 @@ def load_mcp_draft(import_id: str, repo_root: Path) -> MCPImportDraftV1:
         command=command,
         url=str(raw["url"]) if raw.get("url") else None,
         required_env=required_env,
+        fixed_env=fixed_env,
+        allowed_hosts=allowed_hosts,
         source=str(raw.get("source") or ""),
         server_name=str(raw["server_name"]) if raw.get("server_name") else None,
         version_identity=(
@@ -245,7 +292,38 @@ def lock_mcp_import(
     draft = load_mcp_draft(import_id, repo_root)
     source_digest = _stable_digest(draft.to_dict())
     if draft.transport == "stdio":
-        manifest, server_info = _probe_stdio_manifest(draft)
+        kind, _, _, _ = _classify_stdio_command(list(draft.command))
+        if kind in {"python", "node"} and not acknowledge_package_code:
+            raise ValueError(
+                "locking a package-backed MCP server requires "
+                "--acknowledge-package-code"
+            )
+        runtime_platform = _managed_runtime_platform()
+        runtime_digest, command = _materialize_stdio_runtime(
+            draft,
+            repo_root,
+            acknowledge_package_code=acknowledge_package_code,
+            runtime_platform=runtime_platform,
+        )
+        runtime_source = (
+            repo_root
+            / MANAGED_MCP_RUNTIME_ROOT
+            / import_id
+            / runtime_digest.removeprefix("sha256:")
+        )
+        probe_command = (
+            _managed_python_probe_command(
+                runtime_source,
+                runtime_platform=runtime_platform,
+                required_env=draft.required_env,
+                fixed_env=draft.fixed_env,
+            )
+            if kind == "python"
+            else ((runtime_source / "bin" / "server").as_posix(),)
+        )
+        manifest, server_info = _probe_stdio_manifest(
+            replace(draft, command=probe_command)
+        )
         discovered = tuple(str(item["name"]) for item in manifest)
         missing = sorted(set(draft.allowed_tools) - set(discovered))
         if missing:
@@ -254,11 +332,6 @@ def lock_mcp_import(
             )
         allowed_tools = draft.allowed_tools or discovered
         manifest_digest = _stable_digest(list(manifest))
-        runtime_digest, command = _materialize_stdio_runtime(
-            draft,
-            repo_root,
-            acknowledge_package_code=acknowledge_package_code,
-        )
         support = "supported"
         runtime = {
             "type": "managed",
@@ -281,6 +354,7 @@ def lock_mcp_import(
             raise ValueError("remote MCP import requires a URL")
         _validate_remote_mcp_url(draft.url)
         runtime_digest = None
+        runtime_platform = None
         command = ()
         manifest = ()
         server_info = None
@@ -301,10 +375,13 @@ def lock_mcp_import(
         source=draft.source,
         source_digest=source_digest,
         runtime_digest=runtime_digest,
+        runtime_platform=runtime_platform,
         command=tuple(command),
         url=draft.url,
         version_identity=draft.version_identity,
         required_env=draft.required_env,
+        fixed_env=draft.fixed_env,
+        allowed_hosts=draft.allowed_hosts,
         allowed_tools=allowed_tools,
         tool_manifest=manifest,
         tool_manifest_digest=manifest_digest,
@@ -324,7 +401,7 @@ def lock_mcp_import(
         "allowed_hosts": (
             [str(urlparse(draft.url or "").hostname)]
             if draft.transport != "stdio"
-            else []
+            else list(draft.allowed_hosts)
         ),
     }
     integration_path = repo_root / IMPORTED_INTEGRATION_ROOT / f"{import_id}.yaml"
@@ -356,6 +433,7 @@ def _probe_stdio_manifest(
             for name in draft.required_env
             if os.environ.get(name)
         }
+        environment.update(dict(draft.fixed_env))
         missing = sorted(set(draft.required_env) - set(environment))
         if missing:
             raise ValueError(
@@ -370,7 +448,7 @@ def _probe_stdio_manifest(
         async with stdio_client(parameters) as streams:
             async with ClientSession(*streams) as session:
                 initialized = await asyncio.wait_for(
-                    session.initialize(), timeout=30
+                    session.initialize(), timeout=90
                 )
                 listed = await asyncio.wait_for(session.list_tools(), timeout=30)
         tools = tuple(
@@ -595,6 +673,7 @@ def _draft_from_server(
         "type",
         "version",
         "allowed_tools",
+        "allowed_hosts",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -605,15 +684,26 @@ def _draft_from_server(
     if not isinstance(env, dict):
         raise ValueError("MCP env must be a mapping of names to references")
     env_names: list[str] = []
+    fixed_env: list[tuple[str, str]] = []
     for name, value in env.items():
         name = str(name)
         if not _ENV_RE.fullmatch(name):
             raise ValueError(f"invalid MCP environment name: {name!r}")
-        if not _is_env_reference(value, name):
+        if _is_env_reference(value, name):
+            env_names.append(name)
+        elif _is_public_env_literal(name, value):
+            fixed_env.append((name, str(value)))
+        else:
             raise ValueError(
-                f"MCP environment {name} contains a literal value; only references are importable"
+                f"MCP environment {name} contains an unsafe literal value; "
+                "secret-like values must use environment references"
             )
-        env_names.append(name)
+    normalized_required_env = tuple(sorted(env_names))
+    normalized_fixed_env = tuple(sorted(fixed_env))
+    _validate_fixed_env(
+        normalized_fixed_env,
+        required_env=normalized_required_env,
+    )
     url = str(raw["url"]) if raw.get("url") else None
     if url:
         transport = str(raw.get("transport") or raw.get("type") or "streamable-http")
@@ -628,15 +718,20 @@ def _draft_from_server(
             raise ValueError("stdio MCP requires command as a string and args as an array")
         command = (executable, *(str(value) for value in args))
         _validate_argv(list(command))
+        _classify_stdio_command(list(command))
         transport = "stdio"
     allowed_tools = _string_tuple(raw.get("allowed_tools"))
+    allowed_hosts = _string_tuple(raw.get("allowed_hosts"))
+    _validate_allowed_hosts(allowed_hosts)
     return MCPImportDraftV1(
         schema_version=1,
         id=import_id,
         transport=transport,
         command=command,
         url=url,
-        required_env=tuple(sorted(env_names)),
+        required_env=normalized_required_env,
+        fixed_env=normalized_fixed_env,
+        allowed_hosts=allowed_hosts,
         source=source,
         server_name=server_name,
         version_identity=str(raw["version"]) if raw.get("version") else None,
@@ -649,6 +744,7 @@ def _materialize_stdio_runtime(
     repo_root: Path,
     *,
     acknowledge_package_code: bool,
+    runtime_platform: str,
 ) -> tuple[str, tuple[str, ...]]:
     command = list(draft.command)
     kind, package, executable, extra = _classify_stdio_command(command)
@@ -665,9 +761,20 @@ def _materialize_stdio_runtime(
     staging = Path(tempfile.mkdtemp(prefix=".prepare-", dir=parent))
     try:
         if kind == "python":
-            _install_python_tool(package, executable, staging)
+            _install_python_tool(
+                package,
+                executable,
+                staging,
+                runtime_platform=runtime_platform,
+                fixed_env=draft.fixed_env,
+            )
         elif kind == "node":
-            _install_node_tool(package, executable, staging)
+            _install_node_tool(
+                package,
+                executable,
+                staging,
+                fixed_env=draft.fixed_env,
+            )
         elif kind == "oci":
             raise ValueError(
                 "digest-pinned OCI MCP imports require an HTTP/SSE gateway in V1"
@@ -695,10 +802,19 @@ def _classify_stdio_command(
     executable = PurePosixPath(command[0]).name
     if executable == "uvx":
         if len(command) < 4 or command[1] != "--from":
-            raise ValueError("uvx MCP declarations must use: uvx --from PACKAGE==VERSION COMMAND")
+            raise ValueError(
+                "uvx MCP declarations must use: "
+                "uvx --from PACKAGE==VERSION COMMAND"
+            )
         package = command[2]
-        if not _PYTHON_PACKAGE_RE.fullmatch(package):
-            raise ValueError("uvx MCP packages must use an exact name==version")
+        if not (
+            _PYTHON_PACKAGE_RE.fullmatch(package)
+            or _PYTHON_GIT_RE.fullmatch(package)
+        ):
+            raise ValueError(
+                "uvx MCP packages must use an exact name==version or a public "
+                "GitHub source pinned to a full commit SHA"
+            )
         return "python", package, command[3], command[4:]
     if executable == "npx":
         values = command[1:]
@@ -714,43 +830,319 @@ def _classify_stdio_command(
     return "unknown", "", "", command[1:]
 
 
-def _install_python_tool(package: str, executable: str, destination: Path) -> None:
+def _install_python_tool(
+    package: str,
+    executable: str,
+    destination: Path,
+    *,
+    runtime_platform: str,
+    fixed_env: tuple[tuple[str, str], ...] = (),
+) -> None:
     site = destination / "site"
     site.mkdir()
-    subprocess.run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--target",
-            site.as_posix(),
-            "--python-platform",
-            "x86_64-manylinux_2_28",
-            "--python-version",
-            "3.12",
-            "--only-binary",
-            ":all:",
+    install_source = package
+    requirements_lock: Path | None = None
+
+    def cleanup() -> None:
+        return None
+
+    if _PYTHON_GIT_RE.fullmatch(package):
+        install_source, requirements_lock, cleanup = _build_exact_git_wheel(
+            package
+        )
+    else:
+        requirements_lock, cleanup = _lock_python_distribution(
             package,
-        ],
-        check=True,
-        timeout=180,
-    )
+            runtime_platform=runtime_platform,
+        )
+    try:
+        _install_python_distribution(
+            install_source,
+            site,
+            runtime_platform=runtime_platform,
+            requirements_lock=requirements_lock,
+        )
+        assert requirements_lock is not None
+        shutil.copyfile(requirements_lock, destination / "requirements.lock")
+    finally:
+        cleanup()
     entrypoint = _python_entrypoint(site, executable)
     bin_dir = destination / "bin"
     bin_dir.mkdir()
     launcher = bin_dir / "server"
     module, function = entrypoint
+    fixed_environment = "".join(
+        f"os.environ[{name!r}] = {value!r}\n"
+        for name, value in fixed_env
+    )
     launcher.write_text(
         "#!/usr/bin/env python3\n"
+        "import os\n"
         "import sys\n"
-        "sys.path.insert(0, '/fugue-components/"
-        f"{destination.parent.name}/site')\n"
+        "from pathlib import Path\n"
+        f"{fixed_environment}"
+        "sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'site'))\n"
         f"from {module} import {function} as _entry\n"
         "raise SystemExit(_entry())\n",
         encoding="utf-8",
     )
     launcher.chmod(0o555)
     _make_tree_read_only(destination)
+
+
+def _install_python_distribution(
+    package: str,
+    site: Path,
+    *,
+    runtime_platform: str,
+    requirements_lock: Path,
+) -> None:
+    python_platform = _UV_PYTHON_PLATFORMS.get(runtime_platform)
+    if python_platform is None:
+        raise ValueError(
+            f"unsupported Docker platform for managed Python MCP runtime: "
+            f"{runtime_platform}"
+        )
+    wheelhouse, cleanup = _build_locked_wheelhouse(
+        requirements_lock,
+        runtime_platform=runtime_platform,
+    )
+    try:
+        command = [
+            "uv",
+            "pip",
+            "install",
+            "--target",
+            site.as_posix(),
+            "--python-platform",
+            python_platform,
+            "--python-version",
+            "3.12",
+            "--only-binary",
+            ":all:",
+            "--no-verify-hashes",
+            "--no-index",
+            "--find-links",
+            wheelhouse.as_posix(),
+            "--requirement",
+            requirements_lock.as_posix(),
+        ]
+        if Path(package).suffix == ".whl":
+            command.append(package)
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        wheel_manifest = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(wheelhouse.glob("*.whl"))
+        }
+        (site.parent / "wheelhouse.lock.json").write_text(
+            json.dumps(wheel_manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    finally:
+        cleanup()
+
+
+def _build_locked_wheelhouse(
+    requirements_lock: Path,
+    *,
+    runtime_platform: str,
+) -> tuple[Path, Any]:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError(
+            "Docker is required to build a managed MCP dependency closure"
+        )
+    _ensure_mcp_python_image(docker)
+    temporary = Path(tempfile.mkdtemp(prefix="fugue-mcp-wheelhouse-"))
+    wheelhouse = temporary / "wheels"
+    wheelhouse.mkdir()
+    try:
+        subprocess.run(
+            [
+                docker,
+                "run",
+                "--rm",
+                "--platform",
+                runtime_platform,
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "256",
+                "--cpus",
+                "2",
+                "--memory",
+                "2g",
+                "--mount",
+                (
+                    "type=bind,"
+                    f"src={requirements_lock.parent},"
+                    "dst=/input,readonly"
+                ),
+                "--mount",
+                f"type=bind,src={wheelhouse},dst=/wheelhouse",
+                "--tmpfs",
+                "/tmp:rw,nosuid,size=1g",
+                "--env",
+                "HOME=/tmp/home",
+                "--env",
+                "PIP_CACHE_DIR=/tmp/pip-cache",
+                _MCP_PYTHON_IMAGE,
+                "python",
+                "-m",
+                "pip",
+                "wheel",
+                "--disable-pip-version-check",
+                "--requirement",
+                f"/input/{requirements_lock.name}",
+                "--wheel-dir",
+                "/wheelhouse",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if not list(wheelhouse.glob("*.whl")):
+            raise ValueError("managed MCP dependency build produced no wheels")
+        return wheelhouse, lambda: shutil.rmtree(temporary)
+    except Exception:
+        shutil.rmtree(temporary)
+        raise
+
+
+def _lock_python_distribution(
+    package: str,
+    *,
+    runtime_platform: str,
+) -> tuple[Path, Any]:
+    python_platform = _UV_PYTHON_PLATFORMS.get(runtime_platform)
+    if python_platform is None:
+        raise ValueError(
+            f"unsupported Docker platform for managed Python MCP runtime: "
+            f"{runtime_platform}"
+        )
+    temporary = Path(tempfile.mkdtemp(prefix="fugue-mcp-requirements-"))
+    source = temporary / "requirements.in"
+    lock = temporary / "requirements.lock"
+    source.write_text(f"{package}\n", encoding="utf-8")
+    try:
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "compile",
+                "--python-platform",
+                python_platform,
+                "--python-version",
+                "3.12",
+                "--generate-hashes",
+                "--output-file",
+                lock.as_posix(),
+                source.as_posix(),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        return lock, lambda: shutil.rmtree(temporary)
+    except Exception:
+        shutil.rmtree(temporary)
+        raise
+
+
+def _build_exact_git_wheel(source: str) -> tuple[str, Path, Any]:
+    raw = source.removeprefix("git+")
+    url, separator, commit = raw.rpartition("@")
+    if (
+        not separator
+        or not _SHA_RE.fullmatch(commit)
+        or not _PYTHON_GIT_RE.fullmatch(source)
+    ):
+        raise ValueError("Python Git packages require an exact public GitHub commit")
+    temporary = Path(tempfile.mkdtemp(prefix="fugue-mcp-source-"))
+    checkout = temporary / "source"
+    wheels = temporary / "wheels"
+    try:
+        subprocess.run(
+            ["git", "clone", "--filter=blob:none", "--no-checkout", url, checkout],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        subprocess.run(
+            ["git", "-C", checkout.as_posix(), "checkout", "--detach", commit],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        resolved = subprocess.run(
+            ["git", "-C", checkout.as_posix(), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        if resolved != commit:
+            raise ValueError("Git MCP source did not resolve to the requested commit")
+        requirements = temporary / "requirements.lock"
+        subprocess.run(
+            [
+                "uv",
+                "export",
+                "--frozen",
+                "--no-dev",
+                "--no-emit-project",
+                "--no-emit-workspace",
+                "--no-header",
+                "--format",
+                "requirements.txt",
+                "--output-file",
+                requirements.as_posix(),
+            ],
+            cwd=checkout,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        subprocess.run(
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--no-sources",
+                "--out-dir",
+                wheels.as_posix(),
+                checkout.as_posix(),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        built = sorted(wheels.glob("*.whl"))
+        if len(built) != 1:
+            raise ValueError("Git MCP source must build exactly one wheel")
+        return (
+            built[0].as_posix(),
+            requirements,
+            lambda: shutil.rmtree(temporary),
+        )
+    except Exception:
+        shutil.rmtree(temporary)
+        raise
 
 
 def _python_entrypoint(site: Path, executable: str) -> tuple[str, str]:
@@ -775,7 +1167,13 @@ def _python_entrypoint(site: Path, executable: str) -> tuple[str, str]:
     return module, function
 
 
-def _install_node_tool(package: str, executable: str, destination: Path) -> None:
+def _install_node_tool(
+    package: str,
+    executable: str,
+    destination: Path,
+    *,
+    fixed_env: tuple[tuple[str, str], ...] = (),
+) -> None:
     package_root = destination / "package"
     package_root.mkdir()
     subprocess.run(
@@ -791,6 +1189,8 @@ def _install_node_tool(package: str, executable: str, destination: Path) -> None
             package,
         ],
         check=True,
+        capture_output=True,
+        text=True,
         timeout=180,
     )
     if list(package_root.rglob("*.node")):
@@ -818,10 +1218,16 @@ def _install_node_tool(package: str, executable: str, destination: Path) -> None
     bin_dir = destination / "bin"
     bin_dir.mkdir()
     launcher = bin_dir / "server"
+    fixed_environment = "".join(
+        f"export {name}={shlex.quote(value)}\n"
+        for name, value in fixed_env
+    )
     launcher.write_text(
         "#!/bin/sh\n"
-        f"exec node /fugue-components/{destination.parent.name}/package/"
-        f"node_modules/{package_name}/{PurePosixPath(relative).as_posix()} \"$@\"\n",
+        f"{fixed_environment}"
+        'root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\n'
+        f'exec node "$root/package/node_modules/{package_name}/'
+        f'{PurePosixPath(relative).as_posix()}" "$@"\n',
         encoding="utf-8",
     )
     launcher.chmod(0o555)
@@ -950,6 +1356,110 @@ def _remove_symlinks(root: Path) -> None:
             path.unlink()
 
 
+def _managed_runtime_platform() -> str:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError(
+            "Docker is required to prepare a managed MCP runtime"
+        )
+    completed = subprocess.run(
+        [docker, "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    platform = completed.stdout.strip()
+    aliases = {
+        "linux/x86_64": "linux/amd64",
+        "linux/aarch64": "linux/arm64",
+    }
+    normalized = aliases.get(platform, platform)
+    if normalized not in _UV_PYTHON_PLATFORMS:
+        raise ValueError(
+            f"unsupported Docker platform for managed MCP runtime: {platform}"
+        )
+    return normalized
+
+
+def _ensure_mcp_python_image(docker: str) -> None:
+    inspect = subprocess.run(
+        [docker, "image", "inspect", _MCP_PYTHON_IMAGE],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        subprocess.run(
+            [docker, "pull", _MCP_PYTHON_IMAGE],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+
+def _managed_python_probe_command(
+    runtime_source: Path,
+    *,
+    runtime_platform: str,
+    required_env: tuple[str, ...],
+    fixed_env: tuple[tuple[str, str], ...],
+) -> tuple[str, ...]:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError(
+            "Docker is required to inspect a managed MCP runtime"
+        )
+    _ensure_mcp_python_image(docker)
+    command = [
+        docker,
+        "run",
+        "--rm",
+        "--interactive",
+        "--pull",
+        "never",
+        "--platform",
+        runtime_platform,
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "128",
+        "--cpus",
+        "1",
+        "--memory",
+        "768m",
+        "--mount",
+        f"type=bind,src={runtime_source},dst=/fugue-component,readonly",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--env",
+        "HOME=/tmp/home",
+        "--env",
+        "XDG_CACHE_HOME=/tmp/cache",
+        "--env",
+        "WANDB_CACHE_DIR=/tmp/wandb-cache",
+    ]
+    for name in required_env:
+        command.extend(("--env", name))
+    for name, value in fixed_env:
+        command.extend(("--env", f"{name}={value}"))
+    command.extend(
+        (
+            _MCP_PYTHON_IMAGE,
+            "python",
+            "/fugue-component/bin/server",
+        )
+    )
+    return tuple(command)
+
+
 def _make_tree_read_only(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
@@ -984,12 +1494,78 @@ def _validate_env_names(values: tuple[str, ...]) -> None:
             raise ValueError(f"invalid MCP environment name: {name!r}")
 
 
+def _validate_fixed_env(
+    values: tuple[tuple[str, str], ...],
+    *,
+    required_env: tuple[str, ...],
+) -> None:
+    names = tuple(name for name, _ in values)
+    _validate_env_names(names)
+    overlap = sorted(set(names) & set(required_env))
+    if overlap:
+        raise ValueError(
+            "MCP environment may not be both fixed and runtime-provided: "
+            + ", ".join(overlap)
+        )
+    for name, value in values:
+        if _SECRET_NAME_RE.search(name):
+            raise ValueError(
+                f"MCP environment {name} is secret-like and must use a runtime reference"
+            )
+        if (
+            not value
+            or len(value.encode("utf-8")) > 256
+            or any(character in value for character in ("\x00", "\n", "\r"))
+        ):
+            raise ValueError(f"MCP environment {name} has an invalid fixed value")
+
+
+def _validate_allowed_hosts(values: tuple[str, ...]) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError("allowed MCP hosts must be unique")
+    for value in values:
+        if (
+            value != value.lower()
+            or "*" in value
+            or "://" in value
+            or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                value,
+            )
+        ):
+            raise ValueError(
+                f"allowed MCP hosts must be exact lowercase hostnames: {value!r}"
+            )
+
+
 def _is_env_reference(value: Any, name: str) -> bool:
     return isinstance(value, str) and value in {
         f"${{{name}}}",
         f"${name}",
         f"env:{name}",
     }
+
+
+def _is_public_env_literal(name: str, value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and not _SECRET_NAME_RE.search(name)
+        and bool(value)
+        and len(value.encode("utf-8")) <= 256
+        and not any(character in value for character in ("\x00", "\n", "\r"))
+    )
+
+
+def _fixed_env_tuple(value: Any) -> tuple[tuple[str, str], ...]:
+    if value in (None, {}):
+        return ()
+    if not isinstance(value, dict) or not all(
+        isinstance(name, str) and isinstance(item, str)
+        for name, item in value.items()
+    ):
+        raise ValueError("fixed_env must be an object of string values")
+    return tuple(sorted(value.items()))
 
 
 def _validate_remote_mcp_url(value: str) -> None:
