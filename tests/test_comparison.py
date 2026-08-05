@@ -14,8 +14,13 @@ from fugue.bench.comparison import (
     ComparisonEvaluatorV1,
     ComparisonResultV3,
     ComparisonSpecV1,
+    DecisionAttestationV1,
+    _apply_decision_attestation,
+    _comparison_qualification_digest,
     _comparison_result_digest,
     _comparison_trial_output,
+    _evaluate_decision,
+    _sanitized_answer_excerpt,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -31,7 +36,9 @@ from fugue.bench.comparison import (
     score_comparison_rows,
     write_comparison_result,
 )
+from fugue.bench.comparison import _decision_policy as parse_decision_policy
 from fugue.bench.operator import OperatorService
+from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.experiment_views import (
     ExperimentViewV2,
@@ -500,6 +507,10 @@ def _decision_row(
     call_prefix = f"{variant}-{task_id}"
     project = "wandb/release-project"
     base_url = "https://wandb.ai/wandb/release-project/weave"
+
+    def call_ref(call_id: str) -> str:
+        return f"weave:///wandb/release-project/call/{call_id}"
+
     return {
         "variant_id": variant,
         "task_id": task_id,
@@ -508,6 +519,9 @@ def _decision_row(
         "candidate_digest": f"sha256:{variant}",
         "runtime_lock_digest": "sha256:runtime",
         "trace_project": project,
+        "trace_receipt": trace_destination_identity(
+            {"FUGUE_WEAVE_PROJECT": project}
+        ),
         "queried_projects": list(queried_projects),
         "pass": passed,
         "status": "passed",
@@ -548,22 +562,32 @@ def _decision_row(
         },
         "evaluation_id": f"evaluation-{task_id}",
         "weave_evaluation_root_call_id": f"{call_prefix}-evaluation",
+        "weave_evaluation_root_ref": call_ref(
+            f"{call_prefix}-evaluation"
+        ),
         "evaluation_url": f"{base_url}/evaluations/{task_id}",
         "evaluation_root_object_verified": True,
         "evaluation_root_dataset_relationship_verified": True,
         "evaluation_root_prediction_relationship_verified": True,
-        "dataset_id": "release-dataset:v1",
+        "dataset_id": (
+            "weave:///wandb/release-project/object/release-dataset:v1"
+        ),
         "dataset_url": f"{base_url}/objects/release-dataset/versions/v1",
         "dataset_version_object_verified": True,
         "eval_predict_and_score_call_id": f"{call_prefix}-eval",
+        "eval_predict_and_score_ref": call_ref(f"{call_prefix}-eval"),
         "eval_predict_and_score_url": f"{base_url}/call/{call_prefix}-eval",
         "eval_predict_and_score_object_verified": True,
         "prediction_call_id": f"{call_prefix}-prediction",
+        "weave_prediction_ref": call_ref(
+            f"{call_prefix}-prediction"
+        ),
         "prediction_url": f"{base_url}/call/{call_prefix}-prediction",
         "weave_prediction_object_verified": True,
         "prediction_child_relationship_verified": True,
         "evaluation_prediction_graph_verified": True,
         "native_agent_root_call_id": f"{call_prefix}-agent",
+        "weave_agent_root_ref": call_ref(f"{call_prefix}-agent"),
         "agent_url": f"{base_url}/call/{call_prefix}-agent",
         "trace_link_status": "linked",
         "agent_graph_verified": True,
@@ -606,6 +630,176 @@ def _decision_policy() -> dict[str, object]:
             }
         ],
     }
+
+
+def _release_note_gate_decision(
+    status: str | None,
+    *,
+    policy: dict[str, object] | None = None,
+    coverage: tuple[dict[str, object], ...] | None = None,
+):
+    rows = [
+        _decision_row(variant="baseline", passed=False),
+        _decision_row(variant="candidate", passed=True),
+    ]
+    for row in rows:
+        row["infrastructure_receipt_digest"] = "9" * 64
+        row["infrastructure_gate_statuses"] = (
+            {"bounded-timeout": status} if status is not None else {}
+        )
+    return _evaluate_decision(
+        policy=parse_decision_policy(policy or _decision_policy()),
+        rows=rows,
+        deterministic={"candidate": {"passed": 1, "evaluated": 1}},
+        operational={"infrastructure_failures": 0},
+        improved=1,
+        regressed=0,
+        incomplete=0,
+        required_incomplete=0,
+        integrity={
+            "status": "reconciled",
+            "duplicate_attempt_ids": [],
+            "unresolved_evidence_attempts": 0,
+            "cross_project_attempts": 0,
+        },
+        attestation=None,
+        release_note_coverage=coverage
+        or (
+            {
+                "release_note": "tool-and-sdk-timeout-boundaries",
+                "status": "infrastructure_only",
+                "task_ids": [],
+                "dimensions": [],
+                "infrastructure_gates": ["bounded-timeout"],
+                "rationale": "qualified by a separate package gate",
+            },
+        ),
+    )
+
+
+def test_release_note_infrastructure_gate_is_implicit_and_fail_closed() -> None:
+    missing = _release_note_gate_decision(None)
+    failed = _release_note_gate_decision("failed")
+    passed = _release_note_gate_decision("passed")
+
+    gate_id = "release-note-infrastructure-bounded-timeout"
+    assert missing.status == "blocked"
+    assert next(item for item in missing.gates if item.id == gate_id).status == (
+        "unavailable"
+    )
+    assert failed.status == "hold"
+    assert next(item for item in failed.gates if item.id == gate_id).status == (
+        "failed"
+    )
+    assert passed.status == "ready_for_signoff"
+    assert next(item for item in passed.gates if item.id == gate_id).status == (
+        "passed"
+    )
+
+
+def test_v3_release_signoff_requires_actionability_review() -> None:
+    decision = _release_note_gate_decision("passed")
+    assert decision.status == "ready_for_signoff"
+    digest = "a" * 64
+    without_review = _apply_decision_attestation(
+        decision,
+        DecisionAttestationV1(
+            signer="release-owner",
+            signed_result_digest=digest,
+            signed_at="2026-07-30T00:00:00Z",
+        ),
+        qualification_digest=digest,
+        require_actionability_review=True,
+    )
+    rejected = _apply_decision_attestation(
+        decision,
+        DecisionAttestationV1(
+            signer="release-owner",
+            signed_result_digest=digest,
+            signed_at="2026-07-30T00:00:00Z",
+            review_status="rejected",
+        ),
+        qualification_digest=digest,
+        require_actionability_review=True,
+    )
+    accepted = _apply_decision_attestation(
+        decision,
+        DecisionAttestationV1(
+            signer="release-owner",
+            signed_result_digest=digest,
+            signed_at="2026-07-30T00:00:00Z",
+            review_status="accepted_actionable",
+        ),
+        qualification_digest=digest,
+        require_actionability_review=True,
+    )
+
+    assert without_review.status == "invalid"
+    assert rejected.status == "invalid"
+    assert accepted.status == "go"
+
+
+def test_release_note_gate_cannot_be_weakened_by_explicit_policy() -> None:
+    policy = _decision_policy()
+    policy["gates"] = [
+        {
+            "id": "weaken-timeout",
+            "label": "Weak timeout gate",
+            "category": "infrastructure",
+            "source": "infrastructure.gate.bounded-timeout",
+            "operator": "eq",
+            "target": False,
+            "critical": False,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="critical infrastructure eq/true"):
+        _release_note_gate_decision("passed", policy=policy)
+
+
+def test_core_implicit_gate_cannot_be_weakened_by_explicit_policy() -> None:
+    policy = _decision_policy()
+    policy["gates"] = [
+        {
+            "id": "weak-critical-regressions",
+            "label": "Allow many critical regressions",
+            "category": "task",
+            "source": "task.critical_regressions",
+            "operator": "lte",
+            "target": 100,
+            "critical": False,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="cannot be weakened"):
+        _release_note_gate_decision("passed", policy=policy)
+
+
+def test_shared_release_note_infrastructure_gate_is_emitted_once() -> None:
+    coverage = (
+        {
+            "release_note": "timeout-a",
+            "status": "infrastructure_only",
+            "task_ids": [],
+            "dimensions": [],
+            "infrastructure_gates": ["bounded-timeout"],
+            "rationale": "first behavior",
+        },
+        {
+            "release_note": "timeout-b",
+            "status": "infrastructure_only",
+            "task_ids": [],
+            "dimensions": [],
+            "infrastructure_gates": ["bounded-timeout"],
+            "rationale": "second behavior",
+        },
+    )
+    decision = _release_note_gate_decision("passed", coverage=coverage)
+
+    assert sum(
+        item.id == "release-note-infrastructure-bounded-timeout"
+        for item in decision.gates
+    ) == 1
 
 
 def test_v2_decision_requires_exact_human_attestation() -> None:
@@ -685,6 +879,12 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         "trace_base_url": "https://trace.wandb.ai",
         "app_base_url": "https://wandb.ai",
     }
+    raw["supersedes"] = [
+        {
+            "result_digest": "6" * 64,
+            "reason": "The historical result lacked source isolation.",
+        }
+    ]
     spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
     operator = OperatorService(tmp_path)
     preview = preview_comparison(spec, repo_root=tmp_path, operator=operator)
@@ -735,6 +935,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["trace_receipt"] = approved["evidence_destination"]
         row["approved_comparison"] = approved
         row["integration_provenance"] = []
+        row["comparison_dimension_roles"] = {
+            "release.factual_correctness": "outcome",
+            "release.locked_project_scope": "safety_gate",
+        }
         row["source_pre_run_drift"] = drift
         row["source_post_run_drift"] = drift
         row["prediction_id"] = f"{variant}-prediction-row"
@@ -749,6 +953,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["weave_evaluation_root_call_id"] = (
             f"{call_prefix}-evaluation"
         )
+        row["weave_evaluation_root_ref"] = (
+            "weave:///wandb/result-project/call/"
+            f"{call_prefix}-evaluation"
+        )
         row["dataset_url"] = (
             f"{result_base}/objects/release-dataset/versions/v1"
         )
@@ -760,12 +968,24 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             f"{result_base}/calls/{call_prefix}-eval"
         )
         row["eval_predict_and_score_call_id"] = f"{call_prefix}-eval"
+        row["eval_predict_and_score_ref"] = (
+            "weave:///wandb/result-project/call/"
+            f"{call_prefix}-eval"
+        )
         row["prediction_url"] = (
             f"{result_base}/calls/{call_prefix}-prediction"
         )
         row["prediction_call_id"] = f"{call_prefix}-prediction"
+        row["weave_prediction_ref"] = (
+            "weave:///wandb/result-project/call/"
+            f"{call_prefix}-prediction"
+        )
         row["agent_url"] = f"{result_base}/calls/{call_prefix}-agent"
         row["native_agent_root_call_id"] = f"{call_prefix}-agent"
+        row["weave_agent_root_ref"] = (
+            "weave:///wandb/result-project/call/"
+            f"{call_prefix}-agent"
+        )
         rows.append(row)
 
     result = analyze_comparison_rows(
@@ -778,6 +998,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         approved_comparison=approved,
         result_schema_version=3,
         study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
     )
 
     assert isinstance(result, ComparisonResultV3)
@@ -789,12 +1010,34 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         result_project
     )
     assert result.behavioral_summary.status == "improved"
+    assert result.supersedes[0].result_digest == "6" * 64
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
     assert (
         result.paired_cases[0].candidate.actual_query_scope
         == (source_project,)
     )
+
+    role_drift = json.loads(json.dumps(rows))
+    candidate_row = next(
+        row for row in role_drift if row["variant_id"] == "candidate"
+    )
+    candidate_row["comparison_dimension_roles"][
+        "release.factual_correctness"
+    ] = "mechanism"
+    with pytest.raises(ValueError, match="one consistent locked role"):
+        analyze_comparison_rows(
+            comparison_id=spec.id,
+            preview_digest=preview.preview_digest,
+            rows=role_drift,
+            source="v3-run",
+            expected_evidence_project=result_project,
+            expected_source_evidence_project=source_project,
+            approved_comparison=approved,
+            result_schema_version=3,
+            study_intent="mcp_release_maintenance",
+            supersedes=spec.supersedes,
+        )
 
     destination = tmp_path / "v3-result"
     destination.mkdir()
@@ -803,6 +1046,150 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     )
     write_comparison_result(result, destination=destination)
     assert read_comparison_result(destination / "result.json") == result
+
+    def write_rehashed_result(
+        raw_result: dict[str, object],
+        filename: str,
+    ) -> Path:
+        raw_result["qualification_digest"] = _comparison_qualification_digest(
+            raw_result
+        )
+        raw_result["result_digest"] = raw_result["qualification_digest"]
+        path = destination / filename
+        path.write_text(json.dumps(raw_result), encoding="utf-8")
+        return path
+
+    forged_identity = result.to_dict()
+    forged_identity["paired_cases"][0]["candidate"]["identity"][
+        "candidate"
+    ] = "forged-candidate"
+    with pytest.raises(ValueError, match="attempt identity disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_identity,
+                "forged-attempt-identity.json",
+            )
+        )
+
+    incomplete_evidence_chain = result.to_dict()
+    incomplete_evidence_chain["paired_cases"][0]["candidate"][
+        "evidence_links"
+    ].pop()
+    with pytest.raises(ValueError, match="exactly five unique evidence links"):
+        read_comparison_result(
+            write_rehashed_result(
+                incomplete_evidence_chain,
+                "incomplete-evidence-chain.json",
+            )
+        )
+
+    wrong_evidence_status = result.to_dict()
+    wrong_evidence_status["paired_cases"][0]["candidate"][
+        "evidence_status"
+    ] = "missing"
+    with pytest.raises(ValueError, match="evidence status disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                wrong_evidence_status,
+                "wrong-evidence-status.json",
+            )
+        )
+
+    wrong_call_route = result.to_dict()
+    evaluation_link = next(
+        item
+        for item in wrong_call_route["paired_cases"][0]["candidate"][
+            "evidence_links"
+        ]
+        if item["kind"] == "evaluation_root"
+    )
+    evaluation_link["ref"] = "weave:///wandb/other-project/call/forged"
+    evaluation_link["url"] = (
+        "https://wandb.ai/wandb/other-project/weave/calls/forged"
+    )
+    with pytest.raises(ValueError, match="result topology"):
+        read_comparison_result(
+            write_rehashed_result(
+                wrong_call_route,
+                "wrong-call-route.json",
+            )
+        )
+
+    wrong_query_scope = result.to_dict()
+    wrong_query_scope["paired_cases"][0]["candidate"][
+        "actual_query_scope"
+    ] = [source_project, "wandb/other-project"]
+    with pytest.raises(ValueError, match="actual query scope disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                wrong_query_scope,
+                "wrong-query-scope.json",
+            )
+        )
+
+    malformed_result = result.to_dict()
+    malformed_result["task_validity"] = []
+    malformed_result["qualification_digest"] = _comparison_qualification_digest(
+        malformed_result
+    )
+    malformed_result["result_digest"] = malformed_result["qualification_digest"]
+    malformed_result_path = destination / "malformed-result.json"
+    malformed_result_path.write_text(
+        json.dumps(malformed_result),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="task validity"):
+        read_comparison_result(malformed_result_path)
+
+    contradictory_pair = result.to_dict()
+    contradictory_pair["paired_cases"][0]["status"] = "regressed"
+    contradictory_pair["qualification_digest"] = (
+        _comparison_qualification_digest(contradictory_pair)
+    )
+    contradictory_pair["result_digest"] = contradictory_pair[
+        "qualification_digest"
+    ]
+    contradictory_pair_path = destination / "contradictory-pair-result.json"
+    contradictory_pair_path.write_text(
+        json.dumps(contradictory_pair),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="pair status disagrees"):
+        read_comparison_result(contradictory_pair_path)
+
+    contradictory_behavior = result.to_dict()
+    contradictory_behavior["behavioral_summary"]["status"] = "regressed"
+    contradictory_behavior["qualification_digest"] = (
+        _comparison_qualification_digest(contradictory_behavior)
+    )
+    contradictory_behavior["result_digest"] = contradictory_behavior[
+        "qualification_digest"
+    ]
+    contradictory_behavior_path = (
+        destination / "contradictory-behavior-result.json"
+    )
+    contradictory_behavior_path.write_text(
+        json.dumps(contradictory_behavior),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="behavioral status disagrees"):
+        read_comparison_result(contradictory_behavior_path)
+
+    unknown_decision_field = result.to_dict()
+    unknown_decision_field["decision"]["invented"] = True
+    unknown_decision_field["qualification_digest"] = (
+        _comparison_qualification_digest(unknown_decision_field)
+    )
+    unknown_decision_field["result_digest"] = unknown_decision_field[
+        "qualification_digest"
+    ]
+    unknown_decision_path = destination / "unknown-decision-result.json"
+    unknown_decision_path.write_text(
+        json.dumps(unknown_decision_field),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="unknown decision summary field"):
+        read_comparison_result(unknown_decision_path)
 
     view = build_comparison_evaluation_view(result.to_dict())
     assert isinstance(view, ExperimentViewV3)
@@ -818,6 +1205,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         .startswith("https://wandb.ai/wandb/result-project/weave/calls/")
     )
     assert experiment_view_from_dict(view.to_dict()) == view
+    assert view.supersedes[0]["result_digest"] == "6" * 64
 
     malformed = json.loads(json.dumps(view.to_dict()))
     malformed["paired_cases"][0]["candidate"]["actual_query_scope"] = [
@@ -825,6 +1213,150 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     ]
     with pytest.raises(ValueError, match="actual query scope"):
         experiment_view_from_dict(malformed)
+
+    missing_attempts = json.loads(json.dumps(view.to_dict()))
+    missing_attempts["paired_cases"] = []
+    with pytest.raises(
+        ValueError,
+        match="paired cases must expose every aligned attempt",
+    ):
+        experiment_view_from_dict(missing_attempts)
+
+    running_attempt = json.loads(json.dumps(view.to_dict()))
+    running_attempt["paired_cases"][0]["candidate"][
+        "execution_status"
+    ] = "running"
+    with pytest.raises(ValueError, match="must be terminal"):
+        experiment_view_from_dict(running_attempt)
+
+    unknown_coverage = result.to_dict()
+    unknown_coverage["release_note_coverage"] = [
+        {
+            "release_note": "structured-query-surface",
+            "status": "observed_delta",
+            "task_ids": ["unknown-task"],
+            "dimensions": ["unknown.dimension"],
+            "infrastructure_gates": [],
+            "rationale": "This mapping is deliberately invalid.",
+        }
+    ]
+    unknown_coverage["qualification_digest"] = (
+        _comparison_qualification_digest(unknown_coverage)
+    )
+    unknown_coverage["result_digest"] = unknown_coverage[
+        "qualification_digest"
+    ]
+    unknown_coverage_path = destination / "unknown-coverage-result.json"
+    unknown_coverage_path.write_text(
+        json.dumps(unknown_coverage),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match="unknown task or dimension evidence",
+    ):
+        read_comparison_result(unknown_coverage_path)
+
+    release_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+        decision_policy=_decision_policy(),
+    )
+    assert release_result.decision.status == "ready_for_signoff"
+
+    forged_gate = release_result.to_dict()
+    candidate_gate = next(
+        gate
+        for gate in forged_gate["decision"]["gates"]
+        if gate["id"] == "candidate-passes"
+    )
+    candidate_gate["actual"] = 999
+    with pytest.raises(ValueError, match="decision gate 'candidate-passes'"):
+        read_comparison_result(
+            write_rehashed_result(forged_gate, "forged-decision-gate.json")
+        )
+
+    forged_decision_identity = release_result.to_dict()
+    forged_decision_identity["decision"]["candidate_sha"] = "9" * 40
+    with pytest.raises(ValueError, match="decision identity disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_decision_identity,
+                "forged-decision-identity.json",
+            )
+        )
+
+    signed_release_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+        decision_policy=_decision_policy(),
+        attestation={
+            "signer": "release-owner",
+            "signed_result_digest": release_result.qualification_digest,
+            "signed_at": "2026-07-30T00:00:00Z",
+            "review_status": "accepted_actionable",
+        },
+    )
+    assert signed_release_result.decision.status == "go"
+    rejected_actionability = signed_release_result.to_dict()
+    rejected_actionability["decision"]["attestation"]["review_status"] = (
+        "rejected"
+    )
+    rejected_actionability["result_digest"] = _comparison_result_digest(
+        rejected_actionability
+    )
+    rejected_actionability_path = (
+        destination / "rejected-actionability-attestation.json"
+    )
+    rejected_actionability_path.write_text(
+        json.dumps(rejected_actionability),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="accepted actionability"):
+        read_comparison_result(rejected_actionability_path)
+
+    both_pass_rows = json.loads(json.dumps(rows))
+    for row in both_pass_rows:
+        row["pass"] = True
+        row["comparison_deterministic_scores"] = {
+            key: True
+            for key in row["comparison_deterministic_scores"]
+        }
+    non_discriminating = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=both_pass_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+    )
+    assert non_discriminating.paired_cases[0].status == "unchanged"
+    assert non_discriminating.task_validity[0].status == (
+        "non_discriminating"
+    )
+    assert non_discriminating.task_validity[0].blockers == ()
+    assert non_discriminating.behavioral_summary.status == "unchanged"
+    assert non_discriminating.behavioral_summary.improved_pairs == 0
 
 
 def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
@@ -1251,6 +1783,14 @@ def test_hosted_privacy_failure_invalidates_behavior_and_release() -> None:
         _decision_row(variant="candidate"),
     ]
     for row in rows:
+        for field in (
+            "harbor_config",
+            "harbor_environment",
+            "harbor_conformance_status",
+            "harbor_conformance_receipt_digest",
+            "harbor_policy_attestation_verified",
+        ):
+            row.pop(field, None)
         row["hosted_evidence_privacy_scan_status"] = "failed"
         row["hosted_evidence_privacy_match_count"] = 1
 
@@ -1304,6 +1844,78 @@ def test_attempt_identity_is_stable_and_duplicates_invalidate_result() -> None:
     )
     assert duplicated.integrity["status"] == "invalid"
     assert duplicated.decision.status == "invalid"
+
+
+def test_supplied_attempt_identity_drift_is_rejected_before_normalization() -> (
+    None
+):
+    baseline = _decision_row(variant="baseline")
+    candidate = _decision_row(variant="candidate")
+    baseline["attempt_identity"] = attempt_identity(
+        task_id="release-task",
+        arm="candidate",
+        harness="claude-code",
+        attempt=1,
+        candidate="sha256:baseline",
+        runtime="sha256:runtime",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="supplied attempt identity disagrees",
+    ):
+        analyze_comparison_rows(
+            comparison_id="attempt-identity-drift",
+            preview_digest="d" * 64,
+            rows=[baseline, candidate],
+            source="test",
+        )
+
+
+def test_answer_excerpt_requires_privacy_evidence_and_redacts_json_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-ant-private-test-value"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    row = _decision_row(variant="candidate")
+    row["agent_response"] = json.dumps(
+        {
+            "api_key": secret,
+            "password": "quoted-private-password",
+            "recommendation": "hold",
+        }
+    )
+
+    excerpt = _sanitized_answer_excerpt(row)
+
+    assert excerpt is not None
+    assert secret not in excerpt
+    assert "quoted-private-password" not in excerpt
+    assert "[redacted]" in excerpt
+    assert '"recommendation":"hold"' in excerpt
+
+    row["agent_response"] = (
+        "```json\n"
+        + json.dumps(
+            {
+                "token": secret,
+                "recommendation": "investigate",
+            }
+        )
+        + "\n```"
+    )
+    fenced_excerpt = _sanitized_answer_excerpt(row)
+    assert fenced_excerpt is not None
+    assert secret not in fenced_excerpt
+    assert '"recommendation":"investigate"' in fenced_excerpt
+
+    row["agent_response"] = f'ANTHROPIC_API_KEY="{secret}" result=hold'
+    text_excerpt = _sanitized_answer_excerpt(row)
+    assert text_excerpt is not None
+    assert secret not in text_excerpt
+
+    row["hosted_evidence_privacy_scan_status"] = "unavailable"
+    assert _sanitized_answer_excerpt(row) is None
 
 
 def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(

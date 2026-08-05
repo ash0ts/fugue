@@ -96,6 +96,7 @@ jobs:
           tests/test_experiment_views.py tests/test_comparison.py
           tests/test_component_imports.py tests/test_research_comparisons.py
           tests/test_tasksets.py
+          tests/test_mcp_read_only_evidence.py
           tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
 
   quality:

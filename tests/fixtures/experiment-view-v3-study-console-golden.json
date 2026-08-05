@@ -139,15 +139,15 @@
     "source_destination": {
       "api_base_url": "https://api.wandb.ai",
       "app_base_url": "https://wandb.ai",
-      "destination_digest": "d14e00b140272ccc93f7ff82798ab070488017d4e6b2529a7558a49fcc6b9dda",
+      "destination_digest": "1a23dbb1c060bf90bf17bd5f89bf01b6c10c7756f94bfc11a8bd7ba06be9c837",
       "entity": "wandb",
-      "project": "fugue-mcp-release-source-v1",
-      "project_slug": "wandb/fugue-mcp-release-source-v1",
+      "project": "fugue-mcp-release-source-v2",
+      "project_slug": "wandb/fugue-mcp-release-source-v2",
       "schema_version": 1,
       "trace_base_url": "https://trace.wandb.ai"
     },
     "source_lock_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-    "topology_digest": "5b100351a8c520cced26d13b2600acd5a7883714a546f3c1be30c5c0fb5558fd"
+    "topology_digest": "bc63b3c3ad203d3ba57119395da58c2eeeec6dd9a029ba46159b8d24fb6b834d"
   },
   "infrastructure_health": "healthy",
   "integrity_status": "reconciled",
@@ -158,7 +158,7 @@
       "attempt": 1,
       "baseline": {
         "actual_query_scope": [
-          "wandb/fugue-mcp-release-source-v1"
+          "wandb/fugue-mcp-release-source-v2"
         ],
         "attempt_id": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
         "cost_usd": 0.1,
@@ -202,7 +202,7 @@
         ],
         "evidence_status": "reconciled",
         "execution_fingerprint": "harbor-execution-fingerprint",
-        "execution_status": "passed",
+      "execution_status": "completed",
         "identity": {
           "arm": "baseline",
           "attempt": 1,
@@ -222,9 +222,9 @@
         "passed": false,
         "prediction_id": "baseline-prediction",
         "queried_projects": [
-          "wandb/fugue-mcp-release-source-v1"
+          "wandb/fugue-mcp-release-source-v2"
         ],
-        "reported_project_identity": "wandb/fugue-mcp-release-source-v1",
+        "reported_project_identity": "wandb/fugue-mcp-release-source-v2",
         "runtime_lock_digest": "harbor-runtime-lock",
         "sanitized_answer_excerpt": "The baseline summary did not reconcile direct children.",
         "score_explanations": {
@@ -242,7 +242,7 @@
       },
       "candidate": {
         "actual_query_scope": [
-          "wandb/fugue-mcp-release-source-v1"
+          "wandb/fugue-mcp-release-source-v2"
         ],
         "attempt_id": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b",
         "cost_usd": 0.1,
@@ -286,7 +286,7 @@
         ],
         "evidence_status": "reconciled",
         "execution_fingerprint": "harbor-execution-fingerprint",
-        "execution_status": "passed",
+      "execution_status": "completed",
         "identity": {
           "arm": "candidate",
           "attempt": 1,
@@ -306,9 +306,9 @@
         "passed": true,
         "prediction_id": "candidate-prediction",
         "queried_projects": [
-          "wandb/fugue-mcp-release-source-v1"
+          "wandb/fugue-mcp-release-source-v2"
         ],
-        "reported_project_identity": "wandb/fugue-mcp-release-source-v1",
+        "reported_project_identity": "wandb/fugue-mcp-release-source-v2",
         "runtime_lock_digest": "harbor-runtime-lock",
         "sanitized_answer_excerpt": "The candidate reconciled the exact direct children.",
         "score_explanations": {
@@ -356,6 +356,9 @@
     }
   ],
   "schema_version": 3,
+  "state_counts": {
+    "completed": 2
+  },
   "scorer_revisions": [
     {
       "details": {

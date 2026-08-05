@@ -1006,22 +1006,37 @@ def _direct_attempt(
         ),
         "evaluation_id": f"{variant}-evaluation",
         "weave_evaluation_root_call_id": f"{call}-evaluation",
+        "weave_evaluation_root_ref": (
+            f"weave:///wandb/projection-test/call/{call}-evaluation"
+        ),
         "evaluation_url": f"{base}/calls/{call}-evaluation",
         "evaluation_root_object_verified": True,
         "evaluation_root_dataset_relationship_verified": True,
         "evaluation_root_prediction_relationship_verified": True,
-        "dataset_id": "projection-dataset",
+        "dataset_id": (
+            "weave:///wandb/projection-test/object/projection-dataset:v1"
+        ),
         "dataset_url": f"{base}/datasets/projection-dataset",
         "dataset_version_object_verified": True,
         "eval_predict_and_score_call_id": f"{call}-predict-and-score",
+        "eval_predict_and_score_ref": (
+            "weave:///wandb/projection-test/call/"
+            f"{call}-predict-and-score"
+        ),
         "eval_predict_and_score_url": f"{base}/calls/{call}-predict-and-score",
         "eval_predict_and_score_object_verified": True,
         "weave_prediction_call_id": f"{call}-prediction",
+        "weave_prediction_ref": (
+            f"weave:///wandb/projection-test/call/{call}-prediction"
+        ),
         "weave_prediction_url": f"{base}/calls/{call}-prediction",
         "weave_prediction_object_verified": True,
         "prediction_child_relationship_verified": True,
         "evaluation_prediction_graph_verified": True,
         "weave_agent_root_call_id": f"{call}-agent",
+        "weave_agent_root_ref": (
+            f"weave:///wandb/projection-test/call/{call}-agent"
+        ),
         "weave_agent_url": f"{base}/calls/{call}-agent",
         "trace_link_status": "linked",
         "agent_graph_verified": True,

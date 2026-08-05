@@ -1,42 +1,56 @@
 {
   "mcpServers": {
-    "wandb-0-3-7": {
+    "wandb-main": {
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server@80252b3aa23ae3c1fdde089ce2b7dfb106dafb38",
+        "git+https://github.com/wandb/wandb-mcp-server@53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
         "wandb_mcp_server"
       ],
       "env": {
         "WANDB_API_KEY": "${WANDB_API_KEY}",
-        "WANDB_BASE_URL": "${WANDB_BASE_URL}",
-        "MCP_ANALYTICS_LOG_STREAM": "stderr"
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
       },
+      "allowed_tools": [
+        "get_run_history_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "summarize_evaluation_tool"
+      ],
       "allowed_hosts": [
         "api.wandb.ai",
         "app.wandb.ai",
         "trace.wandb.ai"
       ],
-      "version": "git:80252b3aa23ae3c1fdde089ce2b7dfb106dafb38"
+      "version": "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
     },
-    "wandb-0-4": {
+    "wandb-0-4-staging": {
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/wandb/wandb-mcp-server@a2bae7271323ac43262ffb73454b0aff01ddc808",
+        "git+https://github.com/wandb/wandb-mcp-server@29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
         "wandb_mcp_server"
       ],
       "env": {
         "WANDB_API_KEY": "${WANDB_API_KEY}",
-        "WANDB_BASE_URL": "${WANDB_BASE_URL}",
-        "MCP_ANALYTICS_LOG_STREAM": "stderr"
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
       },
+      "allowed_tools": [
+        "get_run_history_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "summarize_evaluation_tool"
+      ],
       "allowed_hosts": [
         "api.wandb.ai",
         "app.wandb.ai",
         "trace.wandb.ai"
       ],
-      "version": "git:a2bae7271323ac43262ffb73454b0aff01ddc808"
+      "version": "git:29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7"
     }
   }
 }
