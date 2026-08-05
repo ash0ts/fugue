@@ -162,6 +162,61 @@ def _parser() -> FugueArgumentParser:
     demo.add_argument("--repo-root", type=Path, default=Path.cwd())
     demo.set_defaults(handler=_comparison_demo)
 
+    mcp_component = subparsers.add_parser(
+        "mcp", help="Import, inspect, and lock a normal MCP server declaration"
+    )
+    mcp_actions = mcp_component.add_subparsers(
+        dest="mcp_action", metavar="ACTION", required=True
+    )
+    mcp_import = mcp_actions.add_parser(
+        "import", help="Import one selected server from Codex TOML or mcpServers JSON"
+    )
+    mcp_import.add_argument("--config", type=Path, required=True)
+    mcp_import.add_argument("--server", required=True)
+    mcp_import.add_argument("--as", dest="import_id", required=True)
+    mcp_import.add_argument("--repo-root", type=Path, default=Path.cwd())
+    mcp_import.set_defaults(handler=_component_mcp)
+    mcp_add = mcp_actions.add_parser(
+        "add", help="Record one explicit argv-based stdio MCP declaration"
+    )
+    mcp_add.add_argument("import_id")
+    mcp_add.add_argument("--required-env", action="append", default=[])
+    mcp_add.add_argument("--repo-root", type=Path, default=Path.cwd())
+    mcp_add.add_argument("argv", nargs=argparse.REMAINDER)
+    mcp_add.set_defaults(handler=_component_mcp)
+    for action_name in ("inspect", "lock"):
+        action_parser = mcp_actions.add_parser(
+            action_name, help=f"{action_name.title()} one imported MCP declaration"
+        )
+        action_parser.add_argument("import_id")
+        action_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+        if action_name == "lock":
+            action_parser.add_argument(
+                "--acknowledge-package-code", action="store_true"
+            )
+        action_parser.set_defaults(handler=_component_mcp)
+
+    skills_component = subparsers.add_parser(
+        "skills", help="Import, inspect, and lock a standard Agent Skill"
+    )
+    skill_actions = skills_component.add_subparsers(
+        dest="skills_action", metavar="ACTION", required=True
+    )
+    skill_import = skill_actions.add_parser(
+        "import", help="Import a local Skill folder or exact Git Skill source"
+    )
+    skill_import.add_argument("source")
+    skill_import.add_argument("--as", dest="import_id")
+    skill_import.add_argument("--repo-root", type=Path, default=Path.cwd())
+    skill_import.set_defaults(handler=_component_skills)
+    for action_name in ("inspect", "lock"):
+        action_parser = skill_actions.add_parser(
+            action_name, help=f"{action_name.title()} one imported Agent Skill"
+        )
+        action_parser.add_argument("skill_id")
+        action_parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+        action_parser.set_defaults(handler=_component_skills)
+
     plan = subparsers.add_parser("plan", help="Plan an experiment with Fugue AI")
     plan.add_argument("request", nargs="+")
     plan.add_argument("--from", dest="base_experiment", default="pilot")
@@ -1213,6 +1268,71 @@ def _tui(args: argparse.Namespace) -> int:
 
     screen = "compose" if args.screen == "plan" else args.screen
     run_tui(initial_screen=screen, experiment_id=args.experiment)
+    return 0
+
+
+def _component_mcp(args: argparse.Namespace) -> int:
+    from fugue.bench.component_imports import (
+        add_mcp_command,
+        import_mcp_config,
+        inspect_mcp_import,
+        lock_mcp_import,
+    )
+
+    root = args.repo_root.resolve()
+    if args.mcp_action == "import":
+        value: Any = import_mcp_config(
+            args.config,
+            server=args.server,
+            import_id=args.import_id,
+            repo_root=root,
+        )
+        payload = value.to_dict()
+    elif args.mcp_action == "add":
+        argv = list(args.argv)
+        if argv[:1] == ["--"]:
+            argv = argv[1:]
+        value = add_mcp_command(
+            args.import_id,
+            argv,
+            repo_root=root,
+            required_env=tuple(args.required_env),
+        )
+        payload = value.to_dict()
+    elif args.mcp_action == "inspect":
+        payload = inspect_mcp_import(args.import_id, root)
+    else:
+        value = lock_mcp_import(
+            args.import_id,
+            root,
+            acknowledge_package_code=args.acknowledge_package_code,
+        )
+        payload = value.to_dict()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _component_skills(args: argparse.Namespace) -> int:
+    from fugue.bench.component_imports import (
+        import_skill,
+        inspect_skill_import,
+        lock_skill_import,
+    )
+
+    root = args.repo_root.resolve()
+    if args.skills_action == "import":
+        value: Any = import_skill(
+            args.source,
+            repo_root=root,
+            import_id=args.import_id,
+        )
+        payload = value.to_dict()
+    elif args.skills_action == "inspect":
+        payload = inspect_skill_import(args.skill_id, root)
+    else:
+        value = lock_skill_import(args.skill_id, root)
+        payload = value.to_dict()
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

@@ -256,12 +256,41 @@ def comparison_from_dict(
 def check_comparison(
     spec: ComparisonSpecV1, *, repo_root: Path
 ) -> ComparisonReadinessV1:
+    from fugue.bench.integrations import load_integration
+    from fugue.bench.sources import resolve_skill
+
     tasks = _load_public_tasks(repo_root / spec.taskset.tasks)
     labels = _load_private_labels(repo_root / spec.taskset.private_labels)
     actual_changes, blockers = _comparison_identity_issues(spec)
     warnings: list[str] = []
     task_ids = tuple(str(item["id"]) for item in tasks)
     blockers.extend(_task_label_issues(task_ids, labels))
+    for candidate_name, candidate in (
+        ("baseline", spec.baseline),
+        ("candidate", spec.candidate),
+    ):
+        for skill_id in candidate.skills:
+            try:
+                resolve_skill(skill_id, repo_root)
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                blockers.append(
+                    f"{candidate_name} Skill {skill_id!r} is not locked and usable: {exc}"
+                )
+        for selection in candidate.integrations:
+            integration_id = str(selection["id"])
+            try:
+                integration = load_integration(integration_id, repo_root)
+            except (FileNotFoundError, ValueError) as exc:
+                blockers.append(
+                    f"{candidate_name} integration {integration_id!r} is not locked "
+                    f"and usable: {exc}"
+                )
+                continue
+            if integration.support != "supported":
+                warnings.append(
+                    f"{candidate_name} integration {integration_id!r} is "
+                    f"{integration.support}; its evidence is exploratory"
+                )
     deterministic = tuple(
         item.id for item in spec.evaluators if item.type == "deterministic"
     )
