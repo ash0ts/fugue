@@ -475,6 +475,8 @@ def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
     assert projected["experiment_id"] == expected_experiment_id
     store = StudyStore(tmp_path)
     study = store.get_study(research_id)
+    assert study.title == "Fugue comparison results"
+    assert study.campaign_id == "fugue-direct-comparisons"
     assert study.results == ()
     assert store.ensure_result_projection_events() == 0
     assert len(

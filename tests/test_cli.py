@@ -446,6 +446,42 @@ tasks:
     assert not (tmp_path / ".fugue").exists()
 
 
+def test_run_preview_reports_missing_governed_asset_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / ".fugue/loop-engineering/tasksets/discovery.yaml"
+
+    assert (
+        main(
+            [
+                "run",
+                "--manifest",
+                missing.as_posix(),
+                "--preview",
+                "--json",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / ".env").as_posix(),
+            ]
+        )
+        == 2
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "asset": ".fugue/loop-engineering/tasksets/discovery.yaml",
+        "error_type": "missing_governed_asset",
+        "next_action": (
+            "Materialize and lock the referenced task or evaluation asset before "
+            "previewing or running this experiment."
+        ),
+        "schema_version": 1,
+        "status": "blocked",
+    }
+
+
 def test_shell_environment_wins_over_blank_dotenv(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=\nWANDB_API_KEY=dotenv-value\n")
