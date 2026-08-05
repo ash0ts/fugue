@@ -1,0 +1,239 @@
+{
+  "counts": {
+    "aligned_evaluation_pairs": 8,
+    "dataset_rows": 8,
+    "evaluation_prediction_rows": 16,
+    "runs": 6,
+    "source_conversations": 24,
+    "tool_spans": 48
+  },
+  "created_at": "2026-07-28T15:45:10.866338Z",
+  "evidence_lock_digest": "6625cc5b59624d792d1f48b283aa0dbfd6a0a2c5721900b1da145d15a461587c",
+  "facts_digest": "992bfe5bcc31511a8eb21c06fe77267442479d50ae838a473aed1b568b512fe6",
+  "objects": {
+    "dataset": {
+      "content_digest": "3f43ad4e3a1e394cb3a9278af3f1e169ab1efe55b7962dbd1734529d3a8bcab1",
+      "name": "mcp-release-maintenance-cases",
+      "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/mcp-release-maintenance-cases:cnjKKmmHwlc4A0JTpHGtP1A59iBG25l4FwQ1mHV7IhU",
+      "rows": 8
+    },
+    "evaluations": [
+      {
+        "call_id": "019fa966-b368-74bf-a142-7b70988c9a45",
+        "call_ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa966-b368-74bf-a142-7b70988c9a45",
+        "prediction_rows": 8,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/mcp-release-maintainer-r17:GQjwLppe59XcnYRTXdAk6MSPY5cODR4HD8Ih30vaNtY",
+        "revision": "maintainer-r17",
+        "summary_digest": "6f75eafb7ef7bbd5064b762253c775453862ac4776e19196e1d4ebcf697afacf"
+      },
+      {
+        "call_id": "019fa966-becb-7809-ab98-2fea9ccc7a56",
+        "call_ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa966-becb-7809-ab98-2fea9ccc7a56",
+        "prediction_rows": 8,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/mcp-release-maintainer-r18:gCE5TXBSgwWrALMHjXmyuZ3F7CUEGSY51v8Lu46jM50",
+        "revision": "maintainer-r18",
+        "summary_digest": "f3fc1ae01866f29fd04598856ad226bae6b6a35c5486ce1ca40f52fc8a7eba6c"
+      }
+    ],
+    "runs": [
+      {
+        "id": "maint-r18-01",
+        "name": "inventory-openclaw",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-01",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-01"
+      },
+      {
+        "id": "maint-r18-02",
+        "name": "coverage-claude",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-02",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-02"
+      },
+      {
+        "id": "maint-r18-03",
+        "name": "regression-openclaw",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-03",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-03"
+      },
+      {
+        "id": "maint-r18-04",
+        "name": "partial-evidence-claude",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-04",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-04"
+      },
+      {
+        "id": "maint-r18-05",
+        "name": "cost-audit-openclaw",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-05",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-05"
+      },
+      {
+        "id": "maint-r18-06",
+        "name": "broad-history-scan-claude",
+        "ref": "wandb-run:///wandb/fugue-mcp-release-qualification-v1/maint-r18-06",
+        "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+        "state": "finished",
+        "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/maint-r18-06"
+      }
+    ],
+    "source_conversations": [
+      {
+        "call_id": "019fa965-27ab-7df3-a257-a0461f1b4dc1",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-27ab-7df3-a257-a0461f1b4dc1",
+        "run_id": "maint-r18-01"
+      },
+      {
+        "call_id": "019fa965-2d2f-7f75-97bd-d4c0b2c433ae",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d2f-7f75-97bd-d4c0b2c433ae",
+        "run_id": "maint-r18-01"
+      },
+      {
+        "call_id": "019fa965-2d30-7fb5-a0d8-332ef7ae6a4d",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d30-7fb5-a0d8-332ef7ae6a4d",
+        "run_id": "maint-r18-01"
+      },
+      {
+        "call_id": "019fa965-2d31-7213-95bb-45e4197fc8d1",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d31-7213-95bb-45e4197fc8d1",
+        "run_id": "maint-r18-01"
+      },
+      {
+        "call_id": "019fa965-2d31-728d-bd6f-1e6bb1854a68",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d31-728d-bd6f-1e6bb1854a68",
+        "run_id": "maint-r18-02"
+      },
+      {
+        "call_id": "019fa965-2d32-74b3-a3f0-c4cb79a08168",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d32-74b3-a3f0-c4cb79a08168",
+        "run_id": "maint-r18-02"
+      },
+      {
+        "call_id": "019fa965-2d33-7c0f-af10-5fc007300253",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d33-7c0f-af10-5fc007300253",
+        "run_id": "maint-r18-02"
+      },
+      {
+        "call_id": "019fa965-2d33-7bba-bb74-67286688808e",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d33-7bba-bb74-67286688808e",
+        "run_id": "maint-r18-02"
+      },
+      {
+        "call_id": "019fa965-2d34-734e-abcd-4bf84cc005ce",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d34-734e-abcd-4bf84cc005ce",
+        "run_id": "maint-r18-03"
+      },
+      {
+        "call_id": "019fa965-2d34-7950-8b33-0936709388f9",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d34-7950-8b33-0936709388f9",
+        "run_id": "maint-r18-03"
+      },
+      {
+        "call_id": "019fa965-2d35-7d15-bd38-ca2b1ce45966",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d35-7d15-bd38-ca2b1ce45966",
+        "run_id": "maint-r18-03"
+      },
+      {
+        "call_id": "019fa965-2d35-7d8f-b567-fbd764e1e479",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d35-7d8f-b567-fbd764e1e479",
+        "run_id": "maint-r18-03"
+      },
+      {
+        "call_id": "019fa965-2d36-7125-a0f5-a6152b24fc5f",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d36-7125-a0f5-a6152b24fc5f",
+        "run_id": "maint-r18-04"
+      },
+      {
+        "call_id": "019fa965-2d37-7019-a871-8e5092233f3c",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d37-7019-a871-8e5092233f3c",
+        "run_id": "maint-r18-04"
+      },
+      {
+        "call_id": "019fa965-2d37-7bd0-995d-51b2b16dfca5",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d37-7bd0-995d-51b2b16dfca5",
+        "run_id": "maint-r18-04"
+      },
+      {
+        "call_id": "019fa965-2d38-79d0-a4e3-eed3f155e9ea",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d38-79d0-a4e3-eed3f155e9ea",
+        "run_id": "maint-r18-04"
+      },
+      {
+        "call_id": "019fa965-2d38-737a-b908-75548489a6b6",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d38-737a-b908-75548489a6b6",
+        "run_id": "maint-r18-05"
+      },
+      {
+        "call_id": "019fa965-2d39-77a3-b1f5-803bc29948dd",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d39-77a3-b1f5-803bc29948dd",
+        "run_id": "maint-r18-05"
+      },
+      {
+        "call_id": "019fa965-2d3a-7e60-82bd-b6ac454859a9",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3a-7e60-82bd-b6ac454859a9",
+        "run_id": "maint-r18-05"
+      },
+      {
+        "call_id": "019fa965-2d3a-7f3d-9e73-9e48ebb7cca7",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3a-7f3d-9e73-9e48ebb7cca7",
+        "run_id": "maint-r18-05"
+      },
+      {
+        "call_id": "019fa965-2d3b-7de8-85c2-d9395e2b9432",
+        "conversation_index": 1,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3b-7de8-85c2-d9395e2b9432",
+        "run_id": "maint-r18-06"
+      },
+      {
+        "call_id": "019fa965-2d3b-70fb-a89a-69dc9b36d7e5",
+        "conversation_index": 2,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3b-70fb-a89a-69dc9b36d7e5",
+        "run_id": "maint-r18-06"
+      },
+      {
+        "call_id": "019fa965-2d3c-7ca8-8ab3-f1451c3f3113",
+        "conversation_index": 3,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3c-7ca8-8ab3-f1451c3f3113",
+        "run_id": "maint-r18-06"
+      },
+      {
+        "call_id": "019fa965-2d3c-7480-ab1f-697897e7fe0b",
+        "conversation_index": 4,
+        "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/019fa965-2d3c-7480-ab1f-697897e7fe0b",
+        "run_id": "maint-r18-06"
+      }
+    ]
+  },
+  "project": "wandb/fugue-mcp-release-qualification-v1",
+  "schema_version": 1,
+  "seed_digest": "aff4170d6daa9424319c626ff2484f0e5f6e98e862c01c702fbe5ed5bb851962",
+  "supported_scope": "Non-sensitive hosted qualification evidence only; not customer data and not a release-wide product claim."
+}

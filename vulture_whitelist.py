@@ -127,6 +127,7 @@ AuthoredTaskMaterializer
 # Supported public analysis/builders.
 factorial_difference_in_differences
 build_trace_selection
+prepare_hosted_project
 
 # HTTP handlers and framework callbacks registered by decorators/metaclasses.
 context_search

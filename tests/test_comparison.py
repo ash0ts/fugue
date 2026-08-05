@@ -72,9 +72,10 @@ def test_live_source_use_skill_comparison_has_locked_holdout_resources() -> None
 @pytest.mark.parametrize(
     ("filename", "tasks", "harnesses", "attempts", "cells"),
     [
-        ("discovery.yaml", 4, ("codex", "claude-code"), 1, 16),
-        ("primary.yaml", 8, ("codex",), 2, 32),
-        ("claude-replication.yaml", 8, ("claude-code",), 2, 32),
+        ("discovery.yaml", 4, ("claude-code",), 1, 8),
+        ("discovery-wandb.yaml", 4, ("openclaw",), 1, 8),
+        ("primary.yaml", 8, ("claude-code",), 2, 32),
+        ("wandb-replication.yaml", 8, ("openclaw",), 2, 32),
     ],
 )
 def test_mcp_maintenance_examples_have_exact_staged_designs(

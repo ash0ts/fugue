@@ -1,6 +1,6 @@
 schema_version: 1
-id: wandb-mcp-maintenance-claude-replication-v1
-question: Does the exact 0.4 candidate reproduce the Codex maintenance result under Claude Code?
+id: wandb-mcp-maintenance-wandb-replication-v1
+question: Does the exact 0.4 candidate reproduce the Claude maintenance result with a W&B Inference Agent?
 taskset:
   tasks: tasks.jsonl
   private_labels: private-labels.jsonl
@@ -19,7 +19,7 @@ evaluators:
   - id: maintainer-quality
     type: llm_judge
     required: true
-    profile: wandb/openai/gpt-oss-120b
+    profile: anthropic/claude-sonnet-5
     calibration: judge-calibration.json
     rubric: >-
       Score only evidence grounding, usefulness to a maintainer, prioritization
@@ -35,8 +35,8 @@ evaluators:
     evidence: [tool_names]
     reserve_cost_usd: 0.10
 execution:
-  model: wandb/zai-org/GLM-5.2
-  harnesses: [claude-code]
+  model: wandb/deepseek-ai/DeepSeek-V4-Flash
+  harnesses: [openclaw]
   attempts: 2
   concurrency: 1
   max_cost_usd: 80

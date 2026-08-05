@@ -1,13 +1,16 @@
 {
-  "schema_version": 1,
+  "critical_false_passes": 0,
+  "disagreements": 0,
+  "disagreements_adjudicated": false,
+  "distinct_reviewers": 0,
+  "examples": 48,
+  "judge_profile": "anthropic/claude-sonnet-5",
+  "note": "Paid execution stays blocked until every example has two independent reviews, disagreements are adjudicated, and the judge meets both 0.85 rates with zero critical false passes.",
+  "passed": false,
   "review_status": "pending_human_review",
   "reviewers_per_example": 0,
-  "disagreements_adjudicated": false,
-  "judge_profile": "wandb/openai/gpt-oss-120b",
-  "rubric_digest": null,
-  "examples": 0,
-  "true_positive_rate": 0.0,
+  "rubric_digest": "8d28203485fd279dcff1d66da9d373c56f6ec5856c21a26d73ccb0bce89c2a8e",
+  "schema_version": 1,
   "true_negative_rate": 0.0,
-  "critical_false_passes": 0,
-  "note": "Paid execution stays blocked until 48 balanced examples are double-reviewed, disagreements are adjudicated, and the locked rubric passes its thresholds."
+  "true_positive_rate": 0.0
 }
